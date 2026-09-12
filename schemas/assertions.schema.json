@@ -6,14 +6,19 @@
     "schemaVersion": {
       "type": "integer",
       "format": "uint32",
-      "minimum": 1,
-      "maximum": 1,
-      "default": 1
+      "minimum": 2,
+      "maximum": 2
     },
     "assertions": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/Assertion"
+      }
+    },
+    "changeAssessments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ChangeAssessment"
       }
     },
     "retiredAssertions": {
@@ -25,6 +30,7 @@
   },
   "additionalProperties": false,
   "required": [
+    "schemaVersion",
     "assertions"
   ],
   "$defs": {
@@ -37,9 +43,11 @@
         "at": {
           "$ref": "#/$defs/Anchor"
         },
-        "analysis": {
-          "$ref": "#/$defs/Analysis",
-          "default": "unmapped"
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "observes": {
           "type": "array",
@@ -91,19 +99,18 @@
         "text"
       ]
     },
-    "Analysis": {
-      "type": "string",
-      "enum": [
-        "unmapped",
-        "partial",
-        "mapped"
-      ]
-    },
     "Flow": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string"
+        },
+        "basis": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^scov2:[0-9a-f]{64}$"
         },
         "explanation": {
           "type": "string"
@@ -111,7 +118,7 @@
         "appliesTo": {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/TestSelector"
           }
         },
         "nodes": {
@@ -136,17 +143,41 @@
         "watch": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Watch"
+            "type": "string"
+          }
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         }
       },
       "additionalProperties": false,
       "required": [
         "id",
+        "basis",
         "explanation",
+        "appliesTo",
         "nodes",
         "countsAsAsserted",
         "watch"
+      ]
+    },
+    "TestSelector": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "name"
       ]
     },
     "Node": {
@@ -194,42 +225,35 @@
         "kind"
       ]
     },
-    "Watch": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "file": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "file"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "file"
-          ]
+    "ChangeAssessment": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
         },
-        {
-          "type": "object",
-          "properties": {
-            "at": {
-              "$ref": "#/$defs/Anchor"
-            },
-            "kind": {
-              "type": "string",
-              "const": "span"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "at"
-          ]
+        "basis": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^scov2:[0-9a-f]{64}$"
+        },
+        "affectedFlows": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explanation": {
+          "type": "string"
         }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "basis",
+        "affectedFlows",
+        "explanation"
       ]
     },
     "Retired": {

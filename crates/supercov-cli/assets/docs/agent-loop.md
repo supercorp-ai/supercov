@@ -62,13 +62,12 @@ npx supercov runs latest assertions --json
 
 Inspect an entry with `runs <run> assertion <id>` and read archived code with
 `runs <run> source <path>`. Edit its `assertions.json`, declare credited nodes
-and broader watch inputs, then acknowledge reviewed flows with `assertions review
---all` or repeated `--flow ASSERTION/FLOW`. After the next run of
+and broader watch inputs, then obtain expectedBasis tokens with `assertions validate --json` and save the examined tokens in the map or repeated `--flow ASSERTION/FLOW`. After the next run of
 the same command, its map automatically inherits prior work; repair affected entries. Supercov
 validates references and freshness, while the agent owns semantic meaning.
 Run `supercov docs assertion-agent` for the full mapping instructions. Validate
-with `runs <run> assertions validate`, acknowledge reviewed flows, then use
-`runs <run> assertions check --require-complete --require-observed` as the
+with `runs <run> assertions validate`, save examined expectedBasis tokens in the map, then use
+`runs <run> assertions check --require-mappings --require-observed` as the
 completion gate. See [assertion maps](assertion-maps.md) for the contract and JS/TS limits.
 
 ## Example

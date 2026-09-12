@@ -1,3 +1,4 @@
+import { acknowledgeMap } from './assertion-map-test-author.mjs';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -73,20 +74,20 @@ export function assertionMapSmoke({ root, launcher, env, runner = 'node', typesc
   assert.equal(query('--file', testFile).pagination.total, 3);
   assert(query('files', '--limit', '100').items.some(f => f.file === file));
   assert(observed.every((a, i) => a.observedPassingTests.length === (parameterized && i === 0 ? 2 : 1)), `${runner}/${ext}: ${JSON.stringify(observed)}`);
-  assert.equal(invoke('runs', run, 'assertions', 'check', '--require-complete').status, 2, 'unmapped inventory must fail a completion gate');
+  assert.equal(invoke('runs', run, 'assertions', 'check', '--require-mappings').status, 2, 'observed assertions without explanations must fail a mappings gate');
+  const testRows = query('report', '--view', 'tests', '--limit', '100').items;
   const credit = ['return input + 1;', 'return 0;', "throw new Error('boom');"];
   for (const [index, a] of map.assertions.entries()) {
     const statement = statements.find(s => s.at?.text === credit[index]);
     assert(statement, `${runner}/${ext}: missing source statement ${credit[index]}: ${JSON.stringify(statements)}`);
-    a.analysis = 'mapped';
     a.observes = [index === 2 ? 'Rejection message matches boom' : parameterized && index === 0 ? 'Result equals the expected number for each parameterized case' : `Result equals ${index === 0 ? 3 : 0}`];
-    a.flows = [{ id: 'result', explanation: index === 2 ? 'The thrown error becomes the rejection inspected by this matcher.' : 'The returned number flows through the test call to this equality assertion.', nodes: [{ id: 'result', at: statement.at }], countsAsAsserted: ['result'], watch: [{ kind: 'file', file }, { kind: 'file', file: testFile }] }];
+    a.flows = [{ id: 'result', basis:null, appliesTo: observed[index].observedPassingTests.map(id => { const t = testRows.find(t => t.id === id); return {file:t.file,name:t.name}; }), edges:[{from:'result',to:'$assertion',kind:'data'}], explanation: index === 2 ? 'The thrown error becomes the rejection inspected by this matcher.' : 'The returned number flows through the test call to this equality assertion.', nodes: [{ id: 'result', at: statement.at }], countsAsAsserted: ['result'], watch: [file, testFile] }];
   }
   write(init.map, map);
   query('validate');
   assert.equal(invoke('runs', run, 'assertions', 'check').status, 2, 'unreviewed edits must fail');
-  query('review', '--all');
-  const report = query('check', '--require-complete', '--require-observed', '--min', '1');
+  acknowledgeMap(query, init.map, map);
+  const report = query('check', '--require-mappings', '--require-observed', '--min', '1');
   assert.equal(report.summary.statements.asserted, 3, JSON.stringify(report));
   assert.equal(invoke('runs', run, 'assertions', 'check', '--min', '100').status, 2, 'unclaimed condition remains outside assertion credit');
   const schema = JSON.parse(ok('assertions', 'schema').stdout);
@@ -115,6 +116,6 @@ export function assertionMapSmoke({ root, launcher, env, runner = 'node', typesc
   assert.equal(invoke('runs', run, 'source', file).status, 2);
   assert.equal(invoke('runs', run, 'assertions', 'review', '--all').status, 2);
   writeFileSync(resolve(root, file), application);
-  console.log(JSON.stringify({ runner, language: typescript ? 'typescript' : 'javascript', module: commonjs ? 'commonjs' : 'esm', assertions: 3, creditedStatements: 3, diagnostics: 'syntax, review, completion, threshold, stale checkout' }));
+  console.log(JSON.stringify({ runner, language: typescript ? 'typescript' : 'javascript', module: commonjs ? 'commonjs' : 'esm', assertions: 3, creditedStatements: 3, diagnostics: 'syntax, basis acknowledgement, mappings, threshold, stale checkout' }));
   return { run, root, invoke, ok, query, map, mapFile: init.map, testFile, source };
 }

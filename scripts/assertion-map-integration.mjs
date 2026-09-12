@@ -1,3 +1,4 @@
+import { acknowledgeMap } from './assertion-map-test-author.mjs';
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,15 +34,16 @@ try {
   assert(!JSON.stringify(inputManifest).includes('export function value()'), 'full source is absent from assertion inputs');
   assert.equal(coverageQuery(root, first).data.confidence.lines.asserted, 0);
   const automatic = coverageQuery(root, first).data.assertionCoverage;
-  assert.equal(automatic.summary.statements.percentage, 0);
-  assert.equal(automatic.summary.unmappedAssertions, 1);
+  assert.equal(automatic.summary.statements.percentage, null);
+  assert.equal(automatic.summary.assertionsWithoutFlows, 1);
   assert.equal(automatic.inheritance.from, null);
   const initialized = query(first);
   assert.equal(initialized.map, automatic.map);
   const map = read(initialized.map);
   assert.equal(map.assertions.length, 1);
   assert.equal(initialized.items.length, 1);
-  assert.equal(initialized.items[0].analysis, 'unmapped');
+  assert.deepEqual(initialized.items[0].flows, []);
+  assert.equal(automatic.summary.status, 'notAssessed');
   assert.equal(initialized.items[0].inMap, true);
   const a = map.assertions[0];
   const source = coverageQuery(root, first, 'source', 'src/core.js', '--offset', '1', '--limit', '1');
@@ -53,12 +55,12 @@ try {
   assert.match(sourceText, /--offset 2 --limit 1/);
   const listText = requireSupercov(root, ['runs', first, 'assertions']).stdout;
   assert(listText.includes(a.id));
-  assert.match(listText, /unmapped · no flows · 1 passing test/);
+  assert.match(listText, /no flows · 1 passing test/);
   for (const resource of [['source'], ['source', 'missing.ts'], ['assertion'], ['assertion', 'unknown-id'], ['assertion', a.id, '--limit', '1'], ['assertions', 'inventory']]) {
     assert.equal(executeSupercov(root, ['runs', first, ...resource]).status, 2, resource.join(' '));
   }
   // Removing a map entry must not hide a recognized assertion from the list.
-  write(initialized.map, { assertions: [] });
+  write(initialized.map, { schemaVersion:2, assertions: [] });
   const missing = query(first);
   assert.equal(missing.items.length, 1);
   assert.equal(missing.items[0].inMap, false);
@@ -67,19 +69,18 @@ try {
   assert.equal(coverageQuery(root, first, 'assertion', a.id).data.assertion.inMap, false);
   write(initialized.map, map);
   assert.equal(a.at.line, 5);
-  a.analysis = "mapped";
   a.observes = ["value returns one"];
-  a.flows = [{ id: "return-value", explanation: "The returned integer is compared to one by this assertion.", nodes: [
+  a.flows = [{ id: "return-value", basis:null, appliesTo:[{file:"tests/core.test.js",name:"value"}], explanation: "The returned integer is compared to one by this assertion.", nodes: [
     { id: "return", at: { file: "src/core.js", line: 2, column: 3, text: "return 1;" } }
-  ], edges: [], countsAsAsserted: ["return"], watch: [{kind:"file", file:"src/core.js"}, {kind:"file", file:"tests/core.test.js"}] }];
+  ], edges: [{from:"return",to:"$assertion",kind:"data"}], countsAsAsserted: ["return"], watch: ["src/core.js", "tests/core.test.js"] }];
   write(initialized.map, map);
   assert.equal(query(first).summary.lines.asserted, 0, "editing a map is not review acknowledgement");
-  assert.match(requireSupercov(root, ["runs", first]).stdout, /Assertions 0\.00% \(0\/1\)/);
-  query(first, "review", "--all");
+  assert.match(requireSupercov(root, ["runs", first]).stdout, /Assertions pending/);
+  acknowledgeMap((...args) => query(first, ...args), initialized.map, map);
   let report = query(first);
   assert.equal(report.summary.lines.asserted, 1, JSON.stringify(report));
   assert.equal(report.summary.statements.asserted, 1);
-  assert.equal(report.summary.dirtyFlows, 0);
+  assert.equal(report.summary.staleFlows, 0);
   assert.equal(query(first, "--view", "creditedLines").items[0].assertions[0], a.id);
   assert.equal(coverageQuery(root, first).data.assertionCoverage.summary.lines.asserted, 1);
   const detail = coverageQuery(root, first, 'assertion', a.id);
@@ -105,32 +106,41 @@ try {
   write(initialized.map, map);
   const edited = coverageQuery(root, first).data.assertionCoverage;
   assert.notEqual(edited.revision, regular.revision);
-  assert.equal(edited.summary.statements.percentage, 0);
-  assert.match(requireSupercov(root, ["runs", first]).stdout, /1 dirty flow\(s\)/);
+  assert.equal(edited.summary.statements.percentage, null);
+  assert.match(requireSupercov(root, ["runs", first]).stdout, /1 stale/);
   writeFileSync(initialized.map, "{broken JSON");
   assert.equal(coverageQuery(root, first).data.assertionCoverage.available, false);
   assert.equal(coverageQuery(root, first, 'source', 'src/core.js').data.items[1].text, '  return 1;', 'source remains readable with malformed map JSON');
   assert.match(requireSupercov(root, ["runs", first]).stdout, /Assertions unavailable: assertions.json/);
   write(initialized.map, map);
-  query(first, "review", "--all");
+  acknowledgeMap((...args) => query(first, ...args), initialized.map, map);
   assert.equal(coverageQuery(root, first).data.assertionCoverage.summary.statements.percentage, 100);
   const firstMapBytes = readFileSync(initialized.map);
   const firstStatePath = join(root, '.supercov/runs', first, 'assertions.state.json');
   const firstStateBytes = readFileSync(firstStatePath);
+  const validation = query(first, 'validate');
+  const tokenPage = query(first, 'validate', '--view', 'flows', '--limit', '1');
+  assert.equal(tokenPage.items[0].expectedBasis, a.flows[0].basis);
+  assert.equal(tokenPage.revision, validation.revision);
+  assert.equal(tokenPage.pagination.total, 1);
+  assert.equal(query(first, 'validate', '--view', 'errors').pagination.total, 0);
+  assert.equal(query(first, '--needs-attention').pagination.total, 0);
+  assert.deepEqual(readFileSync(initialized.map), firstMapBytes, 'queries never edit map tokens');
+  assert.deepEqual(readFileSync(firstStatePath), firstStateBytes, 'queries never mutate managed state');
   const currentSource = coverageQuery(root, first, "source", "src/core.js").data.items;
   assert.equal(currentSource[1].text, "  return 1;");
   assert.notEqual(executeSupercov(root, ["runs",first,"assertions","init"]).status, 0, "the init command is removed");
   assert.notEqual(executeSupercov(root, ["runs",first,"asserted"]).status, 0, "legacy analyzer command is gone");
   const second = run();
   assert.equal(query(second).inheritance.from, first);
-  assert.equal(query(second).summary.dirtyFlows, 0);
+  assert.equal(query(second).summary.staleFlows, 0);
   assert.equal(query(second).summary.lines.asserted, 1);
   writeFileSync(join(root,"src/core.js"), "export function value() {\n  return 2 - 1;\n}\n");
   const third = run();
   const carried = query(third);
   assert.equal(carried.inheritance.from, second);
   report = query(third);
-  assert.equal(report.summary.dirtyFlows,1);
+  assert.equal(report.summary.staleFlows,1);
   assert.equal(report.summary.lines.asserted,0);
   for (const resource of [['source', 'src/core.js'], ['assertions'], ['assertions', 'review', '--all'], ['assertions', 'validate']]) {
     assert.equal(executeSupercov(root, ['runs', first, ...resource]).status, 2, 'old run must not use changed source');
@@ -140,7 +150,7 @@ try {
   const updated=read(carried.map);assert.equal(updated.assertions[0].id,a.id);
   updated.assertions[0].flows[0].nodes[0].at.text="return 2 - 1;";
   write(carried.map,updated);
-  query(third,"review","--flow",`${a.id}/return-value`);
+  acknowledgeMap((...args) => query(third, ...args), carried.map, updated);
   assert.equal(query(third).summary.lines.asserted,1);
   assert.equal(read(initialized.map).assertions[0].flows[0].nodes[0].at.text,"return 1;");
   // A different test command starts its own map and cannot eclipse this suite.
@@ -157,14 +167,14 @@ try {
   const recovered = query(fallback);
   assert.equal(recovered.inheritance.from, third);
   assert.equal(recovered.inheritance.skipped[0].run, fourth);
-  assert.equal(recovered.summary.dirtyFlows, 1);
+  assert.equal(recovered.summary.staleFlows, 1);
   assert.equal(recovered.summary.statements.asserted, 0);
-  assert.match(requireSupercov(root, ["runs", fallback]).stdout, /Map reuse skipped 1 prior map/);
+  assert.match(requireSupercov(root, ["runs", fallback]).stdout, /Map reuse skipped 1 newer candidate/);
   assert.equal(readFileSync(join(root, '.supercov/runs', fourth, 'assertions.json'), 'utf8'), '{broken JSON');
   const stillDirty = run();
   assert.equal(query(stillDirty).inheritance.from, fallback);
-  assert.equal(query(stillDirty).summary.dirtyFlows, 1, 'fallback review requirement persists');
-  query(stillDirty, "review", "--all");
+  assert.equal(query(stillDirty).summary.staleFlows, 1, 'fallback review requirement persists');
+  acknowledgeMap((...args) => query(stillDirty, ...args), query(stillDirty).map);
   assert.equal(query(stillDirty).summary.statements.asserted, 1);
 
   // Unique snippets relocate automatically, while changed files need review.
@@ -179,8 +189,8 @@ try {
   assert.equal(movedMap.assertions[0].at.line, 6);
   assert.equal(movedMap.assertions[0].flows[0].nodes[0].at.line, 3);
   assert.equal(movedReport.summary.statements.asserted, 0);
-  assert.equal(movedReport.summary.dirtyFlows, 1);
-  query(moved, 'review', '--all');
+  assert.equal(movedReport.summary.staleFlows, 1);
+  acknowledgeMap((...args) => query(moved, ...args), movedReport.map, movedMap);
   assert.equal(query(moved).summary.statements.asserted, 1);
 
   // Failed runs still have maps, but cannot inherit passing execution credit.
@@ -192,7 +202,7 @@ try {
   assert.equal(query(failed).summary.statements.asserted, 0);
   assert.deepEqual(readFileSync(initialized.map), firstMapBytes);
   assert.deepEqual(readFileSync(firstStatePath), firstStateBytes);
-  console.log(JSON.stringify({pilot:"assertion-map-cli",runs:9,assertions:1,creditedLines:1,inheritance:"unchanged reused; edited flow dirty until review",sourceStorage:"hash manifest; current checkout required"}));
+  console.log(JSON.stringify({pilot:"assertion-map-cli",runs:9,assertions:1,creditedLines:1,inheritance:"unchanged tokens reused; source impact and edited flows acknowledged in JSON",sourceStorage:"hash manifest; current checkout required"}));
 } finally { rmSync(root,{recursive:true,force:true}); }
 
 const rustRoot = mkdtempSync(join(tmpdir(), "supercov-assertion-map-rust-"));
@@ -208,9 +218,10 @@ try {
   assert.equal(sites.length,2);
   assert(sites.every(a=>a.observedPassingTests.length===1),JSON.stringify(sites));
   const map=read(init.map);
-  const a=map.assertions[0];a.analysis="mapped";a.observes=["value returns one"];
-  a.flows=[{id:"return-value",explanation:"This macro compares the returned integer with one.",nodes:[{id:"return",at:{file:"src/lib.rs",line:2,column:3,text:"return 1;"}}],edges:[],countsAsAsserted:["return"],watch:[{kind:"file",file:"src/lib.rs"}]}];
-  write(init.map,map);queryRust("review","--all");
+  const a=map.assertions[0];a.observes=["value returns one"];
+  const t=queryRust("report","--view","tests").items[0];
+  a.flows=[{id:"return-value",basis:null,appliesTo:[{file:t.file,name:t.name}],explanation:"This macro compares the returned integer with one.",nodes:[{id:"return",at:{file:"src/lib.rs",line:2,column:3,text:"return 1;"}}],edges:[{from:"return",to:"$assertion",kind:"data"}],countsAsAsserted:["return"],watch:["src/lib.rs"]}];
+  write(init.map,map);acknowledgeMap(queryRust,init.map,map);
   assert.equal(queryRust().summary.statements.asserted,1);
   console.log(JSON.stringify({pilot:"assertion-map-rust",assertions:2,passingSites:2,creditedStatements:1}));
 } finally { rmSync(rustRoot,{recursive:true,force:true}); }

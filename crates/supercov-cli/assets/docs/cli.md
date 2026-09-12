@@ -74,7 +74,7 @@ npx supercov runs <run-id> [query] [options]
 | `kinds` | Group coverage by test level, such as unit or E2E |
 | `runners` | Group coverage by test runner |
 | `scope` | Review included, excluded, and ambiguous source files |
-| `assertions` | List assertions, including unmapped sites, with review and execution status |
+| `assertions` | List assertions, including sites without flows, with freshness and execution status |
 | `assertion <id>` | Inspect one assertion and its authored flows |
 | `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
@@ -104,8 +104,11 @@ zero-based and `--limit` controls the number of source lines. Source and asserti
 checkout to match the run. Changed source makes assertion coverage unavailable;
 rerun tests to inherit mappings. The old `assertions inventory` and nested
 `assertions source --file` commands are replaced by these resource queries.
-Use `assertions validate`, `assertions review` and `assertions check` to validate
-and acknowledge the authored map.
+Use read-only `assertions validate --json` to obtain expected acknowledgement tokens.
+After investigating, copy those tokens into `assertions.json`, save, and run
+`assertions check`. The `review` command is removed. `--require-mappings` requires
+a current explanation per recognized passing site, without implying completeness.
+Use `assertions --needs-attention` and `assertions report --view changes` to resume work.
 The regular run summary automatically includes the assertion percentage when
 that map exists, in text and `data.assertionCoverage` JSON. Read
 [Understanding assertion coverage](assertions.md) for the workflow or run

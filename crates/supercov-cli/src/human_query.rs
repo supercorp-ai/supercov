@@ -1380,42 +1380,53 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
     }
 }
 
-fn assertion_summary_lines(report: &serde_json::Value) -> Vec<String> {
-    if let Some(error) = report["error"].as_str() {
-        return vec![format!("  Assertions unavailable: {error}")];
+fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
+    if value["available"] == false {
+        return vec![format!(
+            "Assertions unavailable: {}",
+            value["error"].as_str().unwrap_or("map cannot be assessed")
+        )];
     }
-    let summary = &report["summary"];
-    let statements = &summary["statements"];
-    let score = match statements["percentage"].as_f64() {
-        Some(pct) => format!(
-            "{pct:.2}% ({}/{})",
-            statements["asserted"], statements["total"]
-        ),
-        None => "n/a (no measured statements)".into(),
+    let s = &value["summary"];
+    let score = &s["statements"];
+    let mut lines = if let Some(pct) = score["percentage"].as_f64() {
+        vec![format!(
+            "Assertions {pct:.2}% ({}/{}) — agent-assessed statements, whole run",
+            score["asserted"], score["total"]
+        )]
+    } else {
+        let status = match s["status"].as_str() {
+            Some("notAssessed") => "not assessed",
+            Some("notApplicable") => "n/a",
+            Some(status) => status,
+            None => "unavailable",
+        };
+        vec![format!(
+            "Assertions {status} — {}",
+            s["reason"].as_str().unwrap_or("no assessment available")
+        )]
     };
-    let mut lines = vec![format!(
-        "  Assertions {score} — agent-assessed statements, whole archived run"
-    )];
-    if summary["inventoryMappingComplete"] != true {
-        lines.push(format!(
-            "             Map incomplete; {} unmapped assertion(s), {} missing site(s), {} dirty flow(s)",
-            summary["unmappedAssertions"], summary["missingInventoryAssertions"], summary["dirtyFlows"]
-        ));
-    }
-    let errors = report["validationErrors"].as_array().map_or(0, Vec::len);
-    let scope = summary["scopeReview"].as_array().map_or(0, Vec::len);
-    if errors > 0 || scope > 0 || summary["runPassed"] == false {
-        lines.push(format!(
-            "             Review needed: {errors} validation error(s), {scope} scope change(s); run passed={}",
-            summary["runPassed"]
-        ));
-    }
-    let skipped = report["inheritance"]["skipped"]
+    lines.push(format!(
+        "  {} assertions with flows; {} without; {} current flows; {} stale; {} draft",
+        s["assertionsWithFlows"],
+        s["assertionsWithoutFlows"],
+        s["currentFlows"],
+        s["staleFlows"],
+        s["draftFlows"]
+    ));
+    if let Some(errors) = value["validationErrors"]
         .as_array()
-        .map_or(0, Vec::len);
-    if skipped > 0 {
+        .filter(|v| !v.is_empty())
+    {
+        lines.push(format!("  {} map reference error(s)", errors.len()));
+    }
+    if let Some(skipped) = value["inheritance"]["skipped"]
+        .as_array()
+        .filter(|v| !v.is_empty())
+    {
         lines.push(format!(
-            "             Map reuse skipped {skipped} prior map(s); inspect the assertions report for details"
+            "  Map reuse skipped {} newer candidate(s); inspect assertions report",
+            skipped.len()
         ));
     }
     lines
@@ -1426,31 +1437,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn assertion_summary_distinguishes_scores_empty_denominators_and_invalid_maps() {
-        let mut report = serde_json::json!({"summary": {
-            "statements": {"asserted": 1, "total": 4, "percentage": 25.0},
-            "inventoryMappingComplete": true, "runPassed": true
-        }});
-        assert_eq!(
-            assertion_summary_lines(&report),
-            vec!["  Assertions 25.00% (1/4) — agent-assessed statements, whole archived run"]
-        );
-        report["summary"]["statements"] =
-            serde_json::json!({"asserted":0,"total":0,"percentage":null});
-        assert!(assertion_summary_lines(&report)[0].contains("n/a (no measured statements)"));
-        report["summary"]["inventoryMappingComplete"] = false.into();
-        report["summary"]["dirtyFlows"] = 2.into();
-        report["summary"]["scopeReview"] = serde_json::json!(["tests/a.js"]);
+    fn assertion_summary_distinguishes_scores_pending_unassessed_and_invalid_maps() {
+        let mut report = serde_json::json!({"available":true,"summary":{"status":"available","reason":"current claims","statements":{"asserted":1,"total":4,"percentage":25},"assertionsWithFlows":1,"assertionsWithoutFlows":2,"currentFlows":1,"staleFlows":0,"draftFlows":0}});
+        assert!(assertion_summary_lines(&report)[0].contains("Assertions 25.00% (1/4)"));
+        for (status, label) in [
+            ("notAssessed", "not assessed"),
+            ("pending", "pending"),
+            ("notApplicable", "n/a"),
+        ] {
+            report["summary"]["status"] = status.into();
+            report["summary"]["statements"]["percentage"] = serde_json::Value::Null;
+            assert!(assertion_summary_lines(&report)[0].contains(label));
+            assert!(!assertion_summary_lines(&report)[0].contains("0.00%"));
+        }
+        report["summary"]["staleFlows"] = 2.into();
         report["validationErrors"] = serde_json::json!(["bad anchor"]);
         let lines = assertion_summary_lines(&report);
-        assert!(lines[1].contains("2 dirty flow(s)"));
-        assert!(lines[2].contains("Review needed: 1 validation error(s), 1 scope change(s)"));
+        assert!(lines[1].contains("2 stale"));
+        assert!(lines[2].contains("1 map reference error"));
         report["inheritance"] =
             serde_json::json!({"from":null,"skipped":[{"run":"older","reason":"bad JSON"}]});
-        assert!(assertion_summary_lines(&report)[3].contains("Map reuse skipped 1 prior map(s)"));
+        assert!(
+            assertion_summary_lines(&report)[3].contains("Map reuse skipped 1 newer candidate")
+        );
         assert_eq!(
             assertion_summary_lines(&serde_json::json!({"available":false,"error":"bad JSON"})),
-            vec!["  Assertions unavailable: bad JSON"]
+            vec!["Assertions unavailable: bad JSON"]
         );
     }
 

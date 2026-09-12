@@ -102,29 +102,14 @@ pub fn load(run: &StoredRun, input: &RunManifest) -> Result<(AssertionMap, State
         fs::read(run.directory.join(file))
             .map_err(|e| format!("{file}: {e}; new test runs create assertion maps automatically"))
     };
-    let map = model::parse(&read(MAP_FILE)?).map_err(|e| format!("{MAP_FILE}: {e}"))?;
-    let mut state: State =
-        serde_json::from_slice(&read(STATE_FILE)?).map_err(|e| format!("{STATE_FILE}: {e}"))?;
-    let identity = digest(&input.manifest);
-    let legacy =
-        state.schema_version == 1 && input.legacy_digest.as_ref() == Some(&state.inputs_digest);
-    if state.evidence_digest != input.evidence_digest
-        || !(legacy || state.schema_version == 2 && state.inputs_digest == identity)
-    {
-        return Err(
-            "Assertion state belongs to different run evidence; rerun tests to create a bound map"
-                .into(),
-        );
-    }
-    if legacy {
-        state.schema_version = 2;
-        state.inputs_digest = identity;
-        for review in state.reviews.values_mut() {
-            review.reasons.insert(
-                "Imported legacy map; review against current source and file dependencies".into(),
-            );
-        }
-    }
+    let map = model::parse_stored(&read(MAP_FILE)?).map_err(|e| format!("{MAP_FILE}: {e}"))?;
+    let state = model::parse_state(
+        &read(STATE_FILE)?,
+        &map,
+        &input.manifest,
+        &input.evidence_digest,
+        input.legacy_digest.as_deref(),
+    )?;
     Ok((map, state))
 }
 fn write_json(
@@ -203,15 +188,6 @@ pub(crate) fn prepare_publication(
                         if let Some(site) =
                             next.assertions.iter_mut().find(|a| a.at == assertion.at)
                         {
-                            for flow in &assertion.flows {
-                                next_state.reviews.insert(
-                                    flow_key(&assertion, flow),
-                                    Review {
-                                        fingerprint: String::new(),
-                                        reasons: BTreeSet::from([reason.clone()]),
-                                    },
-                                );
-                            }
                             *site = assertion;
                         } else {
                             next.retired_assertions.push(Retired {
@@ -236,7 +212,15 @@ pub(crate) fn prepare_publication(
                             assertion.id.push('_');
                         }
                     }
-                    next_state.scope_review.insert(reason.clone());
+                    invalidate(&mut next_state, &next, reason);
+                    add_change(
+                        &mut next_state,
+                        None,
+                        None,
+                        None,
+                        reason.clone(),
+                        BTreeSet::new(),
+                    );
                     return Ok(Some((next, next_state)));
                 }
             };
@@ -268,34 +252,20 @@ pub(crate) fn prepare_publication(
     // A malformed newer map might contain changed claims. An older fallback
     // preserves work, but must not silently restore its previous credit.
     if !inheritance.skipped.is_empty() {
-        for review in state.reviews.values_mut() {
-            review
-                .reasons
-                .insert("newer assertion map could not be reused; review inherited claims".into());
-        }
+        invalidate(
+            &mut state,
+            &map,
+            "newer assertion map could not be reused; inspect inherited claims",
+        );
     }
     if let Err(reason) = current {
-        state.scope_review.insert(reason);
+        invalidate(&mut state, &map, &reason);
+        add_change(&mut state, None, None, None, reason, BTreeSet::new());
     }
     state.inheritance = Some(inheritance);
     write_json(root, &run, MAP_FILE, &map)?;
     write_json(root, &run, STATE_FILE, &state)?;
     Ok(())
-}
-pub fn acknowledge(
-    root: &Path,
-    run: &StoredRun,
-    selected: &BTreeSet<String>,
-    all: bool,
-    ack_scope: bool,
-) -> Result<Value, String> {
-    let input = load_inputs(root, run)?;
-    let (map, mut state) = load(run, &input)?;
-    model::review(&map, &mut state, &input.inputs, selected, all, ack_scope)?;
-    write_json(root, run, STATE_FILE, &state)?;
-    Ok(
-        json!({"reviewedFlows":if all { map.assertions.iter().map(|a| a.flows.len()).sum::<usize>() } else { selected.len() }, "scopeReview":state.scope_review,"meaning":"Agent acknowledgement recorded; semantic edges were not mechanically proved"}),
-    )
 }
 pub fn coverage(run: &StoredRun) -> Result<CoverageReport, String> {
     analyze_coverage_archive(&ArchiveReportRequest {
@@ -415,7 +385,20 @@ pub fn assess(
     coverage: &CoverageReport,
     passed: bool,
 ) -> Value {
-    let errors = model::validate(map, inputs);
+    let manifest = inputs.manifest();
+    let validation = model::validation(map, state, inputs);
+    let errors = validation["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let pending_changes = validation["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["current"] != true)
+        .count();
     let view = &coverage.filters.passed;
     let tests = view
         .tests
@@ -459,7 +442,9 @@ pub fn assess(
     let mut claimed_points = BTreeSet::new();
     let mut credited_points = BTreeSet::new();
     let mut point_flows = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut dirty_flows = 0;
+    let mut draft_flows = 0;
+    let mut stale_flows = 0;
+    let mut invalid_flows = 0;
     let mut current_flows = 0;
     let mut credit_flows = 0;
     let mut line_assertions = BTreeMap::<(String, usize), BTreeSet<String>>::new();
@@ -536,27 +521,52 @@ pub fn assess(
             .collect::<BTreeSet<_>>();
         let mut flows = Vec::new();
         for f in &a.flows {
-            let dirty = model::reasons(a, f, state, inputs);
+            let dirty = model::reasons_for_manifest(a, f, map, state, inputs, &manifest);
+            let valid = model::validate_flow(f, &inputs.files).is_empty()
+                && a.at.offset(&inputs.files).is_some();
+            let freshness = if f.basis.is_none() {
+                draft_flows += 1;
+                "draft"
+            } else if f.basis.as_deref()
+                != Some(model::expected_basis(a, f, map, state, &manifest).as_str())
+            {
+                stale_flows += 1;
+                "stale"
+            } else {
+                "current"
+            };
+            if !valid {
+                invalid_flows += 1;
+            }
             if dirty.is_empty() {
                 current_flows += 1;
-            } else {
-                dirty_flows += 1;
             }
-            let applicable = witnesses
-                .iter()
-                .filter(|id| {
-                    tests.get(id).is_some_and(|test| {
-                        f.applies_to.is_empty() || f.applies_to.contains(&test.name)
+            // A file + exact displayed name must resolve to one logical test.
+            // Retry attempts remain under that identity; duplicate names do not.
+            let mut resolved = BTreeSet::new();
+            let mut selectors = Vec::new();
+            for selector in &f.applies_to {
+                let matches = coverage
+                    .view
+                    .tests
+                    .iter()
+                    .filter(|t| {
+                        t.file.as_deref() == Some(selector.file.as_str()) && t.name == selector.name
                     })
-                })
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            let eligible = passed
-                && identities_valid
-                && state.scope_review.is_empty()
-                && dirty.is_empty()
-                && !applicable.is_empty()
-                && a.analysis != Analysis::Unmapped;
+                    .collect::<Vec<_>>();
+                let status = match matches.as_slice() {
+                    [test] if witnesses.contains(&test.id) && tests.contains_key(&test.id) => {
+                        resolved.insert(test.id.clone());
+                        "observed"
+                    }
+                    [] => "missing",
+                    [_] => "unobserved",
+                    _ => "ambiguous",
+                };
+                selectors.push(json!({"file":selector.file,"name":selector.name,"status":status}));
+            }
+            let applicable = resolved;
+            let eligible = passed && identities_valid && dirty.is_empty() && !applicable.is_empty();
             let mut blockers = Vec::new();
             if !passed {
                 blockers.push("run did not pass");
@@ -564,17 +574,11 @@ pub fn assess(
             if !identities_valid {
                 blockers.push("invalid map identities");
             }
-            if !state.scope_review.is_empty() {
-                blockers.push("scope review pending");
-            }
             if !dirty.is_empty() {
                 blockers.push("flow requires review or reference repair");
             }
             if applicable.is_empty() {
                 blockers.push("no matching passing assertion occurrence for appliesTo");
-            }
-            if a.analysis == Analysis::Unmapped {
-                blockers.push("assertion is unmapped");
             }
             if eligible {
                 credit_flows += 1;
@@ -617,9 +621,9 @@ pub fn assess(
                     }
                 }
             }
-            flows.push(json!({"id":f.id,"current":dirty.is_empty(),"reasons":dirty,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines}));
+            flows.push(json!({"id":f.id,"freshness":freshness,"valid":valid,"current":dirty.is_empty(),"expectedBasis":model::expected_basis(a,f,map,state,&manifest),"selectors":selectors,"questions":f.questions,"reasons":dirty,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines}));
         }
-        rows.push(json!({"id":a.id,"at":a.at,"analysis":a.analysis,"inMap":in_map,"observes":a.observes,"operations":inventory.get(&a.at).cloned().unwrap_or_default(),"observedPassingTests":witnesses,"flows":flows}));
+        rows.push(json!({"id":a.id,"at":a.at,"questions":a.questions,"inMap":in_map,"observes":a.observes,"operations":inventory.get(&a.at).cloned().unwrap_or_default(),"observedPassingTests":witnesses,"flows":flows}));
     }
     let denominator = coverage
         .view
@@ -652,14 +656,37 @@ pub fn assess(
         .iter()
         .filter(|s| !map.assertions.iter().any(|a| a.at == s.at))
         .count();
-    let mapping_complete = missing_inventory == 0
-        && map
-            .assertions
-            .iter()
-            .all(|a| a.analysis == Analysis::Mapped && !a.flows.is_empty())
-        && dirty_flows == 0
-        && state.scope_review.is_empty()
-        && errors.is_empty();
+    let (status, reason) = if !passed || !identities_valid {
+        ("unavailable", "Run failed or map identities are invalid")
+    } else if pending_changes > 0 {
+        ("pending", "Source changes need impact assessment")
+    } else if measured_statements.is_empty() {
+        ("notApplicable", "No measured statements")
+    } else if credit_flows > 0 {
+        (
+            "available",
+            "Agent-assessed statements; mapping completeness is unknown",
+        )
+    } else if map.assertions.iter().all(|a| a.flows.is_empty()) {
+        ("notAssessed", "No recorded flow explanations")
+    } else {
+        (
+            "pending",
+            "No current flow with matching passing assertion evidence",
+        )
+    };
+    let assertions_without_current_explanation = rows
+        .iter()
+        .filter(|a| {
+            inventory.keys().any(|at| json!(at) == a["at"])
+                && a["observedPassingTests"]
+                    .as_array()
+                    .is_some_and(|v| !v.is_empty())
+                && a["flows"]
+                    .as_array()
+                    .is_none_or(|v| !v.iter().any(|f| f["eligible"] == true))
+        })
+        .count();
     let total = denominator.len();
     let statements = measured_statements.iter().map(|p| {
         let at = inputs.files.get(&p.meta.file)
@@ -669,18 +696,21 @@ pub fn assess(
         json!({"id":p.meta.id,"file":p.meta.file,"line":p.meta.line,"at":at,"covered":p.covered,"tests":p.tests,"declared":claimed_points.contains(&p.meta.id),"asserted":credited_points.contains(&p.meta.id),"flows":point_flows.get(&p.meta.id).cloned().unwrap_or_default()})
     }).collect::<Vec<_>>();
     json!({"basis":"agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
-        "summary":{"metric":"measured statements","statements":{"asserted":credited_points.len(),"declared":claimed_points.len(),"total":measured_statements.len(),"percentage":if measured_statements.is_empty() { None } else {Some(credited_points.len() as f64 * 100.0 / measured_statements.len() as f64)}},"assertions":map.assertions.len(),"inventoryAssertions":inputs.assertions.len(),"missingInventoryAssertions":missing_inventory,
-            "unmappedAssertions":map.assertions.iter().filter(|a| a.analysis==Analysis::Unmapped || a.flows.is_empty()).count(),
-            "currentFlows":current_flows,"dirtyFlows":dirty_flows,"eligibleFlows":credit_flows,"retiredAssertions":map.retired_assertions.len(),
+        "summary":{"status":status,"reason":reason,"pendingChanges":pending_changes,"metric":"measured statements","statements":{"asserted":credited_points.len(),"declared":claimed_points.len(),"total":measured_statements.len(),"percentage":if status != "available" { None } else {Some(credited_points.len() as f64 * 100.0 / measured_statements.len() as f64)}},"assertions":map.assertions.len(),"inventoryAssertions":inputs.assertions.len(),"missingInventoryAssertions":missing_inventory,
+            "assertionsWithFlows":rows.iter().filter(|a| a["flows"].as_array().is_some_and(|f| !f.is_empty())).count(),
+            "assertionsWithoutFlows":rows.iter().filter(|a| a["flows"].as_array().is_none_or(Vec::is_empty)).count(),
+            "observedAssertionsWithoutCurrentExplanation":assertions_without_current_explanation,
+            "questions":map.assertions.iter().map(|a| a.questions.len()+a.flows.iter().map(|f| f.questions.len()).sum::<usize>()).sum::<usize>(),
+            "currentFlows":current_flows,"draftFlows":draft_flows,"staleFlows":stale_flows,"invalidFlows":invalid_flows,"eligibleFlows":credit_flows,"retiredAssertions":map.retired_assertions.len(),
             "unobservedAssertions":rows.iter().filter(|a| a["observedPassingTests"].as_array().is_none_or(Vec::is_empty)).count(),
             "inventoryFailures":inputs.limitations.iter().filter(|s| s.starts_with("Inventory unavailable for ")).count(),
             "unanchoredStatements":statements.iter().filter(|s| s["at"].is_null()).count(),
-            "inventoryMappingComplete":mapping_complete,"runPassed":passed,"scopeReview":state.scope_review,
-            "lines":{"asserted":credited.len(),"declared":declared.len(),"total":total,"percentage":if total==0 {None} else {Some(credited.len() as f64 * 100.0 / total as f64)}}},
-        "assertions":rows,"statements":statements,"tests":tests.values().map(|t| json!({"id":t.id,"name":t.name})).collect::<Vec<_>>(),
+            "runPassed":passed,
+            "lines":{"asserted":credited.len(),"declared":declared.len(),"total":total,"percentage":if total==0 || status != "available" {None} else {Some(credited.len() as f64 * 100.0 / total as f64)}}},
+        "assertions":rows,"statements":statements,"tests":tests.values().map(|t| json!({"id":t.id,"file":t.file,"name":t.name})).collect::<Vec<_>>(),
         "creditedLines":credited.iter().map(|loc| json!({"file":loc.0,"line":loc.1,"assertions":line_assertions.get(loc)})).collect::<Vec<_>>(),
         "unassertedLines":denominator.difference(&credited).map(|(f,l)| json!({"file":f,"line":l})).collect::<Vec<_>>(),
-        "validationErrors":errors,"limitations":inputs.limitations})
+        "changes":validation["changes"],"validationErrors":errors,"limitations":inputs.limitations})
 }
 
 #[cfg(test)]
@@ -713,24 +743,14 @@ mod tests {
         fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         let run = discover_runs(&root).unwrap().runs.remove(0);
         let stored = load_manifest(&run).unwrap();
-        let (mut map, mut state) = seed(&old, &stored.evidence_digest);
-        map.assertions[0].analysis = Analysis::Mapped;
-        map.assertions[0].flows.push(Flow {
-            id: "constant".into(),
-            explanation: "The assertion checks the constant one.".into(),
-            applies_to: vec![],
-            nodes: vec![],
-            edges: vec![],
-            counts_as_asserted: vec![],
-            watch: vec![Watch::File {
-                file: "test.js".into(),
-            }],
-        });
-        review(&map, &mut state, &old, &BTreeSet::new(), true, false).unwrap();
-        state.schema_version = 1;
-        state.inputs_digest = digest(&old);
-        write_json(&root, &run, MAP_FILE, &map).unwrap();
-        write_json(&root, &run, STATE_FILE, &state).unwrap();
+        let (map, _) = seed(&old, &stored.evidence_digest);
+        let legacy_map = json!({"schemaVersion":1,"assertions":[{"id":map.assertions[0].id,"at":map.assertions[0].at,"analysis":"mapped","observes":[],"flows":[{
+            "id":"constant","explanation":"The assertion checks the constant one.","appliesTo":[],"nodes":[],"edges":[],"countsAsAsserted":[],"watch":[{"kind":"span","at":map.assertions[0].at}]
+        }]}]});
+        let legacy_state = json!({"schemaVersion":1,"inputsDigest":digest(&old),"evidenceDigest":stored.evidence_digest,"reviews":{},"scopeReview":[]});
+        write_json(&root, &run, MAP_FILE, &legacy_map).unwrap();
+        write_json(&root, &run, STATE_FILE, &legacy_state).unwrap();
+        let map = model::parse_stored(&serde_json::to_vec(&legacy_map).unwrap()).unwrap();
         let map_bytes = fs::read(directory.join(MAP_FILE)).unwrap();
         let state_bytes = fs::read(directory.join(STATE_FILE)).unwrap();
 
@@ -746,12 +766,8 @@ mod tests {
             next.assertions[0].flows[0].explanation,
             map.assertions[0].flows[0].explanation
         );
-        assert!(
-            state
-                .reviews
-                .values()
-                .all(|r| r.reasons.iter().any(|r| r.contains("legacy")))
-        );
+        assert!(next.assertions[0].flows[0].basis.is_none());
+        assert!(!next.assertions[0].flows[0].questions.is_empty());
         assert_eq!(fs::read(directory.join(MAP_FILE)).unwrap(), map_bytes);
         assert_eq!(fs::read(directory.join(STATE_FILE)).unwrap(), state_bytes);
 
@@ -786,9 +802,9 @@ mod tests {
         let next_manifest = load_manifest(&next_run).unwrap();
         let (pending, pending_state) = load(&next_run, &next_manifest).unwrap();
         assert_eq!(pending.assertions[0], map.assertions[0]);
-        assert!(!pending_state.scope_review.is_empty());
+        assert!(!pending_state.changes.is_empty());
         assert!(
-            !pending_state.reviews
+            !pending_state.flows
                 [&flow_key(&pending.assertions[0], &pending.assertions[0].flows[0])]
                 .reasons
                 .is_empty()

@@ -8,6 +8,59 @@ verified baseline is commit `0b6394a3c37a51a1d332c25b7e42789ef7fd4393` on
 automatically and uses current project source with per-run file hashes; see the follow-ups below. This checklist records preparation and
 validation; no release tag or publication has been made.
 
+## Current schema-2 flow, 2026-09-12
+
+The active contract is now [assertion maps](assertion-maps.md) and
+[the agent workflow](assertion-agent.md). The sections below record historical
+verification of earlier schemas and commands, not today's interface.
+
+The editable map uses schema 2 and managed state uses schema 3. The assertion
+completion enum and the `review` command are removed. A flow records its own
+`basis`, explicit file/name test selectors, authored paths to `$assertion`,
+whole-file watches and optional questions. Read-only validation supplies tokens
+for the agent to save. Large validation responses can be paged by flows, changes
+or errors. Version-1 maps import without altering their old files; their graphs
+remain suggestions, with null tokens and migration questions.
+
+Every changed captured file enters an impact queue, including files already
+watched by some flows. Authored change assessments can identify additional
+flows affected by missing dependencies. Invalidation generations survive reruns
+and reverts; acknowledged changes fold into the next baseline without churning
+unchanged tokens. Regular reports distinguish available percentages from
+not-assessed, pending, unavailable and inapplicable results. An eligible
+zero-credit explanation can yield a meaningful 0%; an untouched map cannot.
+`--require-mappings` checks for current explanations at recognized passing
+sites, without claiming semantic completeness.
+
+`npm run check` passed: **503 Rust tests**, **22 runtime tests**, schema equality,
+formatting, clippy, all 67 embedded assets, package preflight, the CLI lifecycle
+and all six JS/TS runner configurations. The same six configurations passed
+with Node **22.23.1** and **24.18.0**. The published schema also accepts all five
+research design examples, including explicit null basis tokens. Regression
+checks cover graph reachability, selector ambiguity, zero-credit status,
+per-flow questions, change-response deletion, omitted known dependencies,
+additional impact assignments, stable folded generations, token encoding,
+legacy import and read-only map/state bytes.
+
+A fresh Supergateway build and focused WebSocket lifecycle run
+`run_b511d683679000f9` passed. It inherited `run_f39d12fd349052c2`, preserving all
+**245 assertion IDs**, with five exact passing assertion sites and 790 measured
+statements. Its public percentage is **pending**, with 46 inherited change
+assessments unresolved. No semantic completion of that map is claimed. Local
+debug-binary observations were approximately 0.10 seconds for validation and
+0.34 seconds for the complete regular report query; this mostly empty map is
+not a large authored-map performance benchmark.
+
+`npm run test:native-package` also passed: the optimized Darwin ARM64 binary
+was installed from actual npm tarballs and exercised with JavaScript and
+TypeScript maps, matching embedded docs and schema. Native complete-set and
+corruption checks passed. This is a local packed-install check, not execution
+of the schema-2 binary on every release platform.
+
+A release still requires a new native artifact set from the final release
+commit. Earlier platform artifacts do not validate schema 2. No tag, merge to
+main, registry publication, or model-accuracy claim is implied by these checks.
+
 ## Current project source follow-up, 2026-09-12
 
 Assertion analysis now reads the ordinary current project files. New

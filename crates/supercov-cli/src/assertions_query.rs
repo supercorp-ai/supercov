@@ -10,23 +10,23 @@ const HELP: &str = r#"Usage: supercov runs <run> assertions [options]
        supercov runs <run> source <path> [--offset <n>] [--limit <n>] [--json]
        supercov runs <run> assertions <action> [options]
 
-assertions                  List assertions, including unmapped sites, with review and execution status.
+assertions                  List assertions, including sites without flows, with freshness and execution status.
 assertion <id>              Read one assertion, its authored flows and execution evidence.
 source <path>               Read matching current project source with line numbers.
 
 Assertion actions:
-validate                    Check syntax, IDs, links, current source references and state binding.
-review --all|--flow <A/F>    Record agent review (repeat --flow); not semantic proof.
-review --ack-scope          Acknowledge classified scope changes; combine with flows.
+validate                    Check syntax/references; return expectedBasis tokens without changing files.
+  --view flows|changes|errors Page validation output for large maps (default: all).
 files                       List run input paths, byte sizes and SHA-256 hashes.
 report [--view <view>]      summary (default), assertions, statements, tests,
-                            creditedLines, unassertedLines.
+                            creditedLines, unassertedLines, changes.
 check                       Fail on invalid references, dirty flows, failed run,
-                            pending scope review or a stale/unavailable working tree.
-  --require-complete        Also require every recognized assertion mapped.
+                            pending change impact assessment or a stale/unavailable working tree.
+  --require-mappings        Require a current explanation for each observed recognized site.
   --require-observed        Also require passing runtime evidence for every mapped site/flow.
   --min <0..100>             Minimum agent-assessed statement percentage.
 
+--needs-attention           List assertions with no flows, stale/draft flows or open questions.
 --file <path>               Filter assertion lists or statement/line report views.
 --offset <n> --limit <n>     Page lists or source (zero-based offset, limit 1..1000).
 --json                      Structured output for integrations; source uses {line, text} items.
@@ -35,37 +35,33 @@ supercov assertions schema [--json]               Export the JSON Schema.
 supercov assertions validate --file <path> [--json] Check JSON shape without a run.
 
 Each new test run creates assertions.json and reuses the newest available map
-for the same command and language. Edit the file, then validate, review and check.
+for the same command and language. Edit the file, validate, copy examined expectedBasis tokens into it, then check.
 Exit 0 means the requested check passed; exit 2 means invalid input or an unmet gate.
 Pin a run ID while authoring. See docs/assertion-maps.md and docs/assertion-agent.md.
 Supercov never authors semantic edges. MC/DC remains separate.
 "#;
 const SOURCE_HELP: &str = "Usage: supercov runs <run> source <path> [--offset <n>] [--limit <n>] [--json]\n\nRead the current project file after verifying it matches the run. The path is project-relative.\n--offset is zero-based; --limit defaults to 20 (1..1000). --json returns line/text items.\nUse runs <run> assertions files to list run input paths.\n";
-const ASSERTION_HELP: &str = "Usage: supercov runs <run> assertion <id> [--json]\n\nRead one assertion and its authored flows, review status and passing execution evidence.\nUse runs <run> assertions to list IDs.\n";
+const ASSERTION_HELP: &str = "Usage: supercov runs <run> assertion <id> [--json]\n\nRead one assertion and its authored flows, flow freshness and passing execution evidence.\nUse runs <run> assertions to list IDs.\n";
 struct Options {
     action: String,
-    require_complete: bool,
+    require_mappings: bool,
     require_observed: bool,
     minimum: Option<f64>,
     file: Option<String>,
     view: String,
-    flows: BTreeSet<String>,
-    all: bool,
-    ack: bool,
+    needs_attention: bool,
     offset: usize,
     limit: usize,
 }
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut o = Options {
         action: "report".into(),
-        require_complete: false,
+        require_mappings: false,
         require_observed: false,
         minimum: None,
         file: None,
         view: "assertions".into(),
-        flows: BTreeSet::new(),
-        all: false,
-        ack: false,
+        needs_attention: false,
         offset: 0,
         limit: 20,
     };
@@ -76,17 +72,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     let mut seen = BTreeSet::new();
     while let Some(arg) = args.next() {
-        if arg != "--flow" && !seen.insert(arg.as_str()) {
+        if !seen.insert(arg.as_str()) {
             return Err(format!("Duplicate option: {arg}"));
         }
         match arg.as_str() {
             "--json" => (),
-            "--all" => o.all = true,
-            "--require-complete" => o.require_complete = true,
+            "--needs-attention" => o.needs_attention = true,
+            "--require-mappings" => o.require_mappings = true,
             "--require-observed" => o.require_observed = true,
             "--archived" => return Err("--archived is removed: assertion analysis requires current files matching the run; rerun tests to inherit previous mappings".into()),
-            "--ack-scope" => o.ack = true,
-            "--file" | "--view" | "--flow" | "--offset" | "--limit" | "--min" => {
+            "--file" | "--view" | "--offset" | "--limit" | "--min" => {
                 let value = args
                     .next()
                     .filter(|v| !v.starts_with('-'))
@@ -95,9 +90,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     "--min" => o.minimum = Some(value.parse().map_err(|_| "Invalid minimum")?),
                     "--file" => o.file = Some(value.clone()),
                     "--view" => o.view = value.clone(),
-                    "--flow" => {
-                        o.flows.insert(value.clone());
-                    }
                     "--offset" => o.offset = value.parse().map_err(|_| "Invalid offset")?,
                     "--limit" => o.limit = value.parse().map_err(|_| "Invalid limit")?,
                     _ => unreachable!(),
@@ -106,11 +98,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             _ => return Err(format!("Unknown option: {arg}")),
         }
     }
-    if !matches!(
-        o.action.as_str(),
-        "report" | "review" | "validate" | "check" | "files"
-    ) {
+    if !matches!(o.action.as_str(), "report" | "validate" | "check" | "files") {
         return Err(match o.action.as_str() {
+            "review" => "The review command is removed: edit assertions.json and copy expectedBasis from assertions validate after examining the claims".into(),
             "inventory" => {
                 "Use runs <run> assertions to list all assertion sites and their status".into()
             }
@@ -128,10 +118,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     for (flag, valid) in [
         ("--min", o.action == "check"),
-        ("--require-complete", o.action == "check"),
+        ("--require-mappings", o.action == "check"),
         ("--require-observed", o.action == "check"),
-        ("--all", o.action == "review"),
-        ("--ack-scope", o.action == "review"),
+        (
+            "--needs-attention",
+            o.action == "report" && o.view == "assertions",
+        ),
         (
             "--file",
             o.action == "report"
@@ -140,31 +132,36 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     "assertions" | "statements" | "creditedLines" | "unassertedLines"
                 ),
         ),
-        ("--view", o.action == "report"),
+        ("--view", matches!(o.action.as_str(), "report" | "validate")),
     ] {
         if seen.contains(flag) && !valid {
             return Err(format!("{flag} is not valid for {}", o.action));
         }
     }
-    if !o.flows.is_empty() && o.action != "review" {
-        return Err("--flow requires review".into());
-    }
-    if o.all && !o.flows.is_empty() {
-        return Err("Choose --all or selected --flow values".into());
-    }
-    if o.action == "review" && !o.all && o.flows.is_empty() && !o.ack {
-        return Err("Review requires --all, --flow or --ack-scope".into());
-    }
     if (seen.contains("--offset") || seen.contains("--limit"))
-        && !matches!(o.action.as_str(), "report" | "files")
+        && !(matches!(o.action.as_str(), "report" | "files")
+            || o.action == "validate" && o.view != "summary")
     {
-        return Err("Pagination requires an assertion list, report array view or files".into());
+        return Err(
+            "Pagination requires a list, files, or validate --view flows|changes|errors".into(),
+        );
     }
-    if !matches!(
-        o.view.as_str(),
-        "summary" | "assertions" | "statements" | "tests" | "creditedLines" | "unassertedLines"
-    ) {
-        return Err("Unknown report view".into());
+    let view_valid = if o.action == "validate" {
+        matches!(o.view.as_str(), "summary" | "flows" | "changes" | "errors")
+    } else {
+        matches!(
+            o.view.as_str(),
+            "summary"
+                | "assertions"
+                | "statements"
+                | "tests"
+                | "creditedLines"
+                | "unassertedLines"
+                | "changes"
+        )
+    };
+    if !view_valid {
+        return Err("Unknown view for this action".into());
     }
     if o.action == "report"
         && o.view == "summary"
@@ -173,6 +170,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
         return Err("Pagination requires an array view, not summary".into());
     }
     Ok(o)
+}
+fn needs_attention(row: &Value) -> bool {
+    row["questions"].as_array().is_some_and(|q| !q.is_empty())
+        || row["flows"].as_array().is_none_or(|flows| {
+            flows.is_empty()
+                || flows
+                    .iter()
+                    .any(|f| f["current"] != true || f["eligible"] != true)
+        })
 }
 fn page(values: &[Value], offset: usize, limit: usize) -> Value {
     let items = values
@@ -206,7 +212,6 @@ pub fn command(args: &[String]) -> ExitCode {
         }
         let mut check_report = None;
         let mut data = match o.action.as_str() {
-            "review" => maps::acknowledge(&root, run, &o.flows, o.all, o.ack)?,
             "files" => {
                 let input = maps::load_manifest(run)?;
                 let values = input
@@ -227,9 +232,26 @@ pub fn command(args: &[String]) -> ExitCode {
                 match supercov_engine::assertion_map::parse(&bytes) {
                     Err(error) => json!({"valid":false,"stage":"syntax","errors":[error]}),
                     Ok(_) => {
-                        let (map, _) = maps::load(run, &input)?;
-                        let errors = supercov_engine::assertion_map::validate(&map, &input.inputs);
-                        json!({"valid":errors.is_empty(),"stage":"references","errors":errors,"meaning":"References only; semantic edges are agent-authored"})
+                        let (map, state) = maps::load(run, &input)?;
+                        let mut data =
+                            supercov_engine::assertion_map::validation(&map, &state, &input.inputs);
+                        data["revision"] = json!(supercov_engine::assertion_map::digest(&(
+                            &map,
+                            &state,
+                            &input.evidence_digest
+                        )));
+                        if o.view != "summary" {
+                            let mut paged =
+                                page(data[&o.view].as_array().unwrap(), o.offset, o.limit);
+                            for key in ["valid", "stage", "meaning", "revision"] {
+                                paged[key] = data[key].clone();
+                            }
+                            paged["view"] = json!(o.view);
+                            paged["errorCount"] = json!(data["errors"].as_array().unwrap().len());
+                            paged
+                        } else {
+                            data
+                        }
                     }
                 }
             }
@@ -248,6 +270,7 @@ pub fn command(args: &[String]) -> ExitCode {
                                     == Some(file.as_str())
                             })
                         })
+                        .filter(|row| !o.needs_attention || needs_attention(row))
                         .cloned()
                         .collect::<Vec<_>>();
                     page(&values, o.offset, o.limit)
@@ -264,6 +287,7 @@ pub fn command(args: &[String]) -> ExitCode {
                 }
                 data["view"] = json!(o.view);
                 data["file"] = json!(o.file);
+                data["needsAttention"] = json!(o.needs_attention);
                 data["scope"] = json!(
                     "summary covers the whole run with matching current source; --file filters items only"
                 );
@@ -278,7 +302,7 @@ pub fn command(args: &[String]) -> ExitCode {
             let failures = check_failures(&report, &data["workingTree"], &o);
             data["valid"] = json!(failures.is_empty());
             data["failures"] = json!(failures);
-            data["requirements"] = json!({"complete":o.require_complete,"observed":o.require_observed,"minimum":o.minimum});
+            data["requirements"] = json!({"mappings":o.require_mappings,"observed":o.require_observed,"minimum":o.minimum});
         }
         data["run"] = json!(run.id);
         data["map"] = json!(run.directory.join(maps::MAP_FILE));
@@ -487,11 +511,14 @@ fn check_failures(report: &Value, working_tree: &Value, o: &Options) -> Vec<Stri
     if s["runPassed"] != true {
         failures.push("Run did not pass".into());
     }
-    if s["dirtyFlows"].as_u64() != Some(0) {
-        failures.push("Flows require review or reference repair".into());
+    if ["draftFlows", "staleFlows", "invalidFlows", "questions"]
+        .iter()
+        .any(|key| s[key].as_u64().unwrap_or(0) != 0)
+    {
+        failures.push("Flows or questions need investigation or reference repair".into());
     }
-    if s["scopeReview"].as_array().is_none_or(|a| !a.is_empty()) {
-        failures.push("Source scope changes require review".into());
+    if s["pendingChanges"].as_u64().unwrap_or(0) != 0 {
+        failures.push("Source changes require impact assessment".into());
     }
     if working_tree["stale"] != false {
         failures.push(
@@ -499,11 +526,12 @@ fn check_failures(report: &Value, working_tree: &Value, o: &Options) -> Vec<Stri
                 .into(),
         );
     }
-    if o.require_complete
-        && (s["inventoryMappingComplete"] != true || s["inventoryFailures"].as_u64() != Some(0))
+    if o.require_mappings
+        && (s["observedAssertionsWithoutCurrentExplanation"].as_u64() != Some(0)
+            || s["inventoryFailures"].as_u64() != Some(0))
     {
         failures.push(
-            "Recognized assertion inventory is incomplete, partial or could not be parsed".into(),
+            "Observed recognized assertions lack current explanations, or assertion discovery failed".into(),
         );
     }
     if o.require_observed
@@ -511,9 +539,11 @@ fn check_failures(report: &Value, working_tree: &Value, o: &Options) -> Vec<Stri
             || report["assertions"].as_array().is_none_or(|rows| {
                 rows.iter().any(|a| {
                     a["flows"].as_array().is_none_or(|flows| {
-                        flows
-                            .iter()
-                            .any(|f| f["matchingTests"].as_array().is_none_or(Vec::is_empty))
+                        flows.iter().any(|f| {
+                            f["selectors"].as_array().is_none_or(|v| {
+                                v.is_empty() || v.iter().any(|s| s["status"] != "observed")
+                            })
+                        })
                     })
                 })
             }))
@@ -526,7 +556,7 @@ fn check_failures(report: &Value, working_tree: &Value, o: &Options) -> Vec<Stri
             .is_none_or(|n| n < minimum)
     {
         failures.push(format!(
-            "Statement assertion coverage is below {minimum}% or has no measured denominator"
+            "Statement assertion coverage is below {minimum}% or is not available"
         ));
     }
     failures
@@ -547,7 +577,7 @@ pub fn global_command(args: &[String]) -> ExitCode {
         ["schema"] => Ok(supercov_engine::assertion_map::schema()),
         ["validate", "--file", file] => std::fs::read(file).map_err(|e| format!("{file}: {e}")).map(|bytes| {
             match supercov_engine::assertion_map::parse(&bytes) {
-                Ok(_) => json!({"valid":true,"stage":"syntax","errors":[],"meaning":"JSON shape only; use runs <run> assertions validate for IDs, links and frozen source references"}),
+                Ok(_) => json!({"valid":true,"stage":"syntax","errors":[],"meaning":"JSON shape only; use runs <run> assertions validate for IDs, links and current source references"}),
                 Err(error) => json!({"valid":false,"stage":"syntax","errors":[error]}),
             }
         }),
@@ -570,7 +600,7 @@ mod tests {
             vec!["report", "--limit", "0"],
             vec!["report", "--limit", "20"],
             vec!["validate", "--min", "50"],
-            vec!["review", "--require-complete"],
+            vec!["review", "--require-mappings"],
             vec!["check", "--min", "NaN"],
             vec!["check", "--min", "101"],
         ] {
@@ -633,14 +663,14 @@ mod tests {
     }
 
     #[test]
-    fn checks_require_completion_evidence_and_current_checkout() {
+    fn checks_require_requested_mappings_evidence_and_current_checkout() {
         let mut report = json!({"validationErrors":[],"assertions":[],"summary":{
-            "runPassed":true,"dirtyFlows":0,"scopeReview":[],"inventoryMappingComplete":false,
+            "runPassed":true,"draftFlows":0,"staleFlows":0,"invalidFlows":0,"pendingChanges":0,"observedAssertionsWithoutCurrentExplanation":1,
             "inventoryFailures":0,"unobservedAssertions":1,"statements":{"percentage":50}
         }});
         let mut options = parse(&["check".into()]).unwrap();
         assert!(check_failures(&report, &json!({"stale":false}), &options).is_empty());
-        options.require_complete = true;
+        options.require_mappings = true;
         options.require_observed = true;
         options.minimum = Some(60.0);
         assert_eq!(
@@ -651,7 +681,7 @@ mod tests {
             check_failures(&report, &json!({"stale":null}), &options).len(),
             4
         );
-        report["summary"]["inventoryMappingComplete"] = json!(true);
+        report["summary"]["observedAssertionsWithoutCurrentExplanation"] = json!(0);
         report["summary"]["unobservedAssertions"] = json!(0);
         options.minimum = Some(50.0);
         assert_eq!(

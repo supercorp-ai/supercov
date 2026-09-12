@@ -7,10 +7,10 @@ flow. Remove the separate `review` command and the assertion-level
 recorded claims, their input versions, their execution evidence, and outstanding
 questions. It should never imply that the expected number of flows is known.
 
-This is the recommended next contract, based on research checked through
-September 12, 2026 and an implementation audit at `afd877d`. It is a design
-decision document, not the currently supported CLI contract. The production
-format at that revision is still schema 1; the proposed format here is schema 2.
+This decision record is based on research checked through September 12, 2026
+and an implementation audit at `afd877d`. The schema-2 implementation now follows
+this contract; [the published map reference](../assertion-maps.md) documents the
+supported CLI. The baseline at `afd877d` used schema 1.
 The accompanying [schema](assertion-maps-v2.schema.json) and
 [examples](assertion-maps-v2.examples.json) are design artifacts, outside the
 published schemas and embedded CLI documentation.

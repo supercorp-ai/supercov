@@ -1,5 +1,5 @@
 //! Agent-authored assertion maps. Edges are explanations, never inferred proofs.
-//! This module owns format validation, text relocation and review bookkeeping.
+//! This module owns format validation, text relocation and input acknowledgement bookkeeping.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -144,15 +144,6 @@ impl InputManifest {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub enum Analysis {
-    #[default]
-    Unmapped,
-    Partial,
-    Mapped,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Node {
@@ -172,33 +163,39 @@ pub struct Edge {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub basis: String,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-pub enum Watch {
-    File { file: String },
-    Span { at: Anchor },
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestSelector {
+    pub file: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Flow {
     pub id: String,
+    #[serde(deserialize_with = "required_basis")]
+    #[schemars(required, schema_with = "basis_schema")]
+    pub basis: Option<String>,
     pub explanation: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub applies_to: Vec<String>,
+    pub applies_to: Vec<TestSelector>,
     pub nodes: Vec<Node>,
     #[serde(default)]
     pub edges: Vec<Edge>,
     pub counts_as_asserted: Vec<String>,
-    pub watch: Vec<Watch>,
+    pub watch: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Assertion {
     pub id: String,
     pub at: Anchor,
-    #[serde(default)]
-    pub analysis: Analysis,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<String>,
     #[serde(default)]
     pub observes: Vec<String>,
     #[serde(default)]
@@ -213,12 +210,44 @@ pub struct Retired {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssertionMap {
-    #[serde(default = "version")]
-    #[schemars(range(min = 1, max = 1))]
+    #[schemars(range(min = 2, max = 2))]
     pub schema_version: u32,
     pub assertions: Vec<Assertion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_assessments: Vec<ChangeAssessment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_assertions: Vec<Retired>,
+}
+
+// Missing basis is a syntax error; null explicitly means unfinished work.
+fn required_basis<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(d)?;
+    if value.as_deref().is_some_and(|s| !valid_basis(s)) {
+        return Err(serde::de::Error::custom(
+            "expected null or scov2:<64 lowercase hex digits>",
+        ));
+    }
+    Ok(value)
+}
+fn basis_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type":["string","null"],"pattern":"^scov2:[0-9a-f]{64}$"})
+}
+fn valid_basis(s: &str) -> bool {
+    s.strip_prefix("scov2:").is_some_and(|h| {
+        h.len() == 64
+            && h.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangeAssessment {
+    pub id: String,
+    #[serde(deserialize_with = "required_basis")]
+    #[schemars(required, schema_with = "basis_schema")]
+    pub basis: Option<String>,
+    pub affected_flows: Vec<String>,
+    pub explanation: String,
 }
 
 /// Editor schema generated from the same Rust types used by every map command.
@@ -274,30 +303,40 @@ pub fn parse(bytes: &[u8]) -> Result<AssertionMap, ParseError> {
         column: e.column(),
         message: e.to_string(),
     })?;
-    if map.schema_version != 1 {
+    if map.schema_version != 2 {
         return Err(ParseError {
             pointer: "/schemaVersion".into(),
             line: 0,
             column: 0,
-            message: "unsupported map schema version; expected 1".into(),
+            message: "unsupported map schema version; expected 2".into(),
         });
     }
     Ok(map)
 }
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Review {
-    pub fingerprint: String,
+pub struct FlowState {
+    pub generation: String,
     pub reasons: BTreeSet<String>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Change {
+    pub id: String,
+    pub file: Option<String>,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub reason: String,
+    pub known_flows: BTreeSet<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub schema_version: u32,
     pub inputs_digest: String,
     pub evidence_digest: String,
-    pub reviews: BTreeMap<String, Review>,
-    pub scope_review: BTreeSet<String>,
+    pub flows: BTreeMap<String, FlowState>,
+    pub changes: Vec<Change>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inheritance: Option<Inheritance>,
 }
@@ -329,26 +368,27 @@ pub fn seed(inputs: &Inputs, evidence_digest: &str) -> (AssertionMap, State) {
 pub fn seed_manifest(inputs: &InputManifest, evidence_digest: &str) -> (AssertionMap, State) {
     (
         AssertionMap {
-            schema_version: 1,
+            schema_version: 2,
             assertions: inputs
                 .assertions
                 .iter()
                 .map(|site| Assertion {
                     id: format!("a_{}", &digest(&site.at)[..20]),
                     at: site.at.clone(),
-                    analysis: Analysis::Unmapped,
+                    questions: vec![],
                     observes: vec![],
                     flows: vec![],
                 })
                 .collect(),
+            change_assessments: vec![],
             retired_assertions: vec![],
         },
         State {
-            schema_version: 2,
+            schema_version: 3,
             inputs_digest: digest(inputs),
             evidence_digest: evidence_digest.into(),
-            reviews: BTreeMap::new(),
-            scope_review: BTreeSet::new(),
+            flows: BTreeMap::new(),
+            changes: vec![],
             inheritance: None,
         },
     )
@@ -357,7 +397,7 @@ pub fn seed_manifest(inputs: &InputManifest, evidence_digest: &str) -> (Assertio
 /// Structural checks only; malformed entries cannot silently earn credit.
 pub fn validate(map: &AssertionMap, inputs: &Inputs) -> Vec<String> {
     let mut errors = Vec::new();
-    if map.schema_version != 1 || inputs.schema_version != 1 {
+    if map.schema_version != 2 || inputs.schema_version != 1 {
         errors.push("unsupported schema version".into());
     }
     let mut ids = BTreeSet::new();
@@ -387,6 +427,12 @@ pub fn validate(map: &AssertionMap, inputs: &Inputs) -> Vec<String> {
             );
         }
     }
+    let mut changes = BTreeSet::new();
+    for change in &map.change_assessments {
+        if !valid_id(&change.id) || !changes.insert(&change.id) {
+            errors.push("invalid/duplicate change assessment ID".into());
+        }
+    }
     errors
 }
 pub fn validate_flow(flow: &Flow, files: &Files) -> Vec<String> {
@@ -401,140 +447,293 @@ pub fn validate_flow(flow: &Flow, files: &Files) -> Vec<String> {
         }
     }
     for edge in &flow.edges {
-        if !nodes.contains(&edge.from) || !nodes.contains(&edge.to) {
+        if !nodes.contains(&edge.from) || (!nodes.contains(&edge.to) && edge.to != "$assertion") {
             errors.push("dangling edge".into());
         }
     }
     if flow.counts_as_asserted.iter().any(|id| !nodes.contains(id)) {
         errors.push("unknown counted node".into());
     }
+    // Traverse only the author's graph. Never infer a dependency from source.
+    let mut reaches = BTreeSet::from(["$assertion".to_owned()]);
+    loop {
+        let size = reaches.len();
+        for edge in &flow.edges {
+            if reaches.contains(&edge.to) {
+                reaches.insert(edge.from.clone());
+            }
+        }
+        if reaches.len() == size {
+            break;
+        }
+    }
+    for id in &flow.counts_as_asserted {
+        if !reaches.contains(id) {
+            errors.push(format!(
+                "counted node {id} has no authored path to $assertion"
+            ));
+        }
+    }
+    if flow.edges.iter().any(|e| e.kind.trim().is_empty()) {
+        errors.push("missing edge kind".into());
+    }
+    if flow
+        .applies_to
+        .iter()
+        .any(|t| !local_path(&t.file) || !files.contains_key(&t.file) || t.name.trim().is_empty())
+    {
+        errors.push("invalid test selector file or name".into());
+    }
+    if flow.applies_to.iter().collect::<BTreeSet<_>>().len() != flow.applies_to.len() {
+        errors.push("duplicate test selector".into());
+    }
+    if flow
+        .counts_as_asserted
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .len()
+        != flow.counts_as_asserted.len()
+    {
+        errors.push("duplicate counted node".into());
+    }
     if flow.explanation.trim().is_empty() {
         errors.push("missing explanation".into());
     }
-    if flow.watch.is_empty() {
-        errors.push("no review inputs declared".into());
-    }
-    for watch in &flow.watch {
-        match watch {
-            Watch::File { file } if !local_path(file) || !files.contains_key(file) => {
-                errors.push(format!("watched file missing: {file}"))
-            }
-            Watch::Span { at } if at.offset(files).is_none() => {
-                errors.push("invalid watched span".into())
-            }
-            _ => (),
+    for file in &flow.watch {
+        if !local_path(file) || !files.contains_key(file) {
+            errors.push(format!("watched file missing: {file}"));
         }
     }
     errors
 }
 
-/// Whole-file dependencies include the assertion's test and every flow node.
-/// Span watches still identify review context, but hashes invalidate whole files.
+/// Whole-file input dependencies, not a mechanically inferred semantic slice.
 pub fn dependencies<'a>(a: &'a Assertion, f: &'a Flow) -> BTreeSet<&'a str> {
     std::iter::once(a.at.file.as_str())
+        .chain(f.applies_to.iter().map(|t| t.file.as_str()))
         .chain(f.nodes.iter().map(|n| n.at.file.as_str()))
-        .chain(f.watch.iter().map(|w| match w {
-            Watch::File { file } => file.as_str(),
-            Watch::Span { at } => at.file.as_str(),
-        }))
+        .chain(f.watch.iter().map(String::as_str))
         .collect()
 }
-
-pub fn fingerprint(a: &Assertion, f: &Flow, files: &Files) -> String {
-    let hashes = dependencies(a, f)
-        .into_iter()
-        .filter_map(|p| files.get(p).map(|s| (p.to_owned(), FileFingerprint::of(s))))
-        .collect();
-    fingerprint_manifest(a, f, &hashes)
+fn token(value: &impl Serialize) -> String {
+    format!("scov2:{}", digest(value))
 }
-fn fingerprint_manifest(a: &Assertion, f: &Flow, files: &FileManifest) -> String {
-    let value = (&a.id, &a.at, &a.analysis, &a.observes, f);
-    let hashes = dependencies(a, f)
-        .into_iter()
-        .map(|p| (p, files.get(p)))
-        .collect::<Vec<_>>();
-    digest(&(value, hashes))
-}
-pub fn reasons(a: &Assertion, f: &Flow, state: &State, inputs: &Inputs) -> BTreeSet<String> {
-    let mut reasons = state
-        .reviews
-        .get(&flow_key(a, f))
-        .map(|r| r.reasons.clone())
-        .unwrap_or_default();
-    if state.schema_version != 2 {
-        reasons.insert("unsupported review state".into());
-    }
-    if state
-        .reviews
-        .get(&flow_key(a, f))
-        .is_none_or(|r| r.fingerprint != fingerprint(a, f, &inputs.files))
-    {
-        reasons.insert("unreviewed map or changed review inputs".into());
-    }
-    reasons.extend(validate_flow(f, &inputs.files));
-    if a.at.offset(&inputs.files).is_none() {
-        reasons.insert("invalid assertion anchor".into());
-    }
-    reasons
-}
-pub fn review(
+pub fn change_errors(
     map: &AssertionMap,
-    state: &mut State,
-    inputs: &Inputs,
-    selected: &BTreeSet<String>,
-    all: bool,
-    ack_scope: bool,
-) -> Result<(), String> {
-    if map.schema_version != 1 {
-        return Err("unsupported map schema version".into());
-    }
-    if state.inputs_digest != inputs.identity() || state.schema_version != 2 {
-        return Err("carry the map to this run before review".into());
-    }
+    change: &Change,
+    response: &ChangeAssessment,
+) -> Vec<String> {
     let keys = map
         .assertions
         .iter()
         .flat_map(|a| a.flows.iter().map(move |f| flow_key(a, f)))
         .collect::<BTreeSet<_>>();
-    if !selected.is_subset(&keys) {
-        return Err("unknown flow selected for review".into());
+    let affected = response
+        .affected_flows
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut errors = Vec::new();
+    if response.explanation.trim().is_empty() {
+        errors.push("missing impact explanation".into());
     }
-    // Partial review permits unrelated stale anchors. ID/edge errors are still
-    // rejected for the selected entries; a report excludes invalid siblings.
-    let mut next = state.clone();
-    let mut assertion_ids = BTreeSet::new();
-    let mut locations = BTreeSet::new();
+    if affected.len() != response.affected_flows.len() {
+        errors.push("duplicate affected flow".into());
+    }
+    if !affected.is_subset(&keys) {
+        errors.push("unknown affected flow".into());
+    }
+    if !change
+        .known_flows
+        .intersection(&keys)
+        .all(|k| affected.contains(k))
+    {
+        errors.push("known dependent flows must be included unless removed from the map".into());
+    }
+    errors
+}
+pub fn expected_change_basis(
+    change: &Change,
+    response: &ChangeAssessment,
+    inputs: &InputManifest,
+) -> String {
+    token(&(
+        "supercov-change-v2",
+        change,
+        digest(inputs),
+        &response.id,
+        &response.affected_flows,
+        &response.explanation,
+    ))
+}
+pub fn change_current(map: &AssertionMap, change: &Change, inputs: &InputManifest) -> bool {
+    let responses = map
+        .change_assessments
+        .iter()
+        .filter(|r| r.id == change.id)
+        .collect::<Vec<_>>();
+    matches!(responses.as_slice(), [r] if change_errors(map, change, r).is_empty() && r.basis.as_deref() == Some(expected_change_basis(change, r, inputs).as_str()))
+}
+fn generation(
+    a: &Assertion,
+    f: &Flow,
+    map: &AssertionMap,
+    state: &State,
+    inputs: &InputManifest,
+) -> String {
+    let key = flow_key(a, f);
+    let base = state.flows.get(&key).map_or("0", |s| s.generation.as_str());
+    let impacts = state
+        .changes
+        .iter()
+        .filter(|c| change_current(map, c, inputs))
+        .filter_map(|c| {
+            map.change_assessments
+                .iter()
+                .find(|r| r.id == c.id && r.affected_flows.contains(&key))
+                .map(|r| (&c.id, &r.basis))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if impacts.is_empty() {
+        base.into()
+    } else {
+        digest(&("supercov-generation-v2", base, impacts))
+    }
+}
+pub fn expected_basis(
+    a: &Assertion,
+    f: &Flow,
+    map: &AssertionMap,
+    state: &State,
+    inputs: &InputManifest,
+) -> String {
+    let mut claim = f.clone();
+    claim.basis = None;
+    let hashes = dependencies(a, f)
+        .into_iter()
+        .map(|p| (p, inputs.files.get(p)))
+        .collect::<BTreeMap<_, _>>();
+    token(&(
+        "supercov-flow-v2",
+        &inputs.context_digest,
+        &a.id,
+        &a.at,
+        &a.observes,
+        claim,
+        hashes,
+        generation(a, f, map, state, inputs),
+    ))
+}
+pub fn reasons(
+    a: &Assertion,
+    f: &Flow,
+    map: &AssertionMap,
+    state: &State,
+    inputs: &Inputs,
+) -> BTreeSet<String> {
+    reasons_for_manifest(a, f, map, state, inputs, &inputs.manifest())
+}
+pub fn reasons_for_manifest(
+    a: &Assertion,
+    f: &Flow,
+    map: &AssertionMap,
+    state: &State,
+    inputs: &Inputs,
+    manifest: &InputManifest,
+) -> BTreeSet<String> {
+    let mut reasons = BTreeSet::new();
+    if state.schema_version != 3 || state.inputs_digest != digest(manifest) {
+        reasons.insert("state does not match run inputs".into());
+    }
+    if f.basis.as_deref() != Some(expected_basis(a, f, map, state, manifest).as_str()) {
+        reasons.insert(
+            if f.basis.is_none() {
+                "draft: input acknowledgement not recorded"
+            } else {
+                "claim or inputs changed; needs rechecking"
+            }
+            .into(),
+        );
+        if let Some(s) = state.flows.get(&flow_key(a, f)) {
+            reasons.extend(s.reasons.iter().cloned());
+        }
+    }
+    reasons.extend(validate_flow(f, &inputs.files));
+    if a.at.offset(&inputs.files).is_none() {
+        reasons.insert("invalid assertion anchor".into());
+    }
+    if !f.questions.is_empty() {
+        reasons.insert("flow has unresolved questions".into());
+    }
+    reasons
+}
+/// Read-only validation. Tokens acknowledge authored claims, never prove them.
+pub fn validation(map: &AssertionMap, state: &State, inputs: &Inputs) -> serde_json::Value {
+    use serde_json::json;
+    let manifest = inputs.manifest();
+    let mut errors = validate(map, inputs);
+    for r in &map.change_assessments {
+        if !state.changes.iter().any(|c| c.id == r.id) {
+            errors.push(format!("{}: unknown change assessment", r.id));
+        }
+    }
+    let changes = state.changes.iter().map(|c| {
+        let response = map.change_assessments.iter().find(|r| r.id == c.id);
+        let faults = response.map(|r| change_errors(map, c, r)).unwrap_or_default();
+        errors.extend(faults.iter().map(|e| format!("{}: {e}", c.id)));
+        json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,"knownFlows":c.known_flows,
+            "current":change_current(map,c,&manifest),"assessment":response,"errors":faults,
+            "expectedBasis":response.map(|r| expected_change_basis(c,r,&manifest))})
+    }).collect::<Vec<_>>();
+    let flows = map.assertions.iter().flat_map(|a| a.flows.iter().map(move |f| (a,f))).map(|(a,f)| {
+        json!({"id":flow_key(a,f),"expectedBasis":expected_basis(a,f,map,state,&manifest),"reasons":reasons_for_manifest(a,f,map,state,inputs,&manifest)})
+    }).collect::<Vec<_>>();
+    json!({"valid":errors.is_empty(),"stage":"references","errors":errors,"flows":flows,"changes":changes,
+        "meaning":"Authored graph references and input acknowledgements only; no semantic proof or completeness claim"})
+}
+pub fn invalidate(state: &mut State, map: &AssertionMap, reason: &str) {
     for a in &map.assertions {
-        if !valid_id(&a.id) || !assertion_ids.insert(&a.id) || !locations.insert(&a.at) {
-            return Err("invalid/duplicate assertion identity".into());
-        }
-        let mut flow_ids = BTreeSet::new();
         for f in &a.flows {
-            if !valid_id(&f.id) || !flow_ids.insert(&f.id) {
-                return Err("invalid/duplicate flow ID".into());
-            }
             let key = flow_key(a, f);
-            if all || selected.contains(&key) {
-                let errors = validate_flow(f, &inputs.files);
-                if !errors.is_empty() || a.at.offset(&inputs.files).is_none() {
-                    return Err(format!("{key}: invalid current references: {errors:?}"));
-                }
-                next.reviews.insert(
-                    key,
-                    Review {
-                        fingerprint: fingerprint(a, f, &inputs.files),
-                        reasons: BTreeSet::new(),
-                    },
-                );
-            }
+            let base = state.flows.get(&key).map_or("0", |s| s.generation.as_str());
+            state.flows.insert(
+                key,
+                FlowState {
+                    generation: digest(&(base, reason, &state.inputs_digest)),
+                    reasons: BTreeSet::from([reason.into()]),
+                },
+            );
         }
     }
-    next.reviews.retain(|k, _| keys.contains(k));
-    if ack_scope {
-        next.scope_review.clear();
-    }
-    *state = next;
-    Ok(())
+}
+pub fn add_change(
+    state: &mut State,
+    file: Option<String>,
+    before: Option<String>,
+    after: Option<String>,
+    reason: String,
+    known_flows: BTreeSet<String>,
+) {
+    // Include pending history so edit/revert/edit cannot alias a still-pending event.
+    let id = format!(
+        "c_{}",
+        &digest(&(
+            "supercov-change-id-v2",
+            &state.changes,
+            &file,
+            &before,
+            &after,
+            &reason
+        ))[..24]
+    );
+    state.changes.push(Change {
+        id,
+        file,
+        before,
+        after,
+        reason,
+        known_flows,
+    });
 }
 
 fn unique_occurrence(text: &str, snippet: &str) -> Option<usize> {
@@ -586,17 +785,28 @@ pub fn carry(
     evidence_digest: &str,
     context_changed: bool,
 ) -> Result<(AssertionMap, State), String> {
-    if map.schema_version != 1 || old.schema_version != 2 || new.schema_version != 1 {
+    if map.schema_version != 2 || old.schema_version != 2 || new.schema_version != 1 {
         return Err("unsupported map/input schema version".into());
     }
-    if state.inputs_digest != digest(old) || state.schema_version != 2 {
+    if state.inputs_digest != digest(old) || state.schema_version != 3 {
         return Err("old map state does not match its run inputs".into());
     }
     let new_manifest = new.manifest();
     let (mut next, mut next_state) = seed_manifest(&new_manifest, evidence_digest);
     next.assertions.clear();
     next.retired_assertions = map.retired_assertions.clone();
-    next_state.scope_review = state.scope_review.clone();
+    next_state.changes = state
+        .changes
+        .iter()
+        .filter(|c| !change_current(map, c, old))
+        .cloned()
+        .collect();
+    next.change_assessments = map
+        .change_assessments
+        .iter()
+        .filter(|r| next_state.changes.iter().any(|c| c.id == r.id))
+        .cloned()
+        .collect();
     let mut consumed = BTreeSet::new();
     let exact = map
         .assertions
@@ -645,17 +855,14 @@ pub fn carry(
         let mut updated = a.clone();
         updated.at = at.clone();
         for (prior, f) in a.flows.iter().zip(&mut updated.flows) {
-            let mut dirty = state
-                .reviews
-                .get(&flow_key(a, prior))
-                .map(|r| r.reasons.clone())
-                .unwrap_or_default();
-            if state
-                .reviews
-                .get(&flow_key(a, prior))
-                .is_none_or(|r| r.fingerprint != fingerprint_manifest(a, prior, &old.files))
+            let base = generation(a, prior, map, state, old);
+            let mut dirty = BTreeSet::new();
+            if prior
+                .basis
+                .as_deref()
+                .is_some_and(|basis| basis != expected_basis(a, prior, map, state, old))
             {
-                dirty.insert("unreviewed map or changed review inputs".into());
+                dirty.insert("inherited claim still needs rechecking".into());
             }
             for file in dependencies(a, prior) {
                 if old.files.get(file) != new_manifest.files.get(file)
@@ -674,41 +881,31 @@ pub fn carry(
                     dirty.insert(format!("node {} changed or ambiguous", node.id));
                 }
             }
-            for watch in &mut f.watch {
-                match watch {
-                    Watch::File { file } => {
-                        if let Some(target) = target_file(file, &old.files, &new.files) {
-                            *file = target;
-                        } else {
-                            dirty.insert(format!("watched file removed: {file}"));
-                        }
-                    }
-                    Watch::Span { at } => {
-                        if let Some(updated) = relocate(at, &old.files, &new.files) {
-                            *at = updated;
-                        } else {
-                            dirty.insert(format!("watched span changed: {}:{}", at.file, at.line));
-                        }
-                    }
+            for file in f
+                .watch
+                .iter_mut()
+                .chain(f.applies_to.iter_mut().map(|t| &mut t.file))
+            {
+                if let Some(target) = target_file(file, &old.files, &new.files) {
+                    *file = target;
+                } else {
+                    dirty.insert(format!("dependency file removed: {file}"));
                 }
             }
             if context_changed {
                 dirty.insert("run configuration, dependencies or execution context changed".into());
             }
-            next_state.reviews.insert(
+            next_state.flows.insert(
                 flow_key(a, f),
-                Review {
-                    fingerprint: String::new(),
+                FlowState {
+                    generation: if dirty.is_empty() {
+                        base
+                    } else {
+                        digest(&("supercov-carry-v2", base, &new_manifest, &dirty))
+                    },
                     reasons: dirty,
                 },
             );
-        }
-        for f in &updated.flows {
-            next_state
-                .reviews
-                .get_mut(&flow_key(&updated, f))
-                .unwrap()
-                .fingerprint = fingerprint_manifest(&updated, f, &new_manifest.files);
         }
         next.assertions.push(updated);
     }
@@ -731,37 +928,64 @@ pub fn carry(
             next.assertions.push(a);
         }
     }
-    // Hashes identify changed files, not changed spans. A whole-file watch
-    // assigns an edit to flow review; all other changes require scope review.
-    let whole_files = |m: &AssertionMap| -> BTreeSet<String> {
-        m.assertions
-            .iter()
-            .flat_map(|a| {
-                a.flows.iter().flat_map(move |f| {
-                    std::iter::once(a.at.file.clone()).chain(f.watch.iter().filter_map(
-                        |w| match w {
-                            Watch::File { file } => Some(file.clone()),
-                            _ => None,
-                        },
-                    ))
-                })
-            })
-            .collect()
-    };
-    let watched = whole_files(map)
-        .union(&whole_files(&next))
-        .cloned()
-        .collect::<BTreeSet<_>>();
     for file in old
         .files
         .keys()
         .chain(new_manifest.files.keys())
         .collect::<BTreeSet<_>>()
     {
-        if old.files.get(file) != new_manifest.files.get(file) && !watched.contains(file) {
-            next_state.scope_review.insert(file.clone());
+        if old.files.get(file) != new_manifest.files.get(file) {
+            let known = map
+                .assertions
+                .iter()
+                .flat_map(|a| {
+                    a.flows
+                        .iter()
+                        .filter(|f| dependencies(a, f).contains(file.as_str()))
+                        .map(move |f| flow_key(a, f))
+                })
+                .collect();
+            add_change(
+                &mut next_state,
+                Some(file.clone()),
+                old.files.get(file).map(|f| f.sha256.clone()),
+                new_manifest.files.get(file).map(|f| f.sha256.clone()),
+                "captured source file changed".into(),
+                known,
+            );
         }
     }
     next.assertions.sort_by(|a, b| a.at.cmp(&b.at));
     Ok((next, next_state))
+}
+
+#[path = "assertion_legacy.rs"]
+mod legacy;
+pub fn parse_stored(bytes: &[u8]) -> Result<AssertionMap, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    match value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+    {
+        None | Some(1) => legacy::import(bytes),
+        _ => parse(bytes).map_err(|e| e.to_string()),
+    }
+}
+pub fn parse_state(
+    bytes: &[u8],
+    map: &AssertionMap,
+    inputs: &InputManifest,
+    evidence: &str,
+    legacy_digest: Option<&str>,
+) -> Result<State, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if value["schemaVersion"] == 3 {
+        let state: State = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        if state.inputs_digest != digest(inputs) || state.evidence_digest != evidence {
+            return Err("Assertion state belongs to different run evidence; rerun tests".into());
+        }
+        Ok(state)
+    } else {
+        legacy::state(bytes, map, inputs, evidence, legacy_digest)
+    }
 }

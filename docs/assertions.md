@@ -14,12 +14,12 @@ The run creates the map automatically, reusing the newest available map for the
 same test command and language. Pin the returned run ID and edit `data.map`.
 Ask your agent to follow
 `supercov docs assertion-agent`, read the current project source, and complete the map.
-Then validate and acknowledge the reviewed flows:
+Then validate and save the acknowledgement tokens for examined flows:
 
 ```sh supercov-example
 npx supercov runs <run> assertions validate --json
-npx supercov runs <run> assertions review --all
-npx supercov runs <run> assertions check --require-complete --require-observed --json
+# Copy examined expectedBasis tokens into assertions.json; save again.
+npx supercov runs <run> assertions check --require-mappings --require-observed --json
 npx supercov runs <run>
 ```
 

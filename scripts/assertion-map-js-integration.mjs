@@ -24,7 +24,7 @@ try {
       assert.equal(inherited.inheritance.from, pilot.run);
       assert.equal(q().summary.unobservedAssertions, 1);
       assert.equal(q().summary.assertions, 5);
-      assert(q().summary.dirtyFlows > 0, 'changed test setup invalidates watched flows');
+      assert(q().summary.staleFlows > 0, 'changed test setup invalidates watched flows');
       assert.equal(pilot.invoke('runs', run, 'assertions', 'check', '--require-observed').status, 2);
       const carried = JSON.parse(readFileSync(inherited.map, 'utf8'));
       assert.equal(carried.assertions[0].id, pilot.map.assertions[0].id);

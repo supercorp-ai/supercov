@@ -57,7 +57,12 @@ fn summary(out: &mut String, data: &Value) {
             score["asserted"], score["total"]
         );
     } else {
-        let _ = writeln!(out, "Assertion coverage: n/a (no measured statements)");
+        let _ = writeln!(
+            out,
+            "Assertion coverage: {} — {}",
+            text(&data["summary"]["status"]),
+            text(&data["summary"]["reason"])
+        );
     }
     if let Some(path) = data["map"].as_str() {
         let _ = writeln!(out, "Map: {path}");
@@ -102,7 +107,7 @@ fn assertions(data: &Value) -> String {
         let review = if flows.is_empty() {
             "no flows".to_owned()
         } else if dirty > 0 {
-            format!("{dirty}/{} flows need review", flows.len())
+            format!("{dirty}/{} flows need rechecking", flows.len())
         } else {
             format!(
                 "{} current {}",
@@ -114,9 +119,8 @@ fn assertions(data: &Value) -> String {
         let test_label = if observed == 1 { "test" } else { "tests" };
         let _ = writeln!(
             out,
-            "\n{}  {} · {review} · {observed} passing {test_label}",
-            text(&a["id"]),
-            text(&a["analysis"])
+            "\n{} · {review} · {observed} passing {test_label}",
+            text(&a["id"])
         );
         let _ = writeln!(out, "  {}", location(&a["at"]));
         let expression = text(&a["at"]["text"]);
@@ -139,6 +143,9 @@ fn assertions(data: &Value) -> String {
     if let Some(file) = data["file"].as_str() {
         let _ = write!(command, " --file {}", quote(file));
     }
+    if data["needsAttention"] == true {
+        command.push_str(" --needs-attention");
+    }
     page_footer(&mut out, data, &command);
     let _ = writeln!(
         out,
@@ -158,7 +165,9 @@ fn assertion(data: &Value) -> String {
         location(&a["at"])
     );
     code(&mut out, text(&a["at"]["text"]), "  ");
-    let _ = writeln!(out, "\nAnalysis: {}", text(&a["analysis"]));
+    for question in items(&a["questions"]) {
+        let _ = writeln!(out, "Question: {}", text(question));
+    }
     if a["inMap"] == false {
         let _ = writeln!(
             out,
@@ -181,7 +190,7 @@ fn assertion(data: &Value) -> String {
         let current = if flow["current"] == true {
             "current"
         } else {
-            "needs review"
+            "needs rechecking"
         };
         let eligible = if flow["eligible"] == true {
             "eligible for credit"
@@ -196,7 +205,12 @@ fn assertion(data: &Value) -> String {
         );
         code(&mut out, text(&flow["explanation"]), "  ");
         for case in items(&flow["appliesTo"]) {
-            let _ = writeln!(out, "  Applies to: {}", text(case));
+            let _ = writeln!(
+                out,
+                "  Applies to: {} — {}",
+                text(&case["file"]),
+                text(&case["name"])
+            );
         }
         for reason in items(&flow["reasons"])
             .iter()
@@ -232,12 +246,7 @@ fn assertion(data: &Value) -> String {
             );
         }
         for watch in items(&flow["watch"]) {
-            let target = if watch["kind"] == "file" {
-                text(&watch["file"]).to_owned()
-            } else {
-                location(&watch["at"])
-            };
-            let _ = writeln!(out, "  Watches {}: {target}", text(&watch["kind"]));
+            let _ = writeln!(out, "  Watches file: {}", text(watch));
         }
     }
     let _ = writeln!(out);
