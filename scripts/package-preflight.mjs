@@ -28,6 +28,8 @@ assert.deepEqual(manifest.files, [
   "runtime/javascript",
   "docs/agent-loop.md",
   "docs/assertion-maps.md",
+  "docs/assertion-agent.md",
+  "schemas",
   "README.md",
 ]);
 assert.equal(

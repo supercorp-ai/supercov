@@ -49,16 +49,20 @@ After a regular run, an agent can author the optional assertion map:
 
 ```sh
 npx supercov runs latest assertions init --json
-# Edit the returned assertions.json path, then acknowledge reviewed flows:
-npx supercov runs latest assertions review --all
-npx supercov runs latest assertions
+# Pin the returned run ID, edit assertions.json, then validate and acknowledge:
+npx supercov runs <run> assertions validate --json
+npx supercov runs <run> assertions review --all
+npx supercov runs <run> assertions check --require-complete --require-observed --json
+npx supercov runs <run> assertions
 ```
 
 After code or tests change, run tests again and use `assertions init --from
 <previous-run>` to reuse the previous map and identify dirty flows. Rust owns
 validation, change tracking and reporting; the agent supplies semantic reasoning.
 The score is agent-assessed and separate from MC/DC. See
-[assertion maps](docs/assertion-maps.md) for the format, language support and limits.
+[assertion maps](docs/assertion-maps.md) for the format and JS/TS limits, or run
+`supercov docs assertion-agent` for the agent workflow. `supercov assertions schema`
+exports the editor schema; `assertions validate --file <path>` checks JSON syntax.
 
 ## Give Supercov a job
 
@@ -167,7 +171,7 @@ Supercov uses exact per-test attribution where an adapter is available. For othe
 | --- | --- |
 | Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
 | Vitest | Exact per test, with setup execution kept separate |
-| Jest | Exact per test, including parameterized tests; `expect` assertions link the evidence they check |
+| Jest | Exact per test, including parameterized tests; exact `expect` occurrence identity for assertion maps |
 | `node:test` | Exact per test |
 | AVA and Mocha | Aggregate structural coverage |
 | Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity |

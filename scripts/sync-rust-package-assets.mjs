@@ -6,6 +6,8 @@ import { dirname, resolve } from "node:path";
 
 const repository = resolve(import.meta.dirname, "..");
 const mappings = [
+  ["docs/assertion-maps.md", "crates/supercov-cli/assets/docs/assertion-maps.md"],
+  ["docs/assertion-agent.md", "crates/supercov-cli/assets/docs/assertion-agent.md"],
   ["contracts/v1/contract.json", "crates/supercov-contracts/assets/v1/contract.json"],
   ["contracts/probe-v2/contract.json", "crates/supercov-contracts/assets/probe-v2/contract.json"],
   ["contracts/frontend-v2/contract.json", "crates/supercov-contracts/assets/frontend-v2/contract.json"],

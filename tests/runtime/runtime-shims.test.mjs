@@ -400,3 +400,23 @@ test("server evidence transport failure is explicit and fail-closed", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("assertion callee binding preserves receivers, await order and synchronous failures", async () => {
+  const runtime = await import('../../runtime/javascript/runtime.mjs');
+  const scope = { version: 1, runId: 'bound-run', workerId: 'worker', testId: 'bound-test', testKey: 'key', retry: 0, attemptId: 'bound-attempt' };
+  const events = [];
+  const receiver = { marker: 42, get equal() { events.push('getter'); return function(value) { events.push('call'); assert.equal(this, receiver); assert.equal(value, this.marker); return 'sync-result'; }; } };
+  await runtime.withCoverageCarrier({ version: 1, scope }, async () => {
+    const bound = runtime.bindNodeAssertionPhase('assert.equal', 'test.js:1:1', receiver, 'equal');
+    assert.deepEqual(events, ['getter']);
+    const result = bound(await Promise.resolve().then(() => { events.push('argument'); return 42; }));
+    assert.equal(result, 'sync-result', 'a synchronous assertion must not become a promise');
+    assert.deepEqual(events, ['getter', 'argument', 'call']);
+    assert.throws(() => runtime.bindNodeAssertionPhase('assert.fail', 'test.js:2:1', () => { throw new Error('sync'); }, null)(), /sync/);
+    await assert.rejects(async () => {
+      runtime.bindNodeAssertionPhase('assert.equal', 'test.js:3:1', receiver, 'equal')(await Promise.reject(new Error('operand failed')));
+    }, /operand failed/);
+  });
+  const phases = runtime.takeNodeAssertionPhases(scope);
+  assert.deepEqual(phases.map(p => [p.source, p.status]), [['test.js:1:1', 'passed'], ['test.js:2:1', 'failed']], 'rejected arguments do not create an assertion occurrence');
+});

@@ -781,6 +781,13 @@ function withNodeAssertionPhase(operation, source, callback) {
     throw cleanInstrumentationStack(error);
   }
 }
+// Callee binding preserves receiver, getter/evaluation order, spreads and the
+// original await/yield placement. Only the matcher call opens the phase.
+function bindNodeAssertionPhase(operation, source, target, property) {
+  const callback = property === null ? target : target[property];
+  const receiver = property === null ? undefined : target;
+  return (...args) => withNodeAssertionPhase(operation, source, () => Reflect.apply(callback, receiver, args));
+}
 function takeNodeAssertionPhases(scope) {
   var _a8, _b;
   const key = attemptKey(scope);
@@ -1288,6 +1295,7 @@ const directRuntimeApi = {
   tryEnd,
   withCoverageCarrier,
   withNodeAssertionPhase,
+  bindNodeAssertionPhase,
   withRequestPhase,
   writeExclusiveBackgroundRecord
 };
@@ -1337,6 +1345,7 @@ export {
   tryEnd,
   withCoverageCarrier,
   withNodeAssertionPhase,
+  bindNodeAssertionPhase,
   withRequestPhase,
   writeExclusiveBackgroundRecord
 };

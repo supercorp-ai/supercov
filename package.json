@@ -17,6 +17,8 @@
     "runtime/javascript",
     "docs/agent-loop.md",
     "docs/assertion-maps.md",
+    "docs/assertion-agent.md",
+    "schemas",
     "README.md"
   ],
   "engines": {
@@ -74,7 +76,9 @@
     "test:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-integration.mjs",
     "test:ruby-coverage": "cargo build -p supercov && node scripts/ruby-coverage-integration.mjs",
     "test:rust-public-cargo": "cargo build -p supercov && node scripts/rust-public-cargo-integration.mjs",
-    "test:assertion-maps": "cargo build -p supercov && node scripts/assertion-map-integration.mjs"
+    "test:assertion-maps": "cargo build -p supercov && node scripts/assertion-map-schema.mjs --check && node scripts/assertion-map-integration.mjs && node scripts/assertion-map-js-integration.mjs",
+    "test:assertion-maps:js": "cargo build -p supercov && node scripts/assertion-map-schema.mjs --check && node scripts/assertion-map-js-integration.mjs",
+    "sync:assertion-schema": "cargo build -p supercov && node scripts/assertion-map-schema.mjs"
   },
   "optionalDependencies": {
     "@supercov/cli-darwin-arm64": "0.0.42",
@@ -108,6 +112,7 @@
     "@types/node": "^24.0.0",
     "esbuild": "^0.28.2",
     "expect": "30.4.1",
+    "jest": "30.5.1",
     "next": "^16.3.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

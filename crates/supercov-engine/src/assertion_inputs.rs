@@ -17,6 +17,15 @@ pub fn capture(
     language: &str,
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Inputs, String> {
+    capture_with_expect_modules(root, language, paths, &[])
+}
+
+pub fn capture_with_expect_modules(
+    root: &Path,
+    language: &str,
+    paths: impl IntoIterator<Item = PathBuf>,
+    expect_modules: &[String],
+) -> Result<Inputs, String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     // Store only a digest of environment inputs, never their values. Engine
     // run IDs, working directories and shell nesting are not semantic inputs.
@@ -28,6 +37,9 @@ pub fn capture(
     let mut inputs = Inputs { schema_version: 1, language: language.into(), context_digest: crate::assertion_map::digest(&environment), files: Files::new(), assertions: vec![], limitations: vec![
         "Syntax inventory covers recognized assertion forms, not every possible custom assertion. Agents may add exact source sites; missing runtime identity never earns credit.".into()
     ] };
+    if language == "javascript" {
+        inputs.limitations.push("Optional assertion calls are inventoried but currently have no injected phase. Unrecognized custom assertion wrappers and dynamically selected matchers may be absent. Use check --require-observed to detect inventoried sites without passing evidence.".into());
+    }
     for path in paths.into_iter().collect::<BTreeSet<_>>() {
         let full = root.join(&path);
         if !full.exists() {
@@ -56,7 +68,11 @@ pub fn capture(
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let ranges = match extension {
             "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" => {
-                crate::js_instrumenter::assertion_ranges(&relative, &text)
+                crate::js_instrumenter::assertion_ranges_with_expect_modules(
+                    &relative,
+                    &text,
+                    expect_modules,
+                )
             }
             "rs" => rust_ranges(&text),
             "py" => python_ranges(&text),

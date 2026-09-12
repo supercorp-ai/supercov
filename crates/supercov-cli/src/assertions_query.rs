@@ -5,9 +5,44 @@ use supercov_engine::{
     run_store::{discover_runs, select_run},
 };
 
-const HELP: &str = "Usage: supercov runs <run> assertions [report|init|review|validate|inventory|source] [options]\n\ninit [--from <older-run>]     Create assertions.json, or carry an older map.\nreview --all|--flow <A/F>     Acknowledge agent-reviewed flows (repeat --flow).\nreview --ack-scope           Acknowledge classified scope changes; combine with flows.\nvalidate                     Check format, IDs and source references only.\ninventory                    Page recognized assertion locations in frozen inputs.\nsource --file <path>         Page original source lines from the run.\nreport [--view <view>]       summary (default), assertions, creditedLines, unassertedLines.\n\n--offset <n> --limit <n>     Page array views; source uses zero-based line offsets.\n--json                      Structured result.\n\nEdit the run's assertions.json directly; Supercov never authors semantic edges.\nReview is your acknowledgement, not a mechanical proof. MC/DC remains separate.\n";
+const HELP: &str = r#"Usage: supercov assertions schema [--json]
+       supercov assertions validate --file <path> [--json]
+       supercov runs <run> assertions [action] [options]
+
+schema                      JSON Schema from Rust types; raw JSON without --json.
+validate --file <path>       Standalone JSON syntax and field types (no run needed).
+
+Run actions:
+init [--from <older-run>]    Create assertions.json, or carry an older map.
+validate                    Check syntax, IDs, links, frozen references and state binding.
+review --all|--flow <A/F>    Record agent review (repeat --flow); not semantic proof.
+review --ack-scope          Acknowledge classified scope changes; combine with flows.
+inventory [--file <path>]  Recognized assertion locations in frozen inputs.
+files                       List frozen input paths and their byte sizes.
+source --file <path>        Frozen source lines; --offset is zero-based.
+report [--view <view>]      summary (default), assertions, statements, tests,
+                            creditedLines, unassertedLines; optional --file filter.
+check                       Fail on invalid references, dirty flows, failed run,
+                            pending scope review or a stale/unavailable working tree.
+  --require-complete        Also require every inventoried assertion mapped.
+  --require-observed        Also require passing runtime evidence for every mapped site/flow.
+  --min <0..100>            Minimum agent-assessed statement percentage.
+  --archived                Check archived evidence without checking today's working tree.
+
+--offset <n> --limit <n>     Page inventory, source or report array views (limit 1..1000).
+--json                      Standard structured result envelope.
+
+Edit the run's assertions.json directly, then validate, review and check.
+Exit 0 means the requested check passed; exit 2 means invalid input or an unmet gate.
+Pin a run ID while authoring. See docs/assertion-maps.md and docs/assertion-agent.md.
+Supercov never authors semantic edges. MC/DC remains separate.
+"#;
 struct Options {
     action: String,
+    require_complete: bool,
+    require_observed: bool,
+    archived: bool,
+    minimum: Option<f64>,
     from: Option<String>,
     file: Option<String>,
     view: String,
@@ -20,6 +55,10 @@ struct Options {
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut o = Options {
         action: "report".into(),
+        require_complete: false,
+        require_observed: false,
+        archived: false,
+        minimum: None,
         from: None,
         file: None,
         view: "summary".into(),
@@ -41,13 +80,17 @@ fn parse(args: &[String]) -> Result<Options, String> {
         match arg.as_str() {
             "--json" => (),
             "--all" => o.all = true,
+            "--require-complete" => o.require_complete = true,
+            "--require-observed" => o.require_observed = true,
+            "--archived" => o.archived = true,
             "--ack-scope" => o.ack = true,
-            "--from" | "--file" | "--view" | "--flow" | "--offset" | "--limit" => {
+            "--from" | "--file" | "--view" | "--flow" | "--offset" | "--limit" | "--min" => {
                 let value = args
                     .next()
                     .filter(|v| !v.starts_with('-'))
                     .ok_or_else(|| format!("{arg} requires a value"))?;
                 match arg.as_str() {
+                    "--min" => o.minimum = Some(value.parse().map_err(|_| "Invalid minimum")?),
                     "--from" => o.from = Some(value.clone()),
                     "--file" => o.file = Some(value.clone()),
                     "--view" => o.view = value.clone(),
@@ -64,18 +107,35 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     if !matches!(
         o.action.as_str(),
-        "report" | "init" | "review" | "validate" | "inventory" | "source"
+        "report" | "init" | "review" | "validate" | "inventory" | "source" | "check" | "files"
     ) {
         return Err("Unknown assertions action".into());
+    }
+    if o.minimum
+        .is_some_and(|n| !n.is_finite() || !(0.0..=100.0).contains(&n))
+    {
+        return Err("min must be a finite percentage from 0 to 100".into());
     }
     if o.limit == 0 || o.limit > 1000 {
         return Err("limit must be 1..1000".into());
     }
     for (flag, valid) in [
+        ("--min", o.action == "check"),
+        ("--require-complete", o.action == "check"),
+        ("--require-observed", o.action == "check"),
+        ("--archived", o.action == "check"),
         ("--from", o.action == "init"),
         ("--all", o.action == "review"),
         ("--ack-scope", o.action == "review"),
-        ("--file", o.action == "source"),
+        (
+            "--file",
+            matches!(o.action.as_str(), "source" | "inventory")
+                || o.action == "report"
+                    && matches!(
+                        o.view.as_str(),
+                        "assertions" | "statements" | "creditedLines" | "unassertedLines"
+                    ),
+        ),
         ("--view", o.action == "report"),
     ] {
         if seen.contains(flag) && !valid {
@@ -95,15 +155,24 @@ fn parse(args: &[String]) -> Result<Options, String> {
         return Err("source requires --file".into());
     }
     if (seen.contains("--offset") || seen.contains("--limit"))
-        && !matches!(o.action.as_str(), "report" | "inventory" | "source")
+        && !matches!(
+            o.action.as_str(),
+            "report" | "inventory" | "source" | "files"
+        )
     {
-        return Err("Pagination requires report, inventory or source".into());
+        return Err("Pagination requires report, inventory, source or files".into());
     }
     if !matches!(
         o.view.as_str(),
-        "summary" | "assertions" | "creditedLines" | "unassertedLines"
+        "summary" | "assertions" | "statements" | "tests" | "creditedLines" | "unassertedLines"
     ) {
         return Err("Unknown report view".into());
+    }
+    if o.action == "report"
+        && o.view == "summary"
+        && (seen.contains("--offset") || seen.contains("--limit"))
+    {
+        return Err("Pagination requires an array view, not summary".into());
     }
     Ok(o)
 }
@@ -127,6 +196,7 @@ pub fn command(args: &[String]) -> ExitCode {
         let root = std::env::current_dir().map_err(|e| e.to_string())?;
         let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
         let run = select_run(&inventory, Some(&args[0])).map_err(|e| e.to_string())?;
+        let mut check_report = None;
         let mut data = match o.action.as_str() {
             "init" => maps::initialize(
                 &root,
@@ -137,9 +207,21 @@ pub fn command(args: &[String]) -> ExitCode {
                     .transpose()?,
             )?,
             "review" => maps::acknowledge(&root, run, &o.flows, o.all, o.ack)?,
-            "source" | "inventory" => {
+            "source" | "inventory" | "files" => {
                 let input = maps::load_inputs(run)?;
-                let values = if o.action == "source" {
+                if let Some(file) = &o.file
+                    && !input.inputs.files.contains_key(file)
+                {
+                    return Err("File absent from frozen run inputs".into());
+                }
+                let values = if o.action == "files" {
+                    input
+                        .inputs
+                        .files
+                        .iter()
+                        .map(|(file, text)| json!({"file":file,"bytes":text.len()}))
+                        .collect::<Vec<_>>()
+                } else if o.action == "source" {
                     input
                         .inputs
                         .files
@@ -154,28 +236,60 @@ pub fn command(args: &[String]) -> ExitCode {
                         .inputs
                         .assertions
                         .iter()
+                        .filter(|s| o.file.as_ref().is_none_or(|file| s.at.file == *file))
                         .map(|s| serde_json::to_value(s).unwrap())
                         .collect()
                 };
                 let mut data = page(&values, o.offset, o.limit);
                 data["limitations"] = json!(input.inputs.limitations);
+                data["revision"] = json!(input.evidence_digest);
                 data
             }
             "validate" => {
                 let input = maps::load_inputs(run)?;
-                let (map, _) = maps::load(run, &input)?;
-                let errors = supercov_engine::assertion_map::validate(&map, &input.inputs);
-                json!({"valid":errors.is_empty(),"errors":errors,"meaning":"References only; semantic edges are agent-authored"})
+                let bytes =
+                    std::fs::read(run.directory.join(maps::MAP_FILE)).map_err(|e| e.to_string())?;
+                match supercov_engine::assertion_map::parse(&bytes) {
+                    Err(error) => json!({"valid":false,"stage":"syntax","errors":[error]}),
+                    Ok(_) => {
+                        let (map, _) = maps::load(run, &input)?;
+                        let errors = supercov_engine::assertion_map::validate(&map, &input.inputs);
+                        json!({"valid":errors.is_empty(),"stage":"references","errors":errors,"meaning":"References only; semantic edges are agent-authored"})
+                    }
+                }
             }
             _ => {
                 let report = maps::report(run)?;
                 let mut data = if o.view == "summary" {
                     json!({})
                 } else {
-                    page(report[&o.view].as_array().unwrap(), o.offset, o.limit)
+                    let values = report[&o.view]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|row| {
+                            o.file.as_ref().is_none_or(|file| {
+                                row["file"].as_str().or_else(|| row["at"]["file"].as_str())
+                                    == Some(file.as_str())
+                            })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    page(&values, o.offset, o.limit)
                 };
-                for key in ["summary", "basis", "validationErrors", "limitations"] {
+                for key in [
+                    "summary",
+                    "basis",
+                    "validationErrors",
+                    "limitations",
+                    "revision",
+                ] {
                     data[key] = report[key].clone();
+                }
+                data["scope"] =
+                    json!("summary covers the whole archived run; --file filters items only");
+                if o.action == "check" {
+                    check_report = Some(report);
                 }
                 data
             }
@@ -190,11 +304,19 @@ pub fn command(args: &[String]) -> ExitCode {
             }
             None => json!({"stale":null,"reason":"current source integrity unavailable"}),
         };
+        if let Some(report) = check_report {
+            let failures = check_failures(&report, &data["workingTree"], &o);
+            data["valid"] = json!(failures.is_empty());
+            data["failures"] = json!(failures);
+            data["requirements"] = json!({"complete":o.require_complete,"observed":o.require_observed,"minimum":o.minimum,"archived":o.archived});
+        }
         data["run"] = json!(run.id);
         data["map"] = json!(run.directory.join(maps::MAP_FILE));
         Ok(data)
     })();
-    let json_output = args.iter().any(|a| a == "--json");
+    emit(result, args.iter().any(|a| a == "--json"))
+}
+fn emit(result: Result<Value, String>, json_output: bool) -> ExitCode {
     match result {
         Ok(data) => {
             let invalid = data.get("valid") == Some(&Value::Bool(false));
@@ -241,6 +363,87 @@ pub fn command(args: &[String]) -> ExitCode {
     }
 }
 
+fn check_failures(report: &Value, working_tree: &Value, o: &Options) -> Vec<String> {
+    let s = &report["summary"];
+    let mut failures = Vec::new();
+    if report["validationErrors"]
+        .as_array()
+        .is_none_or(|a| !a.is_empty())
+    {
+        failures.push("Map has invalid references".into());
+    }
+    if s["runPassed"] != true {
+        failures.push("Run did not pass".into());
+    }
+    if s["dirtyFlows"].as_u64() != Some(0) {
+        failures.push("Flows require review or reference repair".into());
+    }
+    if s["scopeReview"].as_array().is_none_or(|a| !a.is_empty()) {
+        failures.push("Source scope changes require review".into());
+    }
+    if !o.archived && working_tree["stale"] != false {
+        failures.push(
+            "Working tree is stale or its integrity is unavailable; run tests and carry the map"
+                .into(),
+        );
+    }
+    if o.require_complete
+        && (s["inventoryMappingComplete"] != true || s["inventoryFailures"].as_u64() != Some(0))
+    {
+        failures.push(
+            "Recognized assertion inventory is incomplete, partial or could not be parsed".into(),
+        );
+    }
+    if o.require_observed
+        && (s["unobservedAssertions"].as_u64() != Some(0)
+            || report["assertions"].as_array().is_none_or(|rows| {
+                rows.iter().any(|a| {
+                    a["flows"].as_array().is_none_or(|flows| {
+                        flows
+                            .iter()
+                            .any(|f| f["matchingTests"].as_array().is_none_or(Vec::is_empty))
+                    })
+                })
+            }))
+    {
+        failures.push("Assertions or appliesTo flows lack matching passing runtime evidence; inspect report --view assertions".into());
+    }
+    if let Some(minimum) = o.minimum
+        && s["statements"]["percentage"]
+            .as_f64()
+            .is_none_or(|n| n < minimum)
+    {
+        failures.push(format!(
+            "Statement assertion coverage is below {minimum}% or has no measured denominator"
+        ));
+    }
+    failures
+}
+
+pub fn global_command(args: &[String]) -> ExitCode {
+    if args.is_empty() || args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
+        print!("{HELP}");
+        return ExitCode::SUCCESS;
+    }
+    let json_output = args.iter().any(|a| a == "--json");
+    let args = args
+        .iter()
+        .filter(|a| a.as_str() != "--json")
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let result = match args.as_slice() {
+        ["schema"] => Ok(supercov_engine::assertion_map::schema()),
+        ["validate", "--file", file] => std::fs::read(file).map_err(|e| format!("{file}: {e}")).map(|bytes| {
+            match supercov_engine::assertion_map::parse(&bytes) {
+                Ok(_) => json!({"valid":true,"stage":"syntax","errors":[],"meaning":"JSON shape only; use runs <run> assertions validate for IDs, links and frozen source references"}),
+                Err(error) => json!({"valid":false,"stage":"syntax","errors":[error]}),
+            }
+        }),
+        _ => Err("Use assertions schema or assertions validate --file <path>; run-owned commands need runs <run> assertions".into()),
+    };
+    emit(result, json_output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,8 +456,44 @@ mod tests {
             vec!["review", "--all", "--flow", "a/f"],
             vec!["source"],
             vec!["report", "--limit", "0"],
+            vec!["report", "--limit", "20"],
+            vec!["validate", "--min", "50"],
+            vec!["review", "--require-complete"],
+            vec!["check", "--min", "NaN"],
+            vec!["check", "--min", "101"],
         ] {
             assert!(parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).is_err());
         }
+    }
+
+    #[test]
+    fn check_distinguishes_completion_evidence_and_archived_freshness() {
+        let mut report = json!({"validationErrors":[],"assertions":[],"summary":{
+            "runPassed":true,"dirtyFlows":0,"scopeReview":[],"inventoryMappingComplete":false,
+            "inventoryFailures":0,"unobservedAssertions":1,"statements":{"percentage":50}
+        }});
+        let mut options = parse(&["check".into()]).unwrap();
+        assert!(check_failures(&report, &json!({"stale":false}), &options).is_empty());
+        options.require_complete = true;
+        options.require_observed = true;
+        options.minimum = Some(60.0);
+        assert_eq!(
+            check_failures(&report, &json!({"stale":true}), &options).len(),
+            4
+        );
+        options.archived = true;
+        assert_eq!(
+            check_failures(&report, &json!({"stale":null}), &options).len(),
+            3
+        );
+        report["summary"]["inventoryMappingComplete"] = json!(true);
+        report["summary"]["unobservedAssertions"] = json!(0);
+        options.minimum = Some(50.0);
+        assert!(check_failures(&report, &json!({"stale":null}), &options).is_empty());
+        report["summary"]["statements"]["percentage"] = Value::Null;
+        assert_eq!(
+            check_failures(&report, &json!({"stale":false}), &options).len(),
+            1
+        );
     }
 }

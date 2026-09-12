@@ -525,10 +525,11 @@ pub fn run_direct_javascript(
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
     let integrity = javascript_integrity_for_project(&root, &project)?;
-    let assertion_inputs = crate::assertion_inputs::capture(
+    let assertion_inputs = crate::assertion_inputs::capture_with_expect_modules(
         &root,
         "javascript",
         crate::integrity::javascript_assertion_paths(&root, &project).map_err(|e| e.to_string())?,
+        std::slice::from_ref(&project.playwright_module),
     )?;
     let build_cache_key = build_cache_key(&integrity, &project)?;
     let frontend_cache_key = format!(

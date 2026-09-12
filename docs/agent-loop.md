@@ -71,7 +71,10 @@ and broader watch inputs, then acknowledge reviewed flows with `assertions revie
 --all` or repeated `--flow ASSERTION/FLOW`. After the next normal run, use
 `assertions init --from <previous-run>` and repair only affected entries. Supercov
 validates references and freshness, while the agent owns semantic meaning.
-See [assertion maps](assertion-maps.md) for the contract and language limits.
+Run `supercov docs assertion-agent` for the full mapping instructions. Validate
+with `runs <run> assertions validate`, acknowledge reviewed flows, then use
+`runs <run> assertions check --require-complete --require-observed` as the
+completion gate. See [assertion maps](assertion-maps.md) for the contract and JS/TS limits.
 
 ## A complete prompt for longer runs
 

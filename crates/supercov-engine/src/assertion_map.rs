@@ -17,7 +17,9 @@ fn version() -> u32 {
 }
 
 /// One-based lines and UTF-8 byte columns, for every language. Text is exact.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Anchor {
     pub file: String,
@@ -62,7 +64,7 @@ impl Anchor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InventorySite {
     pub at: Anchor,
@@ -70,7 +72,7 @@ pub struct InventorySite {
 }
 
 /// Frozen once before execution, stored once in the compressed run archive.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Inputs {
     #[serde(default = "version")]
@@ -82,7 +84,7 @@ pub struct Inputs {
     pub limitations: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Analysis {
     #[default]
@@ -91,7 +93,7 @@ pub enum Analysis {
     Mapped,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Node {
     pub id: String,
@@ -101,7 +103,7 @@ pub struct Node {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub meaning: String,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Edge {
     pub from: String,
@@ -110,14 +112,14 @@ pub struct Edge {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub basis: String,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Watch {
     File { file: String },
     Span { at: Anchor },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Flow {
     pub id: String,
@@ -130,7 +132,7 @@ pub struct Flow {
     pub counts_as_asserted: Vec<String>,
     pub watch: Vec<Watch>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Assertion {
     pub id: String,
@@ -142,28 +144,93 @@ pub struct Assertion {
     #[serde(default)]
     pub flows: Vec<Flow>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Retired {
     pub assertion: Assertion,
     pub reason: String,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssertionMap {
     #[serde(default = "version")]
+    #[schemars(range(min = 1, max = 1))]
     pub schema_version: u32,
     pub assertions: Vec<Assertion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_assertions: Vec<Retired>,
 }
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+
+/// Editor schema generated from the same Rust types used by every map command.
+/// Source existence, links, freshness and semantic meaning are outside JSON Schema.
+pub fn schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(AssertionMap)).expect("schema")
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParseError {
+    pub pointer: String,
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+}
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} at {} (JSON line {}, column {})",
+            self.message, self.pointer, self.line, self.column
+        )
+    }
+}
+pub fn parse(bytes: &[u8]) -> Result<AssertionMap, ParseError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let map: AssertionMap = serde_path_to_error::deserialize(&mut deserializer).map_err(|e| {
+        let pointer = e
+            .path()
+            .iter()
+            .map(|segment| {
+                use serde_path_to_error::Segment;
+                let part = match segment {
+                    Segment::Seq { index } => index.to_string(),
+                    Segment::Map { key } => key.clone(),
+                    Segment::Enum { variant } => variant.clone(),
+                    Segment::Unknown => "?".into(),
+                };
+                format!("/{}", part.replace('~', "~0").replace('/', "~1"))
+            })
+            .collect();
+        ParseError {
+            pointer,
+            line: e.inner().line(),
+            column: e.inner().column(),
+            message: e.inner().to_string(),
+        }
+    })?;
+    deserializer.end().map_err(|e| ParseError {
+        pointer: String::new(),
+        line: e.line(),
+        column: e.column(),
+        message: e.to_string(),
+    })?;
+    if map.schema_version != 1 {
+        return Err(ParseError {
+            pointer: "/schemaVersion".into(),
+            line: 0,
+            column: 0,
+            message: "unsupported map schema version; expected 1".into(),
+        });
+    }
+    Ok(map)
+}
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Review {
     pub fingerprint: String,
     pub reasons: BTreeSet<String>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub schema_version: u32,

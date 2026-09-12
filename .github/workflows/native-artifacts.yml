@@ -100,7 +100,7 @@ jobs:
       - name: Build static musl binary
         if: matrix.musl
         run: cargo build --config 'target.${{ matrix.target }}.linker="musl-gcc"' --release --target ${{ matrix.target }} -p supercov
-      - name: Packed install and real Rust run
+      - name: Packed install, real JS/TS runs and assertion map gates
         if: matrix.packedInstall
         run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
       - name: Stage native package

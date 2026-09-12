@@ -387,3 +387,97 @@ fn syntax_inventory_spans_work_across_all_language_adapters() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn syntax_diagnostics_locate_nested_errors_and_reject_ambiguous_json() {
+    let (_, map, _) = fixture();
+    let mut value = serde_json::to_value(map).unwrap();
+    value["assertions"][0]["flows"][0]["countsAsAsserted"] = json!(true);
+    let error = parse(&serde_json::to_vec_pretty(&value).unwrap()).unwrap_err();
+    assert_eq!(error.pointer, "/assertions/0/flows/0/countsAsAsserted");
+    assert!(error.line > 1);
+    for text in [
+        r#"{"assertions":[],"assertions":[]}"#,
+        r#"{"assertions":[],"unknown":1}"#,
+        r#"{"assertions":[],"schemaVersion":2}"#,
+        r#"{"assertions":[]} {}"#,
+    ] {
+        assert!(parse(text.as_bytes()).is_err(), "{text}");
+    }
+    assert!(parse(br#"{"assertions":[]}"#).is_ok());
+}
+
+#[test]
+fn javascript_inventory_includes_async_operands_and_fixture_modules() {
+    use supercov_engine::js_instrumenter::{
+        assertion_ranges_with_expect_modules, instrument_node_assertion_phases_with_expect_modules,
+    };
+    let source = "import { expect as check } from '@acme/fixtures';\nasync function test() { check(await value()).toBe(1); check(value()).toBe(1); }\n";
+    let modules = vec!["@acme/fixtures".into()];
+    let inventory = assertion_ranges_with_expect_modules("test.ts", source, &modules).unwrap();
+    assert_eq!(inventory.len(), 2, "await sites must stay inventoried");
+    assert!(source[inventory[0].0..inventory[0].1].contains("await"));
+    let transformed =
+        instrument_node_assertion_phases_with_expect_modules(source, "test.ts", &modules).unwrap();
+    assert_eq!(
+        transformed.assertions, 2,
+        "callee binding preserves await syntax"
+    );
+    let cjs = "const { expect: check } = require('@jest/globals'); check(1).toBe(1); function f(check) { check(2).toBe(2); }";
+    assert_eq!(
+        assertion_ranges_with_expect_modules("test.cjs", cjs, &[])
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_coordinate_cannot_substitute_for_exact_assertion_identity() {
+    let (inputs, mut map, mut state) = fixture();
+    let coverage = report_fixture(&["a", "b"], true);
+    map.assertions[0].at.text.push(';');
+    assert!(
+        validate(&map, &inputs).is_empty(),
+        "source exists but it is a different anchor"
+    );
+    review(&map, &mut state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    let report = assess(&map, &state, &inputs, &coverage, true);
+    assert_eq!(report["summary"]["statements"]["asserted"], 0);
+    assert_eq!(report["summary"]["unobservedAssertions"], 1);
+}
+
+#[test]
+fn statement_view_exposes_exact_anchors_and_flow_credit() {
+    let (inputs, map, state) = fixture();
+    let report = assess(&map, &state, &inputs, &report_fixture(&["a"], true), true);
+    let rows = report["statements"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["at"]["text"], "return 1;");
+    assert_eq!(
+        rows[0]["flows"][0],
+        flow_key(&map.assertions[0], &map.assertions[0].flows[0])
+    );
+    assert_eq!(rows[1]["declared"], true);
+    assert_eq!(rows[1]["asserted"], false);
+}
+
+#[test]
+fn crediting_a_control_statement_does_not_credit_its_nested_body() {
+    let (mut inputs, mut map, mut state) = fixture();
+    let source = "if (true) { return 1; }\n";
+    inputs.files.insert("src/a.js".into(), source.into());
+    map.assertions[0].flows[0].nodes[0].at = anchor("src/a.js", source, source.trim());
+    state.inputs_digest = digest(&inputs);
+    review(&map, &mut state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    let mut coverage = report_fixture(&["a", "b"], true);
+    let mut inner = coverage.filters.passed.points[0].clone();
+    inner.meta.id = "inner".into();
+    inner.meta.column = 13;
+    coverage.filters.passed.points[0].meta.source = source.trim().into();
+    coverage.filters.passed.points.push(inner);
+    let report = assess(&map, &state, &inputs, &coverage, true);
+    assert_eq!(report["summary"]["statements"]["asserted"], 2);
+    assert_eq!(report["summary"]["statements"]["total"], 3);
+    assert_eq!(report["statements"][2]["asserted"], false);
+}

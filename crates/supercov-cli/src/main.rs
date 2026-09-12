@@ -54,6 +54,8 @@ use supercov_engine::progress::ProgressLine;
 
 const HELP: &str = r#"Supercov coverage engine.
 
+Assertion map schema and syntax: supercov assertions --help
+
 Measure your FULL test command, not one suite. Supercov copies the project
 into an isolated instrumented workspace, so sandboxed and VM-gated suites run
 unchanged and every detected runner lands in one run.
@@ -82,6 +84,8 @@ Guides:
 const DOC_TOPICS: &[&str] = &[
     "getting-started",
     "agent-loop",
+    "assertion-maps",
+    "assertion-agent",
     "troubleshooting",
     "cli",
     "coverage-model",
@@ -296,6 +300,7 @@ fn main() -> ExitCode {
         Some("__run-rust-compiler") => run_rust_compiler(),
         Some("clean") => cleanup_command(arguments.collect()),
         Some("docs") => docs_command(arguments.collect()),
+        Some("assertions") => assertions_query::global_command(&arguments.collect::<Vec<_>>()),
         Some("runs") => public_query_command("runs", arguments.collect()),
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
@@ -391,6 +396,15 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
     if !DOC_TOPICS.contains(&topic.as_str()) {
         eprintln!("[supercov] unknown guide {topic:?}; run `supercov docs` to list topics");
         return ExitCode::from(2);
+    }
+    let embedded = match topic.as_str() {
+        "assertion-maps" => Some(include_str!("../assets/docs/assertion-maps.md")),
+        "assertion-agent" => Some(include_str!("../assets/docs/assertion-agent.md")),
+        _ => None,
+    };
+    if let Some(markdown) = embedded {
+        print!("{markdown}");
+        return ExitCode::SUCCESS;
     }
     let mut roots = Vec::new();
     if let Some(root) = std::env::var_os("SUPERCOV_PACKAGE_ROOT") {

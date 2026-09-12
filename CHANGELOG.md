@@ -4,8 +4,8 @@
 
 **Added**
 
+- JS/TS assertion maps gain a Rust-generated editor schema, JSON-path syntax diagnostics, CI gates for freshness/completion/evidence/percentage, exact statement views and bundled agent instructions. Playwright fixture and CommonJS `expect` inventories match instrumentation; awaited operands now preserve evaluation order while recording exact assertion identity.
 - Replace experimental assertion inference with Rust-managed, agent-authored `assertions.json`: frozen run inputs, incremental carry, explicit review and separate assertion coverage. Ordinary phase links no longer award assertion credit.
-- Python and Ruby coverage says whether a test checked what it ran. Evidence a test recorded before its first assertion links to that assertion when the test passes: pytest `assert` statements, `pytest.raises`/`pytest.warns`, `unittest` assert methods, Minitest, RSpec expectations (in Cucumber steps too) and test-unit.
 - On Windows, the Rust test processes are placed in a Job Object that ends them when Supercov ends, however it ends.
 - `npm run oracle:rust` compares Rust coverage per file against `cargo llvm-cov` over 26 crates and flags the differences.
 

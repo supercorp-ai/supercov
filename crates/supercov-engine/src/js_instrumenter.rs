@@ -869,6 +869,22 @@ impl<'a> Visit<'a> for NodeAssertionBindingCollector<'_> {
     }
 
     fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        // CommonJS named expect imports use the same lexical symbol identities
+        // as ESM; a local/shadowed require is deliberately not recognized.
+        if let Some(Expression::CallExpression(call)) = &declarator.init
+            && matches!(&call.callee, Expression::Identifier(i) if i.name == "require" && referenced_symbol(i, self.scoping).is_none())
+            && let [Argument::StringLiteral(module)] = call.arguments.as_slice()
+            && self.expect_modules.contains(module.value.as_str())
+            && let BindingPattern::ObjectPattern(pattern) = &declarator.id
+        {
+            for property in &pattern.properties {
+                if property.key.static_name().as_deref() == Some("expect")
+                    && let BindingPattern::BindingIdentifier(local) = &property.value
+                {
+                    bind_expect(&mut self.bindings, local);
+                }
+            }
+        }
         if let Some(module) = declarator
             .init
             .as_ref()
@@ -914,7 +930,7 @@ fn node_assertion_bindings(
         bindings: NodeAssertionBindings::default(),
         scoping,
         allow_contextual_expect,
-        expect_modules: ["vitest", "@jest/globals", "expect"]
+        expect_modules: ["vitest", "@jest/globals", "expect", "@playwright/test"]
             .into_iter()
             .map(str::to_owned)
             .chain(extra_expect_modules.iter().cloned())
@@ -933,12 +949,21 @@ struct NodeAssertionSiteCollector<'s> {
     file: &'s str,
     bindings: &'s NodeAssertionBindings,
     scoping: &'s oxc_semantic::Scoping,
-    sites: HashMap<SpanKey, (String, String)>,
+    sites: HashMap<SpanKey, (String, String, bool)>,
+    inventory: bool,
 }
 
 /// Syntax/binding inventory using the same recognizer as instrumentation.
 /// Does not trace assertion operands or infer dependencies.
 pub fn assertion_ranges(file: &str, source: &str) -> Result<Vec<(usize, usize, String)>, String> {
+    assertion_ranges_with_expect_modules(file, source, &[])
+}
+
+pub fn assertion_ranges_with_expect_modules(
+    file: &str,
+    source: &str,
+    modules: &[String],
+) -> Result<Vec<(usize, usize, String)>, String> {
     let source_type = SourceType::from_path(Path::new(file)).map_err(|e| e.to_string())?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
@@ -946,19 +971,20 @@ pub fn assertion_ranges(file: &str, source: &str) -> Result<Vec<(usize, usize, S
         return Err(format!("{} parse errors", parsed.errors.len()));
     }
     let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
-    let bindings = node_assertion_bindings(&parsed.program, semantic.scoping(), &[]);
+    let bindings = node_assertion_bindings(&parsed.program, semantic.scoping(), modules);
     let mut collector = NodeAssertionSiteCollector {
         source,
         file,
         bindings: &bindings,
         scoping: semantic.scoping(),
         sites: HashMap::new(),
+        inventory: true,
     };
     collector.visit_program(&parsed.program);
     let mut sites = collector
         .sites
         .into_iter()
-        .map(|((start, end), (op, _))| (start as usize, end as usize, op))
+        .map(|((start, end), (op, _, _))| (start as usize, end as usize, op))
         .collect::<Vec<_>>();
     sites.sort();
     Ok(sites)
@@ -1075,14 +1101,24 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
             for argument in &call.arguments {
                 unsafe_argument.visit_argument(argument);
             }
-            if unsafe_argument.found {
+            let optional = call.optional
+                || matches!(&call.callee,
+                Expression::StaticMemberExpression(m) if m.optional)
+                || matches!(&call.callee, Expression::ComputedMemberExpression(m) if m.optional);
+            // Keep optional sites in inventory, but never manufacture a passed
+            // occurrence when a call can short-circuit before invoking a matcher.
+            if optional && !self.inventory {
                 walk::walk_call_expression(self, call);
                 return;
             }
             let (line, column) = line_and_utf16_column(self.source, call.span.start as usize);
             self.sites.insert(
                 span_key(call.span),
-                (operation, format!("{}:{line}:{column}", self.file)),
+                (
+                    operation,
+                    format!("{}:{line}:{column}", self.file),
+                    unsafe_argument.found,
+                ),
             );
         }
         walk::walk_call_expression(self, call);
@@ -1091,11 +1127,11 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
 
 struct NodeAssertionTransformer<'a> {
     ast: AstBuilder<'a>,
-    sites: HashMap<SpanKey, (String, String)>,
+    sites: HashMap<SpanKey, (String, String, bool)>,
 }
 
 impl<'a> NodeAssertionTransformer<'a> {
-    fn wrap(&self, original: Expression<'a>, operation: &str, source: &str) -> Expression<'a> {
+    fn helper(&self, name: &str) -> Expression<'a> {
         let runtime = Expression::StaticMemberExpression(
             self.ast.alloc_static_member_expression(
                 Span::default(),
@@ -1108,15 +1144,18 @@ impl<'a> NodeAssertionTransformer<'a> {
                 false,
             ),
         );
-        let helper = Expression::StaticMemberExpression(
+        Expression::StaticMemberExpression(
             self.ast.alloc_static_member_expression(
                 Span::default(),
                 runtime,
                 self.ast
-                    .identifier_name(Span::default(), self.ast.ident("withNodeAssertionPhase")),
+                    .identifier_name(Span::default(), self.ast.ident(name)),
                 false,
             ),
-        );
+        )
+    }
+    fn wrap(&self, original: Expression<'a>, operation: &str, source: &str) -> Expression<'a> {
+        let helper = self.helper("withNodeAssertionPhase");
         let parameters = self.ast.alloc_formal_parameters(
             Span::default(),
             FormalParameterKind::ArrowFormalParameters,
@@ -1160,20 +1199,74 @@ impl<'a> NodeAssertionTransformer<'a> {
     }
 }
 
+impl<'a> NodeAssertionTransformer<'a> {
+    /// Bind the original callee and receiver, leaving await/yield operands in
+    /// their original function. No async thunk, extra await or new microtask.
+    fn bind_call(&self, original: Expression<'a>, operation: &str, source: &str) -> Expression<'a> {
+        let Expression::CallExpression(mut call) = original else {
+            unreachable!("assertion call")
+        };
+        let (target, property) = match &mut call.callee {
+            Expression::StaticMemberExpression(m) => (
+                m.object.take_in(self.ast.allocator),
+                self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(m.property.name.as_str()),
+                    None,
+                ),
+            ),
+            Expression::ComputedMemberExpression(m) => (
+                m.object.take_in(self.ast.allocator),
+                m.expression.take_in(self.ast.allocator),
+            ),
+            _ => (
+                call.callee.take_in(self.ast.allocator),
+                self.ast.expression_null_literal(Span::default()),
+            ),
+        };
+        call.callee = self.ast.expression_call(
+            Span::default(),
+            self.helper("bindNodeAssertionPhase"),
+            NONE,
+            self.ast.vec_from_array([
+                Argument::from(self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(operation),
+                    None,
+                )),
+                Argument::from(self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(source),
+                    None,
+                )),
+                Argument::from(target),
+                Argument::from(property),
+            ]),
+            false,
+        );
+        Expression::CallExpression(call)
+    }
+}
+
 impl<'a> VisitMut<'a> for NodeAssertionTransformer<'a> {
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
         let key = span_key(expression.span());
         walk_mut::walk_expression(self, expression);
-        let Some((operation, source)) = self.sites.remove(&key) else {
+        let Some((operation, source, bound)) = self.sites.remove(&key) else {
             return;
         };
         let original = expression.take_in(self.ast.allocator);
-        *expression = self.wrap(original, &operation, &source);
+        *expression = if bound {
+            self.bind_call(original, &operation, &source)
+        } else {
+            self.wrap(original, &operation, &source)
+        };
     }
 }
 
 /// Attribute native node:assert and node:test expect calls by opening the
-/// assertion phase before argument evaluation. Lexical symbol identity avoids
+/// assertion phase before argument evaluation when possible, or binding the
+/// callee when arguments contain await/yield. Lexical symbol identity avoids
 /// wrapping a shadowed or merely assert-shaped user binding.
 pub fn instrument_node_assertion_phases(
     source: &str,
@@ -1252,6 +1345,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
             bindings: &bindings,
             scoping: semantic.scoping(),
             sites: HashMap::new(),
+            inventory: false,
         };
         collector.visit_program(&parsed.program);
         assertions = collector.sites.len();
@@ -7186,8 +7280,16 @@ mod tests {
             "export async function check() { assert.equal(await value(), 1); }\n",
         );
         let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
-        assert_eq!(output.assertions, 0);
-        assert_eq!(output.code, source);
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("bindNodeAssertionPhase"));
+        assert!(output.code.contains("await value()"));
+        let allocator = Allocator::default();
+        assert!(
+            Parser::new(&allocator, &output.code, SourceType::mjs())
+                .parse()
+                .errors
+                .is_empty()
+        );
     }
 
     #[test]
@@ -7197,8 +7299,16 @@ mod tests {
             "test('value', async () => { expect(await value()).toBe(1); });\n",
         );
         let output = instrument_node_assertion_phases(source, "tests/value.spec.mjs").unwrap();
-        assert_eq!(output.assertions, 0);
-        assert_eq!(output.code, source);
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("bindNodeAssertionPhase"));
+        assert!(output.code.contains("await value()"));
+        let allocator = Allocator::default();
+        assert!(
+            Parser::new(&allocator, &output.code, SourceType::mjs())
+                .parse()
+                .errors
+                .is_empty()
+        );
     }
 
     #[test]
@@ -7279,14 +7389,14 @@ mod tests {
     }
 
     #[test]
-    fn playwright_expect_matchers_are_left_to_the_runner_adapter() {
+    fn playwright_expect_matchers_have_the_same_source_identity_as_other_expect_bindings() {
         let source = concat!(
             "import { expect, test } from '@playwright/test';\n",
             "test('value', () => expect(value()).toBe(1));\n",
         );
         let output = instrument_node_assertion_phases(source, "tests/value.spec.mjs").unwrap();
-        assert_eq!(output.assertions, 0);
-        assert_eq!(output.code, source);
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("expect.toBe"));
     }
 
     #[test]

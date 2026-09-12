@@ -58,8 +58,7 @@ pub fn load(run: &StoredRun, input: &RunInputs) -> Result<(AssertionMap, State),
         fs::read(run.directory.join(file))
             .map_err(|e| format!("{file}: {e}; use assertions init first"))
     };
-    let map: AssertionMap =
-        serde_json::from_slice(&read(MAP_FILE)?).map_err(|e| format!("{MAP_FILE}: {e}"))?;
+    let map = model::parse(&read(MAP_FILE)?).map_err(|e| format!("{MAP_FILE}: {e}"))?;
     let state: State =
         serde_json::from_slice(&read(STATE_FILE)?).map_err(|e| format!("{STATE_FILE}: {e}"))?;
     if state.schema_version != 1
@@ -122,10 +121,8 @@ pub fn initialize(
             context_changed,
         )?
     } else if run.directory.join(MAP_FILE).exists() {
-        let map: AssertionMap = serde_json::from_slice(
-            &fs::read(run.directory.join(MAP_FILE)).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        let map = model::parse(&fs::read(run.directory.join(MAP_FILE)).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
         (map, seed(&input.inputs, &input.evidence_digest).1)
     } else {
         seed(&input.inputs, &input.evidence_digest)
@@ -192,6 +189,17 @@ fn phase_matches(
     if phase.kind != "assertion" || phase.status.as_deref() != Some("passed") {
         return false;
     }
+    // A source coordinate alone is not an assertion identity: an agent could
+    // accidentally anchor a larger enclosing expression at the same position.
+    // Require the inventoried expression and operation as well for JS/TS.
+    if inputs.language == "javascript"
+        && !inputs
+            .assertions
+            .iter()
+            .any(|s| s.at == a.at && s.operation == phase.operation)
+    {
+        return false;
+    }
     let source = phase
         .operation
         .strip_prefix("Rust assertion at ")
@@ -224,13 +232,15 @@ pub fn report(run: &StoredRun) -> Result<Value, String> {
     let input = load_inputs(run)?;
     let (map, state) = load(run, &input)?;
     let coverage = coverage(run)?;
-    Ok(assess(
+    let mut report = assess(
         &map,
         &state,
         &input.inputs,
         &coverage,
         run.metadata.test_exit_code == Some(0),
-    ))
+    );
+    report["revision"] = json!(digest(&(&map, &state, &input.evidence_digest)));
+    Ok(report)
 }
 
 pub fn assess(
@@ -283,6 +293,7 @@ pub fn assess(
     let mut rows = Vec::new();
     let mut claimed_points = BTreeSet::new();
     let mut credited_points = BTreeSet::new();
+    let mut point_flows = BTreeMap::<String, BTreeSet<String>>::new();
     let mut dirty_flows = 0;
     let mut current_flows = 0;
     let mut credit_flows = 0;
@@ -323,6 +334,25 @@ pub fn assess(
                 && dirty.is_empty()
                 && !applicable.is_empty()
                 && a.analysis != Analysis::Unmapped;
+            let mut blockers = Vec::new();
+            if !passed {
+                blockers.push("run did not pass");
+            }
+            if !identities_valid {
+                blockers.push("invalid map identities");
+            }
+            if !state.scope_review.is_empty() {
+                blockers.push("scope review pending");
+            }
+            if !dirty.is_empty() {
+                blockers.push("flow requires review or reference repair");
+            }
+            if applicable.is_empty() {
+                blockers.push("no matching passing assertion occurrence for appliesTo");
+            }
+            if a.analysis == Analysis::Unmapped {
+                blockers.push("assertion is unmapped");
+            }
             if eligible {
                 credit_flows += 1;
             }
@@ -339,12 +369,11 @@ pub fn assess(
                     continue;
                 };
                 let first = points.partition_point(|(pos, _)| *pos < start);
-                for (pos, point) in points[first..]
-                    .iter()
-                    .take_while(|(pos, _)| *pos < start + node.at.text.len())
-                {
-                    // Require the complete statement anchor, not just its line.
-                    if pos + point.meta.source.len() > start + node.at.text.len() {
+                for (pos, point) in points[first..].iter().take_while(|(pos, _)| *pos == start) {
+                    // One explicit node credits one exact measured statement.
+                    // A guard/class/block claim must not silently credit every
+                    // nested statement just because its source span contains it.
+                    if *pos != start || point.meta.source != node.at.text {
                         continue;
                     }
                     claimed_points.insert(point.meta.id.clone());
@@ -353,6 +382,10 @@ pub fn assess(
                         && point.tests.iter().any(|t| applicable.contains(t))
                     {
                         credited_points.insert(point.meta.id.clone());
+                        point_flows
+                            .entry(point.meta.id.clone())
+                            .or_default()
+                            .insert(flow_key(a, f));
                         lines.insert((node.at.file.clone(), point.meta.line));
                         line_assertions
                             .entry((node.at.file.clone(), point.meta.line))
@@ -361,7 +394,7 @@ pub fn assess(
                     }
                 }
             }
-            flows.push(json!({"id":f.id,"current":dirty.is_empty(),"reasons":dirty,"eligible":eligible,"matchingTests":applicable,"creditedStatementLines":lines}));
+            flows.push(json!({"id":f.id,"current":dirty.is_empty(),"reasons":dirty,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines}));
         }
         rows.push(json!({"id":a.id,"at":a.at,"analysis":a.analysis,"observedPassingTests":witnesses,"flows":flows}));
     }
@@ -405,13 +438,24 @@ pub fn assess(
         && state.scope_review.is_empty()
         && errors.is_empty();
     let total = denominator.len();
+    let statements = measured_statements.iter().map(|p| {
+        let at = inputs.files.get(&p.meta.file)
+            .and_then(|text| byte_column(text, p.meta.line, p.meta.column, &inputs.language))
+            .map(|column| Anchor { file: p.meta.file.clone(), line: p.meta.line, column, text: p.meta.source.clone() })
+            .filter(|at| at.offset(&inputs.files).is_some());
+        json!({"id":p.meta.id,"file":p.meta.file,"line":p.meta.line,"at":at,"covered":p.covered,"tests":p.tests,"declared":claimed_points.contains(&p.meta.id),"asserted":credited_points.contains(&p.meta.id),"flows":point_flows.get(&p.meta.id).cloned().unwrap_or_default()})
+    }).collect::<Vec<_>>();
     json!({"basis":"agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
         "summary":{"metric":"measured statements","statements":{"asserted":credited_points.len(),"declared":claimed_points.len(),"total":measured_statements.len(),"percentage":if measured_statements.is_empty() { None } else {Some(credited_points.len() as f64 * 100.0 / measured_statements.len() as f64)}},"assertions":map.assertions.len(),"inventoryAssertions":inputs.assertions.len(),"missingInventoryAssertions":missing_inventory,
             "unmappedAssertions":map.assertions.iter().filter(|a| a.analysis==Analysis::Unmapped || a.flows.is_empty()).count(),
             "currentFlows":current_flows,"dirtyFlows":dirty_flows,"eligibleFlows":credit_flows,"retiredAssertions":map.retired_assertions.len(),
+            "unobservedAssertions":rows.iter().filter(|a| a["observedPassingTests"].as_array().is_none_or(Vec::is_empty)).count(),
+            "inventoryFailures":inputs.limitations.iter().filter(|s| s.starts_with("Inventory unavailable for ")).count(),
+            "unanchoredStatements":statements.iter().filter(|s| s["at"].is_null()).count(),
             "inventoryMappingComplete":mapping_complete,"runPassed":passed,"scopeReview":state.scope_review,
             "lines":{"asserted":credited.len(),"declared":declared.len(),"total":total,"percentage":if total==0 {None} else {Some(credited.len() as f64 * 100.0 / total as f64)}}},
-        "assertions":rows,"creditedLines":credited.iter().map(|loc| json!({"file":loc.0,"line":loc.1,"assertions":line_assertions.get(loc)})).collect::<Vec<_>>(),
+        "assertions":rows,"statements":statements,"tests":tests.values().map(|t| json!({"id":t.id,"name":t.name})).collect::<Vec<_>>(),
+        "creditedLines":credited.iter().map(|loc| json!({"file":loc.0,"line":loc.1,"assertions":line_assertions.get(loc)})).collect::<Vec<_>>(),
         "unassertedLines":denominator.difference(&credited).map(|(f,l)| json!({"file":f,"line":l})).collect::<Vec<_>>(),
         "validationErrors":errors,"limitations":inputs.limitations})
 }
