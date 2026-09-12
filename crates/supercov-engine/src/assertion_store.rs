@@ -181,49 +181,24 @@ fn byte_column(source: &str, line: usize, column: usize, language: &str) -> Opti
     }
     (units == column - 1).then_some(line.len() + 1)
 }
-fn phase_matches(
-    a: &Assertion,
-    phase: &crate::coverage_report::CoveragePhase,
+fn phase_location<'a>(
+    phase: &'a crate::coverage_report::CoveragePhase,
     inputs: &Inputs,
-) -> bool {
+) -> Option<(&'a str, usize, usize)> {
     if phase.kind != "assertion" || phase.status.as_deref() != Some("passed") {
-        return false;
-    }
-    // A source coordinate alone is not an assertion identity: an agent could
-    // accidentally anchor a larger enclosing expression at the same position.
-    // Require the inventoried expression and operation as well for JS/TS.
-    if inputs.language == "javascript"
-        && !inputs
-            .assertions
-            .iter()
-            .any(|s| s.at == a.at && s.operation == phase.operation)
-    {
-        return false;
+        return None;
     }
     let source = phase
         .operation
         .strip_prefix("Rust assertion at ")
         .or(phase.source.as_deref());
-    let Some(location) = source else {
-        return false;
-    };
+    let location = source?;
     let mut parts = location.rsplitn(3, ':');
-    let Some(column) = parts.next().and_then(|n| n.parse::<usize>().ok()) else {
-        return false;
-    };
-    let Some(line) = parts.next().and_then(|n| n.parse::<usize>().ok()) else {
-        return false;
-    };
-    let Some(file) = parts.next() else {
-        return false;
-    };
-    file == a.at.file
-        && line == a.at.line
-        && inputs
-            .files
-            .get(file)
-            .and_then(|text| byte_column(text, line, column, &inputs.language))
-            == Some(a.at.column)
+    let column = parts.next()?.parse::<usize>().ok()?;
+    let line = parts.next()?.parse::<usize>().ok()?;
+    let file = parts.next()?;
+    let column = byte_column(inputs.files.get(file)?, line, column, &inputs.language)?;
+    Some((file, line, column))
 }
 
 /// Recompute from the mutable map on every query; never cache it into the
@@ -304,11 +279,37 @@ pub fn assess(
         && errors.iter().all(|e| {
             !e.contains("duplicate") && !e.contains("schema") && !e.contains("assertion ID")
         });
+    // Join exact identities once, rather than rescanning the complete inventory
+    // for every assertion/phase pair. This is evidence lookup, not inference.
+    let mut phases_by_location = BTreeMap::new();
+    for p in &view.phases {
+        if let Some(location) = phase_location(&p.phase, inputs) {
+            phases_by_location
+                .entry(location)
+                .or_insert_with(Vec::new)
+                .push(p);
+        }
+    }
+    let mut inventory = BTreeMap::<&Anchor, BTreeSet<&str>>::new();
+    for site in &inputs.assertions {
+        inventory
+            .entry(&site.at)
+            .or_default()
+            .insert(&site.operation);
+    }
     for a in &map.assertions {
-        let witnesses = view
-            .phases
-            .iter()
-            .filter(|p| phase_matches(a, &p.phase, inputs))
+        let witnesses = phases_by_location
+            .get(&(a.at.file.as_str(), a.at.line, a.at.column))
+            .into_iter()
+            .flatten()
+            // Coordinates alone cannot identify a JS assertion: retain the
+            // complete inventoried expression and operation requirement.
+            .filter(|p| {
+                inputs.language != "javascript"
+                    || inventory
+                        .get(&a.at)
+                        .is_some_and(|operations| operations.contains(p.phase.operation.as_str()))
+            })
             .map(|p| p.test.clone())
             .collect::<BTreeSet<_>>();
         let mut flows = Vec::new();
