@@ -13,7 +13,7 @@ npx supercov runs latest assertions --json
 The run creates the map automatically, reusing the newest available map for the
 same test command and language. Pin the returned run ID and edit `data.map`.
 Ask your agent to follow
-`supercov docs assertion-agent`, read the frozen source, and complete the map.
+`supercov docs assertion-agent`, read the current project source, and complete the map.
 Then validate and acknowledge the reviewed flows:
 
 ```sh supercov-example
@@ -26,7 +26,7 @@ npx supercov runs <run>
 The **Assertions** row appears beside Lines, Branches and MC/DC. It is the
 percentage of measured statements credited by current agent-authored flows,
 with exact passing assertion identity and execution in the same test. It uses
-the whole archived run even when structural coverage is filtered. Incomplete
+the whole run with matching current source even when structural coverage is filtered. Incomplete
 maps remain useful; unmapped or dirty flows earn no credit.
 
 ## Check what the test asserts
@@ -71,7 +71,10 @@ and freshness without reconstructing the reasoning.
 
 After changing code or tests, run the same suite command again. Its new map
 automatically carries forward unchanged entries;
-changed or ambiguous references stay dirty until reviewed. See the
+changed or ambiguous references stay dirty until reviewed. Source files are
+read from the project; each run retains file hashes and the map, without storing
+complete source copies. A stale checkout makes assertion coverage unavailable
+until tests are rerun. See the
 [map reference](assertion-maps.md) for the format, commands and limitations.
 
 MC/DC measures independent condition effects. Assertion coverage measures the

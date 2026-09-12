@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from 'node:zlib';
 import { requireSupercov, executeSupercov, latestRun, coverageQuery } from "./coverage-test-helpers.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "supercov-assertion-maps-"));
@@ -15,6 +16,21 @@ try {
   writeFileSync(join(root, "src/core.js"), "export function value() {\n  return 1;\n}\n");
   writeFileSync(join(root, "tests/core.test.js"), "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { value } from '../src/core.js';\ntest('value', () => {\n  assert.equal(value(), 1);\n});\n");
   const first = run();
+  const archive = gunzipSync(readFileSync(join(root, '.supercov/runs', first, 'evidence.raw.gz')));
+  const magic = Buffer.from('SUPERCOV-EVIDENCE-3\n');
+  assert(archive.subarray(0, magic.length).equals(magic));
+  let inputManifest;
+  for (let offset = magic.length; offset < archive.length;) {
+    const length = archive.readUInt32BE(offset); offset += 4;
+    const header = JSON.parse(archive.subarray(offset, offset + length)); offset += length;
+    if (header.path === 'assertion-inputs.json') inputManifest = JSON.parse(archive.subarray(offset, offset + header.bytes));
+    offset += header.bytes;
+  }
+  assert.equal(inputManifest.schemaVersion, 2);
+  assert.equal(typeof inputManifest.files['src/core.js'], 'object');
+  assert.equal(inputManifest.files['src/core.js'].bytes, readFileSync(join(root, 'src/core.js')).length);
+  assert.match(inputManifest.files['src/core.js'].sha256, /^[a-f0-9]{64}$/);
+  assert(!JSON.stringify(inputManifest).includes('export function value()'), 'full source is absent from assertion inputs');
   assert.equal(coverageQuery(root, first).data.confidence.lines.asserted, 0);
   const automatic = coverageQuery(root, first).data.assertionCoverage;
   assert.equal(automatic.summary.statements.percentage, 0);
@@ -101,8 +117,8 @@ try {
   const firstMapBytes = readFileSync(initialized.map);
   const firstStatePath = join(root, '.supercov/runs', first, 'assertions.state.json');
   const firstStateBytes = readFileSync(firstStatePath);
-  const frozen = coverageQuery(root, first, "source", "src/core.js").data.items;
-  assert.equal(frozen[1].text, "  return 1;");
+  const currentSource = coverageQuery(root, first, "source", "src/core.js").data.items;
+  assert.equal(currentSource[1].text, "  return 1;");
   assert.notEqual(executeSupercov(root, ["runs",first,"assertions","init"]).status, 0, "the init command is removed");
   assert.notEqual(executeSupercov(root, ["runs",first,"asserted"]).status, 0, "legacy analyzer command is gone");
   const second = run();
@@ -116,8 +132,11 @@ try {
   report = query(third);
   assert.equal(report.summary.dirtyFlows,1);
   assert.equal(report.summary.lines.asserted,0);
-  assert.equal(coverageQuery(root, first, "source", "src/core.js").data.items[1].text,"  return 1;", "old input snapshot remains frozen");
-  assert.equal(query(first).workingTree.stale,true);
+  for (const resource of [['source', 'src/core.js'], ['assertions'], ['assertions', 'review', '--all'], ['assertions', 'validate']]) {
+    assert.equal(executeSupercov(root, ['runs', first, ...resource]).status, 2, 'old run must not use changed source');
+  }
+  assert.equal(coverageQuery(root, first).data.assertionCoverage.available, false);
+  assert(query(first, 'files').items.some(f => f.file === 'src/core.js' && /^[a-f0-9]{64}$/.test(f.sha256)), 'old manifest stays inspectable');
   const updated=read(carried.map);assert.equal(updated.assertions[0].id,a.id);
   updated.assertions[0].flows[0].nodes[0].at.text="return 2 - 1;";
   write(carried.map,updated);
@@ -148,7 +167,7 @@ try {
   query(stillDirty, "review", "--all");
   assert.equal(query(stillDirty).summary.statements.asserted, 1);
 
-  // Exact moves remap both assertion and statement anchors automatically.
+  // Unique snippets relocate automatically, while changed files need review.
   const testPath = join(root, 'tests/core.test.js');
   const corePath = join(root, 'src/core.js');
   writeFileSync(testPath, '\n' + readFileSync(testPath, 'utf8'));
@@ -159,7 +178,10 @@ try {
   assert.equal(movedMap.assertions[0].id, a.id);
   assert.equal(movedMap.assertions[0].at.line, 6);
   assert.equal(movedMap.assertions[0].flows[0].nodes[0].at.line, 3);
-  assert.equal(movedReport.summary.statements.asserted, 1);
+  assert.equal(movedReport.summary.statements.asserted, 0);
+  assert.equal(movedReport.summary.dirtyFlows, 1);
+  query(moved, 'review', '--all');
+  assert.equal(query(moved).summary.statements.asserted, 1);
 
   // Failed runs still have maps, but cannot inherit passing execution credit.
   writeFileSync(corePath, readFileSync(corePath, 'utf8').replace('return 2 - 1;', 'return 2;'));
@@ -170,7 +192,7 @@ try {
   assert.equal(query(failed).summary.statements.asserted, 0);
   assert.deepEqual(readFileSync(initialized.map), firstMapBytes);
   assert.deepEqual(readFileSync(firstStatePath), firstStateBytes);
-  console.log(JSON.stringify({pilot:"assertion-map-cli",runs:9,assertions:1,creditedLines:1,inheritance:"unchanged reused; edited flow dirty until review",archivedSources:"preserved"}));
+  console.log(JSON.stringify({pilot:"assertion-map-cli",runs:9,assertions:1,creditedLines:1,inheritance:"unchanged reused; edited flow dirty until review",sourceStorage:"hash manifest; current checkout required"}));
 } finally { rmSync(root,{recursive:true,force:true}); }
 
 const rustRoot = mkdtempSync(join(tmpdir(), "supercov-assertion-map-rust-"));

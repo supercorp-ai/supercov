@@ -1,7 +1,9 @@
-//! Thin syntax inventories and frozen input capture for assertion maps.
+//! Thin syntax inventories and source fingerprints for assertion maps.
 //! No type/flow/dependency verifier belongs here.
 use crate::{
-    assertion_map::{Anchor, Files, Inputs, InventorySite, local_path},
+    assertion_map::{
+        Anchor, FileFingerprint, Files, InputManifest, Inputs, InventorySite, local_path,
+    },
     evidence_archive::EvidenceArchiveEntry,
     workspace::{canonicalize_simplified, simplified},
 };
@@ -27,6 +29,7 @@ pub fn capture_with_expect_modules(
     paths: impl IntoIterator<Item = PathBuf>,
     expect_modules: &[String],
 ) -> Result<Inputs, String> {
+    let supplied_root = simplified(root.to_owned());
     let root = canonicalize_simplified(root).map_err(|e| e.to_string())?;
     // Store only a digest of environment inputs, never their values. Engine
     // run IDs, working directories and shell nesting are not semantic inputs.
@@ -42,7 +45,11 @@ pub fn capture_with_expect_modules(
         inputs.limitations.push("Optional assertion calls are inventoried but currently have no injected phase. Unrecognized custom assertion wrappers and dynamically selected matchers may be absent. Use check --require-observed to detect inventoried sites without passing evidence.".into());
     }
     for path in paths.into_iter().map(simplified).collect::<BTreeSet<_>>() {
-        let full = root.join(&path);
+        let full = if path.is_absolute() {
+            root.join(path.strip_prefix(&supplied_root).unwrap_or(&path))
+        } else {
+            root.join(&path)
+        };
         if !full.exists() {
             continue;
         }
@@ -114,9 +121,45 @@ pub fn append(
     }
     entries.push(EvidenceArchiveEntry {
         path: ARCHIVE_PATH.into(),
-        contents: serde_json::to_vec(inputs).map_err(|e| e.to_string())?,
+        contents: serde_json::to_vec(&inputs.manifest()).map_err(|e| e.to_string())?,
     });
     Ok(entries)
+}
+
+/// Read project files only when their exact bytes still match the run manifest.
+/// This is source identity checking, not semantic dependency analysis.
+pub fn current_sources(root: &Path, manifest: &InputManifest) -> Result<Inputs, String> {
+    let root = canonicalize_simplified(root).map_err(|e| e.to_string())?;
+    let mut files = Files::new();
+    for (file, expected) in &manifest.files {
+        if !local_path(file) {
+            return Err(format!("Invalid assertion input path: {file}"));
+        }
+        let path = root.join(file);
+        let source = (|| {
+            let canonical = canonicalize_simplified(&path).ok()?;
+            if !canonical.starts_with(&root) || !canonical.is_file() {
+                return None;
+            }
+            let text = fs::read_to_string(canonical).ok()?;
+            (FileFingerprint::of(&text) == *expected).then_some(text)
+        })();
+        let Some(source) = source else {
+            return Err(format!(
+                "Current source differs from the run or is unavailable: {file}; rerun tests to inherit the map for the current checkout"
+            ));
+        };
+        files.insert(file.clone(), source);
+    }
+    let inputs = manifest.with_sources(files);
+    if inputs
+        .assertions
+        .iter()
+        .any(|s| s.at.offset(&inputs.files).is_none())
+    {
+        return Err("Invalid assertion identities in run manifest".into());
+    }
+    Ok(inputs)
 }
 
 fn rust_ranges(source: &str) -> Result<Vec<(usize, usize, String)>, String> {

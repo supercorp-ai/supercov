@@ -28,16 +28,19 @@ tracks evidence and changes. Read this guide with `supercov docs assertion-agent
 
 ## Investigate each assertion
 
-Read archived code with
-`supercov runs <run> source <path> --offset 0 --limit 100`.
-This prints source code with line numbers from the run's archive. Add `--json`
-only when you need structured `{line, text}` items. It reads the archived file
-as it was when the tests ran, even when today's checkout has changed or the
-assertion map has a syntax error. Use `assertions files` to discover frozen paths.
+Read the ordinary source and test files in the current project using your normal
+file-reading tools. The checkout must match the pinned test run. Supercov stores
+file hashes and assertion identities, not copies of complete source files.
+
+Optionally use `supercov runs <run> source <path> --offset 0 --limit 100` for a
+numbered view that verifies the source matches the run. Add `--json` only when
+you need structured `{line, text}` items. It remains usable with malformed map
+JSON, but refuses changed or missing source. `assertions files` lists run input
+paths, byte sizes and SHA-256 hashes, including when the checkout is stale.
 
 `supercov runs <run> assertions --file <test-path>` lists all assertion sites,
 including unmapped ones, with review and passing-execution status. An entry with
-`inMap: false` was found in archived code but is missing from the authored map;
+`inMap: false` was discovered when the tests ran but is missing from the authored map;
 restore that entry before treating the investigation as complete. There is no
 separate `inventory` command.
 
@@ -71,8 +74,9 @@ For each assertion:
   explicitly if your reasoning supports them.
 - Record broader review inputs in `watch`: the containing test, relevant
   functions, setup, guards, alternate branches and helpers. Whole files are a
-  simple conservative starting point. Span watches can reduce review work once
-  you understand the complete relevant context. Do not watch just a return
+  simple starting point. Span watches describe relevant context, but freshness
+  uses the entire containing file. Changes outside whole-file watches also
+  need scope review. Do not watch just a return
   expression while relying on an unwatched guard.
 - For parameterized or shared assertions, describe each relevant case. Use
   `appliesTo` with exact names from the `tests` view when flows differ by case.
@@ -120,11 +124,19 @@ claims. A green check is meaningful only alongside honest authored reasoning.
 
 ## Continue after code or test changes
 
-Run the same test command again. Its new map automatically inherits prior work. Read the new
-summary, assertion rows, new sites and `retiredAssertions`. Retain unchanged
-explanations. Repair dirty flow anchors and reasoning; resolve ambiguous identity
-suggestions using the old explanation and the new test. A changed assertion can
-keep an ID as a dirty suggestion, so retaining an ID is not evidence of equivalence.
+Run the same test command again. Its new map automatically inherits the previous
+map using its file-hash manifest; old source files are unnecessary. Read the new
+summary, assertion rows, new sites and `retiredAssertions`. Focus on unmapped or
+partial entries and flows with nonempty `reasons`. Leave current reviewed flows
+alone. Reuse the existing explanations and graphs when repairing dirty flows.
+
+The assertion's test file, every node's file and declared watches participate
+in freshness. Unchanged inputs retain review. Any byte change in a dependency
+file requires review, including comments and blank lines. Unique snippets can
+relocate while keeping their IDs, but that does not establish unchanged meaning.
+Renamed files and changed assertion candidates also retain work for review;
+ambiguous or removed assertions are retired as suggestions. An old schema-1 map
+is imported with review required. Each run uses its own passing/execution evidence.
 
 Investigate each `scopeReview` file. Add missing watches/flows or explain why its
 changes do not affect existing claims, then `review --ack-scope`. Acknowledge only

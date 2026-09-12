@@ -19,7 +19,7 @@ npx supercov --help
 | Inspect one file | `npx supercov runs latest file <path>` |
 | List assertions and their status | `npx supercov runs latest assertions` |
 | Inspect one assertion and its flows | `npx supercov runs latest assertion <id>` |
-| Read archived source code | `npx supercov runs latest source <path>` |
+| Read matching current source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
@@ -76,7 +76,7 @@ npx supercov runs <run-id> [query] [options]
 | `scope` | Review included, excluded, and ambiguous source files |
 | `assertions` | List assertions, including unmapped sites, with review and execution status |
 | `assertion <id>` | Inspect one assertion and its authored flows |
-| `source <path>` | Read archived source as code with line numbers |
+| `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
 Common examples:
@@ -97,11 +97,12 @@ npx supercov runs latest file --help
 npx supercov runs latest assertions --help
 ```
 
-Assertion queries read the run-owned map. `source <path>` reads the archived
+Assertion queries read the run-owned map. `source <path>` reads the matching current
 file directly. It prints source code with line numbers, preserving indentation;
 add `--json` only when you want structured `{line, text}` items. `--offset` is
-zero-based and `--limit` controls the number of source lines. Neither query
-reads source from today's checkout. The old `assertions inventory` and nested
+zero-based and `--limit` controls the number of source lines. Source and assertion analysis require the current
+checkout to match the run. Changed source makes assertion coverage unavailable;
+rerun tests to inherit mappings. The old `assertions inventory` and nested
 `assertions source --file` commands are replaced by these resource queries.
 Use `assertions validate`, `assertions review` and `assertions check` to validate
 and acknowledge the authored map.

@@ -71,7 +71,8 @@ pub struct InventorySite {
     pub operation: String,
 }
 
-/// Frozen once before execution, stored once in the compressed run archive.
+/// Source text held in memory for capture or a verified current-checkout query.
+/// The serialized form is retained only for reading legacy source archives.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Inputs {
@@ -82,6 +83,65 @@ pub struct Inputs {
     pub files: Files,
     pub assertions: Vec<InventorySite>,
     pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileFingerprint {
+    pub sha256: String,
+    pub bytes: usize,
+}
+impl FileFingerprint {
+    pub fn of(source: &str) -> Self {
+        Self {
+            sha256: format!("{:x}", Sha256::digest(source.as_bytes())),
+            bytes: source.len(),
+        }
+    }
+}
+pub type FileManifest = BTreeMap<String, FileFingerprint>;
+
+/// The run stores identities and hashes, never complete source files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InputManifest {
+    pub schema_version: u32,
+    pub language: String,
+    pub context_digest: String,
+    pub files: FileManifest,
+    pub assertions: Vec<InventorySite>,
+    pub limitations: Vec<String>,
+}
+impl Inputs {
+    pub fn manifest(&self) -> InputManifest {
+        InputManifest {
+            schema_version: 2,
+            language: self.language.clone(),
+            context_digest: self.context_digest.clone(),
+            files: self
+                .files
+                .iter()
+                .map(|(p, s)| (p.clone(), FileFingerprint::of(s)))
+                .collect(),
+            assertions: self.assertions.clone(),
+            limitations: self.limitations.clone(),
+        }
+    }
+    pub fn identity(&self) -> String {
+        digest(&self.manifest())
+    }
+}
+impl InputManifest {
+    pub fn with_sources(&self, files: Files) -> Inputs {
+        Inputs {
+            schema_version: 1,
+            language: self.language.clone(),
+            context_digest: self.context_digest.clone(),
+            files,
+            assertions: self.assertions.clone(),
+            limitations: self.limitations.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -264,6 +324,9 @@ fn valid_id(id: &str) -> bool {
 }
 
 pub fn seed(inputs: &Inputs, evidence_digest: &str) -> (AssertionMap, State) {
+    seed_manifest(&inputs.manifest(), evidence_digest)
+}
+pub fn seed_manifest(inputs: &InputManifest, evidence_digest: &str) -> (AssertionMap, State) {
     (
         AssertionMap {
             schema_version: 1,
@@ -281,7 +344,7 @@ pub fn seed(inputs: &Inputs, evidence_digest: &str) -> (AssertionMap, State) {
             retired_assertions: vec![],
         },
         State {
-            schema_version: 1,
+            schema_version: 2,
             inputs_digest: digest(inputs),
             evidence_digest: evidence_digest.into(),
             reviews: BTreeMap::new(),
@@ -365,36 +428,32 @@ pub fn validate_flow(flow: &Flow, files: &Files) -> Vec<String> {
     errors
 }
 
-/// Includes assertion meaning, each flow, its anchors and all declared watches.
-/// Locations are omitted, allowing exact text to move without losing review.
+/// Whole-file dependencies include the assertion's test and every flow node.
+/// Span watches still identify review context, but hashes invalidate whole files.
+pub fn dependencies<'a>(a: &'a Assertion, f: &'a Flow) -> BTreeSet<&'a str> {
+    std::iter::once(a.at.file.as_str())
+        .chain(f.nodes.iter().map(|n| n.at.file.as_str()))
+        .chain(f.watch.iter().map(|w| match w {
+            Watch::File { file } => file.as_str(),
+            Watch::Span { at } => at.file.as_str(),
+        }))
+        .collect()
+}
+
 pub fn fingerprint(a: &Assertion, f: &Flow, files: &Files) -> String {
-    let mut value = serde_json::to_value((&a.id, &a.at, &a.analysis, &a.observes, f)).expect("map");
-    fn strip_locations(v: &mut serde_json::Value) {
-        match v {
-            serde_json::Value::Object(o) => {
-                if o.contains_key("file") && o.contains_key("text") {
-                    o.remove("line");
-                    o.remove("column");
-                }
-                o.values_mut().for_each(strip_locations);
-            }
-            serde_json::Value::Array(a) => a.iter_mut().for_each(strip_locations),
-            _ => (),
-        }
-    }
-    strip_locations(&mut value);
-    let watches = f
-        .watch
-        .iter()
-        .map(|w| match w {
-            // Leading/trailing blank lines do not change reviewed file content.
-            Watch::File { file } => files
-                .get(file)
-                .map(|s| s.trim_matches(['\r', '\n']).to_owned()),
-            Watch::Span { at } => at.offset(files).map(|_| at.text.clone()),
-        })
+    let hashes = dependencies(a, f)
+        .into_iter()
+        .filter_map(|p| files.get(p).map(|s| (p.to_owned(), FileFingerprint::of(s))))
+        .collect();
+    fingerprint_manifest(a, f, &hashes)
+}
+fn fingerprint_manifest(a: &Assertion, f: &Flow, files: &FileManifest) -> String {
+    let value = (&a.id, &a.at, &a.analysis, &a.observes, f);
+    let hashes = dependencies(a, f)
+        .into_iter()
+        .map(|p| (p, files.get(p)))
         .collect::<Vec<_>>();
-    digest(&(value, watches))
+    digest(&(value, hashes))
 }
 pub fn reasons(a: &Assertion, f: &Flow, state: &State, inputs: &Inputs) -> BTreeSet<String> {
     let mut reasons = state
@@ -402,7 +461,7 @@ pub fn reasons(a: &Assertion, f: &Flow, state: &State, inputs: &Inputs) -> BTree
         .get(&flow_key(a, f))
         .map(|r| r.reasons.clone())
         .unwrap_or_default();
-    if state.schema_version != 1 {
+    if state.schema_version != 2 {
         reasons.insert("unsupported review state".into());
     }
     if state
@@ -429,7 +488,7 @@ pub fn review(
     if map.schema_version != 1 {
         return Err("unsupported map schema version".into());
     }
-    if state.inputs_digest != digest(inputs) || state.schema_version != 1 {
+    if state.inputs_digest != inputs.identity() || state.schema_version != 2 {
         return Err("carry the map to this run before review".into());
     }
     let keys = map
@@ -490,27 +549,25 @@ fn unique_occurrence(text: &str, snippet: &str) -> Option<usize> {
         .then_some(())
         .map_or(Some(first), |_| None)
 }
-fn target_file(file: &str, old: &Files, new: &Files) -> Option<String> {
+fn target_file(file: &str, old: &FileManifest, new: &Files) -> Option<String> {
     if new.contains_key(file) {
         return Some(file.into());
     }
-    let text = old.get(file)?;
-    let mut matches = new.iter().filter(|(_, s)| *s == text);
+    let hash = old.get(file)?;
+    let mut matches = new.iter().filter(|(_, s)| FileFingerprint::of(s) == *hash);
     let first = matches.next()?.0;
     matches.next().is_none().then(|| first.clone())
 }
-pub fn relocate(at: &Anchor, old: &Files, new: &Files) -> Option<Anchor> {
-    let start = at.offset(old)?;
-    let target = target_file(&at.file, old, new)?;
+pub fn relocate(at: &Anchor, old: &FileManifest, new: &Files) -> Option<Anchor> {
     let before = old.get(&at.file)?;
+    let target = target_file(&at.file, old, new)?;
     let after = &new[&target];
-    let position = if before == after {
-        start
-    } else if let Some(whole) = unique_occurrence(after, before) {
-        whole + start
-    } else {
-        unique_occurrence(after, &at.text)?
-    };
+    let mut candidate = at.clone();
+    candidate.file.clone_from(&target);
+    if FileFingerprint::of(after) == *before && candidate.offset(new).is_some() {
+        return Some(candidate);
+    }
+    let position = unique_occurrence(after, &at.text)?;
     Some(Anchor::new(
         &target,
         after,
@@ -524,18 +581,19 @@ pub fn relocate(at: &Anchor, old: &Files, new: &Files) -> Option<Anchor> {
 pub fn carry(
     map: &AssertionMap,
     state: &State,
-    old: &Inputs,
+    old: &InputManifest,
     new: &Inputs,
     evidence_digest: &str,
     context_changed: bool,
 ) -> Result<(AssertionMap, State), String> {
-    if map.schema_version != 1 || new.schema_version != 1 {
+    if map.schema_version != 1 || old.schema_version != 2 || new.schema_version != 1 {
         return Err("unsupported map/input schema version".into());
     }
-    if state.inputs_digest != digest(old) || state.schema_version != 1 {
+    if state.inputs_digest != digest(old) || state.schema_version != 2 {
         return Err("old map state does not match its run inputs".into());
     }
-    let (mut next, mut next_state) = seed(new, evidence_digest);
+    let new_manifest = new.manifest();
+    let (mut next, mut next_state) = seed_manifest(&new_manifest, evidence_digest);
     next.assertions.clear();
     next.retired_assertions = map.retired_assertions.clone();
     next_state.scope_review = state.scope_review.clone();
@@ -587,7 +645,25 @@ pub fn carry(
         let mut updated = a.clone();
         updated.at = at.clone();
         for (prior, f) in a.flows.iter().zip(&mut updated.flows) {
-            let mut dirty = reasons(a, prior, state, old);
+            let mut dirty = state
+                .reviews
+                .get(&flow_key(a, prior))
+                .map(|r| r.reasons.clone())
+                .unwrap_or_default();
+            if state
+                .reviews
+                .get(&flow_key(a, prior))
+                .is_none_or(|r| r.fingerprint != fingerprint_manifest(a, prior, &old.files))
+            {
+                dirty.insert("unreviewed map or changed review inputs".into());
+            }
+            for file in dependencies(a, prior) {
+                if old.files.get(file) != new_manifest.files.get(file)
+                    || !old.files.contains_key(file)
+                {
+                    dirty.insert(format!("dependency file changed or removed: {file}"));
+                }
+            }
             if replacement.is_some() {
                 dirty.insert("assertion changed or replaced; confirm identity and meaning".into());
             }
@@ -602,11 +678,6 @@ pub fn carry(
                 match watch {
                     Watch::File { file } => {
                         if let Some(target) = target_file(file, &old.files, &new.files) {
-                            if old.files.get(file).map(|s| s.trim_matches(['\r', '\n']))
-                                != new.files.get(&target).map(|s| s.trim_matches(['\r', '\n']))
-                            {
-                                dirty.insert(format!("watched file changed: {file}"));
-                            }
                             *file = target;
                         } else {
                             dirty.insert(format!("watched file removed: {file}"));
@@ -637,7 +708,7 @@ pub fn carry(
                 .reviews
                 .get_mut(&flow_key(&updated, f))
                 .unwrap()
-                .fingerprint = fingerprint(&updated, f, &new.files);
+                .fingerprint = fingerprint_manifest(&updated, f, &new_manifest.files);
         }
         next.assertions.push(updated);
     }
@@ -660,70 +731,34 @@ pub fn carry(
             next.assertions.push(a);
         }
     }
-    // Conservative textual scope check. A whole-file watch assigns every edit.
-    // For spans, the entire changed extent must lie inside reviewed spans on
-    // both sides. Multiple disjoint edits may request extra scope review.
-    let ranges = |file: &str, mapping: &AssertionMap, files: &Files| {
-        let mut out = Vec::new();
-        for a in &mapping.assertions {
-            for f in &a.flows {
-                for w in &f.watch {
-                    match w {
-                        Watch::File { file: watched } if watched == file => {
-                            out.push((0, files.get(file).map_or(0, String::len)))
-                        }
-                        Watch::Span { at } if at.file == file => {
-                            if let Some(start) = at.offset(files) {
-                                out.push((start, start + at.text.len()));
-                            }
-                        }
-                        _ => (),
-                    }
-                }
-            }
-        }
-        out
+    // Hashes identify changed files, not changed spans. A whole-file watch
+    // assigns an edit to flow review; all other changes require scope review.
+    let whole_files = |m: &AssertionMap| -> BTreeSet<String> {
+        m.assertions
+            .iter()
+            .flat_map(|a| {
+                a.flows.iter().flat_map(move |f| {
+                    std::iter::once(a.at.file.clone()).chain(f.watch.iter().filter_map(
+                        |w| match w {
+                            Watch::File { file } => Some(file.clone()),
+                            _ => None,
+                        },
+                    ))
+                })
+            })
+            .collect()
     };
+    let watched = whole_files(map)
+        .union(&whole_files(&next))
+        .cloned()
+        .collect::<BTreeSet<_>>();
     for file in old
         .files
         .keys()
-        .chain(new.files.keys())
+        .chain(new_manifest.files.keys())
         .collect::<BTreeSet<_>>()
     {
-        if old.files.get(file) == new.files.get(file) {
-            continue;
-        }
-        if !old.files.contains_key(file)
-            && old.files.iter().any(|(f, _)| {
-                !new.files.contains_key(f)
-                    && target_file(f, &old.files, &new.files).as_ref() == Some(file)
-            })
-        {
-            continue;
-        }
-        let target = target_file(file, &old.files, &new.files).unwrap_or_else(|| file.clone());
-        let before = old.files.get(file).map_or("", String::as_str);
-        let after = new.files.get(&target).map_or("", String::as_str);
-        if before.trim_matches(['\r', '\n']) == after.trim_matches(['\r', '\n']) {
-            continue;
-        }
-        let prefix = before
-            .bytes()
-            .zip(after.bytes())
-            .take_while(|(a, b)| a == b)
-            .count();
-        let suffix = before.as_bytes()[prefix..]
-            .iter()
-            .rev()
-            .zip(after.as_bytes()[prefix..].iter().rev())
-            .take_while(|(a, b)| a == b)
-            .count();
-        let contains = |ranges: Vec<(usize, usize)>, end: usize| {
-            ranges.iter().any(|(s, e)| *s <= prefix && *e >= end)
-        };
-        if !contains(ranges(file, map, &old.files), before.len() - suffix)
-            || !contains(ranges(&target, &next, &new.files), after.len() - suffix)
-        {
+        if old.files.get(file) != new_manifest.files.get(file) && !watched.contains(file) {
             next_state.scope_review.insert(file.clone());
         }
     }

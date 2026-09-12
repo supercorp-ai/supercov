@@ -2095,8 +2095,10 @@ fn execute_public_query(
                     {
                         data.command.clone_from(&run.metadata.command);
                         if run.directory.join(supercov_engine::assertion_store::MAP_FILE).exists() {
-                            data.assertion_coverage = Some(match supercov_engine::assertion_store::report(run) {
-                                Ok(report) => serde_json::json!({"available":true,"summary":report["summary"],"basis":report["basis"],"revision":report["revision"],"inheritance":report["inheritance"],"map":run.directory.join(supercov_engine::assertion_store::MAP_FILE),"validationErrors":report["validationErrors"],"scope":"whole archived run; independent of structural query filters"}),
+                            data.assertion_coverage = Some(match if current.as_ref().is_some_and(|c| !compare_run_integrity(Some(&run.metadata.integrity), c).stale) {
+                                supercov_engine::assertion_store::report(root, run)
+                            } else { Err("Current checkout differs from the run or cannot be verified; rerun tests to inherit the assertion map".into()) } {
+                                Ok(report) => serde_json::json!({"available":true,"summary":report["summary"],"basis":report["basis"],"revision":report["revision"],"inheritance":report["inheritance"],"map":run.directory.join(supercov_engine::assertion_store::MAP_FILE),"validationErrors":report["validationErrors"],"scope":"whole run with matching current source; independent of structural query filters"}),
                                 Err(error) => serde_json::json!({"available":false,"error":error}),
                             });
                         }

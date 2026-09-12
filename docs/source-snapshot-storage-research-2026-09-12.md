@@ -1,5 +1,9 @@
 # Source snapshot storage research
 
+**Historical research:** the subsequently selected design retains assertion maps
+and file hashes, and uses matching current project files. The snapshot
+recommendation below was not adopted. See [the current map reference](assertion-maps.md).
+
 Research and local measurements on 2026-09-12, using Supercov code `bf956b4`
 and Supergateway run `run_1d377c69729e4e0d`. This document proposes storage
 policy; it does not implement a new archive format or source provider.

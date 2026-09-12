@@ -66,8 +66,90 @@ fn current(map: &AssertionMap, state: &State, inputs: &Inputs) -> usize {
 }
 
 #[test]
-fn unchanged_and_blank_line_moves_reuse_review() {
+fn serialized_manifest_reuses_analysis_without_previous_source() {
     let (old, map, state) = fixture();
+    let encoded = serde_json::to_vec(&old.manifest()).unwrap();
+    let old_manifest: InputManifest = serde_json::from_slice(&encoded).unwrap();
+    let mut new = old.clone();
+    drop(old);
+    new.files.insert("src/a.js".into(), "return 2;\n".into());
+    let (next, state) = carry(&map, &state, &old_manifest, &new, "new", false).unwrap();
+    assert_eq!(next.assertions[0].id, map.assertions[0].id);
+    assert_eq!(next.assertions[0].flows, map.assertions[0].flows);
+    assert_eq!(current(&next, &state, &new), 1);
+    assert!(state.scope_review.is_empty());
+    let report = assess(&next, &state, &new, &report_fixture(&["b"], true), true);
+    assert_eq!(report["summary"]["statements"]["asserted"], 1);
+}
+
+#[test]
+fn test_setup_changes_dirty_flows_even_without_an_explicit_test_watch() {
+    let (old, mut map, mut state) = fixture();
+    for flow in &mut map.assertions[0].flows {
+        flow.watch
+            .retain(|w| !matches!(w, Watch::File { file } if file == "test.js"));
+    }
+    review(&map, &mut state, &old, &BTreeSet::new(), true, false).unwrap();
+    let mut new = old.clone();
+    new.files
+        .get_mut("test.js")
+        .unwrap()
+        .push_str("setupChanged();\n");
+    let (next, state) = carry(&map, &state, &old.manifest(), &new, "new", false).unwrap();
+    assert_eq!(current(&next, &state, &new), 0);
+    assert_eq!(next.assertions[0].flows, map.assertions[0].flows);
+}
+
+#[test]
+fn changing_a_node_location_requires_review_even_when_its_text_is_identical() {
+    let (mut inputs, mut map, mut state) = fixture();
+    inputs
+        .files
+        .insert("src/a.js".into(), "return 1;\nreturn 1;\n".into());
+    state.inputs_digest = inputs.identity();
+    review(&map, &mut state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    map.assertions[0].flows[0].nodes[0].at.line = 2;
+    assert!(validate(&map, &inputs).is_empty());
+    let (next, state) = carry(&map, &state, &inputs.manifest(), &inputs, "new", false).unwrap();
+    assert_eq!(current(&next, &state, &inputs), 1);
+}
+
+#[test]
+fn input_archive_contains_hashes_and_requires_matching_current_files() {
+    use supercov_engine::assertion_inputs::{append, capture, current_sources};
+    let root = std::env::temp_dir().join(format!("supercov-manifest-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let source = "// source-only-sentinel-not-an-assertion\nimport assert from 'node:assert/strict';\nassert.equal(1, 1);\n";
+    std::fs::write(root.join("test.js"), source).unwrap();
+    let inputs = capture(&root, "javascript", ["test.js".into()]).unwrap();
+    let entries = append(vec![], &inputs).unwrap();
+    let encoded = &entries[0].contents;
+    assert!(!String::from_utf8_lossy(encoded).contains("source-only-sentinel"));
+    let value: serde_json::Value = serde_json::from_slice(encoded).unwrap();
+    assert_eq!(value["schemaVersion"], 2);
+    assert_eq!(value["files"]["test.js"]["bytes"], source.len());
+    assert!(value["files"]["test.js"]["sha256"].as_str().unwrap().len() == 64);
+    let manifest: InputManifest = serde_json::from_slice(encoded).unwrap();
+    assert_eq!(
+        current_sources(&root, &manifest).unwrap().files,
+        inputs.files
+    );
+    std::fs::write(root.join("test.js"), source.replace("1, 1", "2, 2")).unwrap();
+    assert!(
+        current_sources(&root, &manifest)
+            .unwrap_err()
+            .contains("Current source differs")
+    );
+    std::fs::remove_file(root.join("test.js")).unwrap();
+    assert!(current_sources(&root, &manifest).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unchanged_files_reuse_review_and_blank_line_moves_preserve_dirty_mappings() {
+    let (old, map, state) = fixture();
+    let (same, same_state) = carry(&map, &state, &old.manifest(), &old, "same", false).unwrap();
+    assert_eq!(current(&same, &same_state, &old), 2);
     let mut new = old.clone();
     for text in new.files.values_mut() {
         *text = format!("\n\n{text}");
@@ -75,9 +157,9 @@ fn unchanged_and_blank_line_moves_reuse_review() {
     for site in &mut new.assertions {
         site.at.line += 2;
     }
-    let (carried, state) = carry(&map, &state, &old, &new, "new", false).unwrap();
-    assert_eq!(current(&carried, &state, &new), 2);
-    assert!(state.scope_review.is_empty());
+    let (carried, state) = carry(&map, &state, &old.manifest(), &new, "new", false).unwrap();
+    assert_eq!(current(&carried, &state, &new), 0);
+    assert!(state.scope_review.contains("src/helper.js"));
     assert_eq!(map.assertions[0].id, carried.assertions[0].id);
     assert_eq!(carried.assertions[0].at.line, 4);
 }
@@ -86,9 +168,9 @@ fn changed_flow_stays_dirty_through_carries_and_partial_review() {
     let (old, map, state) = fixture();
     let mut new = old.clone();
     new.files.insert("src/a.js".into(), "return 2;\n".into());
-    let (mut map, state) = carry(&map, &state, &old, &new, "two", false).unwrap();
+    let (mut map, state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
     assert_eq!(current(&map, &state, &new), 1);
-    let (next, mut state) = carry(&map, &state, &new, &new, "three", false).unwrap();
+    let (next, mut state) = carry(&map, &state, &new.manifest(), &new, "three", false).unwrap();
     map = next;
     assert_eq!(current(&map, &state, &new), 1);
     // Acknowledging only the unaffected sibling never clears the dirty one.
@@ -110,7 +192,7 @@ fn changed_assertion_keeps_its_explanation_as_a_dirty_identity_suggestion() {
         .unwrap()
         .replace_range(.., &old.files["test.js"].replace("result, 1", "result, 2"));
     new.assertions[0].at.text = "assert.equal(result, 2)".into();
-    let (next, state) = carry(&map, &state, &old, &new, "two", false).unwrap();
+    let (next, state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
     assert_eq!(next.assertions.len(), 1);
     assert_eq!(next.assertions[0].id, map.assertions[0].id);
     assert_eq!(
@@ -128,7 +210,7 @@ fn newly_declared_watch_missing_in_old_snapshot_does_not_panic_on_carry() {
         file: "new.js".into(),
     });
     new.files.insert("new.js".into(), "new();".into());
-    let (next, state) = carry(&map, &state, &old, &new, "two", false).unwrap();
+    let (next, state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
     assert_eq!(current(&next, &state, &new), 1);
 }
 #[test]
@@ -136,8 +218,8 @@ fn revert_does_not_implicitly_acknowledge_review() {
     let (old, map, state) = fixture();
     let mut new = old.clone();
     new.files.insert("src/a.js".into(), "return 2;\n".into());
-    let (map, state) = carry(&map, &state, &old, &new, "two", false).unwrap();
-    let (map, state) = carry(&map, &state, &new, &old, "three", false).unwrap();
+    let (map, state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
+    let (map, state) = carry(&map, &state, &new.manifest(), &old, "three", false).unwrap();
     assert_eq!(current(&map, &state, &old), 1);
 }
 #[test]
@@ -145,7 +227,7 @@ fn map_edits_require_acknowledgement_even_with_unchanged_sources() {
     let (inputs, mut map, state) = fixture();
     map.assertions[0].flows[0].explanation.push_str(" revised");
     assert_eq!(current(&map, &state, &inputs), 1);
-    let (map, state) = carry(&map, &state, &inputs, &inputs, "two", false).unwrap();
+    let (map, state) = carry(&map, &state, &inputs.manifest(), &inputs, "two", false).unwrap();
     assert_eq!(current(&map, &state, &inputs), 1);
 }
 #[test]
@@ -160,7 +242,7 @@ fn deleted_or_changed_assertions_keep_their_explanations() {
     let mut new = old.clone();
     new.assertions.clear();
     new.files.insert("test.js".into(), String::new());
-    let (next, _) = carry(&map, &state, &old, &new, "two", false).unwrap();
+    let (next, _) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
     assert!(next.assertions.is_empty());
     assert_eq!(next.retired_assertions[0].assertion, map.assertions[0]);
 }
@@ -176,7 +258,7 @@ fn new_assertions_are_unmapped_and_do_not_steal_old_ids() {
         at: anchor("test.js", &new.files["test.js"], "assert.equal(other, 2)"),
         operation: "assert.equal".into(),
     });
-    let (next, _) = carry(&map, &state, &old, &new, "two", false).unwrap();
+    let (next, _) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
     assert_eq!(next.assertions.len(), 2);
     assert_eq!(next.assertions[0].id, map.assertions[0].id);
     assert_eq!(next.assertions[1].analysis, Analysis::Unmapped);
@@ -186,7 +268,11 @@ fn ambiguous_duplicate_is_never_matched_by_distance() {
     let old = Files::from([("a.js".into(), "before(); x(); after();".into())]);
     let at = anchor("a.js", &old["a.js"], "x()");
     let new = Files::from([("a.js".into(), "changed(); x(); x(); after();".into())]);
-    assert!(relocate(&at, &old, &new).is_none());
+    let hashes = old
+        .iter()
+        .map(|(p, s)| (p.clone(), FileFingerprint::of(s)))
+        .collect();
+    assert!(relocate(&at, &hashes, &new).is_none());
 }
 #[test]
 fn unique_file_rename_rebases_and_ambiguous_rename_dirties() {
@@ -195,16 +281,16 @@ fn unique_file_rename_rebases_and_ambiguous_rename_dirties() {
         .insert("src/a.js".into(), "return 1;\n// unique".into());
     let mut state = state;
     review(&map, &mut state, &old, &BTreeSet::new(), true, false).unwrap_err();
-    state.inputs_digest = digest(&old);
+    state.inputs_digest = old.identity();
     review(&map, &mut state, &old, &BTreeSet::new(), true, false).unwrap();
     let mut new = old.clone();
     let source = new.files.remove("src/a.js").unwrap();
     new.files.insert("src/renamed.js".into(), source.clone());
-    let (next, next_state) = carry(&map, &state, &old, &new, "two", false).unwrap();
-    assert_eq!(current(&next, &next_state, &new), 2);
+    let (next, next_state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
+    assert_eq!(current(&next, &next_state, &new), 1);
     assert!(next_state.scope_review.is_empty());
     new.files.insert("src/other.js".into(), source);
-    let (next, next_state) = carry(&map, &state, &old, &new, "two", false).unwrap();
+    let (next, next_state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
     assert_eq!(current(&next, &next_state, &new), 1);
 }
 #[test]
@@ -214,7 +300,7 @@ fn unwatched_changes_and_new_files_queue_scope_review() {
     new.files
         .insert("src/helper.js".into(), "changed();\n".into());
     new.files.insert("src/new.js".into(), "newThing();".into());
-    let (map, mut state) = carry(&map, &state, &old, &new, "two", false).unwrap();
+    let (map, mut state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
     assert_eq!(current(&map, &state, &new), 2);
     assert_eq!(state.scope_review.len(), 2);
     review(&map, &mut state, &new, &BTreeSet::new(), false, true).unwrap();
@@ -223,7 +309,7 @@ fn unwatched_changes_and_new_files_queue_scope_review() {
 #[test]
 fn context_change_dirties_all_without_new_tracing() {
     let (inputs, map, state) = fixture();
-    let (map, state) = carry(&map, &state, &inputs, &inputs, "two", true).unwrap();
+    let (map, state) = carry(&map, &state, &inputs.manifest(), &inputs, "two", true).unwrap();
     assert_eq!(current(&map, &state, &inputs), 0);
 }
 #[test]
@@ -235,13 +321,13 @@ fn span_watch_does_not_hide_unwatched_setup_edit_in_same_file() {
     map.assertions[0].flows[0].watch[0] = Watch::Span {
         at: map.assertions[0].flows[0].nodes[0].at.clone(),
     };
-    state.inputs_digest = digest(&old);
+    state.inputs_digest = old.identity();
     review(&map, &mut state, &old, &BTreeSet::new(), true, false).unwrap();
     let mut new = old.clone();
     new.files
         .insert("src/a.js".into(), "setupChanged();\nreturn 1;\n".into());
-    let (map, state) = carry(&map, &state, &old, &new, "two", false).unwrap();
-    assert_eq!(current(&map, &state, &new), 2);
+    let (map, state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
+    assert_eq!(current(&map, &state, &new), 1);
     assert!(state.scope_review.contains("src/a.js"));
 }
 #[test]
@@ -506,7 +592,7 @@ fn crediting_a_control_statement_does_not_credit_its_nested_body() {
     let source = "if (true) { return 1; }\n";
     inputs.files.insert("src/a.js".into(), source.into());
     map.assertions[0].flows[0].nodes[0].at = anchor("src/a.js", source, source.trim());
-    state.inputs_digest = digest(&inputs);
+    state.inputs_digest = inputs.identity();
     review(&map, &mut state, &inputs, &BTreeSet::new(), true, false).unwrap();
     let mut coverage = report_fixture(&["a", "b"], true);
     let mut inner = coverage.filters.passed.points[0].clone();

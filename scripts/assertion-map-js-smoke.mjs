@@ -110,7 +110,10 @@ export function assertionMapSmoke({ root, launcher, env, runner = 'node', typesc
   assert.equal(query().revision, revision);
   writeFileSync(resolve(root, file), application.replace('input + 1', '1 + input'));
   assert.equal(invoke('runs', run, 'assertions', 'check').status, 2, 'archived score cannot endorse changed source');
-  query('check', '--archived', '--require-complete');
+  assert.equal(invoke('runs', run, 'assertions', 'check', '--archived').status, 2, 'no source freshness bypass');
+  assert.equal(data('runs', run).assertionCoverage.available, false);
+  assert.equal(invoke('runs', run, 'source', file).status, 2);
+  assert.equal(invoke('runs', run, 'assertions', 'review', '--all').status, 2);
   writeFileSync(resolve(root, file), application);
   console.log(JSON.stringify({ runner, language: typescript ? 'typescript' : 'javascript', module: commonjs ? 'commonjs' : 'esm', assertions: 3, creditedStatements: 3, diagnostics: 'syntax, review, completion, threshold, stale checkout' }));
   return { run, root, invoke, ok, query, map, mapFile: init.map, testFile, source };

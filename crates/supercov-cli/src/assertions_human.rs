@@ -1,4 +1,4 @@
-//! Readable views for assertion resources and archived source.
+//! Readable views for assertion resources and matching current source.
 use serde_json::Value;
 use std::fmt::Write;
 
@@ -74,7 +74,7 @@ fn summary(out: &mut String, data: &Value) {
 
 fn source(data: &Value) -> String {
     let mut out = format!(
-        "{} — archived source, run {}\n\n",
+        "{} — matching current source, run {}\n\n",
         text(&data["file"]),
         text(&data["run"])
     );
@@ -131,7 +131,7 @@ fn assertions(data: &Value) -> String {
         if a["inMap"] == false {
             let _ = writeln!(
                 out,
-                "  Missing from assertions.json; this site was found in archived source."
+                "  Missing from assertions.json; this site was found in matching current source."
             );
         }
     }

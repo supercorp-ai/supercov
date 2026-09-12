@@ -322,7 +322,12 @@ fn walk_files(
         }
         if file_type.is_dir() {
             let name = entry.file_name();
-            if !name.to_str().is_some_and(skipped_directory) && !owned_workspace_store(&path) {
+            if !name
+                .to_str()
+                .is_some_and(|name| name.starts_with('.') || skipped_directory(name))
+                && !path.join(".git").exists()
+                && !owned_workspace_store(&path)
+            {
                 walk_files(&path, predicate, output)?;
             }
         } else if file_type.is_file() && predicate(&path) {
@@ -838,6 +843,46 @@ mod tests {
         assert_ne!(
             instrumenter.fingerprint.combined,
             first.fingerprint.combined
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(shim).unwrap();
+    }
+
+    #[test]
+    fn assertion_inputs_ignore_tool_worktrees_and_nested_repositories() {
+        let (root, shim) = fixture();
+        write(&root, "packages/ui/package.json", r#"{"name":"ui"}"#);
+        write(
+            &root,
+            "packages/ui/tests/ui.test.ts",
+            "import assert from 'node:assert/strict'; assert.equal(1, 1);",
+        );
+        let before = integrity(&root, &shim, &BTreeMap::new());
+        for base in [".claude/worktrees/other", "nested-fork"] {
+            write(
+                &root,
+                &format!("{base}/.git"),
+                "gitdir: /unrelated/repository",
+            );
+            write(
+                &root,
+                &format!("{base}/tests/other.test.ts"),
+                "assert.equal(2, 2);",
+            );
+            write(&root, &format!("{base}/package.json"), "{}");
+            write(&root, &format!("{base}/tsconfig.json"), "{}");
+        }
+        let after = integrity(&root, &shim, &BTreeMap::new());
+        assert_eq!(before.fingerprint, after.fingerprint);
+        let project = discover_coverage_project(&root, &BTreeMap::new(), &[]).unwrap();
+        let paths = javascript_assertion_paths(&root, &project).unwrap();
+        let inputs = crate::assertion_inputs::capture(&root, "javascript", paths).unwrap();
+        assert!(inputs.files.contains_key("packages/ui/tests/ui.test.ts"));
+        assert!(
+            !inputs
+                .files
+                .keys()
+                .any(|p| p.starts_with(".claude/") || p.starts_with("nested-fork/"))
         );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(shim).unwrap();

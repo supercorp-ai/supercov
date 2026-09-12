@@ -12,13 +12,13 @@ const HELP: &str = r#"Usage: supercov runs <run> assertions [options]
 
 assertions                  List assertions, including unmapped sites, with review and execution status.
 assertion <id>              Read one assertion, its authored flows and execution evidence.
-source <path>               Read archived source as code with line numbers.
+source <path>               Read matching current project source with line numbers.
 
 Assertion actions:
-validate                    Check syntax, IDs, links, frozen references and state binding.
+validate                    Check syntax, IDs, links, current source references and state binding.
 review --all|--flow <A/F>    Record agent review (repeat --flow); not semantic proof.
 review --ack-scope          Acknowledge classified scope changes; combine with flows.
-files                       List frozen input paths and their byte sizes.
+files                       List run input paths, byte sizes and SHA-256 hashes.
 report [--view <view>]      summary (default), assertions, statements, tests,
                             creditedLines, unassertedLines.
 check                       Fail on invalid references, dirty flows, failed run,
@@ -26,7 +26,6 @@ check                       Fail on invalid references, dirty flows, failed run,
   --require-complete        Also require every recognized assertion mapped.
   --require-observed        Also require passing runtime evidence for every mapped site/flow.
   --min <0..100>             Minimum agent-assessed statement percentage.
-  --archived                Check archived evidence without checking today's working tree.
 
 --file <path>               Filter assertion lists or statement/line report views.
 --offset <n> --limit <n>     Page lists or source (zero-based offset, limit 1..1000).
@@ -41,13 +40,12 @@ Exit 0 means the requested check passed; exit 2 means invalid input or an unmet 
 Pin a run ID while authoring. See docs/assertion-maps.md and docs/assertion-agent.md.
 Supercov never authors semantic edges. MC/DC remains separate.
 "#;
-const SOURCE_HELP: &str = "Usage: supercov runs <run> source <path> [--offset <n>] [--limit <n>] [--json]\n\nRead the archived file as source code with line numbers. The path is project-relative.\n--offset is zero-based; --limit defaults to 20 (1..1000). --json returns line/text items.\nUse runs <run> assertions files to list archived paths.\n";
+const SOURCE_HELP: &str = "Usage: supercov runs <run> source <path> [--offset <n>] [--limit <n>] [--json]\n\nRead the current project file after verifying it matches the run. The path is project-relative.\n--offset is zero-based; --limit defaults to 20 (1..1000). --json returns line/text items.\nUse runs <run> assertions files to list run input paths.\n";
 const ASSERTION_HELP: &str = "Usage: supercov runs <run> assertion <id> [--json]\n\nRead one assertion and its authored flows, review status and passing execution evidence.\nUse runs <run> assertions to list IDs.\n";
 struct Options {
     action: String,
     require_complete: bool,
     require_observed: bool,
-    archived: bool,
     minimum: Option<f64>,
     file: Option<String>,
     view: String,
@@ -62,7 +60,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
         action: "report".into(),
         require_complete: false,
         require_observed: false,
-        archived: false,
         minimum: None,
         file: None,
         view: "assertions".into(),
@@ -87,7 +84,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--all" => o.all = true,
             "--require-complete" => o.require_complete = true,
             "--require-observed" => o.require_observed = true,
-            "--archived" => o.archived = true,
+            "--archived" => return Err("--archived is removed: assertion analysis requires current files matching the run; rerun tests to inherit previous mappings".into()),
             "--ack-scope" => o.ack = true,
             "--file" | "--view" | "--flow" | "--offset" | "--limit" | "--min" => {
                 let value = args
@@ -117,7 +114,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "inventory" => {
                 "Use runs <run> assertions to list all assertion sites and their status".into()
             }
-            "source" => "Use runs <run> source <path> to read archived source".into(),
+            "source" => "Use runs <run> source <path> to read matching current source".into(),
             _ => "Unknown assertions action".into(),
         });
     }
@@ -133,7 +130,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
         ("--min", o.action == "check"),
         ("--require-complete", o.action == "check"),
         ("--require-observed", o.action == "check"),
-        ("--archived", o.action == "check"),
         ("--all", o.action == "review"),
         ("--ack-scope", o.action == "review"),
         (
@@ -204,16 +200,20 @@ pub fn command(args: &[String]) -> ExitCode {
         let root = std::env::current_dir().map_err(|e| e.to_string())?;
         let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
         let run = select_run(&inventory, Some(&args[0])).map_err(|e| e.to_string())?;
+        let working_tree = working_tree(&root, run);
+        if o.action != "files" {
+            require_current(&working_tree)?;
+        }
         let mut check_report = None;
         let mut data = match o.action.as_str() {
             "review" => maps::acknowledge(&root, run, &o.flows, o.all, o.ack)?,
             "files" => {
-                let input = maps::load_inputs(run)?;
+                let input = maps::load_manifest(run)?;
                 let values = input
-                    .inputs
+                    .manifest
                     .files
                     .iter()
-                    .map(|(file, text)| json!({"file":file,"bytes":text.len()}))
+                    .map(|(file, fingerprint)| json!({"file":file,"bytes":fingerprint.bytes,"sha256":fingerprint.sha256}))
                     .collect::<Vec<_>>();
                 let mut data = page(&values, o.offset, o.limit);
                 data["revision"] = json!(input.evidence_digest);
@@ -221,7 +221,7 @@ pub fn command(args: &[String]) -> ExitCode {
                 data
             }
             "validate" => {
-                let input = maps::load_inputs(run)?;
+                let input = maps::load_inputs(&root, run)?;
                 let bytes =
                     std::fs::read(run.directory.join(maps::MAP_FILE)).map_err(|e| e.to_string())?;
                 match supercov_engine::assertion_map::parse(&bytes) {
@@ -234,7 +234,7 @@ pub fn command(args: &[String]) -> ExitCode {
                 }
             }
             _ => {
-                let report = maps::report(run)?;
+                let report = maps::report(&root, run)?;
                 let mut data = if o.view == "summary" {
                     json!({})
                 } else {
@@ -264,20 +264,21 @@ pub fn command(args: &[String]) -> ExitCode {
                 }
                 data["view"] = json!(o.view);
                 data["file"] = json!(o.file);
-                data["scope"] =
-                    json!("summary covers the whole archived run; --file filters items only");
+                data["scope"] = json!(
+                    "summary covers the whole run with matching current source; --file filters items only"
+                );
                 if o.action == "check" {
                     check_report = Some(report);
                 }
                 data
             }
         };
-        data["workingTree"] = working_tree(&root, run);
+        data["workingTree"] = working_tree;
         if let Some(report) = check_report {
             let failures = check_failures(&report, &data["workingTree"], &o);
             data["valid"] = json!(failures.is_empty());
             data["failures"] = json!(failures);
-            data["requirements"] = json!({"complete":o.require_complete,"observed":o.require_observed,"minimum":o.minimum,"archived":o.archived});
+            data["requirements"] = json!({"complete":o.require_complete,"observed":o.require_observed,"minimum":o.minimum});
         }
         data["run"] = json!(run.id);
         data["map"] = json!(run.directory.join(maps::MAP_FILE));
@@ -288,6 +289,12 @@ pub fn command(args: &[String]) -> ExitCode {
         args.iter().any(|a| a == "--json"),
         "coverage.assertions",
     )
+}
+fn require_current(tree: &Value) -> Result<(), String> {
+    if tree["stale"] != false {
+        return Err("Current checkout differs from the run or cannot be verified; rerun tests to inherit the assertion map for current files".into());
+    }
+    Ok(())
 }
 fn working_tree(root: &std::path::Path, run: &supercov_engine::run_store::StoredRun) -> Value {
     match super::current_integrity_for_run(root, run) {
@@ -360,11 +367,13 @@ fn inspection_command(args: &[String]) -> ExitCode {
         let root = std::env::current_dir().map_err(|e| e.to_string())?;
         let runs = discover_runs(&root).map_err(|e| e.to_string())?;
         let run = select_run(&runs, Some(&args[0])).map_err(|e| e.to_string())?;
+        let working_tree = working_tree(&root, run);
+        require_current(&working_tree)?;
         let mut data = if source {
-            let input = maps::load_inputs(run)?;
+            let input = maps::load_inputs(&root, run)?;
             let text =
                 input.inputs.files.get(&o.selector).ok_or_else(|| {
-                    format!("File absent from archived run inputs: {}", o.selector)
+                    format!("File absent from run input manifest: {}", o.selector)
                 })?;
             let lines = text
                 .lines()
@@ -377,7 +386,7 @@ fn inspection_command(args: &[String]) -> ExitCode {
             data["view"] = json!("source");
             data
         } else {
-            let report = maps::assertion(run, &o.selector)?;
+            let report = maps::assertion(&root, run, &o.selector)?;
             let mut data = json!({"view":"assertion", "assertion":report["assertion"],
                 "map":run.directory.join(maps::MAP_FILE)});
             for key in [
@@ -404,7 +413,7 @@ fn inspection_command(args: &[String]) -> ExitCode {
             data
         };
         data["run"] = json!(run.id);
-        data["workingTree"] = working_tree(&root, run);
+        data["workingTree"] = working_tree;
         Ok(data)
     })();
     emit(
@@ -484,7 +493,7 @@ fn check_failures(report: &Value, working_tree: &Value, o: &Options) -> Vec<Stri
     if s["scopeReview"].as_array().is_none_or(|a| !a.is_empty()) {
         failures.push("Source scope changes require review".into());
     }
-    if !o.archived && working_tree["stale"] != false {
+    if working_tree["stale"] != false {
         failures.push(
             "Working tree is stale or its integrity is unavailable; rerun tests to refresh the map automatically"
                 .into(),
@@ -624,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn check_distinguishes_completion_evidence_and_archived_freshness() {
+    fn checks_require_completion_evidence_and_current_checkout() {
         let mut report = json!({"validationErrors":[],"assertions":[],"summary":{
             "runPassed":true,"dirtyFlows":0,"scopeReview":[],"inventoryMappingComplete":false,
             "inventoryFailures":0,"unobservedAssertions":1,"statements":{"percentage":50}
@@ -638,15 +647,18 @@ mod tests {
             check_failures(&report, &json!({"stale":true}), &options).len(),
             4
         );
-        options.archived = true;
         assert_eq!(
             check_failures(&report, &json!({"stale":null}), &options).len(),
-            3
+            4
         );
         report["summary"]["inventoryMappingComplete"] = json!(true);
         report["summary"]["unobservedAssertions"] = json!(0);
         options.minimum = Some(50.0);
-        assert!(check_failures(&report, &json!({"stale":null}), &options).is_empty());
+        assert_eq!(
+            check_failures(&report, &json!({"stale":null}), &options).len(),
+            1
+        );
+        assert!(parse(&["check".into(), "--archived".into()]).is_err());
         report["summary"]["statements"]["percentage"] = Value::Null;
         assert_eq!(
             check_failures(&report, &json!({"stale":false}), &options).len(),

@@ -1,7 +1,7 @@
 # Agent-authored assertion maps
 
 Run the normal test command through Supercov first. It collects structural
-coverage, freezes source inputs and creates an assertion map. An external coding agent can then edit one
+coverage, records source hashes and creates an assertion map. An external coding agent can then edit one
 run-owned `assertions.json`; Supercov has no embedded model and does not infer or
 reconstruct its semantic edges. This release work targets JavaScript and TypeScript. Format validation,
 review tracking and reporting all run in Rust.
@@ -25,9 +25,17 @@ Read `supercov docs assertion-agent` for a complete single-agent workflow.
 Pin a concrete run ID while editing. The map lives at
 `.supercov/runs/<run>/assertions.json`; its containing directory identifies the
 run. `assertions.state.json` holds fingerprints and review state. Neither file
-replaces the immutable archive or MC/DC evidence. Source is stored once in the
-compressed archive's `assertion-inputs.json`, not once per flow. Old runs that
-lack this input snapshot need one regular test run with this version.
+replaces the immutable archive or MC/DC evidence. The archive's
+`assertion-inputs.json` is a schema-2 manifest: file paths, SHA-256 hashes, byte
+sizes, assertion identities and context metadata. New runs do not store complete
+source files for assertion analysis. Source snippets in assertion anchors and
+normal coverage evidence are still retained. The editable map format remains
+schema version 1; managed review state uses version 2.
+
+Queries read the ordinary project files and verify their contents match the
+run. Previous schema-1 archives can supply hashes and maps for inheritance;
+imported review requires acknowledgement under the current policy. Old archives
+are not rewritten. Runs without any assertion inputs need a new regular run.
 
 ## Where the percentage appears
 
@@ -37,7 +45,7 @@ row beside Lines, Branches and MC/DC. New normal runs always have
 For example, a reviewed map crediting 32 of 40 measured statements displays:
 
 ```text
-  Assertions 80.00% (32/40) — agent-assessed statements, whole archived run
+  Assertions 80.00% (32/40) — agent-assessed statements, whole run
 ```
 
 The numerator is the union of explicitly credited measured statements, so
@@ -51,14 +59,16 @@ JSON consumers read
 `data.assertionCoverage.summary.statements.{asserted,total,percentage}`.
 `revision` changes with map, review state or evidence. The detailed
 `runs <run> assertions` command exposes the same summary and pageable statement
-and assertion views. All assertion scores describe the whole archived run,
+and assertion views. All assertion scores describe the whole run with matching current source,
 independently of structural query filters.
 
-The CLI recalculates from local map, state and archived evidence on each query.
+The CLI recalculates from the map, state, matching current files and recorded evidence on each query.
 It does not rerun tests or invoke a model. This keeps edits visible immediately;
 there is no saved percentage to regenerate. Query time scales with archive and
-map size. The existing stale-source warning still applies to old runs; use
-`assertions check` to gate development against the current checkout.
+map and source size. Changed or unavailable inputs make assertion coverage
+unavailable in the regular report; structural coverage remains inspectable.
+Rerun tests to inherit the map for current code. A historical score is never
+silently applied to a changed checkout.
 
 ## Inspect assertions and source
 
@@ -73,7 +83,7 @@ supercov runs <run> source src/core.js --offset 0 --limit 20
 
 `assertions` lists assertion sites, including unmapped ones, with mapping,
 review and passing-execution status. The list combines the authored map and
-recognized sites in archived code. If a site was removed from the map, it still
+sites recognized when the tests ran. If a site was removed from the map, it still
 appears with `inMap: false`; listing it does not repair the file or award credit.
 The list replaces the old `assertions inventory` command.
 
@@ -82,9 +92,10 @@ authored flows, nodes, edges, watches and review/evidence status. With `--json`,
 the detail is in `data.assertion`; `data.tests` names its passing test witnesses.
 The authored graph and calculated status come from the same map snapshot.
 
-`source <path>` reads the file archived with this run, even if today's file has
-changed or been deleted. Source is printed as code, with line numbers on the
-left, for example:
+Agents can read ordinary project files using their existing tools.
+`source <path>` is an optional convenience: it reads the current project file
+only after verifying the checkout and file contents match this run. Changed or
+missing source is an error. Source is printed with line numbers, for example:
 
 ```text
 1 │ export function value() {
@@ -94,8 +105,9 @@ left, for example:
 
 `--offset` is zero-based and `--limit` defaults to 20 (maximum 1000). Lists and
 source pages include a copyable next-page command. Use `assertions files` to
-list archived paths and byte sizes. Source is independent of the assertion map
-and remains readable when that JSON file is malformed.
+list input paths, byte sizes and SHA-256 hashes recorded with the run. That
+manifest view works with a stale checkout. Source is independent of map JSON
+and remains readable when the map is malformed, provided the checkout matches.
 
 Add `--json` for structured output: lists use `data.items`, and source uses
 `data.items` entries of `{line, text}`. Both include pagination and a revision.
@@ -107,8 +119,8 @@ use `assertions report` for just the assertion summary.
 
 This example shows a return-value observation. Every `text` must match that
 run's source exactly; locations use **one-based lines and one-based UTF-8 byte
-columns in all languages**. Source and assertion queries read archived inputs,
-even if the checkout has since changed.
+columns in all languages**. Source and assertion queries use verified current
+project files. Rerun tests after code or test changes before reviewing the map.
 
 ```json
 {
@@ -190,24 +202,30 @@ starts unmapped and earlier files stay available for manual recovery.
 
 Only the map's reasoning and review metadata carry forward. Assertion
 occurrences and statement execution always come from the new run's evidence;
-a failed run never inherits a passing score. Merged runs have multiple source
-snapshots and are excluded; investigate their individual runs instead.
+a failed run never inherits a passing score. Merged runs have multiple input
+manifests and are excluded; investigate their individual runs instead.
 
-Unchanged, unambiguous source fragments relocate and retain their IDs. Unique exact file renames work too. New assertions
-start unmapped. A sole changed/replacement assertion in a file retains its ID and
+The old map and file-hash manifest are sufficient for inheritance; previous
+source files are not required. Unchanged files retain review status. Unique
+source snippets can relocate while retaining their IDs, and a unique exact
+file hash can suggest a rename. Any changed dependency file or renamed path
+requires review, even for a comment or blank-line edit. New assertions start unmapped. A sole changed/replacement assertion in a file retains its ID and
 explanation as a dirty review suggestion. Deleted or ambiguously matched assertions are retained
 with their full explanations in `retiredAssertions`; the agent can reuse those
 explanations and IDs when resolving the new inventory.
 
-Changed watched inputs mark the affected flows dirty. Dirty state persists
+Dependencies include the assertion's test file, every node's file and declared
+watches. Changed dependency files mark affected flows dirty, including when the
+assertion expression itself is unchanged. Span watches use whole-file freshness;
+without previous source, Supercov does not attempt to calculate an edit diff. Dirty state persists
 through subsequent runs and reversions until an explicit review acknowledgement.
 Editing the map also requires acknowledgement. Reviewing one flow does not
 clear its siblings. A failed reference check leaves the review state unchanged.
 
 Unassigned source changes enter `scopeReview`, which blocks score credit until
-the agent has classified them. Span comparison is deliberately conservative:
-multiple separated edits can produce extra scope-review work. Changed
-dependencies, configuration, instrumenter or captured environment digest dirty
+the agent has classified them. Hashes identify changed files rather than changed
+spans, so changes in a file with only span watches require scope review as well
+as flow review. Changed package dependencies, configuration, instrumenter or captured environment digest dirty
 every inherited flow. A different command or language starts a
 separate map history. Environment values are not stored. Inputs
 outside the project's discovered source/configuration scope, external services
@@ -229,7 +247,7 @@ supercov runs <run> assertions validate --json
 ```
 
 The primary score is **agent-assessed asserted statements / measured statements**
-for the archived run, separate from structural coverage. Only explicitly credited, current flows count. They
+for the run with matching current source, separate from structural coverage. Only explicitly credited, current flows count. They
 must have an exact passing assertion site and same-test statement execution in
 the current run's successful attempts. Failed runs, unreviewed flows, invalid
 references and unresolved scope changes cannot add credit.
@@ -241,8 +259,8 @@ credit in this first version. `declared` includes syntactically valid authored
 claims even when runtime evidence or review is missing; `asserted` is the stricter
 count. A zero denominator yields a null percentage. The primary statement
 percentage counts measured statements, independently of function-entry points.
-`workingTree.stale` reports changes since the archived run; an old score never
-becomes evidence for changed code. Structural query filters do not silently
+Run-bound assertion queries refuse a stale or unavailable checkout; the regular
+structural report instead marks `assertionCoverage.available: false`. Structural query filters do not silently
 change this whole-run assertion metric.
 
 Absence checks can describe a prevented call or empty collection in the graph.
@@ -276,7 +294,7 @@ editor's JSON settings; `$schema` is not a map field.
 | Command | What it verifies | What it changes |
 | --- | --- | --- |
 | `assertions validate --file` | JSON syntax, types, required/unknown/duplicate fields, supported schema version | Nothing |
-| `runs <run> assertions validate` | Above, plus IDs, node/edge links, frozen anchors and state binding | Nothing |
+| `runs <run> assertions validate` | Above, plus IDs, node/edge links, current source anchors and state binding | Nothing |
 | `runs <run> assertions review` | Selected references are valid; records your review of the explanation | Review state |
 | `runs <run> assertions check` | Valid references/state, passed run, current flows, no scope queue, current working tree | Nothing |
 
@@ -286,8 +304,9 @@ recognized inventory with no parse failures. `--require-observed` additionally
 requires a passing occurrence for every map entry and every `appliesTo` filter.
 `--min N` requires at least N percent asserted statements; it fails on a null
 percentage. Basic `check` supports incremental work and does not demand all
-assertions be mapped. `--archived` explicitly checks an old run without requiring
-today's working tree to match. All gates use exit 0 for success, 2 for unmet
+assertions be mapped. `--archived` is removed: run-bound assertion analysis
+requires matching current files and has no freshness bypass. Standalone syntax
+validation does not need source. All gates use exit 0 for success, 2 for unmet
 requirements or invalid input. Reporting alone never acts as a CI gate.
 
 Malformed JSON returns a diagnostic such as
@@ -296,10 +315,10 @@ file syntax locations, separate from an anchor's source coordinates. Run-level
 reference errors identify assertion/flow IDs. Flow report rows provide
 `blockers`, `reasons`, `matchingTests` and credited statement lines. Statement
 rows provide the complete source `at`, `declared`, `asserted` and crediting flow
-IDs. `at: null` means the frozen source could not resolve that measured statement;
+IDs. `at: null` means the matching current source could not resolve that measured statement;
 it stays in the denominator and cannot earn credit.
 
-Use `assertions files` to list frozen input paths. `assertions --file <path>` and
+Use `assertions files` to list run input paths and hashes. `assertions --file <path>` and
 `assertions --view statements|creditedLines|unassertedLines --file <path>`
 filter items; summary metrics remain whole-run. Array views use
 `--offset`/`--limit`, with `pagination.nextOffset`. Do not use
@@ -342,7 +361,7 @@ Known boundaries remain visible:
   recognizer and generated tests may be absent from inventory. Completeness
   applies only to recognized syntax, never every conceivable assertion.
 - Transformed or generated statement locations that cannot be resolved against
-  frozen inputs stay uncredited. Inspect `unanchoredStatements` and statement rows.
+  matching current inputs stay uncredited. Inspect `unanchoredStatements` and statement rows.
 - Assertions and statements must share a successful test identity, but the tool
   does not reconstruct an exact dynamic slice or distinguish every loop iteration.
   The agent supplies that causal judgment. Test-level co-execution alone is not

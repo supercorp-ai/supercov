@@ -5,8 +5,66 @@ assertion analyzer with agent-authored maps. The released Node registration,
 worker-attempt and source-location safeguards are retained. The previously
 verified baseline is commit `0b6394a3c37a51a1d332c25b7e42789ef7fd4393` on
 `codex/agent-assertion-maps`. The branch now additionally creates and carries maps
-automatically and exposes assertion/source resources; see the follow-ups below. This checklist records preparation and
+automatically and uses current project source with per-run file hashes; see the follow-ups below. This checklist records preparation and
 validation; no release tag or publication has been made.
+
+## Current project source follow-up, 2026-09-12
+
+Assertion analysis now reads the ordinary current project files. New
+`assertion-inputs.json` entries store a schema-2 file manifest (paths, SHA-256
+hashes and byte sizes), assertion identities and context metadata. They contain
+no complete source-file snapshots. The editable `assertions.json` format stays
+at schema 1; managed review state uses schema 2. Normal coverage evidence and
+exact snippets in map anchors remain available.
+
+New runs inherit prior maps without reading the previous checkout. Unchanged
+dependency files preserve review; changes in the assertion's test, node files
+or declared watches preserve explanations and queue review. Unique snippets
+and exact file hashes support relocation suggestions. Comments, blank lines
+and renames require review under the whole-file policy. Unassigned changes
+queue scope review. Old schema-1 maps import with review required; old archives,
+maps and state remain intact. A checkout edit during execution does not prevent
+run publication or discard existing explanations.
+
+Run-bound assertion reporting, validation, review and source access require
+matching current files. The regular structural report marks assertion coverage
+unavailable when the checkout is stale. `source <path>` remains an optional
+numbered current-file view. `assertions files` exposes recorded paths, sizes and
+hashes even with stale source. `--archived` is removed; standalone map syntax
+validation remains independent of source. User and agent guides reflect this
+workflow, and all 67 packaged assets match.
+
+`npm run check` passed with **494 Rust tests**, 22 runtime tests, schema checks,
+formatting, clippy, package preflight, the nine-run lifecycle and all six JS/TS
+configurations. The same six configurations passed on Node 22.23.1 as well as
+Node 24.18.0. Regressions cover source-free input serialization, exact hashes,
+missing/edited files, unchanged reuse, implicit test-file dependencies, dirty
+latches, changed locations with identical text, legacy migration without old
+source, and publication when the checkout changes during execution.
+
+The nested-checkout capture issue identified below is fixed. Discovery excludes
+hidden tool directories and nested Git checkouts while retaining ordinary
+workspace packages. A regression verifies both the file manifest and integrity
+fingerprints; capture also handles ordinary/canonical macOS root aliases and
+the existing Windows verbatim-path cases.
+
+A Supergateway build and focused WebSocket lifecycle test passed. Migration run
+`run_cd6caa1ff7e33c79` retained all **245 current assertion IDs**, retiring the
+299 unrelated nested-worktree sites. Its assertion input entry is 55,375 bytes,
+contains 61 file-hash records and no nested-worktree paths; the whole evidence
+archive is 57,054 bytes. After the CLI finished rebuilding, final run
+`run_f39d12fd349052c2` inherited that map and verified as current. Its regular
+report displays 0% (0/790) because all 245 assertions remain unmapped. All 790
+statement anchors resolve; five exact assertion sites have passing evidence in
+this focused test. The 46 scope-review entries from the removed worktree inputs
+remain latched for agent classification. This trial validates migration and
+bookkeeping, not a completed semantic mapping of Supergateway.
+
+`npm run test:native-package` passed: a rebuilt release binary in an actual
+macOS arm64 npm installation exercised JS/TS maps, source access, stale-input
+rejection and percentage gates. Release-set, wheel, gem and corruption checks
+also passed. The platform artifacts below belong to earlier code; build fresh
+release artifacts from the final selected commit before publication.
 
 ## Assertion and source resources follow-up, 2026-09-12
 
