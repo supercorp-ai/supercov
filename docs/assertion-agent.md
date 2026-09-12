@@ -17,7 +17,7 @@ tracks evidence and changes. Read this guide with `supercov docs assertion-agent
 4. Read `supercov docs assertion-maps` and page all of:
 
    ```sh
-   supercov runs <run> assertions report --view assertions --limit 100 --json
+   supercov runs <run> assertions --limit 100 --json
    supercov runs <run> assertions report --view statements --limit 100 --json
    supercov runs <run> assertions report --view tests --limit 100 --json
    ```
@@ -28,18 +28,29 @@ tracks evidence and changes. Read this guide with `supercov docs assertion-agent
 
 ## Investigate each assertion
 
-Read the archived files with
-`supercov runs <run> assertions source --file <path> --offset 0 --limit 100 --json`.
-This command reads the archived source as it was when the tests ran, with line
-numbers; it never reads today's checkout. Use `assertions files` to discover
-frozen paths. `assertions inventory` is an optional raw discovery view of the
-assertion calls recognized in saved test code; those sites already seed the map.
-It is useful when checking missing or unsupported assertion forms.
-Add `--file <path>` to inventory
-or assertion/statement report pages to focus an investigation; summary counts
-still cover the whole run. The file path is project-relative. Use frozen sources even when today's checkout
-has changed. Read test setup, input values, mocks, callbacks, called functions,
-branches and any helpers that matter to this assertion.
+Read archived code with
+`supercov runs <run> source <path> --offset 0 --limit 100`.
+This prints source code with line numbers from the run's archive. Add `--json`
+only when you need structured `{line, text}` items. It reads the archived file
+as it was when the tests ran, even when today's checkout has changed or the
+assertion map has a syntax error. Use `assertions files` to discover frozen paths.
+
+`supercov runs <run> assertions --file <test-path>` lists all assertion sites,
+including unmapped ones, with review and passing-execution status. An entry with
+`inMap: false` was found in archived code but is missing from the authored map;
+restore that entry before treating the investigation as complete. There is no
+separate `inventory` command.
+
+Use `supercov runs <run> assertion <id>` to inspect one assertion's property,
+full authored flows, nodes, edges, watches and current review/evidence status.
+The detail response uses the same map snapshot for its graph and assessment.
+Add `--json` to read these under `data.assertion` and matching test names under
+`data.tests`. IDs must match exactly.
+
+Add `--file <path>` to assertion/statement report pages to focus an investigation;
+summary counts still cover the whole run. Paths are project-relative. Read test
+setup, input values, mocks, callbacks, called functions, branches and any helpers
+that matter to this assertion.
 
 For each assertion:
 

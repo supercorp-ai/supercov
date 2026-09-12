@@ -5,39 +5,44 @@ use supercov_engine::{
     run_store::{discover_runs, select_run},
 };
 
-const HELP: &str = r#"Usage: supercov assertions schema [--json]
-       supercov assertions validate --file <path> [--json]
-       supercov runs <run> assertions [action] [options]
+const HELP: &str = r#"Usage: supercov runs <run> assertions [options]
+       supercov runs <run> assertion <id> [--json]
+       supercov runs <run> source <path> [--offset <n>] [--limit <n>] [--json]
+       supercov runs <run> assertions <action> [options]
 
-schema                      JSON Schema from Rust types; raw JSON without --json.
-validate --file <path>       Standalone JSON syntax and field types (no run needed).
+assertions                  List assertions, including unmapped sites, with review and execution status.
+assertion <id>              Read one assertion, its authored flows and execution evidence.
+source <path>               Read archived source as code with line numbers.
 
-Run actions:
+Assertion actions:
 validate                    Check syntax, IDs, links, frozen references and state binding.
 review --all|--flow <A/F>    Record agent review (repeat --flow); not semantic proof.
 review --ack-scope          Acknowledge classified scope changes; combine with flows.
-inventory [--file <path>]   Optional raw list of assertions found in saved test code.
 files                       List frozen input paths and their byte sizes.
-source --file <path>        Read source saved at run time, not today's checkout.
 report [--view <view>]      summary (default), assertions, statements, tests,
-                            creditedLines, unassertedLines; optional --file filter.
+                            creditedLines, unassertedLines.
 check                       Fail on invalid references, dirty flows, failed run,
                             pending scope review or a stale/unavailable working tree.
-  --require-complete        Also require every inventoried assertion mapped.
+  --require-complete        Also require every recognized assertion mapped.
   --require-observed        Also require passing runtime evidence for every mapped site/flow.
-  --min <0..100>            Minimum agent-assessed statement percentage.
+  --min <0..100>             Minimum agent-assessed statement percentage.
   --archived                Check archived evidence without checking today's working tree.
 
---offset <n> --limit <n>     Page inventory, source or report array views (limit 1..1000).
---json                      Standard structured result envelope.
+--file <path>               Filter assertion lists or statement/line report views.
+--offset <n> --limit <n>     Page lists or source (zero-based offset, limit 1..1000).
+--json                      Structured output for integrations; source uses {line, text} items.
+
+supercov assertions schema [--json]               Export the JSON Schema.
+supercov assertions validate --file <path> [--json] Check JSON shape without a run.
 
 Each new test run creates assertions.json and reuses the newest available map
-for the same command and language. No init step is needed.
-Edit the run's assertions.json directly, then validate, review and check.
+for the same command and language. Edit the file, then validate, review and check.
 Exit 0 means the requested check passed; exit 2 means invalid input or an unmet gate.
 Pin a run ID while authoring. See docs/assertion-maps.md and docs/assertion-agent.md.
 Supercov never authors semantic edges. MC/DC remains separate.
 "#;
+const SOURCE_HELP: &str = "Usage: supercov runs <run> source <path> [--offset <n>] [--limit <n>] [--json]\n\nRead the archived file as source code with line numbers. The path is project-relative.\n--offset is zero-based; --limit defaults to 20 (1..1000). --json returns line/text items.\nUse runs <run> assertions files to list archived paths.\n";
+const ASSERTION_HELP: &str = "Usage: supercov runs <run> assertion <id> [--json]\n\nRead one assertion and its authored flows, review status and passing execution evidence.\nUse runs <run> assertions to list IDs.\n";
 struct Options {
     action: String,
     require_complete: bool,
@@ -60,7 +65,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         archived: false,
         minimum: None,
         file: None,
-        view: "summary".into(),
+        view: "assertions".into(),
         flows: BTreeSet::new(),
         all: false,
         ack: false,
@@ -70,6 +75,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut args = args.iter().peekable();
     if args.peek().is_some_and(|a| !a.starts_with('-')) {
         o.action = args.next().unwrap().clone();
+        o.view = "summary".into();
     }
     let mut seen = BTreeSet::new();
     while let Some(arg) = args.next() {
@@ -105,9 +111,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     if !matches!(
         o.action.as_str(),
-        "report" | "review" | "validate" | "inventory" | "source" | "check" | "files"
+        "report" | "review" | "validate" | "check" | "files"
     ) {
-        return Err("Unknown assertions action".into());
+        return Err(match o.action.as_str() {
+            "inventory" => {
+                "Use runs <run> assertions to list all assertion sites and their status".into()
+            }
+            "source" => "Use runs <run> source <path> to read archived source".into(),
+            _ => "Unknown assertions action".into(),
+        });
     }
     if o.minimum
         .is_some_and(|n| !n.is_finite() || !(0.0..=100.0).contains(&n))
@@ -126,12 +138,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
         ("--ack-scope", o.action == "review"),
         (
             "--file",
-            matches!(o.action.as_str(), "source" | "inventory")
-                || o.action == "report"
-                    && matches!(
-                        o.view.as_str(),
-                        "assertions" | "statements" | "creditedLines" | "unassertedLines"
-                    ),
+            o.action == "report"
+                && matches!(
+                    o.view.as_str(),
+                    "assertions" | "statements" | "creditedLines" | "unassertedLines"
+                ),
         ),
         ("--view", o.action == "report"),
     ] {
@@ -148,16 +159,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if o.action == "review" && !o.all && o.flows.is_empty() && !o.ack {
         return Err("Review requires --all, --flow or --ack-scope".into());
     }
-    if o.action == "source" && o.file.is_none() {
-        return Err("source requires --file".into());
-    }
     if (seen.contains("--offset") || seen.contains("--limit"))
-        && !matches!(
-            o.action.as_str(),
-            "report" | "inventory" | "source" | "files"
-        )
+        && !matches!(o.action.as_str(), "report" | "files")
     {
-        return Err("Pagination requires report, inventory, source or files".into());
+        return Err("Pagination requires an assertion list, report array view or files".into());
     }
     if !matches!(
         o.view.as_str(),
@@ -184,6 +189,12 @@ fn page(values: &[Value], offset: usize, limit: usize) -> Value {
     json!({"items":items,"pagination":{"offset":offset,"returned":items.len(),"total":values.len(),"nextOffset":if next<values.len(){Some(next)}else{None}}})
 }
 pub fn command(args: &[String]) -> ExitCode {
+    if matches!(
+        args.get(1).map(String::as_str),
+        Some("source" | "assertion")
+    ) {
+        return inspection_command(args);
+    }
     if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
         print!("{HELP}");
         return ExitCode::SUCCESS;
@@ -196,42 +207,17 @@ pub fn command(args: &[String]) -> ExitCode {
         let mut check_report = None;
         let mut data = match o.action.as_str() {
             "review" => maps::acknowledge(&root, run, &o.flows, o.all, o.ack)?,
-            "source" | "inventory" | "files" => {
+            "files" => {
                 let input = maps::load_inputs(run)?;
-                if let Some(file) = &o.file
-                    && !input.inputs.files.contains_key(file)
-                {
-                    return Err("File absent from frozen run inputs".into());
-                }
-                let values = if o.action == "files" {
-                    input
-                        .inputs
-                        .files
-                        .iter()
-                        .map(|(file, text)| json!({"file":file,"bytes":text.len()}))
-                        .collect::<Vec<_>>()
-                } else if o.action == "source" {
-                    input
-                        .inputs
-                        .files
-                        .get(o.file.as_ref().unwrap())
-                        .ok_or("File absent from frozen run inputs")?
-                        .lines()
-                        .enumerate()
-                        .map(|(i, s)| json!({"line":i+1,"text":s}))
-                        .collect::<Vec<_>>()
-                } else {
-                    input
-                        .inputs
-                        .assertions
-                        .iter()
-                        .filter(|s| o.file.as_ref().is_none_or(|file| s.at.file == *file))
-                        .map(|s| serde_json::to_value(s).unwrap())
-                        .collect()
-                };
+                let values = input
+                    .inputs
+                    .files
+                    .iter()
+                    .map(|(file, text)| json!({"file":file,"bytes":text.len()}))
+                    .collect::<Vec<_>>();
                 let mut data = page(&values, o.offset, o.limit);
-                data["limitations"] = json!(input.inputs.limitations);
                 data["revision"] = json!(input.evidence_digest);
+                data["view"] = json!("files");
                 data
             }
             "validate" => {
@@ -276,6 +262,8 @@ pub fn command(args: &[String]) -> ExitCode {
                 ] {
                     data[key] = report[key].clone();
                 }
+                data["view"] = json!(o.view);
+                data["file"] = json!(o.file);
                 data["scope"] =
                     json!("summary covers the whole archived run; --file filters items only");
                 if o.action == "check" {
@@ -284,16 +272,7 @@ pub fn command(args: &[String]) -> ExitCode {
                 data
             }
         };
-        data["workingTree"] = match super::current_integrity_for_run(&root, run) {
-            Some(current) => {
-                let comparison = supercov_engine::run_store::compare_run_integrity(
-                    Some(&run.metadata.integrity),
-                    &current,
-                );
-                json!({"stale":comparison.stale,"reasons":comparison.reasons})
-            }
-            None => json!({"stale":null,"reason":"current source integrity unavailable"}),
-        };
+        data["workingTree"] = working_tree(&root, run);
         if let Some(report) = check_report {
             let failures = check_failures(&report, &data["workingTree"], &o);
             data["valid"] = json!(failures.is_empty());
@@ -304,24 +283,158 @@ pub fn command(args: &[String]) -> ExitCode {
         data["map"] = json!(run.directory.join(maps::MAP_FILE));
         Ok(data)
     })();
-    emit(result, args.iter().any(|a| a == "--json"))
+    emit(
+        result,
+        args.iter().any(|a| a == "--json"),
+        "coverage.assertions",
+    )
 }
-fn emit(result: Result<Value, String>, json_output: bool) -> ExitCode {
+fn working_tree(root: &std::path::Path, run: &supercov_engine::run_store::StoredRun) -> Value {
+    match super::current_integrity_for_run(root, run) {
+        Some(current) => {
+            let comparison = supercov_engine::run_store::compare_run_integrity(
+                Some(&run.metadata.integrity),
+                &current,
+            );
+            json!({"stale":comparison.stale,"reasons":comparison.reasons})
+        }
+        None => json!({"stale":null,"reason":"current source integrity unavailable"}),
+    }
+}
+
+struct Inspection {
+    selector: String,
+    offset: usize,
+    limit: usize,
+}
+fn parse_inspection(args: &[String], source: bool) -> Result<Inspection, String> {
+    let (selector, flags) = args
+        .split_first()
+        .filter(|(s, _)| !s.starts_with('-'))
+        .ok_or(if source {
+            "source requires a project-relative path"
+        } else {
+            "assertion requires an ID"
+        })?;
+    let mut o = Inspection {
+        selector: selector.clone(),
+        offset: 0,
+        limit: 20,
+    };
+    let mut flags = flags.iter();
+    let mut seen = BTreeSet::new();
+    while let Some(flag) = flags.next() {
+        if !seen.insert(flag) {
+            return Err(format!("Duplicate option: {flag}"));
+        }
+        match flag.as_str() {
+            "--json" => (),
+            "--offset" | "--limit" if source => {
+                let value = flags
+                    .next()
+                    .ok_or_else(|| format!("{flag} requires a value"))?
+                    .parse::<usize>()
+                    .map_err(|_| format!("Invalid {flag}"))?;
+                if flag == "--offset" {
+                    o.offset = value;
+                } else {
+                    o.limit = value;
+                }
+            }
+            _ => return Err(format!("Unexpected argument: {flag}")),
+        }
+    }
+    if o.limit == 0 || o.limit > 1000 {
+        return Err("limit must be 1..1000".into());
+    }
+    Ok(o)
+}
+fn inspection_command(args: &[String]) -> ExitCode {
+    let source = args[1] == "source";
+    if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
+        print!("{}", if source { SOURCE_HELP } else { ASSERTION_HELP });
+        return ExitCode::SUCCESS;
+    }
+    let result = (|| -> Result<Value, String> {
+        let o = parse_inspection(&args[2..], source)?;
+        let root = std::env::current_dir().map_err(|e| e.to_string())?;
+        let runs = discover_runs(&root).map_err(|e| e.to_string())?;
+        let run = select_run(&runs, Some(&args[0])).map_err(|e| e.to_string())?;
+        let mut data = if source {
+            let input = maps::load_inputs(run)?;
+            let text =
+                input.inputs.files.get(&o.selector).ok_or_else(|| {
+                    format!("File absent from archived run inputs: {}", o.selector)
+                })?;
+            let lines = text
+                .lines()
+                .enumerate()
+                .map(|(i, text)| json!({"line":i+1,"text":text}))
+                .collect::<Vec<_>>();
+            let mut data = page(&lines, o.offset, o.limit);
+            data["file"] = json!(o.selector);
+            data["revision"] = json!(input.evidence_digest);
+            data["view"] = json!("source");
+            data
+        } else {
+            let report = maps::assertion(run, &o.selector)?;
+            let mut data = json!({"view":"assertion", "assertion":report["assertion"],
+                "map":run.directory.join(maps::MAP_FILE)});
+            for key in [
+                "summary",
+                "basis",
+                "validationErrors",
+                "limitations",
+                "revision",
+                "inheritance",
+            ] {
+                data[key] = report[key].clone();
+            }
+            let witnessed = report["assertion"]["observedPassingTests"]
+                .as_array()
+                .unwrap();
+            data["tests"] = json!(
+                report["tests"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|test| witnessed.contains(&test["id"]))
+                    .collect::<Vec<_>>()
+            );
+            data
+        };
+        data["run"] = json!(run.id);
+        data["workingTree"] = working_tree(&root, run);
+        Ok(data)
+    })();
+    emit(
+        result,
+        args.iter().any(|a| a == "--json"),
+        if source {
+            "coverage.source"
+        } else {
+            "coverage.assertion"
+        },
+    )
+}
+fn emit(result: Result<Value, String>, json_output: bool, command: &str) -> ExitCode {
     match result {
         Ok(data) => {
             let invalid = data.get("valid") == Some(&Value::Bool(false));
             if json_output {
-                match agent_json::success("coverage.assertions", &data, None) {
+                match agent_json::success(command, &data, None) {
                     Ok(output) => print!("{output}"),
                     Err(size) => {
-                        print!("{}",agent_json::failure(Some("coverage.assertions"), &agent_json::AgentError {
+                        print!("{}",agent_json::failure(Some(command), &agent_json::AgentError {
                             code:agent_json::ErrorCode::ResponseTooLarge,
-                            message:"Response too large; reduce --limit or read the assertions.json file".into(),
+                            message:"Response too large; reduce --limit or use the text view (omit --json)".into(),
                             retryable:false,details:Some(json!({"actualBytes":size.actual_bytes,"maxBytes":size.max_bytes})),
                         }));
                         return ExitCode::from(2);
                     }
                 }
+            } else if let Some(output) = super::assertions_human::render(&data) {
+                print!("{output}");
             } else {
                 println!("{}", serde_json::to_string_pretty(&data).unwrap());
             }
@@ -336,7 +449,7 @@ fn emit(result: Result<Value, String>, json_output: bool) -> ExitCode {
                 print!(
                     "{}",
                     agent_json::failure(
-                        Some("coverage.assertions"),
+                        Some(command),
                         &agent_json::AgentError {
                             code: agent_json::ErrorCode::InvalidArgument,
                             message,
@@ -396,7 +509,7 @@ fn check_failures(report: &Value, working_tree: &Value, o: &Options) -> Vec<Stri
                 })
             }))
     {
-        failures.push("Assertions or appliesTo flows lack matching passing runtime evidence; inspect report --view assertions".into());
+        failures.push("Assertions or appliesTo flows lack matching passing runtime evidence; inspect runs <run> assertions".into());
     }
     if let Some(minimum) = o.minimum
         && s["statements"]["percentage"]
@@ -431,7 +544,7 @@ pub fn global_command(args: &[String]) -> ExitCode {
         }),
         _ => Err("Use assertions schema or assertions validate --file <path>; run-owned commands need runs <run> assertions".into()),
     };
-    emit(result, json_output)
+    emit(result, json_output, "coverage.assertions")
 }
 
 #[cfg(test)]
@@ -454,6 +567,60 @@ mod tests {
         ] {
             assert!(parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).is_err());
         }
+    }
+
+    #[test]
+    fn defaults_to_assertion_list_and_keeps_explicit_summary() {
+        assert_eq!(parse(&[]).unwrap().view, "assertions");
+        assert_eq!(parse(&["report".into()]).unwrap().view, "summary");
+        assert!(
+            parse(&[
+                "--file".into(),
+                "tests/a.ts".into(),
+                "--limit".into(),
+                "2".into()
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn positional_resources_reject_ignored_flags_and_invalid_paging() {
+        for (source, args) in [
+            (true, vec![]),
+            (false, vec![]),
+            (true, vec!["a.ts", "--file", "b.ts"]),
+            (true, vec!["a.ts", "--limit", "0"]),
+            (true, vec!["a.ts", "--offset", "-1"]),
+            (true, vec!["a.ts", "--limit", "1001"]),
+            (true, vec!["a.ts", "--offset"]),
+            (true, vec!["a.ts", "--json", "--json"]),
+            (true, vec!["a.ts", "b.ts"]),
+            (false, vec!["a_id", "--offset", "1"]),
+            (false, vec!["a_id", "--view", "summary"]),
+        ] {
+            assert!(
+                parse_inspection(
+                    &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    source
+                )
+                .is_err()
+            );
+        }
+        let source = parse_inspection(
+            &[
+                "tests/a b.ts".into(),
+                "--offset".into(),
+                "33".into(),
+                "--limit".into(),
+                "4".into(),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(source.selector, "tests/a b.ts");
+        assert_eq!((source.offset, source.limit), (33, 4));
+        assert!(parse_inspection(&["a_id".into(), "--json".into()], false).is_ok());
     }
 
     #[test]

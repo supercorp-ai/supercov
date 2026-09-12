@@ -246,6 +246,13 @@ fn phase_location<'a>(
 /// Recompute from the mutable map on every query; never cache it into the
 /// immutable structural coverage index. Reports stay about the archived run.
 pub fn report(run: &StoredRun) -> Result<Value, String> {
+    report_with_detail(run, None)
+}
+/// Read authored flows and their assessment from the same map snapshot.
+pub fn assertion(run: &StoredRun, id: &str) -> Result<Value, String> {
+    report_with_detail(run, Some(id))
+}
+fn report_with_detail(run: &StoredRun, id: Option<&str>) -> Result<Value, String> {
     let input = load_inputs(run)?;
     let (map, state) = load(run, &input)?;
     let coverage = coverage(run)?;
@@ -256,6 +263,41 @@ pub fn report(run: &StoredRun) -> Result<Value, String> {
         &coverage,
         run.metadata.test_exit_code == Some(0),
     );
+    if let Some(id) = id {
+        let matches = report["assertions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["id"] == id)
+            .collect::<Vec<_>>();
+        let mut row = match matches.as_slice() {
+            [row] => (*row).clone(),
+            [] => {
+                return Err(format!(
+                    "Unknown assertion ID: {id}; use runs {} assertions to list IDs",
+                    run.id
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "Ambiguous assertion ID: {id}; repair duplicate IDs in assertions.json"
+                ));
+            }
+        };
+        if let Some(authored) = map.assertions.iter().find(|a| a.id == id) {
+            for (flow, authored) in row["flows"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .zip(&authored.flows)
+            {
+                let assessment = flow.as_object().unwrap().clone();
+                *flow = serde_json::to_value(authored).map_err(|e| e.to_string())?;
+                flow.as_object_mut().unwrap().extend(assessment);
+            }
+        }
+        report["assertion"] = row;
+    }
     report["inheritance"] = json!(state.inheritance);
     report["revision"] = json!(digest(&(&map, &state, &input.evidence_digest)));
     Ok(report)
@@ -340,7 +382,39 @@ pub fn assess(
             .or_default()
             .insert(&site.operation);
     }
-    for a in &map.assertions {
+    let mapped_anchors = map
+        .assertions
+        .iter()
+        .map(|a| &a.at)
+        .collect::<BTreeSet<_>>();
+    let mut used_ids = map
+        .assertions
+        .iter()
+        .map(|a| a.id.clone())
+        .chain(
+            map.retired_assertions
+                .iter()
+                .map(|r| r.assertion.id.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    let missing = seed(inputs, "")
+        .0
+        .assertions
+        .into_iter()
+        .filter(|a| !mapped_anchors.contains(&a.at))
+        .map(|mut a| {
+            while !used_ids.insert(a.id.clone()) {
+                a.id.push('_');
+            }
+            a
+        })
+        .collect::<Vec<_>>();
+    for (a, in_map) in map
+        .assertions
+        .iter()
+        .map(|a| (a, true))
+        .chain(missing.iter().map(|a| (a, false)))
+    {
         let witnesses = phases_by_location
             .get(&(a.at.file.as_str(), a.at.line, a.at.column))
             .into_iter()
@@ -440,7 +514,7 @@ pub fn assess(
             }
             flows.push(json!({"id":f.id,"current":dirty.is_empty(),"reasons":dirty,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines}));
         }
-        rows.push(json!({"id":a.id,"at":a.at,"analysis":a.analysis,"observedPassingTests":witnesses,"flows":flows}));
+        rows.push(json!({"id":a.id,"at":a.at,"analysis":a.analysis,"inMap":in_map,"observes":a.observes,"operations":inventory.get(&a.at).cloned().unwrap_or_default(),"observedPassingTests":witnesses,"flows":flows}));
     }
     let denominator = coverage
         .view

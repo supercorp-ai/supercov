@@ -11,7 +11,7 @@ supercov -- npm test
 supercov runs --json
 # Choose a concrete run ID from the response:
 supercov runs <run> assertions --json
-supercov runs <run> assertions source --file src/example.ts --limit 100 --json
+supercov runs <run> source src/example.ts --limit 100
 # Edit the map path returned as data.map:
 supercov runs <run> assertions validate --json
 supercov runs <run> assertions review --all --json
@@ -60,30 +60,55 @@ there is no saved percentage to regenerate. Query time scales with archive and
 map size. The existing stale-source warning still applies to old runs; use
 `assertions check` to gate development against the current checkout.
 
-## Optional inspection commands
+## Inspect assertions and source
 
-The normal workflow needs no inventory-building command. The automatically
-created map already lists the recognized assertion sites.
+Resource names follow the rest of the CLI: a plural lists entries, and a
+singular selects one entry.
 
-- `assertions inventory`: the raw list of assertion expressions recognized in
-  the saved test source, with exact locations and operation names. Use it to
-  compare the authored map against discovery; it does not trace flows or imply
-  the assertion executed. `report --view assertions` adds mapping/review status
-  and passing execution witnesses.
-- `assertions source --file src/example.ts`: numbered lines from the source
-  archived with this run, even if that file has since changed or been deleted.
-  This lets the agent trace the exact code that ran. `--offset` is zero-based.
-- `assertions files`: the available archived paths and their byte sizes.
+```sh
+supercov runs <run> assertions --file tests/core.test.js --limit 20
+supercov runs <run> assertion a_example
+supercov runs <run> source src/core.js --offset 0 --limit 20
+```
 
-These read-only helpers are optional. The assertion map remains an ordinary JSON
-file that the agent edits directly.
+`assertions` lists assertion sites, including unmapped ones, with mapping,
+review and passing-execution status. The list combines the authored map and
+recognized sites in archived code. If a site was removed from the map, it still
+appears with `inMap: false`; listing it does not repair the file or award credit.
+The list replaces the old `assertions inventory` command.
+
+`assertion <id>` shows one exact ID's assertion expression, observed property,
+authored flows, nodes, edges, watches and review/evidence status. With `--json`,
+the detail is in `data.assertion`; `data.tests` names its passing test witnesses.
+The authored graph and calculated status come from the same map snapshot.
+
+`source <path>` reads the file archived with this run, even if today's file has
+changed or been deleted. Source is printed as code, with line numbers on the
+left, for example:
+
+```text
+1 │ export function value() {
+2 │   return 1;
+3 │ }
+```
+
+`--offset` is zero-based and `--limit` defaults to 20 (maximum 1000). Lists and
+source pages include a copyable next-page command. Use `assertions files` to
+list archived paths and byte sizes. Source is independent of the assertion map
+and remains readable when that JSON file is malformed.
+
+Add `--json` for structured output: lists use `data.items`, and source uses
+`data.items` entries of `{line, text}`. Both include pagination and a revision.
+Without `--json`, the assertion list, assertion detail and source are readable
+text. Other report views remain available through `assertions --view <view>`;
+use `assertions report` for just the assertion summary.
 
 ## File format
 
 This example shows a return-value observation. Every `text` must match that
 run's source exactly; locations use **one-based lines and one-based UTF-8 byte
-columns in all languages**. `source` and `inventory` queries read archived
-inputs, even if the checkout has since changed.
+columns in all languages**. Source and assertion queries read archived inputs,
+even if the checkout has since changed.
 
 ```json
 {
@@ -136,7 +161,7 @@ assertion expression and operation that matches a passing runtime occurrence.
 
 ```sh
 supercov -- npm test
-supercov runs <run> assertions --view assertions --json
+supercov runs <run> assertions --json
 # Repair only affected explanations/anchors in the new map, then:
 supercov runs <run> assertions review --flow a_example/return-value
 # After investigating and assigning any unowned changes:
@@ -274,8 +299,8 @@ rows provide the complete source `at`, `declared`, `asserted` and crediting flow
 IDs. `at: null` means the frozen source could not resolve that measured statement;
 it stays in the denominator and cannot earn credit.
 
-Use `assertions files` to list frozen input paths. `inventory --file <path>` and
-`report --view assertions|statements|creditedLines|unassertedLines --file <path>`
+Use `assertions files` to list frozen input paths. `assertions --file <path>` and
+`assertions --view statements|creditedLines|unassertedLines --file <path>`
 filter items; summary metrics remain whole-run. Array views use
 `--offset`/`--limit`, with `pagination.nextOffset`. Do not use
 pagination on a summary. `revision` identifies the map/review/evidence version

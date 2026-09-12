@@ -24,7 +24,32 @@ try {
   assert.equal(initialized.map, automatic.map);
   const map = read(initialized.map);
   assert.equal(map.assertions.length, 1);
+  assert.equal(initialized.items.length, 1);
+  assert.equal(initialized.items[0].analysis, 'unmapped');
+  assert.equal(initialized.items[0].inMap, true);
   const a = map.assertions[0];
+  const source = coverageQuery(root, first, 'source', 'src/core.js', '--offset', '1', '--limit', '1');
+  assert.equal(source.command, 'coverage.source');
+  assert.deepEqual(source.data.items, [{ line: 2, text: '  return 1;' }]);
+  const sourceText = requireSupercov(root, ['runs', first, 'source', 'src/core.js', '--offset', '1', '--limit', '1']).stdout;
+  assert.match(sourceText, /2 │   return 1;/);
+  assert(!sourceText.includes('"text"'));
+  assert.match(sourceText, /--offset 2 --limit 1/);
+  const listText = requireSupercov(root, ['runs', first, 'assertions']).stdout;
+  assert(listText.includes(a.id));
+  assert.match(listText, /unmapped · no flows · 1 passing test/);
+  for (const resource of [['source'], ['source', 'missing.ts'], ['assertion'], ['assertion', 'unknown-id'], ['assertion', a.id, '--limit', '1'], ['assertions', 'inventory']]) {
+    assert.equal(executeSupercov(root, ['runs', first, ...resource]).status, 2, resource.join(' '));
+  }
+  // Removing a map entry must not hide a recognized assertion from the list.
+  write(initialized.map, { assertions: [] });
+  const missing = query(first);
+  assert.equal(missing.items.length, 1);
+  assert.equal(missing.items[0].inMap, false);
+  assert.equal(missing.items[0].id, a.id);
+  assert.equal(missing.summary.missingInventoryAssertions, 1);
+  assert.equal(coverageQuery(root, first, 'assertion', a.id).data.assertion.inMap, false);
+  write(initialized.map, map);
   assert.equal(a.at.line, 5);
   a.analysis = "mapped";
   a.observes = ["value returns one"];
@@ -41,6 +66,20 @@ try {
   assert.equal(report.summary.dirtyFlows, 0);
   assert.equal(query(first, "--view", "creditedLines").items[0].assertions[0], a.id);
   assert.equal(coverageQuery(root, first).data.assertionCoverage.summary.lines.asserted, 1);
+  const detail = coverageQuery(root, first, 'assertion', a.id);
+  assert.equal(detail.command, 'coverage.assertion');
+  assert.deepEqual(detail.data.assertion.observes, a.observes);
+  assert.deepEqual(detail.data.assertion.flows[0].nodes, a.flows[0].nodes);
+  assert.deepEqual(detail.data.assertion.flows[0].watch, a.flows[0].watch);
+  assert.equal(detail.data.assertion.flows[0].explanation, a.flows[0].explanation);
+  assert.equal(detail.data.assertion.flows[0].current, true);
+  assert.equal(detail.data.assertion.flows[0].eligible, true);
+  assert.equal(detail.data.revision, report.revision);
+  assert.equal(detail.data.tests.length, 1);
+  const detailText = requireSupercov(root, ['runs', first, 'assertion', a.id]).stdout;
+  assert(detailText.includes(a.flows[0].explanation));
+  assert.match(detailText, /Node return — src\/core.js:2:3/);
+  assert.match(detailText, /current, eligible for credit/);
   const regular = coverageQuery(root, first).data.assertionCoverage;
   assert.equal(regular.summary.statements.percentage, 100);
   assert.equal(regular.revision, report.revision);
@@ -54,6 +93,7 @@ try {
   assert.match(requireSupercov(root, ["runs", first]).stdout, /1 dirty flow\(s\)/);
   writeFileSync(initialized.map, "{broken JSON");
   assert.equal(coverageQuery(root, first).data.assertionCoverage.available, false);
+  assert.equal(coverageQuery(root, first, 'source', 'src/core.js').data.items[1].text, '  return 1;', 'source remains readable with malformed map JSON');
   assert.match(requireSupercov(root, ["runs", first]).stdout, /Assertions unavailable: assertions.json/);
   write(initialized.map, map);
   query(first, "review", "--all");
@@ -61,7 +101,7 @@ try {
   const firstMapBytes = readFileSync(initialized.map);
   const firstStatePath = join(root, '.supercov/runs', first, 'assertions.state.json');
   const firstStateBytes = readFileSync(firstStatePath);
-  const frozen = query(first, "source", "--file", "src/core.js").items;
+  const frozen = coverageQuery(root, first, "source", "src/core.js").data.items;
   assert.equal(frozen[1].text, "  return 1;");
   assert.notEqual(executeSupercov(root, ["runs",first,"assertions","init"]).status, 0, "the init command is removed");
   assert.notEqual(executeSupercov(root, ["runs",first,"asserted"]).status, 0, "legacy analyzer command is gone");
@@ -76,7 +116,7 @@ try {
   report = query(third);
   assert.equal(report.summary.dirtyFlows,1);
   assert.equal(report.summary.lines.asserted,0);
-  assert.equal(query(first,"source","--file","src/core.js").items[1].text,"  return 1;", "old input snapshot remains frozen");
+  assert.equal(coverageQuery(root, first, "source", "src/core.js").data.items[1].text,"  return 1;", "old input snapshot remains frozen");
   assert.equal(query(first).workingTree.stale,true);
   const updated=read(carried.map);assert.equal(updated.assertions[0].id,a.id);
   updated.assertions[0].flows[0].nodes[0].at.text="return 2 - 1;";

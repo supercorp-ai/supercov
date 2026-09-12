@@ -17,7 +17,9 @@ npx supercov --help
 | Read the newest run | `npx supercov runs latest` |
 | Find useful gaps | `npx supercov runs latest gaps` |
 | Inspect one file | `npx supercov runs latest file <path>` |
-| Read agent-assessed assertion coverage | `npx supercov runs latest assertions` |
+| List assertions and their status | `npx supercov runs latest assertions` |
+| Inspect one assertion and its flows | `npx supercov runs latest assertion <id>` |
+| Read archived source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
@@ -72,7 +74,9 @@ npx supercov runs <run-id> [query] [options]
 | `kinds` | Group coverage by test level, such as unit or E2E |
 | `runners` | Group coverage by test runner |
 | `scope` | Review included, excluded, and ambiguous source files |
-| `assertions` | Inspect, validate, review and report the automatically created assertion map |
+| `assertions` | List assertions, including unmapped sites, with review and execution status |
+| `assertion <id>` | Inspect one assertion and its authored flows |
+| `source <path>` | Read archived source as code with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
 Common examples:
@@ -93,7 +97,14 @@ npx supercov runs latest file --help
 npx supercov runs latest assertions --help
 ```
 
-The optional `assertions` commands read the run-owned map and frozen source.
+Assertion queries read the run-owned map. `source <path>` reads the archived
+file directly. It prints source code with line numbers, preserving indentation;
+add `--json` only when you want structured `{line, text}` items. `--offset` is
+zero-based and `--limit` controls the number of source lines. Neither query
+reads source from today's checkout. The old `assertions inventory` and nested
+`assertions source --file` commands are replaced by these resource queries.
+Use `assertions validate`, `assertions review` and `assertions check` to validate
+and acknowledge the authored map.
 The regular run summary automatically includes the assertion percentage when
 that map exists, in text and `data.assertionCoverage` JSON. Read
 [Understanding assertion coverage](assertions.md) for the workflow or run

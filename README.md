@@ -53,7 +53,10 @@ optionally fill in what the assertions check:
 
 ```sh
 npx supercov runs latest assertions --json
-# Pin the returned run ID, edit assertions.json, then validate and acknowledge:
+# Pin the returned run ID. Inspect assertions and the source that ran:
+npx supercov runs <run> assertion <assertion-id>
+npx supercov runs <run> source src/example.ts
+# Edit assertions.json, then validate and acknowledge:
 npx supercov runs <run> assertions validate --json
 npx supercov runs <run> assertions review --all
 npx supercov runs <run> assertions check --require-complete --require-observed --json

@@ -57,7 +57,9 @@ check their messages, and checking one substring does not check the whole respon
 ## Inspect and improve the map
 
 ```sh supercov-example
-npx supercov runs <run> assertions --view assertions --limit 5
+npx supercov runs <run> assertions --limit 5
+npx supercov runs <run> assertion <assertion-id>
+npx supercov runs <run> source src/shipping.js
 npx supercov runs <run> assertions --view statements --file src/shipping.js --limit 20
 ```
 

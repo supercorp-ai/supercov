@@ -60,7 +60,8 @@ npx supercov runs latest assertions --json
 # Pin data.run and edit the file at data.map.
 ```
 
-Read the run's frozen sources, edit its `assertions.json`, declare credited nodes
+Inspect an entry with `runs <run> assertion <id>` and read archived code with
+`runs <run> source <path>`. Edit its `assertions.json`, declare credited nodes
 and broader watch inputs, then acknowledge reviewed flows with `assertions review
 --all` or repeated `--flow ASSERTION/FLOW`. After the next run of
 the same command, its map automatically inherits prior work; repair affected entries. Supercov

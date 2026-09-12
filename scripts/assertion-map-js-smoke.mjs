@@ -69,8 +69,8 @@ export function assertionMapSmoke({ root, launcher, env, runner = 'node', typesc
   const map = JSON.parse(readFileSync(init.map, 'utf8'));
   assert.equal(map.assertions.length, 3, `${runner}/${ext}: ${JSON.stringify(map)}`);
   const statements = query('report', '--view', 'statements', '--limit', '100').items;
-  const observed = query('report', '--view', 'assertions', '--file', testFile).items;
-  assert.equal(query('inventory', '--file', testFile).pagination.total, 3);
+  const observed = query('--file', testFile).items;
+  assert.equal(query('--file', testFile).pagination.total, 3);
   assert(query('files', '--limit', '100').items.some(f => f.file === file));
   assert(observed.every((a, i) => a.observedPassingTests.length === (parameterized && i === 0 ? 2 : 1)), `${runner}/${ext}: ${JSON.stringify(observed)}`);
   assert.equal(invoke('runs', run, 'assertions', 'check', '--require-complete').status, 2, 'unmapped inventory must fail a completion gate');
@@ -92,6 +92,14 @@ export function assertionMapSmoke({ root, launcher, env, runner = 'node', typesc
   const schema = JSON.parse(ok('assertions', 'schema').stdout);
   assert.equal(schema.additionalProperties, false);
   data('assertions', 'validate', '--file', init.map);
+  const detail = data('runs', run, 'assertion', map.assertions[0].id);
+  assert.equal(detail.assertion.flows[0].current, true);
+  assert.equal(detail.assertion.flows[0].explanation, map.assertions[0].flows[0].explanation);
+  assert.equal(detail.assertion.flows[0].nodes[0].at.text, 'return input + 1;');
+  const readable = ok('runs', run, 'source', file, '--offset', '1', '--limit', '3').stdout;
+  assert.match(readable, /3 │     return input \+ 1;/);
+  assert(!readable.includes('"text"'));
+  assert.equal(data('runs', run, 'source', file, '--offset', '2', '--limit', '1').items[0].line, 3);
   const revision = query().revision;
   const bad = structuredClone(map); bad.assertions[0].flows[0].countsAsAsserted = true;
   write(init.map, bad);

@@ -5,8 +5,34 @@ assertion analyzer with agent-authored maps. The released Node registration,
 worker-attempt and source-location safeguards are retained. The previously
 verified baseline is commit `0b6394a3c37a51a1d332c25b7e42789ef7fd4393` on
 `codex/agent-assertion-maps`. The branch now additionally creates and carries maps
-automatically; see the follow-up below. This checklist records preparation and
+automatically and exposes assertion/source resources; see the follow-ups below. This checklist records preparation and
 validation; no release tag or publication has been made.
+
+## Assertion and source resources follow-up, 2026-09-12
+
+The public inspection commands now follow the existing resource naming:
+`runs <run> assertions` lists sites with mapping, review and passing-execution
+status; `runs <run> assertion <id>` reads one assertion and its authored flows;
+`runs <run> source <path>` prints archived code with line numbers. Structured
+line/text objects are limited to `--json`. The separate inventory command and
+nested assertion-source command are removed, with migration guidance on error.
+
+The list combines authored entries with discovered sites missing from the map.
+Those entries have `inMap: false` and remain incomplete without earning credit.
+Detail queries read authored flows and calculated status from the same snapshot.
+Source queries work independently of map JSON and preserve the archived code
+when the checkout changes. Source/list pages include copyable next-page commands.
+
+`npm run check` passed: 488 Rust tests, 22 runtime tests, all six JS/TS
+configurations, schema, embedded assets, formatting, clippy and package preflight.
+The six JS/TS configurations also passed on Node 22.23.1. Regressions cover
+readable source, Unicode/indentation/blank lines, paging, missing-map entries,
+exact detail IDs, invalid options, full flow details, matching test names and
+source access during malformed map edits. All three text views were checked
+against Supergateway's archived `run_1d377c69729e4e0d`.
+
+The installed-package check for this follow-up is pending. Earlier platform
+artifacts below are historical; build new artifacts from the final release commit.
 
 ## Automatic map creation follow-up, 2026-09-12
 

@@ -6,6 +6,8 @@
 
 **Added**
 
+- Assertion inspection follows the CLI resource pattern: `runs <run> assertions`, `assertion <id>` and `source <path>`. Source prints as code with line numbers; `--json` retains structured data. The separate `inventory` command is removed.
+
 - Each normal test run creates `assertions.json`, automatically reusing the newest compatible map and preserving dirty review work. Maps publish atomically with run evidence; `assertions init` is removed.
 
 - The regular coverage summary displays the current assertion percentage beside Lines, Branches and MC/DC, with incomplete-map and review status. All public guides are bundled in npm and native installs.
