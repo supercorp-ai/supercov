@@ -1,9 +1,0 @@
-[package]
-name = "asserted_identity_fixture"
-version = "0.0.0"
-edition = "2024"
-
-[workspace]
-
-[lib]
-doctest = false

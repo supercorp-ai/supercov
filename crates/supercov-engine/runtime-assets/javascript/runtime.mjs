@@ -144,9 +144,6 @@ function createState() {
     decisions: /* @__PURE__ */ new Map(),
     hits: /* @__PURE__ */ new Set(),
     events: [],
-    // Position of the test-file statement currently executing ("file:line:column"), set by the
-    // instrumented test module; production hits recorded meanwhile are attributed to it.
-    testStatement: void 0,
     // Per value-position logical expression (`a && b`, `a || b`, `a ?? b`): the distinct
     // (right operand evaluated?, result truthy?) pairs seen, keyed by branch id.
     logicals: /* @__PURE__ */ new Map(),
@@ -317,7 +314,6 @@ function resetCoverage(testId2) {
   state.decisions.clear();
   state.hits.clear();
   state.events.length = 0;
-  state.testStatement = void 0;
   state.logicals.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
@@ -978,31 +974,25 @@ function recordBrowserEvent(event) {
   state.events.push(event);
   return true;
 }
-function testStatement(source) {
-  state.testStatement = typeof source === "string" && source.length > 0 ? source : void 0;
-}
-function statementFields() {
-  return state.testStatement ? { statementId: state.testStatement } : {};
-}
 function coverageHit(id) {
   state.hits.add(id);
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(__spreadProps(__spreadValues(__spreadValues({
+    if (recordBrowserEvent(__spreadProps(__spreadValues({
       type: "hit",
       id,
       timestampMs
-    }, phaseId ? { phaseId } : {}), statementFields()), {
+    }, phaseId ? { phaseId } : {}), {
       environment: "browser"
     })))
       persistBrowser();
   } else {
-    appendServer(__spreadValues(__spreadValues({
+    appendServer(__spreadValues({
       type: "hit",
       id,
       timestampMs
-    }, phaseId ? { phaseId } : {}), statementFields()));
+    }, phaseId ? { phaseId } : {}));
   }
 }
 function registerProbeV2(definition) {
@@ -1237,22 +1227,22 @@ function mcdcEnd(frame, value) {
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(__spreadProps(__spreadValues(__spreadValues({
+    if (recordBrowserEvent(__spreadProps(__spreadValues({
       type: "decision",
       id: decision.meta.id,
       vector,
       timestampMs
-    }, phaseId ? { phaseId } : {}), statementFields()), {
+    }, phaseId ? { phaseId } : {}), {
       environment: "browser"
     })))
       persistBrowser();
   } else {
-    appendServer(__spreadValues(__spreadValues({
+    appendServer(__spreadValues({
       type: "decision",
       meta: decision.meta,
       vector,
       timestampMs
-    }, phaseId ? { phaseId } : {}), statementFields()));
+    }, phaseId ? { phaseId } : {}));
   }
   return value;
 }
@@ -1293,7 +1283,6 @@ const directRuntimeApi = {
   selectionEnd,
   selectionRight,
   takeNodeAssertionPhases,
-  testStatement,
   tryBegin,
   tryCatch,
   tryEnd,
@@ -1343,7 +1332,6 @@ export {
   selectionEnd,
   selectionRight,
   takeNodeAssertionPhases,
-  testStatement,
   tryBegin,
   tryCatch,
   tryEnd,

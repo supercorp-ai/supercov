@@ -3,9 +3,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import { releaseNotes } from "./release-notes.mjs";
-import { checkedIdentity } from "../analyzers/typescript/bin/identity.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
 const manifest = JSON.parse(
@@ -28,16 +27,9 @@ assert.deepEqual(manifest.files, [
   "bin",
   "runtime/javascript",
   "docs/agent-loop.md",
-  "docs/assertion-evidence.md",
-  "analyzers/typescript/bin",
-  "analyzers/typescript/dist",
-  "analyzers/typescript/src",
-  "analyzers/typescript/package.json",
-  "analyzers/typescript/tsconfig.json",
-  "analyzers/typescript/README.md",
+  "docs/assertion-maps.md",
   "README.md",
 ]);
-checkedIdentity();
 assert.equal(
   manifest.dependencies,
   undefined,
@@ -125,8 +117,6 @@ assert(
 const productSources = [
   resolve(repository, "bin/supercov.js"),
   ...runtimeFiles.map((name) => resolve(runtime, name)),
-  ...sourceFiles(resolve(repository, "analyzers/typescript/bin"), ".mjs"),
-  ...sourceFiles(resolve(repository, "analyzers/typescript/dist"), ".js"),
   ...sourceFiles(resolve(repository, "crates/supercov-cli/src"), ".rs"),
   ...sourceFiles(
     resolve(repository, "crates/supercov-engine/src"),
@@ -139,14 +129,6 @@ const productSources = [
 ];
 for (const path of productSources) {
   let source = readFileSync(path, "utf8");
-  if (path.startsWith(resolve(repository, "analyzers/typescript") + sep)) {
-    // The archive adapter uses an in-memory LCOV-shaped line format for the
-    // extracted analyzer. Reading that format is not invoking the lcov tool.
-    // This exception is only for the query-only analyzer, which cannot spawn
-    // any subprocess; the remaining product-oracle checks still apply.
-    assert.doesNotMatch(source, /["'](?:node:)?child_process["']/);
-    source = source.replace(/\blcov\b/g, "internal-line-format");
-  }
   assert.doesNotMatch(
     source,
     forbiddenProductOracle,
@@ -236,5 +218,5 @@ assert.equal(
 );
 
 console.log(
-  `[package-preflight] native launcher, ${runtimeFiles.length} target-language shims, checked post-run analyzer, no legacy engine or product-oracle dependencies`,
+  `[package-preflight] native launcher, ${runtimeFiles.length} target-language shims, Rust assertion-map workflow, no legacy engine or product-oracle dependencies`,
 );

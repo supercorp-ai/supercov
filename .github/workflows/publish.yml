@@ -50,10 +50,8 @@ jobs:
       # The downloaded artifacts are about to create these same-version
       # optional packages, so the publisher intentionally does not fetch them.
       - run: npm ci --omit=optional
-      - run: npm --prefix analyzers/typescript ci --ignore-scripts
-      - run: npm run build:asserted-typescript
       # The release commit is validated locally before tagging. Revalidate the
-      # exact package surface after building the query-only analyzer.
+      # exact native package surface before publishing.
       - run: node scripts/package-preflight.mjs
       - name: Revalidate and publish every exact-version native package
         run: |

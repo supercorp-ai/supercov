@@ -81,7 +81,6 @@ macro_rules! exact_def_path {
 }
 
 const OUTPUT_DIRECTORY: &str = "SUPERCOV_RUST_COMPILER_OUTPUT";
-mod asserted_identities;
 const INSTRUMENT_MIR: &str = "SUPERCOV_RUST_INSTRUMENT_MIR";
 /// Fail the compilation when an obligation cannot be bound exactly, instead
 /// of degrading it to a recorded limitation. Supercov's own gates set this so
@@ -3049,7 +3048,6 @@ fn manifest_json(
     decisions: &BTreeMap<String, DecisionObligation>,
     match_groups: &BTreeMap<String, MatchSelectionObligation>,
     limitations: &[String],
-    assertion_identities: &BTreeMap<String, serde_json::Value>,
 ) -> String {
     let points = points
         .iter()
@@ -3209,7 +3207,7 @@ fn manifest_json(
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"schema\":\"supercov-rust-manifest-candidate-v4\",\"model\":\"rust-source-v1\",\"crate\":\"{}\",\"measurementComplete\":false,\"boundBodies\":{},\"points\":[{}],\"branches\":[{}],\"decisions\":[{}],\"selectionGroups\":[{}],\"limitations\":[{}],\"unmeasuredObligations\":[{}]{}}}\n",
+        "{{\"schema\":\"supercov-rust-manifest-candidate-v4\",\"model\":\"rust-source-v1\",\"crate\":\"{}\",\"measurementComplete\":false,\"boundBodies\":{},\"points\":[{}],\"branches\":[{}],\"decisions\":[{}],\"selectionGroups\":[{}],\"limitations\":[{}],\"unmeasuredObligations\":[{}]}}\n",
         escape(crate_name),
         BOUND_BODIES.load(Ordering::Relaxed),
         points,
@@ -3217,15 +3215,7 @@ fn manifest_json(
         decisions,
         selection_groups,
         limitations,
-        unmeasured,
-        if assertion_identities.is_empty() {
-            String::new()
-        } else {
-            format!(
-                ",\"assertionIdentities\":{}",
-                serde_json::json!(assertion_identities.values().collect::<Vec<_>>())
-            )
-        }
+        unmeasured
     )
 }
 
@@ -3372,9 +3362,6 @@ impl Callbacks for ProbeCallbacks {
             let doctest_path = env::var("UNSTABLE_RUSTDOC_TEST_PATH").ok();
             let doctest_line = env::var("UNSTABLE_RUSTDOC_TEST_LINE").ok();
             let mut points = BTreeMap::<String, PointObligation>::new();
-            let mut assertion_identities = BTreeMap::new();
-            let collect_assertion_identities =
-                asserted_identities::enabled(tcx) && doctest_role.is_none();
             let mut branches = BTreeMap::<String, BranchObligation>::new();
             let mut decisions = BTreeMap::<String, DecisionObligation>::new();
             let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
@@ -3575,19 +3562,6 @@ impl Callbacks for ProbeCallbacks {
                 };
                 if !synthetic_merged_wrapper {
                     let body = tcx.hir_body_owned_by(owner);
-                    if collect_assertion_identities
-                        && kind == DefKind::Fn
-                        && let Some(identity) = &function_identity
-                        && identity.provenance == "authored-source"
-                    {
-                        asserted_identities::collect(
-                            tcx,
-                            owner,
-                            &identity.id,
-                            &crate_name_string,
-                            &mut assertion_identities,
-                        );
-                    }
                     let mut collector = HirManifestCollector {
                         tcx,
                         def_id,
@@ -3696,7 +3670,6 @@ impl Callbacks for ProbeCallbacks {
                 &decisions,
                 &match_groups,
                 &limitations,
-                &assertion_identities,
             );
             let Ok(mut manifest_output) = OpenOptions::new()
                 .create_new(true)
@@ -3744,11 +3717,6 @@ impl Callbacks for ProbeCallbacks {
                     std::iter::once(group.identity.source.key.clone())
                         .chain(group.arms.iter().map(|arm| arm.body_source.key.clone()))
                 }))
-                .chain(
-                    assertion_identities
-                        .values()
-                        .filter_map(|record| record["sourceKey"].as_str().map(str::to_owned)),
-                )
                 .collect::<BTreeSet<_>>();
             let snapshots = source_snapshots_json(&crate_name_string, &required_sources)
                 .unwrap_or_else(|error| tcx.dcx().fatal(error));

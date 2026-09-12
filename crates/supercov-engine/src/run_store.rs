@@ -24,7 +24,7 @@ use crate::{
 
 const MAX_RUN_METADATA_BYTES: u64 = 1024 * 1024;
 pub const RUST_ANALYSIS_ABI_VERSION: u32 = 1;
-pub const RUST_QUERY_PRODUCER_ABI_VERSION: u32 = 2;
+pub const RUST_QUERY_PRODUCER_ABI_VERSION: u32 = 3;
 pub const RUST_QUERY_INDEX_FILE: &str = "query-index.v1.bin";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

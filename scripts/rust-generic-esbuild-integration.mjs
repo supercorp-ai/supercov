@@ -98,8 +98,8 @@ try {
   assert.equal(summary.data.coverage.conditionCoveragePct, 100);
   assert.equal(summary.data.coverage.lines.percentage, 100);
   assert.equal(summary.data.coverage.branches.percentage, 100);
-  assert.equal(summary.data.confidence.lines.asserted, 3);
-  assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 2);
+  assert.equal(summary.data.confidence.lines.asserted, 0);
+  assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 0);
   assert.deepEqual(
     summary.data.coverageByRunner.map(entry => entry.runner),
     ['node:test'],

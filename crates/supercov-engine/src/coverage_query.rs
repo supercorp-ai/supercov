@@ -315,6 +315,8 @@ pub struct CoverageDiagnostic {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageSummaryData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertion_coverage: Option<serde_json::Value>,
     pub run: String,
     #[serde(default)]
     pub command: Vec<String>,
@@ -2453,6 +2455,7 @@ pub fn coverage_summary_query(
         && !options.stale
         && structurally_complete;
     Ok(CoverageSummaryData {
+        assertion_coverage: None,
         run: options.run.into(),
         command: Vec::new(),
         hints: Vec::new(),

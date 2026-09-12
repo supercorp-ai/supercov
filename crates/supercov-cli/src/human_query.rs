@@ -527,6 +527,17 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     data.coverage.conditions
                 ),
             ]);
+            if let Some(assertions) = &data.assertion_coverage {
+                if let Some(pct) = assertions["summary"]["statements"]["percentage"].as_f64() {
+                    lines.push(format!("  Assertions {:.1}% ({}/{}) — agent-assessed statements, whole archived run; {} dirty flow(s)", pct,
+                        assertions["summary"]["statements"]["asserted"], assertions["summary"]["statements"]["total"], assertions["summary"]["dirtyFlows"]));
+                } else {
+                    lines.push(format!(
+                        "  Assertions unavailable: {}",
+                        assertions.get("error").unwrap_or(&serde_json::Value::Null)
+                    ));
+                }
+            }
             if data.coverage_by_kind.iter().any(|kind| kind.tests > 0) {
                 lines.extend([String::new(), "By test kind".into()]);
                 for kind in data.coverage_by_kind.iter().filter(|kind| kind.tests > 0) {
@@ -601,10 +612,6 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     String::new(),
                     "Evidence confidence".into(),
                     format!(
-                        "  Linked to passing assertions      {} lines",
-                        count(confidence.lines.asserted)
-                    ),
-                    format!(
                         "  Linked to test actions             {} lines",
                         count(confidence.lines.action)
                     ),
@@ -612,11 +619,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         "  Execution only                     {} lines",
                         count(confidence.lines.executed)
                     ),
-                    format!(
-                        "  MC/DC linked to assertions         {} conditions",
-                        count(confidence.assertion_covered_mcdc_conditions)
-                    ),
-                    "  Linkage indicates evidence strength; it does not prove that an assertion is correct.".into(),
+                    "  Assertion coverage comes from the optional reviewed assertions.json map."
+                        .into(),
                 ]);
             }
             if !data.diagnostics.is_empty() {
@@ -902,31 +906,17 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         ];
                         lines.extend(decision.conditions.iter().map(|condition| {
                             format!(
-                                "C{} {}{}: {}",
+                                "C{} {}: {}",
                                 condition.index + 1,
                                 if condition.covered {
                                     "covered"
                                 } else {
                                     "MISSING"
                                 },
-                                if condition.assertion_covered == Some(true) {
-                                    " + asserted"
-                                } else {
-                                    ""
-                                },
                                 condition.source,
                             )
                         }));
-                        lines.push(format!(
-                            "confidence {}; asserted MC/DC {}/{}",
-                            decision.confidence.level,
-                            decision
-                                .conditions
-                                .iter()
-                                .filter(|condition| condition.assertion_covered == Some(true))
-                                .count(),
-                            decision.conditions.len()
-                        ));
+                        lines.push(format!("confidence {}", decision.confidence.level));
                         lines.push("vectors:".into());
                         if decision.vector_observations.is_empty() {
                             lines.push("  none".into());

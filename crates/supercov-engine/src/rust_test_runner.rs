@@ -1145,14 +1145,14 @@ pub(crate) fn snapshot(
                         return Err(RustTestRunnerError::UnknownProbe(id));
                     };
                     let witnessed = pending.remove(&thread).unwrap_or_default();
-                    if witnessed.is_empty() {
-                        continue;
-                    }
                     let phase_id = format!("{attempt}:assertion:{sequence}");
                     phases.push(CoveragePhase {
                         id: phase_id.clone(),
                         kind: "assertion".into(),
-                        operation: format!("{}:{}", point.file, point.line),
+                        operation: format!(
+                            "Rust assertion at {}:{}:{}",
+                            point.file, point.line, point.column
+                        ),
                         source: Some(point.source.clone()),
                         caused_by_phase_id: None,
                         started_at_ms: witnessed.first().map_or(sequence, |record| record.sequence),
@@ -2233,7 +2233,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_a_passing_assertion_witnessed_is_marked_as_such() {
+    fn assertion_occurrences_are_retained_without_automatic_asserted_credit() {
         // Records are appended in execution order, so what a thread wrote
         // before it passed an assertion was in scope for that check. Without
         // this every Rust line read "execution only", however thoroughly the
@@ -2325,8 +2325,8 @@ mod tests {
                 .map(|entry| entry.confidence.level.clone())
                 .unwrap_or_else(|| panic!("no line {line}"))
         };
-        // `value * 2` was checked; `value + 1` only ran.
-        assert_eq!(level(3), "asserted");
+        // Both executed. Assertion meaning is supplied later by assertions.json.
+        assert_eq!(level(3), "executed");
         assert_eq!(level(6), "executed");
         fs::remove_dir_all(&root).ok();
     }

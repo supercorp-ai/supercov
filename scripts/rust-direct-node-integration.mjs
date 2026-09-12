@@ -71,8 +71,8 @@ try {
   assert.equal(summary.data.complete, true);
   assert.equal(summary.data.tests, 5);
   assert.equal(summary.data.coverage.conditionCoveragePct, 100);
-  assert.equal(summary.data.confidence.lines.asserted, 3);
-  assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 2);
+  assert.equal(summary.data.confidence.lines.asserted, 0);
+  assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 0);
   assert.equal(summary.data.attribution.serverExplicit, 20);
   assert.equal(summary.data.attribution.serverFallback, 0);
   const expectTest = rust('__query-stored-run', {
@@ -138,8 +138,8 @@ try {
   assert.equal(commonjsSummary.data.tests, 4);
   assert.equal(commonjsSummary.data.coverage.conditionCoveragePct, 100);
   assert.equal(commonjsSummary.data.coverage.statements.percentage, 75);
-  assert.equal(commonjsSummary.data.confidence.lines.asserted, 3);
-  assert.equal(commonjsSummary.data.confidence.assertionCoveredMcdcConditions, 2);
+  assert.equal(commonjsSummary.data.confidence.lines.asserted, 0);
+  assert.equal(commonjsSummary.data.confidence.assertionCoveredMcdcConditions, 0);
   assert.equal(commonjsSummary.data.attribution.serverFallback, 0);
   const commonjsAll = rust('__query-stored-run', {
     root: commonjsProject,

@@ -231,6 +231,11 @@ pub fn run_direct_python(
             &FrontendIntegrityInputs::embedded_python(),
         )
         .map_err(|error| error.to_string())?;
+        let assertion_inputs = crate::assertion_inputs::capture(
+            &root,
+            "python",
+            python_integrity_inputs(&project.files, &request.command).assertion_paths(),
+        )?;
         let python_directory = work_directory.join("python");
         let runtime_directory = python_directory.join("runtime");
         let evidence_directory = python_directory.join("evidence");
@@ -306,6 +311,7 @@ pub fn run_direct_python(
         let archive_path = work_directory.join("evidence.raw.gz");
         let entries = run.archive_entries().map_err(|error| error.to_string())?;
         let serialized_ms = elapsed_ms(publication_started) - joined_ms;
+        let entries = crate::assertion_inputs::append(entries, &assertion_inputs)?;
         let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
         if verbose {
             writeln!(

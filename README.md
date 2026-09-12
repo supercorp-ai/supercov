@@ -43,22 +43,22 @@ npx supercov -- python -m unittest
 npx supercov -- bundle exec rspec
 ```
 
-## Inspect assertion evidence (experimental JS/TS)
+## Map what assertions check
 
-After a run, inspect what existing assertions appear to check:
+After a regular run, an agent can author the optional assertion map:
 
 ```sh
-npx supercov runs latest asserted --limit 5
-npx supercov runs latest asserted --pragmas --json
-npx supercov runs latest asserted --evidence /tests --limit 5 --json
+npx supercov runs latest assertions init --json
+# Edit the returned assertions.json path, then acknowledge reviewed flows:
+npx supercov runs latest assertions review --all
+npx supercov runs latest assertions
 ```
 
-This npm-only query uses the run archive and matching source; it adds no new
-test-time instrumentation. It requires a compatible project TypeScript compiler
-API (5.8.3 is tested; 7.0.2 is not supported). Results are candidates, not proof
-that changes are safe or a verified assertion percentage. Follow
-[`assertion-evidence.md`](docs/assertion-evidence.md) for provenance, optional
-assertion hints, pagination, and limitations.
+After code or tests change, run tests again and use `assertions init --from
+<previous-run>` to reuse the previous map and identify dirty flows. Rust owns
+validation, change tracking and reporting; the agent supplies semantic reasoning.
+The score is agent-assessed and separate from MC/DC. See
+[assertion maps](docs/assertion-maps.md) for the format, language support and limits.
 
 ## Give Supercov a job
 

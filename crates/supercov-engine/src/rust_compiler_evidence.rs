@@ -93,13 +93,7 @@ struct SnapshotBuilder {
 }
 
 impl SnapshotBuilder {
-    fn hit(
-        &mut self,
-        id: &str,
-        phase_id: Option<&str>,
-        statement_id: Option<&str>,
-        timestamp_ms: i64,
-    ) {
+    fn hit(&mut self, id: &str, phase_id: Option<&str>, timestamp_ms: i64) {
         self.hits.insert(id.into());
         self.events.push(RuntimeEvent {
             event_type: "hit".into(),
@@ -110,7 +104,7 @@ impl SnapshotBuilder {
             // phase identity, never this value, owns causal attribution.
             timestamp_ms,
             phase_id: phase_id.map(str::to_owned),
-            statement_id: statement_id.map(str::to_owned),
+            statement_id: None,
             environment: "rust".into(),
         });
     }
@@ -120,7 +114,6 @@ impl SnapshotBuilder {
         id: &str,
         vector: McdcVector,
         phase_id: Option<&str>,
-        statement_id: Option<&str>,
         timestamp_ms: i64,
     ) {
         self.decisions
@@ -133,7 +126,7 @@ impl SnapshotBuilder {
             vector: Some(vector),
             timestamp_ms,
             phase_id: phase_id.map(str::to_owned),
-            statement_id: statement_id.map(str::to_owned),
+            statement_id: None,
             environment: "rust".into(),
         });
     }
@@ -211,10 +204,6 @@ pub fn project_rust_compiler_evidence(
     let mut background = SnapshotBuilder::default();
 
     for record in &read.observations {
-        let statement_id = phases
-            .assertion_statement_by_context
-            .get(&(record.process_id, record.context_id))
-            .map(String::as_str);
         let (builder, phase_id) = builder_and_phase(
             record.context_id,
             base_context_id,
@@ -230,7 +219,7 @@ pub fn project_rust_compiler_evidence(
                 if !points_and_alternatives.contains(id.as_str()) {
                     return Err(RustCompilerEvidenceError::UnknownProbe(id.clone()));
                 }
-                builder.hit(id, phase_id, statement_id, base_phase.started_at_ms);
+                builder.hit(id, phase_id, base_phase.started_at_ms);
             }
             RustProbeObservation::Decision {
                 id,
@@ -256,12 +245,7 @@ pub fn project_rust_compiler_evidence(
                         } else {
                             &selection.short_circuited_id
                         };
-                        builder.hit(
-                            alternative_id,
-                            phase_id,
-                            statement_id,
-                            base_phase.started_at_ms,
-                        );
+                        builder.hit(alternative_id, phase_id, base_phase.started_at_ms);
                     }
                 }
                 builder.decision(
@@ -271,17 +255,12 @@ pub fn project_rust_compiler_evidence(
                         outcome: *outcome,
                     },
                     phase_id,
-                    statement_id,
                     base_phase.started_at_ms,
                 );
             }
         }
     }
     for record in &read.ordinal_hits {
-        let statement_id = phases
-            .assertion_statement_by_context
-            .get(&(record.process_id, record.context_id))
-            .map(String::as_str);
         let (builder, phase_id) = builder_and_phase(
             record.context_id,
             base_context_id,
@@ -299,7 +278,7 @@ pub fn project_rust_compiler_evidence(
             return Err(RustCompilerEvidenceError::UnknownOrdinal(record.ordinal));
         };
         for id in ids {
-            builder.hit(id, phase_id, statement_id, base_phase.started_at_ms);
+            builder.hit(id, phase_id, base_phase.started_at_ms);
         }
     }
 
@@ -471,96 +450,6 @@ mod tests {
                 .all(|event| event.phase_id == Some(projection.assertion_phases[0].id.clone()))
         );
         assert!(!projection.health.is_complete());
-    }
-
-    #[test]
-    fn statement_locations_are_exact_context_scoped_and_not_guessed() {
-        use crate::rust_probe_transport::{RustThreadPhase, rust_thread_context_id};
-        let mut normalized = normalized();
-        let meta = normalized.manifest.decisions[0].clone();
-        let statement = PointMeta {
-            id: "rs:statement:555555555555555555555555".into(),
-            kind: PointKind::Statement,
-            file: meta.file.clone(),
-            line: meta.line,
-            column: meta.column,
-            source: format!("{};", meta.source),
-            label: None,
-        };
-        normalized.manifest.points.push(statement.clone());
-        let assertion = rust_assertion_context_id(BASE, ASSERTION, 0).unwrap();
-        let child = rust_thread_context_id(assertion, 1);
-        let mut read = RustTransportRead {
-            phases: vec![RustPhaseContext {
-                process_id: 1,
-                child_context_id: assertion,
-                parent_context_id: BASE,
-                invocation_nonce: 0,
-                decision_id: ASSERTION.into(),
-            }],
-            thread_phases: vec![RustThreadPhase {
-                process_id: 1,
-                child_context_id: child,
-                parent_context_id: assertion,
-                invocation_nonce: 1,
-                commit_index: 0,
-            }],
-            ordinal_hits: [BASE, assertion, child, 0]
-                .into_iter()
-                .map(|context_id| RustOrdinalHit {
-                    process_id: 1,
-                    context_id,
-                    ordinal: 10,
-                })
-                .collect(),
-            ..RustTransportRead::empty()
-        };
-        read.ordinal_hits.push(RustOrdinalHit {
-            process_id: 2,
-            context_id: assertion,
-            ordinal: 10,
-        });
-        let project = |normalized: &NormalizedRustCompilerManifest| {
-            project_rust_compiler_evidence(BASE, &base_phase(), &read, normalized).unwrap()
-        };
-        let output = project(&normalized);
-        let events = output.attributed.events;
-        assert_eq!(events[0].statement_id, None);
-        assert_eq!(events[1].statement_id.as_deref(), Some("src/lib.rs:4:4"));
-        assert_eq!(
-            events[2].statement_id, None,
-            "an inherited child thread is not the caller statement"
-        );
-        assert_eq!(
-            events[1].phase_id, events[2].phase_id,
-            "phase linkage is deliberately weaker"
-        );
-        assert_eq!(output.background.events[0].statement_id, None);
-        assert_eq!(
-            events[3].statement_id, None,
-            "inherited subprocess work is not the caller statement"
-        );
-        // Unknown assertion outcome does not erase the execution location.
-        assert_eq!(output.assertion_phases[0].status, None);
-        normalized.manifest.unmeasured.push(statement.id);
-        assert!(
-            project(&normalized)
-                .attributed
-                .events
-                .iter()
-                .all(|e| e.statement_id.is_none())
-        );
-        normalized.manifest.unmeasured.clear();
-        normalized.manifest.points.last_mut().unwrap().source =
-            "let x = { assert!(value); 42 };".into();
-        assert!(
-            project(&normalized)
-                .attributed
-                .events
-                .iter()
-                .all(|e| e.statement_id.is_none()),
-            "no enclosing-statement guess"
-        );
     }
 
     #[test]

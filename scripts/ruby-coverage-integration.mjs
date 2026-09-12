@@ -209,7 +209,7 @@ try {
   const testUnitFile = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
   assert.doesNotMatch(JSON.stringify(testUnitFile), /ruby-runner-adapter-failed/, 'the test-unit adapter installed completely');
   const testUnitSummary = query(['runs', 'latest'], environment);
-  assert.ok(testUnitSummary.confidence.lines.asserted > 0, `test-unit assertions link the evidence before them: ${JSON.stringify(testUnitSummary.confidence)}`);
+  assert.equal(testUnitSummary.confidence.lines.asserted, 0, "Only assertions.json awards assertion credit");
 
   // Thread-parallel Minitest: probes stay per test, stdlib deltas that
   // overlapped go to the run and the limitation says so.

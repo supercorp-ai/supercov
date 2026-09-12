@@ -15,8 +15,8 @@ if (summary.tests !== 4 || summary.coverageByRunner?.[0]?.runner !== "node:test"
   throw new Error(`expected four attributed node:test tests, received ${JSON.stringify(summary)}`);
 if (summary.coverage.conditionCoveragePct !== 100)
   throw new Error(`expected 100% MC/DC, received ${summary.coverage.conditionCoveragePct}%`);
-if (summary.confidence.lines.asserted === 0)
-  throw new Error("expected node:assert argument execution to be assertion-attributed");
-if (summary.confidence.assertionCoveredMcdcConditions !== summary.coverage.conditions)
-  throw new Error("expected every node:test MC/DC witness to be assertion-linked");
-console.log(`[node:test] run ${runId}: four exact test scopes, 100% assertion-linked MC/DC`);
+if (summary.confidence.lines.asserted !== 0)
+  throw new Error("ordinary run must not infer assertion coverage");
+if (summary.confidence.assertionCoveredMcdcConditions !== 0)
+  throw new Error("MC/DC witnesses must not imply assertion coverage");
+console.log(`[node:test] run ${runId}: four exact test scopes, 100% MC/DC; no automatic assertion credit`);

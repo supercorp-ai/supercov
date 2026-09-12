@@ -103,6 +103,37 @@ pub struct ExplicitIntegrityInputs {
     pub execution_configuration: Vec<u8>,
 }
 
+impl ExplicitIntegrityInputs {
+    pub(crate) fn assertion_paths(&self) -> Vec<PathBuf> {
+        self.source_files
+            .iter()
+            .chain(&self.test_files)
+            .chain(&self.dependency_files)
+            .chain(&self.configuration_files)
+            .cloned()
+            .collect()
+    }
+}
+
+pub(crate) fn javascript_assertion_paths(
+    root: &Path,
+    project: &CoverageProject,
+) -> Result<Vec<PathBuf>, IntegrityError> {
+    let mut paths = test_files(root)?;
+    paths.extend(dependency_files(root)?);
+    paths.extend(configuration_files(root, project)?);
+    paths.extend(project.source_files.iter().map(|p| root.join(p)));
+    paths.extend(
+        project
+            .source_scope
+            .entries
+            .iter()
+            .filter(|e| !e.is_generated_output())
+            .map(|e| root.join(&e.file)),
+    );
+    Ok(paths)
+}
+
 #[derive(Debug)]
 pub enum IntegrityError {
     Io { path: PathBuf, source: io::Error },

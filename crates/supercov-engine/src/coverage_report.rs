@@ -98,10 +98,8 @@ pub struct RuntimeEvent {
     pub timestamp_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_id: Option<String>,
-    /// Position ("file:line:column") of the test-file statement that was executing when the
-    /// event was recorded; set by the statement markers the assertion pass adds to test modules.
-    /// Rust currently supplies only exact assertion-as-statement invocations on the same
-    /// process/context, not preceding producer statements or inherited thread/process locations.
+    /// Legacy test-statement location retained for reading historical archives.
+    /// The assertion-map workflow does not emit test-statement markers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement_id: Option<String>,
     pub environment: String,
@@ -317,6 +315,8 @@ pub struct DecisionResult {
 pub struct PointResult {
     pub meta: PointMeta,
     pub covered: bool,
+    #[serde(skip)]
+    pub measured: bool,
     pub tests: Vec<String>,
     pub phases: Vec<String>,
     pub confidence: CoverageConfidence,
@@ -1102,19 +1102,10 @@ fn confidence_for(
     explicit_phase_ids: impl IntoIterator<Item = String>,
     tests: &HashMap<String, MutableTest>,
     phases: &HashMap<String, MutablePhase>,
-    asserted_phase_ids: &BTreeSet<String>,
 ) -> CoverageConfidence {
     let test_ids = test_ids.into_iter().collect::<BTreeSet<_>>();
     let phase_ids = phase_ids.into_iter().collect::<BTreeSet<_>>();
     let explicit_phase_ids = explicit_phase_ids.into_iter().collect::<BTreeSet<_>>();
-    let asserted_phases = explicit_phase_ids
-        .iter()
-        .filter(|id| asserted_phase_ids.contains(*id))
-        .collect::<Vec<_>>();
-    let asserted_tests = asserted_phases
-        .iter()
-        .filter_map(|id| phases.get(*id).map(|phase| phase.test.clone()))
-        .collect::<BTreeSet<_>>();
     let provenances = test_ids
         .iter()
         .filter_map(|id| tests.get(id).map(|test| &test.provenance))
@@ -1141,8 +1132,6 @@ fn confidence_for(
     });
     let level = if test_ids.is_empty() {
         "unexecuted"
-    } else if !asserted_tests.is_empty() {
-        "asserted"
     } else if has_action {
         "action"
     } else {
@@ -1160,9 +1149,9 @@ fn confidence_for(
         level: level.into(),
         setup_only: only("setup", "setup"),
         background_only: only("background", "background"),
-        asserted: !asserted_tests.is_empty(),
+        asserted: false,
         tests: sorted(&test_ids),
-        asserted_tests: sorted(&asserted_tests),
+        asserted_tests: vec![],
         runners: sorted(&runners),
         e2e: kinds.contains("e2e"),
         kinds: sorted(&kinds),
@@ -1522,15 +1511,9 @@ fn create_coverage_view_with_model(
         }
     }
 
-    let mut asserted_phase_ids = BTreeSet::new();
-    for phase in phases_by_id.values() {
-        if phase.phase.kind == "assertion" && phase.phase.status.as_deref() == Some("passed") {
-            asserted_phase_ids.insert(phase.phase.id.clone());
-            if let Some(cause) = &phase.phase.caused_by_phase_id {
-                asserted_phase_ids.insert(cause.clone());
-            }
-        }
-    }
+    // Legacy confidence fields remain readable for archive compatibility.
+    // Execution inside/before a passing assertion does not establish that
+    // an assertion checks a statement. Only the agent-authored map awards it.
 
     decision_metadata.sort_by(|left, right| {
         left.file
@@ -1549,7 +1532,6 @@ fn create_coverage_view_with_model(
                 sorted(&observation.explicit_phases),
                 &tests_by_id,
                 &phases_by_id,
-                &asserted_phase_ids,
             );
             observations.push(VectorObservation {
                 vector: observation.vector,
@@ -1584,17 +1566,7 @@ fn create_coverage_view_with_model(
                     observations[witness.second].tests.clone(),
                 ]
             });
-            let assertion_covered = (0..observations.len()).any(|left| {
-                ((left + 1)..observations.len()).any(|right| {
-                    observations[left].confidence.asserted
-                        && observations[right].confidence.asserted
-                        && crate::coverage_analysis::is_independence_pair(
-                            &observations[left].vector,
-                            &observations[right].vector,
-                            index,
-                        )
-                })
-            });
+            let assertion_covered = false;
             conditions.push(ConditionResult {
                 index,
                 source: source.clone(),
@@ -1615,7 +1587,6 @@ fn create_coverage_view_with_model(
                 .flat_map(|observation| observation.explicit_phases.clone()),
             &tests_by_id,
             &phases_by_id,
-            &asserted_phase_ids,
         );
         decisions.push(DecisionResult {
             executed: !vectors.is_empty(),
@@ -1641,6 +1612,7 @@ fn create_coverage_view_with_model(
                 .cloned()
                 .unwrap_or_default();
             PointResult {
+                measured: !manifest.unmeasured.contains(&meta.id),
                 covered: tests_by_hit.contains_key(&meta.id),
                 confidence: confidence_for(
                     sorted(&tests),
@@ -1648,7 +1620,6 @@ fn create_coverage_view_with_model(
                     sorted(&explicit),
                     &tests_by_id,
                     &phases_by_id,
-                    &asserted_phase_ids,
                 ),
                 meta,
                 tests: sorted(&tests),
@@ -1690,7 +1661,6 @@ fn create_coverage_view_with_model(
                             sorted(&explicit),
                             &tests_by_id,
                             &phases_by_id,
-                            &asserted_phase_ids,
                         ),
                     }
                 })
@@ -1774,7 +1744,6 @@ fn create_coverage_view_with_model(
                     sorted(&explicit_ids),
                     &tests_by_id,
                     &phases_by_id,
-                    &asserted_phase_ids,
                 ),
                 kinds: sorted(&kinds),
             }
@@ -2184,15 +2153,9 @@ fn validate_rust_compiler_scope(manifest: &CoverageManifest) -> Result<(), Repor
         "model",
         "sourceFingerprint",
     ]);
-    if let Some(value) = scope.get("assertionIdentities") {
+    // Historical experimental metadata is ignored, never used for credit.
+    if scope.contains_key("assertionIdentities") {
         expected.insert("assertionIdentities");
-        let identities: crate::rust_compiler_manifest::ResolvedRustAssertionIdentities =
-            serde_json::from_value(value.clone()).map_err(|e| {
-                ReportError::InvalidArchive(format!("invalid assertion identities: {e}"))
-            })?;
-        identities.validate(manifest).map_err(|e| {
-            ReportError::InvalidArchive(format!("invalid assertion identities: {e}"))
-        })?;
     }
     if scope.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected
         || scope.get("language").and_then(Value::as_str) != Some("rust")
@@ -2664,7 +2627,7 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_overlap_cannot_upgrade_assertion_confidence() {
+    fn neither_timestamp_nor_explicit_phase_links_award_assertion_credit() {
         let manifest = CoverageManifest {
             unmeasured: Vec::new(),
             decisions: vec![],
@@ -2701,8 +2664,8 @@ mod tests {
 
         attempt.runtime[0].events[0].phase_id = Some(phase.id);
         let explicit = create_coverage_view(&manifest, &[attempt], "time").unwrap();
-        assert_eq!(explicit.points[0].confidence.level, "asserted");
-        assert!(explicit.points[0].confidence.asserted);
+        assert_eq!(explicit.points[0].confidence.level, "executed");
+        assert!(!explicit.points[0].confidence.asserted);
     }
 
     #[test]
@@ -3200,15 +3163,6 @@ mod tests {
             "schema":"supercov-rust-assertion-identities-v1", "records":[]
         });
         validate_rust_compiler_scope(&extended).unwrap();
-        for value in [
-            Value::Null,
-            serde_json::json!({"schema":"unknown", "records":[]}),
-            serde_json::json!({"schema":"supercov-rust-assertion-identities-v1", "records":[], "extra":true}),
-            serde_json::json!({"schema":"supercov-rust-assertion-identities-v1", "records":[{}]}),
-        ] {
-            extended.scope.as_mut().unwrap()["assertionIdentities"] = value;
-            assert!(validate_rust_compiler_scope(&extended).is_err());
-        }
 
         manifest.scope.as_mut().unwrap()["sourceFingerprint"]["digest"] =
             Value::String("not-a-digest".into());

@@ -30,7 +30,6 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npm --prefix analyzers/typescript ci --ignore-scripts
       - run: npm run check
       - run: npm run build
       - run: node ../../../bin/supercov.js -- npm test

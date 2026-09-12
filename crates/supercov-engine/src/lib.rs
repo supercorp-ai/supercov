@@ -3,7 +3,9 @@
 //! are owned here.
 
 pub mod agent_json;
-pub mod asserted_coverage;
+pub mod assertion_inputs;
+pub mod assertion_map;
+pub mod assertion_store;
 pub mod build_cache;
 pub mod child_signal_guard;
 pub mod coverage_analysis;
@@ -18,7 +20,6 @@ pub mod integrity;
 pub mod javascript_frontend;
 pub mod javascript_run;
 pub mod js_instrumenter;
-pub mod js_sites;
 pub mod lifecycle;
 pub mod orchestration;
 pub mod probe_v2;
@@ -39,8 +40,6 @@ pub mod ruby_run;
 pub mod run_merge;
 pub mod run_query;
 pub mod run_store;
-pub mod rust_asserted_coverage;
-pub mod rust_asserted_source;
 pub mod rust_build_cache;
 mod rust_cargo_config_model;
 pub mod rust_cargo_configuration;

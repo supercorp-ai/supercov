@@ -143,7 +143,7 @@ fn collect_project_inputs(
     Ok(())
 }
 
-fn collect_integrity_inputs(
+pub(crate) fn collect_integrity_inputs(
     root: &Path,
     command: &[String],
 ) -> Result<ExplicitIntegrityInputs, String> {
@@ -255,6 +255,8 @@ pub fn run_direct_rust(
 
         let adapter_started = Instant::now();
         let integrity_inputs = collect_integrity_inputs(&root, &request.command)?;
+        let assertion_inputs =
+            crate::assertion_inputs::capture(&root, "rust", integrity_inputs.assertion_paths())?;
         let integrity = create_explicit_run_integrity(
             &root,
             &integrity_inputs,
@@ -359,7 +361,10 @@ pub fn run_direct_rust(
             .join(&request.run_id)
             .join("evidence.raw.gz");
         let raw = write_archive(
-            run.archive_entries().map_err(|error| error.to_string())?,
+            crate::assertion_inputs::append(
+                run.archive_entries().map_err(|error| error.to_string())?,
+                &assertion_inputs,
+            )?,
             &archive_path,
         )
         .map_err(|error| error.to_string())?;

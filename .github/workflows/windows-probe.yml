@@ -46,8 +46,6 @@ jobs:
       # them, so the circular optional dependency is omitted here as it is
       # everywhere else that installs before a release.
       - run: npm ci --omit=optional
-      - run: npm --prefix analyzers/typescript ci --ignore-scripts
-      - run: npm run build:asserted-typescript
       - run: cargo build --release --target ${{ matrix.target }} -p supercov
       - name: Packed install and real Rust run, first pass
         env:

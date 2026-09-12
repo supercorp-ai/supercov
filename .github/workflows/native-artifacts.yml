@@ -85,8 +85,6 @@ jobs:
       # publishes them. Install the reproducible JS toolchain while omitting
       # that circular optional dependency.
       - run: npm ci --omit=optional
-      - run: npm --prefix analyzers/typescript ci --ignore-scripts
-      - run: npm run build:asserted-typescript
       - run: node scripts/package-preflight.mjs
       - name: Read package version
         run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'SUPERCOV_VERSION=' + require('./package.json').version + '\n')"
@@ -105,9 +103,6 @@ jobs:
       - name: Packed install and real Rust run
         if: matrix.packedInstall
         run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
-      - name: Packed JS/TS assertion queries and source freshness
-        if: matrix.packedInstall
-        run: node scripts/asserted-packed-integration.mjs --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
       - name: Stage native package
         run: node scripts/package-native.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out native-dist
       - name: Pack native package

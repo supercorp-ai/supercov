@@ -127,8 +127,8 @@ try {
   assert.equal(summary.data.coverage.conditionCoveragePct, 100);
   assert.equal(summary.data.coverage.lines.percentage, 100);
   assert.equal(summary.data.coverage.branches.percentage, 100);
-  assert.equal(summary.data.confidence.lines.asserted, 7);
-  assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 3);
+  assert.equal(summary.data.confidence.lines.asserted, 0);
+  assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 0);
 
   // A project may intentionally compile inside its test command. With no
   // separately declared build script this is a Direct adapter run, so its

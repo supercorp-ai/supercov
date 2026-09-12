@@ -59,18 +59,19 @@ The `line` query is useful before writing a test because it shows which tests
 already reach that line. Extending a nearby test is often better than adding a
 duplicate.
 
-For supported JS/TS projects, inspect assertion evidence before adding tests:
+To inspect what tests assert, initialize the optional agent-authored map:
 
 ```sh
-npx supercov runs latest asserted --file app/checkout/session.ts --limit 5 --json
-npx supercov runs latest asserted --pragmas --json
+npx supercov runs latest assertions init --json
+npx supercov runs latest assertions inventory --json
 ```
 
-This experimental post-run query needs the matching source and a compatible
-project TypeScript API. An `evident` candidate is not a proof of safety; keep
-test gaps separate from analysis limits. Follow the returned evidence pointers
-and `pagination.nextOffset`, pinning `--analysis` and the run id while paging.
-See [assertion evidence](assertion-evidence.md) for requirements and examples.
+Read the run's frozen sources, edit its `assertions.json`, declare credited nodes
+and broader watch inputs, then acknowledge reviewed flows with `assertions review
+--all` or repeated `--flow ASSERTION/FLOW`. After the next normal run, use
+`assertions init --from <previous-run>` and repair only affected entries. Supercov
+validates references and freshness, while the agent owns semantic meaning.
+See [assertion maps](assertion-maps.md) for the contract and language limits.
 
 ## A complete prompt for longer runs
 

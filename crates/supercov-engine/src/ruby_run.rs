@@ -207,6 +207,11 @@ pub fn run_direct_ruby(
             &FrontendIntegrityInputs::embedded_ruby(),
         )
         .map_err(|error| error.to_string())?;
+        let assertion_inputs = crate::assertion_inputs::capture(
+            &root,
+            "ruby",
+            ruby_integrity_inputs(&project.files, &request.command).assertion_paths(),
+        )?;
         let ruby_directory = work_directory.join("ruby");
         let runtime_directory = ruby_directory.join("runtime");
         let evidence_directory = ruby_directory.join("evidence");
@@ -288,6 +293,7 @@ pub fn run_direct_ruby(
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
         let entries = run.archive_entries().map_err(|error| error.to_string())?;
+        let entries = crate::assertion_inputs::append(entries, &assertion_inputs)?;
         let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(&root, &ruby_directory).map_err(|error| error.to_string())?;
         let evidence_publication_ms = elapsed_ms(publication_started);

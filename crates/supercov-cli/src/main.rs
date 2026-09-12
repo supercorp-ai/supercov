@@ -44,7 +44,7 @@ use supercov_engine::{
 };
 use time::{OffsetDateTime, macros::format_description};
 
-mod asserted_query;
+mod assertions_query;
 mod human_query;
 mod public_query;
 
@@ -2065,6 +2065,13 @@ fn execute_public_query(
                         &mut output.data
                     {
                         data.command.clone_from(&run.metadata.command);
+                        if run.directory.join(supercov_engine::assertion_store::MAP_FILE).exists() {
+                            data.assertion_coverage = Some(match supercov_engine::assertion_store::report(run) {
+                                Ok(report) => serde_json::json!({"summary":report["summary"],"basis":report["basis"],"validationErrors":report["validationErrors"],"scope":"whole archived run; independent of structural query filters"}),
+                                Err(error) => serde_json::json!({"available":false,"error":error}),
+                            });
+                        }
+
                         let observed_kinds = data
                             .coverage_by_kind
                             .iter()
@@ -2090,8 +2097,8 @@ fn execute_public_query(
 }
 
 fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
-    if command == "runs" && arguments.get(1).is_some_and(|a| a == "asserted") {
-        return asserted_query::command(&arguments);
+    if command == "runs" && arguments.get(1).is_some_and(|a| a == "assertions") {
+        return assertions_query::command(&arguments);
     }
     if let Some(help) = help_for(command, &arguments) {
         print!("{help}");
