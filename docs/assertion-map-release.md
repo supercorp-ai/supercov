@@ -10,7 +10,8 @@ validation; no release tag or publication has been made.
 
 ## Automatic map creation follow-up, 2026-09-12
 
-Each normal run now publishes `assertions.json` and `assertions.state.json`
+Code commit `c6811f4` makes each normal run publish `assertions.json` and
+`assertions.state.json`
 together with its evidence. The newest available map with the same command and
 language is carried automatically. `assertions init` is removed. Fresh assertions
 start unmapped; exact moves retain identity; changed or ambiguous claims require
@@ -31,9 +32,12 @@ automatically inherited the 544 assertion entries from `run_a7a997bb35c093ec`.
 No initialization command was used. Its 790 measured statement anchors resolve;
 the inventory is still unmapped and correctly reports 0% assertion coverage.
 
-The native package check for this follow-up is pending. The platform CI and
-native artifacts recorded below belong to the earlier baseline, not this change.
-Rebuild the release artifacts from the final selected commit before publishing.
+`npm run test:native-package` passed using the new release binary: a real macOS
+arm64 npm install exercised JavaScript/TypeScript automatic map creation, review,
+validation, percentage and freshness gates. Native release-set checks also passed.
+The platform CI and native artifacts recorded below belong to the earlier
+baseline, not this change. Rebuild the release artifacts from the final selected
+commit before publishing.
 
 ## Baseline verification, 2026-09-12
 
