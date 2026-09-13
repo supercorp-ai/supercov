@@ -53,6 +53,13 @@ module Supercov
       { worker: @runtime.worker, test: id, retry: retry_index, phase: nil }
     end
 
+    # RSpec's identity is "spec/m_spec.rb[1:1]" -- a path with a scope suffix,
+    # not a path. Metadata carries the file itself.
+    def self.source_file(example)
+      metadata = example.metadata
+      metadata[:absolute_file_path] || metadata[:file_path]
+    end
+
     def self.enter(example, phase)
       state = (@state[example.object_id] ||= { failed: {} })
       state[:phase] = phase
@@ -89,7 +96,7 @@ module Supercov
         else
           "passed"
         end
-        @runtime.outcome(identity[:worker], identity[:test], identity[:retry], phase, outcome, xfail, RUNNER)
+        @runtime.outcome(identity[:worker], identity[:test], identity[:retry], phase, outcome, xfail, RUNNER, source_file(example))
       end
       @runtime.switch(nil)
     end

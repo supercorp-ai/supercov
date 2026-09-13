@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+**Added**
+
+- Assertion coverage measures Ruby. A Ruby run now records which assertion each test reached and where it is written, so an agent can explain Ruby assertions the same way it explains JavaScript ones and earn the same statement credit. RSpec, Minitest, test-unit and Cucumber are covered. Ruby backtraces carry no column, so a line is a witness only when the syntax inventory holds exactly one assertion on it; two assertions sharing a line name neither rather than guessing between them.
+- Ruby test results report the file the test is defined in rather than the runner's own identity, which is what an assertion map's test selector needs. Adapters that cannot name a file keep the previous behaviour.
+
 **Fixed**
 
 - Assertion review tokens no longer depend on the ambient process environment. Running from another directory, a new terminal session, a different package manager or another Node installation previously marked every flow in a map stale at once with "run configuration, dependencies or execution context changed", even though source, tests, dependencies, configuration and instrumenter fingerprints were unchanged. Set `SUPERCOV_ASSERTION_CONTEXT_ENV` to a comma-separated list when a suite genuinely depends on specific variables; only those participate. Maps need one review after upgrading, because the recorded context identity changes once.

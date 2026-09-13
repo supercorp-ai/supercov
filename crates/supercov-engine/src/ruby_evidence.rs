@@ -11,7 +11,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use memmap2::{Mmap, MmapOptions};
@@ -86,6 +86,10 @@ enum Record {
         xfail: bool,
         #[serde(default = "default_runner")]
         runner: String,
+        /// Where the runner says the test is defined. Absent for adapters or
+        /// synthesised methods that cannot name a file.
+        #[serde(default)]
+        file: Option<String>,
     },
     Hit {
         ctx: u64,
@@ -101,6 +105,14 @@ enum Record {
     /// this record is the assertion's evidence too.
     Assert {
         ctx: u64,
+    },
+    /// One assertion site a call phase reached, once per site per test. Ruby
+    /// backtraces carry no column, so the line is resolved against the syntax
+    /// inventory; a frame that names no inventoried site witnesses nothing.
+    Asite {
+        ctx: u64,
+        f: String,
+        l: usize,
     },
     Limitation {
         id: String,
@@ -236,6 +248,81 @@ type ObservedVectors = BTreeSet<(Vec<Option<bool>>, bool)>;
 type OutcomesByAttempt = BTreeMap<(String, String, usize), Vec<(String, String, bool)>>;
 /// (worker, test, retry) -> runner that reported the attempt
 type RunnersByAttempt = BTreeMap<(String, String, usize), String>;
+/// (worker, test, retry) -> the source file the runner named for the test
+type TestFilesByAttempt = BTreeMap<(String, String, usize), String>;
+/// (worker, test, retry) -> assertion sites the call phase reached, in the
+/// order they were first seen, as the runtime reported them: (path, line)
+type SitesByAttempt = BTreeMap<(String, String, usize), Vec<(String, usize)>>;
+
+/// The assertion sites Supercov inventoried from source before the run,
+/// indexed so a runtime backtrace frame can name one exactly.
+///
+/// Ruby backtraces carry a file and a line but no column, while an assertion
+/// anchor is a file, line and column. The inventory supplies the missing
+/// column. It is also the validator: a frame that names no inventoried site
+/// witnesses nothing, so a runtime that reports the wrong frame loses a
+/// witness rather than inventing one.
+pub struct RubyAssertionInventory {
+    root: PathBuf,
+    /// (project-relative file, line) -> the sites on that line
+    columns: BTreeMap<(String, usize), Vec<usize>>,
+}
+
+impl RubyAssertionInventory {
+    pub fn new(root: &Path, inputs: &crate::assertion_map::Inputs) -> Self {
+        let mut columns = BTreeMap::<(String, usize), Vec<usize>>::new();
+        for site in &inputs.assertions {
+            columns
+                .entry((site.at.file.clone(), site.at.line))
+                .or_default()
+                // Every native manifest reports a zero-based byte column and
+                // the report adds one to reach the anchor's own column.
+                .push(site.at.column.saturating_sub(1));
+        }
+        for sites in columns.values_mut() {
+            sites.sort_unstable();
+            sites.dedup();
+        }
+        Self {
+            root: root.to_path_buf(),
+            columns,
+        }
+    }
+
+    /// An inventory with no sites: every frame names nothing, which is what a
+    /// run with no assertion inputs should see.
+    pub fn empty() -> Self {
+        Self {
+            root: PathBuf::new(),
+            columns: BTreeMap::new(),
+        }
+    }
+
+    /// Ruby reports both forms: a backtrace frame is absolute, while a method
+    /// defined by a file the interpreter loaded by a relative path keeps that
+    /// path. A path outside the project names nothing here.
+    pub fn relative(&self, path: &str) -> Option<String> {
+        let candidate = Path::new(path);
+        let relative = if candidate.is_absolute() {
+            candidate.strip_prefix(&self.root).ok()?
+        } else {
+            candidate.strip_prefix("./").unwrap_or(candidate)
+        };
+        let text = relative.to_string_lossy().replace('\\', "/");
+        (!text.is_empty() && !text.starts_with("../")).then_some(text)
+    }
+
+    /// `file:line:column` when that line holds exactly one inventoried site.
+    /// Two assertions on one line cannot be told apart from a backtrace, so
+    /// the frame names neither rather than guessing between them.
+    pub fn locate(&self, path: &str, line: usize) -> Option<String> {
+        let file = self.relative(path)?;
+        match self.columns.get(&(file.clone(), line))?.as_slice() {
+            [column] => Some(format!("{file}:{line}:{column}")),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct Observations {
@@ -259,6 +346,8 @@ struct Evidence {
     background: BTreeMap<String, Observations>,
     outcomes: OutcomesByAttempt,
     runners: RunnersByAttempt,
+    test_files: TestFilesByAttempt,
+    sites: SitesByAttempt,
     limitations: Vec<RuntimeLimitation>,
 }
 
@@ -496,6 +585,7 @@ fn read_evidence_file(
                 outcome,
                 xfail,
                 runner,
+                file,
             } => {
                 if !matches!(phase.as_str(), "setup" | "call" | "teardown") {
                     return Err(invalid("unknown test outcome phase"));
@@ -519,6 +609,9 @@ fn read_evidence_file(
                     return Err(invalid("one attempt was reported by two runners"));
                 }
                 evidence.runners.insert(key.clone(), runner);
+                if let Some(file) = file.filter(|path| !path.is_empty()) {
+                    evidence.test_files.entry(key.clone()).or_insert(file);
+                }
                 evidence
                     .outcomes
                     .entry(key)
@@ -596,6 +689,32 @@ fn read_evidence_file(
                     asserted.hits.extend(before.hits);
                     for (id, vectors) in before.vectors {
                         asserted.vectors.entry(id).or_default().extend(vectors);
+                    }
+                }
+            }
+            Record::Asite { ctx, f, l } => {
+                if f.is_empty() || l == 0 {
+                    return Err(invalid("assertion site needs a file and a line"));
+                }
+                let identity = contexts
+                    .get(&ctx)
+                    .ok_or(RubyEvidenceError::UnknownContext {
+                        file: name.into(),
+                        line: line_number,
+                        context: ctx,
+                    })?;
+                // Only the call phase witnesses a test's assertions; setup and
+                // teardown assertions belong to no single site under test.
+                if identity.phase == "call" {
+                    let key = (
+                        identity.worker.clone(),
+                        identity.test.clone(),
+                        identity.retry,
+                    );
+                    let sites = evidence.sites.entry(key).or_default();
+                    let site = (f, l);
+                    if !sites.contains(&site) {
+                        sites.push(site);
                     }
                 }
             }
@@ -893,6 +1012,7 @@ pub fn build_ruby_frontend_run(
     run_id: &str,
     generated_at: &str,
     test_exit_code: i32,
+    assertions: &RubyAssertionInventory,
 ) -> Result<RubyFrontendRun, RubyEvidenceError> {
     let evidence = read_evidence_directory(evidence_directory, run_id)?;
     if evidence.interpreters == 0 {
@@ -908,6 +1028,8 @@ pub fn build_ruby_frontend_run(
         background,
         outcomes,
         runners,
+        test_files,
+        sites,
         limitations,
     } = evidence;
     let mut manifest = manifest.clone();
@@ -1008,6 +1130,35 @@ pub fn build_ruby_frontend_run(
                     error: None,
                 });
                 runtime.push(snapshot(&index, observations, &id)?);
+                // One phase per assertion site the call phase reached, so an
+                // assertion map can tell the sites apart. The per-test phase
+                // above keeps carrying the pre-assertion evidence; these are
+                // witnesses only, and a site the inventory does not know is
+                // skipped rather than guessed at.
+                let attempt = (worker.clone(), test.clone(), retry);
+                for (path, line) in sites.get(&attempt).into_iter().flatten() {
+                    let Some(location) = assertions.locate(path, *line) else {
+                        continue;
+                    };
+                    phases.push(CoveragePhase {
+                        id: stable_id("ruby-assertion", &[run_id, &id, &location]),
+                        kind: "assertion".into(),
+                        operation: format!("{runner} assertion at {location}"),
+                        source: Some(location),
+                        caused_by_phase_id: Some(id.clone()),
+                        started_at_ms: position as i64 * 2 + 1,
+                        ended_at_ms: Some(position as i64 * 2 + 2),
+                        status: Some(
+                            if outcome == "passed" && !*xfail {
+                                "passed"
+                            } else {
+                                "failed"
+                            }
+                            .into(),
+                        ),
+                        error: None,
+                    });
+                }
             }
         }
         // A phase the runtime entered but the runner never reported (the worker
@@ -1042,7 +1193,13 @@ pub fn build_ruby_frontend_run(
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &worker, &test, retry)),
             test: test.clone(),
-            test_file: test.split("::").next().map(str::to_owned),
+            // What the runner named, as the project names it. A runner
+            // identity is not a path, so the old derivation stays only as a
+            // fallback for an adapter that cannot name the file.
+            test_file: test_files
+                .get(&(worker.clone(), test.clone(), retry))
+                .and_then(|path| assertions.relative(path))
+                .or_else(|| test.split("::").next().map(str::to_owned)),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
             status: Some(status),
@@ -1102,7 +1259,13 @@ pub fn build_ruby_frontend_run(
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &worker, &test, retry)),
             test: test.clone(),
-            test_file: test.split("::").next().map(str::to_owned),
+            // What the runner named, as the project names it. A runner
+            // identity is not a path, so the old derivation stays only as a
+            // fallback for an adapter that cannot name the file.
+            test_file: test_files
+                .get(&(worker.clone(), test.clone(), retry))
+                .and_then(|path| assertions.relative(path))
+                .or_else(|| test.split("::").next().map(str::to_owned)),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
             status: Some("failed".into()),
@@ -1364,8 +1527,15 @@ mod tests {
 
         let killed = temporary("killed");
         fs::write(killed.join("main.7.a.mmap"), transport(&base)).unwrap();
-        let run =
-            build_ruby_frontend_run(&obligations.manifest, &killed, "run-1", "now", 0).unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &killed,
+            "run-1",
+            "now",
+            0,
+            &RubyAssertionInventory::empty(),
+        )
+        .unwrap();
         let declared = serde_json::to_string(&run.request.manifest.limitations).unwrap();
         assert!(
             declared.contains("ruby-process-did-not-report"),
@@ -1377,14 +1547,174 @@ mod tests {
         clean.push(serde_json::json!({"t":"exit","at":9}));
         let reported = temporary("reported");
         fs::write(reported.join("main.7.a.mmap"), transport(&clean)).unwrap();
-        let run =
-            build_ruby_frontend_run(&obligations.manifest, &reported, "run-1", "now", 0).unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &reported,
+            "run-1",
+            "now",
+            0,
+            &RubyAssertionInventory::empty(),
+        )
+        .unwrap();
         let declared = serde_json::to_string(&run.request.manifest.limitations).unwrap();
         assert!(
             !declared.contains("ruby-process-did-not-report"),
             "a process that reported cleanly must declare nothing: {declared}"
         );
         fs::remove_dir_all(&reported).unwrap();
+    }
+
+    fn inventory_of(root: &str, sites: &[(&str, usize, usize)]) -> RubyAssertionInventory {
+        use crate::assertion_map::{Anchor, Files, Inputs, InventorySite};
+        RubyAssertionInventory::new(
+            Path::new(root),
+            &Inputs {
+                schema_version: 1,
+                language: "ruby".into(),
+                context_digest: "context".into(),
+                files: Files::new(),
+                assertions: sites
+                    .iter()
+                    .map(|(file, line, column)| InventorySite {
+                        at: Anchor {
+                            file: (*file).into(),
+                            line: *line,
+                            column: *column,
+                            text: "assert_equal 1, f(1)".into(),
+                        },
+                        operation: "assert".into(),
+                    })
+                    .collect(),
+                limitations: vec![],
+            },
+        )
+    }
+
+    fn assertion_sources(run: &RubyFrontendRun) -> Vec<String> {
+        run.request.raw_results[0]
+            .phases
+            .iter()
+            .filter(|phase| phase.kind == "assertion")
+            .filter_map(|phase| phase.source.clone())
+            .collect()
+    }
+
+    fn run_with_sites(
+        name: &str,
+        sites: &[serde_json::Value],
+        outcome_file: Option<&str>,
+        inventory: &RubyAssertionInventory,
+    ) -> RubyFrontendRun {
+        let source = "def f(a)\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let mut outcome = serde_json::json!({"t":"outcome","worker":"main","test":"MTest#test_x","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"minitest"});
+        if let Some(file) = outcome_file {
+            outcome["file"] = serde_json::json!(file);
+        }
+        let mut records = vec![
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["test.rb"]}),
+            serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"MTest#test_x","retry":0,"phase":"call"}),
+            serde_json::json!({"t":"assert","ctx":1}),
+        ];
+        records.extend(sites.iter().cloned());
+        records.push(outcome);
+        records.push(serde_json::json!({"t":"exit","at":9}));
+        let directory = temporary(name);
+        fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            inventory,
+        )
+        .unwrap();
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        run
+    }
+
+    #[test]
+    fn an_assertion_site_becomes_a_located_phase_when_the_inventory_names_one() {
+        // A Ruby backtrace carries no column, so a line is a witness only when
+        // the inventory holds exactly one site on it. The column reported is
+        // zero-based, which is what every native manifest reports and what the
+        // assertion report adds one to.
+        let inventory = inventory_of("/project", &[("test/m_test.rb", 6, 5)]);
+        let run = run_with_sites(
+            "asite-located",
+            &[serde_json::json!({"t":"asite","ctx":1,"f":"/project/test/m_test.rb","l":6})],
+            None,
+            &inventory,
+        );
+        assert!(
+            assertion_sources(&run).contains(&"test/m_test.rb:6:4".to_string()),
+            "expected a located assertion phase, got {:?}",
+            assertion_sources(&run)
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_or_foreign_assertion_site_witnesses_nothing() {
+        // Two sites on one line cannot be told apart from a backtrace, and a
+        // frame outside the project names nothing. Both lose the witness
+        // rather than guessing one.
+        let ambiguous = inventory_of(
+            "/project",
+            &[("test/m_test.rb", 6, 5), ("test/m_test.rb", 6, 30)],
+        );
+        let run = run_with_sites(
+            "asite-ambiguous",
+            &[serde_json::json!({"t":"asite","ctx":1,"f":"/project/test/m_test.rb","l":6})],
+            None,
+            &ambiguous,
+        );
+        assert_eq!(
+            assertion_sources(&run),
+            vec!["MTest#test_x".to_string()],
+            "only the per-test assertion phase should remain"
+        );
+
+        let known = inventory_of("/project", &[("test/m_test.rb", 6, 5)]);
+        let outside = run_with_sites(
+            "asite-outside",
+            &[serde_json::json!({"t":"asite","ctx":1,"f":"/elsewhere/test/m_test.rb","l":6})],
+            None,
+            &known,
+        );
+        assert_eq!(
+            assertion_sources(&outside),
+            vec!["MTest#test_x".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_runner_names_the_test_file_in_either_path_form() {
+        // Minitest keeps the path the interpreter loaded, which may be
+        // relative; a backtrace is absolute. Both name the same project file,
+        // and an adapter that names none falls back to the identity.
+        let inventory = inventory_of("/project", &[("test/m_test.rb", 6, 5)]);
+        for reported in [
+            "/project/test/m_test.rb",
+            "test/m_test.rb",
+            "./test/m_test.rb",
+        ] {
+            let run = run_with_sites("asite-file", &[], Some(reported), &inventory);
+            assert_eq!(
+                run.request.raw_results[0].test_file.as_deref(),
+                Some("test/m_test.rb"),
+                "{reported} should resolve to the project path"
+            );
+        }
+        let without = run_with_sites("asite-nofile", &[], None, &inventory);
+        assert_eq!(
+            without.request.raw_results[0].test_file.as_deref(),
+            Some("MTest#test_x"),
+            "an adapter that cannot name a file keeps the identity fallback"
+        );
     }
 
     #[test]
@@ -1417,8 +1747,15 @@ mod tests {
             ];
             let directory = temporary(name);
             fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
-            let run = build_ruby_frontend_run(&obligations.manifest, &directory, "run-1", "now", 0)
-                .unwrap();
+            let run = build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                &RubyAssertionInventory::empty(),
+            )
+            .unwrap();
             validate_frontend_report_request(&run.declaration, &run.request).unwrap();
             fs::remove_dir_all(directory).unwrap();
             run
@@ -1503,8 +1840,15 @@ mod tests {
             serde_json::json!({"t":"exit","at":9}),
         ];
         fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
-        let run =
-            build_ruby_frontend_run(&obligations.manifest, &directory, "run-1", "now", 0).unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            &RubyAssertionInventory::empty(),
+        )
+        .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         assert_eq!(run.tests, 2);
         let runners = run
@@ -1524,7 +1868,14 @@ mod tests {
         let obligations = build_ruby_obligations("m.rb", b"x = 1\n", &mut probe).unwrap();
         let directory = temporary("empty");
         assert!(matches!(
-            build_ruby_frontend_run(&obligations.manifest, &directory, "run-1", "now", 0),
+            build_ruby_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                &RubyAssertionInventory::empty()
+            ),
             Err(RubyEvidenceError::NoInterpreter)
         ));
         fs::remove_dir_all(directory).unwrap();
