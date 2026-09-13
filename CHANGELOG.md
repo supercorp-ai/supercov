@@ -2,20 +2,20 @@
 
 ## Unreleased
 
+Each invalidation signal now costs what it is worth. Maps need one review after upgrading.
+
 **Fixed**
 
-- Manifests are fingerprinted by what they declare, not their bytes. A release rewrites the version in `package.json`, `Cargo.toml`, `pyproject.toml` and the lockfile, marking every flow stale — 62% of supergateway's manifest edits. A dependency edit still invalidates; an unparseable one is hashed whole.
-- Upgrading Supercov no longer marks maps or stored runs stale. Its own source digest moved on nearly every release; only a deliberate contract change does now. Merging and the build caches still see it.
-- A dependency upgrade is one change to assess, not staleness on every flow. Credit is retained meanwhile.
-- The ambient environment is no longer part of run identity for Rust, Python and Ruby. It is not a property of the project, so no two shells agreed on a run. The test command still counts; JavaScript keeps what its build scripts reference.
-- Linters, formatters, type checkers and coverage settings are no longer execution context. Babel, tsconfig, pytest and tox still are.
+- Manifests are fingerprinted by what they declare, not their bytes, so cutting a release costs nothing. It rewrote the version in `package.json`, `Cargo.toml`, `pyproject.toml` and the lockfile, marking every flow stale. A flow watching a manifest is covered run-wide, not by its own token, so a redundant watch cannot undo this. A dependency edit still invalidates; an unparseable manifest is hashed whole.
+- Upgrading Supercov no longer marks maps or stored runs stale. Only a deliberate instrumenter contract change does. Merging and the build caches still see that digest.
+- A dependency upgrade is one change to assess, not staleness on every flow, and credit is retained meanwhile.
+- The ambient environment is no longer part of run identity for Rust, Python and Ruby. The test command still counts; JavaScript keeps what its build scripts read.
+- Linters, formatters, type checkers and coverage settings are no longer execution context; Babel, tsconfig, pytest and tox still are.
 - Published crates carry the project README again.
-
-Maps need one review after upgrading.
 
 **Added**
 
-- Assertion reports carry `advisories`. The first names a redundant `watch` entry on a file already tracked run-wide.
+- Assertion reports carry `advisories`. The first names a redundant `watch` entry.
 
 ## 0.0.47
 
