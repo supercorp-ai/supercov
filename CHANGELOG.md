@@ -4,17 +4,18 @@
 
 **Fixed**
 
-- Dependency manifests are fingerprinted by what they declare rather than by their bytes. A release rewrites the version in `package.json`, `Cargo.toml`, `pyproject.toml` and the lockfile, which marked every flow stale; in supergateway's history that was 62% of manifest changes. A real dependency edit still invalidates; an unparseable manifest is hashed whole.
-- Upgrading Supercov no longer marks every map stale. That digest covers Supercov's own source, so every release moved it, for claims about the project's code rather than about Supercov.
-- A dependency upgrade is recorded as one change to assess instead of staleness on every flow. Credit is retained until that assessment says otherwise.
-- Linters, formatters, type checkers and coverage settings are no longer execution context: `.prettierrc`, ESLint configuration, `mypy.ini` and `.coveragerc`. Babel, tsconfig, pytest, tox and `.python-version` still count, because they decide what executes.
+- Manifests are fingerprinted by what they declare, not by their bytes. A release rewrites the version in `package.json`, `Cargo.toml`, `pyproject.toml` and the lockfile, which marked every flow stale — 62% of supergateway's manifest edits. A dependency edit still invalidates; an unparseable manifest is hashed whole.
+- Upgrading Supercov no longer marks every map stale. That digest covers Supercov's own source, so every release moved it, for claims about your code.
+- A dependency upgrade is recorded as one change to assess, not staleness on every flow. Credit is retained meanwhile.
+- Linters, formatters, type checkers and coverage settings are no longer execution context. Babel, tsconfig, pytest and tox still are, because they decide what executes.
+- The ambient environment is no longer part of run identity for Rust, Python and Ruby. It is not a property of the project, so no two shells agreed on one run. The test command still counts; JavaScript keeps the build variables its scripts reference.
 - Published crates carry the project README again.
 
 Maps need one review after upgrading.
 
 **Added**
 
-- Assertion reports carry `advisories`, for what is worth saying about a map without making it invalid. The first names a `watch` entry on a file Supercov already tracks for the whole run.
+- Assertion reports carry `advisories`. The first names a `watch` entry on a file already tracked run-wide.
 
 ## 0.0.47
 

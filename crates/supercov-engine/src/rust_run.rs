@@ -50,31 +50,6 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
-#[cfg(unix)]
-fn os_string_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt as _;
-    value.as_bytes().to_vec()
-}
-
-#[cfg(windows)]
-fn os_string_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt as _;
-    value
-        .encode_wide()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn os_string_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
-    value.to_string_lossy().as_bytes().to_vec()
-}
-
-fn append_identity_field(destination: &mut Vec<u8>, value: &[u8]) {
-    destination.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    destination.extend_from_slice(value);
-}
-
 const ROOT_INPUT_EXCLUSIONS: &[&str] = &[
     ".cache",
     ".git",
@@ -182,14 +157,6 @@ pub(crate) fn collect_integrity_inputs(
     for link in links {
         execution_configuration.push(0);
         execution_configuration.extend_from_slice(link.as_bytes());
-    }
-    let mut environment = std::env::vars_os()
-        .map(|(key, value)| (os_string_bytes(&key), os_string_bytes(&value)))
-        .collect::<Vec<_>>();
-    environment.sort();
-    for (key, value) in environment {
-        append_identity_field(&mut execution_configuration, &key);
-        append_identity_field(&mut execution_configuration, &value);
     }
     Ok(ExplicitIntegrityInputs {
         source_files,

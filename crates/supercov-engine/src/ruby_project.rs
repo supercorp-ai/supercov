@@ -286,32 +286,8 @@ pub fn prepare_ruby_project(root: &Path) -> Result<PreparedRubyProject, String> 
     })
 }
 
-#[cfg(unix)]
-fn os_string_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt as _;
-    value.as_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn os_string_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
-    value.to_string_lossy().as_bytes().to_vec()
-}
-
-fn append_identity_field(destination: &mut Vec<u8>, value: &[u8]) {
-    destination.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    destination.extend_from_slice(value);
-}
-
 pub fn ruby_integrity_inputs(files: &RubyFiles, command: &[String]) -> ExplicitIntegrityInputs {
-    let mut execution_configuration = command.join("\0").into_bytes();
-    let mut environment = std::env::vars_os()
-        .map(|(key, value)| (os_string_bytes(&key), os_string_bytes(&value)))
-        .collect::<Vec<_>>();
-    environment.sort();
-    for (key, value) in environment {
-        append_identity_field(&mut execution_configuration, &key);
-        append_identity_field(&mut execution_configuration, &value);
-    }
+    let execution_configuration = command.join("\0").into_bytes();
     ExplicitIntegrityInputs {
         source_files: files.sources.iter().map(PathBuf::from).collect(),
         test_files: files.tests.iter().map(PathBuf::from).collect(),
@@ -323,6 +299,18 @@ pub fn ruby_integrity_inputs(files: &RubyFiles, command: &[String]) -> ExplicitI
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_ambient_environment_is_not_part_of_run_identity() {
+        // Identity is what the project is, not which shell it was run from.
+        // Folding the environment in meant no two terminals, and no two
+        // machines, ever agreed on the same run. What a project genuinely needs
+        // from its environment it declares in the files that are hashed above.
+        let files = RubyFiles::default();
+        let command = ["rspec".to_owned(), "--format=progress".to_owned()];
+        let inputs = ruby_integrity_inputs(&files, &command);
+        assert_eq!(inputs.execution_configuration, b"rspec\0--format=progress");
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
