@@ -87,7 +87,7 @@ function restoreUserError(error, depth = 0) {
     return error;
 }
 const registrationCounts = new Map();
-function wrappedRegistration(original, parentTestId) {
+function wrappedRegistration(original, parentTestId, forcedStatus) {
     const wrapped = function supercovNodeTest(...args) {
         const index = callbackIndex(args);
         if (index < 0)
@@ -115,13 +115,15 @@ function wrappedRegistration(original, parentTestId) {
         const scope = runnerExecutionScope(identity);
         const options = testOptions(args, index);
         const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
+        if (options?.skip || options?.todo || forcedStatus)
+            writeRunnerEvidence(identity, "skipped", scope, evidenceDirectory);
         const next = [...args];
         const execute = (callbackThis, context, done) => {
             // A test or its hooks may intentionally modify Supercov's public
             // environment while testing integrations. Keep this attempt's transport
             // destination fixed to the value present when the test was registered.
             beginBufferedServerEvidence(scope);
-            let status = options?.skip || options?.todo
+            let status = options?.skip || options?.todo || forcedStatus
                 ? "skipped"
                 : "passed";
             const contextProxy = new Proxy(context, {
@@ -138,6 +140,8 @@ function wrappedRegistration(original, parentTestId) {
                     }
                     if (property === "test" && typeof value === "function")
                         return wrappedRegistration(value.bind(target), scope.testId);
+                    if (["after", "before", "afterEach", "beforeEach"].includes(property) && typeof value === "function")
+                        return restoringHook(value.bind(target), scope);
                     return typeof value === "function" ? value.bind(target) : value;
                 },
             });
@@ -149,6 +153,11 @@ function wrappedRegistration(original, parentTestId) {
                 const flushedServerEvidence = flushBufferedServerEvidence(scope);
                 writeRunnerEvidence(identity, nextStatus, scope, evidenceDirectory, takeNodeAssertionPhases(scope), flushedServerEvidence);
             };
+            const finishBody = () => {
+                // User t.after callbacks run after the body. Register last so
+                // their assertions and cleanup probes are part of this attempt.
+                context.after(() => emit());
+            };
             try {
                 if (callback.length >= 2) {
                     const callbackDone = (error) => {
@@ -156,7 +165,7 @@ function wrappedRegistration(original, parentTestId) {
                             status = "failed";
                             restoreUserError(error);
                         }
-                        emit();
+                        finishBody();
                         done?.(error);
                     };
                     return withCoverageCarrier({ version: 1, scope }, () => Reflect.apply(callback, callbackThis, [contextProxy, callbackDone]));
@@ -164,19 +173,19 @@ function wrappedRegistration(original, parentTestId) {
                 const result = withCoverageCarrier({ version: 1, scope }, () => Reflect.apply(callback, callbackThis, [contextProxy]));
                 if (result && typeof result.then === "function")
                     return Promise.resolve(result).then((value) => {
-                        emit();
+                        finishBody();
                         return value;
                     }, (error) => {
                         status = "failed";
-                        emit();
+                        finishBody();
                         throw restoreUserError(error);
                     });
-                emit();
+                finishBody();
                 return result;
             }
             catch (error) {
                 status = "failed";
-                emit();
+                finishBody();
                 throw restoreUserError(error);
             }
         };
@@ -200,45 +209,52 @@ function wrappedRegistration(original, parentTestId) {
             Object.defineProperty(wrapped, property, {
                 configurable: true,
                 enumerable: true,
-                value: wrappedRegistration(member, parentTestId),
+                value: wrappedRegistration(member, parentTestId, property === "only" ? undefined : "skipped"),
             });
     }
     return wrapped;
 }
-// Hooks carry no coverage evidence, but an error thrown inside one still
-// reaches the report with the adapter's execution context in its stack.
-// Restore it at the same boundary the test wrapper uses.
-function restoringHook(original) {
+// Shared hooks get their own setup scope. Their execution is visible but is
+// never silently copied into every test. t.after and other per-test hooks keep
+// the exact owning attempt supplied by the TestContext proxy.
+function restoringHook(original, scope, hookName = "hook") {
     return function supercovNodeTestHook(...args) {
         const index = callbackIndex(args);
-        if (index < 0)
-            return Reflect.apply(original, this, args);
+        if (index < 0) return Reflect.apply(original, this, args);
         const callback = args[index];
-        const next = [...args];
-        // node:test uses callback arity to distinguish promise/synchronous
-        // hooks from the legacy done-callback form. Preserve it exactly.
-        next[index] = callback.length >= 2
-            ? function supercovNodeTestHookDoneCallback(context, done) {
-                const restoringDone = (error) => {
-                    if (error)
-                        restoreUserError(error);
-                    done?.(error);
-                };
-                return callback.call(this, context, restoringDone);
-            }
-            : function supercovNodeTestHookCallback(context) {
-                try {
-                    const result = callback.call(this, context);
-                    if (result && typeof result.then === "function")
-                        return Promise.resolve(result).then(undefined, (error) => {
-                            throw restoreUserError(error);
-                        });
-                    return result;
-                }
-                catch (error) {
-                    throw restoreUserError(error);
-                }
+        const location = callerLocation(supercovNodeTestHook);
+        let invocation = 0;
+        const execute = (receiver, context, done) => {
+            const identity = { runner: "node:test", role: "setup", name: `[${hookName}] ${callback.name || "anonymous"}`,
+                ...location, registrationOrdinal: invocation++ };
+            const owner = scope ?? runnerExecutionScope(identity);
+            const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
+            if (!scope) beginBufferedServerEvidence(owner);
+            let emitted = false;
+            const finish = error => {
+                if (scope || emitted) return;
+                emitted = true;
+                writeRunnerEvidence(identity, error ? "failed" : "passed", owner, evidenceDirectory,
+                    takeNodeAssertionPhases(owner), flushBufferedServerEvidence(owner));
             };
+            try {
+                const result = withCoverageCarrier({ version: 1, scope: owner }, () =>
+                    callback.length >= 2 ? callback.call(receiver, context, error => {
+                        finish(error);
+                        done?.(error ? restoreUserError(error) : undefined);
+                    }) : callback.call(receiver, context));
+                if (callback.length >= 2) return result;
+                if (result && typeof result.then === "function")
+                    return Promise.resolve(result).then(value => { finish(); return value; },
+                        error => { finish(error); throw restoreUserError(error); });
+                finish();
+                return result;
+            } catch (error) { finish(error); throw restoreUserError(error); }
+        };
+        const next = [...args];
+        next[index] = callback.length >= 2
+            ? function supercovNodeTestHookDoneCallback(context, done) { return execute(this, context, done); }
+            : function supercovNodeTestHookCallback(context) { return execute(this, context); };
         return Reflect.apply(original, this, next);
     };
 }
@@ -246,10 +262,10 @@ export const test = wrappedRegistration(native.test);
 export const it = wrappedRegistration(native.it);
 export const suite = native.suite;
 export const describe = native.describe;
-export const before = restoringHook(native.before);
-export const after = restoringHook(native.after);
-export const beforeEach = restoringHook(native.beforeEach);
-export const afterEach = restoringHook(native.afterEach);
+export const before = restoringHook(native.before, undefined, "before");
+export const after = restoringHook(native.after, undefined, "after");
+export const beforeEach = restoringHook(native.beforeEach, undefined, "beforeEach");
+export const afterEach = restoringHook(native.afterEach, undefined, "afterEach");
 export const mock = native.mock;
 export const snapshot = native.snapshot;
 export const run = native.run;

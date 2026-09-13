@@ -578,6 +578,11 @@ function injectChildEnvironment(method, args) {
     const environment = existingEnvironment
         ? { ...existingEnvironment, ...inherited }
         : { ...process.env, ...inherited };
+    // The runtime child wrapper has captured the current async test scope in
+    // these options. An inherited setup/unscoped carrier from the launcher
+    // must not overwrite it when we restore the other coverage variables.
+    if (existingEnvironment?.SUPERCOV_CONTEXT !== undefined)
+        environment.SUPERCOV_CONTEXT = existingEnvironment.SUPERCOV_CONTEXT;
     // The register path must come from THIS module's own location, never from
     // the environment or the working directory. Monorepo runners both defeat
     // the old derivation at once: turbo's strict env strips SUPERCOV_PROJECT_ROOT

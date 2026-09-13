@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.0.46
+
+**Fixed**
+
+- JavaScript and TypeScript assertion coverage excludes imports known to disappear during compilation. Value imports, side-effect imports and ambiguous compiler settings remain measured. Reports explain excluded statements; rerun tests to collect the corrected denominator.
+- Preserve test ownership through HTTP requests, WebSocket upgrades and child processes. Node test cleanup assertions retain their evidence, while shared setup stays separate from individual tests. Skipped and TODO tests remain visible without receiving passing assertion credit.
+- Repeated assertion reports reuse cached calculations while checking current source and map freshness. Corrupt caches rebuild automatically without changing authored maps.
+
+**Added**
+
+- Assertion details explain why each mapped source node receives credit or remains context only. Large flows support paginated node and edge views with compact output.
+- Evidence diagnostics distinguish missing execution, setup or background work, unobserved assertions and non-passing test selectors. Test-kind reports recognize common E2E and integration file names and disclose runner defaults.
+- Updated CLI reference and assertion guides cover mapping, validation, percentage, gaps and reuse after edits. The same guides ship with the CLI and on supercov.com, with a shared sync command and publication checks to prevent drift.
+
 ## 0.0.45
 
 **Added**

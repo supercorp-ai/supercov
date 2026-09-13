@@ -315,6 +315,7 @@ pub struct CoverageDiagnostic {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageSummaryData {
+    pub test_kind_sources: BTreeMap<String, usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assertion_coverage: Option<serde_json::Value>,
     pub run: String,
@@ -2349,6 +2350,16 @@ pub fn coverage_summary_query(
     options: CoverageSummaryQueryOptions<'_>,
 ) -> Result<CoverageSummaryData, QueryError> {
     let projection = index.projection(options.view, options.kind, options.runner)?;
+    let mut test_kind_sources = BTreeMap::new();
+    for test in index.test_summaries(options.view)?.iter().filter(|t| {
+        t.role == "test"
+            && options.kind.is_none_or(|k| t.provenance.kind == k)
+            && options.runner.is_none_or(|r| t.provenance.runner == r)
+    }) {
+        *test_kind_sources
+            .entry(test.provenance.source.clone())
+            .or_insert(0) += 1;
+    }
     let mut diagnostics = Vec::new();
     let mut transport_blockers = 0usize;
     if projection.empty_evidence_tests > 0 {
@@ -2356,7 +2367,7 @@ pub fn coverage_summary_query(
             code: "TEST_EVIDENCE_MISSING".into(),
             severity: "warning".into(),
             message: format!(
-                "{} test(s) recorded assertion phases but attributed zero coverage evidence; this is valid for assertions over static or uninstrumented data, but may otherwise indicate missing probe transport. First: {}",
+                "{} test(s) recorded assertion phases but attributed zero coverage evidence; possible causes include checks of uninstrumented data, shared setup, lost async context or missing probe transport. First: {}",
                 projection.empty_evidence_tests,
                 projection.first_empty_evidence_test.as_deref().unwrap_or("unknown")
             ),
@@ -2455,6 +2466,7 @@ pub fn coverage_summary_query(
         && !options.stale
         && structurally_complete;
     Ok(CoverageSummaryData {
+        test_kind_sources,
         assertion_coverage: None,
         run: options.run.into(),
         command: Vec::new(),

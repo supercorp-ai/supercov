@@ -109,3 +109,31 @@ npx supercov clean
 Preview cleanup first. The final command removes all runs and the isolated build
 cache; `--keep 20` preserves the 20 newest runs. Cleanup removes only
 marker-owned Supercov data.
+
+## Understand test kinds
+
+Reports group tests by kind, such as unit, integration or E2E. Supercov uses
+recognized file names and runner information; a kind is a classification, not
+proof of what the test checks. A name such as `gatewayE2e.test.ts` identifies an
+E2E test. Ambiguous names keep the runner's default, and the report tells you
+how many tests use that default.
+
+If your suite has a known kind, set it when running the command:
+
+```sh supercov-example
+SUPERCOV_TEST_KIND=integration npx supercov -- npm test
+```
+
+Supported values are `unit`, `component`, `integration` and `e2e`. Use separate
+runs when different suites need different classifications.
+
+## When assertion evidence is missing
+
+A test can make assertions without executing measured application code. It
+might check static data or a dependency, or use work performed in shared setup.
+Missing attribution across an asynchronous boundary can also leave a gap.
+
+The assertion detail explains why a mapped node did or did not receive credit.
+Use [Investigating assertion evidence](assertion-evidence.md) to distinguish
+these cases. The report's runtime action-phase counts are separate from the
+assertion map; zero action-phase lines does not mean zero asserted statements.

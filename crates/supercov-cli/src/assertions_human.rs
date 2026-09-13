@@ -30,7 +30,12 @@ fn page_footer(out: &mut String, data: &Value, command: &str) {
     let returned = page["returned"].as_u64().unwrap_or(0);
     let start = if returned == 0 { 0 } else { offset + 1 };
     let end = if returned == 0 { 0 } else { offset + returned };
-    let _ = writeln!(out, "\nShowing {start}-{end} of {}", page["total"]);
+    let unit = if data["view"] == "assertion" {
+        "flows "
+    } else {
+        ""
+    };
+    let _ = writeln!(out, "\nShowing {unit}{start}-{end} of {}", page["total"]);
     if let Some(next) = page["nextOffset"].as_u64() {
         let _ = writeln!(out, "Next: {command} --offset {next} --limit {returned}");
     }
@@ -123,6 +128,9 @@ fn assertions(data: &Value) -> String {
             text(&a["id"])
         );
         let _ = writeln!(out, "  {}", location(&a["at"]));
+        if observed == 0 {
+            let _ = writeln!(out, "  {}", text(&a["observation"]));
+        }
         let expression = text(&a["at"]["text"]);
         let first = expression.lines().next().unwrap_or("");
         let preview = first.chars().take(140).collect::<String>();
@@ -132,6 +140,17 @@ fn assertions(data: &Value) -> String {
             ""
         };
         let _ = writeln!(out, "  {preview}{suffix}");
+        let uncredited = flows
+            .iter()
+            .flat_map(|f| items(&f["nodeCredit"]))
+            .filter(|n| n["status"] == "notCredited")
+            .count();
+        if uncredited > 0 {
+            let _ = writeln!(
+                out,
+                "  {uncredited} claimed node(s) without credit; inspect assertion details for reasons."
+            );
+        }
         if a["inMap"] == false {
             let _ = writeln!(
                 out,
@@ -183,8 +202,13 @@ fn assertion(data: &Value) -> String {
     for test in items(&data["tests"]) {
         let _ = writeln!(out, "Observed in passing test: {}", text(&test["name"]));
     }
+    let _ = writeln!(out, "{}", text(&a["observation"]));
     if items(&a["flows"]).is_empty() {
-        let _ = writeln!(out, "\nNo flows mapped yet.");
+        if data["pagination"]["total"].as_u64().unwrap_or(0) > 0 {
+            let _ = writeln!(out, "\nNo flows on this page.");
+        } else {
+            let _ = writeln!(out, "\nNo flows mapped yet.");
+        }
     }
     for flow in items(&a["flows"]) {
         let current = if flow["current"] == true {
@@ -219,20 +243,38 @@ fn assertion(data: &Value) -> String {
             let _ = writeln!(out, "  Review/evidence: {}", text(reason));
         }
         for node in items(&flow["nodes"]) {
-            let counted = if items(&flow["countsAsAsserted"]).contains(&node["id"]) {
-                " [claimed as asserted]"
-            } else {
-                ""
+            let assessment = items(&flow["nodeCredit"])
+                .iter()
+                .find(|credit| credit["nodeId"] == node["id"]);
+            let label = match assessment.map(|credit| text(&credit["status"])) {
+                Some("credited") => "Credited",
+                Some("notCredited") => "Not credited",
+                Some("context") => "Context only",
+                _ if items(&flow["countsAsAsserted"]).contains(&node["id"]) => {
+                    "Claimed as asserted"
+                }
+                _ => "Context only",
             };
             let _ = writeln!(
                 out,
-                "  Node {} — {}{counted}",
+                "  Node {} — {} [{label}]",
                 text(&node["id"]),
                 location(&node["at"])
             );
+            if let Some(assessment) = assessment {
+                for reason in items(&assessment["reasons"]) {
+                    let _ = writeln!(out, "    Credit reason: {}", text(&reason["message"]));
+                }
+            }
             code(&mut out, text(&node["at"]["text"]), "    ");
+            if node["at"]["textOmitted"] == true {
+                let _ = writeln!(
+                    out,
+                    "    Source text omitted (--compact); read the matching source file at this location."
+                );
+            }
             if let Some(meaning) = node["meaning"].as_str().filter(|s| !s.is_empty()) {
-                let _ = writeln!(out, "    {meaning}");
+                let _ = writeln!(out, "    Agent explanation: {meaning}");
             }
         }
         for edge in items(&flow["edges"]) {
@@ -249,6 +291,17 @@ fn assertion(data: &Value) -> String {
             let _ = writeln!(out, "  Watches file: {}", text(watch));
         }
     }
+    if data["pagination"].is_object() {
+        page_footer(
+            &mut out,
+            data,
+            &format!(
+                "supercov runs {} assertion {}",
+                quote(text(&data["run"])),
+                quote(text(&a["id"]))
+            ),
+        );
+    }
     let _ = writeln!(out);
     summary(&mut out, data);
     notes(&mut out, data);
@@ -260,6 +313,62 @@ pub fn render(data: &Value) -> Option<String> {
         "source" => Some(source(data)),
         "assertions" => Some(assertions(data)),
         "assertion" => Some(assertion(data)),
+        "assertionFlow" => {
+            let mut out = format!(
+                "Assertion {} / flow {} — {}\n",
+                text(&data["assertion"]["id"]),
+                text(&data["flow"]["id"]),
+                text(&data["flowView"])
+            );
+            for item in items(&data["items"]) {
+                if data["flowView"] == "nodes" {
+                    let _ = writeln!(
+                        out,
+                        "\nNode {} — {} [{}]",
+                        text(&item["id"]),
+                        location(&item["at"]),
+                        text(&item["credit"]["status"])
+                    );
+                    code(&mut out, text(&item["at"]["text"]), "  ");
+                    if item["at"]["textOmitted"] == true {
+                        let _ = writeln!(
+                            out,
+                            "  Source text omitted (--compact); use runs <run> source <path> at this location."
+                        );
+                    }
+                    let _ = writeln!(out, "  {}", text(&item["meaning"]));
+                    for reason in items(&item["credit"]["reasons"]) {
+                        let _ = writeln!(out, "  Credit reason: {}", text(&reason["message"]));
+                    }
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "  {} → {} ({}) {}",
+                        text(&item["from"]),
+                        text(&item["to"]),
+                        text(&item["kind"]),
+                        text(&item["basis"])
+                    );
+                }
+            }
+            page_footer(
+                &mut out,
+                data,
+                &format!(
+                    "supercov runs {} assertion {} --flow {} --view {}{}",
+                    quote(text(&data["run"])),
+                    quote(text(&data["assertion"]["id"])),
+                    quote(text(&data["flow"]["id"])),
+                    text(&data["flowView"]),
+                    if data["compact"] == true {
+                        " --compact"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+            Some(out)
+        }
         _ => None,
     }
 }
@@ -288,5 +397,27 @@ mod tests {
         let rendered = render(&data).unwrap();
         assert!(rendered.contains("Showing 0-0 of 0"));
         assert!(!rendered.contains("Next:"));
+    }
+
+    #[test]
+    fn assertion_distinguishes_agent_explanation_from_computed_credit() {
+        let data = json!({"view":"assertion","run":"run_one","assertion":{
+            "id":"a_one","at":{"file":"test.js","line":4,"column":1,"text":"assert(result)"},
+            "flows":[{"id":"value","current":true,"eligible":true,"nodes":[
+                {"id":"return","at":{"file":"src.js","line":1,"column":1,"text":"return result;"},"meaning":"Returns the checked value."},
+                {"id":"callback","at":{"file":"src.js","line":2,"column":1,"text":"callback();"}},
+                {"id":"setup","at":{"file":"test.js","line":1,"column":1,"text":"setup();"}}
+            ],"countsAsAsserted":["return","callback"],"nodeCredit":[
+                {"nodeId":"return","status":"credited","reasons":[{"code":"same_test_execution","message":"Statement executed in the selected test."}]},
+                {"nodeId":"callback","status":"notCredited","reasons":[{"code":"no_same_test_execution","message":"No execution evidence attributed to this test."}]},
+                {"nodeId":"setup","status":"context","reasons":[{"code":"context_only","message":"Included as context only."}]}
+            ]}]
+        }});
+        let output = render(&data).unwrap();
+        assert!(output.contains("Node return — src.js:1:1 [Credited]"));
+        assert!(output.contains("Node callback — src.js:2:1 [Not credited]"));
+        assert!(output.contains("Node setup — test.js:1:1 [Context only]"));
+        assert!(output.contains("Credit reason: No execution evidence attributed to this test."));
+        assert!(output.contains("Agent explanation: Returns the checked value."));
     }
 }

@@ -19,10 +19,12 @@ use std::{
 
 pub const MAP_FILE: &str = "assertions.json";
 pub const STATE_FILE: &str = "assertions.state.json";
+const REPORT_CACHE_FILE: &str = "assertions.report.cache.json";
 pub struct RunManifest {
     pub manifest: InputManifest,
     pub evidence_digest: String,
     legacy_digest: Option<String>,
+    pub statement_exclusions: Vec<Value>,
 }
 pub struct RunInputs {
     pub inputs: Inputs,
@@ -95,6 +97,12 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
         manifest,
         evidence_digest,
         legacy_digest,
+        statement_exclusions: entries
+            .iter()
+            .find(|e| e.path == "statement-exclusions.json")
+            .map(|entry| serde_json::from_slice(&entry.contents).map_err(|e| e.to_string()))
+            .transpose()?
+            .unwrap_or_default(),
     }))
 }
 pub fn load(run: &StoredRun, input: &RunManifest) -> Result<(AssertionMap, State), String> {
@@ -318,8 +326,8 @@ fn phase_location<'a>(
     Some((file, line, column))
 }
 
-/// Recompute from the mutable map on every query; never cache it into the
-/// immutable structural coverage index. Current source must match the run.
+/// Cache derived assessments separately from immutable coverage evidence.
+/// Every query still verifies current source, map and managed-state identities.
 pub fn report(root: &Path, run: &StoredRun) -> Result<Value, String> {
     report_with_detail(root, run, None)
 }
@@ -330,14 +338,32 @@ pub fn assertion(root: &Path, run: &StoredRun, id: &str) -> Result<Value, String
 fn report_with_detail(root: &Path, run: &StoredRun, id: Option<&str>) -> Result<Value, String> {
     let input = load_inputs(root, run)?;
     let (map, state) = load(run, &input)?;
-    let coverage = coverage(run)?;
-    let mut report = assess(
+    let cache_key = digest(&(
+        env!("SUPERCOV_ENGINE_SOURCE_SHA256"),
+        &run.id,
+        run.metadata.test_exit_code,
         &map,
         &state,
-        &input.inputs,
-        &coverage,
-        run.metadata.test_exit_code == Some(0),
-    );
+        &input.evidence_digest,
+    ));
+    let cache_path = run.directory.join(REPORT_CACHE_FILE);
+    let mut report = read_report_cache(&cache_path, &cache_key).unwrap_or_else(|| Value::Null);
+    if report.is_null() {
+        let coverage = coverage(run)?;
+        report = assess(
+            &map,
+            &state,
+            &input.inputs,
+            &coverage,
+            run.metadata.test_exit_code == Some(0),
+        );
+        report["excludedStatements"] = json!(input.statement_exclusions);
+        report["summary"]["excludedStatements"] = json!(input.statement_exclusions.len());
+        // This is disposable acceleration. A read-only directory or corrupt
+        // cache must never prevent a freshly computed report from working.
+        let cached = json!({"key":cache_key,"digest":digest(&report),"report":report});
+        let _ = write_json(root, run, REPORT_CACHE_FILE, &cached);
+    }
     if let Some(id) = id {
         let matches = report["assertions"]
             .as_array()
@@ -378,6 +404,19 @@ fn report_with_detail(root: &Path, run: &StoredRun, id: Option<&str>) -> Result<
     Ok(report)
 }
 
+fn read_report_cache(path: &Path, key: &str) -> Option<Value> {
+    if fs::metadata(path).ok()?.len() > 256 * 1024 * 1024 {
+        return None;
+    }
+    let cached: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let report = &cached["report"];
+    (cached["key"] == key
+        && cached["digest"] == digest(report)
+        && report["summary"].is_object()
+        && report["assertions"].is_array())
+    .then(|| report.clone())
+}
+
 pub fn assess(
     map: &AssertionMap,
     state: &State,
@@ -403,6 +442,7 @@ pub fn assess(
     let tests = view
         .tests
         .iter()
+        .filter(|t| t.role == "test")
         .map(|t| (&t.id, t))
         .collect::<BTreeMap<_, _>>();
     let measured_statements = view
@@ -410,6 +450,18 @@ pub fn assess(
         .iter()
         .filter(|p| p.measured && p.meta.kind == crate::coverage_analysis::PointKind::Statement)
         .collect::<Vec<_>>();
+    let all_points = coverage
+        .view
+        .points
+        .iter()
+        .map(|p| (&p.meta.id, p))
+        .collect::<BTreeMap<_, _>>();
+    let all_tests = coverage
+        .view
+        .tests
+        .iter()
+        .map(|t| (&t.id, t))
+        .collect::<BTreeMap<_, _>>();
     let mut by_file = BTreeMap::<&str, Vec<(usize, &crate::coverage_report::PointResult)>>::new();
     let mut by_line = BTreeMap::<(String, usize), Vec<&crate::coverage_report::PointResult>>::new();
     for point in &measured_statements {
@@ -458,6 +510,9 @@ pub fn assess(
     // for every assertion/phase pair. This is evidence lookup, not inference.
     let mut phases_by_location = BTreeMap::new();
     for p in &view.phases {
+        if !tests.contains_key(&p.test) {
+            continue;
+        }
         if let Some(location) = phase_location(&p.phase, inputs) {
             phases_by_location
                 .entry(location)
@@ -563,7 +618,15 @@ pub fn assess(
                     [_] => "unobserved",
                     _ => "ambiguous",
                 };
-                selectors.push(json!({"file":selector.file,"name":selector.name,"status":status}));
+                selectors.push(json!({"file":selector.file,"name":selector.name,"status":status,
+                    "outcomes":matches.iter().map(|t| &t.outcome).collect::<Vec<_>>(),
+                    "reason":match matches.as_slice() {
+                        [] => "No test execution record matches this selector. The test may be disabled or outside this run.",
+                        [test] if test.outcome != "passed" => "The selected test has no passing outcome.",
+                        [_] if status == "unobserved" => "The test passed but this assertion occurrence was not recorded. Its branch may not have run, or attribution may be missing.",
+                        [_] => "A passing assertion occurrence matches this test.",
+                        _ => "Multiple test identities match this selector."
+                    }}));
             }
             let applicable = resolved;
             let eligible = passed && identities_valid && dirty.is_empty() && !applicable.is_empty();
@@ -584,25 +647,110 @@ pub fn assess(
                 credit_flows += 1;
             }
             let mut lines = BTreeSet::new();
-            for node in f
-                .nodes
-                .iter()
-                .filter(|n| f.counts_as_asserted.contains(&n.id))
-            {
-                let Some(start) = node.at.offset(&inputs.files) else {
-                    continue;
-                };
-                let Some(points) = by_file.get(node.at.file.as_str()) else {
-                    continue;
-                };
-                let first = points.partition_point(|(pos, _)| *pos < start);
-                for (pos, point) in points[first..].iter().take_while(|(pos, _)| *pos == start) {
-                    // One explicit node credits one exact measured statement.
-                    // A guard/class/block claim must not silently credit every
-                    // nested statement just because its source span contains it.
-                    if *pos != start || point.meta.source != node.at.text {
-                        continue;
+            let mut node_credit = Vec::new();
+            for node in &f.nodes {
+                let claimed = f.counts_as_asserted.contains(&node.id);
+                let start = node.at.offset(&inputs.files);
+                let mut matched = Vec::new();
+                if let Some(start) = start
+                    && let Some(points) = by_file.get(node.at.file.as_str())
+                {
+                    let first = points.partition_point(|(pos, _)| *pos < start);
+                    for (_, point) in points[first..].iter().take_while(|(pos, _)| *pos == start) {
+                        // Exact statement identity only: a guard/block does not
+                        // include its nested statements in the score or diagnostic.
+                        if point.meta.source == node.at.text {
+                            matched.push(*point);
+                        }
                     }
+                }
+                let matching_tests = matched
+                    .iter()
+                    .filter(|p| p.covered)
+                    .flat_map(|p| p.tests.iter())
+                    .filter(|test| applicable.contains(*test))
+                    .collect::<BTreeSet<_>>();
+                let credited = claimed && eligible && !matching_tests.is_empty();
+                let mut reasons = Vec::new();
+                let mut reason = |code: &str, message: String| {
+                    reasons.push(json!({"code":code,"message":message}));
+                };
+                if !claimed {
+                    reason(
+                        "context_only",
+                        "The agent included this node as context, not in countsAsAsserted.".into(),
+                    );
+                } else if credited {
+                    reason("same_test_execution", "Current agent claim, passing assertion, and statement execution in the same selected test.".into());
+                } else {
+                    if start.is_none() {
+                        reason(
+                            "invalid_source_anchor",
+                            "The node's source anchor does not match the run's current source."
+                                .into(),
+                        );
+                    } else if matched.is_empty() {
+                        reason("no_measured_statement", "The node does not exactly identify a measured production statement in this run.".into());
+                    }
+                    if !passed {
+                        reason("run_failed", "The test run did not pass.".into());
+                    }
+                    if !identities_valid {
+                        reason("invalid_map_identity", "Map identities or managed input state are invalid; see validation errors.".into());
+                    }
+                    if !dirty.is_empty() {
+                        reason(
+                            "flow_needs_attention",
+                            format!(
+                                "Flow needs investigation: {}",
+                                dirty.iter().cloned().collect::<Vec<_>>().join("; ")
+                            ),
+                        );
+                    }
+                    if applicable.is_empty() {
+                        reason("no_passing_assertion", "No selected test has a matching passing occurrence of this assertion; see flow selectors.".into());
+                    }
+                    if !matched.is_empty() {
+                        if !matched.iter().any(|p| p.covered) {
+                            let executed = matched
+                                .iter()
+                                .filter_map(|p| all_points.get(&p.meta.id))
+                                .filter(|p| p.covered)
+                                .collect::<Vec<_>>();
+                            if !executed.is_empty() {
+                                let setup = executed
+                                    .iter()
+                                    .flat_map(|p| &p.tests)
+                                    .any(|id| all_tests.get(id).is_some_and(|t| t.role == "setup"));
+                                reason(if setup {"shared_setup_execution"} else {"execution_outside_passing_tests"},
+                                    if setup {"Execution was recorded in a separate setup scope. Shared setup is not automatically credited to consuming tests."} else {"Execution was recorded outside passing tests (for example module initialization, background work or a failed test). It cannot establish same-test execution."}.into());
+                            }
+                            reason(
+                                "no_passing_execution",
+                                "No execution evidence from passing tests for this statement."
+                                    .into(),
+                            );
+                        } else if !applicable.is_empty() && matching_tests.is_empty() {
+                            if matched
+                                .iter()
+                                .flat_map(|p| &p.tests)
+                                .any(|id| all_tests.get(id).is_some_and(|t| t.role == "setup"))
+                            {
+                                reason("shared_setup_execution", "Execution was recorded in a separate setup scope. Shared setup is not automatically credited to consuming tests.".into());
+                            }
+                            reason("no_same_test_execution", "No execution evidence attributed to a selected passing test for this assertion.".into());
+                        }
+                    }
+                }
+                node_credit.push(json!({
+                    "nodeId":node.id,
+                    "location":{"file":node.at.file,"line":node.at.line,"column":node.at.column},
+                    "status":if !claimed {"context"} else if credited {"credited"} else {"notCredited"},
+                    "statementIds":matched.iter().map(|p| &p.meta.id).collect::<Vec<_>>(),
+                    "matchingTests":matching_tests,
+                    "reasons":reasons,
+                }));
+                for point in matched.into_iter().filter(|_| claimed) {
                     claimed_points.insert(point.meta.id.clone());
                     if eligible
                         && point.covered
@@ -621,9 +769,30 @@ pub fn assess(
                     }
                 }
             }
-            flows.push(json!({"id":f.id,"freshness":freshness,"valid":valid,"current":dirty.is_empty(),"expectedBasis":model::expected_basis(a,f,map,state,&manifest),"selectors":selectors,"questions":f.questions,"reasons":dirty,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines}));
+            flows.push(json!({"id":f.id,"freshness":freshness,"valid":valid,"current":dirty.is_empty(),"expectedBasis":model::expected_basis(a,f,map,state,&manifest),"selectors":selectors,"questions":f.questions,"reasons":dirty,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines,"nodeCredit":node_credit}));
         }
-        rows.push(json!({"id":a.id,"at":a.at,"questions":a.questions,"inMap":in_map,"observes":a.observes,"operations":inventory.get(&a.at).cloned().unwrap_or_default(),"observedPassingTests":witnesses,"flows":flows}));
+        let observation = if !witnesses.is_empty() {
+            "Passing assertion occurrence recorded."
+        } else if flows
+            .iter()
+            .flat_map(|f| f["selectors"].as_array().into_iter().flatten())
+            .any(|s| s["status"] == "missing")
+        {
+            "No passing occurrence. Some selected tests have no execution record (for example disabled tests or tests outside this run)."
+        } else if flows
+            .iter()
+            .flat_map(|f| f["selectors"].as_array().into_iter().flatten())
+            .any(|s| {
+                s["outcomes"]
+                    .as_array()
+                    .is_some_and(|outcomes| outcomes.iter().any(|o| o == "skipped"))
+            })
+        {
+            "No passing occurrence. Selected tests include skipped/TODO executions."
+        } else {
+            "No passing occurrence recorded. The assertion may be in an untaken branch or its execution attribution may be missing; inspect the selected tests."
+        };
+        rows.push(json!({"observation":observation,"id":a.id,"at":a.at,"questions":a.questions,"inMap":in_map,"observes":a.observes,"operations":inventory.get(&a.at).cloned().unwrap_or_default(),"observedPassingTests":witnesses,"flows":flows}));
     }
     let denominator = coverage
         .view
@@ -693,7 +862,10 @@ pub fn assess(
             .and_then(|text| byte_column(text, p.meta.line, p.meta.column, &inputs.language))
             .map(|column| Anchor { file: p.meta.file.clone(), line: p.meta.line, column, text: p.meta.source.clone() })
             .filter(|at| at.offset(&inputs.files).is_some());
-        json!({"id":p.meta.id,"file":p.meta.file,"line":p.meta.line,"at":at,"covered":p.covered,"tests":p.tests,"declared":claimed_points.contains(&p.meta.id),"asserted":credited_points.contains(&p.meta.id),"flows":point_flows.get(&p.meta.id).cloned().unwrap_or_default()})
+        let all = all_points.get(&p.meta.id);
+        json!({"id":p.meta.id,"file":p.meta.file,"line":p.meta.line,"at":at,"covered":p.covered,"tests":p.tests,"declared":claimed_points.contains(&p.meta.id),"asserted":credited_points.contains(&p.meta.id),"flows":point_flows.get(&p.meta.id).cloned().unwrap_or_default(),
+            "executionEvidence":{"anyExecution":all.is_some_and(|p| p.covered),"passingTests":p.tests.iter().filter(|id| tests.contains_key(id)).collect::<Vec<_>>(),
+                "outsidePassingTests":all.into_iter().flat_map(|p| &p.tests).filter(|id| !tests.contains_key(id)).collect::<Vec<_>>()}})
     }).collect::<Vec<_>>();
     json!({"basis":"agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
         "summary":{"status":status,"reason":reason,"pendingChanges":pending_changes,"metric":"measured statements","statements":{"asserted":credited_points.len(),"declared":claimed_points.len(),"total":measured_statements.len(),"percentage":if status != "available" { None } else {Some(credited_points.len() as f64 * 100.0 / measured_statements.len() as f64)}},"assertions":map.assertions.len(),"inventoryAssertions":inputs.assertions.len(),"missingInventoryAssertions":missing_inventory,
@@ -707,7 +879,8 @@ pub fn assess(
             "unanchoredStatements":statements.iter().filter(|s| s["at"].is_null()).count(),
             "runPassed":passed,
             "lines":{"asserted":credited.len(),"declared":declared.len(),"total":total,"percentage":if total==0 || status != "available" {None} else {Some(credited.len() as f64 * 100.0 / total as f64)}}},
-        "assertions":rows,"statements":statements,"tests":tests.values().map(|t| json!({"id":t.id,"file":t.file,"name":t.name})).collect::<Vec<_>>(),
+        "assertions":rows,"statements":statements,"tests":coverage.view.tests.iter().map(|t| json!({"id":t.id,"file":t.file,"name":t.name,"role":t.role,"outcome":t.outcome,"provenance":t.provenance,
+            "hasExecutionEvidence":!t.hits.is_empty() || !t.decisions.is_empty() || !t.lines.is_empty()})).collect::<Vec<_>>(),
         "creditedLines":credited.iter().map(|loc| json!({"file":loc.0,"line":loc.1,"assertions":line_assertions.get(loc)})).collect::<Vec<_>>(),
         "unassertedLines":denominator.difference(&credited).map(|(f,l)| json!({"file":f,"line":l})).collect::<Vec<_>>(),
         "changes":validation["changes"],"validationErrors":errors,"limitations":inputs.limitations})
@@ -716,6 +889,24 @@ pub fn assess(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn report_cache_requires_exact_revision_and_intact_payload() {
+        let directory =
+            std::env::temp_dir().join(format!("supercov-report-cache-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(REPORT_CACHE_FILE);
+        let report = json!({"summary":{"statements":{"asserted":4,"percentage":97.02842377260981}},"assertions":[]});
+        let mut cache = json!({"key":"revision-one","digest":digest(&report),"report":report});
+        fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        assert_eq!(read_report_cache(&path, "revision-one"), Some(report));
+        assert!(read_report_cache(&path, "revision-two").is_none());
+        cache["report"]["summary"]["statements"]["asserted"] = json!(100);
+        fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        assert!(read_report_cache(&path, "revision-one").is_none());
+        fs::write(&path, "interrupted write").unwrap();
+        assert!(read_report_cache(&path, "revision-one").is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
     use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
 
     #[test]

@@ -59,7 +59,7 @@ npx supercov runs <run> source src/example.ts
 # Edit assertions.json, then validate and acknowledge:
 npx supercov runs <run> assertions validate --json
 # Copy examined expectedBasis tokens into assertions.json; save again.
-npx supercov runs <run> assertions check --require-mappings --require-observed --json
+npx supercov runs <run> assertions check --require-mappings --json
 npx supercov runs <run>  # includes the assertion percentage in the regular report
 ```
 

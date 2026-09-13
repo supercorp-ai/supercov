@@ -85,8 +85,9 @@ fn diagnostic_lines(diagnostic: &CoverageDiagnostic) -> Vec<String> {
                     count(test_count),
                     if test_count == 1 { "test" } else { "tests" }
                 ),
-                format!("    {first}"),
-                "  This is usually normal for environment or static-data checks. Investigate only if the test should execute instrumented application code.".into(),
+                format!("    Example: {first}"),
+                "  Possible causes: uninstrumented data, shared setup, lost async context, or missing probe transport. Missing evidence does not prove the code did not execute.".into(),
+                "  Inspect the test's coverage and assertion details to distinguish missing execution from missing attribution.".into(),
             ];
         }
     }
@@ -542,6 +543,14 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         percentage(kind.summary.condition_coverage_pct),
                     ));
                 }
+                if let Some(defaults) = data
+                    .test_kind_sources
+                    .get("runner-default")
+                    .filter(|n| **n > 0)
+                {
+                    lines.push(format!("  {defaults} test(s) use the runner's default kind; this is not inferred from their behavior."));
+                    lines.push("  Set SUPERCOV_TEST_KIND=integration (or unit/component/e2e) when running a suite to override it.".into());
+                }
             }
             if let Some(context) = &data.e2e_gap_context {
                 let share = if data.coverage.lines.covered == 0 {
@@ -602,16 +611,16 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             if let Some(confidence) = &data.confidence {
                 lines.extend([
                     String::new(),
-                    "Evidence confidence".into(),
+                    "Runtime action phases (separate from assertion mappings)".into(),
                     format!(
-                        "  Linked to test actions             {} lines",
+                        "  Recorded within action phases      {} lines",
                         count(confidence.lines.action)
                     ),
                     format!(
-                        "  Execution only                     {} lines",
+                        "  Other recorded execution           {} lines",
                         count(confidence.lines.executed)
                     ),
-                    "  Assertion coverage comes from the optional reviewed assertions.json map."
+                    "  These runtime phase counts do not include the agent-assessed assertion coverage shown above."
                         .into(),
                 ]);
             }
@@ -1414,6 +1423,12 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
         s["staleFlows"],
         s["draftFlows"]
     ));
+    if let Some(count) = s["excludedStatements"].as_u64().filter(|n| *n > 0) {
+        lines.push(format!("  {count} erased TypeScript imports excluded; inspect assertions report --view excludedStatements."));
+    }
+    if let Some(count) = s["unobservedAssertions"].as_u64().filter(|n| *n > 0) {
+        lines.push(format!("  {count} assertion site(s) have no passing occurrence; mapped flows alone do not earn credit."));
+    }
     if let Some(errors) = value["validationErrors"]
         .as_array()
         .filter(|v| !v.is_empty())
@@ -1540,8 +1555,9 @@ mod tests {
             lines,
             vec![
                 "  1 test made assertions, but Supercov received no source-coverage evidence:",
-                "    safety.spec.ts > checks the VM",
-                "  This is usually normal for environment or static-data checks. Investigate only if the test should execute instrumented application code.",
+                "    Example: safety.spec.ts > checks the VM",
+                "  Possible causes: uninstrumented data, shared setup, lost async context, or missing probe transport. Missing evidence does not prove the code did not execute.",
+                "  Inspect the test's coverage and assertion details to distinguish missing execution from missing attribution.",
             ]
         );
         assert!(

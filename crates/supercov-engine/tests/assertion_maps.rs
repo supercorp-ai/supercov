@@ -443,6 +443,50 @@ fn report_fixture(hits: &[&str], assertion_passed: bool) -> CoverageReport {
     analyze_coverage_results(&request).unwrap()
 }
 #[test]
+fn shared_setup_is_visible_but_never_borrowed_as_same_test_evidence() {
+    let (inputs, map, state) = fixture();
+    let mut coverage = report_fixture(&["a", "b"], true);
+    for view in [&mut coverage.view, &mut coverage.filters.passed] {
+        let mut setup = view.tests[0].clone();
+        setup.id = "setup".into();
+        setup.name = "shared setup".into();
+        setup.role = "setup".into();
+        view.tests[0].hits.clear();
+        view.tests[0].lines.clear();
+        view.tests.push(setup);
+        for point in &mut view.points {
+            point.tests = vec!["setup".into()];
+        }
+    }
+    let report = assess(&map, &state, &inputs, &coverage, true);
+    assert_eq!(report["summary"]["statements"]["asserted"], 0);
+    assert_eq!(
+        report["statements"][0]["executionEvidence"]["anyExecution"],
+        true
+    );
+    assert_eq!(
+        report["statements"][0]["executionEvidence"]["passingTests"],
+        json!([])
+    );
+    assert_eq!(
+        report["statements"][0]["executionEvidence"]["outsidePassingTests"],
+        json!(["setup"])
+    );
+    assert!(
+        report["assertions"][0]["flows"][0]["nodeCredit"][0]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["code"] == "shared_setup_execution")
+    );
+    // A setup assertion is not silently reclassified as a passing test site.
+    for phase in &mut coverage.filters.passed.phases {
+        phase.test = "setup".into();
+    }
+    let report = assess(&map, &state, &inputs, &coverage, true);
+    assert_eq!(report["summary"]["unobservedAssertions"], 1);
+}
+#[test]
 fn score_requires_explicit_credit_current_review_and_passing_site() {
     let (inputs, mut map, state) = fixture();
     let coverage = report_fixture(&["a", "b"], true);
@@ -518,6 +562,98 @@ fn execution_from_another_test_cannot_supply_credit() {
         assess(&map, &state, &inputs, &coverage, true)["summary"]["lines"]["asserted"],
         0
     );
+}
+
+#[test]
+fn node_credit_distinguishes_context_unexecuted_and_other_test_evidence() {
+    let (inputs, mut map, state) = fixture();
+    let flow = &mut map.assertions[0].flows[0];
+    flow.nodes.push(Node {
+        id: "context".into(),
+        at: flow.nodes[0].at.clone(),
+        role: String::new(),
+        meaning: "Background explanation only".into(),
+    });
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    let original = map.clone();
+    let report = assess(&map, &state, &inputs, &report_fixture(&["a"], true), true);
+    let flows = &report["assertions"][0]["flows"];
+    let credited = &flows[0]["nodeCredit"][0];
+    assert_eq!(credited["nodeId"], "return");
+    assert_eq!(credited["status"], "credited");
+    assert_eq!(credited["statementIds"], json!(["a"]));
+    assert_eq!(credited["matchingTests"], json!(["test"]));
+    assert_eq!(credited["reasons"][0]["code"], "same_test_execution");
+    assert_eq!(flows[0]["nodeCredit"][1]["status"], "context");
+    assert_eq!(
+        flows[0]["nodeCredit"][1]["reasons"][0]["code"],
+        "context_only"
+    );
+    assert_eq!(flows[1]["nodeCredit"][0]["status"], "notCredited");
+    assert_eq!(
+        flows[1]["nodeCredit"][0]["reasons"][0]["code"],
+        "no_passing_execution"
+    );
+    assert_eq!(report["summary"]["statements"]["asserted"], 1);
+
+    let mut coverage = report_fixture(&["a", "b"], true);
+    coverage.filters.passed.points[1].tests = vec!["another test".into()];
+    let report = assess(&map, &state, &inputs, &coverage, true);
+    let flow = &report["assertions"][0]["flows"][1];
+    assert_eq!(flow["current"], true);
+    assert_eq!(flow["eligible"], true);
+    assert_eq!(
+        flow["nodeCredit"][0]["reasons"][0]["code"],
+        "no_same_test_execution"
+    );
+    assert_eq!(flow["nodeCredit"][0]["matchingTests"], json!([]));
+    assert_eq!(report["summary"]["statements"]["asserted"], 1);
+    assert_eq!(
+        map, original,
+        "Credit diagnostics must not mutate authored claims"
+    );
+}
+
+#[test]
+fn node_credit_reports_reference_freshness_and_run_blockers() {
+    let (inputs, map, state) = fixture();
+    let coverage = report_fixture(&["a", "b"], true);
+    for (case, expected) in [
+        (0, "flow_needs_attention"),
+        (1, "no_measured_statement"),
+        (2, "invalid_source_anchor"),
+        (3, "no_passing_assertion"),
+        (4, "run_failed"),
+        (5, "invalid_map_identity"),
+    ] {
+        let mut map = map.clone();
+        let mut state = state.clone();
+        let mut coverage = coverage.clone();
+        match case {
+            0 => map.assertions[0].flows[0].basis = None,
+            1 => {
+                // A valid source fragment is not an exact measured statement.
+                map.assertions[0].flows[0].nodes[0].at.text = "return".into();
+                acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+            }
+            2 => map.assertions[0].flows[0].nodes[0].at.line = 99,
+            3 => coverage.filters.passed.phases.clear(),
+            4 => (),
+            5 => state.inputs_digest = "wrong-inputs".into(),
+            _ => unreachable!(),
+        }
+        let report = assess(&map, &state, &inputs, &coverage, case != 4);
+        let node = &report["assertions"][0]["flows"][0]["nodeCredit"][0];
+        assert_eq!(node["status"], "notCredited", "{expected}");
+        assert!(
+            node["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["code"] == expected),
+            "{node}"
+        );
+    }
 }
 #[test]
 fn frozen_inputs_accept_absolute_relative_and_windows_verbatim_paths_once() {
@@ -678,6 +814,10 @@ fn crediting_a_control_statement_does_not_credit_its_nested_body() {
     assert_eq!(report["summary"]["statements"]["asserted"], 2);
     assert_eq!(report["summary"]["statements"]["total"], 3);
     assert_eq!(report["statements"][2]["asserted"], false);
+    assert_eq!(
+        report["assertions"][0]["flows"][0]["nodeCredit"][0]["statementIds"],
+        json!(["a"])
+    );
 }
 
 #[test]

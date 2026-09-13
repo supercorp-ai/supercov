@@ -963,15 +963,56 @@ function requestCoverageContext(value) {
   const phaseId = typeof rawPhaseId === "string" && rawPhaseId.length > 0 && (!scope || phaseBelongsToAttempt(rawPhaseId, scope.attemptId)) ? rawPhaseId : void 0;
   return __spreadValues(__spreadValues({}, scope ? { scope } : {}), phaseId ? { phaseId } : {});
 }
-function withRequestPhase(handler) {
+// Keep connection ownership on the emitter, without changing listener
+// identity (removeListener/off and once still see the original callbacks).
+const emitterContextMaps = runtimeGlobal.__SUPERCOV_EMITTER_CONTEXT_MAPS__ ??= new Map();
+const emitterCoverageContexts = emitterContextMaps.get(runtimeInstance) ?? new WeakMap();
+emitterContextMaps.set(runtimeInstance, emitterCoverageContexts);
+const patchedEmitterInstances = runtimeGlobal.__SUPERCOV_EMITTER_PATCHED_INSTANCES__ ??= new Set();
+function installNodeRequestPropagation() {
+  if (isBrowser || patchedEmitterInstances.has(runtimeInstance) || typeof process === "undefined") return;
+  const EventEmitter = process.getBuiltinModule?.("node:events")?.EventEmitter;
+  const Server = process.getBuiltinModule?.("node:http")?.Server;
+  const SecureServer = process.getBuiltinModule?.("node:https")?.Server;
+  if (!EventEmitter) return;
+  const original = EventEmitter.prototype.emit;
+  EventEmitter.prototype.emit = function(event, ...args) {
+    let context = emitterCoverageContexts.get(this);
+    if ((event === "request" || event === "upgrade") &&
+        ((Server && this instanceof Server) || (SecureServer && this instanceof SecureServer))) {
+      // HTTP headers establish ownership even when Express/SDK listeners and
+      // the server process were created by a shared before hook.
+      const incoming = requestCoverageContext(args[0]);
+      if (incoming) context = incoming.scope ? incoming : context ?? currentRequestContext();
+    }
+    const invoke = () => Reflect.apply(original, this, [event, ...args]);
+    try {
+      return context ? withCoverageCarrier({ version: 1, ...context }, invoke) : invoke();
+    } finally {
+      if (event === "close") emitterCoverageContexts.delete(this);
+    }
+  };
+  patchedEmitterInstances.add(runtimeInstance);
+}
+installNodeRequestPropagation();
+
+function withRequestPhase(handler, event) {
   if (!serverPhaseStorage)
     return handler;
+  const registeredContext = currentRequestContext();
   return function coverageRequestPhase(...args) {
     var _a8, _b, _c, _d;
     const requestContext = args.map((argument) => requestCoverageContext(argument)).find((context2) => context2 !== void 0);
-    const inheritedContext = requestContext === void 0 ? currentRequestContext() : {};
+    // An untagged request to a test-owned server must not erase that server's
+    // owner. Shared servers have no captured test scope and stay unattributed.
+    const inheritedContext = requestContext?.scope ? {} : registeredContext.scope ? registeredContext : requestContext === void 0 ? currentRequestContext() : {};
     const context = __spreadValues(__spreadValues({}, ((_a8 = requestContext == null ? void 0 : requestContext.scope) != null ? _a8 : inheritedContext.scope) ? { scope: (_b = requestContext == null ? void 0 : requestContext.scope) != null ? _b : inheritedContext.scope } : {}), ((_c = requestContext == null ? void 0 : requestContext.phaseId) != null ? _c : inheritedContext.phaseId) ? { phaseId: (_d = requestContext == null ? void 0 : requestContext.phaseId) != null ? _d : inheritedContext.phaseId } : {});
-    const invoke = () => Reflect.apply(handler, this, args);
+    const invoke = () => {
+      if (event === "connection" && context.scope && args[0] &&
+          typeof args[0] === "object" && typeof args[0].emit === "function")
+        emitterCoverageContexts.set(args[0], context);
+      return Reflect.apply(handler, this, args);
+    };
     return requestContext !== void 0 || context.scope || context.phaseId ? serverPhaseStorage.run(context, () => withProbeV2Context(context, invoke)) : invoke();
   };
 }

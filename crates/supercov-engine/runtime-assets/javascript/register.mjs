@@ -69,17 +69,21 @@ if (verboseDiagnostics && !process.__SUPERCOV_DIAGNOSTIC_REPORTER__) {
         });
     }
 }
-// Runner adapters and instrumented modules import the runtime when they need
-// it. Keeping the preload itself thin avoids evaluating the full collector in
-// npm launchers, web-server supervisors, and other Node children that never
-// execute measured JavaScript.
-if (process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1") {
+// Direct instrumentation must initialize the collector before script files
+// with no import boundary evaluate. Other modes let the runner adapter or an
+// instrumented module load it, except when durable remote evidence requires it.
+if (process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1" ||
+    process.env.SUPERCOV_DIRECT_INSTRUMENTATION === "1") {
     // A translated remote/VM command can execute an ahead-of-run transformed
     // test through an opaque runner that bypasses the ordinary Playwright or
     // node:test import boundary. The remote-launch adapter marks that process;
     // initialize the runtime before its transformed module can evaluate.
     globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
     process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    // Generic builds can contain script files with no import/export syntax.
+    // They cannot import the collector without changing their module semantics,
+    // and may evaluate before any ESM instrumented file imports it.
+    globalThis.__supercovRuntime ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
 }
 // Workers are independent Node processes and an explicit `execArgv: []`
 // otherwise strips the preload that supplies the isolated runtime. Preserve
