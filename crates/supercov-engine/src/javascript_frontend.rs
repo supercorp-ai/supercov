@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     js_instrumenter::{
         CandidateBranch, CandidateDecision, CandidateError, CandidateLimitation, CandidatePoint,
-        instrument_candidate_with_runtime_hooks, instrument_direct_candidate_with_runtime_hooks,
+        instrument_with_import_policy,
     },
     project_discovery::{BuildAdapter, CoverageProject},
     source_discovery::{SourceLimitation, SourceScope},
@@ -360,6 +360,7 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
         ".supercov/vite-transforms.json".to_owned(),
         ".supercov/viteInstrumentation.mjs".to_owned(),
         ".supercov/manifest.json".to_owned(),
+        ".supercov/statement-exclusions.json".to_owned(),
         ".supercov/instrumentation-complete".to_owned(),
     ];
     artifacts.extend(
@@ -1233,6 +1234,7 @@ pub fn prepare_javascript_frontend(
     project: &CoverageProject,
     collector_id: &str,
     cache_key: &str,
+    command: &[String],
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     let generated = workspace.join(".supercov");
     // Runtime code files live under a node_modules segment: Node attributes
@@ -1251,6 +1253,7 @@ pub fn prepare_javascript_frontend(
     let vitest_config_path = write_vitest_config(workspace, project, &generated)?;
     account(&SETUP.config_ns, configuration_started);
 
+    let mut exclusions = Vec::new();
     let mut decisions = BTreeMap::new();
     let mut points = BTreeMap::new();
     let mut branches = BTreeMap::new();
@@ -1265,13 +1268,20 @@ pub fn prepare_javascript_frontend(
         let path = checked_source_path(workspace, file)?;
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
         let capability_wrapper = runtime_specifier(file, "capability.mjs")?;
-        let mut output = timed(&SETUP.instrument_ns, || match project.build_adapter {
-            BuildAdapter::Vite | BuildAdapter::Generic => {
-                instrument_candidate_with_runtime_hooks(&source, file, &capability_wrapper)
-            }
-            BuildAdapter::Direct => {
-                instrument_direct_candidate_with_runtime_hooks(&source, file, &capability_wrapper)
-            }
+        let elide = crate::typescript_imports::elides_type_imports(
+            workspace,
+            file,
+            command,
+            &project.build_command,
+        );
+        let mut output = timed(&SETUP.instrument_ns, || {
+            instrument_with_import_policy(
+                &source,
+                file,
+                &capability_wrapper,
+                project.build_adapter == BuildAdapter::Direct,
+                elide,
+            )
         })
         .map_err(|source| JavascriptFrontendError::Instrument {
             file: file.clone(),
@@ -1322,6 +1332,7 @@ pub fn prepare_javascript_frontend(
             };
             atomic_write(&path, code.as_bytes())?;
         }
+        exclusions.extend(output.excluded_statements);
         for value in output.decisions {
             decisions.insert(value.id.clone(), value);
         }
@@ -1411,6 +1422,10 @@ pub fn prepare_javascript_frontend(
         )
     });
 
+    atomic_write(
+        &generated.join("statement-exclusions.json"),
+        &serde_json::to_vec(&exclusions).map_err(JavascriptFrontendError::Serialize)?,
+    )?;
     let manifest_path = generated.join("manifest.json");
     let mut encoded =
         serde_json::to_vec_pretty(&manifest).map_err(JavascriptFrontendError::Serialize)?;
@@ -1515,7 +1530,7 @@ mod tests {
         .unwrap();
         let original = fs::read_to_string(source_root.join("src/example.mjs")).unwrap();
         let prepared =
-            prepare_javascript_frontend(&workspace, &project, "collector-test", "cache-test")
+            prepare_javascript_frontend(&workspace, &project, "collector-test", "cache-test", &[])
                 .unwrap();
         assert_eq!(
             fs::read_to_string(source_root.join("src/example.mjs")).unwrap(),

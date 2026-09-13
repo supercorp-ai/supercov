@@ -53,22 +53,26 @@ The `line` query is useful before writing a test because it shows which tests
 already reach that line. Extending a nearby test is often better than adding a
 duplicate.
 
-Every new test run creates `assertions.json`. To investigate what tests assert:
+## Add assertion coverage
 
-```sh
-npx supercov runs latest assertions --json
-# Pin data.run and edit the file at data.map.
+For JavaScript and TypeScript projects, you can also ask the agent to explain
+what each test assertion checks. Every normal run creates an `assertions.json`
+map and carries forward compatible work from earlier runs of the same command.
+
+```sh supercov
+npx supercov runs latest assertions
+npx supercov docs assertion-agent
 ```
 
-Inspect an entry with `runs <run> assertion <id>` and read archived code with
-`runs <run> source <path>`. Edit its `assertions.json`, declare credited nodes
-and broader watch inputs, then obtain expectedBasis tokens with `assertions validate --json` and save the examined tokens in the map or repeated `--flow ASSERTION/FLOW`. After the next run of
-the same command, its map automatically inherits prior work; repair affected entries. Supercov
-validates references and freshness, while the agent owns semantic meaning.
-Run `supercov docs assertion-agent` for the full mapping instructions. Validate
-with `runs <run> assertions validate`, save examined expectedBasis tokens in the map, then use
-`runs <run> assertions check --require-mappings --require-observed` as the
-completion gate. See [assertion maps](assertion-maps.md) for the contract and JS/TS limits.
+Keep the printed run ID fixed while editing. The agent reads matching current
+source, updates the map, validates its references and saves review tokens for
+the explanations it examined. The regular run report then shows the assertion
+percentage. It does not need another test run just to read the edited map.
+
+Start with [Understanding assertion coverage](assertions.md) for a copyable
+prompt. [Mapping assertions with an agent](assertion-agent.md) gives the complete
+editing and checking loop. Use the evidence and recorded observations alongside
+MC/DC when deciding which tests need stronger checks.
 
 ## Example
 

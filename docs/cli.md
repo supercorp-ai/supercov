@@ -100,20 +100,37 @@ npx supercov runs latest assertions --help
 Assertion queries read the run-owned map. `source <path>` reads the matching current
 file directly. It prints source code with line numbers, preserving indentation;
 add `--json` only when you want structured `{line, text}` items. `--offset` is
-zero-based and `--limit` controls the number of source lines. Source and assertion analysis require the current
-checkout to match the run. Changed source makes assertion coverage unavailable;
-rerun tests to inherit mappings. The old `assertions inventory` and nested
-`assertions source --file` commands are replaced by these resource queries.
-Use read-only `assertions validate --json` to obtain expected acknowledgement tokens.
-After investigating, copy those tokens into `assertions.json`, save, and run
-`assertions check`. The `review` command is removed. `--require-mappings` requires
-a current explanation per recognized passing site, without implying completeness.
-Use `assertions --needs-attention` and `assertions report --view changes` to resume work.
-The regular run summary automatically includes the assertion percentage when
-that map exists, in text and `data.assertionCoverage` JSON. Read
-[Understanding assertion coverage](assertions.md) for the workflow or run
-`npx supercov docs assertion-agent` for instructions to give a coding agent.
-The [map reference](assertion-maps.md) covers syntax and verification gates.
+zero-based and `--limit` controls the number of source lines. Source and assertion
+investigation require current files that match the run. Rerun the suite after
+source changes to inherit the map into a new run.
+
+### Assertion coverage
+
+The regular run summary includes assertion coverage when a map has been
+assessed. JSON reports expose it under `data.assertionCoverage`. Start with
+[Understanding assertion coverage](assertions.md), or use these commands to
+inspect and check a map:
+
+```sh supercov-example
+npx supercov runs <run-id> assertions --needs-attention
+npx supercov runs <run-id> assertion <assertion-id>
+npx supercov runs <run-id> assertions report --view statements --file src/shipping.js
+npx supercov runs <run-id> assertions report --view excludedStatements
+npx supercov runs <run-id> assertions validate --json
+npx supercov runs <run-id> assertions check --require-mappings
+```
+
+Edit the file shown by `assertions`. Validation returns `expectedBasis` tokens;
+after examining a flow, save its token in the map before running `check`.
+`--require-mappings` requires explanations for recognized assertions observed
+passing. Add `--require-observed` when every mapped site and selector should have
+passing evidence, or `--min <percentage>` for a chosen target.
+
+To inspect one large flow, add `--flow <flow-id> --view nodes` or `--view edges`
+to the assertion detail command. `--compact` omits repeated source text from the
+report. Follow the printed next-page command or JSON `pagination.nextOffset`.
+Validation supports `--view flows`, `--view changes` and `--view errors` for large
+maps. The [map reference](assertion-maps.md) describes all fields and gates.
 
 ## Narrow a view
 

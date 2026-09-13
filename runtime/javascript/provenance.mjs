@@ -7,7 +7,10 @@ const NORMALIZED_KINDS = [
 function classifiedKind(value) {
     if (!value)
         return undefined;
-    return NORMALIZED_KINDS.find(([, pattern]) => pattern.test(value))?.[0];
+    // gatewayE2e.test.ts and responseIntegration.test.ts are conventional
+    // camel-case paths too. Do not infer kinds from test titles or API usage.
+    const words = value.replace(/([a-z0-9])([A-Z])/g, "$1-$2");
+    return NORMALIZED_KINDS.find(([, pattern]) => pattern.test(words))?.[0];
 }
 export function inferTestProvenance({ runner, file, project, explicitKind, }) {
     if (explicitKind?.trim()) {

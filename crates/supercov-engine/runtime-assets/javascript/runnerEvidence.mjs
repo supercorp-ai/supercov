@@ -36,13 +36,15 @@ export function runnerTestId(identity) {
     ];
     // Preserve existing top-level, uniquely registered test IDs. Nested tests
     // and repeated registrations need more than a shared source/name identity.
+    if (identity.role === "setup")
+        parts.push("role", "setup");
     if (identity.parentTestId)
         parts.push("parent", identity.parentTestId);
     if (identity.registrationOrdinal)
         parts.push("registration", identity.registrationOrdinal);
     // Titles can themselves contain separator text. Domain-separate and encode
     // the extended identity structurally so it cannot alias a literal title.
-    const key = identity.parentTestId || identity.registrationOrdinal
+    const key = identity.role === "setup" || identity.parentTestId || identity.registrationOrdinal
         ? JSON.stringify(["registration-v2", ...parts])
         : parts.join("\0");
     return `${identity.runner}:${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
@@ -116,6 +118,7 @@ export function writeRunnerEvidence(identity, status, scope, evidenceDirectoryOv
         title: identity.name.split(" > ").at(-1) ?? identity.name,
         retry: identity.retry ?? 0,
         status,
+        ...(identity.role ? { role: identity.role } : {}),
         provenance: inferTestProvenance({
             runner: identity.runner,
             file: testFile,

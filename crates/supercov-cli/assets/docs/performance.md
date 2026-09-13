@@ -82,3 +82,19 @@ npx supercov clean
 Use `--dry-run` to preview cleanup. Keep enough run history for active reviews
 and automation; remove the cache only when reclaiming space matters more than a
 faster next run.
+
+## Keep assertion investigation fast
+
+Save `assertions.json` and query the run to see the updated score. Supercov does
+not rerun tests or call a model to calculate the report. Repeated queries reuse
+the previous assessment while checking that your source still matches the run.
+Editing the map automatically refreshes that assessment.
+
+For large maps, ask for a short page instead of the whole graph. Within one
+flow, `--view nodes` or `--view edges` pages the details; `--compact` omits repeated
+source text while keeping locations and credit reasons. See
+[Investigating assertion evidence](assertion-evidence.md#read-a-large-flow).
+
+The disposable `assertions.report.cache.json` file lives beside the map. A missing
+or damaged cache is rebuilt. Removing it affects the next query's speed, not
+your saved explanations.

@@ -99,6 +99,9 @@ pub struct CandidateOutput {
     pub map: Option<serde_json::Value>,
     pub decisions: Vec<CandidateDecision>,
     pub points: Vec<CandidatePoint>,
+    /// Source statements erased by the selected TypeScript import policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_statements: Vec<CandidatePoint>,
     pub branches: Vec<CandidateBranch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<CandidateRuntime>,
@@ -1439,6 +1442,7 @@ struct PointCollector<'s> {
     statement_targets: HashMap<SpanKey, Vec<String>>,
     function_targets: HashMap<SpanKey, String>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
+    erased_imports: &'s HashSet<SpanKey>,
     unsafe_function_depth: usize,
     with_depth: usize,
     ambient_depth: usize,
@@ -1524,21 +1528,57 @@ fn type_only_import(statement: &Statement<'_>) -> bool {
     let Statement::ImportDeclaration(declaration) = statement else {
         return false;
     };
-    if declaration.import_kind == ImportOrExportKind::Type {
-        return true;
-    }
-    let Some(specifiers) = declaration.specifiers.as_ref() else {
-        // A bare import (`import './side-effect.js'`) executes at runtime.
-        return false;
-    };
-    !specifiers.is_empty()
-        && specifiers.iter().all(|specifier| {
-            matches!(
-                specifier,
-                ImportDeclarationSpecifier::ImportSpecifier(specifier)
-                    if specifier.import_kind == ImportOrExportKind::Type
-            )
+    // Inline `import { type T }` can leave an empty runtime import under
+    // verbatimModuleSyntax. Only declaration-level `import type` is universal.
+    declaration.import_kind == ImportOrExportKind::Type
+}
+
+/// Local binding classification, not dependency/taint analysis. The caller
+/// enables implicit elision only for a recognized compiler configuration.
+fn erased_imports(program: &Program<'_>, elide_type_imports: bool) -> HashSet<SpanKey> {
+    let semantic = SemanticBuilder::new().build(program).semantic;
+    let scoping = semantic.scoping();
+    program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let Statement::ImportDeclaration(declaration) = statement else {
+                return None;
+            };
+            let erased = declaration.import_kind == ImportOrExportKind::Type
+                || (elide_type_imports
+                    && program.source_type.is_typescript()
+                    && !program.source_type.is_jsx()
+                    && declaration.specifiers.as_ref().is_some_and(|specifiers| {
+                        !specifiers.is_empty()
+                            && specifiers.iter().all(|specifier| {
+                                let local = match specifier {
+                                    ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                                        if s.import_kind == ImportOrExportKind::Type {
+                                            return true;
+                                        }
+                                        &s.local
+                                    }
+                                    ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                                        &s.local
+                                    }
+                                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                                        &s.local
+                                    }
+                                };
+                                local.symbol_id.get().is_some_and(|symbol| {
+                                    let mut refs =
+                                        scoping.get_resolved_references(symbol).peekable();
+                                    // An unused binding may be needed by a JSX/decorator
+                                    // transform. Only positively identified type uses count.
+                                    refs.peek().is_some()
+                                        && refs.all(|r| r.is_type() && !r.is_value())
+                                })
+                            })
+                    }));
+            erased.then_some(span_key(declaration.span))
         })
+        .collect()
 }
 
 fn executable_statement(statement: &Statement<'_>) -> bool {
@@ -1562,6 +1602,7 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
         if self.pass != PointPass::Statements
             || self.unsafe_context()
             || !executable_statement(node)
+            || self.erased_imports.contains(&span_key(node.span()))
             || matches!(parent, Some(Ancestor::LabeledStatementBody(_)))
             || expression_arrow_body
         {
@@ -1739,6 +1780,7 @@ fn collect_points<'a>(
     source: &str,
     file: &str,
     source_sensitive_functions: &HashSet<SpanKey>,
+    erased_imports: &HashSet<SpanKey>,
 ) -> PointAnalysis {
     let mut analysis = PointAnalysis::default();
     for pass in [PointPass::Statements, PointPass::Functions] {
@@ -1750,6 +1792,7 @@ fn collect_points<'a>(
             statement_targets: HashMap::new(),
             function_targets: HashMap::new(),
             source_sensitive_functions,
+            erased_imports,
             unsafe_function_depth: 0,
             with_depth: 0,
             ambient_depth: 0,
@@ -2113,6 +2156,7 @@ fn observes_function_source<State>(span: Span, context: &TraverseCtx<'_, State>)
 }
 
 pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
+    let elide_type_imports = false;
     let source_type = SourceType::from_path(Path::new(file))
         .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
     let allocator = Allocator::default();
@@ -2128,12 +2172,33 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     }
 
     let safety = analyze_safety(&allocator, &mut parsed.program, source, file);
+    let erased = erased_imports(&parsed.program, elide_type_imports);
+    let excluded_statements = parsed
+        .program
+        .body
+        .iter()
+        .filter(|s| erased.contains(&span_key(s.span())))
+        .map(|s| {
+            let span = s.span();
+            let (line, column) = line_and_utf16_column(source, span.start as usize);
+            CandidatePoint {
+                id: stable_id(source, file, "statement", span, ""),
+                kind: "statement".into(),
+                file: file.into(),
+                line,
+                column,
+                source: source_slice(source, span).into(),
+                label: Some("typescript-import-erasure".into()),
+            }
+        })
+        .collect();
     let point_analysis = collect_points(
         &allocator,
         &mut parsed.program,
         source,
         file,
         &safety.source_sensitive_functions,
+        &erased,
     );
     let mut collector = DecisionCollector {
         source,
@@ -2211,6 +2276,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         map,
         decisions: collector.decisions,
         points: point_analysis.points,
+        excluded_statements,
         branches,
         runtime: None,
         coverage_limitations: {
@@ -2274,7 +2340,7 @@ fn json_expression<'a>(ast: AstBuilder<'a>, value: &serde_json::Value) -> Expres
 /// conformance-tested; selection of the Rust engine remains private until the
 /// Phase 4 CLI/orchestration cutover is complete.
 pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(source, file, RuntimeBinding::ModuleImport, None)
+    instrument_candidate_with_binding(source, file, RuntimeBinding::ModuleImport, None, false)
 }
 
 pub fn instrument_candidate_with_runtime_hooks(
@@ -2287,6 +2353,7 @@ pub fn instrument_candidate_with_runtime_hooks(
         file,
         RuntimeBinding::ModuleImport,
         Some(capability_wrapper),
+        false,
     )
 }
 
@@ -2298,7 +2365,7 @@ pub fn instrument_direct_candidate(
     source: &str,
     file: &str,
 ) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(source, file, RuntimeBinding::DirectGlobal, None)
+    instrument_candidate_with_binding(source, file, RuntimeBinding::DirectGlobal, None, false)
 }
 
 pub fn instrument_direct_candidate_with_runtime_hooks(
@@ -2311,6 +2378,27 @@ pub fn instrument_direct_candidate_with_runtime_hooks(
         file,
         RuntimeBinding::DirectGlobal,
         Some(capability_wrapper),
+        false,
+    )
+}
+
+pub fn instrument_with_import_policy(
+    source: &str,
+    file: &str,
+    capability_wrapper: &str,
+    direct: bool,
+    elide_type_imports: bool,
+) -> Result<CandidateOutput, CandidateError> {
+    instrument_candidate_with_binding(
+        source,
+        file,
+        if direct {
+            RuntimeBinding::DirectGlobal
+        } else {
+            RuntimeBinding::ModuleImport
+        },
+        Some(capability_wrapper),
+        elide_type_imports,
     )
 }
 
@@ -2319,6 +2407,7 @@ fn instrument_candidate_with_binding(
     file: &str,
     runtime_binding: RuntimeBinding,
     capability_wrapper: Option<&str>,
+    elide_type_imports: bool,
 ) -> Result<CandidateOutput, CandidateError> {
     let source_type = SourceType::from_path(Path::new(file))
         .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
@@ -2335,12 +2424,33 @@ fn instrument_candidate_with_binding(
     }
 
     let safety = analyze_safety(&allocator, &mut parsed.program, source, file);
+    let erased = erased_imports(&parsed.program, elide_type_imports);
+    let excluded_statements = parsed
+        .program
+        .body
+        .iter()
+        .filter(|s| erased.contains(&span_key(s.span())))
+        .map(|s| {
+            let span = s.span();
+            let (line, column) = line_and_utf16_column(source, span.start as usize);
+            CandidatePoint {
+                id: stable_id(source, file, "statement", span, ""),
+                kind: "statement".into(),
+                file: file.into(),
+                line,
+                column,
+                source: source_slice(source, span).into(),
+                label: Some("typescript-import-erasure".into()),
+            }
+        })
+        .collect();
     let point_analysis = collect_points(
         &allocator,
         &mut parsed.program,
         source,
         file,
         &safety.source_sensitive_functions,
+        &erased,
     );
     let mut collector = DecisionCollector {
         source,
@@ -2745,6 +2855,7 @@ fn instrument_candidate_with_binding(
         map,
         decisions: collector.decisions,
         points: point_analysis.points,
+        excluded_statements,
         branches,
         runtime: Some(CandidateRuntime {
             coverage_hit,
@@ -4747,7 +4858,7 @@ impl<'a> RequestPhaseTransformer<'a> {
         )
     }
 
-    fn wrap_argument(&mut self, argument: &mut Argument<'a>) {
+    fn wrap_argument(&mut self, argument: &mut Argument<'a>, event: Option<&str>) {
         if self.already_wrapped(argument) || !argument.is_expression() {
             return;
         }
@@ -4757,7 +4868,16 @@ impl<'a> RequestPhaseTransformer<'a> {
             Span::default(),
             self.identifier(&self.with_request_phase),
             NONE,
-            self.ast.vec1(Argument::from(original)),
+            self.ast
+                .vec_from_iter(std::iter::once(Argument::from(original)).chain(event.map(
+                    |name| {
+                        Argument::from(self.ast.expression_string_literal(
+                            Span::default(),
+                            self.ast.str(name),
+                            None,
+                        ))
+                    },
+                ))),
             false,
         );
         self.used = true;
@@ -4810,10 +4930,11 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
         } else if Self::callee_is(&call.callee, "createServer") {
             callback_index = call.arguments.iter().rposition(Self::callback_candidate);
         }
+        let connection = matches!(call.arguments.first(), Some(Argument::StringLiteral(event)) if event.value == "connection");
         if let Some(index) = callback_index
             && let Some(argument) = call.arguments.get_mut(index)
         {
-            self.wrap_argument(argument);
+            self.wrap_argument(argument, connection.then_some("connection"));
         }
     }
 }
@@ -7684,7 +7805,56 @@ mod tests {
             .filter(|point| point.kind == "statement")
             .map(|point| point.line)
             .collect::<Vec<_>>();
-        assert_eq!(statement_lines, vec![3, 4]);
+        assert_eq!(statement_lines, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn configured_import_elision_keeps_values_side_effects_and_statement_ids() {
+        let source = concat!(
+            "import { Logger } from './types.js';\n",
+            "import DefaultType from './default.js';\n",
+            "import * as Types from './namespace.js';\n",
+            "import { type Inline } from './inline.js';\n",
+            "import { run, type Config } from './mixed.js';\n",
+            "import './register.js';\n",
+            "import {} from './empty.js';\n",
+            "import { unused } from './unused.js';\n",
+            "export function main(logger: Logger, value: DefaultType, t: Types.Row) { return run(logger); }\n",
+        );
+        let preserved =
+            instrument_with_import_policy(source, "src/main.ts", "./capability.mjs", true, false)
+                .unwrap();
+        let erased =
+            instrument_with_import_policy(source, "src/main.ts", "./capability.mjs", true, true)
+                .unwrap();
+        assert_eq!(
+            erased
+                .excluded_statements
+                .iter()
+                .map(|p| p.line)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        let excluded = erased
+            .excluded_statements
+            .iter()
+            .map(|p| &p.id)
+            .collect::<HashSet<_>>();
+        let expected = preserved
+            .points
+            .iter()
+            .filter(|p| !excluded.contains(&p.id))
+            .collect::<Vec<_>>();
+        assert_eq!(erased.points.iter().collect::<Vec<_>>(), expected);
+        for line in [5, 6, 7, 8] {
+            assert!(erased.points.iter().any(|p| p.line == line));
+        }
+        // JavaScript value imports and type queries with runtime uses remain.
+        let source = "import { Factory } from './types.js'; type T = typeof Factory; export const f = () => new Factory();";
+        let mixed =
+            instrument_with_import_policy(source, "src/mixed.ts", "./capability.mjs", true, true)
+                .unwrap();
+        assert!(mixed.excluded_statements.is_empty());
     }
 
     #[test]

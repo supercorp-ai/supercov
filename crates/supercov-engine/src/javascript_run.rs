@@ -533,8 +533,10 @@ pub fn run_direct_javascript(
     )?;
     let build_cache_key = build_cache_key(&integrity, &project)?;
     let frontend_cache_key = format!(
-        "{}:{}",
-        integrity.fingerprint.combined, integrity.fingerprint.execution
+        "{}:{}:{}",
+        integrity.fingerprint.combined,
+        integrity.fingerprint.execution,
+        crate::assertion_map::digest(&request.command)
     );
     let prior_workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
     let reusable_build = if project.build_adapter == BuildAdapter::Direct {
@@ -587,7 +589,13 @@ pub fn run_direct_javascript(
     let frontend = if let Some(cache) = &reusable_frontend {
         load_cached_javascript_frontend(&workspace, cache)
     } else {
-        prepare_javascript_frontend(&workspace, &project, &collector_id, &frontend_cache_key)
+        prepare_javascript_frontend(
+            &workspace,
+            &project,
+            &collector_id,
+            &frontend_cache_key,
+            &request.command,
+        )
     }
     .map_err(|error| error.to_string())?;
     drop(instrumentation_progress);
@@ -909,6 +917,10 @@ pub fn run_direct_javascript(
         EvidenceArchiveSource::File {
             file: frontend.manifest_path,
             path: "manifest.json".into(),
+        },
+        EvidenceArchiveSource::File {
+            file: workspace.join(".supercov/statement-exclusions.json"),
+            path: "statement-exclusions.json".into(),
         },
         EvidenceArchiveSource::Directory {
             directory: evidence_directory,

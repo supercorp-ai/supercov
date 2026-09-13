@@ -65,6 +65,7 @@ pub mod rust_runtime;
 pub mod rust_test_context;
 pub mod rust_test_runner;
 pub mod source_discovery;
+mod typescript_imports;
 pub mod workspace;
 
 pub use supercov_contracts::CONTRACT_VERSION;

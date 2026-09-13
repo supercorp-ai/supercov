@@ -704,13 +704,25 @@ fn infer_build_environment(
     if command_words.is_empty() {
         return BTreeMap::new();
     }
-    referenced_build_environment(root)
+    let mut values = referenced_build_environment(root)
         .into_iter()
         .filter(|(name, _)| {
             !environment.contains_key(name)
                 && words(name).iter().any(|word| command_words.contains(word))
         })
-        .collect()
+        .collect::<BTreeMap<_, _>>();
+    // These overrides affect TypeScript emission and must participate in run
+    // and frontend-cache identity even when no build script references them.
+    for name in [
+        "TS_NODE_COMPILER_OPTIONS",
+        "TS_NODE_PROJECT",
+        "TSX_TSCONFIG_PATH",
+    ] {
+        if let Some(value) = environment.get(name) {
+            values.insert(name.into(), value.clone());
+        }
+    }
+    values
 }
 
 fn command_tokens(value: &str) -> Vec<String> {

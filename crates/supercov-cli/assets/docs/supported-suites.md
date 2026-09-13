@@ -45,7 +45,7 @@ Supercov reports the level it actually observed. It does not guess.
 | --- | --- |
 | Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
 | Vitest | Exact per test, with setup execution kept separate |
-| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept; `expect` assertions link the evidence they check |
+| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept; passing `expect` occurrences are identified for assertion maps |
 | `node:test` | Exact per test |
 | AVA and Mocha | Aggregate structural coverage |
 | Other Node-based runners | Aggregate when their processes remain visible to Supercov |
@@ -63,19 +63,15 @@ TypeScript, and TSX are supported.
 Supercov instruments an isolated copy. It does not ask you to add an import,
 reporter, plugin, or alternate build output.
 
-A suite that runs its own compiled output is built before the tests start.
-Supercov reads the tests: one that imports from `dist/`, or launches a package
-script that does—`spawn("npm", ["run", "start"])`, `execSync("npm run
-start")`, or any launch handed to the shell as one string—means the build is
-part of the run, and a `build` script is run inside the isolated copy first.
-Without it the server under test would never exist. A launch that only names a
-build subcommand, such as `vite build`, is not taken as consuming a build.
+If tests import compiled output such as `dist/` or launch a script that uses it,
+Supercov runs the project's build inside the isolated copy before testing.
+Keep using your normal test and build commands. Instrumentation does not
+require changing the project's TypeScript settings.
 
-Instrumented TypeScript is exempt from the host's type policy whether the
-compile is Supercov's own build step or the test command's own `tsc`.
-Instrumentation necessarily rewrites control-flow expressions in ways a type
-checker cannot narrow through, so a project that compiles inside its test
-command builds under measurement exactly as it does without it.
+For assertion maps, Node, Vitest, Jest and Playwright's Node-side assertions
+supply supported passing-occurrence evidence. Custom assertion wrappers and
+browser-side checks can have additional observation limits. See
+[Assertion evidence](assertion-evidence.md) before interpreting a missing occurrence.
 
 ### Browsers, servers, and child processes
 
@@ -114,22 +110,16 @@ whatever was still buffered.
 | cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-nextest 0.9.138 or 0.9.140 |
 
 Supercov preserves Cargo's test selection, scheduling, fail-fast behavior,
-environment, and exit status. Doctests are measured like any other test:
-Supercov stands in for rustdoc during `cargo test --doc`, runs each doctest
-in its own process, and attributes what it executed to that doctest by name.
-With nextest, Supercov is nextest's target runner, so nextest's own
-scheduling, retries and output stay as they are and each attempt is recorded
-separately. The measured source is what rustc compiles: every crate root and
-the modules it reaches through `mod` declarations, `#[path]` attributes and
-literal `include!` calls; a `.rs` file nothing declares as a module, such as
-one embedded with `include_str!`, is left untouched. Statements, functions,
-`if`/`while`/match-guard decisions with their conditions (let chains
-included), match arms, `&&` and `||`, `for` and `while` loops and the `?`
-operator each take a probe; what a thread recorded before it passed an
-`assert!`, `assert_eq!` or `assert_ne!` is linked to that assertion, so the
-report can separate code a test checked from code it merely ran; const contexts and macro expansions stay in the
-denominator behind an explicit limitation. Use the repository's normal flags after the
-wrapped command:
+environment and exit status. Doctests run with their own identities; nextest
+retries remain separate attempts.
+
+Measured source follows the modules rustc compiles, including `#[path]` and
+literal `include!` calls. Undeclared `.rs` files are not treated as application
+modules. Statements, functions, branches, boolean decisions, loops and error
+propagation are measured. Const contexts and macro expansions remain visible
+with explicit measurement limitations.
+
+Use the repository's normal flags after the wrapped command:
 
 ```sh
 npx supercov -- cargo test --workspace
@@ -149,35 +139,22 @@ attribution.
 | pytest-rerunfailures | Exact per attempt; flaky tests are reported as such | |
 | `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test |
 
-Evidence a test records before its first assertion is linked to that assertion
-when the test passes, so a line reads "linked to a passing assertion" rather
-than "execution only". Under pytest this covers plain `assert` statements,
-through pytest's assertion-pass hook, which Supercov turns on for a rewrite
-cache of its own so plain runs keep theirs, and `pytest.raises` and
-`pytest.warns` blocks; every `unittest` `assert*` method counts under both
-runners. What a test runs after its first assertion is execution only.
+Your project runs in place with its own interpreter and virtual environment.
+Supercov adds its monitoring and runner hooks through the process environment;
+you do not need to rewrite tests or configure a different build.
 
-Supercov measures Python through CPython's own monitoring interface. Nothing is
-copied, rewritten, or compiled differently: the project runs in place with its
-own interpreter and virtual environment, and Supercov only adds a start-up hook
-through `PYTHONPATH`, a pytest plugin through `PYTEST_PLUGINS`, one pytest
-option (`enable_assertion_pass_hook`) through `PYTEST_ADDOPTS`, and a few
-`SUPERCOV_*` variables. Child interpreters started with `subprocess` or
-`multiprocessing` inherit the exact test identity; threads and thread pools
-carry it through `contextvars`.
+Coverage includes statements, functions, boolean decisions, loops,
+comprehensions, short-circuit operators, `match` cases and exception paths.
+Child interpreters, threads and thread pools can retain the calling test's
+identity. The report also distinguishes execution before a passing assertion
+from later execution. These phase records alone do not prove which values the
+assertion checks.
 
-Each interpreter writes commit-framed evidence to a process-owned mmap. A hard
-kill preserves completed observations and an incomplete tail is ignored; an
-exhausted transport or corrupt committed frame fails the run closed.
-
-Measured obligations are statements (including several on one line), function
-entry, boolean decisions with MC/DC vectors, `for` and comprehension iteration,
-`and`/`or` short-circuiting, `match` case selection, and `try` completion,
-handler selection and exception propagation, all derived from CPython's own
-instruction positions rather than from exception hooks.
-
-Interpreters launched with `-I`, `-E`, or `-S` ignore `PYTHONPATH` and are not
-measured. Code compiled from strings at runtime has no source obligations.
+Interpreters launched with `-I`, `-E` or `-S` ignore the required startup hook
+and are not measured. Code compiled from strings at runtime has no source
+obligations. Completed observations can survive a hard kill, but a corrupt or
+exhausted evidence channel fails the run rather than reporting partial data as
+complete.
 
 ```sh
 npx supercov -- pytest
@@ -197,95 +174,35 @@ npx supercov -- python -m unittest
 | Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
 | Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
 
-Evidence a test records before its first assertion is linked to that assertion
-when the test passes: Minitest's `assert`/`refute` family, RSpec's
-`expect(...).to` and `not_to` (in Cucumber steps too) and test-unit's
-assertions all count. What a test runs after its first assertion is execution
-only.
+Your project runs in place with its own interpreter and bundle. Supercov loads
+through `RUBYOPT`; application files on disk and their backtrace line numbers
+stay unchanged. RSpec, Minitest and test-unit assertions can identify execution
+before a passing assertion. That timing evidence alone does not show which
+values the assertion checks.
 
-Supercov measures Ruby with Ruby's own `Coverage` module plus probe calls it
-splices into application files in memory as they load. Nothing on disk is
-rewritten or copied; the project runs with its own interpreter and bundle, and
-Supercov only adds a `-r` entry to `RUBYOPT` and a few `SUPERCOV_*` variables.
-No insertion adds a line, so backtraces keep their line numbers.
+Ruby 3.4 and newer support statement, method, branch and MC/DC measurement,
+including loops, iterator blocks, short-circuit operators, pattern matching,
+optional calls and exception paths. Ruby 3.3 supplies Ruby's own line, method
+and branch coverage; obligations requiring additional instrumentation are
+reported as measurement limits.
 
-Measured obligations are statements, method definitions, `if`/`unless`/
-ternary/`while`/`until` decisions with MC/DC vectors over `&&`/`||` operands,
-`while`/`until`/`for` iteration and the idiomatic iterator blocks (`each`,
-`map`, `times`, `select`, ...), `&&`/`||`/`||=`/`&&=` short-circuiting,
-`case`/`when`, `case`/`in` and `&.` selection, and `begin`/`rescue` completion,
-handler selection and propagation. `||=` and `&&=` on method-call, index and
-constant targets are exact too: an arrival probe and a right-side probe count
-the skipped side without re-reading the target. Blocks and lambdas are
-statements inside their methods, not function entry points, and that includes
-a `define_method` block: Ruby's own method coverage reports one entry per
-method it defines, but the block's body is measured statement by statement
-instead of as a definition.
+Some constructs have narrower coverage. Code in a non-main Ractor keeps line
+coverage but may lack other observations. Certain nested-return expressions
+limit normal-completion measurement. Constant predicates are folded as Ruby
+folds them, so unreachable alternatives do not become obligations.
 
-A statement on a line Ruby's own line table never counts (`x = case`, a
-multi-line literal assignment, a bare `begin`, `if false`) gets a probe at load
-time instead.
+If a file cannot be instrumented safely, Supercov loads it unchanged and reports
+the remaining limits. To apply that fallback to a known incompatible file, set
+`SUPERCOV_RUBY_SKIP_PROBES` to a comma-separated list of path fragments. This
+reduces measurement; it is not a way to claim that skipped obligations are covered.
 
-On Ruby 3.4 and newer, Supercov asks the `Coverage` module for line events
-alone. Each test phase is sampled from `Coverage`, and asking for its branch
-and method tables too made every sample rebuild both for every loaded file,
-gems included, which was most of what a Ruby test suite paid under Supercov.
-Instead, the statement that starts a branch body or a method body proves the
-branch, the method and the decision outcome it witnesses, and what has no such
-statement is probed: an `if` without `else`, a modifier `if`, a ternary, `&.`,
-a `case` without `else`, an empty body. Ruby 3.3 cannot apply probes and keeps
-reading `Coverage`'s branch and method keys.
-`if true`/`if false`/`if nil` and other literal predicates are folded the way
-Ruby folds them: no branch, and the dead arm is not an obligation. Code inside
-a `Ractor.new` block gets no probes: a non-main Ractor cannot read the probe
-receiver, so a probe there would raise where the untouched program ran. Its
-lines are still counted; what only a probe could have proven inside it is
-declared unmeasured at the block. A Spring
-preloader started before the run has no hook and fails closed; JRuby and
-TruffleRuby are not supported.
+A Spring preloader started before the run has no coverage hook. Restart it
+within the measured command. JRuby and TruffleRuby are not supported.
 
-The runtime loads through `RUBYOPT` before Bundler and requires only
-`coverage`, so it never activates a gem an application's Gemfile pins
-differently. Insertions are checked against Ruby itself by a sweep
-(`scripts/ruby-corpus-sweep.sh`, which drives `scripts/ruby-position-sweep.rb`)
-over Ruby's whole standard library and the Rails, Rack, RSpec, Minitest,
-test-unit and Cucumber gems, about 4,300 files installed once into a stable
-corpus directory: every file is transformed and compiled with its line count
-intact, every branch key Ruby 3.3 reads is compared with what Ruby reports for
-the untouched source, and each file is loaded twice, untouched and
-transformed, so the probes are proven to preserve behaviour and define the
-same methods.
-
-A `begin` whose body ends in an expression that can `return` from inside
-itself has its handlers and propagation measured as usual, but its normal
-completion is declared instead of probed unless every branch of that
-expression can carry the probe: Ruby cannot pass such an expression as an
-argument, which is what a probe wrapper does.
-
-Measuring never breaks the program being measured. If a file cannot be
-compiled with its probes, it loads unmodified: Ruby's `Coverage` still
-measures its lines, methods and own branches, and only the obligations a
-probe would have proven are declared for that file. Setting
-`SUPERCOV_RUBY_SKIP_PROBES` to a comma-separated list of path fragments puts
-chosen files on that same path deliberately, which is the escape hatch if
-instrumentation ever disagrees with one of yours.
-
-Ruby 3.3 does not apply its `Coverage` module to code compiled by a load hook,
-so on 3.3 Supercov measures through `Coverage` alone: lines, methods and the
-branches Ruby reports itself. Everything that needs a probe (multi-condition
-decisions, `||=`, loops, `rescue` flow, a second statement on a line) is
-declared unmeasured on that interpreter rather than shown as a gap. Ruby 3.4
-and newer measure everything.
-
-Ruby reads its own coverage as the interpreter exits, and that shapes what a
-stopped process keeps. A process ended by a signal it can catch—`SIGTERM`
-from a test's teardown, `SIGINT`—unwinds through that exit and reports
-everything it measured. A process killed with `SIGKILL`, or one that leaves
-through `exit!`, never gets there and takes with it whatever it observed since
-its last test boundary. Supercov cannot recover that or say which lines it
-would have been, so the run declares that a process did not report, which
-blocks completeness, rather than counting those lines against the code. Stop a
-Ruby server with `SIGTERM`, or wait for it to exit, and it reports.
+Stop test-owned Ruby servers with `SIGTERM` or wait for normal exit so they can
+report their evidence. `SIGKILL` and `exit!` can lose observations since the last
+test boundary. A process that does not report leaves a measurement limit; its
+missing evidence is not counted as uncovered application code.
 
 ```sh
 npx supercov -- rspec

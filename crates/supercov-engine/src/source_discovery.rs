@@ -540,7 +540,7 @@ fn entry_targets(directory: &Path, manifest: &Value) -> Vec<PathBuf> {
         .collect()
 }
 
-fn strip_jsonc_comments(contents: &str) -> String {
+pub(crate) fn strip_jsonc_comments(contents: &str) -> String {
     let mut output = String::with_capacity(contents.len());
     let mut chars = contents.chars().peekable();
     let mut string = false;
@@ -584,7 +584,7 @@ fn strip_jsonc_comments(contents: &str) -> String {
     output
 }
 
-fn strip_trailing_commas(contents: &str) -> String {
+pub(crate) fn strip_trailing_commas(contents: &str) -> String {
     let chars = contents.chars().collect::<Vec<_>>();
     let mut output = String::with_capacity(contents.len());
     let mut string = false;

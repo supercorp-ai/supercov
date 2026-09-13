@@ -33,6 +33,7 @@ npx supercov runs latest scope
 | Branch | Did each alternative execute? |
 | Decision vector | Which combinations of boolean conditions occurred? |
 | MC/DC witness | Was each condition shown to affect the decision independently? |
+| Assertion coverage | Which measured statements are linked to passing checks by the agent-authored map? |
 | Value path | Did defaults, optional chains, logical assignments, and similar constructs take each meaningful path? |
 
 The exact obligations depend on the language and source construct. You do not
@@ -70,6 +71,11 @@ A complete result means every declared obligation was measured and covered. It
 does not mean the product has no bugs, the assertions are meaningful, or every
 possible input was tested. Review test quality and user-visible behavior, not
 only the percentage.
+
+TypeScript imports known to disappear during compilation do not add runtime
+statement obligations. The assertion report's `excludedStatements` view lists
+these locations. Imports that still execute, including side-effect imports,
+remain in the denominator.
 
 To review what your JavaScript and TypeScript tests actually check, see
 [Understanding assertions](assertions.md).

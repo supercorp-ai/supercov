@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.45",
+  "version": "0.0.46",
   "description": "Coverage for coding agents and software factories \ud83c\udf19",
   "license": "MIT",
   "repository": {
@@ -87,19 +87,21 @@
     "test:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-integration.mjs",
     "test:ruby-coverage": "cargo build -p supercov && node scripts/ruby-coverage-integration.mjs",
     "test:rust-public-cargo": "cargo build -p supercov && node scripts/rust-public-cargo-integration.mjs",
-    "test:assertion-maps": "cargo build -p supercov && node scripts/assertion-map-schema.mjs --check && node scripts/assertion-map-integration.mjs && node scripts/assertion-map-js-integration.mjs",
-    "test:assertion-maps:js": "cargo build -p supercov && node scripts/assertion-map-schema.mjs --check && node scripts/assertion-map-js-integration.mjs",
-    "sync:assertion-schema": "cargo build -p supercov && node scripts/assertion-map-schema.mjs"
+    "test:assertion-maps": "cargo build -p supercov && node scripts/assertion-map-schema.mjs --check && node scripts/assertion-map-integration.mjs && node scripts/assertion-map-js-integration.mjs && node scripts/assertion-dogfood-integration.mjs",
+    "test:assertion-maps:js": "cargo build -p supercov && node scripts/assertion-map-schema.mjs --check && node scripts/assertion-map-js-integration.mjs && node scripts/assertion-dogfood-integration.mjs",
+    "sync:assertion-schema": "cargo build -p supercov && node scripts/assertion-map-schema.mjs",
+    "docs:sync": "node scripts/sync-docs.mjs",
+    "docs:check": "node scripts/sync-docs.mjs --check"
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "0.0.45",
-    "@supercov/cli-darwin-x64": "0.0.45",
-    "@supercov/cli-linux-arm64-gnu": "0.0.45",
-    "@supercov/cli-linux-arm64-musl": "0.0.45",
-    "@supercov/cli-linux-x64-gnu": "0.0.45",
-    "@supercov/cli-linux-x64-musl": "0.0.45",
-    "@supercov/cli-win32-arm64": "0.0.45",
-    "@supercov/cli-win32-x64": "0.0.45"
+    "@supercov/cli-darwin-arm64": "0.0.46",
+    "@supercov/cli-darwin-x64": "0.0.46",
+    "@supercov/cli-linux-arm64-gnu": "0.0.46",
+    "@supercov/cli-linux-arm64-musl": "0.0.46",
+    "@supercov/cli-linux-x64-gnu": "0.0.46",
+    "@supercov/cli-linux-x64-musl": "0.0.46",
+    "@supercov/cli-win32-arm64": "0.0.46",
+    "@supercov/cli-win32-x64": "0.0.46"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",

@@ -56,7 +56,7 @@ try {
   const listText = requireSupercov(root, ['runs', first, 'assertions']).stdout;
   assert(listText.includes(a.id));
   assert.match(listText, /no flows · 1 passing test/);
-  for (const resource of [['source'], ['source', 'missing.ts'], ['assertion'], ['assertion', 'unknown-id'], ['assertion', a.id, '--limit', '1'], ['assertions', 'inventory']]) {
+  for (const resource of [['source'], ['source', 'missing.ts'], ['assertion'], ['assertion', 'unknown-id'], ['assertion', a.id, '--limit', '0'], ['assertions', 'inventory']]) {
     assert.equal(executeSupercov(root, ['runs', first, ...resource]).status, 2, resource.join(' '));
   }
   // Removing a map entry must not hide a recognized assertion from the list.
@@ -91,16 +91,53 @@ try {
   assert.equal(detail.data.assertion.flows[0].explanation, a.flows[0].explanation);
   assert.equal(detail.data.assertion.flows[0].current, true);
   assert.equal(detail.data.assertion.flows[0].eligible, true);
+  assert.equal(detail.data.assertion.flows[0].nodeCredit[0].status, 'credited');
+  assert.equal(detail.data.assertion.flows[0].nodeCredit[0].reasons[0].code, 'same_test_execution');
   assert.equal(detail.data.revision, report.revision);
   assert.equal(detail.data.tests.length, 1);
   const detailText = requireSupercov(root, ['runs', first, 'assertion', a.id]).stdout;
   assert(detailText.includes(a.flows[0].explanation));
   assert.match(detailText, /Node return — src\/core.js:2:3/);
   assert.match(detailText, /current, eligible for credit/);
+  assert.match(detailText, /\[Credited\]/);
+  assert.match(detailText, /Credit reason: Current agent claim/);
   const regular = coverageQuery(root, first).data.assertionCoverage;
   assert.equal(regular.summary.statements.percentage, 100);
   assert.equal(regular.revision, report.revision);
   assert.match(requireSupercov(root, ["runs", first]).stdout, /Assertions 100\.00% \(1\/1\)/);
+  // Large details must remain readable without truncating any authored graph.
+  const originalFlows = a.flows;
+  a.flows = Array.from({length: 7}, (_, index) => ({
+    ...structuredClone(originalFlows[0]), id: `large-${index}`,
+    explanation: 'The checked return value. '.repeat(520),
+  }));
+  write(initialized.map, map);
+  acknowledgeMap((...args) => query(first, ...args), initialized.map, map);
+  const collected = [];
+  let offset = 0;
+  do {
+    const page = coverageQuery(root, first, 'assertion', a.id, '--offset', String(offset)).data;
+    assert.equal(page.pagination.total, 7);
+    assert(page.pagination.returned > 0);
+    if (offset === 0) assert(page.pagination.returned < 7, 'JSON pages adapt to the byte limit');
+    collected.push(...page.assertion.flows);
+    assert.equal(page.summary.statements.asserted, 1, 'paging does not change credit');
+    offset = page.pagination.nextOffset;
+  } while (offset !== null);
+  assert.deepEqual(collected.map(f => f.id), a.flows.map(f => f.id));
+  for (const [index, flow] of collected.entries()) {
+    assert.deepEqual(flow.nodes, a.flows[index].nodes);
+    assert.equal(flow.explanation, a.flows[index].explanation);
+    assert.equal(flow.nodeCredit[0].status, 'credited');
+  }
+  const pagedText = requireSupercov(root, ['runs', first, 'assertion', a.id, '--offset', '1', '--limit', '1']).stdout;
+  assert.match(pagedText, /Showing flows 2-2 of 7/);
+  assert.match(pagedText, /--offset 2 --limit 1/);
+  const emptyText = requireSupercov(root, ['runs', first, 'assertion', a.id, '--offset', '7']).stdout;
+  assert.match(emptyText, /No flows on this page/);
+  assert(!emptyText.includes('No flows mapped yet'));
+  a.flows = originalFlows;
+  write(initialized.map, map);
   // The regular report must refresh after map edits without rerunning tests.
   a.flows[0].explanation += " Reviewed again.";
   write(initialized.map, map);

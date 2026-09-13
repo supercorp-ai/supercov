@@ -122,6 +122,10 @@ pub(crate) fn javascript_assertion_paths(
     let mut paths = test_files(root)?;
     paths.extend(dependency_files(root)?);
     paths.extend(configuration_files(root, project)?);
+    paths.extend(crate::typescript_imports::config_paths(
+        root,
+        &project.source_files,
+    ));
     paths.extend(project.source_files.iter().map(|p| root.join(p)));
     paths.extend(
         project
@@ -498,7 +502,15 @@ pub fn create_run_integrity(
     let source = digest_files(root, source_paths)?;
     let tests_digest = digest_files(root, tests.iter().cloned())?;
     let dependency_digest = digest_files(root, dependencies)?;
-    let configuration_digest = digest_files(root, configuration)?;
+    let configuration_digest = digest_files(
+        root,
+        configuration
+            .into_iter()
+            .chain(crate::typescript_imports::config_paths(
+                root,
+                &project.source_files,
+            )),
+    )?;
     let frontend_instrumenter =
         digest_files(&frontend.root, frontend.instrumenter_files.iter().cloned())?;
     let frontend_execution =

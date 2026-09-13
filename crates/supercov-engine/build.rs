@@ -76,6 +76,8 @@ fn main() {
     );
     let javascript_frontend = [
         crate_root.join("src/js_instrumenter.rs"),
+        crate_root.join("src/typescript_imports.rs"),
+        crate_root.join("src/javascript_frontend.rs"),
         crate_root.join("src/probe_v2.rs"),
         crate_root.join("Cargo.toml"),
     ];
