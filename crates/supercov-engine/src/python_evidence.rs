@@ -1477,6 +1477,22 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    // A path is only absolute in the platform's own spelling: "/project" is a
+    // relative path on Windows, where an absolute one needs a drive. The
+    // runtimes report whatever the interpreter loaded, so these fixtures have
+    // to speak the host's dialect too.
+    fn under(first: &str, rest: &str) -> String {
+        let mut path = PathBuf::from(if cfg!(windows) {
+            format!("C:\\{first}")
+        } else {
+            format!("/{first}")
+        });
+        for part in rest.split('/').filter(|part| !part.is_empty()) {
+            path.push(part);
+        }
+        path.to_string_lossy().into_owned()
+    }
+
     fn inventory_of(root: &str, sites: &[(&str, usize, usize)]) -> PythonAssertionInventory {
         use crate::assertion_map::{Anchor, Files, Inputs, InventorySite};
         PythonAssertionInventory::new(
@@ -1554,10 +1570,10 @@ mod tests {
         // witness only when the inventory holds exactly one site on it. The
         // column reported is zero-based, which is what every native manifest
         // reports and what the assertion report adds one to.
-        let inventory = inventory_of("/project", &[("tests/test_m.py", 6, 5)]);
+        let inventory = inventory_of(&under("project", ""), &[("tests/test_m.py", 6, 5)]);
         let run = run_with_sites(
             "py-asite-located",
-            &[json!({"t":"asite","ctx":1,"f":"/project/tests/test_m.py","l":6})],
+            &[json!({"t":"asite","ctx":1,"f":under("project", "tests/test_m.py"),"l":6})],
             None,
             &inventory,
         );
@@ -1574,12 +1590,12 @@ mod tests {
         // frame outside the project names nothing. Both lose the witness
         // rather than guessing one.
         let ambiguous = inventory_of(
-            "/project",
+            &under("project", ""),
             &[("tests/test_m.py", 6, 5), ("tests/test_m.py", 6, 30)],
         );
         let run = run_with_sites(
             "py-asite-ambiguous",
-            &[json!({"t":"asite","ctx":1,"f":"/project/tests/test_m.py","l":6})],
+            &[json!({"t":"asite","ctx":1,"f":under("project", "tests/test_m.py"),"l":6})],
             None,
             &ambiguous,
         );
@@ -1589,10 +1605,10 @@ mod tests {
             "only the per-test assertion phase should remain"
         );
 
-        let known = inventory_of("/project", &[("tests/test_m.py", 6, 5)]);
+        let known = inventory_of(&under("project", ""), &[("tests/test_m.py", 6, 5)]);
         let outside = run_with_sites(
             "py-asite-outside",
-            &[json!({"t":"asite","ctx":1,"f":"/elsewhere/tests/test_m.py","l":6})],
+            &[json!({"t":"asite","ctx":1,"f":under("elsewhere", "tests/test_m.py"),"l":6})],
             None,
             &known,
         );
@@ -1608,13 +1624,13 @@ mod tests {
         // the test's module; either may be absolute or relative. Both name the
         // same project file, and a runner that names none falls back to the
         // node id.
-        let inventory = inventory_of("/project", &[("tests/test_m.py", 6, 5)]);
+        let inventory = inventory_of(&under("project", ""), &[("tests/test_m.py", 6, 5)]);
         for reported in [
-            "/project/tests/test_m.py",
-            "tests/test_m.py",
-            "./tests/test_m.py",
+            under("project", "tests/test_m.py"),
+            "tests/test_m.py".to_owned(),
+            "./tests/test_m.py".to_owned(),
         ] {
-            let run = run_with_sites("py-asite-file", &[], Some(reported), &inventory);
+            let run = run_with_sites("py-asite-file", &[], Some(reported.as_str()), &inventory);
             assert_eq!(
                 run.request.raw_results[0].test_file.as_deref(),
                 Some("tests/test_m.py"),
