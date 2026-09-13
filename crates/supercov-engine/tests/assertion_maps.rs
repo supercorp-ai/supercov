@@ -869,6 +869,104 @@ fn basis_syntax_requires_an_explicit_null_or_versioned_token() {
 }
 
 #[test]
+fn a_manifest_is_never_reported_twice_as_a_change_to_assess() {
+    // The run's dependency fingerprint already answers for a manifest, and it
+    // reads what the manifest declares rather than its bytes. Recording the
+    // bytes here as well made cutting a release look like a change that needed
+    // an explanation before coverage would report a number again.
+    let (inputs, map, state) = fixture();
+    let mut released = inputs.clone();
+    released
+        .files
+        .insert("package.json".into(), r#"{"version":"2.0.0"}"#.into());
+    let (_, next) = carry(&map, &state, &inputs.manifest(), &released, "next", false).unwrap();
+    assert!(
+        next.changes.is_empty(),
+        "a manifest must not queue an assessment: {:?}",
+        next.changes
+    );
+
+    // An ordinary source file still does, which is what the mechanism is for.
+    let mut edited = inputs.clone();
+    edited.files.insert("src/a.js".into(), "return 2;\n".into());
+    let (_, reported) = carry(&map, &state, &inputs.manifest(), &edited, "next", false).unwrap();
+    assert!(!reported.changes.is_empty());
+}
+
+#[test]
+fn a_redundant_watch_cannot_undo_the_manifest_rule() {
+    // Found by running a real 653-flow map through the upgrade: almost every
+    // flow watched `package.json`, so a version bump still made all of them
+    // stale even though the manifest digest ignores version numbers. The bytes
+    // were reaching the flow's own token by the back door.
+    let (mut inputs, mut map, state) = fixture();
+    inputs
+        .files
+        .insert("package.json".into(), r#"{"version":"1.0.0"}"#.into());
+    map.assertions[0].flows[0].watch = vec!["package.json".into()];
+    let before = expected_basis(
+        &map.assertions[0],
+        &map.assertions[0].flows[0],
+        &map,
+        &state,
+        &inputs.manifest(),
+    );
+
+    let mut released = inputs.clone();
+    released
+        .files
+        .insert("package.json".into(), r#"{"version":"2.0.0"}"#.into());
+    assert_eq!(
+        before,
+        expected_basis(
+            &map.assertions[0],
+            &map.assertions[0].flows[0],
+            &map,
+            &state,
+            &released.manifest(),
+        ),
+        "cutting a release must not move a flow's token"
+    );
+
+    // A node in that file is the flow's subject, not a redundant watch, so it
+    // still counts. `setup.py` is a dependency manifest and measured source at
+    // once, and editing it has to cost a review.
+    let mut subject = map.clone();
+    subject.assertions[0].flows[0].watch.clear();
+    subject.assertions[0].flows[0].nodes[0].at.file = "package.json".into();
+    assert!(
+        dependencies(&subject.assertions[0], &subject.assertions[0].flows[0])
+            .contains("package.json")
+    );
+}
+
+#[test]
+fn a_watch_on_a_file_supercov_already_tracks_is_reported_as_redundant() {
+    // Every flow is marked dirty when a dependency manifest or the execution
+    // configuration changes, so naming one of those per flow catches nothing
+    // extra. The map is not wrong, which is why this is an advisory -- but left
+    // unsaid it teaches the author that per-flow watching is how dependency
+    // drift is caught, and the effort goes to entries that change nothing.
+    let (mut inputs, mut map, _) = fixture();
+    assert!(advisories(&map).is_empty());
+    for tracked in ["package-lock.json", "package.json", "Cargo.toml"] {
+        // A real project carries these in the inventory, so watching one is a
+        // well-formed thing to write. That is exactly why it needs saying.
+        inputs.files.insert(tracked.into(), "{}".into());
+        map.assertions[0].flows[0].watch = vec![tracked.into()];
+        assert!(
+            advisories(&map).iter().any(|a| a.contains("redundant")),
+            "{tracked} should be reported"
+        );
+        // It stays an advisory. A redundant watch never fails validation.
+        assert!(validate_flow(&map.assertions[0].flows[0], &inputs.files).is_empty());
+    }
+    // A file no fingerprint covers is exactly what watch exists for.
+    map.assertions[0].flows[0].watch = vec!["tests/helpers/peer.js".into()];
+    assert!(advisories(&map).is_empty());
+}
+
+#[test]
 fn counted_nodes_need_an_authored_path_to_the_exact_assertion_sink() {
     let (inputs, mut map, _) = fixture();
     let flow = &mut map.assertions[0].flows[0];

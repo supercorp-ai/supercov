@@ -211,9 +211,163 @@ fn local_path(root: &Path, path: &Path) -> Result<String, IntegrityError> {
         .map(|parts| parts.join("/"))
 }
 
+/// Fields that name the project rather than its dependencies. None of them can
+/// change how installed code behaves, so none of them belong in a fingerprint
+/// whose only job is to say whether the execution context moved.
+const RELEASE_METADATA: &[&str] = &[
+    "author",
+    "authors",
+    "bugs",
+    "categories",
+    "classifiers",
+    "contributors",
+    "description",
+    "documentation",
+    "funding",
+    "homepage",
+    "keywords",
+    "license",
+    "license-file",
+    "maintainers",
+    "man",
+    "readme",
+    "repository",
+    "urls",
+    "version",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManifestKind {
+    PackageJson,
+    PackageLock,
+    CargoToml,
+    PyprojectToml,
+}
+
+fn manifest_kind(path: &Path) -> Option<ManifestKind> {
+    match path.file_name()?.to_str()? {
+        "package.json" => Some(ManifestKind::PackageJson),
+        "package-lock.json" | "npm-shrinkwrap.json" => Some(ManifestKind::PackageLock),
+        "Cargo.toml" => Some(ManifestKind::CargoToml),
+        "pyproject.toml" => Some(ManifestKind::PyprojectToml),
+        _ => None,
+    }
+}
+
+/// The part of a manifest that decides behaviour, in a canonical encoding.
+///
+/// Only release metadata is dropped, and only from the tables that describe
+/// this project. Every other field survives, including one a future npm or
+/// cargo invents, so an unrecognised key is conservative by default. A lockfile
+/// keeps every dependency's version and loses only the project's own, which it
+/// mirrors from `package.json`.
+fn behavioural_manifest(kind: ManifestKind, raw: &[u8]) -> Option<Vec<u8>> {
+    let mut value: serde_json::Value = match kind {
+        ManifestKind::PackageJson | ManifestKind::PackageLock => {
+            serde_json::from_slice(raw).ok()?
+        }
+        ManifestKind::CargoToml | ManifestKind::PyprojectToml => {
+            let text = std::str::from_utf8(raw).ok()?;
+            serde_json::to_value(toml::from_str::<toml::Value>(text).ok()?).ok()?
+        }
+    };
+    match kind {
+        ManifestKind::PackageJson => strip_metadata(&mut value, &[]),
+        // A lockfile repeats this project's own version at its root and again
+        // in `packages[""]`. Every other entry is a real dependency whose
+        // version must still be hashed.
+        ManifestKind::PackageLock => {
+            strip_metadata(&mut value, &[]);
+            strip_metadata(&mut value, &["packages", ""]);
+        }
+        ManifestKind::CargoToml => {
+            strip_metadata(&mut value, &["package"]);
+            strip_metadata(&mut value, &["workspace", "package"]);
+        }
+        ManifestKind::PyprojectToml => {
+            strip_metadata(&mut value, &["project"]);
+            strip_metadata(&mut value, &["tool", "poetry"]);
+        }
+    }
+    let mut bytes = Vec::new();
+    canonical(&value, &mut bytes);
+    Some(bytes)
+}
+
+fn strip_metadata(value: &mut serde_json::Value, path: &[&str]) {
+    let mut table = value;
+    for key in path {
+        match table.get_mut(*key) {
+            Some(next) => table = next,
+            None => return,
+        }
+    }
+    let Some(table) = table.as_object_mut() else {
+        return;
+    };
+    for key in RELEASE_METADATA {
+        table.remove(*key);
+    }
+}
+
+/// A length-prefixed, key-sorted encoding, so the digest does not move when a
+/// formatter reorders keys or rewrites whitespace.
+fn canonical(value: &serde_json::Value, out: &mut Vec<u8>) {
+    match value {
+        serde_json::Value::Null => out.push(0),
+        serde_json::Value::Bool(flag) => out.extend([1, u8::from(*flag)]),
+        serde_json::Value::Number(number) => tagged(out, 2, number.to_string().as_bytes()),
+        serde_json::Value::String(text) => tagged(out, 3, text.as_bytes()),
+        serde_json::Value::Array(items) => {
+            tagged(out, 4, &(items.len() as u64).to_le_bytes());
+            for item in items {
+                canonical(item, out);
+            }
+        }
+        serde_json::Value::Object(table) => {
+            let mut keys = table.keys().collect::<Vec<_>>();
+            keys.sort();
+            tagged(out, 5, &(keys.len() as u64).to_le_bytes());
+            for key in keys {
+                tagged(out, 6, key.as_bytes());
+                canonical(&table[key], out);
+            }
+        }
+    }
+}
+
+fn tagged(out: &mut Vec<u8>, tag: u8, bytes: &[u8]) {
+    out.push(tag);
+    out.extend((bytes.len() as u64).to_le_bytes());
+    out.extend(bytes);
+}
+
 fn digest_files(
     root: &Path,
     paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<String, IntegrityError> {
+    digest_paths(root, paths, false)
+}
+
+/// Dependency manifests, hashed by what they say rather than by their bytes.
+///
+/// A manifest carries two unrelated things: what the project depends on, and
+/// how the project describes itself. Hashing both means every release
+/// invalidates every claim in the map, because a manifest is where the version
+/// number lives. Across supergateway's last sixty commits thirty percent
+/// touched a manifest, and seven of those eighteen changed nothing but a
+/// version string.
+fn digest_manifests(
+    root: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<String, IntegrityError> {
+    digest_paths(root, paths, true)
+}
+
+fn digest_paths(
+    root: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+    manifests: bool,
 ) -> Result<String, IntegrityError> {
     let paths = paths.into_iter().collect::<BTreeSet<_>>();
     let mut labeled = paths
@@ -230,15 +384,26 @@ fn digest_files(
         }
         hash.update(label.as_bytes());
         hash.update([0]);
-        let mut file = fs::File::open(&path).map_err(|source| io_error(&path, source))?;
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|source| io_error(&path, source))?;
-            if read == 0 {
-                break;
+        // A manifest we can parse is hashed by meaning; anything else, and any
+        // manifest we fail to parse, is hashed whole. Falling back to the bytes
+        // keeps an unfamiliar or malformed file conservative.
+        let meaning = manifests
+            .then(|| manifest_kind(&path))
+            .flatten()
+            .and_then(|kind| behavioural_manifest(kind, &fs::read(&path).ok()?));
+        if let Some(bytes) = meaning {
+            hash.update(&bytes);
+        } else {
+            let mut file = fs::File::open(&path).map_err(|source| io_error(&path, source))?;
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .map_err(|source| io_error(&path, source))?;
+                if read == 0 {
+                    break;
+                }
+                hash.update(&buffer[..read]);
             }
-            hash.update(&buffer[..read]);
         }
         hash.update([0]);
     }
@@ -394,12 +559,72 @@ fn configuration_file(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if formatting_only(&name) {
+        return false;
+    }
     name == ".npmrc"
         || (name.starts_with("tsconfig") && name.ends_with(".json"))
         || name.contains(".config.")
         || name.starts_with(".babelrc.")
-        || name.starts_with(".eslint")
-        || name.starts_with(".prettier")
+}
+
+/// Linters and formatters do not change what the code does when it runs, so
+/// editing their settings is not a change of execution context. Counting it as
+/// one meant a Prettier tweak invalidated every flow in the map. Transpiler
+/// configuration is a different matter and stays: Babel and tsconfig decide
+/// what actually executes.
+fn formatting_only(name: &str) -> bool {
+    let stem = name.strip_prefix('.').unwrap_or(name);
+    stem.starts_with("eslint") || stem.starts_with("prettier")
+}
+
+/// Files whose content already reaches the run fingerprint, for any language
+/// Supercov supports.
+///
+/// When one of these changes the whole map is marked dirty, so a flow that also
+/// names one in `watch` buys nothing. Worse, it teaches the author a model of
+/// the tool that is not true: that per-flow watching is what catches dependency
+/// drift.
+const TRACKED_MANIFESTS: &[&str] = &[
+    "Cargo.lock",
+    "Cargo.toml",
+    "Gemfile",
+    "Gemfile.lock",
+    "Pipfile",
+    "Pipfile.lock",
+    "bun.lock",
+    "bun.lockb",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "package.json",
+    "pdm.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
+    "uv.lock",
+    "yarn.lock",
+    ".ruby-version",
+    ".tool-versions",
+];
+
+/// A dependency manifest or lockfile, for any language Supercov supports.
+///
+/// These already have a dedicated signal: the run's dependency fingerprint,
+/// which reads what a manifest declares rather than its bytes. Reporting their
+/// raw bytes a second time would say a release changed something when it
+/// changed nothing.
+pub fn tracked_manifest(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    TRACKED_MANIFESTS.contains(&name)
+        || name.ends_with(".gemspec")
+        || (name.starts_with("requirements") && name.ends_with(".txt"))
+}
+
+pub fn globally_tracked(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    tracked_manifest(name) || configuration_file(Path::new(name))
 }
 
 fn configuration_files(
@@ -501,7 +726,7 @@ pub fn create_run_integrity(
         .collect::<Vec<_>>();
     let source = digest_files(root, source_paths)?;
     let tests_digest = digest_files(root, tests.iter().cloned())?;
-    let dependency_digest = digest_files(root, dependencies)?;
+    let dependency_digest = digest_manifests(root, dependencies)?;
     let configuration_digest = digest_files(
         root,
         configuration
@@ -522,9 +747,21 @@ pub fn create_run_integrity(
             ("version", frontend.version.as_bytes()),
             ("engine", frontend.engine_instrumenter_sha256.as_bytes()),
             ("shim", frontend_instrumenter.as_bytes()),
+            // The runtime shim decides what evidence looks like, so it is part
+            // of who instrumented the run rather than of the run's setup.
+            (
+                "executionEngine",
+                frontend.engine_execution_sha256.as_bytes(),
+            ),
+            ("executionShim", frontend_execution.as_bytes()),
         ],
     );
     let build_environment = frontend_map_bytes(&project.build_environment);
+    // `execution` describes the run's setup, not who instrumented it. Supercov's
+    // own source used to be folded in here as well, so upgrading Supercov made
+    // every stored run stale for a checkout that had not changed. Its identity
+    // still lives in `instrumenter`, which the build caches and run merging
+    // consult directly.
     let execution = domain_hash(
         "supercov-run-execution-v1",
         &[
@@ -534,8 +771,6 @@ pub fn create_run_integrity(
             ("dependencies", dependency_digest.as_bytes()),
             ("configuration", configuration_digest.as_bytes()),
             ("buildEnvironment", &build_environment),
-            ("engine", frontend.engine_execution_sha256.as_bytes()),
-            ("shim", frontend_execution.as_bytes()),
         ],
     );
     let combined = domain_hash(
@@ -586,7 +821,7 @@ pub fn create_explicit_run_integrity(
     }
     let source = digest_files(root, inputs.source_files.iter().map(|path| root.join(path)))?;
     let tests = digest_files(root, inputs.test_files.iter().map(|path| root.join(path)))?;
-    let dependencies = digest_files(
+    let dependencies = digest_manifests(
         root,
         inputs.dependency_files.iter().map(|path| root.join(path)),
     )?;
@@ -608,8 +843,20 @@ pub fn create_explicit_run_integrity(
             ("version", frontend.version.as_bytes()),
             ("engine", frontend.engine_instrumenter_sha256.as_bytes()),
             ("shim", frontend_instrumenter.as_bytes()),
+            // The runtime shim decides what evidence looks like, so it is part
+            // of who instrumented the run rather than of the run's setup.
+            (
+                "executionEngine",
+                frontend.engine_execution_sha256.as_bytes(),
+            ),
+            ("executionShim", frontend_execution.as_bytes()),
         ],
     );
+    // `execution` describes the run's setup, not who instrumented it. Supercov's
+    // own source used to be folded in here as well, so upgrading Supercov made
+    // every stored run stale for a checkout that had not changed. Its identity
+    // still lives in `instrumenter`, which the build caches and run merging
+    // consult directly.
     let execution = domain_hash(
         "supercov-run-execution-v1",
         &[
@@ -619,8 +866,6 @@ pub fn create_explicit_run_integrity(
             ("dependencies", dependencies.as_bytes()),
             ("configuration", configuration.as_bytes()),
             ("executionConfiguration", &inputs.execution_configuration),
-            ("engine", frontend.engine_execution_sha256.as_bytes()),
-            ("shim", frontend_execution.as_bytes()),
         ],
     );
     let combined = domain_hash(
@@ -698,6 +943,186 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    const PACKAGE: &str = r#"{"name":"g","version":"1.0.0","dependencies":{"a":"^1.2.3"}}"#;
+    const LOCK: &str = r#"{"name":"g","version":"1.0.0","packages":{"":{"name":"g","version":"1.0.0"},"node_modules/a":{"version":"1.2.3"}}}"#;
+    const CARGO: &str =
+        "[package]\nname = \"g\"\nversion = \"1.0.0\"\n\n[dependencies]\na = \"1.2.3\"\n";
+    const PYPROJECT: &str =
+        "[project]\nname = \"g\"\nversion = \"1.0.0\"\ndependencies = [\"a==1.2.3\"]\n";
+
+    #[test]
+    fn a_release_bump_leaves_a_manifest_digest_alone() {
+        // A version number says what the project calls itself, not what it
+        // depends on, and it lives in the same file as the dependencies. Hashing
+        // it meant every release invalidated every claim in the map.
+        for (kind, before, after) in [
+            (
+                ManifestKind::PackageJson,
+                PACKAGE.to_owned(),
+                PACKAGE.replace("1.0.0", "2.0.0"),
+            ),
+            (
+                ManifestKind::PackageLock,
+                LOCK.to_owned(),
+                LOCK.replace("\"version\":\"1.0.0\"", "\"version\":\"2.0.0\""),
+            ),
+            (
+                ManifestKind::CargoToml,
+                CARGO.to_owned(),
+                CARGO.replace("1.0.0", "2.0.0"),
+            ),
+            (
+                ManifestKind::PyprojectToml,
+                PYPROJECT.to_owned(),
+                PYPROJECT.replace("1.0.0", "2.0.0"),
+            ),
+        ] {
+            let stable = behavioural_manifest(kind, before.as_bytes());
+            assert!(stable.is_some());
+            assert_eq!(stable, behavioural_manifest(kind, after.as_bytes()));
+        }
+    }
+
+    #[test]
+    fn a_dependency_change_still_moves_a_manifest_digest() {
+        // Dropping metadata must not drop the signal. A lockfile keeps every
+        // dependency's version and loses only the project's own.
+        for (kind, before, after) in [
+            (
+                ManifestKind::PackageJson,
+                PACKAGE.to_owned(),
+                PACKAGE.replace("^1.2.3", "^2.0.0"),
+            ),
+            (
+                ManifestKind::PackageLock,
+                LOCK.to_owned(),
+                LOCK.replace(
+                    "\"node_modules/a\":{\"version\":\"1.2.3\"}",
+                    "\"node_modules/a\":{\"version\":\"9.9.9\"}",
+                ),
+            ),
+            (
+                ManifestKind::CargoToml,
+                CARGO.to_owned(),
+                CARGO.replace("a = \"1.2.3\"", "a = \"9.9.9\""),
+            ),
+            (
+                ManifestKind::PyprojectToml,
+                PYPROJECT.to_owned(),
+                PYPROJECT.replace("a==1.2.3", "a==9.9.9"),
+            ),
+        ] {
+            assert_ne!(
+                behavioural_manifest(kind, before.as_bytes()),
+                behavioural_manifest(kind, after.as_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn the_dependency_fingerprint_survives_a_release_but_not_an_upgrade() {
+        // The whole point, at the seam the fingerprint actually uses: cutting a
+        // release must cost nothing, and changing a dependency must still cost
+        // a recheck.
+        let root = directory("manifest-fingerprint");
+        let paths = || [root.join("package.json"), root.join("package-lock.json")];
+        write(&root, "package.json", PACKAGE);
+        write(&root, "package-lock.json", LOCK);
+        let before = digest_manifests(&root, paths()).unwrap();
+
+        write(&root, "package.json", &PACKAGE.replace("1.0.0", "2.0.0"));
+        write(
+            &root,
+            "package-lock.json",
+            &LOCK.replace("\"version\":\"1.0.0\"", "\"version\":\"2.0.0\""),
+        );
+        assert_eq!(
+            before,
+            digest_manifests(&root, paths()).unwrap(),
+            "a release must not move the dependency fingerprint"
+        );
+
+        write(&root, "package.json", &PACKAGE.replace("^1.2.3", "^2.0.0"));
+        assert_ne!(
+            before,
+            digest_manifests(&root, paths()).unwrap(),
+            "an upgrade must still move it"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reformatting_a_manifest_leaves_its_digest_alone() {
+        // Key order and whitespace are not meaning, and a formatter rewriting
+        // either should not cost the author a re-acknowledgement.
+        let reordered = r#"{"dependencies":{"a":"^1.2.3"},  "version":"1.0.0",
+            "name":"g"}"#;
+        assert_eq!(
+            behavioural_manifest(ManifestKind::PackageJson, PACKAGE.as_bytes()),
+            behavioural_manifest(ManifestKind::PackageJson, reordered.as_bytes())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_manifest_falls_back_to_its_bytes() {
+        // A file we cannot parse is hashed whole, so a format we do not
+        // understand stays conservative instead of silently hashing nothing.
+        assert!(behavioural_manifest(ManifestKind::PackageJson, b"{ not json").is_none());
+        assert!(behavioural_manifest(ManifestKind::CargoToml, b"[[[").is_none());
+        let root = directory("manifest-fallback");
+        write(&root, "package.json", "{ not json");
+        let first = digest_manifests(&root, [root.join("package.json")]).unwrap();
+        write(&root, "package.json", "{ still not json");
+        assert_ne!(
+            first,
+            digest_manifests(&root, [root.join("package.json")]).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn linter_and_formatter_settings_are_not_execution_context() {
+        // Neither tool changes what runs, so neither belongs in a fingerprint
+        // that answers whether the execution context moved. Transpiler config
+        // is a different matter and stays.
+        for inert in [
+            ".prettierrc",
+            ".prettierrc.json",
+            "prettier.config.js",
+            ".eslintrc",
+            ".eslintrc.json",
+            "eslint.config.mjs",
+        ] {
+            assert!(!configuration_file(Path::new(inert)), "{inert}");
+        }
+        for real in ["tsconfig.json", ".babelrc.js", "vite.config.ts", ".npmrc"] {
+            assert!(configuration_file(Path::new(real)), "{real}");
+        }
+    }
+
+    #[test]
+    fn globally_tracked_names_what_the_fingerprint_already_covers() {
+        for tracked in [
+            "package-lock.json",
+            "package.json",
+            "Cargo.toml",
+            "Gemfile.lock",
+            "requirements-dev.txt",
+            "supercov.gemspec",
+            "tsconfig.json",
+            "nested/pyproject.toml",
+        ] {
+            assert!(globally_tracked(tracked), "{tracked}");
+        }
+        for own in [
+            "src/index.ts",
+            "tests/helpers/gateway-process.ts",
+            "README.md",
+        ] {
+            assert!(!globally_tracked(own), "{own}");
+        }
     }
 
     fn write(root: &Path, path: &str, contents: &str) {
@@ -895,6 +1320,36 @@ mod tests {
                 .files
                 .keys()
                 .any(|p| p.starts_with(".claude/") || p.starts_with("nested-fork/"))
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(shim).unwrap();
+    }
+
+    #[test]
+    fn a_new_supercov_moves_its_own_identity_and_nothing_else() {
+        // An upgrade must still stop a merge and bust the build caches, because
+        // evidence from two different instrumenters is not comparable. It must
+        // not touch the run's setup, which is what decides whether a stored run
+        // still matches the checkout.
+        let (root, shim) = fixture();
+        let project = discover_coverage_project(&root, &BTreeMap::new(), &[]).unwrap();
+        let baseline = create_run_integrity(&root, &project, &frontend(&shim)).unwrap();
+        let mut newer = frontend(&shim);
+        newer.engine_instrumenter_sha256 = "b".repeat(64);
+        newer.engine_execution_sha256 = "c".repeat(64);
+        let upgraded = create_run_integrity(&root, &project, &newer).unwrap();
+
+        assert_ne!(
+            baseline.fingerprint.instrumenter, upgraded.fingerprint.instrumenter,
+            "a merge and the build caches still have to see this"
+        );
+        assert_eq!(
+            baseline.fingerprint.execution, upgraded.fingerprint.execution,
+            "the run's setup did not change"
+        );
+        assert!(
+            !compare_run_integrity(Some(&baseline), &upgraded).stale,
+            "upgrading Supercov must not discard a recorded run"
         );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(shim).unwrap();

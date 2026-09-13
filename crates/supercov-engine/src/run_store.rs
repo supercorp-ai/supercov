@@ -598,8 +598,13 @@ pub fn compare_run_integrity(
     if stored.schema_version != current.schema_version {
         reasons.push("coverage schema changed".into());
     }
-    if stored.fingerprint.instrumenter != current.fingerprint.instrumenter {
-        reasons.push("instrumenter changed".into());
+    // The declared contract, not the build that produced it. The instrumenter
+    // digest covers Supercov's own source, so comparing it here marked every
+    // stored run stale on every release -- for a checkout that had not changed
+    // and evidence that is still a true record of what ran. A change in what
+    // instrumentation *means* is a deliberate act, and it moves this version.
+    if stored.instrumenter_version != current.instrumenter_version {
+        reasons.push("instrumenter contract changed".into());
     }
     if stored.fingerprint.source != current.fingerprint.source {
         reasons.push("instrumented source changed".into());
@@ -1088,7 +1093,7 @@ mod tests {
 
         let mut current = integrity();
         current.schema_version += 1;
-        current.fingerprint.instrumenter = digest('1');
+        current.instrumenter_version = "javascript-v2".into();
         current.fingerprint.source = digest('2');
         current.fingerprint.tests = digest('3');
         current.fingerprint.dependencies = digest('4');
@@ -1097,13 +1102,21 @@ mod tests {
             compare_run_integrity(Some(&integrity()), &current).reasons,
             [
                 "coverage schema changed",
-                "instrumenter changed",
+                "instrumenter contract changed",
                 "instrumented source changed",
                 "test files changed",
                 "dependencies or lockfile changed",
                 "test/build configuration changed",
             ]
         );
+
+        // Supercov's own digest moves on nearly every release. The checkout has
+        // not changed and the recorded evidence is still a true record of what
+        // ran, so it is not a reason to discard the run. Merging and the build
+        // caches still consult this digest directly, where it does matter.
+        let mut rebuilt = integrity();
+        rebuilt.fingerprint.instrumenter = digest('1');
+        assert!(!compare_run_integrity(Some(&integrity()), &rebuilt).stale);
         fs::remove_dir_all(root).unwrap();
     }
 

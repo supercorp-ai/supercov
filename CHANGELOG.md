@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.0.48
+
+**Added**
+
+- `supercov runs <id> check` fails CI below a coverage floor, reading a recorded run without rerunning tests. Floors are set per metric (`--min-lines`, `--min-branches`, `--min-mcdc` and the rest) and `--per-file` applies them to every file with eligible obligations. They compare the counts, never a rounded percentage, so 9,999 covered lines of 10,000 fails a 100% floor. Insufficient evidence — a failed suite, a stale run, a metric with nothing eligible, one left partly measured, or one the adapter never records — ends with `2` rather than passing.
+- `supercov runs <id> patch --base <ref>` reports coverage of the lines a change touches, against the merge base rather than the target branch's tip. The denominator is changed lines the run measured, so comments, blanks and declarations fall out by the adapter's own judgement, and deleted lines are excluded. A change with nothing executable says so instead of claiming 100%, and changed product source missing from the run is named rather than counted as covered. `--annotate github` emits workflow annotations, needing no token.
+- `supercov runs <id> report --format lcov|cobertura|html` exports a run. All three read the view the gates read, so a consumer's totals are the ones Supercov enforced. Files are written atomically and kept unless `--force`.
+- The HTML report is one self-contained document that opens offline from a CI artifact, with a filterable file table and a source view marking each line in words and a glyph as well as colour. Uncovered, not applicable, partly measured and stale stay distinct rather than collapsing into one score; source is embedded only when the run still matches the checkout.
+- Assertion reports carry `advisories`, the first naming a `watch` on a file already tracked run-wide.
+
+**Changed**
+
+- Each invalidation signal now costs what it is worth, so maps need one review after upgrading and then stop being disturbed by changes that alter nothing.
+
+**Fixed**
+
+- Cutting a release costs nothing. Manifests are fingerprinted by what they declare rather than their bytes, and a flow watching one is covered run-wide — together, 62% of supergateway's manifest edits.
+- Upgrading Supercov no longer marks maps or stored runs stale; only an instrumenter contract change does. Merging and the build caches still see that digest.
+- A dependency upgrade is one change to assess, not staleness on every flow, and credit is retained meanwhile.
+- The ambient environment left run identity for Rust, Python and Ruby. Linters, formatters, type checkers and coverage settings are no longer execution context; Babel, tsconfig and pytest still are.
+- Published crates carry the project README again.
+
 ## 0.0.47
 
 **Added**

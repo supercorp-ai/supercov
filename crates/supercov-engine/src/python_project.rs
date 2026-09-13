@@ -164,10 +164,11 @@ fn walk(
                     continue;
                 }
             }
-            if matches!(
-                name.as_str(),
-                "pytest.ini" | "tox.ini" | ".coveragerc" | "mypy.ini" | ".python-version"
-            ) {
+            // A type checker and a coverage tool do not change what the code
+            // does when it runs, so neither is execution context, any more than
+            // a formatter is. pytest and tox decide what executes;
+            // `.python-version` decides which interpreter executes it.
+            if matches!(name.as_str(), "pytest.ini" | "tox.ini" | ".python-version") {
                 files.configuration_files.push(PathBuf::from(&relative));
                 continue;
             }
@@ -324,35 +325,16 @@ pub fn prepare_python_project(root: &Path) -> Result<PreparedPythonProject, Stri
     })
 }
 
-#[cfg(unix)]
-fn os_string_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt as _;
-    value.as_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn os_string_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
-    value.to_string_lossy().as_bytes().to_vec()
-}
-
-fn append_identity_field(destination: &mut Vec<u8>, value: &[u8]) {
-    destination.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    destination.extend_from_slice(value);
-}
-
 /// Integrity inputs: sources and tests are hashed separately, dependency and
-/// configuration files identify the environment, and the command plus the
-/// supervisor environment identify execution.
+/// configuration files identify the environment, and the test command
+/// identifies execution.
+///
+/// The ambient environment is deliberately absent. It is not a property of the
+/// project, it changes with every terminal, and folding it in made a run
+/// identity that no two machines could agree on. What a project actually needs
+/// from its environment is declared in the files above.
 pub fn python_integrity_inputs(files: &PythonFiles, command: &[String]) -> ExplicitIntegrityInputs {
-    let mut execution_configuration = command.join("\0").into_bytes();
-    let mut environment = std::env::vars_os()
-        .map(|(key, value)| (os_string_bytes(&key), os_string_bytes(&value)))
-        .collect::<Vec<_>>();
-    environment.sort();
-    for (key, value) in environment {
-        append_identity_field(&mut execution_configuration, &key);
-        append_identity_field(&mut execution_configuration, &value);
-    }
+    let execution_configuration = command.join("\0").into_bytes();
     ExplicitIntegrityInputs {
         source_files: files.sources.iter().map(PathBuf::from).collect(),
         test_files: files.tests.iter().map(PathBuf::from).collect(),
@@ -364,6 +346,18 @@ pub fn python_integrity_inputs(files: &PythonFiles, command: &[String]) -> Expli
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_ambient_environment_is_not_part_of_run_identity() {
+        // Identity is what the project is, not which shell it was run from.
+        // Folding the environment in meant no two terminals, and no two
+        // machines, ever agreed on the same run. What a project genuinely needs
+        // from its environment it declares in the files that are hashed above.
+        let files = PythonFiles::default();
+        let command = ["pytest".to_owned(), "-q".to_owned()];
+        let inputs = python_integrity_inputs(&files, &command);
+        assert_eq!(inputs.execution_configuration, b"pytest\0-q");
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -385,6 +379,30 @@ mod tests {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn a_type_checker_and_a_coverage_tool_are_not_execution_context() {
+        // Neither changes what the code does when it runs, so neither should
+        // cost every flow in the map a re-reading. What decides execution does:
+        // pytest and tox choose what runs, `.python-version` chooses the
+        // interpreter that runs it.
+        let root = fixture("inert-tooling");
+        write(&root, "pyproject.toml", "[project]\nname='x'\n");
+        write(&root, "mypy.ini", "[mypy]\n");
+        write(&root, ".coveragerc", "[run]\n");
+        write(&root, "pytest.ini", "[pytest]\n");
+        write(&root, ".python-version", "3.13\n");
+        write(&root, "src/pkg/core.py", "def f(a):\n    return a\n");
+        let project = prepare_python_project(&root).unwrap();
+        assert_eq!(
+            project.files.configuration_files,
+            [
+                PathBuf::from(".python-version"),
+                PathBuf::from("pytest.ini")
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1433,6 +1433,613 @@ fn public_run_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+const CHECK_USAGE: &str = "supercov runs <run-id> check [--min-lines <pct>] [--min-statements <pct>]\n                           [--min-functions <pct>] [--min-branches <pct>] [--min-mcdc <pct>]\n                           [--per-file] [--json]\n";
+
+/// Gate a recorded run against percentage floors, without running tests again.
+///
+/// Exit codes follow the CLI contract: 0 passed, 1 a valid measurement that
+/// fails policy, 2 a request or evidence that cannot answer the question. The
+/// third is the important one -- a failed suite, a stale run, an empty scope or
+/// a partly measured metric must never leave a gate green.
+fn coverage_check_command(arguments: &[String]) -> ExitCode {
+    let mut floors: Vec<supercov_engine::run_view::Floor> = Vec::new();
+    let mut per_file = false;
+    let mut json = false;
+    let mut selector: Option<&str> = None;
+    let mut index = 0;
+    // `runs <id> check ...`; the id may be absent, meaning the latest run.
+    let rest = &arguments[1..];
+    if let Some(first) = arguments.first()
+        && first != "check"
+    {
+        selector = Some(first.as_str());
+    }
+    while index < rest.len() {
+        let argument = rest[index].as_str();
+        index += 1;
+        if argument == "check" {
+            continue;
+        }
+        match argument {
+            "--per-file" => per_file = true,
+            "--json" => json = true,
+            "--help" | "-h" => {
+                print!("{CHECK_USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            flag if flag.starts_with("--min-") => {
+                let Some(metric) = supercov_engine::run_view::Metric::parse(&flag[6..]) else {
+                    eprintln!("[supercov] unknown metric in {flag}\n{CHECK_USAGE}");
+                    return ExitCode::from(2);
+                };
+                let Some(value) = rest.get(index) else {
+                    eprintln!("[supercov] {flag} needs a percentage\n{CHECK_USAGE}");
+                    return ExitCode::from(2);
+                };
+                index += 1;
+                match supercov_engine::run_view::parse_percentage(value) {
+                    Ok(ppm) => floors.push(supercov_engine::run_view::Floor { metric, ppm }),
+                    Err(error) => {
+                        eprintln!("[supercov] {flag}: {error}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            other => {
+                eprintln!("[supercov] unknown option {other}\n{CHECK_USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    let result = (|| -> Result<supercov_engine::run_view::Outcome, String> {
+        let view = load_run_view(selector)?;
+        let outcome = supercov_engine::run_view::check(&view, &floors, per_file);
+        if json {
+            print!(
+                "{}",
+                agent_json::success(
+                    "coverage.check",
+                    &serde_json::json!({"view": view, "outcome": outcome}),
+                    None,
+                )
+                .map_err(|error| format!("response exceeds {} bytes", error.max_bytes))?
+            );
+        } else {
+            print!("{}", render_check(&view, &floors, &outcome));
+        }
+        Ok(outcome)
+    })();
+    match result {
+        Ok(outcome) => ExitCode::from(outcome.exit_code()),
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn render_percentage(covered: usize, eligible: usize) -> String {
+    if eligible == 0 {
+        return "n/a".into();
+    }
+    format!("{:.2}%", covered as f64 * 100.0 / eligible as f64)
+}
+
+fn render_floor(ppm: u64) -> String {
+    let text = format!("{:.4}", ppm as f64 / 10_000.0);
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    format!("{trimmed}%")
+}
+
+fn render_check(
+    view: &supercov_engine::run_view::RunView,
+    floors: &[supercov_engine::run_view::Floor],
+    outcome: &supercov_engine::run_view::Outcome,
+) -> String {
+    use supercov_engine::run_view::Outcome;
+    let mut out = format!("Coverage check for {}\n", view.run);
+    for floor in floors {
+        if let Some(metric) = view.metric(floor.metric) {
+            out.push_str(&format!(
+                "  {:<11} {:>8}  {}/{}  (floor {})\n",
+                metric.metric.name(),
+                render_percentage(metric.covered, metric.eligible),
+                metric.covered,
+                metric.eligible,
+                render_floor(floor.ppm),
+            ));
+        }
+    }
+    match outcome {
+        Outcome::Pass => out.push_str("\nPASS: every floor is met.\n"),
+        Outcome::Fail { violations } => {
+            out.push_str(&format!("\nFAIL: {} floor(s) not met.\n", violations.len()));
+            for violation in violations {
+                let scope = violation.file.as_deref().unwrap_or("(whole run)");
+                out.push_str(&format!(
+                    "  {scope}: {} {}  {}/{} below {}\n",
+                    violation.metric.name(),
+                    render_percentage(violation.covered, violation.eligible),
+                    violation.covered,
+                    violation.eligible,
+                    render_floor(violation.floor_ppm),
+                ));
+                if !violation.uncovered_lines.is_empty() {
+                    let shown = violation
+                        .uncovered_lines
+                        .iter()
+                        .take(10)
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let more = violation.uncovered_lines.len().saturating_sub(10);
+                    out.push_str(&format!(
+                        "    uncovered lines: {shown}{}\n",
+                        if more > 0 {
+                            format!(", and {more} more")
+                        } else {
+                            String::new()
+                        }
+                    ));
+                }
+            }
+        }
+        Outcome::Error { reasons } => {
+            out.push_str("\nERROR: this run cannot answer the question asked.\n");
+            for reason in reasons {
+                out.push_str(&format!("  {reason}\n"));
+            }
+        }
+    }
+    out
+}
+
+const PATCH_USAGE: &str = "supercov runs <run-id> patch --base <ref> [--min-lines <pct>]\n                           [--annotate github] [--max-annotations <n>] [--json]\n";
+
+fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("could not run git: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Changed lines between the merge base with `base` and the working tree.
+///
+/// The merge base is the point the branch diverged, not the previous commit.
+/// Comparing against the tip of a target branch that has moved on would report
+/// other people's lines as this change's obligation.
+fn changed_lines_against(
+    root: &Path,
+    base: &str,
+    measured: &supercov_engine::run_view::RunView,
+) -> Result<supercov_engine::patch_view::ChangedLines, String> {
+    let top = git_output(root, &["rev-parse", "--show-toplevel"])?
+        .trim()
+        .to_owned();
+    let merge_base = git_output(root, &["merge-base", base, "HEAD"])
+        .map_err(|error| format!(
+            "{error}\nCould not find where this branch left {base}. A shallow checkout has no merge base: fetch with enough history (actions/checkout uses fetch-depth: 0), and make sure {base} exists locally."
+        ))?
+        .trim()
+        .to_owned();
+    let diff = git_output(
+        root,
+        &[
+            "diff",
+            "--unified=0",
+            "--no-color",
+            "--find-renames",
+            &merge_base,
+            "--",
+        ],
+    )?;
+    // Git speaks in repository-relative paths; the run speaks in paths
+    // relative to wherever Supercov ran. Translate rather than matching by
+    // basename, which would attribute one `index.ts` to another.
+    let top = fs::canonicalize(&top).unwrap_or_else(|_| PathBuf::from(&top));
+    let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
+    let prefix = here
+        .strip_prefix(&top)
+        .ok()
+        .map(|rest| rest.to_string_lossy().replace('\\', "/"))
+        .filter(|rest| !rest.is_empty())
+        .map(|rest| format!("{rest}/"));
+    let relocate = |path: String| -> Option<String> {
+        match prefix.as_ref() {
+            Some(prefix) => path.strip_prefix(prefix).map(str::to_owned),
+            None => Some(path),
+        }
+    };
+    let mut changed = supercov_engine::patch_view::changed_lines(&diff)
+        .into_iter()
+        .filter_map(|(path, lines)| relocate(path).map(|path| (path, lines)))
+        .collect::<supercov_engine::patch_view::ChangedLines>();
+    // An untracked file is entirely new, so every line the adapter measured in
+    // it is a changed line. Reading the adapter's own set keeps this consistent
+    // with the rest of the denominator.
+    for path in git_output(root, &["ls-files", "--others", "--exclude-standard"])?.lines() {
+        let Some(path) = relocate(path.trim().to_owned()) else {
+            continue;
+        };
+        if let Some(file) = measured.file(&path) {
+            changed
+                .entry(path)
+                .or_default()
+                .extend(file.measured_lines.iter().copied());
+        }
+    }
+    Ok(changed)
+}
+
+/// Report coverage of the lines a change touches.
+fn coverage_patch_command(arguments: &[String]) -> ExitCode {
+    let mut base: Option<String> = None;
+    let mut floor: Option<u64> = None;
+    let mut annotate = false;
+    let mut max_annotations = 50_usize;
+    let mut json = false;
+    let mut selector: Option<&str> = None;
+    if let Some(first) = arguments.first()
+        && first != "patch"
+    {
+        selector = Some(first.as_str());
+    }
+    let rest = &arguments[1..];
+    let mut index = 0;
+    while index < rest.len() {
+        let argument = rest[index].as_str();
+        index += 1;
+        match argument {
+            "patch" => continue,
+            "--json" => json = true,
+            "--help" | "-h" => {
+                print!("{PATCH_USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            "--base" | "--min-lines" | "--annotate" | "--max-annotations" => {
+                let Some(value) = rest.get(index) else {
+                    eprintln!("[supercov] {argument} needs a value\n{PATCH_USAGE}");
+                    return ExitCode::from(2);
+                };
+                index += 1;
+                match argument {
+                    "--base" => base = Some(value.clone()),
+                    "--min-lines" => match supercov_engine::run_view::parse_percentage(value) {
+                        Ok(ppm) => floor = Some(ppm),
+                        Err(error) => {
+                            eprintln!("[supercov] --min-lines: {error}");
+                            return ExitCode::from(2);
+                        }
+                    },
+                    "--annotate" => {
+                        if value != "github" {
+                            eprintln!("[supercov] --annotate only supports github");
+                            return ExitCode::from(2);
+                        }
+                        annotate = true;
+                    }
+                    _ => match value.parse::<usize>() {
+                        Ok(parsed) => max_annotations = parsed,
+                        Err(_) => {
+                            eprintln!("[supercov] --max-annotations needs a whole number");
+                            return ExitCode::from(2);
+                        }
+                    },
+                }
+            }
+            other => {
+                eprintln!("[supercov] unknown option {other}\n{PATCH_USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(base) = base else {
+        eprintln!("[supercov] patch needs --base <ref>\n{PATCH_USAGE}");
+        return ExitCode::from(2);
+    };
+
+    let result = (|| -> Result<u8, String> {
+        let root = std::env::current_dir().map_err(|error| error.to_string())?;
+        let view = load_run_view(selector)?;
+        // Mapping a patch onto coverage recorded from different source would
+        // annotate the wrong lines, which is worse than refusing.
+        let blockers = view.blockers();
+        if !blockers.is_empty() {
+            let reasons = blockers
+                .into_iter()
+                .map(|blocker| blocker.reason)
+                .collect::<Vec<_>>();
+            if json {
+                print!(
+                    "{}",
+                    agent_json::success(
+                        "coverage.patch",
+                        &serde_json::json!({"result": "error", "reasons": reasons}),
+                        None,
+                    )
+                    .map_err(|error| format!("response exceeds {} bytes", error.max_bytes))?
+                );
+            } else {
+                eprintln!("[supercov] this run cannot map a patch:");
+                for reason in &reasons {
+                    eprintln!("  {reason}");
+                }
+            }
+            return Ok(2);
+        }
+        let changed = changed_lines_against(&root, &base, &view)?;
+        let patch = supercov_engine::patch_view::build(&view, &changed);
+        let passed = floor.is_none_or(|ppm| patch.is_empty() || patch.meets(ppm));
+        if json {
+            print!(
+                "{}",
+                agent_json::success(
+                    "coverage.patch",
+                    &serde_json::json!({
+                        "result": if passed { "pass" } else { "fail" },
+                        "base": base,
+                        "patch": patch,
+                    }),
+                    None,
+                )
+                .map_err(|error| format!("response exceeds {} bytes", error.max_bytes))?
+            );
+        } else {
+            print!("{}", render_patch(&patch, &base, floor, passed));
+        }
+        if annotate {
+            for annotation in supercov_engine::patch_view::annotations(&patch, max_annotations) {
+                println!("{annotation}");
+            }
+        }
+        Ok(u8::from(!passed))
+    })();
+    match result {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn render_patch(
+    patch: &supercov_engine::patch_view::PatchView,
+    base: &str,
+    floor: Option<u64>,
+    passed: bool,
+) -> String {
+    let mut out = format!("Changed-line coverage against {base}\n");
+    if patch.is_empty() {
+        out.push_str("  No executable changes.\n");
+    } else {
+        out.push_str(&format!(
+            "  {} of {} changed executable line(s) covered ({})\n",
+            patch.covered,
+            patch.eligible,
+            render_percentage(patch.covered, patch.eligible),
+        ));
+        for file in patch.files.iter().filter(|f| !f.uncovered.is_empty()) {
+            let ranges = supercov_engine::patch_view::ranges(&file.uncovered)
+                .into_iter()
+                .map(|(start, end)| {
+                    if start == end {
+                        start.to_string()
+                    } else {
+                        format!("{start}-{end}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("  {}: {ranges}\n", file.file));
+        }
+    }
+    if !patch.missing_from_run.is_empty() {
+        out.push_str("  Changed but not measured by this run:\n");
+        for file in &patch.missing_from_run {
+            out.push_str(&format!("    {file}\n"));
+        }
+    }
+    match (floor, passed) {
+        (Some(ppm), false) => out.push_str(&format!("\nFAIL: below {}\n", render_floor(ppm))),
+        (Some(ppm), true) if patch.is_empty() => out.push_str(&format!(
+            "\nPASS: nothing executable changed, so {} does not apply.\n",
+            render_floor(ppm)
+        )),
+        (Some(ppm), true) => out.push_str(&format!("\nPASS: at or above {}\n", render_floor(ppm))),
+        (None, _) => {}
+    }
+    out
+}
+
+/// Resolve a run and build the shared view every workflow command reads.
+fn load_run_view(selector: Option<&str>) -> Result<supercov_engine::run_view::RunView, String> {
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+    let comparison = current_integrity_for_run(&root, run)
+        .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
+    let report = analyze_stored_run(run)?;
+    supercov_engine::run_view::build(
+        &run.id,
+        &run.metadata.started_at,
+        &report.filters.passed,
+        run.metadata.test_exit_code == Some(0),
+        comparison.as_ref().is_some_and(|c| c.stale),
+        comparison.map(|c| c.reasons).unwrap_or_default(),
+    )
+    .map_err(|error| format!("{error:?}"))
+}
+
+/// The format names live in the engine module the packaging audit reads, so
+/// this file never spells them: Supercov emits those formats and must never
+/// look like it invokes the tools they are named after.
+fn report_usage() -> String {
+    format!(
+        "supercov runs <run-id> report --format {} [--output <path>] [--force]\n",
+        supercov_engine::coverage_export::FORMATS
+    )
+}
+
+/// Write the file atomically, so a reader never sees a half-written report and
+/// a failed write leaves the previous one intact.
+fn write_atomically(path: &Path, contents: &str, force: bool) -> Result<(), String> {
+    if path.exists() && !force {
+        return Err(format!(
+            "{} already exists; pass --force to replace it",
+            path.display()
+        ));
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+    let temporary = path.with_extension(format!(
+        "{}.supercov-{}",
+        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp"),
+        std::process::id()
+    ));
+    fs::write(&temporary, contents)
+        .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("could not replace {}: {error}", path.display())
+    })
+}
+
+/// Export a recorded run in a format other tools already read.
+fn coverage_report_command(arguments: &[String]) -> ExitCode {
+    let mut format: Option<String> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut force = false;
+    let mut selector: Option<&str> = None;
+    if let Some(first) = arguments.first()
+        && first != "report"
+    {
+        selector = Some(first.as_str());
+    }
+    let rest = &arguments[1..];
+    let mut index = 0;
+    while index < rest.len() {
+        let argument = rest[index].as_str();
+        index += 1;
+        match argument {
+            "report" => continue,
+            "--force" => force = true,
+            "--help" | "-h" => {
+                print!("{}", report_usage());
+                return ExitCode::SUCCESS;
+            }
+            "--format" | "--output" => {
+                let Some(value) = rest.get(index) else {
+                    eprintln!("[supercov] {argument} needs a value\n{}", report_usage());
+                    return ExitCode::from(2);
+                };
+                index += 1;
+                if argument == "--format" {
+                    format = Some(value.to_ascii_lowercase());
+                } else {
+                    output = Some(PathBuf::from(value));
+                }
+            }
+            other => {
+                eprintln!("[supercov] unknown option {other}\n{}", report_usage());
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(format) = format else {
+        eprintln!("[supercov] report needs --format\n{}", report_usage());
+        return ExitCode::from(2);
+    };
+
+    let result = (|| -> Result<(), String> {
+        let view = load_run_view(selector)?;
+        // A report from a failed or stale run is still worth reading, so this
+        // writes it and says so on stderr rather than refusing. Only a gate
+        // must never go green over one.
+        for blocker in view.blockers() {
+            eprintln!("[supercov] warning: {}", blocker.reason);
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or(0);
+        let contents = if format == "html" {
+            // Annotating source that no longer matches the run would point at
+            // the wrong lines, so the text is embedded only when the run still
+            // describes this checkout. Otherwise the report shows line numbers
+            // and says why.
+            let (sources, reason) = if view.stale {
+                (
+                    std::collections::BTreeMap::new(),
+                    format!(
+                        "The run no longer matches the checkout: {}.",
+                        view.stale_reasons.join(", ")
+                    ),
+                )
+            } else {
+                let root = std::env::current_dir().map_err(|error| error.to_string())?;
+                let sources = view
+                    .files
+                    .iter()
+                    .filter_map(|file| {
+                        let text = fs::read_to_string(root.join(&file.file)).ok()?;
+                        Some((file.file.clone(), text))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                (
+                    sources,
+                    "The file could not be read from this checkout.".to_owned(),
+                )
+            };
+            supercov_engine::coverage_html::html(&view, &sources, &reason)
+        } else {
+            supercov_engine::coverage_export::export(&view, &format, timestamp)?
+        };
+        match output {
+            Some(path) => {
+                // `--output coverage/report` names a directory for the HTML
+                // report; the document itself is always one self-contained
+                // file, so nothing here ever removes a directory tree.
+                let path = if format == "html"
+                    && path.extension().is_none_or(|extension| extension != "html")
+                {
+                    path.join("index.html")
+                } else {
+                    path
+                };
+                write_atomically(&path, &contents, force)?;
+                // Diagnostics go to stderr so a shell redirect of stdout still
+                // captures only the report.
+                eprintln!("[supercov] wrote {} ({})", path.display(), format);
+            }
+            None => print!("{contents}"),
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn public_run_inventory(root: &Path) -> Result<RunInventory, RunStoreError> {
     let mut inventory = discover_runs(root)?;
     // Timestamp-named runs belonged to the pre-release local store contract.
@@ -2134,6 +2741,25 @@ fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
             .is_some_and(|a| matches!(a.as_str(), "assertions" | "assertion" | "source"))
     {
         return assertions_query::command(&arguments);
+    }
+    // Both `runs check` (the latest run) and `runs <id> check` reach here.
+    if command == "runs"
+        && (arguments.first().is_some_and(|a| a == "check")
+            || arguments.get(1).is_some_and(|a| a == "check"))
+    {
+        return coverage_check_command(&arguments);
+    }
+    if command == "runs"
+        && (arguments.first().is_some_and(|a| a == "patch")
+            || arguments.get(1).is_some_and(|a| a == "patch"))
+    {
+        return coverage_patch_command(&arguments);
+    }
+    if command == "runs"
+        && (arguments.first().is_some_and(|a| a == "report")
+            || arguments.get(1).is_some_and(|a| a == "report"))
+    {
+        return coverage_report_command(&arguments);
     }
     if let Some(help) = help_for(command, &arguments) {
         print!("{help}");

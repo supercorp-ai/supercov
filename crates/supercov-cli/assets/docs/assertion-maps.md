@@ -70,7 +70,7 @@ examined and acknowledged.
 | `appliesTo` | Select tests by project-relative file and exact displayed test name. |
 | `nodes`, `edges` | Record source locations and relationships ending at `$assertion`. |
 | `countsAsAsserted` | List the node IDs you judge to be checked by the assertion. |
-| `watch` | List additional files the explanation depends on, such as helpers or configuration. |
+| `watch` | List additional files the explanation depends on, such as helpers or configuration. Manifests, lockfiles and runner configuration are already tracked for the whole run; naming one here catches nothing, and the report says so. |
 | `questions` | Record unresolved investigation questions. Questions inside a flow block its credit. |
 
 Source anchors use project-relative paths with `/`, one-based lines and one-based
@@ -108,13 +108,32 @@ token stale.
 ### What makes a review token stale
 
 A flow needs a fresh review when its claim changes, when a file it watches or a
-test it selects changes, or when the project's dependencies, configuration or
-the instrumenter change. The ambient environment does not count: running from
-another directory, a new terminal session, a different package manager or
-another Node installation leaves current flows current. A behavioural
-difference that matters still shows up on its own, because credit requires a
-passing assertion occurrence and execution of the claimed statement in the same
-selected test.
+test it selects changes, or when the configuration that decides what executes
+changes: a transpiler, a test runner, an interpreter pin.
+
+Several things that sound like they should count do not, because an
+acknowledgement demanded for all of them at once stops being read.
+
+Cutting a release does not. A manifest is fingerprinted by what it declares, so
+a version number moving in `package.json`, `Cargo.toml`, `pyproject.toml` or a
+lockfile changes nothing. Neither does reformatting one.
+
+Upgrading Supercov does not. Your claims are about your code, and a new release
+re-derives the evidence they rest on rather than making them wrong. Only a
+deliberate change to the instrumenter contract counts.
+
+Upgrading a dependency does not make every flow stale either. It is recorded
+once, as a change to assess, and flows keep their credit until that assessment
+says otherwise. One explanation answers for the upgrade.
+
+Linters, formatters, type checkers and coverage settings never count, because
+none of them change what the code does when it runs.
+
+The ambient environment does not count: running from another directory, a new
+terminal session, a different package manager or another Node installation
+leaves current flows current. A behavioural difference that matters still shows
+up on its own, because credit requires a passing assertion occurrence and
+execution of the claimed statement in the same selected test.
 
 If your suite genuinely depends on particular variables, name them; only the
 ones you name participate, and an unset variable is recorded as absent.

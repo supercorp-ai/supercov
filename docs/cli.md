@@ -132,6 +132,115 @@ report. Follow the printed next-page command or JSON `pagination.nextOffset`.
 Validation supports `--view flows`, `--view changes` and `--view errors` for large
 maps. The [map reference](assertion-maps.md) describes all fields and gates.
 
+## Fail CI below a coverage floor
+
+```sh supercov-example
+supercov runs check --min-lines 90 --min-branches 80 --min-mcdc 80
+supercov runs check --min-lines 100 --per-file --json
+```
+
+`check` reads a recorded run; it never runs tests again. Give a floor per metric
+with `--min-lines`, `--min-statements`, `--min-functions`, `--min-branches` or
+`--min-mcdc`. `--per-file` applies the same floors to every file that has
+eligible obligations, in addition to the whole run. Both report the counts
+behind the percentage and, for lines, where the gaps are.
+
+Floors are compared against the counts, never a rounded percentage: 9,999
+covered lines out of 10,000 displays as 99.99% and fails a 100% floor, and a
+run that displayed `100.00%` could never pass one while something is uncovered.
+
+A check answers only when the run can answer. These end the command with `2`
+rather than a pass or a failure:
+
+- the wrapped test command did not pass, so a gate over it would turn a red CI
+  run green
+- the run no longer matches the current checkout
+- a requested metric has nothing eligible, which is not the same as complete
+- a requested metric left obligations unmeasured, so no exact judgement exists
+- a requested metric is not recorded by the language adapter
+
+Assertion coverage keeps its own check. Whether a test *examines* what it
+executes is a different question from whether a line ran, and
+`runs <id> assertions check` carries the freshness and acknowledgement rules
+that answer needs.
+
+## Check the lines a change touches
+
+```sh supercov-example
+supercov runs patch --base origin/main --min-lines 100
+supercov runs patch --base origin/main --annotate github
+```
+
+`patch` answers whether the lines this change added or modified are tested. It
+compares against the **merge base** with `--base`, not that branch's tip, so
+commits other people landed after you branched are not counted as your
+obligation. A shallow checkout has no merge base; fetch with full history
+(`actions/checkout` takes `fetch-depth: 0`).
+
+The denominator is the changed lines the run measured. Comments, blank lines and
+declarations fall out because the language adapter already decided they are not
+executable, not because `patch` guesses at syntax. Deleted lines are excluded:
+there is nothing left to cover. Untracked new source counts as entirely added.
+
+A change with nothing executable in it reports **No executable changes** and
+passes, rather than claiming 100% for a patch that changed only comments. A
+changed file that looks like product source but is absent from the run is named
+separately, because treating it as zero uncovered lines would report success for
+code nothing ran.
+
+`--annotate github` prints workflow-command annotations on stdout, combining
+adjacent misses into one range and capping the total (`--max-annotations`). It
+needs no token and posts no comment.
+
+## Export for other tools
+
+```sh supercov-example
+supercov runs report --format lcov --output coverage/lcov.info
+supercov runs report --format cobertura --output coverage/cobertura.xml
+supercov runs report --format html --output coverage/report
+```
+
+Both are written from the same view `check` and `patch` read, so a viewer,
+hosted service or CI integration sees the totals Supercov enforced. Paths are
+repository-relative with forward slashes, ordering is stable, and the file is
+written atomically; an existing file is kept unless you pass `--force`. Without
+`--output` the report goes to stdout and diagnostics to stderr, so a redirect
+captures only the report.
+
+Supercov records that a line ran, not how many times, so `DA:` and `hits` state
+`1` or `0`. They are not execution frequencies, and Supercov will not invent
+one to fill a field.
+
+MC/DC conditions are not exported as ordinary branches. A consumer would then
+show condition obligations as branch coverage, which is a different
+measurement; that evidence stays in the JSON view and the HTML report. A report
+from a failed or stale run is still written, with a warning on stderr — only
+`check` refuses to pass on one.
+
+### The HTML report
+
+`--format html` writes one self-contained document. It opens from a copied CI
+artifact with no server, no network and no login, and nothing is fetched from a
+CDN. Because a source path is never used as an output path, a filename cannot
+write outside the directory you named, and no directory is ever cleared to
+regenerate a report.
+
+It has three levels: the run's metric counts, a filterable and sortable file
+table, and a source view marking each line covered or not covered in words and
+a glyph as well as colour. Every line links as `#<file>:<line>`, so a CI summary
+can point someone at the obligation rather than at the report.
+
+Four states stay distinct, because collapsing them into one score is how a
+report starts to mislead: **uncovered** (measured, nothing reached it), **not
+applicable** (nothing eligible), **partly measured** (Supercov declined some
+obligations, which are excluded from every count) and **stale** (the run no
+longer matches the checkout). A failed suite says so beside its numbers.
+
+Source text is embedded only when the run still matches the checkout; otherwise
+the report shows line numbers and explains why. Embedding makes a report
+portable and also means it contains your code — worth knowing before uploading
+one as a public artifact.
+
 ## Narrow a view
 
 | Option | Meaning |
@@ -233,4 +342,5 @@ SUPERCOV_TEST_KIND=e2e npx supercov -- npx playwright test
 | --- | --- |
 | `0` | The command or query succeeded |
 | Wrapped command's code | The test command failed and Supercov preserved its status |
-| `2` | Supercov could not complete the request |
+| `1` | A valid measurement failed a policy you set, such as a coverage floor |
+| `2` | Supercov could not complete the request, or the evidence cannot answer it |
