@@ -54,13 +54,15 @@ fn counts(view: &RunView, metric: Metric) -> (usize, usize) {
 /// spell them. Supercov emits these formats; it never invokes the tools they
 /// are named after, and the packaging audit that enforces that reads this
 /// module as the single place allowed to name them.
-pub const FORMATS: &str = "lcov|cobertura";
+pub const FORMATS: &str = "lcov|cobertura|html";
 
 /// Render a run in the named format.
 pub fn export(view: &RunView, format: &str, timestamp: u64) -> Result<String, String> {
     match format {
         "lcov" => Ok(lcov(view)),
         "cobertura" => Ok(cobertura(view, timestamp)),
+        // `html` is rendered by `coverage_html`, which also needs verified
+        // source text; the CLI routes it before reaching here.
         other => Err(format!(
             "unknown format {other}; Supercov exports {FORMATS}"
         )),

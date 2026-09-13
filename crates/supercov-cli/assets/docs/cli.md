@@ -197,6 +197,7 @@ needs no token and posts no comment.
 ```sh supercov-example
 supercov runs report --format lcov --output coverage/lcov.info
 supercov runs report --format cobertura --output coverage/cobertura.xml
+supercov runs report --format html --output coverage/report
 ```
 
 Both are written from the same view `check` and `patch` read, so a viewer,
@@ -215,6 +216,30 @@ show condition obligations as branch coverage, which is a different
 measurement; that evidence stays in the JSON view and the HTML report. A report
 from a failed or stale run is still written, with a warning on stderr — only
 `check` refuses to pass on one.
+
+### The HTML report
+
+`--format html` writes one self-contained document. It opens from a copied CI
+artifact with no server, no network and no login, and nothing is fetched from a
+CDN. Because a source path is never used as an output path, a filename cannot
+write outside the directory you named, and no directory is ever cleared to
+regenerate a report.
+
+It has three levels: the run's metric counts, a filterable and sortable file
+table, and a source view marking each line covered or not covered in words and
+a glyph as well as colour. Every line links as `#<file>:<line>`, so a CI summary
+can point someone at the obligation rather than at the report.
+
+Four states stay distinct, because collapsing them into one score is how a
+report starts to mislead: **uncovered** (measured, nothing reached it), **not
+applicable** (nothing eligible), **partly measured** (Supercov declined some
+obligations, which are excluded from every count) and **stale** (the run no
+longer matches the checkout). A failed suite says so beside its numbers.
+
+Source text is embedded only when the run still matches the checkout; otherwise
+the report shows line numbers and explains why. Embedding makes a report
+portable and also means it contains your code — worth knowing before uploading
+one as a public artifact.
 
 ## Narrow a view
 

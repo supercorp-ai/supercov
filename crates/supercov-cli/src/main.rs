@@ -1978,9 +1978,50 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_secs())
             .unwrap_or(0);
-        let contents = supercov_engine::coverage_export::export(&view, &format, timestamp)?;
+        let contents = if format == "html" {
+            // Annotating source that no longer matches the run would point at
+            // the wrong lines, so the text is embedded only when the run still
+            // describes this checkout. Otherwise the report shows line numbers
+            // and says why.
+            let (sources, reason) = if view.stale {
+                (
+                    std::collections::BTreeMap::new(),
+                    format!(
+                        "The run no longer matches the checkout: {}.",
+                        view.stale_reasons.join(", ")
+                    ),
+                )
+            } else {
+                let root = std::env::current_dir().map_err(|error| error.to_string())?;
+                let sources = view
+                    .files
+                    .iter()
+                    .filter_map(|file| {
+                        let text = fs::read_to_string(root.join(&file.file)).ok()?;
+                        Some((file.file.clone(), text))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                (
+                    sources,
+                    "The file could not be read from this checkout.".to_owned(),
+                )
+            };
+            supercov_engine::coverage_html::html(&view, &sources, &reason)
+        } else {
+            supercov_engine::coverage_export::export(&view, &format, timestamp)?
+        };
         match output {
             Some(path) => {
+                // `--output coverage/report` names a directory for the HTML
+                // report; the document itself is always one self-contained
+                // file, so nothing here ever removes a directory tree.
+                let path = if format == "html"
+                    && path.extension().is_none_or(|extension| extension != "html")
+                {
+                    path.join("index.html")
+                } else {
+                    path
+                };
                 write_atomically(&path, &contents, force)?;
                 // Diagnostics go to stderr so a shell redirect of stdout still
                 // captures only the report.

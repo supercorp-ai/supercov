@@ -2,13 +2,13 @@
 
 ## Unreleased
 
-Each invalidation signal now costs what it is worth. Maps need one review after upgrading.
+Coverage becomes something CI can enforce, and each invalidation signal now costs what it is worth. Maps need one review after upgrading.
 
 **Added**
 
-- `supercov runs <id> check` fails CI below a coverage floor, reading a recorded run without rerunning tests. Floors are per metric, apply per file, and compare counts, not percentages. Insufficient evidence ends with `2` rather than passing.
-- `supercov runs <id> patch --base <ref>` reports coverage of the lines a change touches, against the merge base. The denominator is changed lines the run measured, so comments and blanks fall out by the adapter's judgement; a comment-only change says so rather than claiming 100%. `--annotate github` emits annotations.
-- `supercov runs <id> report --format lcov|cobertura` exports a recorded run for the viewers and CI integrations a team already uses, from the same view the gates read, so a consumer's totals are the ones Supercov enforced. Written atomically; existing files are kept unless `--force`.
+- `supercov runs <id> check` fails CI below a coverage floor, reading a recorded run without rerunning tests. Floors are per metric, apply per file, and compare counts, not percentages. Insufficient evidence — a failed suite, stale run, empty scope or partial metric — ends with `2` rather than passing.
+- `supercov runs <id> patch --base <ref>` reports coverage of the lines a change touches, against the merge base. The denominator is changed lines the run measured, so comments and blanks fall out by the adapter's judgement, and a comment-only change says so rather than claiming 100%. `--annotate github` emits workflow annotations.
+- `supercov runs <id> report --format lcov|cobertura|html` exports a run. All three read the view the gates read, so a consumer's totals are the ones Supercov enforced. The HTML report is one self-contained file that opens offline, marking lines in words and a glyph rather than colour alone, and keeping uncovered, not applicable, partly measured and stale distinct.
 - Assertion reports carry `advisories`, the first naming a redundant `watch`.
 
 **Fixed**
