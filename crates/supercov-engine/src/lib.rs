@@ -40,6 +40,7 @@ pub mod ruby_run;
 pub mod run_merge;
 pub mod run_query;
 pub mod run_store;
+pub mod run_view;
 pub mod rust_build_cache;
 mod rust_cargo_config_model;
 pub mod rust_cargo_configuration;

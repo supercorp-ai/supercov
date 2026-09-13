@@ -2,20 +2,21 @@
 
 ## Unreleased
 
-Each invalidation signal now costs what it is worth. Maps need one review after upgrading.
-
-**Fixed**
-
-- Manifests are fingerprinted by what they declare, not their bytes, so cutting a release costs nothing. It rewrote the version in `package.json`, `Cargo.toml`, `pyproject.toml` and the lockfile, marking every flow stale. A flow watching a manifest is covered run-wide, not by its own token, so a redundant watch cannot undo this. A dependency edit still invalidates; an unparseable manifest is hashed whole.
-- Upgrading Supercov no longer marks maps or stored runs stale. Only a deliberate instrumenter contract change does. Merging and the build caches still see that digest.
-- A dependency upgrade is one change to assess, not staleness on every flow, and credit is retained meanwhile.
-- The ambient environment is no longer part of run identity for Rust, Python and Ruby. The test command still counts; JavaScript keeps what its build scripts read.
-- Linters, formatters, type checkers and coverage settings are no longer execution context; Babel, tsconfig, pytest and tox still are.
-- Published crates carry the project README again.
+Each invalidation signal now costs what it is worth; maps need one review after upgrading.
 
 **Added**
 
-- Assertion reports carry `advisories`. The first names a redundant `watch` entry.
+- `supercov runs <id> check` fails CI below a coverage floor, reading a recorded run without rerunning tests. Floors are per metric, apply per file, and compare counts, not percentages. A failed suite, stale run, empty scope or partial metric ends with `2`, never a pass.
+- Assertion reports carry `advisories`, the first naming a redundant `watch`.
+
+**Fixed**
+
+- Manifests are fingerprinted by what they declare, not their bytes, so cutting a release costs nothing — 62% of supergateway's manifest edits. A flow watching one is covered run-wide, not by its own token. A dependency edit still invalidates.
+- Upgrading Supercov no longer marks maps or stored runs stale; only a deliberate instrumenter contract change does. Merging and the build caches still see that digest.
+- A dependency upgrade is one change to assess, not staleness everywhere.
+- The ambient environment is no longer part of run identity for Rust, Python and Ruby. The test command still counts.
+- Linters, formatters, type checkers and coverage settings are no longer execution context; Babel, tsconfig and pytest still are.
+- Published crates carry the README again.
 
 ## 0.0.47
 

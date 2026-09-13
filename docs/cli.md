@@ -132,6 +132,38 @@ report. Follow the printed next-page command or JSON `pagination.nextOffset`.
 Validation supports `--view flows`, `--view changes` and `--view errors` for large
 maps. The [map reference](assertion-maps.md) describes all fields and gates.
 
+## Fail CI below a coverage floor
+
+```sh supercov-example
+supercov runs check --min-lines 90 --min-branches 80 --min-mcdc 80
+supercov runs check --min-lines 100 --per-file --json
+```
+
+`check` reads a recorded run; it never runs tests again. Give a floor per metric
+with `--min-lines`, `--min-statements`, `--min-functions`, `--min-branches` or
+`--min-mcdc`. `--per-file` applies the same floors to every file that has
+eligible obligations, in addition to the whole run. Both report the counts
+behind the percentage and, for lines, where the gaps are.
+
+Floors are compared against the counts, never a rounded percentage: 9,999
+covered lines out of 10,000 displays as 99.99% and fails a 100% floor, and a
+run that displayed `100.00%` could never pass one while something is uncovered.
+
+A check answers only when the run can answer. These end the command with `2`
+rather than a pass or a failure:
+
+- the wrapped test command did not pass, so a gate over it would turn a red CI
+  run green
+- the run no longer matches the current checkout
+- a requested metric has nothing eligible, which is not the same as complete
+- a requested metric left obligations unmeasured, so no exact judgement exists
+- a requested metric is not recorded by the language adapter
+
+Assertion coverage keeps its own check. Whether a test *examines* what it
+executes is a different question from whether a line ran, and
+`runs <id> assertions check` carries the freshness and acknowledgement rules
+that answer needs.
+
 ## Narrow a view
 
 | Option | Meaning |
@@ -233,4 +265,5 @@ SUPERCOV_TEST_KIND=e2e npx supercov -- npx playwright test
 | --- | --- |
 | `0` | The command or query succeeded |
 | Wrapped command's code | The test command failed and Supercov preserved its status |
-| `2` | Supercov could not complete the request |
+| `1` | A valid measurement failed a policy you set, such as a coverage floor |
+| `2` | Supercov could not complete the request, or the evidence cannot answer it |

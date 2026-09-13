@@ -1016,6 +1016,45 @@ pub(crate) fn javascript_coverage_model() -> CoverageModelDeclaration {
     }
 }
 
+/// One file's counts, derived by the same function that produced the run's
+/// totals.
+///
+/// Every feature that judges a run -- a threshold gate, a changed-line check,
+/// an export, an HTML report -- has to agree with the summary it sits beside.
+/// Re-deriving a file's denominator independently is how a gate and a report
+/// come to disagree about the same run, so this filters the same results and
+/// calls the same core.
+pub fn coverage_summary_for_file(
+    view: &CoverageView,
+    file: &str,
+) -> Result<CoverageSummary, ReportError> {
+    let decisions = view
+        .decisions
+        .iter()
+        .filter(|decision| decision.meta.file == file)
+        .cloned()
+        .collect::<Vec<_>>();
+    let points = view
+        .points
+        .iter()
+        .filter(|point| point.meta.file == file)
+        .cloned()
+        .collect::<Vec<_>>();
+    let branches = view
+        .branches
+        .iter()
+        .filter(|branch| branch.meta.file == file)
+        .cloned()
+        .collect::<Vec<_>>();
+    let lines = view
+        .lines
+        .iter()
+        .filter(|line| line.file == file)
+        .cloned()
+        .collect::<Vec<_>>();
+    summary_for_results(&decisions, &points, &branches, &lines, None)
+}
+
 fn summary_for_results(
     decisions: &[DecisionResult],
     points: &[PointResult],
