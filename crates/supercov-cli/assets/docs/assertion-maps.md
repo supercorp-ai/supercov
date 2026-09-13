@@ -105,6 +105,27 @@ After examining a flow, copy its returned `expectedBasis` into that flow's
 do not generate it yourself. Editing a claim or its dependencies makes the old
 token stale.
 
+### What makes a review token stale
+
+A flow needs a fresh review when its claim changes, when a file it watches or a
+test it selects changes, or when the project's dependencies, configuration or
+the instrumenter change. The ambient environment does not count: running from
+another directory, a new terminal session, a different package manager or
+another Node installation leaves current flows current. A behavioural
+difference that matters still shows up on its own, because credit requires a
+passing assertion occurrence and execution of the claimed statement in the same
+selected test.
+
+If your suite genuinely depends on particular variables, name them; only the
+ones you name participate, and an unset variable is recorded as absent.
+
+```sh supercov-example
+SUPERCOV_ASSERTION_CONTEXT_ENV=TZ,LANG npx supercov -- npm test
+```
+
+Use the same list for every run. Changing it changes the recorded context and
+asks for a fresh review.
+
 ```sh supercov-example
 npx supercov runs <run-id> assertions check --require-mappings
 npx supercov runs <run-id>

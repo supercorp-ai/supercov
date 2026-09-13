@@ -15,6 +15,44 @@ use std::{
 
 pub const ARCHIVE_PATH: &str = "assertion-inputs.json";
 
+/// Names the variables whose values participate in assertion context identity,
+/// as a comma-separated list. Empty or unset means none.
+pub const CONTEXT_ENVIRONMENT: &str = "SUPERCOV_ASSERTION_CONTEXT_ENV";
+
+/// Identity of the execution context an authored claim was reviewed against.
+///
+/// The ambient process environment is deliberately **not** part of this. A run
+/// from a different directory, terminal session, package manager or Node
+/// installation carries dozens of incidental variables (`INIT_CWD`, `npm_*`,
+/// `TERM_SESSION_ID`, per-session sockets and tokens), and folding those in
+/// invalidated every flow in a map at once for no semantic reason. Environment
+/// differences that actually change behaviour are already caught where it
+/// matters: build-relevant variables participate in the run's configuration,
+/// dependency and instrumenter fingerprints, and any real behavioural change
+/// shows up in re-collected evidence, because credit requires a passing
+/// assertion occurrence and execution of the claimed statement in the same
+/// selected test.
+///
+/// Projects that genuinely depend on specific variables name them in
+/// [`CONTEXT_ENVIRONMENT`]; only those participate, and a variable that is not
+/// set is recorded as absent rather than skipped.
+fn context_digest() -> String {
+    selected_context_digest(
+        &std::env::var(CONTEXT_ENVIRONMENT).unwrap_or_default(),
+        |name| std::env::var(name).ok(),
+    )
+}
+
+fn selected_context_digest(names: &str, value: impl Fn(&str) -> Option<String>) -> String {
+    let selected = names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| (name.to_owned(), value(name)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    crate::assertion_map::digest(&("supercov-assertion-context-v2", selected))
+}
+
 pub fn capture(
     root: &Path,
     language: &str,
@@ -31,14 +69,8 @@ pub fn capture_with_expect_modules(
 ) -> Result<Inputs, String> {
     let supplied_root = simplified(root.to_owned());
     let root = canonicalize_simplified(root).map_err(|e| e.to_string())?;
-    // Store only a digest of environment inputs, never their values. Engine
-    // run IDs, working directories and shell nesting are not semantic inputs.
-    let environment = std::env::vars()
-        .filter(|(k, _)| {
-            !k.starts_with("SUPERCOV_") && !matches!(k.as_str(), "PWD" | "OLDPWD" | "SHLVL" | "_")
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut inputs = Inputs { schema_version: 1, language: language.into(), context_digest: crate::assertion_map::digest(&environment), files: Files::new(), assertions: vec![], limitations: vec![
+    // Store only a digest of the selected context, never its values.
+    let mut inputs = Inputs { schema_version: 1, language: language.into(), context_digest: context_digest(), files: Files::new(), assertions: vec![], limitations: vec![
         "Syntax inventory covers recognized assertion forms, not every possible custom assertion. Agents may add exact source sites; missing runtime identity never earns credit.".into()
     ] };
     if language == "javascript" {
@@ -260,4 +292,50 @@ fn ruby_ranges(source: &str) -> Result<Vec<(usize, usize, String)>, String> {
     let mut collector = Collector(vec![]);
     collector.visit(&parsed.node());
     Ok(collector.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn incidental_environment_never_reaches_context_identity() {
+        // The values a shell, package manager or terminal happens to export are
+        // not semantic inputs; without an explicit selection the identity is a
+        // constant, so a map authored in one session stays current in the next.
+        let baseline = selected_context_digest("", empty);
+        assert_eq!(
+            baseline,
+            selected_context_digest("", |_| {
+                panic!("no variable may be read without an explicit selection")
+            })
+        );
+        assert_eq!(baseline, selected_context_digest("  ,  ,", empty));
+    }
+
+    #[test]
+    fn explicitly_selected_variables_participate_and_distinguish_absence() {
+        let unset = selected_context_digest("TZ", empty);
+        let utc = selected_context_digest("TZ", |name| (name == "TZ").then(|| "UTC".to_owned()));
+        let berlin = selected_context_digest("TZ", |name| {
+            (name == "TZ").then(|| "Europe/Berlin".to_owned())
+        });
+        assert_ne!(unset, utc, "an unset variable differs from a set one");
+        assert_ne!(utc, berlin, "the value participates, not just the name");
+        assert_ne!(
+            utc,
+            selected_context_digest("", empty),
+            "selecting a variable differs from selecting none"
+        );
+        // Order and padding in the selection are not themselves inputs.
+        let pair = selected_context_digest("TZ,LANG", |name| Some(name.to_owned()));
+        assert_eq!(
+            pair,
+            selected_context_digest(" LANG , TZ ", |name| Some(name.to_owned()))
+        );
+    }
 }
