@@ -229,6 +229,15 @@ try {
     environment,
   );
   assertFixtureTotals(query(project, ['runs', 'latest'], environment));
+  // Each xdist worker is its own process with its own contexts and evidence
+  // file, so the sites have to survive being joined from several of them.
+  assertAssertionsAreObserved(
+    project,
+    environment,
+    'pytest -n 2',
+    ['tests/test_shapes.py', 'tests/test_unittest_style.py'],
+    ['tests/test_unittest_style.py:19'],
+  );
 
   const rerun = successfulSupercov(
     project,
