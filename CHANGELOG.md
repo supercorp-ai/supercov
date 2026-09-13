@@ -4,18 +4,18 @@
 
 **Fixed**
 
-- Manifests are fingerprinted by what they declare, not by their bytes. A release rewrites the version in `package.json`, `Cargo.toml`, `pyproject.toml` and the lockfile, which marked every flow stale — 62% of supergateway's manifest edits. A dependency edit still invalidates; an unparseable manifest is hashed whole.
-- Upgrading Supercov no longer marks every map stale. That digest covers Supercov's own source, so every release moved it, for claims about your code.
-- A dependency upgrade is recorded as one change to assess, not staleness on every flow. Credit is retained meanwhile.
-- Linters, formatters, type checkers and coverage settings are no longer execution context. Babel, tsconfig, pytest and tox still are, because they decide what executes.
-- The ambient environment is no longer part of run identity for Rust, Python and Ruby. It is not a property of the project, so no two shells agreed on one run. The test command still counts; JavaScript keeps the build variables its scripts reference.
+- Manifests are fingerprinted by what they declare, not their bytes. A release rewrites the version in `package.json`, `Cargo.toml`, `pyproject.toml` and the lockfile, marking every flow stale — 62% of supergateway's manifest edits. A dependency edit still invalidates; an unparseable one is hashed whole.
+- Upgrading Supercov no longer marks maps or stored runs stale. Its own source digest moved on nearly every release; only a deliberate contract change does now. Merging and the build caches still see it.
+- A dependency upgrade is one change to assess, not staleness on every flow. Credit is retained meanwhile.
+- The ambient environment is no longer part of run identity for Rust, Python and Ruby. It is not a property of the project, so no two shells agreed on a run. The test command still counts; JavaScript keeps what its build scripts reference.
+- Linters, formatters, type checkers and coverage settings are no longer execution context. Babel, tsconfig, pytest and tox still are.
 - Published crates carry the project README again.
 
 Maps need one review after upgrading.
 
 **Added**
 
-- Assertion reports carry `advisories`. The first names a `watch` entry on a file already tracked run-wide.
+- Assertion reports carry `advisories`. The first names a redundant `watch` entry on a file already tracked run-wide.
 
 ## 0.0.47
 

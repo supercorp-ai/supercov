@@ -39,6 +39,9 @@ pub struct RustBuildCacheMetadata {
 struct RustBuildCacheIdentity<'a> {
     schema_version: u32,
     execution_fingerprint: &'a str,
+    /// Supercov's own build. `execution` no longer carries it, and cached
+    /// output from a different instrumenter must never be reused.
+    instrumenter_fingerprint: &'a str,
     command: &'a [String],
     rustc: String,
     cargo: String,
@@ -65,6 +68,7 @@ pub fn rust_build_cache_key(
     let identity = RustBuildCacheIdentity {
         schema_version: RUST_BUILD_CACHE_SCHEMA_VERSION,
         execution_fingerprint: &integrity.fingerprint.execution,
+        instrumenter_fingerprint: &integrity.fingerprint.instrumenter,
         command,
         rustc: tool_version("rustc", &["-vV"]),
         cargo: tool_version("cargo", &["-Vv"]),

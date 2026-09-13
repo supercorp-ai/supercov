@@ -737,9 +737,21 @@ pub fn create_run_integrity(
             ("version", frontend.version.as_bytes()),
             ("engine", frontend.engine_instrumenter_sha256.as_bytes()),
             ("shim", frontend_instrumenter.as_bytes()),
+            // The runtime shim decides what evidence looks like, so it is part
+            // of who instrumented the run rather than of the run's setup.
+            (
+                "executionEngine",
+                frontend.engine_execution_sha256.as_bytes(),
+            ),
+            ("executionShim", frontend_execution.as_bytes()),
         ],
     );
     let build_environment = frontend_map_bytes(&project.build_environment);
+    // `execution` describes the run's setup, not who instrumented it. Supercov's
+    // own source used to be folded in here as well, so upgrading Supercov made
+    // every stored run stale for a checkout that had not changed. Its identity
+    // still lives in `instrumenter`, which the build caches and run merging
+    // consult directly.
     let execution = domain_hash(
         "supercov-run-execution-v1",
         &[
@@ -749,8 +761,6 @@ pub fn create_run_integrity(
             ("dependencies", dependency_digest.as_bytes()),
             ("configuration", configuration_digest.as_bytes()),
             ("buildEnvironment", &build_environment),
-            ("engine", frontend.engine_execution_sha256.as_bytes()),
-            ("shim", frontend_execution.as_bytes()),
         ],
     );
     let combined = domain_hash(
@@ -823,8 +833,20 @@ pub fn create_explicit_run_integrity(
             ("version", frontend.version.as_bytes()),
             ("engine", frontend.engine_instrumenter_sha256.as_bytes()),
             ("shim", frontend_instrumenter.as_bytes()),
+            // The runtime shim decides what evidence looks like, so it is part
+            // of who instrumented the run rather than of the run's setup.
+            (
+                "executionEngine",
+                frontend.engine_execution_sha256.as_bytes(),
+            ),
+            ("executionShim", frontend_execution.as_bytes()),
         ],
     );
+    // `execution` describes the run's setup, not who instrumented it. Supercov's
+    // own source used to be folded in here as well, so upgrading Supercov made
+    // every stored run stale for a checkout that had not changed. Its identity
+    // still lives in `instrumenter`, which the build caches and run merging
+    // consult directly.
     let execution = domain_hash(
         "supercov-run-execution-v1",
         &[
@@ -834,8 +856,6 @@ pub fn create_explicit_run_integrity(
             ("dependencies", dependencies.as_bytes()),
             ("configuration", configuration.as_bytes()),
             ("executionConfiguration", &inputs.execution_configuration),
-            ("engine", frontend.engine_execution_sha256.as_bytes()),
-            ("shim", frontend_execution.as_bytes()),
         ],
     );
     let combined = domain_hash(
@@ -1290,6 +1310,36 @@ mod tests {
                 .files
                 .keys()
                 .any(|p| p.starts_with(".claude/") || p.starts_with("nested-fork/"))
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(shim).unwrap();
+    }
+
+    #[test]
+    fn a_new_supercov_moves_its_own_identity_and_nothing_else() {
+        // An upgrade must still stop a merge and bust the build caches, because
+        // evidence from two different instrumenters is not comparable. It must
+        // not touch the run's setup, which is what decides whether a stored run
+        // still matches the checkout.
+        let (root, shim) = fixture();
+        let project = discover_coverage_project(&root, &BTreeMap::new(), &[]).unwrap();
+        let baseline = create_run_integrity(&root, &project, &frontend(&shim)).unwrap();
+        let mut newer = frontend(&shim);
+        newer.engine_instrumenter_sha256 = "b".repeat(64);
+        newer.engine_execution_sha256 = "c".repeat(64);
+        let upgraded = create_run_integrity(&root, &project, &newer).unwrap();
+
+        assert_ne!(
+            baseline.fingerprint.instrumenter, upgraded.fingerprint.instrumenter,
+            "a merge and the build caches still have to see this"
+        );
+        assert_eq!(
+            baseline.fingerprint.execution, upgraded.fingerprint.execution,
+            "the run's setup did not change"
+        );
+        assert!(
+            !compare_run_integrity(Some(&baseline), &upgraded).stale,
+            "upgrading Supercov must not discard a recorded run"
         );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(shim).unwrap();

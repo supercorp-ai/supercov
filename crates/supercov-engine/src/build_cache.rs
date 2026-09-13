@@ -31,6 +31,9 @@ pub struct BuildCacheMetadata {
 struct CacheIdentity<'a> {
     schema_version: u32,
     execution_fingerprint: &'a str,
+    /// Supercov's own build. `execution` no longer carries it, and cached
+    /// output from a different instrumenter must never be reused.
+    instrumenter_fingerprint: &'a str,
     adapter: crate::project_discovery::BuildAdapter,
     command: &'a [String],
     environment: &'a BTreeMap<String, String>,
@@ -73,6 +76,7 @@ pub fn build_cache_key(
     let identity = CacheIdentity {
         schema_version: BUILD_CACHE_SCHEMA_VERSION,
         execution_fingerprint: &integrity.fingerprint.execution,
+        instrumenter_fingerprint: &integrity.fingerprint.instrumenter,
         adapter: project.build_adapter,
         command: &project.build_command,
         environment: &project.build_environment,
