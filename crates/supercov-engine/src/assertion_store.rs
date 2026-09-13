@@ -794,12 +794,20 @@ pub fn assess(
         };
         rows.push(json!({"observation":observation,"id":a.id,"at":a.at,"questions":a.questions,"inMap":in_map,"observes":a.observes,"operations":inventory.get(&a.at).cloned().unwrap_or_default(),"observedPassingTests":witnesses,"flows":flows}));
     }
+    // Only lines carrying a measured statement can ever be asserted: credit is
+    // claimed per statement, and statements are keyed by their anchor line. A
+    // measured line without one — a continuation line of a multi-line
+    // statement, or a nested function/arrow body with no statement of its own —
+    // is unclaimable by construction, so counting it here would cap the
+    // percentage below 100% for structural reasons and list it under
+    // `unassertedLines` as if an agent could act on it.
     let denominator = coverage
         .view
         .lines
         .iter()
         .filter(|l| l.measured)
         .map(|l| (l.file.clone(), l.line))
+        .filter(|location| by_line.contains_key(location))
         .collect::<BTreeSet<_>>();
     let mut credited = BTreeSet::new();
     let mut declared = BTreeSet::new();

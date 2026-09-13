@@ -542,6 +542,30 @@ fn unsupported_runtime_identity_does_not_borrow_test_level_assertions() {
 }
 
 #[test]
+fn measured_lines_without_a_statement_stay_out_of_the_line_denominator() {
+    let (inputs, map, state) = fixture();
+    let mut coverage = report_fixture(&["a", "b"], true);
+    let baseline = assess(&map, &state, &inputs, &coverage, true);
+    let total = baseline["summary"]["lines"]["total"].as_u64().unwrap();
+    assert_eq!(baseline["summary"]["lines"]["percentage"], 100.0);
+    // Continuation lines of a multi-line statement, and nested arrow bodies
+    // with no statement of their own, are measured but carry no claimable
+    // statement. Counting them would cap the percentage for structural reasons
+    // and offer an agent work it cannot do.
+    let mut orphan = coverage.view.lines[0].clone();
+    orphan.line = 99;
+    orphan.measured = true;
+    coverage.view.lines.push(orphan);
+    let report = assess(&map, &state, &inputs, &coverage, true);
+    assert_eq!(report["summary"]["lines"]["total"], total);
+    assert_eq!(report["summary"]["lines"]["percentage"], 100.0);
+    assert_eq!(
+        report["unassertedLines"],
+        json!([]),
+        "a line no statement anchors is not reported as unasserted work"
+    );
+}
+#[test]
 fn unmeasured_statements_never_enter_the_primary_denominator_or_numerator() {
     let (inputs, map, state) = fixture();
     let mut coverage = report_fixture(&["a", "b"], true);
