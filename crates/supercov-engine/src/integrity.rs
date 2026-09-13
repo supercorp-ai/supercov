@@ -609,12 +609,22 @@ const TRACKED_MANIFESTS: &[&str] = &[
     ".tool-versions",
 ];
 
-pub fn globally_tracked(path: &str) -> bool {
+/// A dependency manifest or lockfile, for any language Supercov supports.
+///
+/// These already have a dedicated signal: the run's dependency fingerprint,
+/// which reads what a manifest declares rather than its bytes. Reporting their
+/// raw bytes a second time would say a release changed something when it
+/// changed nothing.
+pub fn tracked_manifest(path: &str) -> bool {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     TRACKED_MANIFESTS.contains(&name)
         || name.ends_with(".gemspec")
         || (name.starts_with("requirements") && name.ends_with(".txt"))
-        || configuration_file(Path::new(name))
+}
+
+pub fn globally_tracked(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    tracked_manifest(name) || configuration_file(Path::new(name))
 }
 
 fn configuration_files(

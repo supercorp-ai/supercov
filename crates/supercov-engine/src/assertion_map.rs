@@ -536,7 +536,22 @@ pub fn dependencies<'a>(a: &'a Assertion, f: &'a Flow) -> BTreeSet<&'a str> {
     std::iter::once(a.at.file.as_str())
         .chain(f.applies_to.iter().map(|t| t.file.as_str()))
         .chain(f.nodes.iter().map(|n| n.at.file.as_str()))
-        .chain(f.watch.iter().map(String::as_str))
+        // A watch on a file Supercov already answers for run-wide contributes
+        // nothing here, and hashing its bytes would quietly undo the manifest
+        // rule: a version bump would still make every flow that names
+        // `package.json` stale, which is most of them in a real map. The
+        // run-level signal still fires, as a change to assess.
+        //
+        // Only the watch list is filtered. An anchor or a node in one of those
+        // files is the flow's actual subject -- `setup.py` is a dependency
+        // manifest and measured source at once -- and editing it must still
+        // cost a review.
+        .chain(
+            f.watch
+                .iter()
+                .map(String::as_str)
+                .filter(|path| !crate::integrity::globally_tracked(path)),
+        )
         .collect()
 }
 fn token(value: &impl Serialize) -> String {
@@ -958,6 +973,13 @@ pub fn carry(
         .chain(new_manifest.files.keys())
         .collect::<BTreeSet<_>>()
     {
+        // A manifest is answered for by the run's dependency fingerprint, which
+        // reads what it declares. Reporting its bytes here as well would make
+        // cutting a release look like a change to assess when nothing about the
+        // project moved.
+        if crate::integrity::tracked_manifest(file) {
+            continue;
+        }
         if old.files.get(file) != new_manifest.files.get(file) {
             let known = map
                 .assertions
