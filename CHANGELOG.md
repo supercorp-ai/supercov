@@ -4,8 +4,13 @@
 
 **Added**
 
-- Assertion coverage measures Ruby. A Ruby run now records which assertion each test reached and where it is written, so an agent can explain Ruby assertions the same way it explains JavaScript ones and earn the same statement credit. RSpec, Minitest, test-unit and Cucumber are covered. Ruby backtraces carry no column, so a line is a witness only when the syntax inventory holds exactly one assertion on it; two assertions sharing a line name neither rather than guessing between them.
-- Ruby test results report the file the test is defined in rather than the runner's own identity, which is what an assertion map's test selector needs. Adapters that cannot name a file keep the previous behaviour.
+- Assertion coverage measures Ruby and Python, alongside the JavaScript, TypeScript and Rust it already measured. A run now records which assertion each test reached and where it is written, so an agent can explain those assertions the same way and earn the same statement credit. Ruby covers RSpec, Minitest, test-unit and Cucumber; Python covers pytest and unittest, including a `unittest.TestCase` that pytest runs.
+- Ruby and Python test results report the file the test is defined in rather than the runner's own identity — a dotted module path, a pytest node id or a class and method name is not a path, and an assertion map selects tests by file and name. A runner that cannot name a file keeps the previous behaviour.
+- Neither language's runtime reports a column for an assertion, so a line is a witness only when the syntax inventory holds exactly one assertion on it; two assertions sharing a line name neither rather than guessing between them. A frame naming no inventoried site witnesses nothing, so a misreported frame loses a witness rather than inventing one.
+
+**Changed**
+
+- pytest's assertion-pass hook now stays armed for a whole test rather than disarming after the first assertion. An assertion map needs every site, and only that hook knows where a rewritten `assert` is; the cost is that pytest builds an explanation string for each passing assertion rather than only the first.
 
 **Fixed**
 

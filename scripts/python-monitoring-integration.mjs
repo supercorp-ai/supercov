@@ -83,6 +83,44 @@ function successfulSupercov(project, args, environment) {
   return result;
 }
 
+// Every assertion the syntax inventory found, with the tests observed running
+// it. An assertion map credits a source statement only when a passing test ran
+// a named assertion, so a site with no observed test can never earn credit
+// however well it is explained.
+function assertionSites(project, environment, runId = 'latest') {
+  const sites = [];
+  let offset = 0;
+  for (;;) {
+    const page = query(project, ['runs', runId, 'assertions', '--limit', '200', '--offset', String(offset)], environment);
+    sites.push(...page.items.map((item) => ({
+      at: `${item.at.file}:${item.at.line}`,
+      tests: item.observedPassingTests ?? [],
+    })));
+    if (page.pagination.nextOffset === null) return sites;
+    offset = page.pagination.nextOffset;
+  }
+}
+
+// The inventory covers every captured test file, so a run that exercised some
+// of them leaves the others unobserved by design. Only the files this command
+// ran have to name a test for each of their assertions.
+function assertAssertionsAreObserved(project, environment, runner, ranFiles, expectedUnobserved = []) {
+  const sites = assertionSites(project, environment)
+    .filter((site) => ranFiles.some((file) => site.at.startsWith(`${file}:`)));
+  assert.ok(sites.length > 0, `${runner}: the inventory found no assertion sites in ${ranFiles.join(', ')}`);
+  // Credit needs a *passing* occurrence, so an assertion that only ever runs
+  // inside a failing or expected-failure test is unobserved by design.
+  const unobserved = sites.filter((site) => site.tests.length === 0).map((site) => site.at);
+  assert.deepEqual(unobserved, expectedUnobserved, `${runner}: every assertion a passing test runs should name that test`);
+  // An assertion map selects a test by file and name, so the run has to report
+  // the test's path rather than the runner's own identity.
+  const tests = query(project, ['runs', 'latest', 'test', sites[0].tests[0]], environment).tests;
+  assert.ok(
+    ranFiles.some((file) => tests[0].file === file),
+    `${runner}: expected the test under one of ${ranFiles.join(', ')}, got ${tests[0].file}`,
+  );
+}
+
 function query(project, args, environment) {
   const result = successfulSupercov(project, [...args, '--json'], environment);
   const payload = JSON.parse(result.stdout);
@@ -161,6 +199,17 @@ try {
   assert.match(serial.stderr, /14 test\(s\) across 2 source file\(s\)/);
   assert.match(serial.stderr, /interpreter process\(es\) on Python 3\./);
   assertFixtureTotals(query(project, ['runs', 'latest'], environment));
+  // pytest's rewriter reports the line of each assert it passes, and a
+  // TestCase pytest runs reaches the wrapped unittest methods instead.
+  assertAssertionsAreObserved(
+    project,
+    environment,
+    'pytest',
+    ['tests/test_shapes.py', 'tests/test_unittest_style.py'],
+    // The only assertion in an @unittest.expectedFailure test: it fails by
+    // design, so it never has a passing occurrence to witness with.
+    ['tests/test_unittest_style.py:19'],
+  );
   assert.deepEqual(
     decisionVectors(project, 'app/shapes.py:26', environment),
     ['TF->T', 'TT->F'],

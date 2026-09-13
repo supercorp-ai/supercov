@@ -417,6 +417,8 @@ class Runtime:
         self.identities: dict[int, dict] = {}
         self.next_context = 1
         self.asserted: set[int] = set()
+        # (context, file, line) of every assertion site a test has reached.
+        self.asserted_sites: set[tuple[int, str, int]] = set()
         self.seen_hits: set = set()
         self.seen_vectors: set = set()
         self.vector_counts: dict = {}
@@ -685,20 +687,55 @@ class Runtime:
             return {}
         return {CONTEXT_ENV: json.dumps(identity, separators=(",", ":"), sort_keys=True)}
 
-    def outcome(self, worker: str, test: str, retry: int, phase: str, outcome: str, xfail: bool, runner: str = "pytest") -> None:
+    def outcome(self, worker: str, test: str, retry: int, phase: str, outcome: str, xfail: bool, runner: str = "pytest", file: "str | None" = None) -> None:
+        """`file` is where the runner says the test is defined.
+
+        An assertion map selects tests by source file and name, and a runner
+        identity alone -- a dotted module path, a pytest node id -- is not a
+        path. An adapter that cannot name the file leaves it None and the
+        report falls back to deriving one from the identity.
+        """
         with self.lock:
-            self._record(
-                {
-                    "t": "outcome",
-                    "worker": worker,
-                    "test": test,
-                    "retry": int(retry),
-                    "phase": phase,
-                    "outcome": outcome,
-                    "xfail": bool(xfail),
-                    "runner": runner,
-                }
-            )
+            entry = {
+                "t": "outcome",
+                "worker": worker,
+                "test": test,
+                "retry": int(retry),
+                "phase": phase,
+                "outcome": outcome,
+                "xfail": bool(xfail),
+                "runner": runner,
+            }
+            if file:
+                entry["file"] = file
+            self._record(entry)
+
+    def assertion_site(self, file: "str | None", line: "int | None") -> None:
+        """Where in the test an assertion ran, so a map can tell sites apart.
+
+        The record is a file and a line; the report resolves the column
+        against the syntax inventory Supercov captured before the run, and a
+        frame naming no inventoried site matches nothing rather than inventing
+        a witness. Recorded once per site per test: later sightings cost one
+        set lookup. Only the call phase is reported, because setup and
+        teardown assertions witness no test.
+        """
+        if not file or not line:
+            return
+        context = self.context.get()
+        if context == 0:
+            return
+        key = (context, file, line)
+        if key in self.asserted_sites:
+            return
+        with self.lock:
+            if key in self.asserted_sites:
+                return
+            identity = self.identities.get(context)
+            if identity is None or identity.get("phase") != "call":
+                return
+            self.asserted_sites.add(key)
+            self._record({"t": "asite", "ctx": context, "f": file, "l": int(line)})
 
     # -- observation --------------------------------------------------------
 

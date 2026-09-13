@@ -111,20 +111,42 @@ def _hook_expectation_contexts() -> None:
 _hook_expectation_contexts()
 
 
+def _item_file(item):
+    """The source file of the module a test item lives in."""
+    try:
+        path = getattr(item, "path", None)
+        return str(path) if path is not None else getattr(item, "fspath", None) and str(item.fspath)
+    except Exception:
+        return None
+
+
+def _report_file(report):
+    """Where the test is defined, from the report's own location.
+
+    A pytest node id is "tests/test_calc.py::CalcTest::test_x" -- a path with
+    a selector suffix, not a path. `report.location` names the file itself.
+    """
+    try:
+        location = getattr(report, "location", None)
+        return location[0] if location else None
+    except Exception:
+        return None
+
+
 def pytest_assertion_pass(item, lineno, orig, expl):
-    del item, lineno, orig, expl
+    del orig, expl
     if _runtime is None or _xdist_controller:
         return
-    if _runtime.assertion():
-        # The phase is sampled; the remaining assertions of this test need
-        # not build their explanation strings for a hook that ignores them.
-        # pytest arms the hook again for the next test.
-        try:
-            from _pytest.assertion import util
-
-            util._assertion_pass = None
-        except Exception:  # noqa: BLE001
-            pass
+    # pytest's rewriter hands us the line of the assert it just passed, so the
+    # site needs no frame walking. The file is the module under test.
+    #
+    # The hook stays armed for the whole test. It used to disarm itself after
+    # the first assertion, when one marker per test was all the runtime
+    # wanted; an assertion map needs every site, and only this hook knows
+    # where a rewritten `assert` is. The cost is that pytest builds an
+    # explanation string for each passing assertion rather than the first.
+    _runtime.assertion_site(_item_file(item), lineno)
+    _runtime.assertion()
 
 
 def pytest_configure(config):
@@ -176,6 +198,7 @@ def pytest_runtest_logreport(report):
         report.when,
         report.outcome,
         bool(getattr(report, "wasxfail", False)),
+        file=_report_file(report),
     )
 
 

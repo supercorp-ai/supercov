@@ -242,6 +242,7 @@ try {
   assert.match(JSON.stringify(negation), /UnitStyleTest#test_negation/, 'test-unit identity reaches the line');
   const testUnitFile = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
   assert.doesNotMatch(JSON.stringify(testUnitFile), /ruby-runner-adapter-failed/, 'the test-unit adapter installed completely');
+  assertAssertionsAreObserved(environment, 'latest', 'test-unit', 'test/unit_style_test.rb');
   const testUnitSummary = query(['runs', 'latest'], environment);
   assert.equal(testUnitSummary.confidence.lines.asserted, 0, "Only assertions.json awards assertion credit");
 
@@ -250,6 +251,7 @@ try {
   const parallel = supercov(['--', 'ruby', '-Itest', 'test/parallel_test.rb'], environment);
   assert.equal(parallel.status, 0, `${parallel.stdout}\n${parallel.stderr}`);
   assert.match(parallel.stderr, /4 test\(s\) across 1 source file\(s\)/);
+  assertAssertionsAreObserved(environment, 'latest', 'parallel minitest', 'test/parallel_test.rb');
   const parallelFile = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
   assert.match(JSON.stringify(parallelFile), /ruby-concurrent-test-phases/, 'thread-parallel run declares its limitation');
 
