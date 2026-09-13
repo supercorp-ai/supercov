@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- Dependency manifests are fingerprinted by what they declare rather than by their bytes. A release rewrites the version in `package.json`, `Cargo.toml`, `pyproject.toml` and the lockfile, which marked every flow stale; in supergateway's history that was 62% of manifest changes. A real dependency edit still invalidates; an unparseable manifest is hashed whole.
+- Upgrading Supercov no longer marks every map stale. That digest covers Supercov's own source, so every release moved it, for claims about the project's code rather than about Supercov.
+- A dependency upgrade is recorded as one change to assess instead of staleness on every flow. Credit is retained until that assessment says otherwise.
+- Linters, formatters, type checkers and coverage settings are no longer execution context: `.prettierrc`, ESLint configuration, `mypy.ini` and `.coveragerc`. Babel, tsconfig, pytest, tox and `.python-version` still count, because they decide what executes.
+- Published crates carry the project README again.
+
+Maps need one review after upgrading.
+
+**Added**
+
+- Assertion reports carry `advisories`, for what is worth saying about a map without making it invalid. The first names a `watch` entry on a file Supercov already tracks for the whole run.
+
 ## 0.0.47
 
 **Added**

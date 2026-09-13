@@ -435,6 +435,30 @@ pub fn validate(map: &AssertionMap, inputs: &Inputs) -> Vec<String> {
     }
     errors
 }
+/// Things worth telling the author that do not make the map wrong.
+///
+/// A redundant `watch` is the one that matters today. Supercov already marks
+/// every flow dirty when a dependency manifest or the execution configuration
+/// changes, so naming one of those files per flow catches nothing extra. It
+/// does teach a false model -- that per-flow watching is how dependency drift
+/// is caught -- and an author who believes it spends the effort on entries that
+/// change nothing instead of on the helper their claim actually rests on.
+pub fn advisories(map: &AssertionMap) -> Vec<String> {
+    let mut out = Vec::new();
+    for a in &map.assertions {
+        for f in &a.flows {
+            for file in &f.watch {
+                if crate::integrity::globally_tracked(file) {
+                    out.push(format!(
+                        "{}: watch \"{file}\" is redundant; Supercov invalidates every flow when that file changes",
+                        flow_key(a, f)
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
 pub fn validate_flow(flow: &Flow, files: &Files) -> Vec<String> {
     let mut errors = Vec::new();
     let mut nodes = BTreeSet::new();

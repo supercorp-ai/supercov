@@ -164,10 +164,11 @@ fn walk(
                     continue;
                 }
             }
-            if matches!(
-                name.as_str(),
-                "pytest.ini" | "tox.ini" | ".coveragerc" | "mypy.ini" | ".python-version"
-            ) {
+            // A type checker and a coverage tool do not change what the code
+            // does when it runs, so neither is execution context, any more than
+            // a formatter is. pytest and tox decide what executes;
+            // `.python-version` decides which interpreter executes it.
+            if matches!(name.as_str(), "pytest.ini" | "tox.ini" | ".python-version") {
                 files.configuration_files.push(PathBuf::from(&relative));
                 continue;
             }
@@ -385,6 +386,30 @@ mod tests {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn a_type_checker_and_a_coverage_tool_are_not_execution_context() {
+        // Neither changes what the code does when it runs, so neither should
+        // cost every flow in the map a re-reading. What decides execution does:
+        // pytest and tox choose what runs, `.python-version` chooses the
+        // interpreter that runs it.
+        let root = fixture("inert-tooling");
+        write(&root, "pyproject.toml", "[project]\nname='x'\n");
+        write(&root, "mypy.ini", "[mypy]\n");
+        write(&root, ".coveragerc", "[run]\n");
+        write(&root, "pytest.ini", "[pytest]\n");
+        write(&root, ".python-version", "3.13\n");
+        write(&root, "src/pkg/core.py", "def f(a):\n    return a\n");
+        let project = prepare_python_project(&root).unwrap();
+        assert_eq!(
+            project.files.configuration_files,
+            [
+                PathBuf::from(".python-version"),
+                PathBuf::from("pytest.ini")
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

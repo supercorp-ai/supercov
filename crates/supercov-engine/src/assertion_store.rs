@@ -7,7 +7,7 @@ use crate::{
     },
     evidence_archive::read_archive,
     lifecycle::atomic_write,
-    run_store::{RunMetadata, StoredRun, discover_runs},
+    run_store::{RunFingerprint, RunMetadata, StoredRun, discover_runs},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -177,12 +177,14 @@ pub(crate) fn prepare_publication(
             let (map, state) = load(previous, &old)?;
             let a = &previous.metadata.integrity.fingerprint;
             let b = &metadata.integrity.fingerprint;
-            // Source hashes are checked through anchors/watches by carry. Only
-            // execution context changes invalidate every inherited flow.
-            let context_changed = a.configuration != b.configuration
-                || a.dependencies != b.dependencies
-                || a.instrumenter != b.instrumenter
-                || old.manifest.context_digest != input.manifest.context_digest;
+            let delta = context_delta(
+                a,
+                b,
+                &old.manifest.context_digest,
+                &input.manifest.context_digest,
+            );
+            let context_changed = delta.execution;
+            let dependencies_changed = delta.dependencies;
             let current = match &current {
                 Ok(current) => current,
                 Err(reason) => {
@@ -240,7 +242,19 @@ pub(crate) fn prepare_publication(
                 &input.evidence_digest,
                 context_changed,
             )
-            .map(Some)
+            .map(|(next, mut next_state)| {
+                if dependencies_changed {
+                    add_change(
+                        &mut next_state,
+                        None,
+                        Some(a.dependencies.clone()),
+                        Some(b.dependencies.clone()),
+                        "installed dependencies changed".into(),
+                        BTreeSet::new(),
+                    );
+                }
+                Some((next, next_state))
+            })
         })();
         match attempt {
             Ok(Some(pair)) => {
@@ -275,6 +289,42 @@ pub(crate) fn prepare_publication(
     write_json(root, &run, STATE_FILE, &state)?;
     Ok(())
 }
+/// How a difference between two runs reaches the flows inherited across it.
+struct ContextDelta {
+    /// What actually executes moved, so every inherited flow has to be read
+    /// again before it can be trusted.
+    execution: bool,
+    /// The installed dependency set moved. Recorded as one change to assess
+    /// rather than as staleness on every flow.
+    dependencies: bool,
+}
+
+/// Source hashes are checked through anchors and watches by `carry`; this is
+/// only about what surrounds them.
+///
+/// The instrumenter is deliberately absent. It is Supercov's own version, so
+/// including it made every release mark every map in the world stale -- for
+/// claims that are about the project's code, not about Supercov. When the
+/// meaning of credit itself changes, the basis domain is the thing that moves.
+///
+/// Dependencies are separated rather than dropped. An upgrade can falsify an
+/// authored explanation without touching a single project file, so it cannot
+/// pass unsaid; but it usually falsifies nothing, and making every flow stale
+/// for it spends the attention the author needs for the changes that do
+/// matter. An acknowledgement demanded six hundred times at once stops being
+/// read, which is the opposite of what it is for.
+fn context_delta(
+    a: &RunFingerprint,
+    b: &RunFingerprint,
+    old_context: &str,
+    new_context: &str,
+) -> ContextDelta {
+    ContextDelta {
+        execution: a.configuration != b.configuration || old_context != new_context,
+        dependencies: a.dependencies != b.dependencies,
+    }
+}
+
 pub fn coverage(run: &StoredRun) -> Result<CoverageReport, String> {
     analyze_coverage_archive(&ArchiveReportRequest {
         archive_path: run.evidence_path.clone(),
@@ -891,12 +941,69 @@ pub fn assess(
             "hasExecutionEvidence":!t.hits.is_empty() || !t.decisions.is_empty() || !t.lines.is_empty()})).collect::<Vec<_>>(),
         "creditedLines":credited.iter().map(|loc| json!({"file":loc.0,"line":loc.1,"assertions":line_assertions.get(loc)})).collect::<Vec<_>>(),
         "unassertedLines":denominator.difference(&credited).map(|(f,l)| json!({"file":f,"line":l})).collect::<Vec<_>>(),
-        "changes":validation["changes"],"validationErrors":errors,"limitations":inputs.limitations})
+        "changes":validation["changes"],"validationErrors":errors,"advisories":model::advisories(map),"limitations":inputs.limitations})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fingerprint() -> RunFingerprint {
+        RunFingerprint {
+            algorithm: "sha256".into(),
+            source: "source".into(),
+            tests: "tests".into(),
+            dependencies: "dependencies".into(),
+            configuration: "configuration".into(),
+            instrumenter: "instrumenter".into(),
+            execution: "execution".into(),
+            combined: "combined".into(),
+            source_files: 1,
+            test_files: 1,
+        }
+    }
+
+    #[test]
+    fn upgrading_supercov_does_not_make_every_map_stale() {
+        // The instrumenter digest covers Supercov's own source, so every
+        // release of it moved. The claims in a map are about the project's
+        // code; a new Supercov re-derives the evidence they rest on rather than
+        // making them wrong.
+        let before = fingerprint();
+        let mut after = fingerprint();
+        after.instrumenter = "a new supercov".into();
+        let delta = context_delta(&before, &after, "context", "context");
+        assert!(!delta.execution);
+        assert!(!delta.dependencies);
+    }
+
+    #[test]
+    fn a_dependency_upgrade_is_reported_without_invalidating_anything() {
+        // It is separated, not ignored: an upgrade can falsify an authored
+        // explanation with no project file touched. One assessment answers for
+        // it, and credit survives in the meantime.
+        let before = fingerprint();
+        let mut after = fingerprint();
+        after.dependencies = "an upgraded lockfile".into();
+        let delta = context_delta(&before, &after, "context", "context");
+        assert!(delta.dependencies);
+        assert!(!delta.execution, "an upgrade must not invalidate flows");
+    }
+
+    #[test]
+    fn what_actually_executes_still_invalidates_every_flow() {
+        // tsconfig, Babel and the declared context decide what runs. A flow
+        // acknowledged under the old one has to be read again.
+        let before = fingerprint();
+        let mut after = fingerprint();
+        after.configuration = "a different tsconfig".into();
+        assert!(context_delta(&before, &after, "context", "context").execution);
+        assert!(
+            context_delta(&before, &fingerprint(), "context", "another context").execution,
+            "declared context variables still count"
+        );
+        assert!(!context_delta(&before, &fingerprint(), "context", "context").execution);
+    }
+
     #[test]
     fn report_cache_requires_exact_revision_and_intact_payload() {
         let directory =

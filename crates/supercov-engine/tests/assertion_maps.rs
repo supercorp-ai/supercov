@@ -869,6 +869,32 @@ fn basis_syntax_requires_an_explicit_null_or_versioned_token() {
 }
 
 #[test]
+fn a_watch_on_a_file_supercov_already_tracks_is_reported_as_redundant() {
+    // Every flow is marked dirty when a dependency manifest or the execution
+    // configuration changes, so naming one of those per flow catches nothing
+    // extra. The map is not wrong, which is why this is an advisory -- but left
+    // unsaid it teaches the author that per-flow watching is how dependency
+    // drift is caught, and the effort goes to entries that change nothing.
+    let (mut inputs, mut map, _) = fixture();
+    assert!(advisories(&map).is_empty());
+    for tracked in ["package-lock.json", "package.json", "Cargo.toml"] {
+        // A real project carries these in the inventory, so watching one is a
+        // well-formed thing to write. That is exactly why it needs saying.
+        inputs.files.insert(tracked.into(), "{}".into());
+        map.assertions[0].flows[0].watch = vec![tracked.into()];
+        assert!(
+            advisories(&map).iter().any(|a| a.contains("redundant")),
+            "{tracked} should be reported"
+        );
+        // It stays an advisory. A redundant watch never fails validation.
+        assert!(validate_flow(&map.assertions[0].flows[0], &inputs.files).is_empty());
+    }
+    // A file no fingerprint covers is exactly what watch exists for.
+    map.assertions[0].flows[0].watch = vec!["tests/helpers/peer.js".into()];
+    assert!(advisories(&map).is_empty());
+}
+
+#[test]
 fn counted_nodes_need_an_authored_path_to_the_exact_assertion_sink() {
     let (inputs, mut map, _) = fixture();
     let flow = &mut map.assertions[0].flows[0];
