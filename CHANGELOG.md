@@ -1,8 +1,6 @@
 # Changelog
 
-## Unreleased
-
-Coverage becomes something CI can enforce, and each invalidation signal now costs what it is worth. Maps need one review after upgrading.
+## 0.0.48
 
 **Added**
 
@@ -11,6 +9,10 @@ Coverage becomes something CI can enforce, and each invalidation signal now cost
 - `supercov runs <id> report --format lcov|cobertura|html` exports a run. All three read the view the gates read, so a consumer's totals are the ones Supercov enforced. Files are written atomically and kept unless `--force`.
 - The HTML report is one self-contained document that opens offline from a CI artifact, with a filterable file table and a source view marking each line in words and a glyph as well as colour. Uncovered, not applicable, partly measured and stale stay distinct rather than collapsing into one score; source is embedded only when the run still matches the checkout.
 - Assertion reports carry `advisories`, the first naming a `watch` on a file already tracked run-wide.
+
+**Changed**
+
+- Each invalidation signal now costs what it is worth, so maps need one review after upgrading and then stop being disturbed by changes that alter nothing.
 
 **Fixed**
 
