@@ -1,11 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.0.47
+
+**Added**
+
+- Assertion coverage measures Python and Ruby, alongside JavaScript, TypeScript and Rust. Runs record which assertion each test reached and where it is written, so an agent can explain them and earn statement credit. Covers pytest, unittest, RSpec, Minitest, test-unit and Cucumber.
+- Python and Ruby test results name the file a test is defined in, which is what an assertion map's test selector needs.
+
+**Changed**
+
+- Neither runtime reports an assertion's column, so a line is credited only when the inventory holds exactly one assertion on it. Put two assertions on separate lines.
+- pytest's assertion-pass hook stays armed for a whole test rather than disarming after the first assertion, so every site is recorded. pytest now builds an explanation per passing assertion.
 
 **Fixed**
 
-- Assertion review tokens no longer depend on the ambient process environment. Running from another directory, a new terminal session, a different package manager or another Node installation previously marked every flow in a map stale at once with "run configuration, dependencies or execution context changed", even though source, tests, dependencies, configuration and instrumenter fingerprints were unchanged. Set `SUPERCOV_ASSERTION_CONTEXT_ENV` to a comma-separated list when a suite genuinely depends on specific variables; only those participate. Maps need one review after upgrading, because the recorded context identity changes once.
-- Assertion line reports count only lines a statement can be claimed on. Continuation lines of multi-line statements and nested function bodies without a statement of their own were counted in the line denominator and listed under `unassertedLines`, which capped the line percentage for structural reasons and offered work that could not be done. The statement percentage is unaffected.
+- Assertion review tokens no longer depend on the ambient environment. A different directory, terminal or Node install previously marked every flow stale at once. Name variables in `SUPERCOV_ASSERTION_CONTEXT_ENV` when a suite needs them. Maps need one review after upgrading.
+- Assertion line reports count only lines a statement can be claimed on. Continuation lines and nested function bodies were wrongly in the denominator. The statement percentage is unaffected.
 
 ## 0.0.46
 

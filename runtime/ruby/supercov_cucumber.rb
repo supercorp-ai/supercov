@@ -37,6 +37,14 @@ module Supercov
       { worker: @runtime.worker, test: test_case.location.to_s, retry: 0, phase: nil }
     end
 
+    # A Cucumber location is "features/a.feature:3"; the feature file is the
+    # part before the line.
+    def self.source_file(test_case)
+      test_case.location.file
+    rescue NoMethodError
+      nil
+    end
+
     def self.enter(phase)
       state = @state
       return if state.nil? || state[:phase] == phase
@@ -94,7 +102,7 @@ module Supercov
         next if status.nil?
 
         status = overall if phase == "call" && overall != "passed" && status == "passed"
-        @runtime.outcome(identity[:worker], identity[:test], 0, phase, status, false, RUNNER)
+        @runtime.outcome(identity[:worker], identity[:test], 0, phase, status, false, RUNNER, source_file(test_case))
       end
       @runtime.switch(nil)
     end

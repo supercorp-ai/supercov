@@ -4,7 +4,14 @@ Line coverage shows which code ran. Assertion coverage helps you see what the
 tests checked. Your coding agent traces assertions back to the source, and
 Supercov checks those links against recorded execution from the same test.
 
-Assertion coverage is available for JavaScript and TypeScript.
+Assertion coverage measures JavaScript, TypeScript, Python, Ruby and Rust. The
+map format is the same for every one of them: an assertion is identified by its
+file, line and column, so a project written in more than one language keeps a
+single map.
+
+Python and Ruby report an assertion's line but not its column, so two
+assertions written on one line cannot be told apart and neither is credited.
+Put them on separate lines.
 
 ## A passing test can miss a wrong result
 

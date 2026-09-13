@@ -50,6 +50,15 @@ module Supercov
       { worker: @runtime.worker, test: "#{test.class.name}##{test.name}", retry: 0, phase: nil }
     end
 
+    # Where the test method is defined. Minitest's identity is a class and
+    # method name, not a path, and an assertion map selects tests by file and
+    # name. A method Minitest synthesised has no source location.
+    def self.source_file(test)
+      test.method(test.name).source_location&.first
+    rescue NameError
+      nil
+    end
+
     def self.enter(test, phase)
       state = (@state[test.object_id] ||= { phases: {} })
       state[:phase] = phase
@@ -73,11 +82,12 @@ module Supercov
       return unless state
 
       identity = identity(test)
+      file = source_file(test)
       %w[setup call teardown].each do |phase|
         status = state[:phases][phase]
         next if status.nil?
 
-        @runtime.outcome(identity[:worker], identity[:test], 0, phase, status, false, RUNNER)
+        @runtime.outcome(identity[:worker], identity[:test], 0, phase, status, false, RUNNER, file)
       end
       @runtime.switch(nil)
     end

@@ -77,6 +77,38 @@ function query(args, environment, cwd = project) {
   return payload.data;
 }
 
+// Every assertion the syntax inventory found in a test file, with the tests
+// that were observed running it. An assertion map credits a source statement
+// only when a passing test ran a named assertion, so a site with no observed
+// test can never earn credit however well it is explained.
+function assertionSites(environment, runId) {
+  const sites = [];
+  let offset = 0;
+  for (;;) {
+    const page = query(['runs', runId, 'assertions', '--limit', '200', '--offset', String(offset)], environment);
+    sites.push(...page.items.map((item) => ({
+      at: `${item.at.file}:${item.at.line}`,
+      tests: item.observedPassingTests ?? [],
+    })));
+    if (page.pagination.nextOffset === null) return sites;
+    offset = page.pagination.nextOffset;
+  }
+}
+
+// The inventory covers every captured test file, so a run that exercised one
+// of them leaves the others' sites unobserved by design. Only the file this
+// command actually ran has to name a test for each of its assertions.
+function assertAssertionsAreObserved(environment, runId, runner, ranFile) {
+  const sites = assertionSites(environment, runId).filter((site) => site.at.startsWith(`${ranFile}:`));
+  assert.ok(sites.length > 0, `${runner}: the inventory found no assertion sites in ${ranFile}`);
+  const unobserved = sites.filter((site) => site.tests.length === 0).map((site) => site.at);
+  assert.deepEqual(unobserved, [], `${runner}: every assertion ${ranFile} runs should name the test that ran it`);
+  // An assertion map selects a test by file and name, so the run has to report
+  // the test's path rather than the runner's own identity.
+  const tests = query(['runs', runId, 'test', sites[0].tests[0]], environment).tests;
+  assert.equal(tests[0].file, ranFile, `${runner}: the test should be reported in ${ranFile}`);
+}
+
 function assertStdlibOnlyTotals(summary) {
   // Ruby 3.3 measures through Coverage alone: lines, methods and stdlib
   // branches are exact, probe-driven obligations are declared unmeasured.
@@ -141,6 +173,7 @@ try {
   assert.match(rspec.stderr, /12 test\(s\) across 1 source file\(s\)/);
   assert.match(rspec.stderr, /interpreter process\(es\) on Ruby (3\.[3-9]|[4-9])/);
   assertTotals(query(['runs', 'latest'], environment));
+  assertAssertionsAreObserved(environment, 'latest', 'rspec', 'spec/shapes_spec.rb');
 
   if (probes) {
     const compound = query(['runs', 'latest', 'decision', 'lib/shapes.rb:8'], environment);
@@ -194,6 +227,7 @@ try {
   const minitest = supercov(['--', 'ruby', '-Itest', 'test/shapes_test.rb'], environment);
   assert.equal(minitest.status, 0, `${minitest.stdout}\n${minitest.stderr}`);
   assert.match(minitest.stderr, /3 test\(s\) across 1 source file\(s\)/);
+  assertAssertionsAreObserved(environment, 'latest', 'minitest', 'test/shapes_test.rb');
   const runners = supercov(['runs', 'latest', 'runners'], environment);
   assert.match(runners.stdout, /minitest\s+3 test\(s\)/);
   const matcher = query(['runs', 'latest', 'line', 'lib/shapes.rb:51'], environment);
@@ -208,6 +242,7 @@ try {
   assert.match(JSON.stringify(negation), /UnitStyleTest#test_negation/, 'test-unit identity reaches the line');
   const testUnitFile = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
   assert.doesNotMatch(JSON.stringify(testUnitFile), /ruby-runner-adapter-failed/, 'the test-unit adapter installed completely');
+  assertAssertionsAreObserved(environment, 'latest', 'test-unit', 'test/unit_style_test.rb');
   const testUnitSummary = query(['runs', 'latest'], environment);
   assert.equal(testUnitSummary.confidence.lines.asserted, 0, "Only assertions.json awards assertion credit");
 
@@ -216,6 +251,7 @@ try {
   const parallel = supercov(['--', 'ruby', '-Itest', 'test/parallel_test.rb'], environment);
   assert.equal(parallel.status, 0, `${parallel.stdout}\n${parallel.stderr}`);
   assert.match(parallel.stderr, /4 test\(s\) across 1 source file\(s\)/);
+  assertAssertionsAreObserved(environment, 'latest', 'parallel minitest', 'test/parallel_test.rb');
   const parallelFile = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
   assert.match(JSON.stringify(parallelFile), /ruby-concurrent-test-phases/, 'thread-parallel run declares its limitation');
 

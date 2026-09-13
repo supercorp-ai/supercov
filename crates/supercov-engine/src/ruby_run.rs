@@ -27,7 +27,7 @@ use crate::{
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
-    ruby_evidence::{RubyFrontendRun, build_ruby_frontend_run},
+    ruby_evidence::{RubyAssertionInventory, RubyFrontendRun, build_ruby_frontend_run},
     ruby_project::{PreparedRubyProject, prepare_ruby_project, ruby_integrity_inputs},
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
 };
@@ -287,6 +287,7 @@ pub fn run_direct_ruby(
             &request.run_id,
             &request.started_at,
             execution.exit_code,
+            &RubyAssertionInventory::new(&root, &assertion_inputs),
         )
         .map_err(|error| error.to_string())?;
         validate_frontend_report_request(&run.declaration, &run.request)

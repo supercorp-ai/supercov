@@ -79,6 +79,13 @@ module Supercov
       { worker: @runtime.worker, test: "#{test.class.name}##{test.method_name}", retry: 0, phase: nil }
     end
 
+    # Test::Unit names a class and method, not a path.
+    def self.source_file(test)
+      test.method(test.method_name).source_location&.first
+    rescue NameError
+      nil
+    end
+
     def self.start(test)
       @state[Thread.current] = { test: test, phase: nil, phases: {} }
     end
@@ -111,7 +118,7 @@ module Supercov
         status = state[:phases][phase]
         next if status.nil?
 
-        @runtime.outcome(identity[:worker], identity[:test], 0, phase, status, false, RUNNER)
+        @runtime.outcome(identity[:worker], identity[:test], 0, phase, status, false, RUNNER, source_file(test))
       end
       @runtime.switch(nil)
     end

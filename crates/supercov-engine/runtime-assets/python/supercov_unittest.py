@@ -7,11 +7,26 @@ identity around `unittest.TestCase` execution while recording the outcomes
 `unittest.TestResult` reports. It computes no coverage.
 """
 
+import sys as _sys
 import unittest
 import unittest.case
 
 RUNNER = "unittest"
 WORKER = "main"
+
+
+def _source_file(test):
+    """Where the test method is defined.
+
+    A unittest identity is a dotted module path, not a path, and an assertion
+    map selects tests by file and name. A dynamically built case may have no
+    module file.
+    """
+    try:
+        module = _sys.modules.get(type(test).__module__)
+        return getattr(module, "__file__", None)
+    except Exception:
+        return None
 
 
 class _State:
@@ -66,6 +81,12 @@ def install(runtime):
         def wrapper(self, *args, **kwargs):
             if not runtime.closed:
                 runtime.assertion()
+                # These wrap the public assert* methods, so one frame up is
+                # the test itself. A nested assert (assertListEqual calling
+                # assertEqual) reports unittest's own file, which the
+                # inventory does not know and therefore discards.
+                frame = _sys._getframe(1)
+                runtime.assertion_site(frame.f_code.co_filename, frame.f_lineno)
             return original(self, *args, **kwargs)
 
         wrapper.__name__ = name
@@ -117,7 +138,7 @@ def install(runtime):
                 for phase in ("setup", "call", "teardown"):
                     status = state.statuses.get(phase)
                     if status is not None:
-                        runtime.outcome(WORKER, state.test_id, 0, phase, status, state.xfail, RUNNER)
+                        runtime.outcome(WORKER, state.test_id, 0, phase, status, state.xfail, RUNNER, _source_file(test))
                 runtime.switch(None)
         return original_stop(self, test)
 

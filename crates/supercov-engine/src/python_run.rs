@@ -27,7 +27,7 @@ use crate::{
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
-    python_evidence::{PythonFrontendRun, build_python_frontend_run},
+    python_evidence::{PythonAssertionInventory, PythonFrontendRun, build_python_frontend_run},
     python_project::{PreparedPythonProject, prepare_python_project, python_integrity_inputs},
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
 };
@@ -303,6 +303,7 @@ pub fn run_direct_python(
             &request.run_id,
             &request.started_at,
             execution.exit_code,
+            &PythonAssertionInventory::new(&root, &assertion_inputs),
         )
         .map_err(|error| error.to_string())?;
         validate_frontend_report_request(&run.declaration, &run.request)
