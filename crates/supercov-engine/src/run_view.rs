@@ -156,6 +156,25 @@ pub struct Location {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FunctionRecord {
+    pub line: usize,
+    pub name: String,
+    pub covered: bool,
+}
+
+/// One alternative of one branch, in the shape every export format wants:
+/// which decision it belongs to and whether it was taken.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchRecord {
+    pub line: usize,
+    pub block: usize,
+    pub index: usize,
+    pub taken: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileView {
     pub file: String,
     pub metrics: Vec<MetricView>,
@@ -168,11 +187,23 @@ pub struct FileView {
     pub uncovered_lines: Vec<usize>,
     pub missing_branches: Vec<Location>,
     pub missing_conditions: Vec<Location>,
+    pub functions: Vec<FunctionRecord>,
+    pub branches: Vec<BranchRecord>,
 }
 
 impl FileView {
     pub fn metric(&self, metric: Metric) -> Option<&MetricView> {
         self.metrics.iter().find(|view| view.metric == metric)
+    }
+
+    /// Every measured line paired with whether a selected test reached it.
+    ///
+    /// Derived rather than stored, so a line can never appear covered here and
+    /// uncovered in the counts beside it.
+    pub fn line_hits(&self) -> impl Iterator<Item = (usize, bool)> + '_ {
+        self.measured_lines
+            .iter()
+            .map(|line| (*line, self.uncovered_lines.binary_search(line).is_err()))
     }
 }
 
@@ -282,6 +313,8 @@ pub fn build(
                 uncovered_lines: Vec::new(),
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),
+                functions: Vec::new(),
+                branches: Vec::new(),
             })
             .measured_lines
             .extend(line.measured.then_some(line.line));
@@ -302,6 +335,8 @@ pub fn build(
                 uncovered_lines: Vec::new(),
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),
+                functions: Vec::new(),
+                branches: Vec::new(),
             });
         for alternative in branch.alternatives.iter().filter(|a| !a.covered) {
             entry.missing_branches.push(Location {
@@ -309,6 +344,34 @@ pub fn build(
                 column: branch.meta.column,
             });
             let _ = alternative;
+        }
+    }
+    for point in &view.points {
+        if point.meta.kind != crate::coverage_analysis::PointKind::Function {
+            continue;
+        }
+        if let Some(file) = files.get_mut(&point.meta.file) {
+            file.functions.push(FunctionRecord {
+                line: point.meta.line,
+                name: point
+                    .meta
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("{}:{}", point.meta.line, point.meta.column)),
+                covered: point.covered,
+            });
+        }
+    }
+    for (block, branch) in view.branches.iter().enumerate() {
+        if let Some(file) = files.get_mut(&branch.meta.file) {
+            for (index, alternative) in branch.alternatives.iter().enumerate() {
+                file.branches.push(BranchRecord {
+                    line: branch.meta.line,
+                    block,
+                    index,
+                    taken: alternative.covered,
+                });
+            }
         }
     }
     for decision in &view.decisions {
@@ -321,6 +384,8 @@ pub fn build(
                 uncovered_lines: Vec::new(),
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),
+                functions: Vec::new(),
+                branches: Vec::new(),
             });
         for _ in decision.conditions.iter().filter(|c| !c.covered) {
             entry.missing_conditions.push(Location {
@@ -339,6 +404,10 @@ pub fn build(
         file.missing_branches.sort_by_key(|at| (at.line, at.column));
         file.missing_conditions
             .sort_by_key(|at| (at.line, at.column));
+        file.functions
+            .sort_by(|a, b| (a.line, &a.name).cmp(&(b.line, &b.name)));
+        file.branches
+            .sort_by_key(|record| (record.line, record.block, record.index));
         built.push(file);
     }
     let source_neighbourhoods = built
@@ -668,6 +737,8 @@ mod tests {
                 uncovered_lines: vec![2, 3, 4],
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),
+                functions: Vec::new(),
+                branches: Vec::new(),
             },
             FileView {
                 file: "src/b.ts".into(),
@@ -681,6 +752,8 @@ mod tests {
                 uncovered_lines: Vec::new(),
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),
+                functions: Vec::new(),
+                branches: Vec::new(),
             },
         ];
         let outcome = check(

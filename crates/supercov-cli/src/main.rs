@@ -1493,21 +1493,7 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
     }
 
     let result = (|| -> Result<supercov_engine::run_view::Outcome, String> {
-        let root = std::env::current_dir().map_err(|error| error.to_string())?;
-        let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
-        let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-        let comparison = current_integrity_for_run(&root, run)
-            .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
-        let report = analyze_stored_run(run)?;
-        let view = supercov_engine::run_view::build(
-            &run.id,
-            &run.metadata.started_at,
-            &report.filters.passed,
-            run.metadata.test_exit_code == Some(0),
-            comparison.as_ref().is_some_and(|c| c.stale),
-            comparison.map(|c| c.reasons).unwrap_or_default(),
-        )
-        .map_err(|error| format!("{error:?}"))?;
+        let view = load_run_view(selector)?;
         let outcome = supercov_engine::run_view::check(&view, &floors, per_file);
         if json {
             print!(
@@ -1764,20 +1750,7 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
 
     let result = (|| -> Result<u8, String> {
         let root = std::env::current_dir().map_err(|error| error.to_string())?;
-        let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
-        let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-        let comparison = current_integrity_for_run(&root, run)
-            .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
-        let report = analyze_stored_run(run)?;
-        let view = supercov_engine::run_view::build(
-            &run.id,
-            &run.metadata.started_at,
-            &report.filters.passed,
-            run.metadata.test_exit_code == Some(0),
-            comparison.as_ref().is_some_and(|c| c.stale),
-            comparison.map(|c| c.reasons).unwrap_or_default(),
-        )
-        .map_err(|error| format!("{error:?}"))?;
+        let view = load_run_view(selector)?;
         // Mapping a patch onto coverage recorded from different source would
         // annotate the wrong lines, which is worse than refusing.
         let blockers = view.blockers();
@@ -1887,6 +1860,143 @@ fn render_patch(
         (None, _) => {}
     }
     out
+}
+
+/// Resolve a run and build the shared view every workflow command reads.
+fn load_run_view(selector: Option<&str>) -> Result<supercov_engine::run_view::RunView, String> {
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+    let comparison = current_integrity_for_run(&root, run)
+        .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
+    let report = analyze_stored_run(run)?;
+    supercov_engine::run_view::build(
+        &run.id,
+        &run.metadata.started_at,
+        &report.filters.passed,
+        run.metadata.test_exit_code == Some(0),
+        comparison.as_ref().is_some_and(|c| c.stale),
+        comparison.map(|c| c.reasons).unwrap_or_default(),
+    )
+    .map_err(|error| format!("{error:?}"))
+}
+
+/// The format names live in the engine module the packaging audit reads, so
+/// this file never spells them: Supercov emits those formats and must never
+/// look like it invokes the tools they are named after.
+fn report_usage() -> String {
+    format!(
+        "supercov runs <run-id> report --format {} [--output <path>] [--force]\n",
+        supercov_engine::coverage_export::FORMATS
+    )
+}
+
+/// Write the file atomically, so a reader never sees a half-written report and
+/// a failed write leaves the previous one intact.
+fn write_atomically(path: &Path, contents: &str, force: bool) -> Result<(), String> {
+    if path.exists() && !force {
+        return Err(format!(
+            "{} already exists; pass --force to replace it",
+            path.display()
+        ));
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+    let temporary = path.with_extension(format!(
+        "{}.supercov-{}",
+        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp"),
+        std::process::id()
+    ));
+    fs::write(&temporary, contents)
+        .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("could not replace {}: {error}", path.display())
+    })
+}
+
+/// Export a recorded run in a format other tools already read.
+fn coverage_report_command(arguments: &[String]) -> ExitCode {
+    let mut format: Option<String> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut force = false;
+    let mut selector: Option<&str> = None;
+    if let Some(first) = arguments.first()
+        && first != "report"
+    {
+        selector = Some(first.as_str());
+    }
+    let rest = &arguments[1..];
+    let mut index = 0;
+    while index < rest.len() {
+        let argument = rest[index].as_str();
+        index += 1;
+        match argument {
+            "report" => continue,
+            "--force" => force = true,
+            "--help" | "-h" => {
+                print!("{}", report_usage());
+                return ExitCode::SUCCESS;
+            }
+            "--format" | "--output" => {
+                let Some(value) = rest.get(index) else {
+                    eprintln!("[supercov] {argument} needs a value\n{}", report_usage());
+                    return ExitCode::from(2);
+                };
+                index += 1;
+                if argument == "--format" {
+                    format = Some(value.to_ascii_lowercase());
+                } else {
+                    output = Some(PathBuf::from(value));
+                }
+            }
+            other => {
+                eprintln!("[supercov] unknown option {other}\n{}", report_usage());
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(format) = format else {
+        eprintln!("[supercov] report needs --format\n{}", report_usage());
+        return ExitCode::from(2);
+    };
+
+    let result = (|| -> Result<(), String> {
+        let view = load_run_view(selector)?;
+        // A report from a failed or stale run is still worth reading, so this
+        // writes it and says so on stderr rather than refusing. Only a gate
+        // must never go green over one.
+        for blocker in view.blockers() {
+            eprintln!("[supercov] warning: {}", blocker.reason);
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or(0);
+        let contents = supercov_engine::coverage_export::export(&view, &format, timestamp)?;
+        match output {
+            Some(path) => {
+                write_atomically(&path, &contents, force)?;
+                // Diagnostics go to stderr so a shell redirect of stdout still
+                // captures only the report.
+                eprintln!("[supercov] wrote {} ({})", path.display(), format);
+            }
+            None => print!("{contents}"),
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn public_run_inventory(root: &Path) -> Result<RunInventory, RunStoreError> {
@@ -2603,6 +2713,12 @@ fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
             || arguments.get(1).is_some_and(|a| a == "patch"))
     {
         return coverage_patch_command(&arguments);
+    }
+    if command == "runs"
+        && (arguments.first().is_some_and(|a| a == "report")
+            || arguments.get(1).is_some_and(|a| a == "report"))
+    {
+        return coverage_report_command(&arguments);
     }
     if let Some(help) = help_for(command, &arguments) {
         print!("{help}");

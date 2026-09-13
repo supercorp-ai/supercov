@@ -8,6 +8,7 @@ Each invalidation signal now costs what it is worth. Maps need one review after 
 
 - `supercov runs <id> check` fails CI below a coverage floor, reading a recorded run without rerunning tests. Floors are per metric, apply per file, and compare counts, not percentages. Insufficient evidence ends with `2` rather than passing.
 - `supercov runs <id> patch --base <ref>` reports coverage of the lines a change touches, against the merge base. The denominator is changed lines the run measured, so comments and blanks fall out by the adapter's judgement; a comment-only change says so rather than claiming 100%. `--annotate github` emits annotations.
+- `supercov runs <id> report --format lcov|cobertura` exports a recorded run for the viewers and CI integrations a team already uses, from the same view the gates read, so a consumer's totals are the ones Supercov enforced. Written atomically; existing files are kept unless `--force`.
 - Assertion reports carry `advisories`, the first naming a redundant `watch`.
 
 **Fixed**

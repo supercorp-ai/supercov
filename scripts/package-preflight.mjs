@@ -105,6 +105,24 @@ for (const name of runtimeFiles) {
 // file name, not by a "/"-joined suffix: the first Windows build failed on
 // exactly that, when D:\a\...\python_frontend.rs did not end with
 // "/python_frontend.rs" and the scan ran on a file it was never meant to.
+// The one module allowed to name these formats. It writes LCOV and Cobertura
+// documents and spawns nothing; the format names are the formats' names, and a
+// product that exports them has to be able to say so. Every other product
+// source stays under the bare-word ban, so an accidental shell-out to a real
+// coverage tool still fails this audit.
+function isFormatWriter(path) {
+  return path.split(/[\\/]/).at(-1) === "coverage_export.rs";
+}
+assert(
+  isFormatWriter("/w/crates/supercov-engine/src/coverage_export.rs"),
+);
+assert(
+  isFormatWriter(
+    "D:\\a\\supercov\\crates\\supercov-engine\\src\\coverage_export.rs",
+  ),
+);
+assert(!isFormatWriter("/w/crates/supercov-engine/src/coverage_report.rs"));
+
 function isOracleDifferential(path) {
   // Not path.basename: on a POSIX host it does not split on "\", so a check
   // that must hold for a Windows path has to split on either separator itself.
@@ -134,7 +152,7 @@ const productSources = [
   ...sourceFiles(
     resolve(repository, "crates/supercov-engine/src"),
     ".rs",
-  ).filter((path) => !isOracleDifferential(path)),
+  ).filter((path) => !isOracleDifferential(path) && !isFormatWriter(path)),
   ...sourceFiles(
     resolve(repository, "crates/supercov-engine/runtime-assets"),
     ".rs",

@@ -264,6 +264,8 @@ mod tests {
             uncovered_lines: uncovered.to_vec(),
             missing_branches: Vec::new(),
             missing_conditions: Vec::new(),
+            functions: Vec::new(),
+            branches: Vec::new(),
         }
     }
 

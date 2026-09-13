@@ -192,6 +192,30 @@ code nothing ran.
 adjacent misses into one range and capping the total (`--max-annotations`). It
 needs no token and posts no comment.
 
+## Export for other tools
+
+```sh supercov-example
+supercov runs report --format lcov --output coverage/lcov.info
+supercov runs report --format cobertura --output coverage/cobertura.xml
+```
+
+Both are written from the same view `check` and `patch` read, so a viewer,
+hosted service or CI integration sees the totals Supercov enforced. Paths are
+repository-relative with forward slashes, ordering is stable, and the file is
+written atomically; an existing file is kept unless you pass `--force`. Without
+`--output` the report goes to stdout and diagnostics to stderr, so a redirect
+captures only the report.
+
+Supercov records that a line ran, not how many times, so `DA:` and `hits` state
+`1` or `0`. They are not execution frequencies, and Supercov will not invent
+one to fill a field.
+
+MC/DC conditions are not exported as ordinary branches. A consumer would then
+show condition obligations as branch coverage, which is a different
+measurement; that evidence stays in the JSON view and the HTML report. A report
+from a failed or stale run is still written, with a warning on stderr — only
+`check` refuses to pass on one.
+
 ## Narrow a view
 
 | Option | Meaning |
