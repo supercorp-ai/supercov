@@ -18,6 +18,7 @@ pub mod evidence_archive;
 pub mod frontend_detection;
 pub mod frontend_protocol;
 pub mod go_instrumenter;
+pub mod go_project;
 pub mod indexed_query;
 pub mod integrity;
 pub mod javascript_frontend;
