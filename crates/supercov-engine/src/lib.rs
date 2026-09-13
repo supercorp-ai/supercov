@@ -22,6 +22,7 @@ pub mod javascript_run;
 pub mod js_instrumenter;
 pub mod lifecycle;
 pub mod orchestration;
+pub mod patch_view;
 pub mod probe_v2;
 pub mod process_supervision;
 pub mod progress;

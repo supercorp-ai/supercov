@@ -9,7 +9,7 @@
 //! distinguish "nothing was uncovered" from "nothing was measured", and a gate
 //! that treats those alike reports success for a run that proved nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -159,6 +159,11 @@ pub struct Location {
 pub struct FileView {
     pub file: String,
     pub metrics: Vec<MetricView>,
+    /// Every line the language adapter decided was executable, in source
+    /// order. A changed-line check intersects a patch with this rather than
+    /// parsing syntax of its own: the adapter already knows which lines are
+    /// comments, blanks or declarations.
+    pub measured_lines: Vec<usize>,
     /// Measured lines no selected test reached, in source order.
     pub uncovered_lines: Vec<usize>,
     pub missing_branches: Vec<Location>,
@@ -193,11 +198,37 @@ pub struct RunView {
     pub limitations: Vec<String>,
     pub totals: Vec<MetricView>,
     pub files: Vec<FileView>,
+    /// Directories the run discovered product source in, paired with the
+    /// extensions it measured there.
+    ///
+    /// A changed file the run never measured is only worth reporting when it
+    /// is the kind of file this project measures. Without this, every changed
+    /// README, lockfile and test would be announced as an unmeasured gap, and
+    /// a list that is mostly noise stops being read.
+    pub source_neighbourhoods: BTreeSet<(String, String)>,
 }
 
 impl RunView {
     pub fn metric(&self, metric: Metric) -> Option<&MetricView> {
         self.totals.iter().find(|view| view.metric == metric)
+    }
+
+    pub fn file(&self, path: &str) -> Option<&FileView> {
+        self.files.iter().find(|file| file.file == path)
+    }
+
+    /// Whether the adapter treated this line as executable at all.
+    pub fn measured_line(&self, path: &str, line: usize) -> bool {
+        self.file(path)
+            .is_some_and(|file| file.measured_lines.binary_search(&line).is_ok())
+    }
+
+    /// Whether this path looks like product source for this project: a file
+    /// sitting where the run found measured source, with an extension it
+    /// measured there. True for a file added beside existing source, false for
+    /// a document, a lockfile or a test living somewhere nothing is measured.
+    pub fn looks_like_source(&self, path: &str) -> bool {
+        neighbourhood(path).is_some_and(|key| self.source_neighbourhoods.contains(&key))
     }
 
     /// Everything that makes this run unusable as evidence for a gate.
@@ -223,6 +254,14 @@ impl RunView {
     }
 }
 
+/// A path's directory and extension, the pair that decides whether a file
+/// belongs to the same measured population as its neighbours.
+fn neighbourhood(path: &str) -> Option<(String, String)> {
+    let (directory, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let (_, extension) = name.rsplit_once('.')?;
+    Some((directory.to_owned(), extension.to_owned()))
+}
+
 /// Build the shared view from a run's coverage view.
 pub fn build(
     run: &str,
@@ -239,12 +278,19 @@ pub fn build(
             .or_insert_with(|| FileView {
                 file: line.file.clone(),
                 metrics: Vec::new(),
+                measured_lines: Vec::new(),
                 uncovered_lines: Vec::new(),
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),
             })
-            .uncovered_lines
-            .extend((line.measured && !line.covered).then_some(line.line));
+            .measured_lines
+            .extend(line.measured.then_some(line.line));
+        if line.measured
+            && !line.covered
+            && let Some(file) = files.get_mut(&line.file)
+        {
+            file.uncovered_lines.push(line.line);
+        }
     }
     for branch in &view.branches {
         let entry = files
@@ -252,6 +298,7 @@ pub fn build(
             .or_insert_with(|| FileView {
                 file: branch.meta.file.clone(),
                 metrics: Vec::new(),
+                measured_lines: Vec::new(),
                 uncovered_lines: Vec::new(),
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),
@@ -270,6 +317,7 @@ pub fn build(
             .or_insert_with(|| FileView {
                 file: decision.meta.file.clone(),
                 metrics: Vec::new(),
+                measured_lines: Vec::new(),
                 uncovered_lines: Vec::new(),
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),
@@ -284,6 +332,8 @@ pub fn build(
     let mut built = Vec::new();
     for (path, mut file) in files {
         file.metrics = metrics_of(&coverage_summary_for_file(view, &path)?);
+        file.measured_lines.sort_unstable();
+        file.measured_lines.dedup();
         file.uncovered_lines.sort_unstable();
         file.uncovered_lines.dedup();
         file.missing_branches.sort_by_key(|at| (at.line, at.column));
@@ -291,6 +341,10 @@ pub fn build(
             .sort_by_key(|at| (at.line, at.column));
         built.push(file);
     }
+    let source_neighbourhoods = built
+        .iter()
+        .filter_map(|file| neighbourhood(&file.file))
+        .collect::<BTreeSet<_>>();
     Ok(RunView {
         schema_version: RUN_VIEW_SCHEMA_VERSION,
         run: run.to_owned(),
@@ -306,6 +360,7 @@ pub fn build(
             .collect(),
         totals: metrics_of(&view.summary),
         files: built,
+        source_neighbourhoods,
     })
 }
 
@@ -511,6 +566,7 @@ mod tests {
             limitations: Vec::new(),
             totals,
             files,
+            source_neighbourhoods: BTreeSet::new(),
         }
     }
 
@@ -608,6 +664,7 @@ mod tests {
                     eligible: 4,
                     applicability: Applicability::Measured,
                 }],
+                measured_lines: vec![1, 2, 3, 4],
                 uncovered_lines: vec![2, 3, 4],
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),
@@ -620,6 +677,7 @@ mod tests {
                     eligible: 6,
                     applicability: Applicability::Measured,
                 }],
+                measured_lines: vec![1, 2, 3, 4, 5, 6],
                 uncovered_lines: Vec::new(),
                 missing_branches: Vec::new(),
                 missing_conditions: Vec::new(),

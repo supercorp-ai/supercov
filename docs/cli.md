@@ -164,6 +164,34 @@ executes is a different question from whether a line ran, and
 `runs <id> assertions check` carries the freshness and acknowledgement rules
 that answer needs.
 
+## Check the lines a change touches
+
+```sh supercov-example
+supercov runs patch --base origin/main --min-lines 100
+supercov runs patch --base origin/main --annotate github
+```
+
+`patch` answers whether the lines this change added or modified are tested. It
+compares against the **merge base** with `--base`, not that branch's tip, so
+commits other people landed after you branched are not counted as your
+obligation. A shallow checkout has no merge base; fetch with full history
+(`actions/checkout` takes `fetch-depth: 0`).
+
+The denominator is the changed lines the run measured. Comments, blank lines and
+declarations fall out because the language adapter already decided they are not
+executable, not because `patch` guesses at syntax. Deleted lines are excluded:
+there is nothing left to cover. Untracked new source counts as entirely added.
+
+A change with nothing executable in it reports **No executable changes** and
+passes, rather than claiming 100% for a patch that changed only comments. A
+changed file that looks like product source but is absent from the run is named
+separately, because treating it as zero uncovered lines would report success for
+code nothing ran.
+
+`--annotate github` prints workflow-command annotations on stdout, combining
+adjacent misses into one range and capping the total (`--max-annotations`). It
+needs no token and posts no comment.
+
 ## Narrow a view
 
 | Option | Meaning |

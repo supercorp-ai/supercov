@@ -2,20 +2,20 @@
 
 ## Unreleased
 
-Each invalidation signal now costs what it is worth; maps need one review after upgrading.
+Each invalidation signal now costs what it is worth. Maps need one review after upgrading.
 
 **Added**
 
-- `supercov runs <id> check` fails CI below a coverage floor, reading a recorded run without rerunning tests. Floors are per metric, apply per file, and compare counts, not percentages. A failed suite, stale run, empty scope or partial metric ends with `2`, never a pass.
+- `supercov runs <id> check` fails CI below a coverage floor, reading a recorded run without rerunning tests. Floors are per metric, apply per file, and compare counts, not percentages. Insufficient evidence ends with `2` rather than passing.
+- `supercov runs <id> patch --base <ref>` reports coverage of the lines a change touches, against the merge base. The denominator is changed lines the run measured, so comments and blanks fall out by the adapter's judgement; a comment-only change says so rather than claiming 100%. `--annotate github` emits annotations.
 - Assertion reports carry `advisories`, the first naming a redundant `watch`.
 
 **Fixed**
 
-- Manifests are fingerprinted by what they declare, not their bytes, so cutting a release costs nothing — 62% of supergateway's manifest edits. A flow watching one is covered run-wide, not by its own token. A dependency edit still invalidates.
-- Upgrading Supercov no longer marks maps or stored runs stale; only a deliberate instrumenter contract change does. Merging and the build caches still see that digest.
+- Cutting a release costs nothing: manifests are fingerprinted by what they declare, and a flow watching one is covered run-wide — 62% of supergateway's manifest edits.
+- Upgrading Supercov no longer marks maps or stored runs stale; only an instrumenter contract change does.
 - A dependency upgrade is one change to assess, not staleness everywhere.
-- The ambient environment is no longer part of run identity for Rust, Python and Ruby. The test command still counts.
-- Linters, formatters, type checkers and coverage settings are no longer execution context; Babel, tsconfig and pytest still are.
+- The ambient environment left run identity for Rust, Python and Ruby. Linters, formatters, type checkers and coverage settings are no longer execution context.
 - Published crates carry the README again.
 
 ## 0.0.47
