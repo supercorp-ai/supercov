@@ -406,3 +406,252 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
 
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Go's answer to the question that broke the JVM frontend: is there a
+/// construct whose meaning changes when a condition is wrapped, or a scope
+/// that instrumentation steps outside?
+///
+/// Java's pattern `instanceof` and Kotlin's smart casts both narrow a type
+/// from a condition the compiler reads, so wrapping one stops the code
+/// compiling. Go has no such thing — its bindings are lexical. An `if` with an
+/// initialiser scopes its names to the statement, so the condition may be
+/// wrapped freely; a type switch's guard is not a boolean at all. This holds
+/// that, over the shapes where it could plausibly fail, by compiling and
+/// running the instrumented result and checking it answers what the untouched
+/// code answered.
+const SHAPES: &str = r#"package p
+
+import (
+	"errors"
+	"fmt"
+)
+
+func lookup(m map[string]int, k string) int {
+	if v, ok := m[k]; ok {
+		return v
+	}
+	return -1
+}
+
+// Two conditions over names the initialiser introduced: MC/DC has to observe
+// each operand without stepping outside what the statement scopes.
+func gated(m map[string]int, k string) string {
+	if v, ok := m[k]; ok && v > 0 {
+		return fmt.Sprint(v)
+	}
+	return ""
+}
+
+func ranged(xs []int) bool {
+	if n := len(xs); n > 0 && xs[n-1] > n {
+		return true
+	}
+	return false
+}
+
+// A type switch binds per case, with a different type in each.
+func describe(x any) string {
+	switch v := x.(type) {
+	case int:
+		return fmt.Sprint(v + 1)
+	case string:
+		if len(v) > 2 {
+			return v[:2]
+		}
+		return v
+	default:
+		return "other"
+	}
+}
+
+func classify(n int) string {
+	switch x := n * 2; {
+	case x > 10:
+		return "big"
+	case x > 2:
+		return "mid"
+	}
+	return "small"
+}
+
+// Labelled break and continue leave loops the probes sit inside.
+func find(rows [][]int, want int) bool {
+outer:
+	for _, row := range rows {
+		for _, cell := range row {
+			if cell == want {
+				return true
+			}
+			if cell < 0 {
+				continue outer
+			}
+			if cell > 99 {
+				break outer
+			}
+		}
+	}
+	return false
+}
+
+// A named result assigned from a deferred closure, which recovers.
+func pump(boom bool) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errors.New("recovered")
+		}
+	}()
+	if boom {
+		panic("boom")
+	}
+	return nil
+}
+"#;
+
+const SHAPE_TESTS: &str = r#"package p
+
+import "testing"
+
+func TestShapes(t *testing.T) {
+	if got := lookup(map[string]int{"a": 1}, "a"); got != 1 {
+		t.Fatalf("lookup=%d", got)
+	}
+	if got := lookup(map[string]int{}, "a"); got != -1 {
+		t.Fatalf("lookup missing=%d", got)
+	}
+	if got := gated(map[string]int{"a": 3}, "a"); got != "3" {
+		t.Fatalf("gated=%q", got)
+	}
+	if got := gated(map[string]int{"a": 0}, "a"); got != "" {
+		t.Fatalf("gated zero=%q", got)
+	}
+	if !ranged([]int{1, 5}) {
+		t.Fatal("ranged")
+	}
+	if got := describe("hello"); got != "he" {
+		t.Fatalf("describe=%q", got)
+	}
+	if got := describe(1); got != "2" {
+		t.Fatalf("describe int=%q", got)
+	}
+	if got := classify(1); got != "small" {
+		t.Fatalf("classify=%q", got)
+	}
+	if !find([][]int{{1, 2}}, 2) {
+		t.Fatal("find")
+	}
+	if find([][]int{{-1, 2}}, 9) {
+		t.Fatal("find negative")
+	}
+	if err := pump(true); err == nil {
+		t.Fatal("pump should have recovered")
+	}
+	if err := pump(false); err != nil {
+		t.Fatalf("pump=%v", err)
+	}
+}
+"#;
+
+#[test]
+fn go_s_own_scoping_survives_instrumentation() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("scoping");
+    write(&root, "go.mod", "module example.com/scoping\n\ngo 1.22\n");
+    let runtime =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/go/supercov/supercov.go");
+    write(
+        &root,
+        "supercov/supercov.go",
+        &std::fs::read_to_string(runtime).expect("runtime source"),
+    );
+    let local = "example.com/scoping/supercov";
+
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations =
+        build_go_obligations("shapes.go", SHAPES, &mut next, &mut decisions).expect("obligations");
+    write(
+        &root,
+        "shapes.go",
+        &rewrite(SHAPES, &obligations.edits).replace(RUNTIME_IMPORT, local),
+    );
+    write(
+        &root,
+        "supercov_probes.go",
+        &probe_array_file("p", "__supercov", local, 512),
+    );
+
+    // Each of these is a shape where wrapping could plausibly have gone wrong.
+    let measured = |kind: &str| {
+        obligations
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == kind)
+            .count()
+    };
+    assert!(
+        measured("type-switch") > 0,
+        "{:?}",
+        obligations.manifest.branches
+    );
+    assert!(
+        measured("switch") > 0,
+        "{:?}",
+        obligations.manifest.branches
+    );
+    assert_eq!(
+        obligations.decision_widths,
+        [2, 2],
+        "both conditions over an initialiser's names carry vectors"
+    );
+
+    let harness = instrument_test_file(SHAPE_TESTS, "__supercov", "evidence.bin").expect("harness");
+    write(
+        &root,
+        "shapes_test.go",
+        &rewrite(SHAPE_TESTS, &harness.edits).replace(RUNTIME_IMPORT, local),
+    );
+    write(
+        &root,
+        "supercov_generated_test.go",
+        &synthesized_harness(
+            "p",
+            "__supercov",
+            local,
+            512,
+            &obligations.decision_widths,
+            "evidence.bin",
+            false,
+        ),
+    );
+
+    // `go vet` is stricter than the compiler and rejects shapes that compile
+    // but that no Go author would accept.
+    let vet = Command::new(&go)
+        .args(["vet", "./..."])
+        .current_dir(&root)
+        .output()
+        .expect("go vet");
+    assert!(
+        vet.status.success(),
+        "go vet rejected the instrumented shapes:\n{}",
+        String::from_utf8_lossy(&vet.stderr)
+    );
+    // And the suite still passes, which is what says the program still means
+    // what it meant.
+    let test = Command::new(&go)
+        .args(["test", "-count=1", "./..."])
+        .current_dir(&root)
+        .output()
+        .expect("go test");
+    assert!(
+        test.status.success(),
+        "the instrumented program must answer what the untouched one did:\n{}{}",
+        String::from_utf8_lossy(&test.stdout),
+        String::from_utf8_lossy(&test.stderr)
+    );
+    std::fs::remove_dir_all(root).ok();
+}
