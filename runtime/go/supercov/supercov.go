@@ -19,7 +19,11 @@ import (
 // What one test reached: the probes it set and the decision vectors it
 // established, as sparse pairs rather than a copy of the whole array.
 type testRecord struct {
-	name    string
+	name string
+	// How the test ended, as the framework saw it. Defaulted rather than
+	// required: a test that reports nothing finished normally, and the
+	// runtime should not need the framework's cooperation to say so.
+	status  string
 	probes  []probeHit
 	vectors []vectorHit
 }
@@ -166,7 +170,7 @@ func EnterTest(name string) func() {
 			mu.Unlock()
 		}
 	}
-	records = append(records, testRecord{name: name})
+	records = append(records, testRecord{name: name, status: "passed"})
 	current = len(records) - 1
 	mu.Unlock()
 	return func() {
@@ -178,6 +182,19 @@ func EnterTest(name string) func() {
 		current = -1
 		mu.Unlock()
 	}
+}
+
+// Outcome records how the running test ended.
+//
+// Called from generated test code rather than from the runtime itself, which
+// is why it takes a string: reading *testing.T here would link the testing
+// package into every product binary that imports this one.
+func Outcome(status string) {
+	mu.Lock()
+	if current >= 0 && current < len(records) {
+		records[current].status = status
+	}
+	mu.Unlock()
 }
 
 // overlap gives up on per-test attribution, once, for the whole run.
@@ -473,6 +490,12 @@ func Write(path string) error {
 			return err
 		}
 		if _, err := out.WriteString(record.name); err != nil {
+			return err
+		}
+		if err := put(uint64(len(record.status))); err != nil {
+			return err
+		}
+		if _, err := out.WriteString(record.status); err != nil {
 			return err
 		}
 		// Sparse: only what this test reached, so the transport is

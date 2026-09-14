@@ -86,6 +86,10 @@ func TestZero(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestSkipped(t *testing.T) {
+	t.Skip("nothing to do here")
+}
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +102,7 @@ struct Vector {
 struct Evidence {
     global: Vec<u64>,
     tests: std::collections::BTreeMap<String, std::collections::BTreeMap<usize, u64>>,
+    statuses: std::collections::BTreeMap<String, String>,
     test_vectors: std::collections::BTreeMap<String, Vec<(usize, Vector)>>,
     decisions: Vec<(u8, Vec<Vector>)>,
 }
@@ -129,10 +134,13 @@ fn decode(bytes: &[u8]) -> Evidence {
     let global = (0..count).map(|_| cursor.u64()).collect::<Vec<_>>();
     let test_count = cursor.u64() as usize;
     let mut tests = std::collections::BTreeMap::new();
+    let mut statuses = std::collections::BTreeMap::new();
     let mut test_vectors = std::collections::BTreeMap::new();
     for _ in 0..test_count {
         let length = cursor.u64() as usize;
         let name = cursor.text(length);
+        let status_length = cursor.u64() as usize;
+        statuses.insert(name.clone(), cursor.text(status_length));
         let entries = cursor.u64() as usize;
         let mut probes = std::collections::BTreeMap::new();
         for _ in 0..entries {
@@ -159,6 +167,7 @@ fn decode(bytes: &[u8]) -> Evidence {
     Evidence {
         global,
         tests,
+        statuses,
         test_vectors,
         decisions,
     }
@@ -204,7 +213,7 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
     // The test file goes in as the author wrote it and comes out bound to its
     // evidence, which is the whole point of the harness generator.
     let harness = instrument_test_file(TESTS, "__supercov", "evidence.bin").expect("harness");
-    assert_eq!(harness.tests, ["TestBig", "TestZero"]);
+    assert_eq!(harness.tests, ["TestBig", "TestZero", "TestSkipped"]);
     assert!(!harness.declares_test_main);
     write(
         &root,
@@ -252,6 +261,14 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
     );
 
     let evidence = decode(&std::fs::read(root.join("evidence.bin")).expect("evidence"));
+
+    // How a test ended travels with what it covered. Without it the report
+    // cannot tell a passing test's coverage from a failing one's, and a
+    // failing test's coverage is not evidence that anything works.
+    assert_eq!(evidence.statuses["TestBig"], "passed");
+    assert_eq!(evidence.statuses["TestZero"], "passed");
+    assert_eq!(evidence.statuses["TestSkipped"], "skipped");
+
     let big = &evidence.tests["TestBig"];
     let zero = &evidence.tests["TestZero"];
 

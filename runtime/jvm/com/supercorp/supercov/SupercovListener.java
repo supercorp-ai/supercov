@@ -63,7 +63,39 @@ public final class SupercovListener implements TestExecutionListener {
   @Override
   public void executionFinished(TestIdentifier identifier, TestExecutionResult result) {
     if (identifier.isTest()) {
-      Supercov.exitTest();
+      Supercov.exitTest(status(result));
+    }
+  }
+
+  /**
+   * A test that was never started, because a condition or assumption ruled it
+   * out. The platform reports it instead of a start/finish pair, so it is
+   * opened and closed here to leave a record that covers nothing — which is
+   * the truth, and more useful than the test's absence.
+   */
+  @Override
+  public void executionSkipped(TestIdentifier identifier, String reason) {
+    if (identifier.isTest()) {
+      Supercov.enterTest(name(identifier));
+      Supercov.exitTest("skipped");
+    }
+  }
+
+  /**
+   * How the test ended, in the vocabulary the evidence uses.
+   *
+   * <p>Aborted is a skip rather than a failure: an assumption that did not
+   * hold means the test declined to run, and counting its coverage as proven
+   * would credit a test that never made its assertions.
+   */
+  private static String status(TestExecutionResult result) {
+    switch (result.getStatus()) {
+      case FAILED:
+        return "failed";
+      case ABORTED:
+        return "skipped";
+      default:
+        return "passed";
     }
   }
 

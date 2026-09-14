@@ -360,7 +360,8 @@ const UNDER_TEST: &str = r#"public class Calculator {
 }
 "#;
 
-const SUITE: &str = r#"import org.junit.jupiter.api.Test;
+const SUITE: &str = r#"import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class CalculatorTest {
@@ -372,6 +373,12 @@ class CalculatorTest {
     @Test
     void loudAndLargeIsBig() {
         assertEquals("BIG", Calculator.size(20, true));
+    }
+
+    @Test
+    @Disabled("proves a skipped test is recorded as one")
+    void neverRuns() {
+        assertEquals("small", Calculator.size(1, false));
     }
 }
 "#;
@@ -505,6 +512,33 @@ public final class SupercovConfig {{
     assert!(
         named.contains(&"CalculatorTest#loudAndLargeIsBig()".to_owned()),
         "{named:?}"
+    );
+
+    // How each test ended travels with what it covered, because a failing or
+    // skipped test's coverage is not evidence that anything works. A disabled
+    // test never starts, so the platform reports it separately: it is recorded
+    // as having covered nothing rather than left out of the run entirely.
+    let status = |needle: &str| {
+        evidence
+            .tests
+            .iter()
+            .find(|t| t.name.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} missing from {named:?}"))
+            .status
+            .clone()
+    };
+    assert_eq!(status("zeroIsNamed"), "passed");
+    assert_eq!(status("loudAndLargeIsBig"), "passed");
+    assert_eq!(status("neverRuns"), "skipped");
+    let skipped = evidence
+        .tests
+        .iter()
+        .find(|t| t.name.contains("neverRuns"))
+        .unwrap();
+    assert!(
+        skipped.probes.is_empty(),
+        "a test that never ran covers nothing: {:?}",
+        skipped.probes
     );
 
     let zero = evidence

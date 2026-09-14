@@ -56,6 +56,9 @@ pub struct PackedVector {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OwnedTestEvidence {
     pub name: String,
+    /// How the test ended, as the framework saw it: `passed`, `failed` or
+    /// `skipped`.
+    pub status: String,
     /// Probe id to the bitmask it was observed with.
     pub probes: BTreeMap<u32, u32>,
     pub vectors: Vec<PackedVector>,
@@ -114,6 +117,8 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
     for _ in 0..test_count {
         let length = cursor.u64("test name")? as usize;
         let name = cursor.text(length, "test name")?;
+        let status_length = cursor.u64("test status")? as usize;
+        let status = cursor.text(status_length, "test status")?;
         let hits = cursor.u64("test probes")? as usize;
         let mut probes = BTreeMap::new();
         for _ in 0..hits {
@@ -131,6 +136,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
         }
         tests.push(OwnedTestEvidence {
             name,
+            status,
             probes,
             vectors,
         });

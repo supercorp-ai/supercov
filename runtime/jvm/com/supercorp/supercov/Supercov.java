@@ -58,6 +58,10 @@ public final class Supercov {
 
   private static final class Record {
     final String name;
+    // How the test ended, as the framework saw it. Defaulted rather than
+    // required: a test that reports nothing finished normally, and the
+    // runtime should not need the framework's cooperation to say so.
+    String status = "passed";
     final List<int[]> probes = new ArrayList<>();
     final List<long[]> vectors = new ArrayList<>();
 
@@ -109,6 +113,14 @@ public final class Supercov {
 
   /** Ends the running test, harvesting what it reached. */
   public static synchronized void exitTest() {
+    exitTest("passed");
+  }
+
+  /** Ends the running test, recording how the framework says it ended. */
+  public static synchronized void exitTest(String status) {
+    if (!overlapped && current >= 0 && current < records.size()) {
+      records.get(current).status = status;
+    }
     harvest();
     open = Math.max(0, open - 1);
     current = -1;
@@ -301,6 +313,9 @@ public final class Supercov {
         byte[] name = record.name.getBytes("UTF-8");
         putLong(out, name.length);
         out.write(name);
+        byte[] status = record.status.getBytes("UTF-8");
+        putLong(out, status.length);
+        out.write(status);
         putLong(out, record.probes.size());
         for (int[] hit : record.probes) {
           putLong(out, hit[0]);
