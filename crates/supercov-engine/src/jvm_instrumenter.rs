@@ -316,6 +316,29 @@ impl Collector<'_> {
     /// The arm also needs its own point. Walking never reaches it, because a
     /// statement is recognised by its parent being a block and this one's
     /// parent is the branch.
+    /// Record which way a branch went from inside its arms, for a condition
+    /// that cannot be wrapped.
+    ///
+    /// An `if` with no `else` has nowhere to record being false, so one is
+    /// added holding nothing but the probe. An empty else changes no
+    /// behaviour: it is the branch the program already took.
+    fn record_arms(&mut self, node: Node, language: JvmLanguage, probes: &[u64]) {
+        let (consequence, alternative) = arms(node, language);
+        for (arm, probe) in [consequence, alternative].into_iter().zip(probes) {
+            match arm {
+                // `ensure_block` has already braced an unbraced arm, and a
+                // store ranked above that brace lands inside it.
+                Some(arm) if arm.kind() == "block" => self.store(arm.start_byte() + 1, *probe),
+                Some(arm) => self.store(arm.start_byte(), *probe),
+                None => self.edit(
+                    node.end_byte(),
+                    10,
+                    format!(" else {{ {HITS}[{probe}] = 2; }}"),
+                ),
+            }
+        }
+    }
+
     fn ensure_block(&mut self, node: Node) {
         if node.kind() == "block" {
             return;
@@ -395,6 +418,83 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
 
 /// The expression inside `if (...)`. Java parenthesises its condition; Kotlin
 /// does not.
+/// Whether the compiler has to see this condition to compile the code around
+/// it.
+///
+/// Some conditions are not only values: the compiler reads them and narrows a
+/// type in the branch that follows. Java's pattern `instanceof` binds a name
+/// whose scope is decided by flow analysis; Kotlin's `is` and its null
+/// comparisons produce smart casts. Wrapping such a condition in a call leaves
+/// an ordinary boolean expression, the narrowing never happens, and the code
+/// after it stops compiling -- `cannot find symbol: variable s`, `unresolved
+/// reference on receiver of type Any?`.
+///
+/// This is not a corner. Pattern `instanceof` is how Java has been written
+/// since 16, and `x != null` guards a great deal of Kotlin.
+fn narrows_a_type(node: Node, source: &str, language: JvmLanguage) -> bool {
+    let narrows = match language {
+        // A binding gives the pattern a name; without one there is nothing to
+        // scope and the condition is an ordinary value.
+        JvmLanguage::Java => {
+            node.kind() == "instanceof_expression" && node.child_by_field_name("name").is_some()
+        }
+        JvmLanguage::Kotlin => {
+            node.kind() == "is_expression"
+                || (node.kind() == "binary_expression"
+                    && matches!(
+                        node.child_by_field_name("operator")
+                            .map(|operator| source[operator.byte_range()].trim())
+                            .unwrap_or_default(),
+                        "==" | "!="
+                    )
+                    && ["left", "right"].iter().any(|side| {
+                        node.child_by_field_name(side)
+                            .is_some_and(|side| source[side.byte_range()].trim() == "null")
+                    }))
+        }
+    };
+    if narrows {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(Node::is_named)
+        .any(|child| narrows_a_type(child, source, language))
+}
+
+/// An `if`'s two arms.
+///
+/// Java names them; Kotlin's grammar does not, so there they are the named
+/// children either side of the `else` keyword. Asking Kotlin for a field it
+/// has no name for answers nothing, which silently left its unbraced arms
+/// unmeasured and, worse, made a branch recorded from its arms write two
+/// `else` blocks onto one `if`.
+fn arms<'t>(node: Node<'t>, language: JvmLanguage) -> (Option<Node<'t>>, Option<Node<'t>>) {
+    match language {
+        JvmLanguage::Java => (
+            node.child_by_field_name("consequence"),
+            node.child_by_field_name("alternative"),
+        ),
+        JvmLanguage::Kotlin => {
+            let condition = node
+                .child_by_field_name("condition")
+                .map(|c| c.byte_range());
+            let mut cursor = node.walk();
+            let children = node.children(&mut cursor).collect::<Vec<_>>();
+            let otherwise = children.iter().position(|child| child.kind() == "else");
+            let arm = |child: &&Node<'t>| child.is_named() && Some(child.byte_range()) != condition;
+            (
+                children
+                    .iter()
+                    .take(otherwise.unwrap_or(children.len()))
+                    .find(arm)
+                    .copied(),
+                otherwise.and_then(|at| children.iter().skip(at + 1).find(arm).copied()),
+            )
+        }
+    }
+}
+
 fn condition_of<'t>(node: Node<'t>, language: JvmLanguage) -> Option<Node<'t>> {
     let condition = node.child_by_field_name("condition")?;
     if language == JvmLanguage::Java && condition.kind() == "parenthesized_expression" {
@@ -458,6 +558,28 @@ fn walk(collector: &mut Collector, node: Node) {
         "if_statement" | "if_expression" => {
             if let Some(condition) = condition_of(node, language) {
                 let probes = collector.add_branch(node, "if", &["true", "false"]);
+                // An arm written without braces has nowhere to record itself.
+                let (consequence, alternative) = arms(node, language);
+                for arm in [consequence, alternative].into_iter().flatten() {
+                    collector.ensure_block(arm);
+                }
+                if narrows_a_type(condition, collector.source, language) {
+                    // The condition stays exactly as written, and the branch is
+                    // recorded from inside the arms instead. Which way it went
+                    // is still measured; only the vectors are lost, because
+                    // those need the operands wrapped.
+                    collector.record_arms(node, language, &probes);
+                    let limitation = collector.limitation_id(node, "condition-narrows-a-type");
+                    collector.limitations.push(serde_json::json!({
+                        "id": limitation,
+                        "kind": "condition-narrows-a-type",
+                        "file": collector.file,
+                        "line": collector.position(node).0,
+                        "column": collector.position(node).1,
+                        "detail": "the compiler reads this condition to narrow a type in the branch below it, so observing its operands would stop the code compiling; the branch is recorded from its arms and carries no condition vectors",
+                    }));
+                    return;
+                }
                 let decision = collector.add_decision(condition, "if");
                 let wrapper = match decision {
                     Some(index) => {
@@ -467,12 +589,6 @@ fn walk(collector: &mut Collector, node: Node) {
                 };
                 collector.edit(condition.start_byte(), 5, wrapper);
                 collector.edit(condition.end_byte(), 5, ")".to_owned());
-                // An arm written without braces has nowhere to record itself.
-                for field in ["consequence", "alternative"] {
-                    if let Some(arm) = node.child_by_field_name(field) {
-                        collector.ensure_block(arm);
-                    }
-                }
             }
         }
         "while_statement" | "for_statement" | "do_statement" | "do_while_statement" => {

@@ -80,3 +80,14 @@ pub fn resolvable(language: &str, probe: impl FnOnce() -> bool) -> bool {
     }
     probe()
 }
+
+/// A classpath from its entries.
+///
+/// The separator is a colon everywhere except Windows, where it is a
+/// semicolon — a colon there is read as part of a drive letter, so every entry
+/// after the first is lost and the compiler reports a package that plainly
+/// exists as missing.
+#[allow(dead_code)]
+pub fn classpath(entries: &[&str]) -> String {
+    entries.join(if cfg!(windows) { ";" } else { ":" })
+}

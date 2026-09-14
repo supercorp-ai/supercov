@@ -453,7 +453,7 @@ public final class SupercovConfig {{
         "com.supercorp.supercov.SupercovListener\n",
     );
 
-    let classpath = format!("{}:.", jar.display());
+    let classpath = common::classpath(&[&jar.display().to_string(), "."]);
     let compile = Command::new(&javac)
         .args([
             "-cp",
@@ -892,6 +892,248 @@ fn instrumented_code_runs_correctly_when_nothing_arms_the_runtime() {
     assert!(
         run.status.success(),
         "instrumented code must not break the program it measures:\n{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "ok");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Some conditions are not only values: the compiler reads them and narrows a
+/// type in the branch below. Java's pattern `instanceof` binds a name whose
+/// scope is decided by flow analysis, and Kotlin's `is` and null comparisons
+/// produce smart casts. Wrapping such a condition leaves an ordinary boolean
+/// expression, the narrowing never happens, and the code after it stops
+/// compiling — `cannot find symbol: variable s`, `unresolved reference on
+/// receiver of type Any?`.
+///
+/// This is not a corner: pattern `instanceof` is how Java has been written
+/// since 16, and `x != null` guards a great deal of Kotlin. RxJava does not
+/// compile without this.
+#[test]
+fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
+    let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
+        common::skip("jvm", "no JDK found");
+        return;
+    };
+    let root = temporary("narrowing");
+    const NARROWING: &str = r#"public class Narrowing {
+    public static String describe(Object o) {
+        if (o instanceof String s) {
+            return "string:" + s.length();
+        }
+        if (o instanceof Integer i && i > 2) {
+            return "big:" + i;
+        }
+        return "other";
+    }
+}
+"#;
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Narrowing.java",
+        NARROWING,
+        JvmLanguage::Java,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
+    let instrumented = rewrite(NARROWING, &obligations.edits);
+
+    // The condition is untouched, so the compiler still sees the pattern.
+    assert!(
+        instrumented.contains("if (o instanceof String s) {"),
+        "{instrumented}"
+    );
+    // And the branch is still measured, from inside its arms.
+    assert_eq!(
+        obligations
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "if")
+            .count(),
+        2,
+        "{:?}",
+        obligations.manifest.branches
+    );
+    // The `if` with no else gains one, holding nothing but the probe.
+    assert!(instrumented.contains("else {"), "{instrumented}");
+
+    write(&root, "Narrowing.java", &instrumented);
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("runtime-assets/jvm/com/supercorp/supercov/Supercov.java");
+    let probes = obligations.probes.len() + 1;
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime).expect("runtime").replace(
+            "static final int PROBE_COUNT = 0; // supercov:probe-count",
+            &format!("static final int PROBE_COUNT = {probes}; // supercov:probe-count"),
+        ),
+    );
+    write(
+        &root,
+        "Main.java",
+        r#"public class Main {
+    public static void main(String[] args) {
+        // Exactly what the uninstrumented program answers.
+        if (!"string:2".equals(Narrowing.describe("hi"))) { throw new AssertionError("string"); }
+        if (!"big:7".equals(Narrowing.describe(7))) { throw new AssertionError("big"); }
+        if (!"other".equals(Narrowing.describe(1))) { throw new AssertionError("other"); }
+        System.out.println("ok");
+    }
+}
+"#,
+    );
+    let compile = Command::new(&javac)
+        .args([
+            "-d",
+            ".",
+            "com/supercorp/supercov/Supercov.java",
+            "Narrowing.java",
+            "Main.java",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "instrumented pattern matching must still compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&java)
+        .args(["-cp", ".", "Main"])
+        .current_dir(&root)
+        .output()
+        .expect("java");
+    assert!(
+        run.status.success(),
+        "and still answer the same:\n{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "ok");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Kotlin's version of the same, and the more pervasive one: `x != null` is
+/// how a great deal of Kotlin is written, and every one of those guards
+/// narrows the type below it.
+#[test]
+fn kotlins_smart_casts_survive_instrumentation() {
+    let (Some(kotlinc), Some(java)) = (kotlinc(), common::tool("java")) else {
+        common::skip("jvm", "no Kotlin toolchain found");
+        return;
+    };
+    let root = temporary("smart-cast");
+    const SMART: &str = r#"package app
+
+object Smart {
+    fun describe(x: Any?): String {
+        if (x is String) {
+            return "string:" + x.length
+        }
+        if (x != null) {
+            return "other:" + x.hashCode()
+        }
+        return "none"
+    }
+}
+"#;
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Smart.kt",
+        SMART,
+        JvmLanguage::Kotlin,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
+    let instrumented = rewrite(SMART, &obligations.edits);
+    assert!(instrumented.contains("if (x is String)"), "{instrumented}");
+    assert!(instrumented.contains("if (x != null)"), "{instrumented}");
+    assert_eq!(
+        obligations
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "if")
+            .count(),
+        2,
+        "both branches are still measured: {:?}",
+        obligations.manifest.branches
+    );
+
+    write(&root, "Smart.kt", &instrumented);
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("runtime-assets/jvm/com/supercorp/supercov/Supercov.java");
+    let probes = obligations.probes.len() + 1;
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime).expect("runtime").replace(
+            "static final int PROBE_COUNT = 0; // supercov:probe-count",
+            &format!("static final int PROBE_COUNT = {probes}; // supercov:probe-count"),
+        ),
+    );
+    let Some(javac) = common::tool("javac") else {
+        common::skip("jvm", "no JDK found");
+        return;
+    };
+    let compile = Command::new(&javac)
+        .args(["-d", ".", "com/supercorp/supercov/Supercov.java"])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let compile = Command::new(&kotlinc)
+        .args(["-cp", ".", "Smart.kt", "-d", "."])
+        .current_dir(&root)
+        .output()
+        .expect("kotlinc");
+    assert!(
+        compile.status.success(),
+        "instrumented smart casts must still compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    // And still answer what the uninstrumented code answered.
+    write(
+        &root,
+        "Main.java",
+        r#"public class Main {
+    public static void main(String[] args) {
+        if (!"string:2".equals(app.Smart.INSTANCE.describe("hi"))) { throw new AssertionError("string"); }
+        if (!"none".equals(app.Smart.INSTANCE.describe(null))) { throw new AssertionError("none"); }
+        System.out.println("ok");
+    }
+}
+"#,
+    );
+    let compile = Command::new(&javac)
+        .args(["-cp", ".", "-d", ".", "Main.java"])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&java)
+        .args(["-cp", ".", "Main"])
+        .current_dir(&root)
+        .output()
+        .expect("java");
+    assert!(
+        run.status.success(),
+        "{}{}",
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
