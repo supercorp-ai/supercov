@@ -16,7 +16,7 @@ When it finishes, review the test change and coverage comparison in your
 conversation. Ask separately if you want a commit or pull request.
 
 No account, config file, import, custom reporter, or hosted service is required.
-Supercov supports JavaScript, TypeScript, Rust, Python, and Ruby today.
+Supercov supports JavaScript, TypeScript, Rust, Python, Ruby, Go, Java, and Kotlin today.
 
 ## What the agent does
 
