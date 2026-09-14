@@ -1,0 +1,255 @@
+// Command supercov runs Supercov from a Go toolchain and nothing else.
+//
+//	go run github.com/supercorp-ai/supercov/cmd/supercov@latest -- go test ./...
+//
+// Go's own help for `go run` says a package argument with a version suffix is
+// built "in module-aware mode, ignoring the go.mod file in the current
+// directory" -- which is npx, for Go. That matters because Supercov's CLI is a
+// Rust binary: before this, measuring a Go project meant installing Node,
+// Python, Ruby or Rust first, and every other language Supercov supports had a
+// native way in.
+//
+// This program is only a way in. It finds the release built for this machine,
+// unpacks the binary beside the others in the user's cache, and hands over to
+// it. A second run finds the binary already there and executes it directly.
+package main
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"strings"
+	"time"
+)
+
+const repository = "https://github.com/supercorp-ai/supercov"
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "supercov: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	version, err := release()
+	if err != nil {
+		return err
+	}
+	binary, err := install(version)
+	if err != nil {
+		return err
+	}
+	return hand(binary, os.Args[1:])
+}
+
+// release is the version to fetch: the one this launcher was built from, so
+// `@v0.0.49` runs that release rather than whatever is newest. A launcher run
+// from a working copy has no version of its own and asks GitHub for the latest.
+func release() (string, error) {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if version := strings.TrimPrefix(info.Main.Version, "v"); looksLikeVersion(version) {
+			return version, nil
+		}
+	}
+	return latest()
+}
+
+// looksLikeVersion accepts only what a release is actually tagged as: three
+// numbers and nothing else. Go reports "(devel)" for a working copy and a
+// pseudo-version like v0.0.0-20260914120000-abcdef123456 for a commit that
+// carries no tag, and neither has a release behind it -- fetching the second
+// as though it did would ask for an archive nobody ever published.
+func looksLikeVersion(value string) bool {
+	parts := strings.Split(value, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, digit := range part {
+			if digit < '0' || digit > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func latest() (string, error) {
+	request, err := http.NewRequest(
+		http.MethodGet,
+		"https://api.github.com/repos/supercorp-ai/supercov/releases/latest",
+		nil,
+	)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Accept", "application/vnd.github+json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("asking GitHub for the latest release: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf(
+			"asking GitHub for the latest release: %s", response.Status,
+		)
+	}
+	var payload struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return "", err
+	}
+	version := strings.TrimPrefix(payload.TagName, "v")
+	if version == "" {
+		return "", errors.New("the latest release has no tag")
+	}
+	return version, nil
+}
+
+// asset names the release archive built for this machine, in the npm platform
+// spelling the releases already use.
+func asset(version string) (string, error) {
+	platform := ""
+	switch runtime.GOOS {
+	case "darwin":
+		platform = "darwin-" + architecture()
+	case "windows":
+		platform = "win32-" + architecture()
+	case "linux":
+		platform = "linux-" + architecture() + "-" + libc()
+	}
+	if platform == "" || strings.HasSuffix(platform, "-") {
+		return "", fmt.Errorf(
+			"no Supercov release is built for %s/%s; see %s/releases",
+			runtime.GOOS, runtime.GOARCH, repository,
+		)
+	}
+	return fmt.Sprintf("supercov-cli-%s-%s.tgz", platform, version), nil
+}
+
+func architecture() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "arm64":
+		return "arm64"
+	}
+	return ""
+}
+
+// libc decides between the glibc and musl builds. Go cannot report which it
+// was linked against from a pure-Go program, so this asks the filesystem: musl
+// installs its loader under a name of its own, and every glibc system has a
+// loader glibc put there.
+func libc() string {
+	for _, pattern := range []string{"/lib/ld-musl-*", "/lib/libc.musl-*"} {
+		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+			return "musl"
+		}
+	}
+	if _, err := os.Stat("/etc/alpine-release"); err == nil {
+		return "musl"
+	}
+	return "gnu"
+}
+
+// install returns the path to the binary for version, downloading it once.
+func install(version string) (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		cache = os.TempDir()
+	}
+	name := "supercov"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	directory := filepath.Join(cache, "supercov", "bin", version)
+	binary := filepath.Join(directory, name)
+	if info, err := os.Stat(binary); err == nil && info.Mode().IsRegular() {
+		return binary, nil
+	}
+	archive, err := asset(version)
+	if err != nil {
+		return "", err
+	}
+	url := fmt.Sprintf("%s/releases/download/v%s/%s", repository, version, archive)
+	fmt.Fprintf(os.Stderr, "supercov: fetching %s\n", archive)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return "", err
+	}
+	if err := download(url, directory, name); err != nil {
+		return "", err
+	}
+	return binary, nil
+}
+
+// download unpacks the one file that matters out of the release archive.
+//
+// The archives are npm packages, which is what every other channel already
+// publishes; the binary sits at package/bin/ inside. `cargo binstall` reads the
+// same asset the same way.
+func download(url, directory, name string) error {
+	client := &http.Client{Timeout: 10 * time.Minute}
+	response, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("downloading %s: %w", url, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("downloading %s: %s", url, response.Status)
+	}
+	unzipped, err := gzip.NewReader(response.Body)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", url, err)
+	}
+	defer unzipped.Close()
+	archive := tar.NewReader(unzipped)
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", url, err)
+		}
+		if header.Typeflag != tar.TypeReg || filepath.Base(header.Name) != name {
+			continue
+		}
+		if !strings.Contains(filepath.ToSlash(header.Name), "/bin/") {
+			continue
+		}
+		// Written beside its destination and renamed, so a second process
+		// never sees a half-written binary and tries to run it.
+		partial, err := os.CreateTemp(directory, ".supercov-*")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(partial.Name())
+		if _, err := io.Copy(partial, archive); err != nil {
+			partial.Close()
+			return err
+		}
+		if err := partial.Close(); err != nil {
+			return err
+		}
+		if err := os.Chmod(partial.Name(), 0o755); err != nil {
+			return err
+		}
+		return os.Rename(partial.Name(), filepath.Join(directory, name))
+	}
+	return fmt.Errorf("%s holds no %s", url, name)
+}

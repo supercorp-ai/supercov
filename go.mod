@@ -1,3 +1,3 @@
-module m
+module github.com/supercorp-ai/supercov
 
-go 1.21
+go 1.22

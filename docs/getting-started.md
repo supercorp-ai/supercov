@@ -121,6 +121,20 @@ on crates.io (`cargo install supercov`). The first invocation may download
 Supercov from the registry. Supercov itself does not upload your source or
 coverage evidence to a Supercov service.
 
+Whichever language your project is in, you should not have to install another
+one first. Go runs it the way Go runs any tool, and without touching your
+`go.mod`:
+
+```sh supercov
+go run github.com/supercorp-ai/supercov/cmd/supercov@latest -- go test ./...
+```
+
+Homebrew installs the same binary for everything else, a JVM project included:
+
+```sh
+brew install supercorp-ai/tap/supercov
+```
+
 ## Files and cleanup
 
 Completed runs live under `.supercov/runs/`. Supercov also keeps an isolated
