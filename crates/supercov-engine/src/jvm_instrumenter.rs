@@ -142,17 +142,21 @@ struct Collector<'a> {
     /// that meant "the first decision in this file" would land on every other
     /// file's first decision too.
     decision_base: u32,
-    /// How many decisions the project already numbered before this file. The
-    /// runtime holds one decision-state array for the whole run, so an index
-    /// that meant "the first decision in this file" would land on every other
-    /// file's first decision too.
-    counter: usize,
 }
 
 impl Collector<'_> {
-    fn id(&mut self, prefix: &str) -> String {
-        self.counter += 1;
-        format!("{prefix}{}", self.counter)
+    fn id(&mut self, node: Node, kind: &str) -> String {
+        let language = match self.language {
+            JvmLanguage::Java => "java",
+            JvmLanguage::Kotlin => "kotlin",
+        };
+        crate::go_instrumenter::stable_obligation_id(
+            language,
+            self.file,
+            kind,
+            node.start_byte(),
+            node.end_byte(),
+        )
     }
 
     fn probe(&mut self, target: GoProbeTarget, at: usize) -> u64 {
@@ -190,10 +194,13 @@ impl Collector<'_> {
 
     fn add_point(&mut self, node: Node, kind: PointKind, label: Option<String>) {
         let (line, column) = self.position(node);
-        let id = self.id(match kind {
-            PointKind::Function => "f",
-            PointKind::Statement => "s",
-        });
+        let id = self.id(
+            node,
+            match kind {
+                PointKind::Function => "function",
+                PointKind::Statement => "statement",
+            },
+        );
         let target = match kind {
             PointKind::Function => GoProbeTarget::Function { id: id.clone() },
             PointKind::Statement => GoProbeTarget::Statement { id: id.clone() },
@@ -223,7 +230,7 @@ impl Collector<'_> {
 
     fn add_branch(&mut self, node: Node, kind: &str, labels: &[&str]) -> Vec<u64> {
         let (line, column) = self.position(node);
-        let id = self.id("b");
+        let id = self.id(node, "branch");
         let mut probes = Vec::new();
         let alternatives = labels
             .iter()
@@ -265,7 +272,7 @@ impl Collector<'_> {
             .map(|leaf| self.source[leaf.byte_range()].trim().to_owned())
             .collect::<Vec<_>>();
         let (line, column) = self.position(node);
-        let id = self.id("d");
+        let id = self.id(node, "decision");
         let index = self.decision_base as usize + self.widths.len();
         self.widths.push(leaves.len().min(64) as u8);
         for (position, leaf) in leaves.iter().enumerate() {
@@ -413,7 +420,6 @@ pub fn build_jvm_obligations(
         probes: BTreeMap::new(),
         limitations: Vec::new(),
         widths: Vec::new(),
-        counter: 0,
     };
     walk(&mut collector, tree.root_node());
     *next_decision += collector.widths.len() as u32;
@@ -475,16 +481,43 @@ fn walk(collector: &mut Collector, node: Node) {
                     } else {
                         condition
                     };
-                    let probes = collector.add_branch(node, "loop", &["true", "false"]);
-                    let decision = collector.add_decision(inner, "loop");
-                    let wrapper = match decision {
-                        Some(index) => {
-                            format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1])
-                        }
-                        None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
-                    };
-                    collector.edit(inner.start_byte(), 5, wrapper);
-                    collector.edit(inner.end_byte(), 5, ")".to_owned());
+                    // `while (true)` is not an ordinary condition. The Java
+                    // compiler treats a constant one specially: it knows the
+                    // loop never completes, so a method whose body is one
+                    // needs no return after it. Wrapping the constant in a
+                    // call makes it an ordinary boolean expression, the
+                    // compiler decides the loop can exit, and the method stops
+                    // compiling for want of a return it never needed.
+                    //
+                    // There is nothing to measure there either. A condition
+                    // that can only go one way is an obligation no test could
+                    // ever half-satisfy, so leaving it alone is the more
+                    // accurate answer as well as the only compiling one.
+                    if matches!(
+                        collector.source[inner.byte_range()].trim(),
+                        "true" | "false"
+                    ) {
+                        let (line, column) = collector.position(node);
+                        collector.limitations.push(serde_json::json!({
+                            "kind": "loop-with-constant-condition",
+                            "file": collector.file,
+                            "line": line,
+                            "column": column,
+                            "reason": "a loop whose condition is a constant can only go one way, and wrapping it would change what the compiler knows about the code around it",
+                        }));
+                    } else {
+                        let probes = collector.add_branch(node, "loop", &["true", "false"]);
+                        let decision = collector.add_decision(inner, "loop");
+                        let wrapper = match decision {
+                            Some(index) => format!(
+                                "{RUNTIME_CLASS}.bd({}, {}, {index}, ",
+                                probes[0], probes[1]
+                            ),
+                            None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
+                        };
+                        collector.edit(inner.start_byte(), 5, wrapper);
+                        collector.edit(inner.end_byte(), 5, ")".to_owned());
+                    }
                 }
                 None => {
                     let (line, column) = collector.position(node);
@@ -792,5 +825,60 @@ mod tests {
                 "{what} on line {line} is unmeasured: {lines:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_loop_on_a_constant_keeps_what_the_compiler_knows() {
+        // `while (true)` is how Java writes a loop that never completes, and
+        // the compiler treats the constant specially: a method whose body is
+        // one needs no return after it. Wrapping the constant in a call makes
+        // it an ordinary boolean expression, the compiler decides the loop can
+        // exit, and the method stops compiling for want of a return it never
+        // needed. There is nothing to measure there in any case.
+        let source = "class X {\n  String f() {\n    while (true) {\n      if (g()) { return \"a\"; }\n    }\n  }\n  boolean g() { return true; }\n}";
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations = build_jvm_obligations(
+            "X.java",
+            source,
+            JvmLanguage::Java,
+            &mut next,
+            &mut decisions,
+        )
+        .expect("obligations");
+        let rewritten = rewrite(source, &obligations.edits);
+        assert!(
+            rewritten.contains("while (true)"),
+            "the constant must survive untouched:\n{rewritten}"
+        );
+        // The `if` beside it is still measured, so this is a narrow exception
+        // rather than a loop nobody looks at.
+        assert!(
+            obligations
+                .manifest
+                .branches
+                .iter()
+                .any(|branch| branch.kind == "if"),
+            "{:?}",
+            obligations.manifest.branches
+        );
+        assert!(
+            !obligations
+                .manifest
+                .branches
+                .iter()
+                .any(|branch| branch.kind == "loop"),
+            "a condition that can only go one way is not an obligation: {:?}",
+            obligations.manifest.branches
+        );
+        assert!(
+            obligations
+                .manifest
+                .limitations
+                .iter()
+                .any(|limitation| limitation["kind"] == "loop-with-constant-condition"),
+            "{:?}",
+            obligations.manifest.limitations
+        );
     }
 }

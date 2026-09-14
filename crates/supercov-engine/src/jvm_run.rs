@@ -83,18 +83,37 @@ const TESTNG_LISTENER_CLASS: &str = "com.supercorp.supercov.SupercovTestNGListen
 struct Frameworks {
     platform: bool,
     testng: bool,
+    /// JUnit 4 with no platform engine beside it. Supercov cannot attribute
+    /// such a suite, and must not try: see `frameworks`.
+    junit4: bool,
 }
 
 fn frameworks(build_file: &str) -> Frameworks {
     let testng = build_file.contains("testng");
-    let platform = build_file.contains("junit")
-        || build_file.contains("kotest")
-        || build_file.contains("spock");
+    // The platform is what Jupiter, Vintage, Kotest and Spock all run on.
+    let platform = [
+        "junit-jupiter",
+        "junit-platform",
+        "junit-vintage",
+        "kotest",
+        "spock",
+    ]
+    .iter()
+    .any(|name| build_file.contains(name));
+    // JUnit 4 is not a platform engine and does not run on one. Surefire runs
+    // it through a provider of its own, and choosing that provider is decided
+    // by what is on the classpath -- so adding the launcher to a JUnit 4
+    // project makes surefire switch to the platform provider, find no engine
+    // there, and fail the suite outright.
+    let junit4 = !platform
+        && (build_file.contains("<groupId>junit</groupId>") || build_file.contains("'junit:junit"))
+        || build_file.contains("\"junit:junit");
     Frameworks {
-        // A TestNG-only project would fail to compile a platform listener, so
-        // the fallback applies only when nothing at all was recognised.
-        platform: platform || !testng,
+        // A TestNG-only or JUnit-4-only project would fail on a platform
+        // listener, so the fallback applies only when nothing was recognised.
+        platform: platform || !(testng || junit4),
         testng,
+        junit4: junit4 && !platform,
     }
 }
 
@@ -236,12 +255,23 @@ const LAUNCHER_ARTIFACT: &str = "junit-platform-launcher";
 /// version every JUnit artifact, and naming a version there would override the
 /// answer it gave.
 fn launcher_version(build_file: &str) -> Option<String> {
+    // The one case where naming no version is right: a project using the BOM
+    // has already said how every JUnit artifact is versioned, and naming one
+    // would override the answer it gave. Every other path must produce a
+    // version -- a versionless dependency in a pom with no BOM to manage it is
+    // one Maven cannot resolve, and the build stops before any test runs.
     if build_file.contains("junit-bom") {
         return None;
     }
+    Some(jupiter_version(build_file).unwrap_or_else(|| DEFAULT_LAUNCHER_VERSION.to_owned()))
+}
+
+/// The platform version matching whatever Jupiter this file pins, if it pins
+/// one. JUnit numbers the platform 1.N alongside Jupiter 5.N.
+fn jupiter_version(build_file: &str) -> Option<String> {
     let jupiter = build_file.find("junit-jupiter")?;
     let rest = &build_file[jupiter..];
-    let mut digits = rest.match_indices("5.").filter_map(|(at, _)| {
+    rest.match_indices("5.").find_map(|(at, _)| {
         let tail = &rest[at + 2..];
         let minor = tail
             .chars()
@@ -253,12 +283,7 @@ fn launcher_version(build_file: &str) -> Option<String> {
             .take_while(char::is_ascii_digit)
             .collect::<String>();
         (!minor.is_empty() && !patch.is_empty()).then(|| format!("1.{minor}.{patch}"))
-    });
-    digits
-        .next()
-        // A project that says nothing gets a launcher new enough to drive an
-        // older engine, which is the direction that works.
-        .or_else(|| Some(DEFAULT_LAUNCHER_VERSION.to_owned()))
+    })
 }
 
 const DEFAULT_LAUNCHER_VERSION: &str = "1.10.2";
@@ -274,9 +299,9 @@ fn maven_with_launcher(pom: &str) -> Option<String> {
     let dependency = format!(
         "    <dependency>\n      <groupId>org.junit.platform</groupId>\n      <artifactId>{LAUNCHER_ARTIFACT}</artifactId>{version}\n      <scope>test</scope>\n    </dependency>\n"
     );
-    match pom.rfind("</dependencies>") {
+    match project_dependencies_end(pom) {
         Some(at) => Some(format!("{}{dependency}{}", &pom[..at], &pom[at..])),
-        // A project with no dependencies block at all still needs one.
+        // A project with no dependencies block of its own still needs one.
         None => pom.rfind("</project>").map(|at| {
             format!(
                 "{}  <dependencies>\n{dependency}  </dependencies>\n{}",
@@ -287,38 +312,42 @@ fn maven_with_launcher(pom: &str) -> Option<String> {
     }
 }
 
-/// Every build file in the tree, concatenated.
+/// Where the project's own `<dependencies>` ends.
 ///
-/// A multi-module build usually declares its frameworks once in the parent and
-/// lets the modules inherit, but either may name them, so the question "what
-/// does this project depend on" is asked of all of them at once.
-fn build_files(workspace: &Path) -> String {
-    let mut out = String::new();
-    let mut directories = vec![workspace.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
+/// Not simply the last one. A pom's `<dependencyManagement>` holds a
+/// `<dependencies>` too, and so does every `<profile>` and every `<plugin>`;
+/// a dependency added inside `<dependencyManagement>` is a version for
+/// something else to ask for rather than something the project depends on, so
+/// the module compiles exactly as it did before and the listener still cannot
+/// find the API it implements. Depth is what tells them apart.
+fn project_dependencies_end(pom: &str) -> Option<usize> {
+    const NESTED: [&str; 4] = ["dependencyManagement", "profiles", "build", "reporting"];
+    let bytes = pom.as_bytes();
+    let mut depth = 0usize;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let Some(open) = pom[at..].find('<') else {
+            break;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if path.is_dir() {
-                // Nothing under a source set or a build output is a build file.
-                if !name.starts_with('.') && !matches!(name.as_ref(), "src" | "target" | "build") {
-                    directories.push(path);
-                }
-            } else if matches!(
-                name.as_ref(),
-                "pom.xml" | "build.gradle" | "build.gradle.kts" | "libs.versions.toml"
-            ) && let Ok(text) = fs::read_to_string(&path)
-            {
-                out.push_str(&text);
-                out.push('\n');
+        let start = at + open;
+        let Some(close) = pom[start..].find('>') else {
+            break;
+        };
+        let tag = &pom[start + 1..start + close];
+        at = start + close + 1;
+        let name = tag.trim_start_matches('/').trim_end_matches('/').trim();
+        let name = name.split_whitespace().next().unwrap_or_default();
+        if NESTED.contains(&name) {
+            if tag.starts_with('/') {
+                depth = depth.saturating_sub(1);
+            } else if !tag.ends_with('/') {
+                depth += 1;
             }
+        } else if name == "dependencies" && tag.starts_with('/') && depth == 0 {
+            return Some(start);
         }
     }
-    out
+    None
 }
 
 /// Whether a Gradle script already puts the launcher where test *sources* can
@@ -369,6 +398,63 @@ fn gradle_with_launcher(build_file: &str, kotlin: bool) -> Option<String> {
     Some(format!(
         "{build_file}\n// Added by Supercov: the JUnit Platform listener that attributes coverage\n// to each test is compiled from each project's own test sources, and the\n// launcher API it implements is on the test runtime classpath but not the\n// compile one.\nallprojects {{\n    plugins.withId({plugin}) {{\n        dependencies {{\n{line}\n        }}\n    }}\n}}\n"
     ))
+}
+
+/// A build file with its warnings-as-errors policy relaxed.
+///
+/// A project is free to fail its build on any warning, and several good ones
+/// do. The instrumented copy contains code that project never wrote and never
+/// agreed a style for, so its own policy would reject it -- gson's Error Prone
+/// configuration rejects a fully-qualified name, and nothing Supercov can emit
+/// satisfies every such rule. The Rust frontend caps lints for the same reason
+/// and in the same place: the copy, never the tree the author keeps.
+///
+/// Only the escalation is removed. The warnings are still emitted, the
+/// compiler still compiles exactly what it would have, and the author's own
+/// build is untouched.
+fn without_warnings_as_errors(build_file: &str) -> Option<String> {
+    let mut updated = build_file.to_owned();
+    for (from, to) in [
+        (
+            "<failOnWarning>true</failOnWarning>",
+            "<failOnWarning>false</failOnWarning>",
+        ),
+        (
+            "<failOnWarnings>true</failOnWarnings>",
+            "<failOnWarnings>false</failOnWarnings>",
+        ),
+        ("<arg>-Werror</arg>", ""),
+        ("<compilerArgument>-Werror</compilerArgument>", ""),
+        ("options.compilerArgs << '-Werror'", ""),
+        ("allWarningsAsErrors = true", "allWarningsAsErrors = false"),
+    ] {
+        updated = updated.replace(from, to);
+    }
+    updated = without_error_prone(&updated);
+    (updated != build_file).then_some(updated)
+}
+
+/// The same build file with Error Prone switched off.
+///
+/// Relaxing warnings is not enough on its own: Error Prone has checks that
+/// fail at error severity, and some are about the shape of a method rather
+/// than its meaning — an `@InlineMe` method must hold exactly one statement,
+/// and a probe makes two. No instrumentation can satisfy a rule like that,
+/// because the rule is about source the author wrote and the copy holds source
+/// they did not.
+///
+/// Switching the analyser off in the copy costs nothing: it says nothing about
+/// whether the tests pass, and the author's own build still runs it in full.
+fn without_error_prone(build_file: &str) -> String {
+    let Some(start) = build_file.find("<arg>-Xplugin:ErrorProne") else {
+        return build_file.to_owned();
+    };
+    let Some(end) = build_file[start..].find("</arg>") else {
+        return build_file.to_owned();
+    };
+    let mut updated = build_file.to_owned();
+    updated.replace_range(start..start + end + "</arg>".len(), "");
+    updated
 }
 
 /// Make the build run its tests again rather than reporting a cached result.
@@ -427,6 +513,11 @@ struct InstrumentedWorkspace {
     declared_in: BTreeMap<String, String>,
     /// The build file the launcher dependency was added to, if it was.
     added_launcher: Option<&'static str>,
+    /// Whether a warnings-as-errors policy had to be relaxed in the copy.
+    relaxed_warnings: bool,
+    /// Modules Supercov instrumented but cannot attribute, and why they were
+    /// left without a listener rather than broken by one.
+    unmeasurable: Vec<String>,
 }
 
 /// The module a `src/main/...` or `src/test/...` path belongs to.
@@ -466,12 +557,27 @@ fn instrument_workspace(
         .max()
         .map_or(0, |highest| *highest as usize + 1);
 
-    // Which listeners can be compiled at all depends on what the project
-    // depends on, so read the build files before writing any of them. Every
-    // one of them: in a multi-module build the frameworks are usually declared
-    // in the parent and the modules inherit, but either may name them.
-    let build_file = build_files(workspace);
-    let frameworks = frameworks(&build_file);
+    // Which frameworks a module runs is a question about that module. A
+    // repository can hold a JUnit 4 module beside a JUnit 5 one, and asking
+    // the whole tree at once answers neither: the platform listener would go
+    // into the JUnit 4 module, where it cannot work, and the launcher with it,
+    // where it makes the build choose a provider that finds no engine.
+    let frameworks_of = |directory: &str| -> Frameworks {
+        let names = ["pom.xml", "build.gradle.kts", "build.gradle"];
+        let mut text = names
+            .iter()
+            .find_map(|name| fs::read_to_string(workspace.join(name)).ok())
+            .unwrap_or_default();
+        for name in names {
+            if let Ok(own) = fs::read_to_string(workspace.join(directory).join(name)) {
+                text.push('\n');
+                text.push_str(&own);
+                break;
+            }
+        }
+        frameworks(&text)
+    };
+    let mut unmeasurable: Vec<String> = Vec::new();
 
     // One entry per module that has a main or a test source set, keyed by
     // directory so a module contributing both is listed once.
@@ -513,6 +619,7 @@ fn instrument_workspace(
         .collect::<Vec<_>>();
 
     for module in &modules {
+        let frameworks = frameworks_of(&module.directory);
         let at = |source_set: &str| {
             workspace
                 .join(&module.directory)
@@ -528,6 +635,12 @@ fn instrument_workspace(
             &runtime_source(probe_count),
         )?;
         if !module.has_tests {
+            continue;
+        }
+        if frameworks.junit4 {
+            // Attributing it is impossible and trying would break it, so the
+            // module keeps its probes and gets no listener.
+            unmeasurable.push(module.directory.clone());
             continue;
         }
         // The listeners and their configuration go in the test source set,
@@ -548,25 +661,50 @@ fn instrument_workspace(
         }
     }
 
+    // A project's warning policy applies to code it wrote. The copy holds code
+    // it did not.
+    let mut relaxed = Vec::new();
+    for name in ["pom.xml", "build.gradle.kts", "build.gradle"] {
+        let path = workspace.join(name);
+        if let Ok(existing) = fs::read_to_string(&path)
+            && let Some(updated) = without_warnings_as_errors(&existing)
+        {
+            write(&path, &updated)?;
+            relaxed.push(name);
+        }
+    }
+
     // The platform listener is compiled from the project's own test sources,
     // so the launcher API it implements has to be on the compile classpath. A
     // TestNG-only project needs none of that: it already depends on the
     // framework its own listener implements.
     let mut added_launcher = None;
-    match if frameworks.platform {
-        build
-    } else {
-        JvmBuild::Plain
-    } {
+    match build {
+        // Per module, not once at the top: the module's own pom is where its
+        // JUnit version is in scope, and a module that runs JUnit 4 must not
+        // get the launcher at all.
         JvmBuild::Maven => {
-            let pom = workspace.join("pom.xml");
-            if let Ok(existing) = fs::read_to_string(&pom)
-                && let Some(updated) = maven_with_launcher(&existing)
+            for module in modules
+                .iter()
+                .filter(|module| module.has_tests && !unmeasurable.contains(&module.directory))
+                // A TestNG module needs none of this: it already depends on
+                // the framework its own listener implements, and the launcher
+                // would only change which provider the build chooses.
+                .filter(|module| frameworks_of(&module.directory).platform)
             {
-                write(&pom, &updated)?;
-                added_launcher = Some("pom.xml");
+                let pom = workspace.join(&module.directory).join("pom.xml");
+                if let Ok(existing) = fs::read_to_string(&pom)
+                    && let Some(updated) = maven_with_launcher(&existing)
+                {
+                    write(&pom, &updated)?;
+                    added_launcher = Some("pom.xml");
+                }
             }
         }
+        JvmBuild::Gradle
+            if !modules
+                .iter()
+                .any(|module| module.has_tests && frameworks_of(&module.directory).platform) => {}
         JvmBuild::Gradle => {
             for name in ["build.gradle.kts", "build.gradle"] {
                 let path = workspace.join(name);
@@ -589,7 +727,11 @@ fn instrument_workspace(
         JvmBuild::Plain => {}
     }
 
-    for module in modules.iter().filter(|module| module.has_tests) {
+    for module in modules
+        .iter()
+        .filter(|module| module.has_tests && !unmeasurable.contains(&module.directory))
+    {
+        let frameworks = frameworks_of(&module.directory);
         let resources = workspace.join(&module.directory).join("src/test/resources");
         if frameworks.platform {
             write(
@@ -628,6 +770,8 @@ fn instrument_workspace(
         modules,
         declared_in,
         added_launcher,
+        relaxed_warnings: !relaxed.is_empty(),
+        unmeasurable,
     })
 }
 
@@ -710,6 +854,22 @@ pub fn run_direct_jvm(
             writeln!(
                 diagnostics,
                 "[supercov] added a test-scoped {LAUNCHER_ARTIFACT} to the workspace's {build_file}: per-test attribution comes from a JUnit Platform listener, and the API it implements is on the test runtime classpath but not the compile one. Your own {build_file} is untouched."
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        if instrumented.relaxed_warnings {
+            writeln!(
+                diagnostics,
+                "[supercov] relaxed warnings-as-errors in the workspace's build file: the copy holds instrumented code your project never wrote a style policy for. Warnings are still reported, and your own build file is untouched."
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        if !instrumented.unmeasurable.is_empty() {
+            writeln!(
+                diagnostics,
+                "[supercov] {} module(s) run JUnit 4, which is not a JUnit Platform engine, so they are not attributed: {}. Supercov listens through the platform's own lifecycle, and putting the platform on a JUnit 4 classpath makes the build choose a provider that finds no engine -- so it leaves those modules alone rather than break them. Adding junit-vintage-engine runs the same tests on the platform, and Supercov measures them.",
+                instrumented.unmeasurable.len(),
+                instrumented.unmeasurable.join(", ")
             )
             .map_err(|error| error.to_string())?;
         }
@@ -998,6 +1158,19 @@ mod tests {
             launcher_version("<artifactId>junit-jupiter</artifactId>").as_deref(),
             Some(DEFAULT_LAUNCHER_VERSION)
         );
+        // Including a file that names no JUnit artifact at all -- an
+        // aggregating parent, say, whose children each declare their own.
+        // Reading that as "a BOM manages it" writes a versionless dependency
+        // into a pom with no BOM to resolve it, and the build stops before a
+        // single test runs.
+        assert_eq!(
+            launcher_version("<artifactId>parent</artifactId>").as_deref(),
+            Some(DEFAULT_LAUNCHER_VERSION)
+        );
+        assert_eq!(
+            launcher_version("").as_deref(),
+            Some(DEFAULT_LAUNCHER_VERSION)
+        );
     }
 
     #[test]
@@ -1091,5 +1264,77 @@ mod tests {
         // is what nearly every JVM suite runs on.
         let unknown = frameworks("<artifactId>demo</artifactId>");
         assert!(unknown.platform && !unknown.testng);
+    }
+
+    #[test]
+    fn junit_four_is_not_the_platform_and_is_not_treated_as_it() {
+        // Surefire picks its provider from what is on the classpath. Adding
+        // the platform launcher to a JUnit 4 project makes it choose the
+        // platform provider, find no engine there, and fail the suite --
+        // Supercov breaking a build it was asked to measure. The word "junit"
+        // appears in both, so the artifact is what tells them apart.
+        let four = frameworks("<groupId>junit</groupId><artifactId>junit</artifactId>");
+        assert!(four.junit4 && !four.platform && !four.testng);
+
+        let five = frameworks("<artifactId>junit-jupiter</artifactId>");
+        assert!(five.platform && !five.junit4);
+
+        // Vintage runs JUnit 4 tests on the platform, so a project with both
+        // is a platform project.
+        let both = frameworks(
+            "<artifactId>junit</artifactId><artifactId>junit-vintage-engine</artifactId>",
+        );
+        assert!(both.platform && !both.junit4);
+
+        // Gradle spells its dependencies differently and means the same.
+        assert!(frameworks("testImplementation 'junit:junit:4.13.2'").junit4);
+        assert!(frameworks("testImplementation(\"junit:junit:4.13.2\")").junit4);
+        assert!(!frameworks("testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'").junit4);
+    }
+
+    #[test]
+    fn the_launcher_joins_the_projects_dependencies_not_its_managed_versions() {
+        // A pom's <dependencyManagement> holds a <dependencies> too, and so
+        // does every profile and plugin. A dependency added there is a version
+        // for something else to ask for rather than something the project
+        // depends on: the module compiles exactly as before and the listener
+        // still cannot find the API it implements.
+        let pom = "<project>\n  <dependencyManagement>\n    <dependencies>\n      <dependency>\n        <groupId>org.junit</groupId>\n        <artifactId>junit-bom</artifactId>\n        <version>5.10.2</version>\n      </dependency>\n    </dependencies>\n  </dependencyManagement>\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n    </dependency>\n  </dependencies>\n  <build>\n    <plugins>\n      <plugin>\n        <dependencies>\n          <dependency><groupId>x</groupId></dependency>\n        </dependencies>\n      </plugin>\n    </plugins>\n  </build>\n</project>\n";
+        let updated = maven_with_launcher(pom).expect("the launcher is missing");
+        let at = updated.find(LAUNCHER_ARTIFACT).expect("added");
+        let managed_end = updated
+            .find("</dependencyManagement>")
+            .expect("managed block");
+        let build_start = updated.find("<build>").expect("build block");
+        assert!(
+            at > managed_end,
+            "not among the managed versions:\n{updated}"
+        );
+        assert!(at < build_start, "nor among a plugin's own:\n{updated}");
+        // The BOM manages every JUnit artifact, so naming a version would
+        // override the answer the project already gave.
+        assert!(!updated[at..at + 200].contains("<version>"), "{updated}");
+    }
+
+    #[test]
+    fn a_projects_warning_policy_does_not_apply_to_code_it_never_wrote() {
+        // A project is free to fail its build on any warning, and good ones
+        // do. The copy holds code that project never wrote and never agreed a
+        // style for -- and Error Prone goes further, failing at error severity
+        // on rules about the shape of a method that no instrumentation can
+        // satisfy.
+        let pom = "<project>\n  <failOnWarning>true</failOnWarning>\n  <compilerArgs>\n    <arg>-XDcompilePolicy=simple</arg>\n    <arg>-Xplugin:ErrorProne\n      -Xep:NotJavadoc:OFF\n    </arg>\n  </compilerArgs>\n</project>\n";
+        let updated = without_warnings_as_errors(pom).expect("a policy to relax");
+        assert!(
+            updated.contains("<failOnWarning>false</failOnWarning>"),
+            "{updated}"
+        );
+        assert!(!updated.contains("Xplugin:ErrorProne"), "{updated}");
+        // Only the escalation goes: the compiler still compiles what it would
+        // have, and everything else the project configured is untouched.
+        assert!(updated.contains("-XDcompilePolicy=simple"), "{updated}");
+
+        // A project with no such policy is left exactly as it is.
+        assert_eq!(without_warnings_as_errors("<project></project>"), None);
     }
 }

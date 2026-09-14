@@ -262,6 +262,7 @@ npx supercov -- go test ./core/... ./app/...
 | Kotest | Exact per test, under the names Kotest itself reports | — |
 | Spock | Exact per feature, under the names Spock itself reports | — |
 | TestNG | Exact per test, each data-provider invocation its own | — |
+| JUnit 4 alone | Not measured — see below | — |
 
 Multi-module builds are measured module by module: each compiles its own source
 set and forks its own JVM, so each gets a runtime and records evidence of its
@@ -274,11 +275,20 @@ rewriter could find. TestNG is not a platform engine and has a listener of its
 own. Tests keep the names their framework chose, so a coverage report and a test
 report name the same thing.
 
+JUnit 4 on its own is not a platform engine and does not run on one. Maven and
+Gradle choose a test provider from what is on the classpath, so putting the
+platform there makes the build pick a provider that finds no engine and fail.
+Supercov leaves such a module alone and says so rather than break it; adding
+`junit-vintage-engine` runs the same tests on the platform, and Supercov
+measures them.
+
 Supercov instruments an isolated copy and leaves your build file alone. In the
 copy it adds a test-scoped `junit-platform-launcher`, because the listener is
 compiled from the project's test sources and neither Maven nor Gradle puts that
-API on the compile classpath, and it disables JUnit's parallel execution,
-keeping whatever else your `junit-platform.properties` set.
+API on the compile classpath; it disables JUnit's parallel execution, keeping
+whatever else your `junit-platform.properties` set; and it stops the copy
+failing its build on warnings, because the copy holds instrumented code your
+project never wrote a style policy for. Warnings are still reported.
 
 If tests do run concurrently anyway, Supercov says so and stops attributing
 rather than reporting numbers nobody can trust: statements and branches still

@@ -943,7 +943,9 @@ fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
     .expect("utf-8");
     assert!(manifest.contains("\"kind\":\"function\""), "{manifest}");
     assert!(
-        records.iter().all(|record| record.contains("\"f1\"")),
+        records
+            .iter()
+            .all(|record| record.contains("kotlin:function:")),
         "both tests enter the function they exercise: {records:?}"
     );
     std::fs::remove_dir_all(root).ok();

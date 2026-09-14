@@ -72,6 +72,39 @@ pub struct GoFileObligations {
     pub decision_widths: Vec<u8>,
 }
 
+/// An obligation's identity, derived from what it is rather than from how many
+/// came before it.
+///
+/// A counter per file collides the moment a project has two of them: every
+/// file starts again at 1, two obligations share an id with different
+/// metadata, and the reader refuses the whole archive. A counter across the
+/// project would be unique but would shift every id after any insertion, so
+/// adding one statement would invalidate every acknowledgement below it.
+///
+/// The file, the kind and the byte range answer both: unique across a project,
+/// and unchanged by edits to any other file.
+pub(crate) fn stable_obligation_id(
+    language: &str,
+    file: &str,
+    kind: &str,
+    start: usize,
+    end: usize,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for value in [file, kind, &start.to_string(), &end.to_string()] {
+        hash.update(value.as_bytes());
+        hash.update([0]);
+    }
+    let digest = hash.finalize();
+    let mut encoded = String::with_capacity(24);
+    for byte in &digest[..12] {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    format!("{language}:{kind}:{encoded}")
+}
+
 pub fn parse(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
     let mut parser = Parser::new();
     parser
@@ -146,7 +179,6 @@ struct Collector<'a> {
     /// index that meant "the first decision in this file" would land on every
     /// other file's first decision too.
     decision_base: u32,
-    counter: usize,
 }
 
 /// A branch whose condition is a single operand needs no independence
@@ -191,9 +223,8 @@ fn loop_condition<'t>(node: Node<'t>) -> Option<Node<'t>> {
 }
 
 impl<'a> Collector<'a> {
-    fn id(&mut self, prefix: &str) -> String {
-        self.counter += 1;
-        format!("{prefix}{}", self.counter)
+    fn id(&mut self, node: Node, kind: &str) -> String {
+        stable_obligation_id("go", self.file, kind, node.start_byte(), node.end_byte())
     }
 
     fn probe(&mut self, target: GoProbeTarget, at: usize) -> u64 {
@@ -227,10 +258,13 @@ impl<'a> Collector<'a> {
 
     fn add_point(&mut self, node: Node, kind: PointKind, label: Option<String>) {
         let (line, column) = self.position(node);
-        let id = self.id(match kind {
-            PointKind::Function => "f",
-            PointKind::Statement => "s",
-        });
+        let id = self.id(
+            node,
+            match kind {
+                PointKind::Function => "function",
+                PointKind::Statement => "statement",
+            },
+        );
         let target = match kind {
             PointKind::Function => GoProbeTarget::Function { id: id.clone() },
             PointKind::Statement => GoProbeTarget::Statement { id: id.clone() },
@@ -262,7 +296,7 @@ impl<'a> Collector<'a> {
 
     fn add_branch(&mut self, node: Node, kind: &str, labels: &[&str]) -> Vec<u64> {
         let (line, column) = self.position(node);
-        let id = self.id("b");
+        let id = self.id(node, "branch");
         let mut probes = Vec::new();
         let alternatives = labels
             .iter()
@@ -309,7 +343,7 @@ impl<'a> Collector<'a> {
             .map(|leaf| self.source[leaf.byte_range()].trim().to_owned())
             .collect::<Vec<_>>();
         let (line, column) = self.position(node);
-        let id = self.id("d");
+        let id = self.id(node, "decision");
         // The runtime indexes decisions by position across the whole module,
         // so the index a wrapper carries is this decision's place in the
         // module's width table, not in this file's.
@@ -594,7 +628,6 @@ pub fn build_go_obligations_with_alias(
         probes: BTreeMap::new(),
         limitations: Vec::new(),
         widths: Vec::new(),
-        counter: 0,
     };
     let mut cursor = tree.root_node().walk();
     for child in tree.root_node().children(&mut cursor) {
