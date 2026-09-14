@@ -118,8 +118,10 @@ var (
 	// even when attribution does not.
 	runWide [][]uint64
 	// Where to write, and when it was last written. See Destination.
-	destination string
-	lastFlush   time.Time
+	destination     string
+	lastFlush       time.Time
+	flushEager      bool
+	flushComplained bool
 )
 
 // Arm records how many conditions each decision has. The probe array is
@@ -202,28 +204,58 @@ func EnterTest(name string) func() {
 // so the cost stays proportional to time rather than to the number of tests.
 // What that cannot save is whatever the last window held, which is a great
 // deal better than everything.
-func Destination(path string) {
+// `eager` says there will be no end-of-run write to fall back on, so every
+// checkpoint must persist rather than wait out the window. It costs a write
+// per test, which is why it is not the default: where TestMain ends in
+// os.Exit(m.Run()) the final write catches everything the window skipped.
+func Destination(path string, eager bool) {
 	mu.Lock()
 	destination = path
+	flushEager = eager
 	mu.Unlock()
 }
 
-// How often a boundary flush may write. Small enough that little is lost to an
-// exit nobody can intercept, large enough that a suite of many short tests
-// does not spend its time writing the same file.
+// How often a boundary flush may write, when there is an end-of-run write to
+// fall back on. Only then: a parallel phase can finish inside one window, and
+// samber/lo's does -- with a window and no final write it recorded 36% of its
+// statements where the same run records 86% without one.
 const flushWindow = 250 * time.Millisecond
 
 // Caller holds mu.
 func flush() {
-	if destination == "" || time.Since(lastFlush) < flushWindow {
+	if destination == "" || (!flushEager && time.Since(lastFlush) < flushWindow) {
 		return
 	}
 	lastFlush = time.Now()
-	if err := writeLocked(destination); err != nil {
+	if err := writeLocked(destination); err != nil && !flushComplained {
 		// A failed flush is not worth failing the suite over: the run still
-		// has its end-of-run write, and the tests are what matter.
+		// has its end-of-run write, and the tests are what matter. Said once,
+		// because a flush happens throughout the run and a line per attempt
+		// would bury the output the tests produced.
+		flushComplained = true
 		os.Stderr.WriteString("supercov: could not flush coverage evidence: " + err.Error() + "\n")
 	}
+}
+
+// Checkpoint sweeps what has been reached into the run-wide totals, without
+// claiming it for anyone.
+//
+// A test that calls t.Parallel() is never announced, because whatever it
+// reaches runs alongside other tests and could not be credited to it. But Go
+// resumes parallel tests after the serial ones have finished, so by then there
+// are no announcements left to sweep at: everything the parallel phase reached
+// sat in the probe array until the process ended, and where the process ends
+// without reaching the end-of-run write -- goleak's VerifyTestMain, say --
+// none of it was ever recorded. samber/lo lost 62% of its statements that way
+// after everything else had been fixed.
+//
+// This is the sweep without the claim. It is what the declaration means by
+// coverage that counts run-wide.
+func Checkpoint() {
+	mu.Lock()
+	harvest()
+	flush()
+	mu.Unlock()
 }
 
 // Outcome records how the running test ended.

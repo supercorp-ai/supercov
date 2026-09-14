@@ -655,3 +655,141 @@ fn go_s_own_scoping_survives_instrumentation() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// A `select` with no `default` blocks until one of its cases is ready. With
+/// one it returns immediately. Supercov used to add a `default` holding a
+/// probe — right for a `switch`, where the added clause is the path the
+/// program already took, and catastrophic here: a loop that waited for values
+/// spun instead, and samber/lo's BufferWithContext returned an empty buffer it
+/// reported as full.
+///
+/// That is the worst thing an instrument can do. It compiled, it ran, and it
+/// answered differently. This holds the program to its own answer.
+#[test]
+fn a_blocking_select_still_blocks() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    const SOURCE: &str = r#"package main
+
+import (
+	"context"
+	"os"
+	"time"
+)
+
+// Reads up to size items, stopping early if the context is cancelled. Its
+// answer depends entirely on the select waiting: without that it never
+// receives anything and reports the full size.
+func Buffer(ctx context.Context, ch <-chan int, size int) ([]int, int) {
+	buffer := make([]int, 0, size)
+	for index := 0; index < size; index++ {
+		select {
+		case item, ok := <-ch:
+			if !ok {
+				return buffer, index
+			}
+			buffer = append(buffer, item)
+		case <-ctx.Done():
+			return buffer, index
+		}
+	}
+	return buffer, size
+}
+
+// A select that already has a default is non-blocking, and stays that way.
+func Poll(ch <-chan int) int {
+	select {
+	case v := <-ch:
+		return v
+	default:
+		return -1
+	}
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan int)
+	go func() {
+		ch <- 0
+		ch <- 1
+		ch <- 2
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	items, length := Buffer(ctx, ch, 20)
+	if len(items) != 3 || length != 3 {
+		panic("select did not wait: got " + itoa(len(items)) + " items, length " + itoa(length))
+	}
+	empty := make(chan int)
+	if Poll(empty) != -1 {
+		panic("a select with a default must not block")
+	}
+	os.Stdout.WriteString("ok\n")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	out := ""
+	for n > 0 {
+		out = string(rune('0'+n%10)) + out
+		n /= 10
+	}
+	return out
+}
+"#;
+    let root = temporary("select");
+    write(&root, "go.mod", "module example.com/sel\n\ngo 1.22\n");
+    let runtime =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/go/supercov/supercov.go");
+    write(
+        &root,
+        "supercov/supercov.go",
+        &std::fs::read_to_string(runtime).expect("runtime source"),
+    );
+    let local = "example.com/sel/supercov";
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations =
+        build_go_obligations("main.go", SOURCE, &mut next, &mut decisions).expect("obligations");
+    let instrumented = rewrite(SOURCE, &obligations.edits).replace(RUNTIME_IMPORT, local);
+
+    // The blocking select keeps exactly the cases its author wrote.
+    assert!(
+        !instrumented.contains("default:\n__supercov.A"),
+        "no default may be added to a select:\n{instrumented}"
+    );
+    // Both selects are still measured, by the cases they actually have.
+    let selects = obligations
+        .manifest
+        .branches
+        .iter()
+        .filter(|branch| branch.kind == "select")
+        .collect::<Vec<_>>();
+    assert_eq!(selects.len(), 2, "{selects:?}");
+    assert_eq!(selects[0].alternatives.len(), 2, "two cases, no default");
+    assert_eq!(selects[1].alternatives.len(), 2, "one case and a default");
+
+    write(&root, "main.go", &instrumented);
+    write(
+        &root,
+        "supercov_probes.go",
+        &probe_array_file("main", "__supercov", local, 256),
+    );
+    let run = Command::new(&go)
+        .args(["run", "."])
+        .current_dir(&root)
+        .output()
+        .expect("go run");
+    assert!(
+        run.status.success(),
+        "the instrumented program must answer what the untouched one did:\n{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "ok");
+    std::fs::remove_dir_all(root).ok();
+}

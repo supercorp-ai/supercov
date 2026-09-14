@@ -103,21 +103,20 @@ pub fn instrument_test_file(
         if name == "TestMain" {
             file.declares_test_main = true;
             needs_runtime = true;
+            // Whether there will be an end-of-run write decides how eagerly
+            // the runtime has to persist, so the wrapping is decided first and
+            // the destination written with the answer.
+            let mut wrapping = Vec::new();
+            let wrapped = wrap_run_calls(body, source, alias, evidence_path, &mut wrapping);
             file.edits.push(GoEdit {
                 at: body.start_byte() + 1,
                 rank: 100,
                 text: format!(
-                    "\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n\t{alias}.Destination(\"{evidence_path}\")\n"
+                    "\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n\t{alias}.Destination(\"{evidence_path}\", {})\n",
+                    !wrapped
                 ),
             });
-            // Wrap the m.Run() call itself rather than deferring after it.
-            //
-            // A TestMain does not have to make that call where we can see it.
-            // goleak's VerifyTestMain takes `m`, runs it, and exits itself, and
-            // hand-written harnesses do the same — so naming the destination
-            // above is what lets the runtime write at test boundaries instead,
-            // and a run like that record anything at all.
-            wrap_run_calls(body, source, alias, evidence_path, &mut file.edits);
+            file.edits.extend(wrapping);
             continue;
         }
         if !is_test_function(&name) {
@@ -134,7 +133,19 @@ pub fn instrument_test_file(
             // what runs next includes the other parallel tests. Its coverage
             // still counts run-wide; it simply belongs to no test, which is
             // the truth rather than a guess dressed as a measurement.
+            //
+            // It still gets a checkpoint. Go resumes parallel tests after the
+            // serial ones are done, so without one there is no announcement
+            // left to sweep at and everything the parallel phase reached sits
+            // in the probe array until the process ends -- which, where the
+            // end-of-run write is never reached, means it is never recorded.
             file.parallel.push(name.clone());
+            needs_runtime = true;
+            file.edits.push(GoEdit {
+                at: body.start_byte() + 1,
+                rank: 100,
+                text: format!("\n\tdefer {alias}.Checkpoint()\n"),
+            });
             continue;
         }
         // Through the generated helper rather than the runtime directly, so
@@ -186,7 +197,13 @@ fn calls_parallel(node: Node, source: &str) -> bool {
         .any(|child| calls_parallel(child, source))
 }
 
-fn wrap_run_calls(node: Node, source: &str, alias: &str, evidence: &str, edits: &mut Vec<GoEdit>) {
+fn wrap_run_calls(
+    node: Node,
+    source: &str,
+    alias: &str,
+    evidence: &str,
+    edits: &mut Vec<GoEdit>,
+) -> bool {
     if node.kind() == "call_expression"
         && let Some(function) = node.child_by_field_name("function")
         && source[function.byte_range()].trim_end().ends_with(".Run")
@@ -201,14 +218,16 @@ fn wrap_run_calls(node: Node, source: &str, alias: &str, evidence: &str, edits: 
             rank: 50,
             text: format!(", \"{evidence}\")"),
         });
-        return;
+        return true;
     }
     let mut cursor = node.walk();
+    let mut wrapped = false;
     for child in node.children(&mut cursor) {
         if child.is_named() {
-            wrap_run_calls(child, source, alias, evidence, edits);
+            wrapped |= wrap_run_calls(child, source, alias, evidence, edits);
         }
     }
+    wrapped
 }
 
 /// The generated file that gives a package the array its probes store into.
@@ -268,7 +287,7 @@ pub fn synthesized_harness(
         return out;
     }
     out.push_str(&format!(
-        "func TestMain(m *testing.M) {{\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n\t{alias}.Destination(\"{evidence_path}\")\n\tos.Exit({alias}.Finish(m.Run(), \"{evidence_path}\"))\n}}\n"
+        "func TestMain(m *testing.M) {{\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n\t{alias}.Destination(\"{evidence_path}\", false)\n\tos.Exit({alias}.Finish(m.Run(), \"{evidence_path}\"))\n}}\n"
     ));
     out.replace("\t\"testing\"\n", "\t\"os\"\n\t\"testing\"\n")
 }
@@ -436,5 +455,40 @@ mod tests {
             "package p\n\nimport \"testing\"\n\nfunc TestMain(m *testing.M) { os.Exit(m.Run()) }\n",
         );
         assert!(out.contains("__supercovDecisionWidths)\n"), "{out}");
+    }
+
+    #[test]
+    fn a_test_main_that_never_calls_run_makes_the_runtime_persist_eagerly() {
+        // The idiomatic TestMain ends in os.Exit(m.Run()), which the harness
+        // wraps so everything is written at the end. A TestMain that hands `m`
+        // to something else -- goleak's VerifyTestMain, testcontainers, a
+        // hand-written harness -- runs the suite and exits itself, and Go can
+        // run no code on os.Exit. Then the only evidence that survives is what
+        // was already written, so every checkpoint has to persist rather than
+        // wait out the window: samber/lo's parallel phase finishes inside one,
+        // and with a window it recorded 36% of its statements where the same
+        // run records 86% without.
+        let (_, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestMain(m *testing.M) {\n\tgoleak.VerifyTestMain(m)\n}\n",
+        );
+        assert!(
+            out.contains(".Destination(\"evidence.bin\", true)"),
+            "{out}"
+        );
+        assert!(
+            !out.contains(".Finish("),
+            "there is no m.Run() here to wrap:\n{out}"
+        );
+
+        // Where the end-of-run write does happen, the window is safe and the
+        // per-test write is not paid.
+        let (_, out) = instrumented(
+            "package p\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) {\n\tos.Exit(m.Run())\n}\n",
+        );
+        assert!(
+            out.contains(".Destination(\"evidence.bin\", false)"),
+            "{out}"
+        );
+        assert!(out.contains(".Finish(m.Run()"), "{out}");
     }
 }

@@ -462,9 +462,20 @@ impl<'a> Collector<'a> {
                     }
                 }
                 // A switch with no default can match nothing, which is an
-                // outcome a reader has to see. Synthesising the clause is the
-                // only way to observe it.
-                if !has_default {
+                // outcome a reader has to see, and synthesising the clause is
+                // the only way to observe it: an added `default` holding
+                // nothing but a probe is the path the program already took.
+                //
+                // A select is not a switch. Without a default it *blocks*
+                // until one of its cases is ready; with one it returns
+                // immediately. So there is no "no case matched" outcome to
+                // record -- a select always selects -- and adding the clause
+                // to observe one would stop it blocking. That is not an
+                // instrument changing what is known about a program, it is an
+                // instrument changing what the program does: a loop that waited
+                // for values spins instead, and the code returns an empty
+                // buffer it reports as full.
+                if !has_default && node.kind() != "select_statement" {
                     cases.push(("no case matched".to_owned(), None));
                 }
                 let labels = cases
