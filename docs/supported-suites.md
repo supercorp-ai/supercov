@@ -1,6 +1,6 @@
 # Supported languages and test suites
 
-Supercov supports JavaScript, TypeScript, Rust, Python, and Ruby today. Start with
+Supercov supports JavaScript, TypeScript, Rust, Python, Ruby, Go, Java, and Kotlin today. Start with
 the same test command the repository already uses; Supercov detects supported
 runners inside that command.
 
@@ -10,6 +10,8 @@ npx supercov -- npx playwright test
 npx supercov -- cargo test
 npx supercov -- pytest
 npx supercov -- rspec
+npx supercov -- go test ./...
+npx supercov -- mvn test
 ```
 
 ## Language support
@@ -21,6 +23,9 @@ npx supercov -- rspec
 | Rust | Available | `npx supercov -- cargo test` |
 | Python | Available | `npx supercov -- pytest` |
 | Ruby | Available | `npx supercov -- rspec` |
+| Go | Available | `npx supercov -- go test ./...` |
+| Java | Available | `npx supercov -- mvn test` |
+| Kotlin | Available | `npx supercov -- ./gradlew test` |
 | Zig | Coming soon | — |
 | PHP | Coming soon | — |
 | C | Coming soon | — |
@@ -209,6 +214,74 @@ npx supercov -- rspec
 npx supercov -- bundle exec rspec
 npx supercov -- ruby -Itest test/shapes_test.rb
 npx supercov -- bin/rails test
+```
+
+## Go
+
+| Runner | Attribution | Current requirement |
+| --- | --- | --- |
+| `go test` | Exact per test | Go 1.22 or newer |
+| A test that calls `t.Parallel()` | Aggregate: its coverage counts run-wide | — |
+
+Supercov instruments an isolated copy of the module and runs your own command
+against it. Your tree is not touched, and your test sources are not rewritten
+beyond one deferred line per test that binds it to its evidence.
+
+`go test` builds one binary per package, so each test package records its own
+evidence and Supercov merges them. It also caches packages that passed, and a
+cached package does not run — so Supercov adds `-count=1` unless your command
+already says otherwise, and tells you it did.
+
+A test that calls `t.Parallel()` runs alongside others. Probes are a store into
+one array shared by the process, so nothing can say which of two concurrent
+tests reached a line; that coverage counts run-wide rather than being assigned
+to a test by guesswork.
+
+For assertion maps, `t.Error`, `t.Errorf`, `t.Fatal`, `t.Fatalf` and testify's
+`assert` and `require` are inventoried. A Go test states its claim with an `if`
+and reports the violation, so the report is the site.
+
+```sh
+npx supercov -- go test ./...
+npx supercov -- go test -run TestParser ./internal/...
+```
+
+## Java and Kotlin
+
+| Runner | Attribution | Current requirement |
+| --- | --- | --- |
+| JUnit 5 (Jupiter) | Exact per test | JDK 17 or newer, Maven or Gradle |
+| JUnit 4 (through Vintage) | Exact per test | — |
+| Kotest | Exact per test, under the names Kotest itself reports | — |
+| Spock | Exact per feature, under the names Spock itself reports | — |
+| TestNG | Exact per test, each data-provider invocation its own | — |
+
+Attribution comes from the framework's own lifecycle rather than from rewritten
+test sources: a JUnit Platform listener sees every engine built on the platform,
+which is what covers Kotest and Spock, whose tests are not annotated methods any
+rewriter could find. TestNG is not a platform engine and has a listener of its
+own. Tests keep the names their framework chose, so a coverage report and a test
+report name the same thing.
+
+Supercov instruments an isolated copy and leaves your build file alone. In the
+copy it adds a test-scoped `junit-platform-launcher`, because the listener is
+compiled from the project's test sources and neither Maven nor Gradle puts that
+API on the compile classpath, and it disables JUnit's parallel execution,
+keeping whatever else your `junit-platform.properties` set.
+
+If tests do run concurrently anyway, Supercov says so and stops attributing
+rather than reporting numbers nobody can trust: statements and branches still
+count run-wide, and condition coverage is dropped, because concurrent
+evaluations corrupt the state it is computed from.
+
+For assertion maps, forms spelled `assertSomething`, `assertThat` or `fail` are
+inventoried, which covers JUnit, TestNG, AssertJ, Hamcrest and kotlin.test.
+Kotest's infix matchers are not.
+
+```sh
+npx supercov -- mvn test
+npx supercov -- ./gradlew test
+npx supercov -- ./mvnw verify
 ```
 
 ## Containers, VMs, and remote execution
