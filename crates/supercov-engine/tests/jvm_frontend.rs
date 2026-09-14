@@ -812,3 +812,95 @@ public class Driver {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Instrumented code must run correctly when nothing ever arms the runtime.
+///
+/// A probe is a bare store into the probe array and nothing checks its bounds,
+/// which is what makes it cost one instruction. If arming were the only thing
+/// that sized the array, then any run where the listener did not start — a
+/// suite in a language Supercov does not parse, a build that never reaches the
+/// test task, a framework nobody wrote a listener for — would not merely lose
+/// coverage. The first instrumented line would throw
+/// ArrayIndexOutOfBoundsException, and Supercov would have turned a passing
+/// suite into a failing one. Losing a measurement is acceptable; breaking the
+/// thing being measured is not.
+#[test]
+fn instrumented_code_runs_correctly_when_nothing_arms_the_runtime() {
+    let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
+        common::skip("jvm", "no JDK found");
+        return;
+    };
+    let root = temporary("unarmed");
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Classify.java",
+        SOURCE,
+        JvmLanguage::Java,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
+    write(&root, "Classify.java", &rewrite(SOURCE, &obligations.edits));
+
+    // The runtime exactly as a workspace gets it, sized for this project, and
+    // no listener and no configuration anywhere.
+    let probes = obligations.probes.len() + 1;
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("runtime-assets/jvm/com/supercorp/supercov/Supercov.java"),
+    )
+    .expect("runtime");
+    let sized = source.replace(
+        "static final int PROBE_COUNT = 0; // supercov:probe-count",
+        &format!("static final int PROBE_COUNT = {probes}; // supercov:probe-count"),
+    );
+    assert_ne!(
+        sized, source,
+        "the runtime must declare a substitutable probe count"
+    );
+    write(&root, "com/supercorp/supercov/Supercov.java", &sized);
+    write(
+        &root,
+        "Main.java",
+        r#"public class Main {
+    public static void main(String[] args) {
+        // The answers the uninstrumented program would give.
+        if (!"big".equals(Classify.classify(20, true))) { throw new AssertionError("big"); }
+        if (!"zero".equals(Classify.classify(0, false))) { throw new AssertionError("zero"); }
+        if (!"small".equals(Classify.classify(1, false))) { throw new AssertionError("small"); }
+        System.out.println("ok");
+    }
+}
+"#,
+    );
+    let compile = Command::new(&javac)
+        .args([
+            "-d",
+            ".",
+            "com/supercorp/supercov/Supercov.java",
+            "Classify.java",
+            "Main.java",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&java)
+        .args(["-cp", ".", "Main"])
+        .current_dir(&root)
+        .output()
+        .expect("java");
+    assert!(
+        run.status.success(),
+        "instrumented code must not break the program it measures:\n{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "ok");
+    std::fs::remove_dir_all(root).ok();
+}

@@ -158,6 +158,27 @@ fn java_literal(value: &str) -> String {
     out
 }
 
+/// The runtime, sized for this project.
+///
+/// A probe is a bare store into the array with nothing checking its bounds,
+/// which is what makes it cost one instruction. So the array has to be the
+/// right size before any product code runs, rather than only once a listener
+/// arms it: a run where no listener starts -- a suite in a language Supercov
+/// does not parse, a build that never reaches the test task -- would otherwise
+/// throw on the first instrumented line, and Supercov would have turned a
+/// passing suite into a failing one.
+fn runtime_source(probe_count: usize) -> String {
+    let marker = "static final int PROBE_COUNT = 0; // supercov:probe-count";
+    debug_assert!(
+        RUNTIME_SOURCE.contains(marker),
+        "the runtime no longer declares the probe count Supercov substitutes"
+    );
+    RUNTIME_SOURCE.replace(
+        marker,
+        &format!("static final int PROBE_COUNT = {probe_count}; // supercov:probe-count"),
+    )
+}
+
 /// What the listener reads to know the shape of the run it is recording.
 fn configuration(probe_count: usize, widths: &[u8], evidence: &Path) -> String {
     let widths = widths
@@ -461,6 +482,17 @@ fn instrument_workspace(
     for (relative, _) in &project.files.tests {
         *modules.entry(module_of(relative)).or_default() = true;
     }
+    // A module's tests may be in a language Supercov does not parse -- Spock
+    // writes them in Groovy, and Supercov measures the Java and Kotlin they
+    // exercise rather than the specification itself. Those files are not in
+    // `files.tests`, so the source sets are asked directly: a module judged to
+    // have no tests gets no listener, and a run with no listener records
+    // nothing at all.
+    for module in modules.keys().cloned().collect::<Vec<_>>() {
+        if workspace.join(&module).join("src/test").is_dir() {
+            modules.insert(module, true);
+        }
+    }
     if modules.is_empty() {
         modules.insert(".".to_owned(), true);
     }
@@ -491,7 +523,10 @@ fn instrument_workspace(
         // product code stores into its array, and a module compiles only its
         // own sources. The class is identical everywhere, and each module's
         // tests fork a JVM that loads exactly one of them.
-        write(&at("main").join("Supercov.java"), RUNTIME_SOURCE)?;
+        write(
+            &at("main").join("Supercov.java"),
+            &runtime_source(probe_count),
+        )?;
         if !module.has_tests {
             continue;
         }

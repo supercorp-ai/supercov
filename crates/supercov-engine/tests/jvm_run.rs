@@ -948,3 +948,92 @@ fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Spock writes its tests in Groovy, which Supercov does not parse: it
+/// measures the Java those specifications exercise, not the specifications
+/// themselves. That makes a module with a Groovy test set look, to a
+/// discovery pass that only reads .java and .kt, like a module with no tests
+/// at all -- so it got no listener, recorded nothing, and the unarmed runtime
+/// then threw on the first instrumented line. Supercov turned a passing suite
+/// into a failing one.
+#[test]
+fn a_spock_specification_is_measured_though_its_tests_are_groovy() {
+    let Some(gradle) = common::tool("gradle") else {
+        common::skip("jvm", "no Gradle found");
+        return;
+    };
+    let fixture = |root: &Path| {
+        write(
+            root,
+            "settings.gradle",
+            "plugins {\n    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'\n}\nrootProject.name = 'demo'\n",
+        );
+        write(
+            root,
+            "build.gradle",
+            // Groovy cannot read the newest JDKs' class files, so the build
+            // asks for one it can; what is under test is Supercov.
+            "plugins {\n    id 'groovy'\n    id 'java'\n}\n\nrepositories { mavenCentral() }\n\njava {\n    toolchain { languageVersion = JavaLanguageVersion.of(21) }\n}\n\ndependencies {\n    testImplementation 'org.spockframework:spock-core:2.3-groovy-4.0'\n    testImplementation 'org.apache.groovy:groovy:4.0.22'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n\ntest { useJUnitPlatform() }\n",
+        );
+        write(root, "src/main/java/app/Calculator.java", SOURCE);
+        write(
+            root,
+            "src/test/groovy/app/CalculatorSpec.groovy",
+            "package app\n\nimport spock.lang.Specification\n\nclass CalculatorSpec extends Specification {\n    def \"loud and large is big\"() {\n        expect:\n        Calculator.size(20, true) == \"BIG\"\n    }\n\n    def \"anything else is small\"() {\n        expect:\n        Calculator.size(1, false) == \"small\"\n    }\n}\n",
+        );
+    };
+    let warmup = temporary("spock-warmup");
+    fixture(&warmup);
+    let resolvable = Command::new(&gradle)
+        .args(["--quiet", "--console=plain", "test"])
+        .current_dir(&warmup)
+        .output()
+        .is_ok_and(|out| out.status.success());
+    std::fs::remove_dir_all(&warmup).ok();
+    if !resolvable {
+        common::skip("jvm", "Gradle cannot build this Spock project here");
+        return;
+    }
+
+    let root = temporary("spock");
+    fixture(&root);
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![
+            gradle.display().to_string(),
+            "--console=plain".into(),
+            "test".into(),
+        ],
+        run_id: "run-jvm-spock".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    // The suite passes, which is the part that matters most: an unmeasurable
+    // test set must cost coverage, never correctness.
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.tests, 2);
+
+    let records = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .filter(|entry| entry.path.ends_with("mcdc.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .collect::<Vec<_>>();
+    // Under the sentence its author wrote, as Spock reports it.
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("CalculatorSpec#loud and large is big")),
+        "{records:?}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

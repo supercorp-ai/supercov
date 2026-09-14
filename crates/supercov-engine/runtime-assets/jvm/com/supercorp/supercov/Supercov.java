@@ -28,10 +28,23 @@ public final class Supercov {
   public static final int NO_DECISION = -1;
 
   /**
+   * How many probes the instrumented sources hold, substituted by Supercov
+   * when it writes this file into a workspace.
+   *
+   * <p>The array has to be the right size before a single line of product code
+   * runs, because a probe is a bare store and nothing checks its bounds -- that
+   * is what makes it cost one instruction. If arming were the only thing that
+   * sized it, any run where the listener did not start would not merely lose
+   * coverage: the first instrumented line would throw, and Supercov would have
+   * turned a passing suite into a failing one.
+   */
+  static final int PROBE_COUNT = 0; // supercov:probe-count
+
+  /**
    * Per-probe bitmasks: bit 0 for false, bit 1 for true. A point or a branch
    * alternative only ever sets bit 1.
    */
-  public static int[] HITS = new int[0];
+  public static int[] HITS = new int[PROBE_COUNT];
 
   private static int[] global = new int[0];
   private static long[] evaluating = new long[0];
@@ -84,6 +97,8 @@ public final class Supercov {
     if (armed && HITS.length == probes && widths.length == conditions.length) {
       return;
     }
+    // Already the right size from PROBE_COUNT in the ordinary case; this is
+    // what makes a differently-sized run, or a second one, start clean.
     armed = true;
     HITS = new int[probes];
     global = new int[probes];
