@@ -433,10 +433,18 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
 /// since 16, and `x != null` guards a great deal of Kotlin.
 fn narrows_a_type(node: Node, source: &str, language: JvmLanguage) -> bool {
     let narrows = match language {
-        // A binding gives the pattern a name; without one there is nothing to
-        // scope and the condition is an ordinary value.
+        // A binding gives the pattern a name to scope; without one the
+        // condition is an ordinary value. Java spells a binding two ways: a
+        // trailing name (`o instanceof String s`) and a record pattern, which
+        // deconstructs into names of its own (`o instanceof R(int a)`) and
+        // carries no name field at all.
         JvmLanguage::Java => {
-            node.kind() == "instanceof_expression" && node.child_by_field_name("name").is_some()
+            node.kind() == "instanceof_expression"
+                && (node.child_by_field_name("name").is_some() || {
+                    let mut cursor = node.walk();
+                    node.children(&mut cursor)
+                        .any(|child| child.kind().ends_with("_pattern"))
+                })
         }
         JvmLanguage::Kotlin => {
             node.kind() == "is_expression"

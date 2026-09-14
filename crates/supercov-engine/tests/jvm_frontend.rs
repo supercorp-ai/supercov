@@ -8,7 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use supercov_engine::jvm_instrumenter::{JvmLanguage, build_jvm_obligations, rewrite};
+use supercov_engine::jvm_instrumenter::{
+    JvmLanguage, RUNTIME_CLASS, build_jvm_obligations, rewrite,
+};
 use supercov_engine::owned_evidence::{
     OwnedRunInputs, OwnedTestOutcome, build_frontend_run, jvm_coverage_model, jvm_declaration,
     read_evidence,
@@ -918,12 +920,22 @@ fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
     };
     let root = temporary("narrowing");
     const NARROWING: &str = r#"public class Narrowing {
+    public record Pair(int a, int b) {}
+
     public static String describe(Object o) {
         if (o instanceof String s) {
             return "string:" + s.length();
         }
         if (o instanceof Integer i && i > 2) {
             return "big:" + i;
+        }
+        // A record pattern binds without a name field of its own.
+        if (o instanceof Pair(int a, int b)) {
+            return "pair:" + (a + b);
+        }
+        // And a plain instanceof binds nothing, so it is measured in full.
+        if (o instanceof Double) {
+            return "double";
         }
         return "other";
     }
@@ -954,9 +966,19 @@ fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
             .iter()
             .filter(|branch| branch.kind == "if")
             .count(),
-        2,
+        4,
         "{:?}",
         obligations.manifest.branches
+    );
+    // The one that binds nothing keeps its condition observed, so the
+    // exception stays as narrow as the language requires.
+    assert!(
+        instrumented.contains("o instanceof Double"),
+        "{instrumented}"
+    );
+    assert!(
+        instrumented.contains(&format!("{RUNTIME_CLASS}.b(")),
+        "a condition that narrows nothing is still wrapped:\n{instrumented}"
     );
     // The `if` with no else gains one, holding nothing but the probe.
     assert!(instrumented.contains("else {"), "{instrumented}");
@@ -981,6 +1003,8 @@ fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
         // Exactly what the uninstrumented program answers.
         if (!"string:2".equals(Narrowing.describe("hi"))) { throw new AssertionError("string"); }
         if (!"big:7".equals(Narrowing.describe(7))) { throw new AssertionError("big"); }
+        if (!"pair:5".equals(Narrowing.describe(new Narrowing.Pair(2, 3)))) { throw new AssertionError("pair"); }
+        if (!"double".equals(Narrowing.describe(1.5))) { throw new AssertionError("double"); }
         if (!"other".equals(Narrowing.describe(1))) { throw new AssertionError("other"); }
         System.out.println("ok");
     }
