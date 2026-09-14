@@ -130,16 +130,19 @@ fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reach
         common::skip("jvm", "no Maven found");
         return;
     };
-    let warmup = temporary("maven-warmup");
-    if !maven_can_resolve(&mvn, &warmup) {
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("maven-warmup");
+        let built = maven_can_resolve(&mvn, &warmup);
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
+    if !resolvable {
         common::skip(
             "jvm",
             "Maven cannot resolve this project's dependencies here",
         );
-        std::fs::remove_dir_all(warmup).ok();
         return;
     }
-    std::fs::remove_dir_all(warmup).ok();
 
     let root = temporary("maven");
     fixture(&root);
@@ -259,14 +262,17 @@ fn a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reac
         common::skip("jvm", "no Gradle found");
         return;
     };
-    let warmup = temporary("gradle-warmup");
-    gradle_fixture(&warmup);
-    let resolvable = Command::new(&gradle)
-        .args(["--quiet", "--console=plain", "test"])
-        .current_dir(&warmup)
-        .output()
-        .is_ok_and(|out| out.status.success());
-    std::fs::remove_dir_all(&warmup).ok();
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("gradle-warmup");
+        gradle_fixture(&warmup);
+        let built = Command::new(&gradle)
+            .args(["--quiet", "--console=plain", "test"])
+            .current_dir(&warmup)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
     if !resolvable {
         common::skip(
             "jvm",
@@ -383,14 +389,17 @@ fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
         common::skip("jvm", "no Maven found");
         return;
     };
-    let warmup = temporary("testng-warmup");
-    testng_fixture(&warmup);
-    let resolvable = Command::new(&mvn)
-        .args(["-q", "test"])
-        .current_dir(&warmup)
-        .output()
-        .is_ok_and(|out| out.status.success());
-    std::fs::remove_dir_all(&warmup).ok();
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("testng-warmup");
+        testng_fixture(&warmup);
+        let built = Command::new(&mvn)
+            .args(["-q", "test"])
+            .current_dir(&warmup)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
     if !resolvable {
         common::skip("jvm", "Maven cannot resolve TestNG here");
         return;
@@ -540,14 +549,17 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
         common::skip("jvm", "no Gradle found");
         return;
     };
-    let warmup = temporary("kotlin-warmup");
-    kotlin_fixture(&warmup);
-    let resolvable = Command::new(&gradle)
-        .args(["--quiet", "--console=plain", "test"])
-        .current_dir(&warmup)
-        .output()
-        .is_ok_and(|out| out.status.success());
-    std::fs::remove_dir_all(&warmup).ok();
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("kotlin-warmup");
+        kotlin_fixture(&warmup);
+        let built = Command::new(&gradle)
+            .args(["--quiet", "--console=plain", "test"])
+            .current_dir(&warmup)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
     if !resolvable {
         common::skip("jvm", "Gradle cannot build this Kotlin project here");
         return;
@@ -679,14 +691,17 @@ fn every_module_of_a_multi_module_build_is_measured_and_merged() {
         common::skip("jvm", "no Maven found");
         return;
     };
-    let warmup = temporary("multi-warmup");
-    multi_module_maven(&warmup);
-    let resolvable = Command::new(&mvn)
-        .args(["-q", "test"])
-        .current_dir(&warmup)
-        .output()
-        .is_ok_and(|out| out.status.success());
-    std::fs::remove_dir_all(&warmup).ok();
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("multi-warmup");
+        multi_module_maven(&warmup);
+        let built = Command::new(&mvn)
+            .args(["-q", "test"])
+            .current_dir(&warmup)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
     if !resolvable {
         common::skip(
             "jvm",
@@ -806,14 +821,17 @@ fn a_multi_project_gradle_build_reaches_every_subproject() {
         common::skip("jvm", "no Gradle found");
         return;
     };
-    let warmup = temporary("multi-gradle-warmup");
-    multi_project_gradle(&warmup);
-    let resolvable = Command::new(&gradle)
-        .args(["--quiet", "--console=plain", "test"])
-        .current_dir(&warmup)
-        .output()
-        .is_ok_and(|out| out.status.success());
-    std::fs::remove_dir_all(&warmup).ok();
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("multi-gradle-warmup");
+        multi_project_gradle(&warmup);
+        let built = Command::new(&gradle)
+            .args(["--quiet", "--console=plain", "test"])
+            .current_dir(&warmup)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
     if !resolvable {
         common::skip(
             "jvm",
@@ -875,14 +893,17 @@ fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
             "package app\n\nimport io.kotest.core.spec.style.StringSpec\nimport io.kotest.matchers.shouldBe\n\nclass CalculatorSpec : StringSpec({\n    \"loud and large is big\" {\n        Calculator.size(20, true) shouldBe \"BIG\"\n    }\n    \"anything else is small\" {\n        Calculator.size(1, false) shouldBe \"small\"\n    }\n})\n",
         );
     };
-    let warmup = temporary("kotest-warmup");
-    fixture(&warmup);
-    let resolvable = Command::new(&gradle)
-        .args(["--quiet", "--console=plain", "test"])
-        .current_dir(&warmup)
-        .output()
-        .is_ok_and(|out| out.status.success());
-    std::fs::remove_dir_all(&warmup).ok();
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("kotest-warmup");
+        fixture(&warmup);
+        let built = Command::new(&gradle)
+            .args(["--quiet", "--console=plain", "test"])
+            .current_dir(&warmup)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
     if !resolvable {
         common::skip("jvm", "Gradle cannot build this Kotest project here");
         return;
@@ -984,14 +1005,17 @@ fn a_spock_specification_is_measured_though_its_tests_are_groovy() {
             "package app\n\nimport spock.lang.Specification\n\nclass CalculatorSpec extends Specification {\n    def \"loud and large is big\"() {\n        expect:\n        Calculator.size(20, true) == \"BIG\"\n    }\n\n    def \"anything else is small\"() {\n        expect:\n        Calculator.size(1, false) == \"small\"\n    }\n}\n",
         );
     };
-    let warmup = temporary("spock-warmup");
-    fixture(&warmup);
-    let resolvable = Command::new(&gradle)
-        .args(["--quiet", "--console=plain", "test"])
-        .current_dir(&warmup)
-        .output()
-        .is_ok_and(|out| out.status.success());
-    std::fs::remove_dir_all(&warmup).ok();
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("spock-warmup");
+        fixture(&warmup);
+        let built = Command::new(&gradle)
+            .args(["--quiet", "--console=plain", "test"])
+            .current_dir(&warmup)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
     if !resolvable {
         common::skip("jvm", "Gradle cannot build this Spock project here");
         return;

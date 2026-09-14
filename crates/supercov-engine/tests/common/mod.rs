@@ -61,3 +61,22 @@ pub fn tool(name: &str) -> Option<std::path::PathBuf> {
     }
     None
 }
+
+/// Whether the toolchain can build the fixture, deciding it by trying only
+/// when the answer could change what happens.
+///
+/// These tests build the fixture once to learn whether its dependencies
+/// resolve here, and skip when they do not — a cold cache with no network is a
+/// real situation on someone's laptop. In CI it is not: `SUPERCOV_REQUIRE_*`
+/// says skipping is forbidden, so a fixture that cannot build must fail the
+/// job whether it is discovered now or a moment later. Asking anyway doubles
+/// every Maven and Gradle invocation in the suite for an answer that cannot be
+/// acted on.
+#[allow(dead_code)]
+pub fn resolvable(language: &str, probe: impl FnOnce() -> bool) -> bool {
+    let variable = format!("SUPERCOV_REQUIRE_{}", language.to_ascii_uppercase());
+    if std::env::var(&variable).as_deref() == Ok("1") {
+        return true;
+    }
+    probe()
+}
