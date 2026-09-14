@@ -15,6 +15,7 @@ use crate::project_discovery::expanded_command;
 #[serde(rename_all = "lowercase")]
 pub enum FrontendLanguage {
     Go,
+    Jvm,
     JavaScript,
     Python,
     Ruby,
@@ -86,6 +87,20 @@ fn supported_by_command(command_tokens: &[String]) -> Vec<(FrontendLanguage, &'s
         launched.push((
             FrontendLanguage::Go,
             "the expanded test command launches Go's test pipeline",
+        ));
+    }
+
+    // Maven and Gradle name themselves unambiguously, so the word is enough;
+    // a wrapper script is how most projects invoke Gradle.
+    let jvm_command = command_tokens.iter().any(|token| {
+        matches!(token.as_str(), "mvn" | "mvnw" | "maven" | "gradle")
+            || token.ends_with("gradlew")
+            || token.ends_with("/mvnw")
+    });
+    if jvm_command {
+        launched.push((
+            FrontendLanguage::Jvm,
+            "the expanded test command launches Maven or Gradle",
         ));
     }
 
@@ -164,6 +179,13 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
                 "go.mod exists and the test command is opaque",
             ),
             (
+                FrontendLanguage::Jvm,
+                ["pom.xml", "build.gradle", "build.gradle.kts"]
+                    .iter()
+                    .any(|name| regular_file(&root.join(name))),
+                "a Maven or Gradle build file exists and the test command is opaque",
+            ),
+            (
                 FrontendLanguage::Rust,
                 regular_file(&root.join("Cargo.toml")),
                 "Cargo.toml exists and the test command is opaque",
@@ -240,7 +262,6 @@ pub fn detect_unsupported_ecosystem(
     let expanded = expanded_command(root, command);
     let command_tokens = tokens(&expanded);
     let by_command: &[(&str, &[&str])] = &[
-        ("Java/Kotlin", &["mvn", "maven", "gradle", "gradlew"]),
         ("PHP", &["phpunit", "pest"]),
         (".NET", &["dotnet"]),
         ("Elixir", &["mix"]),
@@ -267,10 +288,6 @@ pub fn detect_unsupported_ecosystem(
         }
     }
     let by_manifest: &[(&str, &[&str])] = &[
-        (
-            "Java/Kotlin",
-            &["pom.xml", "build.gradle", "build.gradle.kts"],
-        ),
         ("PHP", &["composer.json"]),
         ("Elixir", &["mix.exs"]),
         ("Swift", &["Package.swift"]),
@@ -378,6 +395,26 @@ mod tests {
             detect_unsupported_ecosystem(&root, &["make".into(), "test".into()]).unwrap();
         assert_eq!(ecosystem.language, "Swift");
         assert_eq!(ecosystem.evidence, "Package.swift is present");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn maven_and_gradle_projects_select_the_jvm_frontend() {
+        let root = fixture("jvm");
+        fs::write(root.join("pom.xml"), "<project></project>\n").unwrap();
+        for command in [
+            vec!["mvn".to_string(), "test".into()],
+            vec!["./mvnw".into(), "verify".into()],
+            // A wrapper script is how most projects invoke Gradle.
+            vec!["./gradlew".into(), "test".into()],
+            vec!["gradle".into(), "check".into()],
+            // An opaque wrapper reveals nothing, so the build file decides.
+            vec!["make".into(), "test".into()],
+        ] {
+            let detected = detect_frontends(&root, &command);
+            assert_eq!(detected.frontends, [FrontendLanguage::Jvm], "{command:?}");
+        }
+        assert!(detect_unsupported_ecosystem(&root, &["make".into(), "test".into()]).is_none());
         fs::remove_dir_all(root).unwrap();
     }
 

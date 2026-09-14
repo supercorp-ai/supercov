@@ -63,6 +63,10 @@ pub struct PreparedJvmProject {
     pub manifest: CoverageManifest,
     pub probes: std::collections::BTreeMap<u64, GoProbe>,
     pub decision_widths: Vec<u8>,
+    /// Each measured source and what it becomes once instrumented, in
+    /// discovery order. Carried rather than recomputed: preparing the
+    /// obligations already parsed and rewrote every file.
+    pub instrumented: Vec<(String, String)>,
     /// Files that did not parse, with the reason. Reported rather than skipped:
     /// a hole in the denominator nobody is told about is a wrong number.
     pub unparseable: Vec<(String, String)>,
@@ -217,6 +221,7 @@ pub fn prepare_jvm_project(root: &Path) -> Result<PreparedJvmProject, String> {
     };
     let mut probes = std::collections::BTreeMap::new();
     let mut widths = Vec::new();
+    let mut instrumented = Vec::new();
     let mut unparseable = Vec::new();
     let mut next_probe = 0_u64;
     let mut next_decision = 0_u32;
@@ -245,6 +250,10 @@ pub fn prepare_jvm_project(root: &Path) -> Result<PreparedJvmProject, String> {
                     .extend(obligations.manifest.limitations);
                 probes.extend(obligations.probes);
                 widths.extend(obligations.decision_widths);
+                instrumented.push((
+                    relative.clone(),
+                    crate::jvm_instrumenter::rewrite(&source, &obligations.edits),
+                ));
             }
             Err(error) => unparseable.push((relative.clone(), error.to_string())),
         }
@@ -255,6 +264,7 @@ pub fn prepare_jvm_project(root: &Path) -> Result<PreparedJvmProject, String> {
         manifest,
         probes,
         decision_widths: widths,
+        instrumented,
         unparseable,
     })
 }
