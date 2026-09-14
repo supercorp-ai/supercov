@@ -928,8 +928,6 @@ fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
     };
     let root = temporary("narrowing");
     const NARROWING: &str = r#"public class Narrowing {
-    public record Pair(int a, int b) {}
-
     public static String describe(Object o) {
         if (o instanceof String s) {
             return "string:" + s.length();
@@ -937,11 +935,7 @@ fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
         if (o instanceof Integer i && i > 2) {
             return "big:" + i;
         }
-        // A record pattern binds without a name field of its own.
-        if (o instanceof Pair(int a, int b)) {
-            return "pair:" + (a + b);
-        }
-        // And a plain instanceof binds nothing, so it is measured in full.
+        // A plain instanceof binds nothing, so it is measured in full.
         if (o instanceof Double) {
             return "double";
         }
@@ -974,7 +968,7 @@ fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
             .iter()
             .filter(|branch| branch.kind == "if")
             .count(),
-        4,
+        3,
         "{:?}",
         obligations.manifest.branches
     );
@@ -1011,7 +1005,6 @@ fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
         // Exactly what the uninstrumented program answers.
         if (!"string:2".equals(Narrowing.describe("hi"))) { throw new AssertionError("string"); }
         if (!"big:7".equals(Narrowing.describe(7))) { throw new AssertionError("big"); }
-        if (!"pair:5".equals(Narrowing.describe(new Narrowing.Pair(2, 3)))) { throw new AssertionError("pair"); }
         if (!"double".equals(Narrowing.describe(1.5))) { throw new AssertionError("double"); }
         if (!"other".equals(Narrowing.describe(1))) { throw new AssertionError("other"); }
         System.out.println("ok");
@@ -1150,6 +1143,122 @@ object Smart {
     );
     let compile = Command::new(&javac)
         .args(["-cp", ".", "-d", ".", "Main.java"])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&java)
+        .args(["-cp", ".", "Main"])
+        .current_dir(&root)
+        .output()
+        .expect("java");
+    assert!(
+        run.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "ok");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A record deconstruction pattern binds names of its own and carries no
+/// `name` field at all, so the check for one missed it and the condition was
+/// wrapped — which is how RxJava stopped compiling. Java 21, so an older
+/// compiler skips the case it cannot express while still running every other
+/// one: a toolchain that is present but older is not a toolchain that is
+/// missing.
+#[test]
+fn a_record_pattern_is_a_binding_too() {
+    let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
+        common::skip("jvm", "no JDK found");
+        return;
+    };
+    match common::java_release(&javac) {
+        Some(release) if release >= 21 => {}
+        Some(release) => {
+            eprintln!("[jvm] skipped: record patterns need Java 21, this compiler is {release}");
+            return;
+        }
+        None => {
+            eprintln!("[jvm] skipped: could not read the compiler's release");
+            return;
+        }
+    }
+    const SOURCE: &str = r#"public class Records {
+    public record Pair(int a, int b) {}
+
+    public static String describe(Object o) {
+        if (o instanceof Pair(int a, int b)) {
+            return "pair:" + (a + b);
+        }
+        return "other";
+    }
+}
+"#;
+    let root = temporary("record-pattern");
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Records.java",
+        SOURCE,
+        JvmLanguage::Java,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
+    let instrumented = rewrite(SOURCE, &obligations.edits);
+    assert!(
+        instrumented.contains("if (o instanceof Pair(int a, int b)) {"),
+        "the pattern must survive untouched:\n{instrumented}"
+    );
+    assert_eq!(
+        obligations
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "if")
+            .count(),
+        1,
+        "and still be measured from its arms"
+    );
+
+    write(&root, "Records.java", &instrumented);
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("runtime-assets/jvm/com/supercorp/supercov/Supercov.java");
+    let probes = obligations.probes.len() + 1;
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime).expect("runtime").replace(
+            "static final int PROBE_COUNT = 0; // supercov:probe-count",
+            &format!("static final int PROBE_COUNT = {probes}; // supercov:probe-count"),
+        ),
+    );
+    write(
+        &root,
+        "Main.java",
+        r#"public class Main {
+    public static void main(String[] args) {
+        if (!"pair:5".equals(Records.describe(new Records.Pair(2, 3)))) { throw new AssertionError("pair"); }
+        if (!"other".equals(Records.describe(1))) { throw new AssertionError("other"); }
+        System.out.println("ok");
+    }
+}
+"#,
+    );
+    let compile = Command::new(&javac)
+        .args([
+            "-d",
+            ".",
+            "com/supercorp/supercov/Supercov.java",
+            "Records.java",
+            "Main.java",
+        ])
         .current_dir(&root)
         .output()
         .expect("javac");

@@ -91,3 +91,25 @@ pub fn resolvable(language: &str, probe: impl FnOnce() -> bool) -> bool {
 pub fn classpath(entries: &[&str]) -> String {
     entries.join(if cfg!(windows) { ";" } else { ":" })
 }
+
+/// The major Java release a compiler supports, from its own `-version`.
+///
+/// A fixture may need a language feature older compilers do not have — record
+/// patterns are Java 21 — and that is not the same as the toolchain being
+/// absent. The require flag exists to catch a missing toolchain; a present one
+/// that is simply older should skip the cases it cannot express and run the
+/// rest.
+#[allow(dead_code)]
+pub fn java_release(javac: &std::path::Path) -> Option<u32> {
+    let output = std::process::Command::new(javac)
+        .arg("-version")
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    text.split_whitespace()
+        .find_map(|word| word.split('.').next()?.parse::<u32>().ok())
+}

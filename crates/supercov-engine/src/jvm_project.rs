@@ -121,6 +121,18 @@ fn role(relative: &str) -> Option<&'static str> {
         return match parts.next() {
             Some("test") | Some("integrationTest") | Some("testFixtures") => Some("test"),
             Some("main") => Some("main"),
+            // A Kotlin Multiplatform project names its source sets by target:
+            // `jvmMain` builds for the JVM and nothing else, so it is measured
+            // like any other main. `commonMain` builds for every target the
+            // project declares, and a probe there is a call to a runtime that
+            // exists only on the JVM -- so it is measured only where the JVM
+            // is the only target, which `discover_jvm_files` decides.
+            Some("jvmMain") => Some("main"),
+            Some("commonMain") => Some("common"),
+            // Tests are never instrumented on the JVM -- attribution comes
+            // from the framework's own lifecycle -- so recognising a test
+            // source set only decides whether a module has tests at all.
+            Some(set) if set.ends_with("Test") => Some("test"),
             Some(_) => Some("other"),
             None => None,
         };
@@ -128,7 +140,42 @@ fn role(relative: &str) -> Option<&'static str> {
     None
 }
 
+/// Whether the JVM is the only target this build produces.
+///
+/// A Kotlin Multiplatform build compiles `commonMain` for every target it
+/// declares. Instrumenting it inserts a call to a runtime that exists on the
+/// JVM and nowhere else, so where anything but the JVM is declared that source
+/// is left alone: losing its coverage is a cost, and breaking the build that
+/// produces the other targets is not a trade worth making.
+fn targets_only_the_jvm(root: &Path) -> bool {
+    let mut text = String::new();
+    for name in ["build.gradle.kts", "build.gradle", "pom.xml"] {
+        if let Ok(own) = std::fs::read_to_string(root.join(name)) {
+            text.push_str(&own);
+            text.push('\n');
+        }
+    }
+    ![
+        "js(",
+        "wasmJs(",
+        "wasmWasi(",
+        "linuxX64(",
+        "macosX64(",
+        "macosArm64(",
+        "mingwX64(",
+        "iosArm64(",
+        "iosX64(",
+        "iosSimulatorArm64(",
+        "watchos",
+        "tvos",
+        "androidNativeArm64(",
+    ]
+    .iter()
+    .any(|target| text.contains(target))
+}
+
 fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), String> {
+    let jvm_only = targets_only_the_jvm(root);
     let entries = std::fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     let mut sorted = entries
@@ -175,6 +222,11 @@ fn walk(root: &Path, directory: &Path, files: &mut JvmFiles) -> Result<(), Strin
         match role(&relative) {
             Some("main") => files.sources.push((relative, language)),
             Some("test") => files.tests.push((relative, language)),
+            Some("common") if jvm_only => files.sources.push((relative, language)),
+            Some("common") => files.excluded.push((
+                relative,
+                "shared with a target that has no Supercov runtime",
+            )),
             Some(other) => files.excluded.push((
                 relative,
                 if other == "other" {
@@ -425,6 +477,79 @@ mod tests {
         let root = fixture("empty");
         write(&root, "pom.xml", "<project/>");
         assert!(prepare_jvm_project(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_multiplatform_layout_is_measured_where_the_jvm_is_the_only_target() {
+        // Kotlin Multiplatform names its source sets by target, so `src/main`
+        // never appears and the whole project used to be invisible. jvmMain
+        // builds for the JVM and nothing else, so it is measured like any
+        // other main; commonMain builds for every target declared, and a probe
+        // there calls a runtime that exists only on the JVM.
+        let root = fixture("kmp-jvm");
+        fs::write(root.join("build.gradle.kts"), "kotlin {\n    jvm()\n}\n").unwrap();
+        for (path, body) in [
+            ("src/commonMain/kotlin/Shared.kt", "fun shared() {}"),
+            ("src/jvmMain/kotlin/Jvm.kt", "fun onlyJvm() {}"),
+            ("src/commonTest/kotlin/SharedTest.kt", "fun sharedTest() {}"),
+            ("src/jvmTest/kotlin/JvmTest.kt", "fun jvmTest() {}"),
+        ] {
+            let full = root.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, body).unwrap();
+        }
+        let files = discover_jvm_files(&root).expect("discovery");
+        assert_eq!(
+            files
+                .sources
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "src/commonMain/kotlin/Shared.kt",
+                "src/jvmMain/kotlin/Jvm.kt"
+            ]
+        );
+        assert_eq!(
+            files
+                .tests
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "src/commonTest/kotlin/SharedTest.kt",
+                "src/jvmTest/kotlin/JvmTest.kt"
+            ]
+        );
+
+        // Declare a second target and the shared source is left alone, because
+        // instrumenting it would stop the build that produces that target.
+        // Losing its coverage costs a measurement; breaking the build costs
+        // the thing being measured.
+        fs::write(
+            root.join("build.gradle.kts"),
+            "kotlin {\n    jvm()\n    js(IR) { nodejs() }\n}\n",
+        )
+        .unwrap();
+        let files = discover_jvm_files(&root).expect("discovery");
+        assert_eq!(
+            files
+                .sources
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>(),
+            ["src/jvmMain/kotlin/Jvm.kt"]
+        );
+        assert!(
+            files
+                .excluded
+                .iter()
+                .any(|(path, reason)| path == "src/commonMain/kotlin/Shared.kt"
+                    && *reason == "shared with a target that has no Supercov runtime"),
+            "{:?}",
+            files.excluded
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
