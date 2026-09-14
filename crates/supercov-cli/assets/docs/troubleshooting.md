@@ -75,6 +75,33 @@ Its lines, methods and simple branches stay measured; everything that needs a
 probe is declared as a measurement limit for that file. Please report the file,
 since Supercov aims to instrument every Ruby source correctly.
 
+## A test that reads your source fails under Supercov
+
+A test that opens your source files and asserts on their text sees the probes,
+because that is what instrumentation is. RxJava has one: `CheckCatchThrowIfFatal`
+reads every `catch` block in the project and requires the first statement to be
+`Exceptions.throwIfFatal`, and under Supercov the first statement is a probe. An
+architecture or convention test that scans bytecode or source can fail the same
+way.
+
+Nothing is wrong with the measurement and nothing your code does has changed --
+the run still records every test that ran -- but the command exited non-zero, so
+its coverage is reported as diagnostic and cannot gate. Leave that one test out
+of the command you give Supercov. Surefire excludes by name:
+
+```sh supercov
+npx supercov -- mvn test -Dtest='!CheckCatchThrowIfFatalTest'
+```
+
+Gradle's `--tests` only includes, so exclude it in your build file instead --
+Supercov measures the copy, and your own build is unaffected by what it runs:
+
+```groovy
+test { filter { excludeTestsMatching "*CheckCatchThrowIfFatal*" } }
+```
+
+Either way your own build still runs the test, against your own sources.
+
 ## A run is marked stale
 
 A stored run remains valid history, but it stops describing the current

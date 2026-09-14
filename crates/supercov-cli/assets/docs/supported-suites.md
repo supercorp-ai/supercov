@@ -307,6 +307,25 @@ rather than reporting numbers nobody can trust: statements and branches still
 count run-wide, and condition coverage is dropped, because concurrent
 evaluations corrupt the state it is computed from.
 
+Some conditions are read by the compiler as well as evaluated at runtime, and
+those Supercov leaves exactly as written. `x instanceof String s`, a record
+deconstruction pattern, and Kotlin's `x is String` or `x != null` all narrow a
+type for the code beneath them; wrapping such a condition to observe its
+operands would take the narrowing away and the code would stop compiling. An
+`if` is still measured — which way it went is recorded from inside its arms
+instead — but it carries no condition vectors, so it contributes no MC/DC
+obligation. A loop is a harder case: it has one arm, and no place to record an
+exit a `break` would not also reach, so a loop whose condition narrows a type
+carries no branch obligation at all rather than one no test could close. The
+same goes for a loop over a constant, `while (true)`, which can only go one
+way. A Kotlin `contract { }` has to stay the first statement of its function,
+so the probe that records the function being entered is written after it.
+
+Every one of these is named in the run: ask for `supercov runs latest
+limitations` and each appears with its file, its line, and why it was left
+alone. A source file the parser cannot read is declared there too, so a hole in
+the denominator stays visible after the build log is gone.
+
 For assertion maps, forms spelled `assertSomething`, `assertThat` or `fail` are
 inventoried, which covers JUnit, TestNG, AssertJ, Hamcrest and kotlin.test.
 Kotest's infix matchers are not.
