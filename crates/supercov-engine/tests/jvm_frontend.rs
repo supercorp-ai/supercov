@@ -8,8 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use supercov_engine::coverage_analysis::PointKind;
 use supercov_engine::jvm_instrumenter::{
-    JvmLanguage, RUNTIME_CLASS, build_jvm_obligations, rewrite,
+    JvmFileObligations, JvmLanguage, RUNTIME_CLASS, build_jvm_obligations, rewrite,
 };
 use supercov_engine::owned_evidence::{
     OwnedRunInputs, OwnedTestOutcome, build_frontend_run, jvm_coverage_model, jvm_declaration,
@@ -1279,5 +1280,347 @@ fn a_record_pattern_is_a_binding_too() {
         String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "ok");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// An unbraced `if` with no `else`, whose condition narrows a type, wants two
+/// edits at exactly the same offset: the brace that closes the arm Supercov
+/// braced, and the `else` Supercov synthesised to catch the other outcome. An
+/// `if` with no `else` ends precisely where its consequence ends, so the two
+/// offsets coincide -- and in the wrong order the `else` lands *inside* the
+/// arm, which is not Kotlin. moshi is written in this style throughout, and
+/// four of its files stopped compiling.
+#[test]
+fn a_synthesised_else_lands_outside_the_arm_it_follows() {
+    let root = temporary("one-line-if");
+    const TERSE: &str = r#"package app
+
+object Terse {
+    fun length(value: String?): Int {
+        @Suppress("UNUSED_EXPRESSION") if (value != null) return value.length
+        return -1
+    }
+}
+"#;
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Terse.kt",
+        TERSE,
+        JvmLanguage::Kotlin,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
+    let instrumented = rewrite(TERSE, &obligations.edits);
+    let arm = instrumented
+        .lines()
+        .find(|line| line.contains("if (value != null)"))
+        .expect("the guard survives");
+    assert!(
+        arm.find("else").expect("an else for the other outcome")
+            > arm.rfind("return value.length").expect("the arm itself"),
+        "the else follows the arm rather than sitting inside it: {arm}"
+    );
+
+    let (Some(kotlinc), Some(java)) = (kotlinc(), common::tool("java")) else {
+        common::skip("jvm", "no Kotlin toolchain found");
+        return;
+    };
+    let Some(javac) = common::tool("javac") else {
+        common::skip("jvm", "no JDK found");
+        return;
+    };
+    write(&root, "Terse.kt", &instrumented);
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("runtime-assets/jvm/com/supercorp/supercov/Supercov.java");
+    let probes = obligations.probes.len() + 1;
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime).expect("runtime").replace(
+            "static final int PROBE_COUNT = 0; // supercov:probe-count",
+            &format!("static final int PROBE_COUNT = {probes}; // supercov:probe-count"),
+        ),
+    );
+    let compile = Command::new(&javac)
+        .args(["-d", ".", "com/supercorp/supercov/Supercov.java"])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let compile = Command::new(&kotlinc)
+        .args(["-cp", ".", "Terse.kt", "-d", "."])
+        .current_dir(&root)
+        .output()
+        .expect("kotlinc");
+    assert!(
+        compile.status.success(),
+        "a one-line if must still compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    write(
+        &root,
+        "Main.java",
+        r#"public class Main {
+    public static void main(String[] args) {
+        if (app.Terse.INSTANCE.length("hi") != 2) { throw new AssertionError("present"); }
+        if (app.Terse.INSTANCE.length(null) != -1) { throw new AssertionError("absent"); }
+        System.out.println("ok");
+    }
+}
+"#,
+    );
+    let compile = Command::new(&javac)
+        .args(["-cp", ".", "-d", ".", "Main.java"])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&java)
+        .args(["-cp", ".", "Main"])
+        .current_dir(&root)
+        .output()
+        .expect("java");
+    assert!(
+        run.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "ok");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Compile a Kotlin file that has already been instrumented, and say what the
+/// compiler said when it refuses.
+fn kotlin_still_compiles(name: &str, source: &str, obligations: &JvmFileObligations) -> bool {
+    let Some(kotlinc) = kotlinc() else {
+        common::skip("jvm", "no Kotlin toolchain found");
+        return false;
+    };
+    let Some(javac) = common::tool("javac") else {
+        common::skip("jvm", "no JDK found");
+        return false;
+    };
+    let root = temporary(name);
+    write(&root, &format!("{name}.kt"), source);
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("runtime-assets/jvm/com/supercorp/supercov/Supercov.java");
+    let probes = obligations.probes.len() + 1;
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime).expect("runtime").replace(
+            "static final int PROBE_COUNT = 0; // supercov:probe-count",
+            &format!("static final int PROBE_COUNT = {probes}; // supercov:probe-count"),
+        ),
+    );
+    let compile = Command::new(&javac)
+        .args(["-d", ".", "com/supercorp/supercov/Supercov.java"])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let compile = Command::new(&kotlinc)
+        .args(["-cp", ".", &format!("{name}.kt"), "-d", "."])
+        .current_dir(&root)
+        .output()
+        .expect("kotlinc");
+    assert!(
+        compile.status.success(),
+        "instrumented Kotlin must still compile:\n{}\n--- source ---\n{source}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    std::fs::remove_dir_all(root).ok();
+    true
+}
+
+/// `while (node != null)` narrows `node` for the whole loop body, exactly as an
+/// `if` would. The `if` path knew that; the loop path did not, and wrapped the
+/// condition anyway -- which cost moshi's `LinkedHashTreeMap` eleven errors of
+/// the form "Only safe (?.) calls are allowed on a nullable receiver".
+///
+/// A loop cannot borrow the `if` repair either. An `if` records both outcomes
+/// from its two arms; a loop has one arm, and no place to record the exit that
+/// a `break` would not also reach. So it records no branch at all rather than
+/// one no test could ever close, and says so in the manifest.
+#[test]
+fn a_loop_condition_that_narrows_a_type_is_left_alone() {
+    const WALK: &str = r#"package app
+
+class Node(val value: Int, val next: Node?)
+
+object Walk {
+    fun total(head: Node?): Int {
+        var node = head
+        var sum = 0
+        while (node != null) {
+            sum += node.value
+            node = node.next
+        }
+        return sum
+    }
+}
+"#;
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Walk.kt",
+        WALK,
+        JvmLanguage::Kotlin,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
+    let instrumented = rewrite(WALK, &obligations.edits);
+    assert!(
+        instrumented.contains("while (node != null) {"),
+        "the condition is untouched: {instrumented}"
+    );
+    assert!(
+        !obligations
+            .manifest
+            .branches
+            .iter()
+            .any(|branch| branch.kind == "loop"),
+        "and carries no loop obligation no test could close: {:?}",
+        obligations.manifest.branches
+    );
+    assert!(
+        obligations
+            .manifest
+            .limitations
+            .iter()
+            .any(|limitation| limitation["kind"] == "condition-narrows-a-type"),
+        "the manifest says why: {:?}",
+        obligations.manifest.limitations
+    );
+    kotlin_still_compiles("Walk", &instrumented, &obligations);
+}
+
+/// Kotlin requires `contract { ... }` to be the *first* statement of its
+/// function. The probe that records a function being entered went first by
+/// definition, so moshi's `knownNotNull` -- a one-line helper the whole
+/// codebase leans on for null assertions -- stopped compiling, and took the
+/// callers' return types with it.
+#[test]
+fn a_contract_stays_the_first_statement() {
+    const CONTRACT: &str = r#"package app
+
+import kotlin.contracts.ExperimentalContracts
+import kotlin.contracts.contract
+
+@OptIn(ExperimentalContracts::class)
+internal inline fun <T> markNotNull(value: T?) {
+    contract { returns() implies (value != null) }
+}
+
+@OptIn(ExperimentalContracts::class)
+internal inline fun <T> knownNotNull(value: T?): T {
+    markNotNull(value)
+    return value
+}
+
+object Holder {
+    fun length(value: String?): Int = knownNotNull(value).length
+}
+"#;
+    let mut next = 0;
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Contract.kt",
+        CONTRACT,
+        JvmLanguage::Kotlin,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
+    let instrumented = rewrite(CONTRACT, &obligations.edits);
+    for line in instrumented.lines() {
+        if let Some(contract) = line.find("contract {") {
+            assert!(
+                line[..contract].find("HITS").is_none(),
+                "nothing is written before the contract: {line}"
+            );
+        }
+    }
+    // The function is still measured -- the probe moved, it did not vanish.
+    assert_eq!(
+        obligations
+            .manifest
+            .points
+            .iter()
+            .filter(|point| {
+                point.kind == PointKind::Function && point.label.as_deref() == Some("markNotNull")
+            })
+            .count(),
+        1,
+        "the function still records being entered: {:?}",
+        obligations.manifest.points
+    );
+    kotlin_still_compiles("Contract", &instrumented, &obligations);
+}
+
+/// The runtime is compiled by the project's own build, at whatever release the
+/// project set -- and a great many published libraries still compile their main
+/// source at Java 8: moshi, gson and OkHttp all do. `ProcessHandle`, which the
+/// runtime used to name each forked JVM's evidence, is Java 9, so moshi's
+/// `compileJava` failed on Supercov's own file and the whole suite with it.
+///
+/// A JDK too new to accept release 8 says so and the test skips: it is asking
+/// whether the runtime uses anything newer than 8, not whether this toolchain
+/// can still express 8.
+#[test]
+fn the_runtime_compiles_at_the_oldest_release_a_project_may_ask_for() {
+    let Some(javac) = common::tool("javac") else {
+        common::skip("jvm", "no JDK found");
+        return;
+    };
+    let root = temporary("release-8");
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime-assets/jvm");
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime.join("com/supercorp/supercov/Supercov.java"))
+            .expect("runtime")
+            .replace(
+                "static final int PROBE_COUNT = 0; // supercov:probe-count",
+                "static final int PROBE_COUNT = 4; // supercov:probe-count",
+            ),
+    );
+    let compile = Command::new(&javac)
+        .args([
+            "--release",
+            "8",
+            "-d",
+            "out",
+            "com/supercorp/supercov/Supercov.java",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    let complaint = String::from_utf8_lossy(&compile.stderr);
+    if !compile.status.success() && complaint.contains("release version 8") {
+        common::skip("jvm", "this JDK no longer accepts release 8");
+        std::fs::remove_dir_all(root).ok();
+        return;
+    }
+    assert!(
+        compile.status.success(),
+        "the runtime must compile at release 8:\n{complaint}"
+    );
     std::fs::remove_dir_all(root).ok();
 }

@@ -213,9 +213,18 @@ impl Collector<'_> {
             PointKind::Function => GoProbeTarget::Function { id: id.clone() },
             PointKind::Statement => GoProbeTarget::Statement { id: id.clone() },
         };
+        // A contract has to stay the first statement, so the probe that
+        // records the function being entered goes after it instead of before.
+        let mut after_contract = false;
         let at = match kind {
             PointKind::Function => match body_block(node, self.language) {
-                Some(body) => body.start_byte() + 1,
+                Some(body) => match opening_contract(body, self.source, self.language) {
+                    Some(contract) => {
+                        after_contract = true;
+                        contract.end_byte()
+                    }
+                    None => body.start_byte() + 1,
+                },
                 // An expression-bodied Kotlin function has no block to open.
                 // Its expression is still measured; the function itself simply
                 // has nowhere to record being entered.
@@ -224,7 +233,13 @@ impl Collector<'_> {
             PointKind::Statement => node.start_byte(),
         };
         let probe = self.probe(target, at);
-        self.store(at, probe);
+        if after_contract {
+            // Kotlin separates statements by newline, and this one follows the
+            // contract on its own line, so it needs the semicolon written.
+            self.edit(at, 100, format!("; {HITS}[{probe}] = 2;"));
+        } else {
+            self.store(at, probe);
+        }
         self.points.push(PointMeta {
             id,
             kind,
@@ -330,9 +345,15 @@ impl Collector<'_> {
                 // store ranked above that brace lands inside it.
                 Some(arm) if arm.kind() == "block" => self.store(arm.start_byte() + 1, *probe),
                 Some(arm) => self.store(arm.start_byte(), *probe),
+                // Ranked above the brace `ensure_block` may have added at
+                // this same offset. Edits at one offset are applied highest
+                // rank first and each pushes the last to the right, so a
+                // lower rank here would put the `else` inside the braces
+                // rather than after them -- which is what an unbraced arm on
+                // one line produced, and it is not Kotlin.
                 None => self.edit(
                     node.end_byte(),
-                    10,
+                    70,
                     format!(" else {{ {HITS}[{probe}] = 2; }}"),
                 ),
             }
@@ -416,8 +437,41 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
     }
 }
 
-/// The expression inside `if (...)`. Java parenthesises its condition; Kotlin
-/// does not.
+/// The `contract { ... }` a Kotlin function body may open with.
+///
+/// Kotlin requires a contract to be the *first* statement of its function --
+/// "Contract should be the first statement" is an error, not a warning -- so a
+/// probe written at the top of the body stops the function compiling, and
+/// moshi's `knownNotNull` is exactly that shape. The function probe goes after
+/// the contract instead, which records the same event: a contract block is
+/// erased before bytecode and cannot throw, so reaching it and reaching the
+/// statement after it cannot come apart. For the same reason the contract
+/// takes no statement obligation of its own -- it is a declaration the
+/// compiler reads, not code that runs.
+fn opening_contract<'tree>(
+    body: Node<'tree>,
+    source: &str,
+    language: JvmLanguage,
+) -> Option<Node<'tree>> {
+    if language != JvmLanguage::Kotlin {
+        return None;
+    }
+    let mut cursor = body.walk();
+    let first = body.children(&mut cursor).find(|child| child.is_named())?;
+    if first.kind() != "call_expression" {
+        return None;
+    }
+    let callee = first.child(0)?;
+    (source[callee.byte_range()].trim() == "contract").then_some(first)
+}
+
+/// Whether this node *is* the contract its block opens with.
+fn is_opening_contract(node: Node, source: &str, language: JvmLanguage) -> bool {
+    node.parent()
+        .and_then(|parent| opening_contract(parent, source, language))
+        .is_some_and(|contract| contract.id() == node.id())
+}
+
 /// Whether the compiler has to see this condition to compile the code around
 /// it.
 ///
@@ -503,6 +557,8 @@ fn arms<'t>(node: Node<'t>, language: JvmLanguage) -> (Option<Node<'t>>, Option<
     }
 }
 
+/// The expression inside `if (...)`. Java parenthesises its condition; Kotlin
+/// does not.
 fn condition_of<'t>(node: Node<'t>, language: JvmLanguage) -> Option<Node<'t>> {
     let condition = node.child_by_field_name("condition")?;
     if language == JvmLanguage::Java && condition.kind() == "parenthesized_expression" {
@@ -582,9 +638,10 @@ fn walk(collector: &mut Collector, node: Node) {
                         "id": limitation,
                         "kind": "condition-narrows-a-type",
                         "file": collector.file,
+                        "source": collector.text(node),
                         "line": collector.position(node).0,
                         "column": collector.position(node).1,
-                        "detail": "the compiler reads this condition to narrow a type in the branch below it, so observing its operands would stop the code compiling; the branch is recorded from its arms and carries no condition vectors",
+                        "reason": "the compiler reads this condition to narrow a type in the branch below it, so observing its operands would stop the code compiling; the branch is recorded from its arms and carries no condition vectors",
                     }));
                     return;
                 }
@@ -636,9 +693,31 @@ fn walk(collector: &mut Collector, node: Node) {
                             "id": limitation,
                             "kind": "loop-with-constant-condition",
                             "file": collector.file,
+                            "source": collector.text(node),
                             "line": line,
                             "column": column,
                             "reason": "a loop whose condition is a constant can only go one way, and wrapping it would change what the compiler knows about the code around it",
+                        }));
+                    } else if narrows_a_type(inner, collector.source, language) {
+                        // A loop condition narrows types too. `while (node !=
+                        // null)` is how a great deal of Kotlin walks a
+                        // structure, and the body below it reads `node` as
+                        // non-null. An `if` survives this because its arms can
+                        // carry the probes instead; a loop has only the one
+                        // arm, and no place to record the exit that a `break`
+                        // would not also reach. So the condition is left
+                        // exactly as written and the loop carries no branch
+                        // obligation, rather than one no test could close.
+                        let (line, column) = collector.position(node);
+                        let limitation = collector.limitation_id(node, "condition-narrows-a-type");
+                        collector.limitations.push(serde_json::json!({
+                            "id": limitation,
+                            "kind": "condition-narrows-a-type",
+                            "file": collector.file,
+                            "source": collector.text(node),
+                            "line": line,
+                            "column": column,
+                            "reason": "the compiler reads this loop condition to narrow a type in the body below it, so observing its operands would stop the code compiling; the loop carries no branch obligation and its body is measured by its statements",
                         }));
                     } else {
                         let probes = collector.add_branch(node, "loop", &["true", "false"]);
@@ -661,9 +740,10 @@ fn walk(collector: &mut Collector, node: Node) {
                         "id": limitation,
                         "kind": "loop-without-condition",
                         "file": collector.file,
+                        "source": collector.text(node),
                         "line": line,
                         "column": column,
-                        "detail": "a for-each or unconditional loop has no condition to observe, so no branch obligation is recorded for it",
+                        "reason": "a for-each or unconditional loop has no condition to observe, so no branch obligation is recorded for it",
                     }));
                 }
             }
@@ -678,16 +758,18 @@ fn walk(collector: &mut Collector, node: Node) {
                 "id": limitation,
                 "kind": "loop-without-condition",
                 "file": collector.file,
+                "source": collector.text(node),
                 "line": line,
                 "column": column,
-                "detail": "a for-each loop has no condition to observe, so no branch obligation is recorded for it",
+                "reason": "a for-each loop has no condition to observe, so no branch obligation is recorded for it",
             }));
             if let Some(body) = node.child_by_field_name("body") {
                 collector.ensure_block(body);
             }
         }
         _ if in_statement_position(node, language)
-            && is_statement(node, collector.source, language) =>
+            && is_statement(node, collector.source, language)
+            && !is_opening_contract(node, collector.source, language) =>
         {
             collector.add_point(node, PointKind::Statement, None);
         }
@@ -732,6 +814,106 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every field the coverage index stores for a limitation.
+    ///
+    /// A limitation missing one of these is written into a run that then
+    /// cannot be opened at all -- `invalid coverage index: coverage
+    /// limitation`, with no coverage report and nothing naming the file that
+    /// caused it. These were writing `detail` where the index reads `reason`,
+    /// and none of them wrote `source`, so any run that measured a for-each
+    /// loop was unreadable.
+    fn assert_indexable(limitations: &[serde_json::Value]) -> Vec<String> {
+        assert!(!limitations.is_empty(), "nothing to check");
+        for limitation in limitations {
+            for field in ["id", "kind", "file", "source", "reason"] {
+                assert!(
+                    limitation.get(field).and_then(|v| v.as_str()).is_some(),
+                    "a limitation needs a string {field}: {limitation}"
+                );
+            }
+            for field in ["line", "column"] {
+                assert!(
+                    limitation.get(field).and_then(|v| v.as_u64()).is_some(),
+                    "a limitation needs a number {field}: {limitation}"
+                );
+            }
+        }
+        let mut kinds = limitations
+            .iter()
+            .filter_map(|limitation| limitation["kind"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    }
+
+    #[test]
+    fn every_limitation_carries_what_the_index_stores() {
+        const JAVA: &str = r#"class Every {
+    int walk(java.util.List<Object> items) {
+        int sum = 0;
+        for (Object item : items) {
+            if (item instanceof Integer value) {
+                sum += value;
+            }
+        }
+        for (;;) {
+            break;
+        }
+        while (true) {
+            break;
+        }
+        return sum;
+    }
+}
+"#;
+        let (obligations, _) = java(JAVA);
+        assert_eq!(
+            assert_indexable(&obligations.manifest.limitations),
+            [
+                "condition-narrows-a-type",
+                "loop-with-constant-condition",
+                "loop-without-condition"
+            ]
+        );
+
+        const KOTLIN: &str = r#"fun walk(items: List<Any>, head: Any?): Int {
+    var sum = 0
+    for (item in items) {
+        if (item is Int) {
+            sum += item
+        }
+    }
+    var node = head
+    while (node != null) {
+        node = null
+    }
+    while (true) {
+        break
+    }
+    return sum
+}
+"#;
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations = build_jvm_obligations(
+            "Every.kt",
+            KOTLIN,
+            JvmLanguage::Kotlin,
+            &mut next,
+            &mut decisions,
+        )
+        .expect("kotlin");
+        assert_eq!(
+            assert_indexable(&obligations.manifest.limitations),
+            [
+                "condition-narrows-a-type",
+                "loop-with-constant-condition",
+                "loop-without-condition"
+            ]
+        );
+    }
 
     fn java(source: &str) -> (JvmFileObligations, String) {
         let mut next = 0;
