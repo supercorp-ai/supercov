@@ -32,6 +32,7 @@ jobs:
   publish:
     needs: native-artifacts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -84,6 +85,7 @@ jobs:
   pypi:
     needs: native-artifacts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
@@ -107,6 +109,7 @@ jobs:
   rubygems:
     needs: native-artifacts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
@@ -133,6 +136,7 @@ jobs:
   crates:
     needs: native-artifacts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write

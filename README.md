@@ -152,11 +152,14 @@ cargo binstall supercov && supercov -- cargo test  # crates.io
 | Rust | Available | `npx supercov -- cargo test` |
 | Python | Available | `npx supercov -- pytest` |
 | Ruby | Available | `npx supercov -- rspec` |
+| Go | Available | `npx supercov -- go test ./...` |
+| Java | Available | `npx supercov -- mvn test` |
+| Kotlin | Available | `npx supercov -- ./gradlew test` |
 | Zig | Coming soon | — |
 | PHP | Coming soon | — |
 | C | Coming soon | — |
 
-Supercov requires Node.js 22 or newer. Rust support currently uses Rust 1.95; cargo-nextest 0.9.138 and 0.9.140 are supported. Python support requires CPython 3.12 or newer and measures pytest and unittest runs. Ruby support requires Ruby 3.3 or newer (3.4 or newer for full measurement) and measures RSpec, Minitest, test-unit and Cucumber runs.
+Supercov requires Node.js 22 or newer. Rust support currently uses Rust 1.95; cargo-nextest 0.9.138 and 0.9.140 are supported. Python support requires CPython 3.12 or newer and measures pytest and unittest runs. Ruby support requires Ruby 3.3 or newer (3.4 or newer for full measurement) and measures RSpec, Minitest, test-unit and Cucumber runs. Go support requires Go 1.22 or newer and measures `go test`. Java and Kotlin support requires a JDK 17 or newer with Maven or Gradle, and measures every JUnit Platform engine -- JUnit 5, JUnit 4 through Vintage, Kotest and Spock -- as well as TestNG.
 
 ## Supported operating systems and architectures
 
@@ -168,7 +171,7 @@ The CLI is a single native binary. `npx supercov` selects the build for the mach
 | Linux | arm64, x64 | glibc 2.28 or newer (Debian 10, Ubuntu 18.10, RHEL 8 and later), or musl (Alpine); chosen automatically |
 | Windows | arm64, x64 | Windows 10 or newer |
 
-JavaScript, TypeScript, Python, Ruby and Rust suites are verified on Linux, macOS and Windows -- CPython 3.12, 3.13 and 3.14, and Ruby 3.3, 3.4 and 4.0 on every one. Containers, VMs, and remote executors run the same Linux builds. Every release publishes the same binaries to npm, PyPI (`supercov-cli`, a wheel per platform) and RubyGems (`supercov`, a gem per platform except arm64 Windows, which Ruby has no platform for), and the source to crates.io (`supercov`).
+JavaScript, TypeScript, Python, Ruby, Rust, Go, Java and Kotlin suites are verified on Linux, macOS and Windows -- CPython 3.12, 3.13 and 3.14, Ruby 3.3, 3.4 and 4.0, and Go 1.22 and 1.25 on every one, and JDK 17 and 21 on every one that has them (Temurin publishes no 17 for arm64 Windows, so that pairing is 21 alone). Containers, VMs, and remote executors run the same Linux builds. Every release publishes the same binaries to npm, PyPI (`supercov-cli`, a wheel per platform) and RubyGems (`supercov`, a gem per platform except arm64 Windows, which Ruby has no platform for), and the source to crates.io (`supercov`).
 
 ## Supported test suites
 

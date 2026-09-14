@@ -2114,7 +2114,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             ecosystem.language, ecosystem.evidence, ecosystem.language
         );
         eprintln!(
-            "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, and Python test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+            "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, Python, Ruby, Go, Java, and Kotlin test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
             ecosystem.language
         );
         return ExitCode::from(2);
@@ -2127,7 +2127,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     ecosystem.language, ecosystem.evidence, ecosystem.language
                 );
                 eprintln!(
-                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, and Python test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, Python, Ruby, Go, Java, and Kotlin test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
                     ecosystem.language
                 );
             }
@@ -2136,7 +2136,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     "[supercov] Supercov could not recognize this project's language or test framework: no supported test files or manifests were found, and the command does not launch a runner Supercov knows."
                 );
                 eprintln!(
-                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, and Python test runs. Alternatively, Supercov may simply not support your test suite yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
+                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, Python, Ruby, Go, Java, and Kotlin test runs. Alternatively, Supercov may simply not support your test suite yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
                 );
             }
         }
@@ -2173,6 +2173,74 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                 eprintln!(
                     "[supercov] Rust coverage: {} test(s) across {} artifact(s)",
                     result.tests, result.artifacts
+                );
+                if let Some(timings) = &result.metadata.timings {
+                    eprintln!(
+                        "[supercov] timings {}",
+                        format_run_timings(timings, result.metadata.duration_ms)
+                    );
+                }
+                process_exit_code(result.exit_code)
+            }
+            Err(error) => {
+                eprintln!("[supercov] {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    if detection.frontends == [supercov_engine::frontend_detection::FrontendLanguage::Go] {
+        let request = supercov_engine::go_run::DirectGoRunRequest {
+            root: root.clone(),
+            command,
+            run_id,
+            started_at,
+        };
+        let mut diagnostics = std::io::stderr().lock();
+        let result = supercov_engine::go_run::run_direct_go(&request, &mut diagnostics);
+        spawn_trash_sweeper(&root);
+        return match result {
+            Ok(result) => {
+                println!(
+                    "[coverage] evidence: {}",
+                    result.run_directory.join("evidence.raw.gz").display()
+                );
+                eprintln!(
+                    "[supercov] Go coverage: {} test(s) across {} source file(s) in {} package(s)",
+                    result.tests, result.source_files, result.packages
+                );
+                if let Some(timings) = &result.metadata.timings {
+                    eprintln!(
+                        "[supercov] timings {}",
+                        format_run_timings(timings, result.metadata.duration_ms)
+                    );
+                }
+                process_exit_code(result.exit_code)
+            }
+            Err(error) => {
+                eprintln!("[supercov] {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    if detection.frontends == [supercov_engine::frontend_detection::FrontendLanguage::Jvm] {
+        let request = supercov_engine::jvm_run::DirectJvmRunRequest {
+            root: root.clone(),
+            command,
+            run_id,
+            started_at,
+        };
+        let mut diagnostics = std::io::stderr().lock();
+        let result = supercov_engine::jvm_run::run_direct_jvm(&request, &mut diagnostics);
+        spawn_trash_sweeper(&root);
+        return match result {
+            Ok(result) => {
+                println!(
+                    "[coverage] evidence: {}",
+                    result.run_directory.join("evidence.raw.gz").display()
+                );
+                eprintln!(
+                    "[supercov] JVM coverage: {} test(s) across {} source file(s) in {} module(s)",
+                    result.tests, result.source_files, result.modules
                 );
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
@@ -2434,19 +2502,55 @@ fn current_javascript_integrity(
     supercov_engine::javascript_run::current_javascript_integrity(root, command).ok()
 }
 
+/// Which frontend measured a run, from the contract version it recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frontend {
+    Rust,
+    Ruby,
+    Python,
+    Go,
+    Jvm,
+    JavaScript,
+}
+
+/// Only the frontend that measured a run can say what its checkout looks like
+/// now. JavaScript is the last resort rather than the default for anything
+/// unrecognised -- a mapping that silently answered for Go and the JVM, which
+/// were added later and never listed. samber/lo is Go with a JavaScript docs
+/// site: every one of its runs compared a Go fingerprint against a JavaScript
+/// one and reported five simultaneous changes to a checkout nobody had
+/// touched. A Go or JVM project with no package.json fared no better -- the
+/// JavaScript answer was None and staleness silently stopped being checked at
+/// all.
+fn frontend_of(instrumenter_version: &str) -> Frontend {
+    for (prefix, frontend) in [
+        ("supercov-rust-", Frontend::Rust),
+        ("supercov-ruby-", Frontend::Ruby),
+        ("supercov-python-", Frontend::Python),
+        ("supercov-go-", Frontend::Go),
+        ("supercov-jvm-", Frontend::Jvm),
+    ] {
+        if instrumenter_version.starts_with(prefix) {
+            return frontend;
+        }
+    }
+    Frontend::JavaScript
+}
+
 fn current_integrity_for_run(
     root: &Path,
     run: &StoredRun,
 ) -> Option<supercov_engine::run_store::RunIntegrity> {
-    let version = run.metadata.integrity.instrumenter_version.as_str();
-    if version.starts_with("supercov-rust-") {
-        supercov_engine::rust_run::current_rust_integrity(root, &run.metadata.command).ok()
-    } else if version.starts_with("supercov-ruby-") {
-        supercov_engine::ruby_run::current_ruby_integrity(root, &run.metadata.command).ok()
-    } else if version.starts_with("supercov-python-") {
-        supercov_engine::python_run::current_python_integrity(root, &run.metadata.command).ok()
-    } else {
-        current_javascript_integrity(root, &run.metadata.command)
+    let command = &run.metadata.command;
+    match frontend_of(&run.metadata.integrity.instrumenter_version) {
+        Frontend::Rust => supercov_engine::rust_run::current_rust_integrity(root, command).ok(),
+        Frontend::Ruby => supercov_engine::ruby_run::current_ruby_integrity(root, command).ok(),
+        Frontend::Python => {
+            supercov_engine::python_run::current_python_integrity(root, command).ok()
+        }
+        Frontend::Go => supercov_engine::go_run::current_go_integrity(root, command).ok(),
+        Frontend::Jvm => supercov_engine::jvm_run::current_jvm_integrity(root, command).ok(),
+        Frontend::JavaScript => current_javascript_integrity(root, command),
     }
 }
 
@@ -4121,6 +4225,27 @@ fn pack_evidence() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    /// The contract version each frontend actually records, so this cannot
+    /// drift from the strings runs are stored with.
+    #[test]
+    fn every_frontend_answers_for_its_own_runs() {
+        for (version, expected) in [
+            ("supercov-rust-rust-owned-v1", Frontend::Rust),
+            ("supercov-ruby-ruby-owned-v1", Frontend::Ruby),
+            ("supercov-python-python-owned-v1", Frontend::Python),
+            ("supercov-go-go-owned-v1", Frontend::Go),
+            ("supercov-jvm-jvm-owned-v1", Frontend::Jvm),
+            ("javascript-v1", Frontend::JavaScript),
+        ] {
+            assert_eq!(frontend_of(version), expected, "{version}");
+        }
+        // A frontend nobody has written yet must not quietly become
+        // JavaScript's problem in a way that reads as a real answer -- but
+        // JavaScript is what a run predating these prefixes recorded, so it
+        // stays the fallback.
+        assert_eq!(frontend_of("supercov-zig-v1"), Frontend::JavaScript);
+    }
+
     use super::*;
 
     #[test]

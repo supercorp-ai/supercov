@@ -14,6 +14,8 @@ use crate::project_discovery::expanded_command;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FrontendLanguage {
+    Go,
+    Jvm,
     JavaScript,
     Python,
     Ruby,
@@ -76,6 +78,29 @@ fn supported_by_command(command_tokens: &[String]) -> Vec<(FrontendLanguage, &'s
         launched.push((
             FrontendLanguage::Rust,
             "the expanded test command launches Cargo's test pipeline",
+        ));
+    }
+
+    // `go` alone is too common a word in shell text to mean anything; the
+    // launch shape is what identifies a test run.
+    if has_sequence(command_tokens, &["go", "test"]) {
+        launched.push((
+            FrontendLanguage::Go,
+            "the expanded test command launches Go's test pipeline",
+        ));
+    }
+
+    // Maven and Gradle name themselves unambiguously, so the word is enough;
+    // a wrapper script is how most projects invoke Gradle.
+    let jvm_command = command_tokens.iter().any(|token| {
+        matches!(token.as_str(), "mvn" | "mvnw" | "maven" | "gradle")
+            || token.ends_with("gradlew")
+            || token.ends_with("/mvnw")
+    });
+    if jvm_command {
+        launched.push((
+            FrontendLanguage::Jvm,
+            "the expanded test command launches Maven or Gradle",
         ));
     }
 
@@ -148,6 +173,18 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
     // which prepared frontend actually ran.
     if selected.is_empty() {
         let candidates = [
+            (
+                FrontendLanguage::Go,
+                regular_file(&root.join("go.mod")),
+                "go.mod exists and the test command is opaque",
+            ),
+            (
+                FrontendLanguage::Jvm,
+                ["pom.xml", "build.gradle", "build.gradle.kts"]
+                    .iter()
+                    .any(|name| regular_file(&root.join(name))),
+                "a Maven or Gradle build file exists and the test command is opaque",
+            ),
             (
                 FrontendLanguage::Rust,
                 regular_file(&root.join("Cargo.toml")),
@@ -225,8 +262,6 @@ pub fn detect_unsupported_ecosystem(
     let expanded = expanded_command(root, command);
     let command_tokens = tokens(&expanded);
     let by_command: &[(&str, &[&str])] = &[
-        ("Go", &["go"]),
-        ("Java/Kotlin", &["mvn", "maven", "gradle", "gradlew"]),
         ("PHP", &["phpunit", "pest"]),
         (".NET", &["dotnet"]),
         ("Elixir", &["mix"]),
@@ -253,11 +288,6 @@ pub fn detect_unsupported_ecosystem(
         }
     }
     let by_manifest: &[(&str, &[&str])] = &[
-        ("Go", &["go.mod"]),
-        (
-            "Java/Kotlin",
-            &["pom.xml", "build.gradle", "build.gradle.kts"],
-        ),
         ("PHP", &["composer.json"]),
         ("Elixir", &["mix.exs"]),
         ("Swift", &["Package.swift"]),
@@ -345,27 +375,69 @@ mod tests {
 
     #[test]
     fn a_known_unsupported_runner_is_named_from_the_command() {
-        let root = fixture("go-command");
-        let detected = detect_frontends(&root, &["go".into(), "test".into(), "./...".into()]);
+        let root = fixture("swift-command");
+        let detected = detect_frontends(&root, &["swift".into(), "test".into()]);
         assert_eq!(detected.frontends, []);
         let ecosystem =
-            detect_unsupported_ecosystem(&root, &["go".into(), "test".into(), "./...".into()])
-                .unwrap();
-        assert_eq!(ecosystem.language, "Go");
-        assert_eq!(ecosystem.evidence, "the test command runs `go`");
+            detect_unsupported_ecosystem(&root, &["swift".into(), "test".into()]).unwrap();
+        assert_eq!(ecosystem.language, "Swift");
+        assert_eq!(ecosystem.evidence, "the test command runs `swift`");
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn a_known_unsupported_manifest_is_named_when_the_command_is_opaque() {
-        let root = fixture("gomod");
-        fs::write(root.join("go.mod"), "module example.com/app\n").unwrap();
+        let root = fixture("swiftpm");
+        fs::write(root.join("Package.swift"), "// swift-tools-version:5.9\n").unwrap();
         let detected = detect_frontends(&root, &["make".into(), "test".into()]);
         assert_eq!(detected.frontends, []);
         let ecosystem =
             detect_unsupported_ecosystem(&root, &["make".into(), "test".into()]).unwrap();
-        assert_eq!(ecosystem.language, "Go");
-        assert_eq!(ecosystem.evidence, "go.mod is present");
+        assert_eq!(ecosystem.language, "Swift");
+        assert_eq!(ecosystem.evidence, "Package.swift is present");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn maven_and_gradle_projects_select_the_jvm_frontend() {
+        let root = fixture("jvm");
+        fs::write(root.join("pom.xml"), "<project></project>\n").unwrap();
+        for command in [
+            vec!["mvn".to_string(), "test".into()],
+            vec!["./mvnw".into(), "verify".into()],
+            // A wrapper script is how most projects invoke Gradle.
+            vec!["./gradlew".into(), "test".into()],
+            vec!["gradle".into(), "check".into()],
+            // An opaque wrapper reveals nothing, so the build file decides.
+            vec!["make".into(), "test".into()],
+        ] {
+            let detected = detect_frontends(&root, &command);
+            assert_eq!(detected.frontends, [FrontendLanguage::Jvm], "{command:?}");
+        }
+        assert!(detect_unsupported_ecosystem(&root, &["make".into(), "test".into()]).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn go_runners_and_manifests_select_the_go_frontend() {
+        let root = fixture("go");
+        fs::write(root.join("go.mod"), "module example.com/app\n").unwrap();
+        for command in [
+            vec!["go".to_string(), "test".into(), "./...".into()],
+            // Opaque wrappers reveal nothing before launch, so the manifest
+            // decides.
+            vec!["make".into(), "test".into()],
+        ] {
+            let detected = detect_frontends(&root, &command);
+            assert_eq!(detected.frontends, [FrontendLanguage::Go], "{command:?}");
+        }
+        // The word on its own is too common in shell text to mean a test run.
+        assert_eq!(
+            detect_frontends(&root, &["go".into(), "build".into(), "./...".into()]).frontends,
+            [FrontendLanguage::Go],
+            "the manifest still decides when the command says nothing"
+        );
+        assert!(detect_unsupported_ecosystem(&root, &["make".into(), "test".into()]).is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -390,17 +462,21 @@ mod tests {
 
     #[test]
     fn an_explicit_unsupported_command_is_authoritative_over_manifests() {
-        let root = fixture("go-with-package-json");
+        let root = fixture("swift-with-package-json");
         fs::write(root.join("package.json"), "{}").unwrap();
-        fs::write(root.join("go.mod"), "module example.com/x\n").unwrap();
-        let command = vec!["go".into(), "test".into(), "./...".into()];
+        fs::write(root.join("Package.swift"), "// swift-tools-version:5.9\n").unwrap();
+        let command = vec!["swift".into(), "test".into()];
         let ecosystem = detect_unsupported_ecosystem(&root, &command).unwrap();
         assert!(ecosystem.from_command);
-        assert_eq!(ecosystem.language, "Go");
+        assert_eq!(ecosystem.language, "Swift");
         assert!(!command_launches_supported_frontend(&root, &command));
         // A genuinely mixed command that also launches a supported runner
         // must keep running.
-        let mixed = vec!["sh".into(), "-c".into(), "go test && npx vitest run".into()];
+        let mixed = vec![
+            "sh".into(),
+            "-c".into(),
+            "swift test && npx vitest run".into(),
+        ];
         assert!(command_launches_supported_frontend(&root, &mixed));
         fs::remove_dir_all(root).unwrap();
     }

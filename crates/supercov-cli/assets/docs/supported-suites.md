@@ -1,6 +1,6 @@
 # Supported languages and test suites
 
-Supercov supports JavaScript, TypeScript, Rust, Python, and Ruby today. Start with
+Supercov supports JavaScript, TypeScript, Rust, Python, Ruby, Go, Java, and Kotlin today. Start with
 the same test command the repository already uses; Supercov detects supported
 runners inside that command.
 
@@ -10,6 +10,8 @@ npx supercov -- npx playwright test
 npx supercov -- cargo test
 npx supercov -- pytest
 npx supercov -- rspec
+npx supercov -- go test ./...
+npx supercov -- mvn test
 ```
 
 ## Language support
@@ -21,6 +23,9 @@ npx supercov -- rspec
 | Rust | Available | `npx supercov -- cargo test` |
 | Python | Available | `npx supercov -- pytest` |
 | Ruby | Available | `npx supercov -- rspec` |
+| Go | Available | `npx supercov -- go test ./...` |
+| Java | Available | `npx supercov -- mvn test` |
+| Kotlin | Available | `npx supercov -- ./gradlew test` |
 | Zig | Coming soon | — |
 | PHP | Coming soon | — |
 | C | Coming soon | — |
@@ -209,6 +214,131 @@ npx supercov -- rspec
 npx supercov -- bundle exec rspec
 npx supercov -- ruby -Itest test/shapes_test.rb
 npx supercov -- bin/rails test
+```
+
+## Go
+
+| Runner | Attribution | Current requirement |
+| --- | --- | --- |
+| `go test` | Exact per test | Go 1.22 or newer |
+| A test that calls `t.Parallel()` | Aggregate: its coverage counts run-wide | — |
+| An `Example` with an `Output` comment, and a `Fuzz` target's seed corpus | Aggregate: measured, but named by no test | — |
+
+Supercov instruments an isolated copy of the module and runs your own command
+against it. Your tree is not touched, and your test sources are not rewritten
+beyond one deferred line per test that binds it to its evidence.
+
+`go test` builds one binary per package, so each test package records its own
+evidence and Supercov merges them. It also caches packages that passed, and a
+cached package does not run — so Supercov adds `-count=1` unless your command
+already says otherwise, and tells you it did.
+
+A test that calls `t.Parallel()` runs alongside others. Probes are a store into
+one array shared by the process, so nothing can say which of two concurrent
+tests reached a line. That coverage is reported against the run rather than
+assigned to a test by guesswork: the lines count as covered, and no test claims
+them. It counts only when the run passed, for the same reason a failing test's
+coverage never counts — a failed run cannot say which of it came from the test
+that failed.
+
+An `Example` with an `Output` comment and a `Fuzz` target's seed corpus are
+measured the same way. `go test` runs both, so what they reach is real
+coverage, but neither takes a `*testing.T` for a result to be named by.
+
+Supercov also writes evidence as the suite runs, not only at the end. Go offers
+no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`
+call Supercov wraps — `goleak.VerifyTestMain(m)` runs the suite and exits
+itself. Without periodic writes such a run recorded nothing at all.
+
+For assertion maps, `t.Error`, `t.Errorf`, `t.Fatal`, `t.Fatalf` and testify's
+`assert` and `require` are inventoried. A Go test states its claim with an `if`
+and reports the violation, so the report is the site.
+
+A repository with several modules works either way it is laid out. A directory
+with a `go.mod` of its own that no `go.work` names is a different module, and
+`go test ./...` walks past it, so Supercov leaves it alone. A `go.work`
+workspace has no module at its root, so each module it names gets a runtime of
+its own.
+
+```sh
+npx supercov -- go test ./...
+npx supercov -- go test -run TestParser ./internal/...
+npx supercov -- go test ./core/... ./app/...
+```
+
+## Java and Kotlin
+
+| Runner | Attribution | Current requirement |
+| --- | --- | --- |
+| JUnit 5 (Jupiter) | Exact per test | JDK 17 or newer, Maven or Gradle |
+| JUnit 4 (through Vintage) | Exact per test | — |
+| Kotest | Exact per test, under the names Kotest itself reports | — |
+| Spock | Exact per feature, under the names Spock itself reports | — |
+| TestNG | Exact per test, each data-provider invocation its own | — |
+| JUnit 4 alone | Exact per test, through Vintage — see below | Maven |
+
+Multi-module builds are measured module by module: each compiles its own source
+set and forks its own JVM, so each gets a runtime and records evidence of its
+own, and the run merges them. A build that forks several JVMs to run tests in
+parallel — Gradle's `maxParallelForks`, surefire's `forkCount` — is measured
+the same way: each JVM writes evidence of its own and the run merges every
+one.
+
+Attribution comes from the framework's own lifecycle rather than from rewritten
+test sources: a JUnit Platform listener sees every engine built on the platform,
+which is what covers Kotest and Spock, whose tests are not annotated methods any
+rewriter could find. TestNG is not a platform engine and has a listener of its
+own. Tests keep the names their framework chose, so a coverage report and a test
+report name the same thing.
+
+JUnit 4 on its own is not a platform engine and does not run on one. Maven and
+Gradle choose a test provider from what is on the classpath, so putting the
+platform there makes the build pick a provider that finds no engine and fail.
+For a Maven module, Supercov adds `junit-vintage-engine` to the copy — the
+platform's own way of running exactly those JUnit 4 tests through the lifecycle
+it listens to — and measures them; your own build still runs JUnit 4 as it did.
+A Gradle module is left alone and told about rather than broken.
+
+Supercov instruments an isolated copy and leaves your build file alone. In the
+copy it adds a test-scoped `junit-platform-launcher`, because the listener is
+compiled from the project's test sources and neither Maven nor Gradle puts that
+API on the compile classpath; it disables JUnit's parallel execution, keeping
+whatever else your `junit-platform.properties` set; and it stops the copy
+failing its build on warnings, because the copy holds instrumented code your
+project never wrote a style policy for. Warnings are still reported.
+
+If tests do run concurrently anyway, Supercov says so and stops attributing
+rather than reporting numbers nobody can trust: statements and branches still
+count run-wide, and condition coverage is dropped, because concurrent
+evaluations corrupt the state it is computed from.
+
+Some conditions are read by the compiler as well as evaluated at runtime, and
+those Supercov leaves exactly as written. `x instanceof String s`, a record
+deconstruction pattern, and Kotlin's `x is String` or `x != null` all narrow a
+type for the code beneath them; wrapping such a condition to observe its
+operands would take the narrowing away and the code would stop compiling. An
+`if` is still measured — which way it went is recorded from inside its arms
+instead — but it carries no condition vectors, so it contributes no MC/DC
+obligation. A loop is a harder case: it has one arm, and no place to record an
+exit a `break` would not also reach, so a loop whose condition narrows a type
+carries no branch obligation at all rather than one no test could close. The
+same goes for a loop over a constant, `while (true)`, which can only go one
+way. A Kotlin `contract { }` has to stay the first statement of its function,
+so the probe that records the function being entered is written after it.
+
+Every one of these is named in the run: ask for `supercov runs latest
+limitations` and each appears with its file, its line, and why it was left
+alone. A source file the parser cannot read is declared there too, so a hole in
+the denominator stays visible after the build log is gone.
+
+For assertion maps, forms spelled `assertSomething`, `assertThat` or `fail` are
+inventoried, which covers JUnit, TestNG, AssertJ, Hamcrest and kotlin.test.
+Kotest's infix matchers are not.
+
+```sh
+npx supercov -- mvn test
+npx supercov -- ./gradlew test
+npx supercov -- ./mvnw verify
 ```
 
 ## Containers, VMs, and remote execution

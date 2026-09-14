@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Comma-separated job names to run (node, runners, browsers, filesystems, python, ruby, rust, released). Empty runs every job except released."
+        description: "Comma-separated job names to run (node, runners, browsers, filesystems, python, ruby, rust, go, jvm, released). Empty runs every job except released."
         default: ""
         type: string
       os:
@@ -19,6 +19,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',node,') }}
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +40,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,') }}
     name: ${{ matrix.name }} runners
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -72,6 +74,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,') }}
     name: Playwright ${{ matrix.browser }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +97,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,') }}
     name: Filesystem safety (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -117,6 +121,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',python,') }}
     name: CPython ${{ matrix.python }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -141,6 +146,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,') }}
     name: Ruby ${{ matrix.ruby }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -169,6 +175,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,') }}
     name: Rust suites (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -190,12 +197,97 @@ jobs:
       - run: npm ci
       - run: npm run test:rust-public-cargo
 
+  go:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',go,') }}
+    name: Go ${{ matrix.go }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        # 1.22 is the oldest the generated harness targets; the rest is what
+        # projects are actually on.
+        go: ["1.22", "1.25"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run test:go
+        env:
+          # Without this a job whose toolchain setup failed would skip every
+          # test and report success, and Go would look verified on a machine
+          # that never ran it.
+          SUPERCOV_REQUIRE_GO: "1"
+
+  jvm:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,') }}
+    name: JDK ${{ matrix.java }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        # 17 is the floor the documentation claims; 21 is the current LTS.
+        java: ["17", "21"]
+        exclude:
+          # Temurin publishes no 17 for arm64 Windows; 21 is the first.
+          - os: windows-11-arm
+            java: "17"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - uses: gradle/actions/setup-gradle@v5
+      # The platform's own console runner, which one test drives directly to
+      # prove the listener attributes through the platform rather than through
+      # anything Maven or Gradle does around it.
+      # Not preinstalled on any runner. One test compiles Kotlin with the
+      # standalone compiler rather than through Gradle, so that what the
+      # rewriter produces is known to be Kotlin the compiler accepts and not
+      # only something a build plugin tolerated.
+      - name: Install the Kotlin compiler
+        shell: bash
+        run: |
+          version=2.2.20
+          curl -sSL --retry 3 -o "$RUNNER_TEMP/kotlin.zip" \
+            "https://github.com/JetBrains/kotlin/releases/download/v$version/kotlin-compiler-$version.zip"
+          unzip -q "$RUNNER_TEMP/kotlin.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/kotlinc/bin" >> "$GITHUB_PATH"
+      - name: Fetch the JUnit Platform console runner
+        shell: bash
+        run: |
+          jar="$RUNNER_TEMP/junit-platform-console-standalone.jar"
+          curl -sSL --retry 3 -o "$jar" \
+            https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
+          echo "JUNIT_CONSOLE_JAR=$jar" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run test:jvm
+        env:
+          SUPERCOV_REQUIRE_JVM: "1"
+
   # The binary we ship, on the machine it is shipped for. Three of the eight
   # native packages had never executed anywhere but the cross-compiler.
   released:
     if: ${{ contains(format(',{0},', inputs.only), ',released,') }}
     name: Released binary (${{ matrix.native }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

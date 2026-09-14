@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.49
+
+**Added**
+
+- Supercov measures Go, Java and Kotlin: lines, branches, functions and MC/DC, on the same footing as every other language. `npx supercov -- go test ./...`, `npx supercov -- mvn test`, `npx supercov -- ./gradlew test`.
+- Go runs on `go test` with exact per-test attribution and one evidence file per test package. `-count=1` is added unless your command says otherwise, so a cached package cannot report as covered without running. A `go.work` workspace gets a runtime per module, and a nested `go.mod` no workspace names is left alone. A test that calls `t.Parallel()` counts run-wide rather than being attributed by guesswork.
+- Java and Kotlin attribute through each framework's own lifecycle rather than rewritten test sources: JUnit 5, JUnit 4 through Vintage, Kotest and Spock through one JUnit Platform listener, and TestNG through a listener of its own, each data-provider invocation its own test.
+- A JUnit 4 suite reaches the platform through Vintage. Supercov adds the engine to its copy of a Maven module and measures it; a Gradle module is named in the output and left alone instead, because putting the platform on a JUnit 4 classpath makes Gradle pick a provider that finds no engine and fails the suite. Add `junit-vintage-engine` and `useJUnitPlatform()` and Supercov measures it.
+- Multi-module Maven and Gradle builds are measured module by module and merged, including builds that fork several JVMs to run tests in parallel — `maxParallelForks`, `forkCount`. Kotlin Multiplatform layouts are measured where the JVM is the only target.
+- Supercov instruments an isolated copy and leaves your own build untouched. Conditions the compiler reads are left exactly as written — Java's pattern `instanceof` and record patterns, Kotlin's `is` and null comparisons — so such a branch is measured from its arms and carries no condition vectors. Every surface left unmeasured is named in the run's limitations, including a source file the parser could not read.
+- Assertion maps inventory `t.Error`, `t.Fatal` and testify for Go, and `assertSomething`, `assertThat` and `fail` for the JVM, which covers JUnit, TestNG, AssertJ, Hamcrest and kotlin.test.
+
 ## 0.0.48
 
 **Added**
