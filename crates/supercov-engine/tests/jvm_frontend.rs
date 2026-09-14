@@ -10,7 +10,7 @@ use std::process::Command;
 
 use supercov_engine::jvm_instrumenter::{JvmLanguage, build_jvm_obligations, rewrite};
 use supercov_engine::owned_evidence::{
-    OwnedTestOutcome, build_frontend_run, jvm_declaration, read_evidence,
+    OwnedRunInputs, OwnedTestOutcome, build_frontend_run, jvm_declaration, read_evidence,
 };
 
 fn tool(name: &str) -> Option<PathBuf> {
@@ -545,17 +545,17 @@ public final class SupercovConfig {{
             status: "passed".into(),
         })
         .collect::<Vec<_>>();
-    let run = build_frontend_run(
-        jvm_declaration(),
-        "jvm",
-        &obligations.manifest,
-        &obligations.probes,
-        &evidence,
-        &outcomes,
-        "run_jvm",
-        "now",
-        0,
-    )
+    let run = build_frontend_run(OwnedRunInputs {
+        declaration: jvm_declaration(),
+        environment: "jvm",
+        manifest: &obligations.manifest,
+        probes: &obligations.probes,
+        evidence: &evidence,
+        outcomes: &outcomes,
+        run_id: "run_jvm",
+        generated_at: "now",
+        test_exit_code: 0,
+    })
     .expect("frontend run");
     let report =
         supercov_engine::coverage_report::analyze_coverage_results(&run.request).expect("report");

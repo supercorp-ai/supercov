@@ -14,7 +14,7 @@ use supercov_engine::go_test_harness::{
     instrument_test_file, probe_array_file, synthesized_harness,
 };
 use supercov_engine::owned_evidence::{
-    OwnedTestOutcome, build_frontend_run, go_declaration, read_evidence,
+    OwnedRunInputs, OwnedTestOutcome, build_frontend_run, go_declaration, read_evidence,
 };
 
 fn go_binary() -> Option<PathBuf> {
@@ -318,13 +318,13 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
     // that records correctly but cannot be read is not yet a frontend.
     let raw = std::fs::read(root.join("evidence.bin")).expect("evidence");
     let decoded = read_evidence(&raw).expect("decode");
-    let run = build_frontend_run(
-        go_declaration(),
-        "go",
-        &obligations.manifest,
-        &obligations.probes,
-        &decoded,
-        &[
+    let run = build_frontend_run(OwnedRunInputs {
+        declaration: go_declaration(),
+        environment: "go",
+        manifest: &obligations.manifest,
+        probes: &obligations.probes,
+        evidence: &decoded,
+        outcomes: &[
             OwnedTestOutcome {
                 name: "TestBig".into(),
                 package: "example.com/probe".into(),
@@ -338,10 +338,10 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
                 status: "passed".into(),
             },
         ],
-        "run_go",
-        "now",
-        0,
-    )
+        run_id: "run_go",
+        generated_at: "now",
+        test_exit_code: 0,
+    })
     .expect("frontend run");
     assert_eq!(run.tests, 2);
     let report =

@@ -361,17 +361,39 @@ pub struct OwnedFrontendRun {
 /// result, with no coverage. Dropping it would make a suite look smaller than
 /// it is, and a test that ran without reaching any measured line is a fact
 /// worth seeing rather than an absence worth hiding.
-pub fn build_frontend_run(
-    declaration: FrontendRunDeclaration,
-    environment: &str,
-    manifest: &CoverageManifest,
-    probes: &BTreeMap<u64, GoProbe>,
-    evidence: &OwnedEvidence,
-    outcomes: &[OwnedTestOutcome],
-    run_id: &str,
-    generated_at: &str,
-    test_exit_code: i32,
-) -> Result<OwnedFrontendRun, OwnedEvidenceError> {
+/// Everything a report needs about one run of one owned frontend.
+pub struct OwnedRunInputs<'a> {
+    pub declaration: FrontendRunDeclaration,
+    /// The label runtime events carry, so a reader can tell which frontend
+    /// produced them.
+    pub environment: &'a str,
+    pub manifest: &'a CoverageManifest,
+    pub probes: &'a BTreeMap<u64, GoProbe>,
+    pub evidence: &'a OwnedEvidence,
+    pub outcomes: &'a [OwnedTestOutcome],
+    pub run_id: &'a str,
+    pub generated_at: &'a str,
+    pub test_exit_code: i32,
+}
+
+/// Build the report request from what the run recorded.
+///
+/// A test the runner reported but that announced nothing still becomes a
+/// result, with no coverage. Dropping it would make a suite look smaller than
+/// it is, and a test that ran without reaching any measured line is a fact
+/// worth seeing rather than an absence worth hiding.
+pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, OwnedEvidenceError> {
+    let OwnedRunInputs {
+        declaration,
+        environment,
+        manifest,
+        probes,
+        evidence,
+        outcomes,
+        run_id,
+        generated_at,
+        test_exit_code,
+    } = inputs;
     if outcomes.is_empty() {
         return Err(OwnedEvidenceError::NoTests);
     }
@@ -478,17 +500,17 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            build_frontend_run(
-                go_declaration(),
-                "go",
-                &manifest,
-                &BTreeMap::new(),
-                &evidence,
-                &[],
-                "run",
-                "now",
-                0
-            )
+            build_frontend_run(OwnedRunInputs {
+                declaration: go_declaration(),
+                environment: "go",
+                manifest: &manifest,
+                probes: &BTreeMap::new(),
+                evidence: &evidence,
+                outcomes: &[],
+                run_id: "run",
+                generated_at: "now",
+                test_exit_code: 0,
+            })
             .err(),
             Some(OwnedEvidenceError::NoTests)
         );
@@ -537,22 +559,22 @@ mod tests {
             unmeasured: Vec::new(),
             scope: None,
         };
-        let run = build_frontend_run(
-            go_declaration(),
-            "go",
-            &manifest,
-            &BTreeMap::new(),
-            &OwnedEvidence::default(),
-            &[OwnedTestOutcome {
+        let run = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &BTreeMap::new(),
+            evidence: &OwnedEvidence::default(),
+            outcomes: &[OwnedTestOutcome {
                 name: "TestSilent".into(),
                 package: "example.com/p".into(),
                 file: Some("p/x_test.go".into()),
                 status: "passed".into(),
             }],
-            "run",
-            "now",
-            0,
-        )
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 0,
+        })
         .expect("run");
         assert_eq!(run.tests, 1);
         let result = &run.request.raw_results[0];
