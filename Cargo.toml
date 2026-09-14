@@ -52,6 +52,8 @@ sysinfo = { version = "0.38.4", default-features = false, features = ["system"] 
 time = { version = "0.3", features = ["formatting", "macros"] }
 tree-sitter = "0.25"
 tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-kotlin-ng = "1.1.0"
 toml = "1.1.4"
 toml_edit = { version = "0.24.0", features = ["serde"] }
 windows-sys = "0.61.2"
