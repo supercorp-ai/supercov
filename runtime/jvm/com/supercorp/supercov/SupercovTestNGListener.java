@@ -35,7 +35,7 @@ public final class SupercovTestNGListener implements IExecutionListener, ITestLi
   /** The runner this listener speaks for, as the frontend declares it. */
   private static final String RUNNER = "testng";
 
-  private String evidencePath = "supercov-evidence.bin";
+  private String evidenceDirectory = "supercov-evidence";
 
   /**
    * How many times each test name has been announced.
@@ -54,7 +54,7 @@ public final class SupercovTestNGListener implements IExecutionListener, ITestLi
       Class<?> config = Class.forName(CONFIG);
       int probes = config.getField("PROBES").getInt(null);
       int[] widths = (int[]) config.getField("WIDTHS").get(null);
-      evidencePath = (String) config.getField("EVIDENCE").get(null);
+      evidenceDirectory = (String) config.getField("EVIDENCE").get(null);
       Supercov.arm(probes, widths);
     } catch (ReflectiveOperationException | ClassCastException e) {
       // Nothing to measure against. Recording nothing is the honest outcome;
@@ -101,7 +101,7 @@ public final class SupercovTestNGListener implements IExecutionListener, ITestLi
   @Override
   public void onExecutionFinish() {
     try {
-      Supercov.write(evidencePath);
+      Supercov.writeInto(evidenceDirectory);
     } catch (Exception e) {
       // The measurement is lost either way; failing the suite as well helps
       // nobody, so this says what happened and lets the tests stand.

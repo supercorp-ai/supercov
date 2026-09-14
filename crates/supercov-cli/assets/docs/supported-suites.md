@@ -274,7 +274,10 @@ npx supercov -- go test ./core/... ./app/...
 
 Multi-module builds are measured module by module: each compiles its own source
 set and forks its own JVM, so each gets a runtime and records evidence of its
-own, and the run merges them.
+own, and the run merges them. A build that forks several JVMs to run tests in
+parallel — Gradle's `maxParallelForks`, surefire's `forkCount` — is measured
+the same way: each JVM writes evidence of its own and the run merges every
+one.
 
 Attribution comes from the framework's own lifecycle rather than from rewritten
 test sources: a JUnit Platform listener sees every engine built on the platform,

@@ -547,6 +547,9 @@ fn command_with_fresh_results(
 struct JvmModule {
     /// Relative to the workspace, `/`-separated; `.` for the build root.
     directory: String,
+    /// Where this module's JVMs write. A directory rather than a file: a build
+    /// may fork more than one to run tests in parallel, and each writes under
+    /// a name of its own so none overwrites another.
     evidence: PathBuf,
     has_tests: bool,
 }
@@ -656,13 +659,12 @@ fn instrument_workspace(
     let modules = modules
         .into_iter()
         .map(|(directory, has_tests)| JvmModule {
-            evidence: evidence_directory.join(format!(
-                "{}.bin",
+            evidence: evidence_directory.join(
                 directory
                     .chars()
                     .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                    .collect::<String>()
-            )),
+                    .collect::<String>(),
+            ),
             directory,
             has_tests,
         })
@@ -1010,12 +1012,31 @@ pub fn run_direct_jvm(
             .iter()
             .filter(|module| module.has_tests)
         {
-            let Ok(bytes) = fs::read(&module.evidence) else {
+            // Every JVM the build forked for this module wrote its own file.
+            let mut written = fs::read_dir(&module.evidence)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| path.extension().is_some_and(|kind| kind == "bin"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            written.sort();
+            if written.is_empty() {
                 silent.push(module.directory.clone());
                 continue;
-            };
-            let evidence = read_evidence(&bytes)
-                .map_err(|error| format!("{}: {error}", module.evidence.display()))?;
+            }
+            let mut forked = Vec::new();
+            for path in &written {
+                let bytes =
+                    fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+                forked.push(
+                    read_evidence(&bytes)
+                        .map_err(|error| format!("{}: {error}", path.display()))?,
+                );
+            }
+            let evidence = merge_evidence(forked);
             for test in &evidence.tests {
                 outcomes.push(OwnedTestOutcome {
                     name: test.name.clone(),

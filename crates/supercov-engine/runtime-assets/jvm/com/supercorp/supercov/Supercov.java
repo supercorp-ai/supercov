@@ -334,6 +334,24 @@ public final class Supercov {
     seen.set(id, grown);
   }
 
+  /**
+   * Writes this JVM's evidence into {@code directory}, under a name no other
+   * JVM will choose.
+   *
+   * <p>A build may fork more than one JVM to run its tests in parallel --
+   * Gradle's maxParallelForks and surefire's forkCount both do, and RxJava
+   * sets the first to the number of processors. Every one of them runs this
+   * listener, so a single agreed path means each fork overwrites the last and
+   * the run keeps whichever finished last: 49 tests of the 406 that ran.
+   */
+  public static synchronized void writeInto(String directory) throws IOException {
+    java.io.File target = new java.io.File(directory);
+    if (!target.isDirectory() && !target.mkdirs() && !target.isDirectory()) {
+      throw new IOException("could not create " + directory);
+    }
+    write(new java.io.File(target, ProcessHandle.current().pid() + ".bin").getPath());
+  }
+
   /** Writes the evidence transport the engine reads. */
   public static synchronized void write(String path) throws IOException {
     harvest();

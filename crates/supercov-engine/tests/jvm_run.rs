@@ -1063,3 +1063,93 @@ fn a_spock_specification_is_measured_though_its_tests_are_groovy() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// A build may fork more than one JVM to run its tests in parallel: Gradle's
+/// maxParallelForks and surefire's forkCount both do, and RxJava sets the
+/// first to the number of processors. Every fork runs the listener, so a
+/// single agreed path meant each overwrote the last and the run kept whichever
+/// finished last — 49 of the 406 tests RxJava had actually run.
+#[test]
+fn every_forked_jvm_is_merged_rather_than_overwriting_the_last() {
+    let Some(gradle) = common::tool("gradle") else {
+        common::skip("jvm", "no Gradle found");
+        return;
+    };
+    let fixture = |root: &Path| {
+        write(root, "settings.gradle", "rootProject.name = 'demo'\n");
+        write(
+            root,
+            "build.gradle",
+            "plugins {\n    id 'java'\n}\n\nrepositories { mavenCentral() }\n\ndependencies {\n    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n\ntest {\n    useJUnitPlatform()\n    // The whole point: more than one JVM, each writing evidence.\n    maxParallelForks = 4\n    forkEvery = 1\n}\n",
+        );
+        write(root, "src/main/java/app/Calculator.java", SOURCE);
+        // Four classes, forkEvery = 1, so four JVMs.
+        for name in ["A", "B", "C", "D"] {
+            write(
+                root,
+                &format!("src/test/java/app/{name}Test.java"),
+                &format!(
+                    "package app;\n\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nclass {name}Test {{\n    @Test\n    void first() {{ assertEquals(\"BIG\", Calculator.size(20, true)); }}\n    @Test\n    void second() {{ assertEquals(\"small\", Calculator.size(1, false)); }}\n}}\n"
+                ),
+            );
+        }
+    };
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("forks-warmup");
+        fixture(&warmup);
+        let built = Command::new(&gradle)
+            .args(["--quiet", "--console=plain", "test"])
+            .current_dir(&warmup)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
+    if !resolvable {
+        common::skip(
+            "jvm",
+            "Gradle cannot resolve this project's dependencies here",
+        );
+        return;
+    }
+
+    let root = temporary("forks");
+    fixture(&root);
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![
+            gradle.display().to_string(),
+            "--console=plain".into(),
+            "test".into(),
+        ],
+        run_id: "run-jvm-forks".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    // Every test from every fork, not just the fork that finished last.
+    assert_eq!(result.tests, 8);
+
+    let records = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .filter(|entry| entry.path.ends_with("mcdc.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .collect::<Vec<_>>();
+    for class in ["ATest", "BTest", "CTest", "DTest"] {
+        assert!(
+            records.iter().any(|record| record.contains(class)),
+            "{class} is missing, so a fork was lost: {records:?}"
+        );
+    }
+    std::fs::remove_dir_all(root).ok();
+}

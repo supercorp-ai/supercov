@@ -444,7 +444,7 @@ fn the_platform_listener_attributes_coverage_without_touching_test_source() {
 public final class SupercovConfig {{
     public static final int PROBES = {probes};
     public static final int[] WIDTHS = new int[] {{{widths}}};
-    public static final String EVIDENCE = "evidence.bin";
+    public static final String EVIDENCE = "evidence";
 }}
 "#
         ),
@@ -498,8 +498,16 @@ public final class SupercovConfig {{
         String::from_utf8_lossy(&run.stderr)
     );
 
-    let evidence = read_evidence(&std::fs::read(root.join("evidence.bin")).expect("evidence"))
-        .expect("decode");
+    // A directory, because a build may fork more than one JVM to run its tests
+    // in parallel and each writes under a name of its own. Here there is one.
+    let written = std::fs::read_dir(root.join("evidence"))
+        .expect("evidence directory")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|kind| kind == "bin"))
+        .collect::<Vec<_>>();
+    assert_eq!(written.len(), 1, "{written:?}");
+    let evidence = read_evidence(&std::fs::read(&written[0]).expect("evidence")).expect("decode");
     let named = evidence
         .tests
         .iter()
