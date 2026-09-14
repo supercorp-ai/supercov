@@ -18,11 +18,12 @@ use crate::go_instrumenter::{GoEdit, GoInstrumenterError, RUNTIME_IMPORT, import
 pub struct GoTestFile {
     /// Test functions this file declares, in source order.
     pub tests: Vec<String>,
-    /// Tests that call `t.Parallel()`. Go runs these alongside each other, so
-    /// work they do after that call belongs to no single test and attributing
-    /// it to whichever was current would be a guess presented as a
-    /// measurement.
-    pub parallel: Vec<String>,
+    /// Functions `go test` runs that get a checkpoint rather than an
+    /// announcement, because nothing they reach can be credited to them: a
+    /// test that calls `t.Parallel()`, whose work runs alongside other tests;
+    /// and an Example or Fuzz target, which takes no `*testing.T` to be named
+    /// by. What they reach is swept into the run-wide totals all the same.
+    pub unattributed: Vec<String>,
     /// True when this file declares `TestMain`, which the package may only
     /// have one of.
     pub declares_test_main: bool,
@@ -104,7 +105,7 @@ pub fn instrument_test_file(
     let tree = parse(source)?;
     let mut file = GoTestFile {
         tests: Vec::new(),
-        parallel: Vec::new(),
+        unattributed: Vec::new(),
         declares_test_main: false,
         edits: Vec::new(),
     };
@@ -146,7 +147,7 @@ pub fn instrument_test_file(
         if !is_test_function(&name) {
             if is_checkpoint_only_function(&name, child, source) {
                 needs_runtime = true;
-                file.parallel.push(name.clone());
+                file.unattributed.push(name.clone());
                 file.edits.push(GoEdit {
                     at: body.start_byte() + 1,
                     rank: 100,
@@ -172,7 +173,7 @@ pub fn instrument_test_file(
             // left to sweep at and everything the parallel phase reached sits
             // in the probe array until the process ends -- which, where the
             // end-of-run write is never reached, means it is never recorded.
-            file.parallel.push(name.clone());
+            file.unattributed.push(name.clone());
             needs_runtime = true;
             file.edits.push(GoEdit {
                 at: body.start_byte() + 1,
@@ -417,7 +418,7 @@ mod tests {
             "package p\n\nimport \"testing\"\n\nfunc TestSerial(t *testing.T) {\n\tdoWork()\n}\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tdoWork()\n}\n",
         );
         assert_eq!(file.tests, ["TestSerial", "TestParallel"]);
-        assert_eq!(file.parallel, ["TestParallel"]);
+        assert_eq!(file.unattributed, ["TestParallel"]);
         assert!(out.contains("__supercovTest(t, \"TestSerial\")"), "{out}");
         assert!(
             !out.contains("\"TestParallel\""),
@@ -441,10 +442,13 @@ mod tests {
         );
         assert_eq!(out.matches("Checkpoint()").count(), 2, "{out}");
         assert!(
-            file.parallel.contains(&"ExampleWork".to_owned()),
+            file.unattributed.contains(&"ExampleWork".to_owned()),
             "{file:?}"
         );
-        assert!(file.parallel.contains(&"FuzzWork".to_owned()), "{file:?}");
+        assert!(
+            file.unattributed.contains(&"FuzzWork".to_owned()),
+            "{file:?}"
+        );
         // `Examples` is an ordinary function whose name starts with the word,
         // exactly as `Testify` is, and one taking arguments is not an example
         // `go test` will ever run.
