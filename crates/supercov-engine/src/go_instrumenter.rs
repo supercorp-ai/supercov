@@ -70,6 +70,8 @@ pub struct GoProbe {
 pub struct GoFileObligations {
     pub manifest: CoverageManifest,
     pub probes: BTreeMap<u64, GoProbe>,
+    /// Everything the rewriter must insert to observe these obligations.
+    pub edits: Vec<GoEdit>,
 }
 
 pub fn parse(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
@@ -132,12 +134,43 @@ fn is_statement(kind: &str) -> bool {
 struct Collector<'a> {
     file: &'a str,
     source: &'a str,
+    alias: &'a str,
     next_probe: &'a mut u64,
+    edits: Vec<GoEdit>,
     points: Vec<PointMeta>,
     branches: Vec<BranchMeta>,
     decisions: Vec<DecisionMeta>,
     probes: BTreeMap<u64, GoProbe>,
+    limitations: Vec<serde_json::Value>,
     counter: usize,
+}
+
+/// Whether a probe may be placed before this node.
+///
+/// Go has slots that hold a statement but are not statement positions: the
+/// init and post clauses of a `for`, and the initialiser of an `if` or a
+/// `switch`. A probe there turns `for i := 0; c; i++` into a four-clause loop
+/// that does not compile. Every real statement is a child of a `statement_list`,
+/// so that is the rule rather than a list of exceptions to remember.
+fn in_statement_position(node: Node) -> bool {
+    node.parent()
+        .is_some_and(|parent| parent.kind() == "statement_list")
+}
+
+/// The condition of a `for` loop, when it has one. A `range` clause and a bare
+/// `for {}` have none.
+fn loop_condition<'t>(node: Node<'t>) -> Option<Node<'t>> {
+    if let Some(condition) = node.child_by_field_name("condition") {
+        return Some(condition);
+    }
+    let mut cursor = node.walk();
+    let clause = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == "for_clause")?;
+    let mut inner = clause.walk();
+    clause
+        .children(&mut inner)
+        .find(|child| child.is_named() && child.kind().ends_with("_expression"))
 }
 
 impl<'a> Collector<'a> {
@@ -146,10 +179,21 @@ impl<'a> Collector<'a> {
         format!("{prefix}{}", self.counter)
     }
 
-    fn probe(&mut self, target: GoProbeTarget, at: usize) {
+    fn probe(&mut self, target: GoProbeTarget, at: usize) -> u64 {
         *self.next_probe += 1;
         let id = *self.next_probe;
         self.probes.insert(id, GoProbe { id, target, at });
+        id
+    }
+
+    fn edit(&mut self, at: usize, rank: i32, text: String) {
+        self.edits.push(GoEdit { at, rank, text });
+    }
+
+    /// Insert a statement-position call. Go allows `a(); b()` on one line, so a
+    /// probe never changes which line a statement reports as its own.
+    fn call_before(&mut self, at: usize, call: String) {
+        self.edit(at, 100, format!("{call}; "));
     }
 
     /// Line and column are one-based, matching every other frontend.
@@ -174,7 +218,18 @@ impl<'a> Collector<'a> {
             PointKind::Function => GoProbeTarget::Function { id: id.clone() },
             PointKind::Statement => GoProbeTarget::Statement { id: id.clone() },
         };
-        self.probe(target, node.start_byte());
+        // A function is observed just inside its body, because the declaration
+        // itself is not a place a statement may go.
+        let at = match kind {
+            PointKind::Function => match node.child_by_field_name("body") {
+                Some(body) => body.start_byte() + 1,
+                None => return,
+            },
+            PointKind::Statement => node.start_byte(),
+        };
+        let probe = self.probe(target, at);
+        let alias = self.alias.to_owned();
+        self.call_before(at, format!("{alias}.P({probe})"));
         self.points.push(PointMeta {
             id,
             kind,
@@ -186,20 +241,21 @@ impl<'a> Collector<'a> {
         });
     }
 
-    fn add_branch(&mut self, node: Node, kind: &str, labels: &[&str]) -> String {
+    fn add_branch(&mut self, node: Node, kind: &str, labels: &[&str]) -> Vec<u64> {
         let (line, column) = self.position(node);
         let id = self.id("b");
+        let mut probes = Vec::new();
         let alternatives = labels
             .iter()
             .map(|label| {
                 let alternative = format!("{id}.{label}");
-                self.probe(
+                probes.push(self.probe(
                     GoProbeTarget::Alternative {
                         branch: id.clone(),
                         alternative: alternative.clone(),
                     },
                     node.start_byte(),
-                );
+                ));
                 BranchAlternativeMeta {
                     id: alternative,
                     label: (*label).to_owned(),
@@ -207,7 +263,7 @@ impl<'a> Collector<'a> {
             })
             .collect();
         self.branches.push(BranchMeta {
-            id: id.clone(),
+            id,
             kind: kind.to_owned(),
             file: self.file.to_owned(),
             line,
@@ -215,34 +271,47 @@ impl<'a> Collector<'a> {
             source: self.text(node),
             alternatives,
         });
-        id
+        probes
     }
 
     /// Record a boolean expression as a decision when it has more than one
     /// condition. A single condition needs no MC/DC obligation: its branch
     /// outcomes already say everything independence could.
     fn add_decision(&mut self, node: Node, kind: &str) {
-        let conditions = conditions_of(node, self.source);
-        if conditions.len() < 2 {
+        let mut leaves = Vec::new();
+        condition_nodes(node, self.source, &mut leaves);
+        if leaves.len() < 2 {
             return;
         }
+        let conditions = leaves
+            .iter()
+            .map(|leaf| self.source[leaf.byte_range()].trim().to_owned())
+            .collect::<Vec<_>>();
         let (line, column) = self.position(node);
         let id = self.id("d");
-        for (index, _) in conditions.iter().enumerate() {
-            self.probe(
+        let alias = self.alias.to_owned();
+        for (index, leaf) in leaves.iter().enumerate() {
+            let probe = self.probe(
                 GoProbeTarget::Condition {
                     decision: id.clone(),
                     index,
                 },
-                node.start_byte(),
+                leaf.start_byte(),
             );
+            // Wrapping an operand keeps short-circuiting intact: Go evaluates a
+            // call argument only when the call is reached, so the right-hand
+            // wrapper runs exactly when the unwrapped operand would have.
+            self.edit(leaf.start_byte(), 20, format!("{alias}.C({probe}, "));
+            self.edit(leaf.end_byte(), 20, ")".to_owned());
         }
-        self.probe(
+        let outcome = self.probe(
             GoProbeTarget::Outcome {
                 decision: id.clone(),
             },
             node.start_byte(),
         );
+        self.edit(node.start_byte(), 10, format!("{alias}.D({outcome}, "));
+        self.edit(node.end_byte(), 10, ")".to_owned());
         self.decisions.push(DecisionMeta {
             id,
             file: self.file.to_owned(),
@@ -255,6 +324,7 @@ impl<'a> Collector<'a> {
     }
 
     fn walk(&mut self, node: Node) {
+        let alias = self.alias.to_owned();
         match node.kind() {
             "function_declaration" | "method_declaration" | "func_literal" => {
                 let label = node
@@ -263,18 +333,47 @@ impl<'a> Collector<'a> {
                 self.add_point(node, PointKind::Function, label);
             }
             "if_statement" => {
-                // An `if` without an else still has two outcomes: the body ran,
-                // or control passed it by. Recording only the taken arm would
-                // make an untested guard look exercised.
-                self.add_branch(node, "if", &["true", "false"]);
                 if let Some(condition) = node.child_by_field_name("condition") {
+                    // An `if` without an else still has two outcomes: the body
+                    // ran, or control passed it by. Wrapping the condition
+                    // records the arm that was *not* taken by never setting its
+                    // bit, which is what makes an untested guard visible.
+                    let probes = self.add_branch(node, "if", &["true", "false"]);
+                    self.edit(
+                        condition.start_byte(),
+                        5,
+                        format!("{alias}.B({}, {}, ", probes[0], probes[1]),
+                    );
+                    self.edit(condition.end_byte(), 5, ")".to_owned());
                     self.add_decision(condition, "if");
                 }
             }
             "for_statement" => {
-                self.add_branch(node, "loop", &["entered", "skipped"]);
-                if let Some(clause) = node.child_by_field_name("condition") {
-                    self.add_decision(clause, "loop");
+                // A `for` with a condition branches on it. A `range` loop and a
+                // bare `for {}` have no expression to observe, so Supercov
+                // records the limitation rather than an obligation it cannot
+                // measure.
+                match loop_condition(node) {
+                    Some(condition) => {
+                        let probes = self.add_branch(node, "loop", &["true", "false"]);
+                        self.edit(
+                            condition.start_byte(),
+                            5,
+                            format!("{alias}.B({}, {}, ", probes[0], probes[1]),
+                        );
+                        self.edit(condition.end_byte(), 5, ")".to_owned());
+                        self.add_decision(condition, "loop");
+                    }
+                    None => {
+                        let (line, column) = self.position(node);
+                        self.limitations.push(serde_json::json!({
+                            "kind": "loop-without-condition",
+                            "file": self.file,
+                            "line": line,
+                            "column": column,
+                            "detail": "a range or unconditional loop has no condition to observe, so no branch obligation is recorded for it",
+                        }));
+                    }
                 }
             }
             "expression_switch_statement" | "type_switch_statement" | "select_statement" => {
@@ -283,40 +382,67 @@ impl<'a> Collector<'a> {
                     "type_switch_statement" => "type-switch",
                     _ => "select",
                 };
-                let mut labels = Vec::new();
+                let mut cases = Vec::new();
+                let mut has_default = false;
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     match child.kind() {
                         "expression_case" | "type_case" | "communication_case" => {
-                            labels.push(self.text(child))
+                            cases.push((self.text(child), Some(child)))
                         }
-                        "default_case" => labels.push("default".to_owned()),
+                        "default_case" => {
+                            has_default = true;
+                            cases.push(("default".to_owned(), Some(child)));
+                        }
                         _ => {}
                     }
                 }
-                // A switch with no default can fall through every case, which
-                // is an outcome a reader has to be able to see.
-                if !labels.iter().any(|label| label == "default") {
-                    labels.push("no case matched".to_owned());
+                // A switch with no default can match nothing, which is an
+                // outcome a reader has to see. Synthesising the clause is the
+                // only way to observe it.
+                if !has_default {
+                    cases.push(("no case matched".to_owned(), None));
                 }
-                let borrowed = labels.iter().map(String::as_str).collect::<Vec<_>>();
-                self.add_branch(node, kind, &borrowed);
+                let labels = cases
+                    .iter()
+                    .map(|(label, _)| label.as_str())
+                    .collect::<Vec<_>>();
+                let probes = self.add_branch(node, kind, &labels);
+                for (probe, (_, clause)) in probes.iter().zip(cases.iter()) {
+                    match clause {
+                        Some(clause) => {
+                            let at = clause
+                                .children(&mut clause.walk())
+                                .find(|child| child.kind() == "statement_list")
+                                .map(|body| body.start_byte())
+                                .unwrap_or_else(|| clause.end_byte());
+                            self.call_before(at, format!("{alias}.A({probe})"));
+                        }
+                        None => {
+                            // Before the switch's closing brace.
+                            let at = node.end_byte().saturating_sub(1);
+                            self.edit(at, 100, format!("\ndefault:\n{alias}.A({probe})\n"));
+                        }
+                    }
+                }
             }
-            kind if is_statement(kind) => {
+            kind if is_statement(kind) && in_statement_position(node) => {
                 self.add_point(node, PointKind::Statement, None);
             }
             _ => {}
         }
         // `if`, `for` and `switch` are statements too, and their own point is
         // what says the construct was reached at all.
-        if matches!(
-            node.kind(),
-            "if_statement"
-                | "for_statement"
-                | "expression_switch_statement"
-                | "type_switch_statement"
-                | "select_statement"
-        ) {
+        if in_statement_position(node)
+            && matches!(
+                node.kind(),
+                "if_statement"
+                    | "for_statement"
+                    | "expression_switch_statement"
+                    | "type_switch_statement"
+                    | "select_statement"
+            )
+        {
             self.add_point(node, PointKind::Statement, None);
         }
         let mut cursor = node.walk();
@@ -333,38 +459,77 @@ impl<'a> Collector<'a> {
 /// `&&` and `||` are the only short-circuiting operators Go has, so they are
 /// the only ones that split a decision. `!` negates a condition rather than
 /// introducing one, and a parenthesised group is transparent.
-fn conditions_of(node: Node, source: &str) -> Vec<String> {
-    fn collect(node: Node, source: &str, out: &mut Vec<String>) {
-        match node.kind() {
-            "binary_expression" => {
-                let operator = node
-                    .child_by_field_name("operator")
-                    .map(|op| &source[op.byte_range()])
-                    .unwrap_or("");
-                if operator == "&&" || operator == "||" {
-                    if let Some(left) = node.child_by_field_name("left") {
-                        collect(left, source, out);
-                    }
-                    if let Some(right) = node.child_by_field_name("right") {
-                        collect(right, source, out);
-                    }
-                    return;
+fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
+    match node.kind() {
+        "binary_expression" => {
+            let operator = node
+                .child_by_field_name("operator")
+                .map(|op| &source[op.byte_range()])
+                .unwrap_or("");
+            if operator == "&&" || operator == "||" {
+                if let Some(left) = node.child_by_field_name("left") {
+                    condition_nodes(left, source, out);
                 }
-                out.push(source[node.byte_range()].trim().to_owned());
-            }
-            "parenthesized_expression" => {
-                let mut cursor = node.walk();
-                match node.children(&mut cursor).find(|child| child.is_named()) {
-                    Some(inner) => collect(inner, source, out),
-                    None => out.push(source[node.byte_range()].trim().to_owned()),
+                if let Some(right) = node.child_by_field_name("right") {
+                    condition_nodes(right, source, out);
                 }
+                return;
             }
-            _ => out.push(source[node.byte_range()].trim().to_owned()),
+            out.push(node);
         }
+        "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            match node.children(&mut cursor).find(|child| child.is_named()) {
+                Some(inner) => condition_nodes(inner, source, out),
+                None => out.push(node),
+            }
+        }
+        _ => out.push(node),
     }
-    let mut out = Vec::new();
-    collect(node, source, &mut out);
+}
+
+/// One source edit. Every probe is an insertion at a byte offset; wrapping an
+/// expression is two of them, at its start and its end.
+///
+/// `rank` orders edits landing on the same offset. Applying right to left, the
+/// edit inserted last ends up leftmost, so an outer wrapper carries a lower
+/// rank than the inner one it encloses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoEdit {
+    pub at: usize,
+    pub rank: i32,
+    pub text: String,
+}
+
+/// Apply edits to source, right to left so earlier offsets stay valid.
+pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
+    let mut ordered = edits.to_vec();
+    ordered.sort_by(|a, b| b.at.cmp(&a.at).then(b.rank.cmp(&a.rank)));
+    let mut out = source.to_owned();
+    for edit in ordered {
+        if edit.at > out.len() {
+            continue;
+        }
+        out.insert_str(edit.at, &edit.text);
+    }
     out
+}
+
+/// The import rewritten source needs, placed straight after the package
+/// clause. Go rejects an unused import, so this is only added to a file that
+/// gained at least one probe.
+pub fn import_edit(source: &str, alias: &str, path: &str) -> Option<GoEdit> {
+    let tree = parse(source).ok()?;
+    let mut cursor = tree.root_node().walk();
+    let package = tree
+        .root_node()
+        .children(&mut cursor)
+        .find(|child| child.kind() == "package_clause")?;
+    Some(GoEdit {
+        at: package.end_byte(),
+        rank: 0,
+        text: format!("\nimport {alias} \"{path}\""),
+    })
 }
 
 pub fn build_go_obligations(
@@ -372,15 +537,34 @@ pub fn build_go_obligations(
     source: &str,
     next_probe: &mut u64,
 ) -> Result<GoFileObligations, GoInstrumenterError> {
+    build_go_obligations_with_alias(file, source, next_probe, RUNTIME_ALIAS)
+}
+
+/// The name rewritten source calls the runtime by. Deliberately unlikely to
+/// collide with an identifier a project already uses.
+pub const RUNTIME_ALIAS: &str = "__supercov";
+
+/// The module path the rewritten source imports the runtime from.
+pub const RUNTIME_IMPORT: &str = "github.com/supercorp-ai/supercov/runtime/go/supercov";
+
+pub fn build_go_obligations_with_alias(
+    file: &str,
+    source: &str,
+    next_probe: &mut u64,
+    alias: &str,
+) -> Result<GoFileObligations, GoInstrumenterError> {
     let tree = parse(source)?;
     let mut collector = Collector {
         file,
         source,
+        alias,
         next_probe,
+        edits: Vec::new(),
         points: Vec::new(),
         branches: Vec::new(),
         decisions: Vec::new(),
         probes: BTreeMap::new(),
+        limitations: Vec::new(),
         counter: 0,
     };
     let mut cursor = tree.root_node().walk();
@@ -389,16 +573,24 @@ pub fn build_go_obligations(
             collector.walk(child);
         }
     }
+    let mut edits = collector.edits;
+    // Only a file that gained a probe gets the import; Go rejects an unused one.
+    if !edits.is_empty()
+        && let Some(import) = import_edit(source, alias, RUNTIME_IMPORT)
+    {
+        edits.push(import);
+    }
     Ok(GoFileObligations {
         manifest: CoverageManifest {
             decisions: collector.decisions,
             points: collector.points,
             branches: collector.branches,
-            limitations: Vec::new(),
+            limitations: collector.limitations,
             unmeasured: Vec::new(),
             scope: None,
         },
         probes: collector.probes,
+        edits,
     })
 }
 
@@ -429,6 +621,134 @@ func classify(a int, b bool) string {
     fn obligations(source: &str) -> GoFileObligations {
         let mut next = 0;
         build_go_obligations("main.go", source, &mut next).expect("obligations")
+    }
+
+    /// Rewriting must never produce source Go cannot compile. Re-parsing the
+    /// output catches that without a toolchain, on every machine, every run.
+    fn rewritten(source: &str) -> String {
+        let mut next = 0;
+        let go = build_go_obligations("x.go", source, &mut next).expect("obligations");
+        let out = rewrite(source, &go.edits);
+        parse(&out)
+            .unwrap_or_else(|error| panic!("rewritten source does not parse: {error}\n{out}"));
+        out
+    }
+
+    #[test]
+    fn a_probe_never_lands_where_go_does_not_allow_a_statement() {
+        // `for i := 0; c; i++` has two slots that hold a statement but are not
+        // statement positions; a probe there makes a four-clause loop that does
+        // not compile. Same for an `if` or `switch` initialiser.
+        let out = rewritten(
+            "package main\nfunc f(a int) int {\n\tfor i := 0; i < a; i++ {\n\t\ta++\n\t}\n\tif b := a; b > 1 {\n\t\treturn b\n\t}\n\tswitch c := a; c {\n\tcase 1:\n\t\treturn 1\n\t}\n\treturn 0\n}\n",
+        );
+        assert!(
+            !out.contains("for __supercov"),
+            "probe in a for-clause init:\n{out}"
+        );
+        assert!(
+            !out.contains("; __supercov.P"),
+            "probe in a for-clause post:\n{out}"
+        );
+        assert!(
+            out.contains("if b := a;"),
+            "the if initialiser survived intact:\n{out}"
+        );
+        assert!(
+            out.contains("switch c := a;"),
+            "the switch initialiser survived intact:\n{out}"
+        );
+    }
+
+    #[test]
+    fn wrapping_a_condition_preserves_short_circuit_order() {
+        // Go evaluates a call argument only when the call is reached, so a
+        // wrapped right-hand operand runs exactly when the unwrapped one would
+        // have. The wrappers must nest outcome-outside-conditions, or the
+        // decision would be observed before its operands.
+        let out = rewritten(
+            "package main\nfunc f(a int, b bool) bool {\n\tif a > 10 && b {\n\t\treturn true\n\t}\n\treturn false\n}\n",
+        );
+        let condition = out
+            .lines()
+            .find(|line| line.contains("if "))
+            .expect("the if survived");
+        let outcome = condition.find(".D(").expect("outcome wrapper");
+        let first = condition.find(".C(").expect("first condition wrapper");
+        assert!(
+            outcome < first,
+            "the outcome must enclose its conditions: {condition}"
+        );
+        assert!(
+            condition.matches(".C(").count() == 2,
+            "one wrapper per condition: {condition}"
+        );
+        assert!(
+            condition.contains("&&"),
+            "the operator itself is untouched: {condition}"
+        );
+    }
+
+    #[test]
+    fn a_switch_without_a_default_gains_one_so_matching_nothing_is_observable() {
+        // The outcome exists whether or not the author wrote a clause for it,
+        // and it cannot be seen without one.
+        let out = rewritten(
+            "package main\nfunc f(a int) {\n\tswitch a {\n\tcase 1:\n\t\treturn\n\t}\n}\n",
+        );
+        assert!(out.contains("default:"), "{out}");
+
+        // A switch that already has one is left alone.
+        let existing = rewritten(
+            "package main\nfunc f(a int) {\n\tswitch a {\n\tcase 1:\n\t\treturn\n\tdefault:\n\t\treturn\n\t}\n}\n",
+        );
+        assert_eq!(existing.matches("default:").count(), 1, "{existing}");
+    }
+
+    #[test]
+    fn a_loop_with_no_condition_records_a_limitation_not_an_obligation() {
+        // A `range` loop and a bare `for {}` have no expression to observe.
+        // Declaring a branch nothing can measure would put an obligation in the
+        // denominator that no test could ever satisfy.
+        let mut next = 0;
+        let go = build_go_obligations(
+            "x.go",
+            "package main\nfunc f(xs []int) {\n\tfor _, x := range xs {\n\t\t_ = x\n\t}\n\tfor {\n\t\tbreak\n\t}\n}\n",
+            &mut next,
+        )
+        .unwrap();
+        assert!(
+            go.manifest.branches.iter().all(|b| b.kind != "loop"),
+            "{:?}",
+            go.manifest.branches
+        );
+        assert_eq!(
+            go.manifest.limitations.len(),
+            2,
+            "{:?}",
+            go.manifest.limitations
+        );
+        assert_eq!(go.manifest.limitations[0]["kind"], "loop-without-condition");
+    }
+
+    #[test]
+    fn only_a_file_that_gained_a_probe_imports_the_runtime() {
+        // Go rejects an unused import, so a file with nothing to observe must
+        // not get one.
+        let out = rewritten("package main\nfunc f(a int) int {\n\treturn a\n}\n");
+        assert!(
+            out.contains(RUNTIME_ALIAS),
+            "a function is itself an obligation:\n{out}"
+        );
+
+        let mut next = 0;
+        let bare =
+            build_go_obligations("t.go", "package main\n\ntype T struct{}\n", &mut next).unwrap();
+        assert!(bare.edits.is_empty(), "{:?}", bare.edits);
+        assert_eq!(
+            rewrite("package main\n\ntype T struct{}\n", &bare.edits),
+            "package main\n\ntype T struct{}\n"
+        );
     }
 
     #[test]
@@ -488,7 +808,10 @@ func classify(a int, b bool) string {
                 })
         };
         assert_eq!(by_kind("if").unwrap(), ["true", "false"]);
-        assert_eq!(by_kind("loop").unwrap(), ["entered", "skipped"]);
+        // A loop's condition is true on every iteration and false when it
+        // stops, so the honest labels are the condition's own outcomes rather
+        // than "entered" and "skipped".
+        assert_eq!(by_kind("loop").unwrap(), ["true", "false"]);
         let switch = by_kind("switch").unwrap();
         assert!(switch.contains(&"default".to_owned()), "{switch:?}");
         assert!(
