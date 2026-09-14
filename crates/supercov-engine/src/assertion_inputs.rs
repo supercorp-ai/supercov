@@ -73,6 +73,12 @@ pub fn capture_with_expect_modules(
     let mut inputs = Inputs { schema_version: 1, language: language.into(), context_digest: context_digest(), files: Files::new(), assertions: vec![], limitations: vec![
         "Syntax inventory covers recognized assertion forms, not every possible custom assertion. Agents may add exact source sites; missing runtime identity never earns credit.".into()
     ] };
+    if language == "go" {
+        inputs.limitations.push("A Go test states its claim with an `if` and reports the violation through t.Error or t.Fatal, so the report is the inventoried site. Custom assertion helpers that wrap it are not recognized.".into());
+    }
+    if language == "jvm" {
+        inputs.limitations.push("Assertion forms spelled assertSomething, assertThat or fail are inventoried, which covers JUnit, TestNG, AssertJ, Hamcrest and kotlin.test. Kotest's infix matchers and custom assertion helpers are not.".into());
+    }
     if language == "javascript" {
         inputs.limitations.push("Optional assertion calls are inventoried but currently have no injected phase. Unrecognized custom assertion wrappers and dynamically selected matchers may be absent. Use check --require-observed to detect inventoried sites without passing evidence.".into());
     }
@@ -119,6 +125,9 @@ pub fn capture_with_expect_modules(
             "rs" => rust_ranges(&text),
             "py" => python_ranges(&text),
             "rb" => ruby_ranges(&text),
+            "go" => go_ranges(&text),
+            "java" => jvm_ranges(&text, crate::jvm_instrumenter::JvmLanguage::Java),
+            "kt" => jvm_ranges(&text, crate::jvm_instrumenter::JvmLanguage::Kotlin),
             _ => Ok(vec![]),
         };
         match ranges {
@@ -192,6 +201,121 @@ pub fn current_sources(root: &Path, manifest: &InputManifest) -> Result<Inputs, 
         return Err("Invalid assertion identities in run manifest".into());
     }
     Ok(inputs)
+}
+
+/// Every call in a file, as (byte range, callee text).
+///
+/// Shared by Go, Java and Kotlin because the question is the same in all
+/// three: which calls are the ones that make a claim. Only the node kinds and
+/// the names differ, and the caller decides those.
+fn calls(tree: &tree_sitter::Tree, source: &str, kinds: &[&str]) -> Vec<(usize, usize, String)> {
+    let mut found = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+        if !kinds.contains(&node.kind()) {
+            continue;
+        }
+        // The callee is the part before the arguments, whatever the grammar
+        // calls it: a field where one is named, the first child otherwise.
+        let callee = node
+            .child_by_field_name("function")
+            .or_else(|| node.child_by_field_name("name"))
+            .or_else(|| node.named_child(0));
+        let Some(callee) = callee else {
+            continue;
+        };
+        found.push((
+            node.start_byte(),
+            node.end_byte(),
+            source[callee.byte_range()].trim().to_owned(),
+        ));
+    }
+    found.sort();
+    found
+}
+
+/// Go's assertion forms.
+///
+/// A Go test states its claim with an `if` and reports the violation through
+/// `t.Error` or `t.Fatal`, so the report is what marks the claim: there is no
+/// assertion expression to point at. testify's `assert` and `require` are the
+/// other form nearly every Go suite uses.
+fn go_ranges(source: &str) -> Result<Vec<(usize, usize, String)>, String> {
+    let tree = crate::go_instrumenter::parse(source).map_err(|e| e.to_string())?;
+    let harnesses = testing_parameters(&tree, source);
+    Ok(calls(&tree, source, &["call_expression"])
+        .into_iter()
+        .filter(|(_, _, callee)| {
+            let Some((receiver, method)) = callee.rsplit_once('.') else {
+                return false;
+            };
+            // `t.Errorf` and `fmt.Errorf` are the same shape, and only one of
+            // them is a claim. The receiver has to be something the file
+            // actually declared as a *testing.T.
+            (harnesses.contains(receiver)
+                && matches!(method, "Error" | "Errorf" | "Fatal" | "Fatalf"))
+                || matches!(receiver, "assert" | "require")
+        })
+        .collect())
+}
+
+/// Every identifier the file binds to a `*testing.T`, `*testing.B` or
+/// `*testing.F`.
+///
+/// Collected from the declarations rather than assumed to be `t`: a subtest
+/// closure rebinds it, a benchmark names it `b`, and a file that chose
+/// something else is still a test file.
+fn testing_parameters(tree: &tree_sitter::Tree, source: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+        if node.kind() != "parameter_declaration" {
+            continue;
+        }
+        let Some(kind) = node.child_by_field_name("type") else {
+            continue;
+        };
+        if !matches!(
+            source[kind.byte_range()].trim(),
+            "*testing.T" | "*testing.B" | "*testing.F"
+        ) {
+            continue;
+        }
+        if let Some(name) = node.child_by_field_name("name") {
+            names.insert(source[name.byte_range()].trim().to_owned());
+        }
+    }
+    names
+}
+
+/// Java and Kotlin's assertion forms.
+///
+/// JUnit, TestNG, AssertJ, Hamcrest and kotlin.test all spell theirs
+/// `assertSomething` or `assertThat`, so the prefix covers every one of them
+/// without naming a framework. `fail` is the other half of the same idiom.
+/// Kotest writes its own infix matchers, which no call-shaped rule reaches.
+fn jvm_ranges(
+    source: &str,
+    language: crate::jvm_instrumenter::JvmLanguage,
+) -> Result<Vec<(usize, usize, String)>, String> {
+    let tree = crate::jvm_instrumenter::parse(source, language).map_err(|e| e.to_string())?;
+    Ok(
+        calls(&tree, source, &["method_invocation", "call_expression"])
+            .into_iter()
+            .filter(|(_, _, callee)| {
+                let last = callee.rsplit('.').next().unwrap_or_default();
+                last.starts_with("assert") || last == "fail"
+            })
+            .collect(),
+    )
 }
 
 fn rust_ranges(source: &str) -> Result<Vec<(usize, usize, String)>, String> {
@@ -336,6 +460,84 @@ mod tests {
         assert_eq!(
             pair,
             selected_context_digest(" LANG , TZ ", |name| Some(name.to_owned()))
+        );
+    }
+
+    #[test]
+    fn go_s_assertion_forms_are_the_failure_report_and_testify() {
+        // A Go test states its claim with an `if` and reports the violation,
+        // so there is no assertion expression to point at: the report is the
+        // site. testify is the other form nearly every Go suite uses.
+        let source = "package p\n\nimport (\n\t\"testing\"\n\n\t\"github.com/stretchr/testify/assert\"\n\t\"github.com/stretchr/testify/require\"\n)\n\nfunc TestThings(t *testing.T) {\n\tif got := f(); got != 1 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n\tif err := g(); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tassert.Equal(t, 1, f())\n\trequire.NoError(t, g())\n\tt.Log(\"not a claim\")\n\tfmt.Errorf(\"not a claim either\")\n}\n";
+        let operations = go_ranges(source)
+            .expect("parse")
+            .into_iter()
+            .map(|(_, _, operation)| operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            ["t.Errorf", "t.Fatal", "assert.Equal", "require.NoError"],
+            "fmt.Errorf is the same shape as t.Errorf and is not a claim"
+        );
+    }
+
+    #[test]
+    fn a_subtest_and_a_benchmark_name_their_harness_whatever_they_like() {
+        // `t` is the convention, not a rule: a subtest closure rebinds it, a
+        // benchmark calls it `b`, and a file is free to choose. Taking the
+        // name from the declaration is what makes all three work.
+        let source = "package p\n\nimport \"testing\"\n\nfunc TestOuter(outer *testing.T) {\n\touter.Run(\"inner\", func(inner *testing.T) {\n\t\tinner.Fatal(\"inner failed\")\n\t})\n}\n\nfunc BenchmarkThing(b *testing.B) {\n\tb.Fatalf(\"setup failed\")\n}\n";
+        let operations = go_ranges(source)
+            .expect("parse")
+            .into_iter()
+            .map(|(_, _, operation)| operation)
+            .collect::<Vec<_>>();
+        assert_eq!(operations, ["inner.Fatal", "b.Fatalf"]);
+    }
+
+    #[test]
+    fn the_jvm_s_assertion_forms_are_recognised_by_shape_not_by_framework() {
+        // JUnit, TestNG, AssertJ, Hamcrest and kotlin.test all spell theirs
+        // the same way, so one rule covers every one of them without naming a
+        // framework or pinning a version.
+        let java = "class T {\n  void t() {\n    assertEquals(1, f());\n    Assertions.assertTrue(g());\n    assertThat(h()).isEqualTo(2);\n    org.junit.Assert.fail(\"boom\");\n    log(\"not a claim\");\n  }\n}";
+        let operations = jvm_ranges(java, crate::jvm_instrumenter::JvmLanguage::Java)
+            .expect("parse")
+            .into_iter()
+            .map(|(_, _, operation)| operation)
+            .collect::<Vec<_>>();
+        for expected in ["assertEquals", "assertTrue", "assertThat", "fail"] {
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| operation.ends_with(expected)),
+                "{expected} missing from {operations:?}"
+            );
+        }
+        assert!(
+            !operations.iter().any(|operation| operation.contains("log")),
+            "{operations:?}"
+        );
+
+        let kotlin = "fun t() {\n    assertEquals(1, f())\n    assertTrue(g())\n    println(\"not a claim\")\n}\n";
+        let operations = jvm_ranges(kotlin, crate::jvm_instrumenter::JvmLanguage::Kotlin)
+            .expect("parse")
+            .into_iter()
+            .map(|(_, _, operation)| operation)
+            .collect::<Vec<_>>();
+        for expected in ["assertEquals", "assertTrue"] {
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| operation.ends_with(expected)),
+                "{expected} missing from {operations:?}"
+            );
+        }
+        assert!(
+            !operations
+                .iter()
+                .any(|operation| operation.contains("println")),
+            "{operations:?}"
         );
     }
 }
