@@ -72,8 +72,11 @@ ${section("on_macos")}
 ${section("on_linux")}
 
   def install
-    # Every channel ships the same npm package, with the binary at package/bin.
-    bin.install "package/bin/supercov"
+    # Every channel ships the same npm package, whose files sit under
+    # package/. Homebrew strips a single top-level directory when it extracts,
+    # so the path here is what is left after that -- unlike cargo-binstall,
+    # which does not strip and asks for package/bin.
+    bin.install "bin/supercov"
   end
 
   test do

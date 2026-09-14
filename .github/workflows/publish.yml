@@ -210,3 +210,29 @@ jobs:
           git add Formula/supercov.rb
           git commit -m "supercov $version"
           git push
+
+  # Pushing a formula is not the same as publishing one that works. The first
+  # one written by hand installed nothing: it asked for package/bin/supercov,
+  # and Homebrew strips a single top-level directory when it extracts, so the
+  # binary was at bin/supercov. `brew audit` passed it happily -- only an
+  # install finds that.
+  homebrew-verify:
+    needs: homebrew
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Install from the tap and run it
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          brew install supercorp-ai/tap/supercov
+          installed=$(supercov --version)
+          echo "$installed"
+          case "$installed" in
+            *"$version"*) echo "The tap installs $version." ;;
+            *) echo "The tap installed something else: $installed" >&2; exit 1 ;;
+          esac
