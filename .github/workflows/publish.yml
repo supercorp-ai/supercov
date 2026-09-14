@@ -155,3 +155,58 @@ jobs:
       - run: node scripts/publish-crates.mjs
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  # The tap carries a sha256 per platform, so its formula is only correct for
+  # one release and has to be rewritten for the next. Left to a human that step
+  # is the one that gets forgotten, and a tap that is quietly a release behind
+  # installs the wrong binary without saying so.
+  #
+  # Runs after publish, because the formula's checksums are read from the very
+  # assets that job uploads. A failure here cannot un-publish anything; it means
+  # the tap kept the formula it had.
+  #
+  # Needs HOMEBREW_TAP_TOKEN: a fine-grained token with contents:write on
+  # supercorp-ai/homebrew-tap. GITHUB_TOKEN reaches only this repository, even
+  # within the same organisation. Without it the step says so and stops.
+  homebrew:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Require a matching version tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node -e 'const version = require("./package.json").version; if (process.env.RELEASE_TAG !== "v" + version) { console.error(`Expected tag v${version}, received ${process.env.RELEASE_TAG}`); process.exit(1); }'
+      - name: Point the tap at this release
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set, so the tap keeps the formula it has."
+            echo "Add a token with contents:write on supercorp-ai/homebrew-tap to update it here."
+            exit 0
+          fi
+          version="${RELEASE_TAG#v}"
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/supercorp-ai/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          node scripts/brew-formula.mjs "$version" > tap/Formula/supercov.rb
+          cd tap
+          if git diff --quiet -- Formula/supercov.rb; then
+            echo "The tap already describes $version."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/supercov.rb
+          git commit -m "supercov $version"
+          git push
