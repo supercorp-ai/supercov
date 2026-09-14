@@ -842,6 +842,20 @@ pub fn relocate(at: &Anchor, old: &FileManifest, new: &Files) -> Option<Anchor> 
     if FileFingerprint::of(after) == *before && candidate.offset(new).is_some() {
         return Some(candidate);
     }
+    // The file changed somewhere. That says nothing about this anchor: read the
+    // recorded position in the new file and see whether it still holds the same
+    // text. If it does, the anchor did not move and there is nothing to find.
+    //
+    // Without this, every anchor in a changed file is re-found by searching the
+    // whole file, and that search insists the text be unique -- so a statement
+    // that appears twice is reported "changed or ambiguous" while sitting
+    // untouched at the line it was recorded at. That is a false statement about
+    // a specific node, and it is most of the staleness in a real map.
+    if let Some(start) = candidate.offset(new)
+        && after.get(start..start + at.text.len()) == Some(at.text.as_str())
+    {
+        return Some(candidate);
+    }
     let position = unique_occurrence(after, &at.text)?;
     Some(Anchor::new(
         &target,

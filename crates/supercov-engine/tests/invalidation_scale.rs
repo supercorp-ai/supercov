@@ -5,10 +5,7 @@
 //! so it cannot separate the causes. This builds a map of a known shape and
 //! makes one edit at a time, so each cause can be priced on its own.
 
-use std::collections::BTreeSet;
 use supercov_engine::assertion_map::*;
-
-mod common;
 
 const FILES: usize = 10;
 const FLOWS_PER_FILE: usize = 20;
@@ -158,7 +155,6 @@ fn one_edit_is_priced_against_every_cause() {
         same >= 1,
         "the flow whose statement changed must be rechecked"
     );
-    let _ = BTreeSet::<String>::new();
 }
 
 /// The floor, held as a test rather than a measurement: a comment cannot change
