@@ -2114,7 +2114,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             ecosystem.language, ecosystem.evidence, ecosystem.language
         );
         eprintln!(
-            "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, and Python test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+            "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, Python, Ruby, and Go test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
             ecosystem.language
         );
         return ExitCode::from(2);
@@ -2127,7 +2127,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     ecosystem.language, ecosystem.evidence, ecosystem.language
                 );
                 eprintln!(
-                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, and Python test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, Python, Ruby, and Go test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
                     ecosystem.language
                 );
             }
@@ -2136,7 +2136,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     "[supercov] Supercov could not recognize this project's language or test framework: no supported test files or manifests were found, and the command does not launch a runner Supercov knows."
                 );
                 eprintln!(
-                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, and Python test runs. Alternatively, Supercov may simply not support your test suite yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
+                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, Python, Ruby, and Go test runs. Alternatively, Supercov may simply not support your test suite yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
                 );
             }
         }
@@ -2173,6 +2173,40 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                 eprintln!(
                     "[supercov] Rust coverage: {} test(s) across {} artifact(s)",
                     result.tests, result.artifacts
+                );
+                if let Some(timings) = &result.metadata.timings {
+                    eprintln!(
+                        "[supercov] timings {}",
+                        format_run_timings(timings, result.metadata.duration_ms)
+                    );
+                }
+                process_exit_code(result.exit_code)
+            }
+            Err(error) => {
+                eprintln!("[supercov] {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    if detection.frontends == [supercov_engine::frontend_detection::FrontendLanguage::Go] {
+        let request = supercov_engine::go_run::DirectGoRunRequest {
+            root: root.clone(),
+            command,
+            run_id,
+            started_at,
+        };
+        let mut diagnostics = std::io::stderr().lock();
+        let result = supercov_engine::go_run::run_direct_go(&request, &mut diagnostics);
+        spawn_trash_sweeper(&root);
+        return match result {
+            Ok(result) => {
+                println!(
+                    "[coverage] evidence: {}",
+                    result.run_directory.join("evidence.raw.gz").display()
+                );
+                eprintln!(
+                    "[supercov] Go coverage: {} test(s) across {} source file(s) in {} package(s)",
+                    result.tests, result.source_files, result.packages
                 );
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(

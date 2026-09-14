@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     evidence_archive::write_archive,
+    frontend_protocol::validate_frontend_report_request,
     go_instrumenter::{RUNTIME_ALIAS, RUNTIME_IMPORT, rewrite},
     go_project::{PreparedGoProject, go_integrity_inputs, module_path, prepare_go_project},
     go_test_harness::{instrument_test_file, probe_array_file, synthesized_harness},
@@ -494,6 +495,11 @@ pub fn run_direct_go(
             coverage_model: go_coverage_model(),
         })
         .map_err(|error| error.to_string())?;
+        // Before anything is written: a run that cannot be read back is not a
+        // run, and finding that out at publication is far better than finding
+        // it out when someone asks for the report.
+        validate_frontend_report_request(&run.declaration, &run.request)
+            .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
         let raw = write_archive(
             crate::assertion_inputs::append(

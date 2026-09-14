@@ -17,14 +17,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use supercov_contracts::{
     AttributionPrecision, ExecutionModel, FrontendAttribution, FrontendLimitation,
     FrontendLimitationScope, FrontendRunDeclaration, FrontendRunnerDeclaration,
+    LANGUAGE_FRONTEND_PROTOCOL_VERSION,
 };
 
 use crate::coverage_analysis::McdcVector;
 use crate::coverage_report::{
-    CoverageManifest, CoverageModelDeclaration, CoverageReportRequest, DecisionSnapshot,
-    ExitCodeInput, PersistedCoverageModel, RawTestResult, RuntimeEvent, RuntimeSnapshot,
-    TestProvenance,
+    CoverageManifest, CoverageModelDeclaration, CoveragePhase, CoverageReportRequest,
+    DecisionSnapshot, ExecutionScope, ExitCodeInput, PersistedCoverageModel, RawTestResult,
+    RuntimeEvent, RuntimeSnapshot, TestProvenance,
 };
+
+/// The one phase an owned frontend can speak for is the test body itself, but
+/// a phase identifies itself across the whole run: two tests naming their
+/// bodies the same thing would be one phase claimed twice.
+fn test_phase(test_id: &str) -> String {
+    format!("{test_id}#call")
+}
 use crate::evidence_archive::EvidenceArchiveEntry;
 use crate::go_instrumenter::{GoProbe, GoProbeTarget};
 
@@ -203,7 +211,7 @@ pub struct OwnedTestOutcome {
 /// guess as a measurement.
 pub fn go_declaration() -> FrontendRunDeclaration {
     FrontendRunDeclaration {
-        protocol_version: 1,
+        protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
         frontend_id: "supercov-go".into(),
         frontend_version: "go-owned-v1".into(),
         language: "go".into(),
@@ -211,18 +219,22 @@ pub fn go_declaration() -> FrontendRunDeclaration {
         // here, not a product input.
         structural_source: supercov_contracts::StructuralSource::OwnedProbes,
         runners: vec![FrontendRunnerDeclaration {
-            runner: "go test".into(),
+            runner: "go-test".into(),
             // Go runs a package's tests one after another unless a test opts
             // into parallelism, and Supercov runs one package at a time.
             execution_model: ExecutionModel::SerialInProcess,
             attribution: exact_per_test(),
-            limitations: vec![FrontendLimitation {
-                id: "go-parallel-tests".into(),
-                scopes: vec![FrontendLimitationScope::Test],
-                reason:
-                    "a test that calls t.Parallel() runs alongside others, so work it does after that call is recorded run-wide rather than against that test"
-                        .into(),
-            }],
+            limitations: {
+                let mut limitations = owned_attribution_limitations("go");
+                limitations.push(FrontendLimitation {
+                    id: "go-parallel-tests".into(),
+                    scopes: vec![FrontendLimitationScope::Test],
+                    reason:
+                        "a test that calls t.Parallel() runs alongside others, so work it does after that call is recorded run-wide rather than against that test"
+                            .into(),
+                });
+                limitations
+            },
         }],
         structural_limitations: Vec::new(),
     }
@@ -254,7 +266,7 @@ pub fn go_coverage_model() -> CoverageModelDeclaration {
 /// attribution follows the framework's own lifecycle.
 pub fn jvm_declaration() -> FrontendRunDeclaration {
     FrontendRunDeclaration {
-        protocol_version: 1,
+        protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
         frontend_id: "supercov-jvm".into(),
         frontend_version: "jvm-owned-v1".into(),
         language: "jvm".into(),
@@ -263,7 +275,9 @@ pub fn jvm_declaration() -> FrontendRunDeclaration {
             runner: "junit-platform".into(),
             execution_model: ExecutionModel::SerialInProcess,
             attribution: exact_per_test(),
-            limitations: vec![
+            limitations: {
+                let mut limitations = owned_attribution_limitations("jvm");
+                limitations.extend([
                 FrontendLimitation {
                     id: "jvm-parallel-execution".into(),
                     scopes: vec![FrontendLimitationScope::Test],
@@ -278,7 +292,9 @@ pub fn jvm_declaration() -> FrontendRunDeclaration {
                         "TestNG is not a JUnit Platform engine, so its tests are attributed only where Supercov could rewrite their annotated methods"
                             .into(),
                 },
-            ],
+                ]);
+                limitations
+            },
         }],
         structural_limitations: Vec::new(),
     }
@@ -306,6 +322,38 @@ pub fn jvm_coverage_model() -> CoverageModelDeclaration {
     }
 }
 
+/// What the owned frontends cannot attribute, and why.
+///
+/// The contract will not accept a precision below `Exact` without a limitation
+/// naming that scope, which is the right rule: a number that quietly means
+/// less than it appears to is worse than one that says so. Supercov measures
+/// statements and decisions here, so a test's individual actions and
+/// assertions are outside what it claims, and a phase is a lifecycle the
+/// probes never see.
+fn owned_attribution_limitations(language: &str) -> Vec<FrontendLimitation> {
+    vec![
+        FrontendLimitation {
+            id: format!("{language}-phase-linkage-aggregate"),
+            scopes: vec![FrontendLimitationScope::Phase],
+            reason:
+                "probes record what a test reached, not which of its setup, body or teardown phases reached it"
+                    .into(),
+        },
+        FrontendLimitation {
+            id: format!("{language}-action-linkage-unavailable"),
+            scopes: vec![FrontendLimitationScope::Action],
+            reason: "there is no general application-action lifecycle to link coverage to".into(),
+        },
+        FrontendLimitation {
+            id: format!("{language}-assertion-linkage-unavailable"),
+            scopes: vec![FrontendLimitationScope::Assertion],
+            reason:
+                "coverage is attributed to the test that reached the code, not to the assertion that checked it"
+                    .into(),
+        },
+    ]
+}
+
 fn exact_per_test() -> FrontendAttribution {
     FrontendAttribution {
         run: AttributionPrecision::Exact,
@@ -318,6 +366,26 @@ fn exact_per_test() -> FrontendAttribution {
         action: AttributionPrecision::Unavailable,
         assertion: AttributionPrecision::Unavailable,
     }
+}
+
+/// A short, stable identity derived from what makes the thing itself, so two
+/// runs of the same test agree on what to call it.
+fn stable_id(prefix: &str, values: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for value in values {
+        hash.update(value.as_bytes());
+        hash.update([0]);
+    }
+    let digest = hash.finalize();
+    let mut encoded = String::with_capacity(prefix.len() + 25);
+    encoded.push_str(prefix);
+    encoded.push(':');
+    for byte in &digest[..12] {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("string formatting");
+    }
+    encoded
 }
 
 /// The obligation each probe answers for, by id.
@@ -339,6 +407,7 @@ fn snapshot(
     evidence: &OwnedTestEvidence,
     manifest: &CoverageManifest,
     by_probe: &BTreeMap<u32, String>,
+    phase: &str,
 ) -> RuntimeSnapshot {
     let mut events = Vec::new();
     let mut clock = 0_i64;
@@ -353,7 +422,7 @@ fn snapshot(
             id: id.clone(),
             vector: None,
             timestamp_ms: clock,
-            phase_id: Some("call".into()),
+            phase_id: Some(phase.to_owned()),
             statement_id: None,
             environment: environment.into(),
         });
@@ -382,7 +451,7 @@ fn snapshot(
                 id: meta.id.clone(),
                 vector: Some(vector.clone()),
                 timestamp_ms: clock,
-                phase_id: Some("call".into()),
+                phase_id: Some(phase.to_owned()),
                 statement_id: None,
                 environment: environment.into(),
             });
@@ -488,6 +557,15 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     if outcomes.is_empty() {
         return Err(OwnedEvidenceError::NoTests);
     }
+    // The runner every result claims must be one the declaration names: a
+    // result attributed to a runner nobody declared is a result nothing can
+    // say the precision of, and the reader refuses it rather than guess.
+    let runner = declaration
+        .runners
+        .first()
+        .map(|runner| runner.runner.clone())
+        .ok_or(OwnedEvidenceError::NoTests)?;
+    let source = declaration.frontend_version.clone();
     let by_probe = obligations(probes);
     let recorded = evidence
         .tests
@@ -499,9 +577,26 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         .iter()
         .map(|outcome| {
             let test = recorded.get(&outcome.name).copied().unwrap_or(&empty);
+            let test_id = format!("{}::{}", outcome.package, outcome.name);
+            let phase = test_phase(&test_id);
             RawTestResult {
-                test_id: Some(format!("{}::{}", outcome.package, outcome.name)),
-                scope: None,
+                scope: Some(ExecutionScope {
+                    version: 1,
+                    run_id: run_id.to_owned(),
+                    // The unit that ran as its own process: a Go test binary
+                    // is built per package, and a JVM suite is one JVM. A
+                    // worker identity the reader can trust is what lets it
+                    // accept exact attribution at all.
+                    worker_id: outcome.package.clone(),
+                    test_id: test_id.clone(),
+                    test_key: stable_id("owned-test", &[&outcome.package, &outcome.name]),
+                    retry: 0,
+                    attempt_id: stable_id(
+                        "owned-attempt",
+                        &[run_id, &outcome.package, &outcome.name, "0"],
+                    ),
+                }),
+                test_id: Some(test_id),
                 test: outcome.name.clone(),
                 test_file: outcome.file.clone(),
                 title: None,
@@ -509,10 +604,30 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 status: Some(outcome.status.clone()),
                 expected_status: None,
                 flaky: false,
-                provenance: TestProvenance::default(),
+                provenance: TestProvenance {
+                    runner: runner.clone(),
+                    kind: "unit".into(),
+                    project: Some(outcome.package.clone()),
+                    source: source.clone(),
+                },
                 role: "test".into(),
-                phases: Vec::new(),
-                runtime: vec![snapshot(environment, test, manifest, &by_probe)],
+                // Every event a probe produces belongs to the test body: the
+                // runtime binds coverage at the test boundary and knows
+                // nothing of setup or teardown. One declared phase says
+                // exactly that, and leaves the events with somewhere real to
+                // point rather than at a phase nobody declared.
+                phases: vec![CoveragePhase {
+                    id: phase.clone(),
+                    kind: "test".into(),
+                    operation: format!("{runner} {}", outcome.name),
+                    source: outcome.file.clone(),
+                    caused_by_phase_id: None,
+                    started_at_ms: 0,
+                    ended_at_ms: None,
+                    status: Some(outcome.status.clone()),
+                    error: None,
+                }],
+                runtime: vec![snapshot(environment, test, manifest, &by_probe, &phase)],
                 browser: Vec::new(),
                 server: Vec::new(),
             }
@@ -619,9 +734,10 @@ mod tests {
         let gaps = jvm_runner
             .limitations
             .iter()
-            .map(|limitation| limitation.id.clone())
+            .map(|limitation| limitation.id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(gaps, ["jvm-parallel-execution", "jvm-testng"]);
+        assert!(gaps.contains(&"jvm-parallel-execution"), "{gaps:?}");
+        assert!(gaps.contains(&"jvm-testng"), "{gaps:?}");
     }
 
     #[test]
@@ -636,7 +752,21 @@ mod tests {
             runner.attribution.assertion,
             AttributionPrecision::Unavailable
         );
-        assert_eq!(runner.limitations[0].id, "go-parallel-tests");
+        let gaps = runner
+            .limitations
+            .iter()
+            .map(|limitation| limitation.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(gaps.contains(&"go-parallel-tests"), "{gaps:?}");
+        // And every precision below Exact is accounted for, which is what the
+        // contract requires before a reader will accept the run at all.
+        for gap in [
+            "go-phase-linkage-aggregate",
+            "go-action-linkage-unavailable",
+            "go-assertion-linkage-unavailable",
+        ] {
+            assert!(gaps.contains(&gap), "{gaps:?}");
+        }
     }
 
     #[test]
@@ -674,5 +804,18 @@ mod tests {
         assert_eq!(result.test, "TestSilent");
         assert_eq!(result.test_id.as_deref(), Some("example.com/p::TestSilent"));
         assert!(result.runtime[0].hits.is_empty());
+    }
+
+    #[test]
+    fn both_owned_declarations_satisfy_the_contract_they_are_read_back_through() {
+        // A declaration is written at publication and checked at read. The two
+        // owned frontends once hardcoded a protocol version while the contract
+        // moved on, so every Go and JVM run published cleanly and then failed
+        // the moment anyone asked for its report.
+        for declaration in [go_declaration(), jvm_declaration()] {
+            let language = declaration.language.clone();
+            supercov_contracts::validate_frontend_run_declaration(&declaration)
+                .unwrap_or_else(|error| panic!("{language} declaration is unreadable: {error}"));
+        }
     }
 }
