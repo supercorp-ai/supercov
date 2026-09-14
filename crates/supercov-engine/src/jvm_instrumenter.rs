@@ -98,19 +98,31 @@ fn is_java_statement(kind: &str) -> bool {
     )
 }
 
-fn is_kotlin_statement(kind: &str) -> bool {
-    matches!(
-        kind,
+/// The kinds tree-sitter's Kotlin grammar actually produces in statement
+/// position, which are not the ones the language's own vocabulary suggests.
+///
+/// Everything in Kotlin is an expression, so a `return` is a
+/// `return_expression` and a `y--` is a `unary_expression`. `break` and
+/// `continue` are stranger still: the grammar gives them no kind of their own
+/// and reports them as identifiers, so they are recognised by their text.
+/// Matching identifiers in general would put a probe before every bare name.
+fn is_kotlin_statement(node: Node, source: &str) -> bool {
+    match node.kind() {
         "assignment"
-            | "call_expression"
-            | "do_while_statement"
-            | "for_statement"
-            | "if_expression"
-            | "jump_expression"
-            | "property_declaration"
-            | "when_expression"
-            | "while_statement"
-    )
+        | "call_expression"
+        | "do_while_statement"
+        | "for_statement"
+        | "if_expression"
+        | "property_declaration"
+        | "return_expression"
+        | "throw_expression"
+        | "try_expression"
+        | "unary_expression"
+        | "when_expression"
+        | "while_statement" => true,
+        "identifier" => matches!(source[node.byte_range()].trim(), "break" | "continue"),
+        _ => false,
+    }
 }
 
 struct Collector<'a> {
@@ -295,7 +307,7 @@ impl Collector<'_> {
         }
         self.edit(node.start_byte(), 60, "{ ".to_owned());
         self.edit(node.end_byte(), 60, " }".to_owned());
-        if is_statement(node.kind(), self.language) {
+        if is_statement(node, self.source, self.language) {
             // Ranked above the brace so that applying right to left leaves the
             // brace outermost and the probe within it.
             self.add_point(node, PointKind::Statement, None);
@@ -303,8 +315,19 @@ impl Collector<'_> {
     }
 }
 
+/// The block a function's statements live in, if it has one.
+///
+/// Java names the field; Kotlin's grammar does not. It puts an unnamed
+/// `function_body` between the declaration and the block, so asking for the
+/// `body` field there answers nothing and every Kotlin function goes
+/// unmeasured — silently, because a function with no block is a real thing in
+/// Kotlin and the caller treats the absence as one.
 fn body_block<'t>(node: Node<'t>, language: JvmLanguage) -> Option<Node<'t>> {
-    let body = node.child_by_field_name("body")?;
+    let body = node.child_by_field_name("body").or_else(|| {
+        let mut cursor = node.walk();
+        node.children(&mut cursor)
+            .find(|child| matches!(child.kind(), "function_body" | "block"))
+    })?;
     match language {
         JvmLanguage::Java => (body.kind() == "block").then_some(body),
         JvmLanguage::Kotlin => {
@@ -491,7 +514,9 @@ fn walk(collector: &mut Collector, node: Node) {
                 collector.ensure_block(body);
             }
         }
-        kind if in_statement_position(node, language) && is_statement(kind, language) => {
+        _ if in_statement_position(node, language)
+            && is_statement(node, collector.source, language) =>
+        {
             collector.add_point(node, PointKind::Statement, None);
         }
         _ => {}
@@ -504,10 +529,10 @@ fn walk(collector: &mut Collector, node: Node) {
     }
 }
 
-fn is_statement(kind: &str, language: JvmLanguage) -> bool {
+fn is_statement(node: Node, source: &str, language: JvmLanguage) -> bool {
     match language {
-        JvmLanguage::Java => is_java_statement(kind),
-        JvmLanguage::Kotlin => is_kotlin_statement(kind),
+        JvmLanguage::Java => is_java_statement(node.kind()),
+        JvmLanguage::Kotlin => is_kotlin_statement(node, source),
     }
 }
 
@@ -715,5 +740,57 @@ mod tests {
         assert_eq!(decisions, 2, "the project numbered two decisions in all");
         assert_eq!(java.decision_widths, [2]);
         assert_eq!(kotlin.decision_widths, [2]);
+    }
+
+    #[test]
+    fn kotlin_statements_are_the_kinds_the_grammar_produces() {
+        // Everything in Kotlin is an expression, so the grammar's names are
+        // not the language's vocabulary: a `return` is a return_expression,
+        // a `y--` is a unary_expression, and `break` and `continue` get no
+        // kind of their own at all and arrive as identifiers. A list written
+        // from the language reference misses all of them, and a function of
+        // nothing but returns measures as having no statements.
+        let source = "fun f(xs: List<Int>, a: Int): Int {\n    var y = a\n    y = y + 1\n    y--\n    for (i in xs) {\n        if (i == 1) { continue }\n        if (i == 2) { break }\n    }\n    try { println(y) } catch (e: Exception) { throw e }\n    return y\n}\n";
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations = build_jvm_obligations(
+            "f.kt",
+            source,
+            JvmLanguage::Kotlin,
+            &mut next,
+            &mut decisions,
+        )
+        .expect("obligations");
+
+        // The rewritten source still parses, which is what says the probes
+        // went somewhere Kotlin accepts.
+        let rewritten = rewrite(source, &obligations.edits);
+        parse(&rewritten, JvmLanguage::Kotlin)
+            .unwrap_or_else(|error| panic!("{error}\n{rewritten}"));
+
+        let lines = obligations
+            .manifest
+            .points
+            .iter()
+            .map(|point| point.line)
+            .collect::<std::collections::BTreeSet<_>>();
+        // A loop is a branch rather than a point, in both languages: what
+        // matters about it is which way it went, and its body's statements
+        // are measured on their own.
+        for (line, what) in [
+            (1, "the function itself"),
+            (2, "var y = a"),
+            (3, "y = y + 1"),
+            (4, "y--"),
+            (6, "if/continue"),
+            (7, "if/break"),
+            (9, "try/throw"),
+            (10, "return"),
+        ] {
+            assert!(
+                lines.contains(&line),
+                "{what} on line {line} is unmeasured: {lines:?}"
+            );
+        }
     }
 }

@@ -845,3 +845,104 @@ fn a_multi_project_gradle_build_reaches_every_subproject() {
     assert_eq!(result.tests, 2);
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Kotest is the reason the platform listener exists rather than an annotation
+/// rewriter: its tests are strings in a constructor block, not annotated
+/// methods, so nothing that reads test source can find them. The platform
+/// announces them like any other engine's.
+#[test]
+fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
+    let Some(gradle) = tool("gradle") else {
+        eprintln!("[jvm-run] skipped: no Gradle found");
+        return;
+    };
+    let fixture = |root: &Path| {
+        write(root, "settings.gradle", "rootProject.name = 'demo'\n");
+        write(
+            root,
+            "build.gradle",
+            &KOTLIN_BUILD_GRADLE.replace(
+                "testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'\n    testImplementation 'org.jetbrains.kotlin:kotlin-test'",
+                "testImplementation 'io.kotest:kotest-runner-junit5:5.9.1'",
+            ),
+        );
+        write(root, "src/main/kotlin/app/Calculator.kt", KOTLIN_SOURCE);
+        write(
+            root,
+            "src/test/kotlin/app/CalculatorSpec.kt",
+            "package app\n\nimport io.kotest.core.spec.style.StringSpec\nimport io.kotest.matchers.shouldBe\n\nclass CalculatorSpec : StringSpec({\n    \"loud and large is big\" {\n        Calculator.size(20, true) shouldBe \"BIG\"\n    }\n    \"anything else is small\" {\n        Calculator.size(1, false) shouldBe \"small\"\n    }\n})\n",
+        );
+    };
+    let warmup = temporary("kotest-warmup");
+    fixture(&warmup);
+    let resolvable = Command::new(&gradle)
+        .args(["--quiet", "--console=plain", "test"])
+        .current_dir(&warmup)
+        .output()
+        .is_ok_and(|out| out.status.success());
+    std::fs::remove_dir_all(&warmup).ok();
+    if !resolvable {
+        eprintln!("[jvm-run] skipped: Gradle cannot build this Kotest project here");
+        return;
+    }
+
+    let root = temporary("kotest");
+    fixture(&root);
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![
+            gradle.display().to_string(),
+            "--console=plain".into(),
+            "test".into(),
+        ],
+        run_id: "run-jvm-kotest".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.tests, 2);
+
+    let entries = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive");
+    let records = entries
+        .iter()
+        .filter(|entry| entry.path.ends_with("mcdc.json"))
+        .map(|entry| String::from_utf8(entry.contents.clone()).expect("utf-8"))
+        .collect::<Vec<_>>();
+    // The sentence its author wrote, not a method name invented for it.
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("loud and large is big")),
+        "{records:?}"
+    );
+
+    // And the Kotlin function it reached is measured at all. A Kotlin function
+    // declaration hides its block behind an unnamed node, so asking the
+    // grammar for a `body` field answered nothing and every Kotlin function
+    // went unrecorded -- silently, because a function with no block is a real
+    // thing in Kotlin and the absence read as one of those.
+    let manifest = String::from_utf8(
+        entries
+            .into_iter()
+            .find(|entry| entry.path == "manifest.json")
+            .expect("manifest")
+            .contents,
+    )
+    .expect("utf-8");
+    assert!(manifest.contains("\"kind\":\"function\""), "{manifest}");
+    assert!(
+        records.iter().all(|record| record.contains("\"f1\"")),
+        "both tests enter the function they exercise: {records:?}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
