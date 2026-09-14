@@ -58,6 +58,12 @@ jobs:
         run: |
           node scripts/verify-native-release-set.mjs native-release
           node scripts/publish-native-release.mjs native-release
+      # Published is not the same as readable. npm serves reads through a cache,
+      # and on 0.0.50 a platform package was visible to `npm publish` four
+      # minutes before it was visible to `npm install`. Anyone installing in
+      # that window resolved the primary package and could not fetch its binary.
+      - name: Wait until a reader would find every native package
+        run: node scripts/await-native-release.mjs native-release
       - name: Publish the primary package only after every native package exists
         run: npm publish --ignore-scripts --access public
       # CHANGELOG.md holds the public notes. Package preflight already refused

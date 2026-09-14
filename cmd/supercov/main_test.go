@@ -1,9 +1,13 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The launcher has one job and two ways to get it wrong: asking for an archive
@@ -63,5 +67,57 @@ func TestOnlyARealReleaseVersionIsFetched(t *testing.T) {
 func TestLibcPicksOneOfTheTwoLinuxBuilds(t *testing.T) {
 	if got := libc(); got != "gnu" && got != "musl" {
 		t.Fatalf("libc() = %q, and only gnu and musl are built", got)
+	}
+}
+
+// The window this closes: a tag is pushed before the workflow that builds its
+// archives runs, so for the twenty minutes that takes, `@latest` resolves to a
+// version nothing can be downloaded for. npm, pip and gem all resolve to the
+// newest version with an artifact for the machine asking; this makes `go run`
+// behave the same way instead of failing outright.
+func TestTheNewestDownloadableReleaseIsFoundWhenATagHasNoArchivesYet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("reaches the GitHub API")
+	}
+	if _, err := platform(); err != nil {
+		t.Skipf("no release is built for this machine: %v", err)
+	}
+	version, err := published()
+	if err != nil {
+		t.Skipf("GitHub unreachable: %v", err)
+	}
+	if !looksLikeVersion(version) {
+		t.Fatalf("published() = %q, which is not a release version", version)
+	}
+	// And what it names really is downloadable: that is the whole claim.
+	name, _ := asset(version)
+	url := fmt.Sprintf("%s/releases/download/v%s/%s", repository, version, name)
+	response, err := (&http.Client{Timeout: 60 * time.Second}).Head(url)
+	if err != nil {
+		t.Skipf("GitHub unreachable: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("published() named %s, but %s is %s", version, name, response.Status)
+	}
+	t.Logf("newest downloadable release for this platform: %s", version)
+}
+
+// A tag whose archives are not published yet must be distinguishable from a
+// download that simply failed: the first is worth falling back for, the second
+// is not.
+func TestAMissingArchiveIsReportedAsUnpublishedRatherThanAsAFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("reaches GitHub")
+	}
+	if _, err := platform(); err != nil {
+		t.Skipf("no release is built for this machine: %v", err)
+	}
+	_, err := install("9.9.9")
+	if err == nil {
+		t.Fatal("a version that was never released must not install")
+	}
+	if !errors.Is(err, errUnpublished) {
+		t.Fatalf("want errUnpublished so run() can fall back, got: %v", err)
 	}
 }
