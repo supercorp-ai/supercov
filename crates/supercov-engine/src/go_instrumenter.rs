@@ -433,9 +433,10 @@ impl<'a> Collector<'a> {
                             "id": limitation,
                             "kind": "loop-without-condition",
                             "file": self.file,
+                            "source": self.text(node),
                             "line": line,
                             "column": column,
-                            "detail": "a range or unconditional loop has no condition to observe, so no branch obligation is recorded for it",
+                            "reason": "a range or unconditional loop has no condition to observe, so no branch obligation is recorded for it",
                         }));
                     }
                 }
@@ -685,6 +686,64 @@ pub fn build_go_obligations_with_alias(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every field the coverage index stores for a limitation.
+    ///
+    /// A limitation missing one of these is written into a run that then
+    /// cannot be opened at all -- `invalid coverage index: coverage
+    /// limitation`, with no coverage report and nothing naming the file that
+    /// caused it. These were writing `detail` where the index reads `reason`,
+    /// and none of them wrote `source`, so any run that measured a for-each
+    /// loop was unreadable.
+    fn assert_indexable(limitations: &[serde_json::Value]) -> Vec<String> {
+        assert!(!limitations.is_empty(), "nothing to check");
+        for limitation in limitations {
+            for field in ["id", "kind", "file", "source", "reason"] {
+                assert!(
+                    limitation.get(field).and_then(|v| v.as_str()).is_some(),
+                    "a limitation needs a string {field}: {limitation}"
+                );
+            }
+            for field in ["line", "column"] {
+                assert!(
+                    limitation.get(field).and_then(|v| v.as_u64()).is_some(),
+                    "a limitation needs a number {field}: {limitation}"
+                );
+            }
+        }
+        let mut kinds = limitations
+            .iter()
+            .filter_map(|limitation| limitation["kind"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    }
+
+    #[test]
+    fn every_limitation_carries_what_the_index_stores() {
+        const EVERY: &str = r#"package main
+
+func walk(items []int) int {
+	sum := 0
+	for _, item := range items {
+		sum += item
+	}
+	for {
+		break
+	}
+	return sum
+}
+"#;
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations =
+            build_go_obligations("walk.go", EVERY, &mut next, &mut decisions).expect("go");
+        assert_eq!(
+            assert_indexable(&obligations.manifest.limitations),
+            ["loop-without-condition"]
+        );
+    }
 
     const SAMPLE: &str = r#"package main
 

@@ -210,6 +210,29 @@ pub fn discover_go_files(root: &Path) -> Result<GoFiles, String> {
     Ok(files)
 }
 
+const LANGUAGE: &str = "go";
+
+/// A file the parser could not read is a hole in the denominator, and a hole
+/// nobody can see is worse than one they can. A diagnostic line scrolls past;
+/// this puts the file in the manifest, so it reaches the declaration's
+/// structural limitations and `supercov runs latest` can still name it long
+/// after the build log is gone.
+fn unparseable_limitation(file: &str, reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": crate::go_instrumenter::stable_obligation_id(LANGUAGE, file, "unparseable", 0, 0),
+        "kind": "file-does-not-parse",
+        "file": file,
+        // The surface is the whole file: there is no construct to quote,
+        // because nothing in it parsed.
+        "source": file,
+        "line": 1,
+        "column": 1,
+        "reason": format!(
+            "{reason}; the file carries no obligations and nothing in it counts towards this run"
+        ),
+    })
+}
+
 pub fn prepare_go_project(root: &Path) -> Result<PreparedGoProject, String> {
     let files = discover_go_files(root)?;
     if files.sources.is_empty() && files.tests.is_empty() {
@@ -235,10 +258,11 @@ pub fn prepare_go_project(root: &Path) -> Result<PreparedGoProject, String> {
     for relative in &files.sources {
         let path = root.join(relative);
         let Ok(source) = std::fs::read_to_string(&path) else {
-            unparseable.push((
-                relative.clone(),
-                "file could not be read as UTF-8".to_owned(),
-            ));
+            let reason = "file could not be read as UTF-8";
+            manifest
+                .limitations
+                .push(unparseable_limitation(relative, reason));
+            unparseable.push((relative.clone(), reason.to_owned()));
             continue;
         };
         match build_go_obligations(relative, &source, &mut next_probe, &mut next_decision) {
@@ -259,7 +283,12 @@ pub fn prepare_go_project(root: &Path) -> Result<PreparedGoProject, String> {
                     crate::go_instrumenter::rewrite(&source, &obligations.edits),
                 ));
             }
-            Err(error) => unparseable.push((relative.clone(), error.to_string())),
+            Err(error) => {
+                manifest
+                    .limitations
+                    .push(unparseable_limitation(relative, &error.to_string()));
+                unparseable.push((relative.clone(), error.to_string()));
+            }
         }
     }
     Ok(PreparedGoProject {
@@ -408,6 +437,23 @@ mod tests {
         let project = prepare_go_project(&root).unwrap();
         assert_eq!(project.unparseable.len(), 1);
         assert_eq!(project.unparseable[0].0, "broken.go");
+        // And the hole it leaves is declared, not merely printed: a
+        // diagnostic scrolls past, a limitation reaches the stored run.
+        let declared = project
+            .manifest
+            .limitations
+            .iter()
+            .filter(|limitation| limitation["kind"] == "file-does-not-parse")
+            .collect::<Vec<_>>();
+        assert_eq!(declared.len(), 1, "{declared:?}");
+        assert!(
+            declared[0]["file"].as_str().unwrap().ends_with("broken.go"),
+            "{declared:?}"
+        );
+        assert!(
+            declared[0]["id"].as_str().is_some_and(|id| !id.is_empty()),
+            "the declaration needs an id to reference: {declared:?}"
+        );
         // The readable file still contributed its obligations.
         assert!(!project.manifest.points.is_empty());
         assert_eq!(project.manifest.decisions.len(), 1);
