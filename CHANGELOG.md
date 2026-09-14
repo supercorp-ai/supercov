@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.50
+
+**Added**
+
+- Supercov installs from Homebrew: `brew install supercorp-ai/tap/supercov`. The same prebuilt binary every other channel ships, at the same version, with nothing compiled on install.
+- A Go project can run Supercov with Go and nothing else: `go run github.com/supercorp-ai/supercov/cmd/supercov@latest -- go test ./...`. Like any `go run` with a version suffix it ignores the `go.mod` in the current directory, so it neither needs nor touches your module. Every language Supercov measures now has a way in that does not start by installing a different one.
+
 ## 0.0.49
 
 **Added**
