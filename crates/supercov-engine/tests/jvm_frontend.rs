@@ -184,3 +184,140 @@ public class Harness {{
 
     std::fs::remove_dir_all(root).unwrap();
 }
+
+const KOTLIN_SOURCE: &str = r#"object Classify {
+    @JvmStatic
+    fun classify(a: Int, b: Boolean): String {
+        if (a > 10 && b) {
+            return "big"
+        }
+        if (a == 0) return "zero"
+        return "small"
+    }
+}
+"#;
+
+fn kotlinc() -> Option<PathBuf> {
+    ["/opt/homebrew/bin/kotlinc", "kotlinc"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| {
+            Command::new(path)
+                .arg("-version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        })
+}
+
+#[test]
+fn instrumented_kotlin_compiles_and_reports_what_actually_ran() {
+    // Parsing correctly and compiling correctly are different claims, and only
+    // the Kotlin compiler can settle the second.
+    let (Some(kotlinc), Some(javac), Some(java)) = (kotlinc(), tool("javac"), tool("java")) else {
+        eprintln!("[jvm-frontend] skipped: no Kotlin toolchain found");
+        return;
+    };
+    let root = temporary("kotlin");
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/jvm/com/supercorp/supercov/Supercov.java");
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime).expect("runtime source"),
+    );
+    let compiled = Command::new(&javac)
+        .args(["-d", "classes", "com/supercorp/supercov/Supercov.java"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let mut next = 0;
+    let obligations =
+        build_jvm_obligations("Classify.kt", KOTLIN_SOURCE, JvmLanguage::Kotlin, &mut next)
+            .expect("obligations");
+    let instrumented = rewrite(KOTLIN_SOURCE, &obligations.edits);
+    write(&root, "Classify.kt", &instrumented);
+
+    let probes = obligations.probes.len() + 1;
+    let widths = obligations
+        .decision_widths
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    write(
+        &root,
+        "Harness.kt",
+        &format!(
+            r#"import com.supercorp.supercov.Supercov
+
+fun main() {{
+    Supercov.arm({probes}, intArrayOf({widths}))
+    Supercov.enterTest("testZero")
+    Classify.classify(0, false)
+    Supercov.exitTest()
+    Supercov.enterTest("testBig")
+    Classify.classify(20, true)
+    Supercov.exitTest()
+    Supercov.write("evidence.bin")
+}}
+"#
+        ),
+    );
+
+    let compile = Command::new(&kotlinc)
+        .args([
+            "-cp",
+            "classes",
+            "-d",
+            "classes",
+            "Classify.kt",
+            "Harness.kt",
+            "-nowarn",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "kotlinc rejected instrumented source:\n{}\n--- source ---\n{instrumented}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&java)
+        .args(["-cp", "classes", "HarnessKt"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "the instrumented program failed:\n{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let evidence = read_evidence(&std::fs::read(root.join("evidence.bin")).expect("evidence"))
+        .expect("decode");
+    assert_eq!(evidence.widths, [2]);
+    let seen = evidence.decision_vectors[0]
+        .iter()
+        .map(|key| {
+            (
+                key & 0xFF_FFFF,
+                (key >> 24) & 0xFF_FFFF,
+                (key >> 48) & 1 == 1,
+            )
+        })
+        .collect::<Vec<_>>();
+    // Kotlin short-circuits `&&` exactly as Java does, and the wrapper must
+    // not change that: `b` is unevaluated when `a > 10` is false.
+    assert!(seen.contains(&(0b01, 0b00, false)), "{seen:?}");
+    assert!(seen.contains(&(0b11, 0b11, true)), "{seen:?}");
+    assert_eq!(evidence.tests.len(), 2);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
