@@ -8,8 +8,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use supercov_engine::go_evidence::read_evidence;
 use supercov_engine::jvm_instrumenter::{JvmLanguage, build_jvm_obligations, rewrite};
+use supercov_engine::owned_evidence::{
+    OwnedTestOutcome, build_frontend_run, jvm_declaration, read_evidence,
+};
 
 fn tool(name: &str) -> Option<PathBuf> {
     // Homebrew's JDK is keg-only, so `/usr/bin/java` is a stub that finds no
@@ -528,6 +530,45 @@ public final class SupercovConfig {{
         zero.vectors.iter().all(|v| v.key & 0b10 == 0),
         "the zero case must never evaluate the second condition: {:?}",
         zero.vectors
+    );
+
+    // And the same engine path Go uses turns it into a report. One transport
+    // and one reader across languages is what keeps two frontends from
+    // disagreeing about what an evaluation was.
+    let outcomes = evidence
+        .tests
+        .iter()
+        .map(|test| OwnedTestOutcome {
+            name: test.name.clone(),
+            package: "CalculatorTest".into(),
+            file: Some("CalculatorTest.java".into()),
+            status: "passed".into(),
+        })
+        .collect::<Vec<_>>();
+    let run = build_frontend_run(
+        jvm_declaration(),
+        "jvm",
+        &obligations.manifest,
+        &obligations.probes,
+        &evidence,
+        &outcomes,
+        "run_jvm",
+        "now",
+        0,
+    )
+    .expect("frontend run");
+    let report =
+        supercov_engine::coverage_report::analyze_coverage_results(&run.request).expect("report");
+    let summary = &report.filters.passed.summary;
+    assert_eq!(summary.conditions, 2, "one decision of two conditions");
+    assert!(summary.lines.covered > 0);
+    // `size` returns "small" only for a value neither test passes, so a report
+    // claiming everything covered would be the wrong answer.
+    assert!(
+        summary.lines.covered < summary.lines.total,
+        "{}/{}",
+        summary.lines.covered,
+        summary.lines.total
     );
 
     std::fs::remove_dir_all(root).unwrap();

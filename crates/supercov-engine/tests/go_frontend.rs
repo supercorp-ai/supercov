@@ -9,10 +9,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use supercov_engine::go_evidence::{GoTestOutcome, build_go_frontend_run, read_evidence};
 use supercov_engine::go_instrumenter::{RUNTIME_IMPORT, build_go_obligations, rewrite};
 use supercov_engine::go_test_harness::{
     instrument_test_file, probe_array_file, synthesized_harness,
+};
+use supercov_engine::owned_evidence::{
+    OwnedTestOutcome, build_frontend_run, go_declaration, read_evidence,
 };
 
 fn go_binary() -> Option<PathBuf> {
@@ -316,18 +318,20 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
     // that records correctly but cannot be read is not yet a frontend.
     let raw = std::fs::read(root.join("evidence.bin")).expect("evidence");
     let decoded = read_evidence(&raw).expect("decode");
-    let run = build_go_frontend_run(
+    let run = build_frontend_run(
+        go_declaration(),
+        "go",
         &obligations.manifest,
         &obligations.probes,
         &decoded,
         &[
-            GoTestOutcome {
+            OwnedTestOutcome {
                 name: "TestBig".into(),
                 package: "example.com/probe".into(),
                 file: Some("main_test.go".into()),
                 status: "passed".into(),
             },
-            GoTestOutcome {
+            OwnedTestOutcome {
                 name: "TestZero".into(),
                 package: "example.com/probe".into(),
                 file: Some("main_test.go".into()),

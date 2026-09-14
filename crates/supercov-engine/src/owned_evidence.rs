@@ -1,6 +1,12 @@
-//! Turning what the Go runtime wrote into the model the report reads.
+//! Turning what a Supercov-owned runtime wrote into the model the report reads.
 //!
-//! The transport is deliberately dumb — sparse pairs of probe ids and packed
+//! Go, Java and Kotlin all write the same transport, because there is no
+//! reason for them to differ and every reason not to: one format means one
+//! reader, one set of edge cases, and no way for two languages to disagree
+//! about what an evaluation was. Only the frontend declaration is per
+//! language, because only that differs in substance.
+//!
+//! The transport itself is deliberately dumb — sparse pairs of probe ids and packed
 //! vector words — because everything it could have computed instead is cheaper
 //! to compute here, once, than in a process that is trying to run tests. The
 //! mapping from probe id back to obligation lives in the manifest this module
@@ -20,24 +26,21 @@ use crate::coverage_report::{
 };
 use crate::go_instrumenter::{GoProbe, GoProbeTarget};
 
-pub const FRONTEND_ID: &str = "supercov-go";
-pub const FRONTEND_VERSION: &str = "go-owned-v1";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GoEvidenceError {
+pub enum OwnedEvidenceError {
     Truncated(&'static str),
     NoTests,
 }
 
-impl std::fmt::Display for GoEvidenceError {
+impl std::fmt::Display for OwnedEvidenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GoEvidenceError::Truncated(part) => {
-                write!(f, "Go coverage evidence ended in the middle of its {part}")
+            OwnedEvidenceError::Truncated(part) => {
+                write!(f, "Coverage evidence ended in the middle of its {part}")
             }
-            GoEvidenceError::NoTests => write!(
+            OwnedEvidenceError::NoTests => write!(
                 f,
-                "the Go run produced coverage evidence but no test announced itself"
+                "the run produced coverage evidence but no test announced itself"
             ),
         }
     }
@@ -51,7 +54,7 @@ pub struct PackedVector {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GoTestEvidence {
+pub struct OwnedTestEvidence {
     pub name: String,
     /// Probe id to the bitmask it was observed with.
     pub probes: BTreeMap<u32, u32>,
@@ -59,10 +62,10 @@ pub struct GoTestEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GoEvidence {
+pub struct OwnedEvidence {
     /// Run-wide probe totals, the union of every test's.
     pub global: Vec<u32>,
-    pub tests: Vec<GoTestEvidence>,
+    pub tests: Vec<OwnedTestEvidence>,
     /// Conditions per decision, as the manifest ordered them.
     pub widths: Vec<u8>,
     /// Every distinct vector each decision produced, run-wide.
@@ -75,31 +78,31 @@ struct Cursor<'a> {
 }
 
 impl Cursor<'_> {
-    fn u64(&mut self, part: &'static str) -> Result<u64, GoEvidenceError> {
+    fn u64(&mut self, part: &'static str) -> Result<u64, OwnedEvidenceError> {
         let end = self.offset + 8;
         let slice = self
             .bytes
             .get(self.offset..end)
-            .ok_or(GoEvidenceError::Truncated(part))?;
+            .ok_or(OwnedEvidenceError::Truncated(part))?;
         self.offset = end;
         Ok(u64::from_le_bytes(slice.try_into().expect("eight bytes")))
     }
 
-    fn text(&mut self, length: usize, part: &'static str) -> Result<String, GoEvidenceError> {
+    fn text(&mut self, length: usize, part: &'static str) -> Result<String, OwnedEvidenceError> {
         let end = self.offset + length;
         let slice = self
             .bytes
             .get(self.offset..end)
-            .ok_or(GoEvidenceError::Truncated(part))?;
+            .ok_or(OwnedEvidenceError::Truncated(part))?;
         self.offset = end;
-        String::from_utf8(slice.to_vec()).map_err(|_| GoEvidenceError::Truncated(part))
+        String::from_utf8(slice.to_vec()).map_err(|_| OwnedEvidenceError::Truncated(part))
     }
 }
 
 /// Read the transport. A truncated file is an error rather than a short read:
 /// a run that was killed half way through has partial evidence, and reporting
 /// it as though it were complete would understate coverage as a fact.
-pub fn read_evidence(bytes: &[u8]) -> Result<GoEvidence, GoEvidenceError> {
+pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> {
     let mut cursor = Cursor { bytes, offset: 0 };
     let probe_count = cursor.u64("probe totals")? as usize;
     let mut global = Vec::with_capacity(probe_count);
@@ -126,7 +129,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<GoEvidence, GoEvidenceError> {
                 key: cursor.u64("test vectors")?,
             });
         }
-        tests.push(GoTestEvidence {
+        tests.push(OwnedTestEvidence {
             name,
             probes,
             vectors,
@@ -144,7 +147,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<GoEvidence, GoEvidenceError> {
         }
         decision_vectors.push(seen);
     }
-    Ok(GoEvidence {
+    Ok(OwnedEvidence {
         global,
         tests,
         widths,
@@ -177,7 +180,7 @@ pub fn unpack_vector(key: u64, width: u8) -> McdcVector {
 
 /// How a test's name and package became the identity the report uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GoTestOutcome {
+pub struct OwnedTestOutcome {
     pub name: String,
     pub package: String,
     pub file: Option<String>,
@@ -185,38 +188,83 @@ pub struct GoTestOutcome {
     pub status: String,
 }
 
-pub fn declaration() -> FrontendRunDeclaration {
+/// How a language's runner attributes what it records.
+///
+/// Declared rather than assumed. A frontend that overstates its precision is
+/// worse than one that admits a gap, because the report would then present a
+/// guess as a measurement.
+pub fn go_declaration() -> FrontendRunDeclaration {
     FrontendRunDeclaration {
         protocol_version: 1,
-        frontend_id: FRONTEND_ID.into(),
-        frontend_version: FRONTEND_VERSION.into(),
+        frontend_id: "supercov-go".into(),
+        frontend_version: "go-owned-v1".into(),
         language: "go".into(),
-        // Supercov owns the probes: Go's own cover tool is a development
-        // oracle here, not a product input.
+        // Supercov owns the probes: `go test -cover` is a development oracle
+        // here, not a product input.
         structural_source: supercov_contracts::StructuralSource::OwnedProbes,
         runners: vec![FrontendRunnerDeclaration {
             runner: "go test".into(),
             // Go runs a package's tests one after another unless a test opts
             // into parallelism, and Supercov runs one package at a time.
             execution_model: ExecutionModel::SerialInProcess,
-            attribution: FrontendAttribution {
-                run: AttributionPrecision::Exact,
-                worker: AttributionPrecision::Exact,
-                test: AttributionPrecision::Exact,
-                retry: AttributionPrecision::Exact,
-                phase: AttributionPrecision::Aggregate,
-                action: AttributionPrecision::Unavailable,
-                assertion: AttributionPrecision::Unavailable,
-            },
+            attribution: exact_per_test(),
             limitations: vec![FrontendLimitation {
                 id: "go-parallel-tests".into(),
                 scopes: vec![FrontendLimitationScope::Test],
                 reason:
-                    "a test that calls t.Parallel() runs alongside others, so work it does after that call cannot be attributed to it alone"
+                    "a test that calls t.Parallel() runs alongside others, so work it does after that call is recorded run-wide rather than against that test"
                         .into(),
             }],
         }],
         structural_limitations: Vec::new(),
+    }
+}
+
+/// The JVM's, where the JUnit Platform reports each test's start and finish so
+/// attribution follows the framework's own lifecycle.
+pub fn jvm_declaration() -> FrontendRunDeclaration {
+    FrontendRunDeclaration {
+        protocol_version: 1,
+        frontend_id: "supercov-jvm".into(),
+        frontend_version: "jvm-owned-v1".into(),
+        language: "jvm".into(),
+        structural_source: supercov_contracts::StructuralSource::OwnedProbes,
+        runners: vec![FrontendRunnerDeclaration {
+            runner: "junit-platform".into(),
+            execution_model: ExecutionModel::SerialInProcess,
+            attribution: exact_per_test(),
+            limitations: vec![
+                FrontendLimitation {
+                    id: "jvm-parallel-execution".into(),
+                    scopes: vec![FrontendLimitationScope::Test],
+                    reason:
+                        "with JUnit parallel execution enabled, tests overlap in one process and work they do concurrently is recorded run-wide rather than against a single test"
+                            .into(),
+                },
+                FrontendLimitation {
+                    id: "jvm-testng".into(),
+                    scopes: vec![FrontendLimitationScope::Test],
+                    reason:
+                        "TestNG is not a JUnit Platform engine, so its tests are attributed only where Supercov could rewrite their annotated methods"
+                            .into(),
+                },
+            ],
+        }],
+        structural_limitations: Vec::new(),
+    }
+}
+
+fn exact_per_test() -> FrontendAttribution {
+    FrontendAttribution {
+        run: AttributionPrecision::Exact,
+        worker: AttributionPrecision::Exact,
+        test: AttributionPrecision::Exact,
+        retry: AttributionPrecision::Exact,
+        phase: AttributionPrecision::Aggregate,
+        // Supercov measures statements and decisions here, not the individual
+        // actions or assertions inside a test.
+        action: AttributionPrecision::Unavailable,
+        assertion: AttributionPrecision::Unavailable,
     }
 }
 
@@ -235,7 +283,8 @@ fn obligations(probes: &BTreeMap<u64, GoProbe>) -> BTreeMap<u32, String> {
 }
 
 fn snapshot(
-    evidence: &GoTestEvidence,
+    environment: &str,
+    evidence: &OwnedTestEvidence,
     manifest: &CoverageManifest,
     by_probe: &BTreeMap<u32, String>,
 ) -> RuntimeSnapshot {
@@ -254,7 +303,7 @@ fn snapshot(
             timestamp_ms: clock,
             phase_id: Some("call".into()),
             statement_id: None,
-            environment: "go".into(),
+            environment: environment.into(),
         });
         clock += 1;
     }
@@ -283,7 +332,7 @@ fn snapshot(
                 timestamp_ms: clock,
                 phase_id: Some("call".into()),
                 statement_id: None,
-                environment: "go".into(),
+                environment: environment.into(),
             });
             clock += 1;
         }
@@ -300,7 +349,7 @@ fn snapshot(
     }
 }
 
-pub struct GoFrontendRun {
+pub struct OwnedFrontendRun {
     pub declaration: FrontendRunDeclaration,
     pub request: CoverageReportRequest,
     pub tests: usize,
@@ -312,17 +361,19 @@ pub struct GoFrontendRun {
 /// result, with no coverage. Dropping it would make a suite look smaller than
 /// it is, and a test that ran without reaching any measured line is a fact
 /// worth seeing rather than an absence worth hiding.
-pub fn build_go_frontend_run(
+pub fn build_frontend_run(
+    declaration: FrontendRunDeclaration,
+    environment: &str,
     manifest: &CoverageManifest,
     probes: &BTreeMap<u64, GoProbe>,
-    evidence: &GoEvidence,
-    outcomes: &[GoTestOutcome],
+    evidence: &OwnedEvidence,
+    outcomes: &[OwnedTestOutcome],
     run_id: &str,
     generated_at: &str,
     test_exit_code: i32,
-) -> Result<GoFrontendRun, GoEvidenceError> {
+) -> Result<OwnedFrontendRun, OwnedEvidenceError> {
     if outcomes.is_empty() {
-        return Err(GoEvidenceError::NoTests);
+        return Err(OwnedEvidenceError::NoTests);
     }
     let by_probe = obligations(probes);
     let recorded = evidence
@@ -330,7 +381,7 @@ pub fn build_go_frontend_run(
         .iter()
         .map(|test| (test.name.clone(), test))
         .collect::<BTreeMap<_, _>>();
-    let empty = GoTestEvidence::default();
+    let empty = OwnedTestEvidence::default();
     let raw_results = outcomes
         .iter()
         .map(|outcome| {
@@ -348,14 +399,14 @@ pub fn build_go_frontend_run(
                 provenance: TestProvenance::default(),
                 role: "test".into(),
                 phases: Vec::new(),
-                runtime: vec![snapshot(test, manifest, &by_probe)],
+                runtime: vec![snapshot(environment, test, manifest, &by_probe)],
                 browser: Vec::new(),
                 server: Vec::new(),
             }
         })
         .collect::<Vec<_>>();
-    Ok(GoFrontendRun {
-        declaration: declaration(),
+    Ok(OwnedFrontendRun {
+        declaration,
         tests: raw_results.len(),
         request: CoverageReportRequest {
             run_id: run_id.to_owned(),
@@ -411,13 +462,13 @@ mod tests {
         }
         assert!(matches!(
             read_evidence(&write(&[5, 1])),
-            Err(GoEvidenceError::Truncated("probe totals"))
+            Err(OwnedEvidenceError::Truncated("probe totals"))
         ));
     }
 
     #[test]
     fn a_run_with_no_tests_is_an_error_not_an_empty_report() {
-        let evidence = GoEvidence::default();
+        let evidence = OwnedEvidence::default();
         let manifest = CoverageManifest {
             decisions: Vec::new(),
             points: Vec::new(),
@@ -427,17 +478,43 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            build_go_frontend_run(&manifest, &BTreeMap::new(), &evidence, &[], "run", "now", 0)
-                .err(),
-            Some(GoEvidenceError::NoTests)
+            build_frontend_run(
+                go_declaration(),
+                "go",
+                &manifest,
+                &BTreeMap::new(),
+                &evidence,
+                &[],
+                "run",
+                "now",
+                0
+            )
+            .err(),
+            Some(OwnedEvidenceError::NoTests)
         );
+    }
+
+    #[test]
+    fn each_declaration_says_what_its_runner_can_and_cannot_attribute() {
+        // The JVM's differs in substance, not just in name: it lists TestNG as
+        // a gap because TestNG is not a platform engine, and parallel
+        // execution as another.
+        let jvm = jvm_declaration();
+        let jvm_runner = &jvm.runners[0];
+        assert_eq!(jvm_runner.runner, "junit-platform");
+        let gaps = jvm_runner
+            .limitations
+            .iter()
+            .map(|limitation| limitation.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(gaps, ["jvm-parallel-execution", "jvm-testng"]);
     }
 
     #[test]
     fn the_declaration_says_what_go_can_and_cannot_attribute() {
         // A frontend that overstates its precision is worse than one that
         // admits a gap: the report would present guesses as measurements.
-        let declared = declaration();
+        let declared = go_declaration();
         let runner = &declared.runners[0];
         assert_eq!(runner.execution_model, ExecutionModel::SerialInProcess);
         assert_eq!(runner.attribution.test, AttributionPrecision::Exact);
@@ -460,11 +537,13 @@ mod tests {
             unmeasured: Vec::new(),
             scope: None,
         };
-        let run = build_go_frontend_run(
+        let run = build_frontend_run(
+            go_declaration(),
+            "go",
             &manifest,
             &BTreeMap::new(),
-            &GoEvidence::default(),
-            &[GoTestOutcome {
+            &OwnedEvidence::default(),
+            &[OwnedTestOutcome {
                 name: "TestSilent".into(),
                 package: "example.com/p".into(),
                 file: Some("p/x_test.go".into()),
