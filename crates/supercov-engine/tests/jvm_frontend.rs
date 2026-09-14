@@ -658,3 +658,114 @@ public class Driver {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Probes are a store into one shared array, which is what makes them cost a
+/// single instruction, and attribution is a sweep of that array at each test
+/// boundary. Two tests running at once share the array, so the sweep credits
+/// hits to whichever test happens to be current. The runtime must notice and
+/// stop attributing rather than emit records that look measured and are not.
+///
+/// Probe hits survive, because every write stores the same constant and no
+/// interleaving changes the result — so a parallel suite still reports what it
+/// reached, it just cannot say which test reached it. Condition vectors do
+/// not: their state is read-modify-write, so concurrent evaluations describe
+/// an evaluation that never happened and they are dropped rather than shown.
+#[test]
+fn concurrent_tests_lose_attribution_rather_than_get_it_wrong() {
+    let (Some(javac), Some(java)) = (tool("javac"), tool("java")) else {
+        eprintln!("[jvm] skipped: no JDK found");
+        return;
+    };
+    let root = temporary("overlap");
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/jvm/com/supercorp/supercov/Supercov.java");
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime).expect("runtime"),
+    );
+    write(
+        &root,
+        "Driver.java",
+        r#"import com.supercorp.supercov.Supercov;
+import java.util.concurrent.CountDownLatch;
+
+public class Driver {
+    public static void main(String[] args) throws Exception {
+        Supercov.arm(4, new int[] {2});
+        // Both tests are open at once: the latch makes the overlap certain
+        // rather than a race the test hopes to lose.
+        CountDownLatch bothStarted = new CountDownLatch(2);
+        Runnable body = () -> {
+            Supercov.enterTest(Thread.currentThread().getName());
+            Supercov.bd(1, 2, 0, Supercov.c(0, 0, true) && Supercov.c(0, 1, true));
+            bothStarted.countDown();
+            try {
+                bothStarted.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            Supercov.exitTest();
+        };
+        Thread first = new Thread(body, "first");
+        Thread second = new Thread(body, "second");
+        first.start();
+        second.start();
+        first.join();
+        second.join();
+        Supercov.write(args[0]);
+    }
+}
+"#,
+    );
+    let compile = Command::new(&javac)
+        .args([
+            "-d",
+            ".",
+            "com/supercorp/supercov/Supercov.java",
+            "Driver.java",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("javac");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let evidence_path = root.join("evidence.bin");
+    let run = Command::new(&java)
+        .args(["-cp", ".", "Driver", evidence_path.to_str().unwrap()])
+        .current_dir(&root)
+        .output()
+        .expect("java");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let complaint = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        complaint.contains("cannot be attributed to individual tests"),
+        "the run should say why attribution is missing, got: {complaint}"
+    );
+
+    let evidence = read_evidence(&std::fs::read(&evidence_path).expect("evidence"))
+        .expect("the runtime's own transport");
+    assert!(
+        evidence.tests.is_empty(),
+        "attribution nobody can trust should be absent, not present: {:?}",
+        evidence.tests
+    );
+    assert!(
+        evidence.global.iter().any(|&mask| mask != 0),
+        "run-wide totals are a union and should survive the overlap"
+    );
+    assert_eq!(
+        evidence.decision_vectors[0].len(),
+        0,
+        "condition vectors a race can corrupt should be dropped, not reported"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

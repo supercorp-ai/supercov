@@ -11,6 +11,7 @@ package supercov
 import (
 	"bufio"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"sync"
 )
@@ -53,9 +54,9 @@ type decisionState struct {
 	// outcomes; a third distinct vector simply pays for the call. Cleared by
 	// harvest, alongside the slots it stands in for. A recorded key always has
 	// a condition bit set, so zero is free to mean empty.
-	recent     [2]uint64
-	width      uint8
-	count      uint8
+	recent [2]uint64
+	width  uint8
+	count  uint8
 	// Distinct vectors seen in the current test. Inline rather than a slice:
 	// a decision of n conditions has at most 2^(n+1) of them, so three
 	// conditions fit exactly and wider ones spill to a map nothing reaches in
@@ -102,6 +103,15 @@ var (
 	widths  []uint8
 	size    int
 	mu      sync.Mutex
+	// Tests currently between EnterTest and its returned closure. More than
+	// one means the shared probe array has two owners and neither can be
+	// believed; see overlap.
+	open       int
+	overlapped bool
+	// Every distinct vector the run evaluated, per decision. Kept apart from
+	// the records because the decision table describes the run, and so stands
+	// even when attribution does not.
+	runWide [][]uint64
 )
 
 // Arm records how many conditions each decision has. The probe array is
@@ -121,6 +131,10 @@ func Arm(count int, conditions []uint8) {
 	}
 	suspended = suspended[:0]
 	current = -1
+	open = 0
+	overlapped = false
+	records = nil
+	runWide = make([][]uint64, len(conditions))
 	for id := range overflow {
 		delete(overflow, id)
 	}
@@ -137,15 +151,71 @@ func Arm(count int, conditions []uint8) {
 func EnterTest(name string) func() {
 	mu.Lock()
 	harvest()
+	if open > 0 {
+		overlap()
+	}
+	open++
+	if overlapped {
+		mu.Unlock()
+		return func() {
+			mu.Lock()
+			harvest()
+			if open > 0 {
+				open--
+			}
+			mu.Unlock()
+		}
+	}
 	records = append(records, testRecord{name: name})
 	current = len(records) - 1
 	mu.Unlock()
 	return func() {
 		mu.Lock()
 		harvest()
+		if open > 0 {
+			open--
+		}
 		current = -1
 		mu.Unlock()
 	}
+}
+
+// overlap gives up on per-test attribution, once, for the whole run.
+//
+// The harness leaves a test that calls t.Parallel() unannounced, because by
+// the time it returns the test has been descheduled and what runs next belongs
+// to someone else. Source detection catches the call itself; it does not catch
+// a helper that makes it. This is the backstop for that, and for any other way
+// two tests end up open at once.
+//
+// Probes are a store into one shared array, and attribution is a sweep of that
+// array at each boundary. Two tests running at once share the array, so the
+// sweep credits what it finds to whoever is current: every record from here is
+// a guess, and records already closed may have had their hits swept into a
+// neighbour. Which ones are wrong is not knowable from here.
+//
+// Run-wide totals are a union and do not care who contributed what, so the run
+// still measures what the suite reaches. It simply cannot say which test
+// reached it, which is the truth rather than a guess dressed as a measurement.
+//
+// Caller holds mu.
+func overlap() {
+	if overlapped {
+		return
+	}
+	overlapped = true
+	records = nil
+	current = -1
+	// Condition state is read-modify-write, so concurrent evaluations lose
+	// updates and the vectors they produce describe an evaluation that never
+	// happened. Unlike the probe array — where every write stores the same
+	// constant and concurrency cannot change the result — these cannot be
+	// salvaged, so the run keeps statements and branches and drops MC/DC.
+	runWide = make([][]uint64, len(widths))
+	fmt.Fprintln(os.Stderr, "supercov: tests ran concurrently. Statement and branch coverage are"+
+		" still recorded run-wide, but they cannot be attributed to individual tests, and"+
+		" condition coverage is dropped because concurrent evaluations corrupt it. For per-test"+
+		" and condition coverage, run the suite sequentially (go test -p 1, no t.Parallel()).")
 }
 
 // harvest moves everything the probe array holds into the running test's
@@ -153,7 +223,7 @@ func EnterTest(name string) func() {
 // totals; it simply belongs to no test.
 func harvest() {
 	var into *testRecord
-	if current >= 0 && current < len(records) {
+	if !overlapped && current >= 0 && current < len(records) {
 		into = &records[current]
 	}
 	for index, value := range hits {
@@ -168,9 +238,12 @@ func harvest() {
 	}
 	for id := range states {
 		state := &states[id]
-		if state.count > 0 && into != nil {
+		if !overlapped {
 			for _, key := range state.slots[:state.count] {
-				into.vectors = append(into.vectors, vectorHit{uint32(id), key})
+				if into != nil {
+					into.vectors = append(into.vectors, vectorHit{uint32(id), key})
+				}
+				runWide[id] = including(runWide[id], key)
 			}
 		}
 		state.count = 0
@@ -181,13 +254,26 @@ func harvest() {
 		state.recent[0], state.recent[1] = 0, 0
 	}
 	for id, keys := range overflow {
-		if into != nil {
+		if !overlapped {
 			for key := range keys {
-				into.vectors = append(into.vectors, vectorHit{id, key})
+				if into != nil {
+					into.vectors = append(into.vectors, vectorHit{id, key})
+				}
+				runWide[id] = including(runWide[id], key)
 			}
 		}
 		delete(overflow, id)
 	}
+}
+
+// including returns keys with key in it, which may be keys itself.
+func including(keys []uint64, key uint64) []uint64 {
+	for _, existing := range keys {
+		if existing == key {
+			return keys
+		}
+	}
+	return append(keys, key)
 }
 
 // Reserve hands every instrumented package the one array their probes store
@@ -423,23 +509,11 @@ func Write(path string) error {
 		if err := put(uint64(width)); err != nil {
 			return err
 		}
-		union := []uint64{}
-		for _, record := range records {
-			for _, hit := range record.vectors {
-				if int(hit.decision) != index {
-					continue
-				}
-				found := false
-				for _, existing := range union {
-					if existing == hit.key {
-						found = true
-						break
-					}
-				}
-				if !found {
-					union = append(union, hit.key)
-				}
-			}
+		// Run-wide rather than a union over the records: the table describes
+		// what the run evaluated, which stands even when attribution does not.
+		var union []uint64
+		if index < len(runWide) {
+			union = runWide[index]
 		}
 		if err := put(uint64(len(union))); err != nil {
 			return err

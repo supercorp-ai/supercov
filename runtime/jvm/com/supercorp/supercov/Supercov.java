@@ -46,8 +46,11 @@ public final class Supercov {
   private static long[] recentFirst = new long[0];
   private static long[] recentSecond = new long[0];
   private static List<long[]> seen = new ArrayList<>();
+  private static List<long[]> runWide = new ArrayList<>();
   private static final List<Record> records = new ArrayList<>();
   private static int current = -1;
+  private static int open = 0;
+  private static boolean overlapped = false;
 
   private static final int VALUE_SHIFT = 24;
   private static final int OUTCOME_SHIFT = 48;
@@ -73,11 +76,15 @@ public final class Supercov {
     recentFirst = new long[conditions.length];
     recentSecond = new long[conditions.length];
     seen = new ArrayList<>();
+    runWide = new ArrayList<>();
     for (int i = 0; i < conditions.length; i++) {
       seen.add(new long[0]);
+      runWide.add(new long[0]);
     }
     records.clear();
     current = -1;
+    open = 0;
+    overlapped = false;
   }
 
   /**
@@ -89,6 +96,13 @@ public final class Supercov {
    */
   public static synchronized void enterTest(String name) {
     harvest();
+    if (open > 0) {
+      overlap();
+    }
+    open++;
+    if (overlapped) {
+      return;
+    }
     records.add(new Record(name));
     current = records.size() - 1;
   }
@@ -96,11 +110,55 @@ public final class Supercov {
   /** Ends the running test, harvesting what it reached. */
   public static synchronized void exitTest() {
     harvest();
+    open = Math.max(0, open - 1);
     current = -1;
   }
 
+  /**
+   * Gives up on per-test attribution, once, for the whole run.
+   *
+   * <p>Probes are a store into one shared array precisely so they cost a
+   * single instruction, and attribution is a sweep of that array at each test
+   * boundary. Two tests running at once share the array, so the sweep credits
+   * whatever it finds to whoever happens to be current — every record from
+   * then on is a guess, and records already closed may have had their hits
+   * swept into a neighbour. Which ones are wrong is not knowable from here.
+   *
+   * <p>Run-wide totals are unaffected: they are a union, and a union does not
+   * care which test contributed what. So the run still measures what the suite
+   * reaches; it just cannot say which test reached it, which is the truth
+   * rather than a guess dressed as a measurement.
+   *
+   * <p>Supercov disables parallel execution in the workspace it generates, so
+   * reaching this means something else turned it back on.
+   */
+  private static void overlap() {
+    if (overlapped) {
+      return;
+    }
+    overlapped = true;
+    records.clear();
+    current = -1;
+    // Condition state is read-modify-write, so concurrent evaluations lose
+    // updates and the vectors they produce describe an evaluation that never
+    // happened. Unlike the probe array — where every write stores the same
+    // constant and concurrency cannot change the result — these cannot be
+    // salvaged, so the run keeps statements and branches and drops MC/DC.
+    runWide = new ArrayList<>();
+    for (int id = 0; id < widths.length; id++) {
+      runWide.add(new long[0]);
+    }
+    System.err.println(
+        "supercov: tests ran concurrently. Statement and branch coverage are still recorded"
+            + " run-wide, but they cannot be attributed to individual tests, and condition"
+            + " coverage is dropped because concurrent evaluations corrupt it. For per-test and"
+            + " condition coverage, run the suite sequentially"
+            + " (JUnit: junit.jupiter.execution.parallel.enabled=false).");
+  }
+
   private static void harvest() {
-    Record into = current >= 0 && current < records.size() ? records.get(current) : null;
+    Record into =
+        !overlapped && current >= 0 && current < records.size() ? records.get(current) : null;
     for (int index = 0; index < HITS.length; index++) {
       int value = HITS[index];
       if (value == 0) {
@@ -114,9 +172,12 @@ public final class Supercov {
     }
     for (int id = 0; id < seen.size(); id++) {
       long[] keys = seen.get(id);
-      if (keys.length > 0 && into != null) {
+      if (!overlapped) {
         for (long key : keys) {
-          into.vectors.add(new long[] {id, key});
+          if (into != null) {
+            into.vectors.add(new long[] {id, key});
+          }
+          runWide.set(id, including(runWide.get(id), key));
         }
       }
       if (keys.length > 0) {
@@ -125,6 +186,19 @@ public final class Supercov {
       recentFirst[id] = 0L;
       recentSecond[id] = 0L;
     }
+  }
+
+  /** {@code keys} with {@code key} in it, which may be {@code keys} itself. */
+  private static long[] including(long[] keys, long key) {
+    for (long existing : keys) {
+      if (existing == key) {
+        return keys;
+      }
+    }
+    long[] grown = new long[keys.length + 1];
+    System.arraycopy(keys, 0, grown, 0, keys.length);
+    grown[keys.length] = key;
+    return grown;
   }
 
   /**
@@ -241,18 +315,10 @@ public final class Supercov {
       putLong(out, widths.length);
       for (int id = 0; id < widths.length; id++) {
         putLong(out, widths[id]);
-        List<Long> union = new ArrayList<>();
-        for (Record record : records) {
-          for (long[] hit : record.vectors) {
-            if (hit[0] != id) {
-              continue;
-            }
-            if (!union.contains(hit[1])) {
-              union.add(hit[1]);
-            }
-          }
-        }
-        putLong(out, union.size());
+        // Run-wide rather than a union over the records: the table describes
+        // what the run evaluated, which stands even when attribution does not.
+        long[] union = id < runWide.size() ? runWide.get(id) : new long[0];
+        putLong(out, union.length);
         for (long key : union) {
           putLong(out, key);
         }
