@@ -45,6 +45,22 @@ func run() error {
 		return err
 	}
 	binary, err := install(version)
+	if errors.Is(err, errUnpublished) {
+		// The tag exists and its archives do not, which is what a release in
+		// progress looks like from here. Use the newest one that is actually
+		// downloadable rather than failing, and say which -- silently running a
+		// different version than the caller named would be worse than either.
+		fallback, lookup := published()
+		if lookup != nil {
+			return fmt.Errorf("%s has no archive for this platform: %w", version, err)
+		}
+		fmt.Fprintf(
+			os.Stderr,
+			"supercov: %s is tagged but its archives are not published yet; using %s\n",
+			version, fallback,
+		)
+		binary, err = install(fallback)
+	}
 	if err != nil {
 		return err
 	}
@@ -120,25 +136,93 @@ func latest() (string, error) {
 	return version, nil
 }
 
-// asset names the release archive built for this machine, in the npm platform
-// spelling the releases already use.
-func asset(version string) (string, error) {
-	platform := ""
+// platform names this machine the way the releases spell it.
+func platform() (string, error) {
+	name := ""
 	switch runtime.GOOS {
 	case "darwin":
-		platform = "darwin-" + architecture()
+		name = "darwin-" + architecture()
 	case "windows":
-		platform = "win32-" + architecture()
+		name = "win32-" + architecture()
 	case "linux":
-		platform = "linux-" + architecture() + "-" + libc()
+		name = "linux-" + architecture() + "-" + libc()
 	}
-	if platform == "" || strings.HasSuffix(platform, "-") {
+	if name == "" || strings.HasSuffix(name, "-") {
 		return "", fmt.Errorf(
 			"no Supercov release is built for %s/%s; see %s/releases",
 			runtime.GOOS, runtime.GOARCH, repository,
 		)
 	}
-	return fmt.Sprintf("supercov-cli-%s-%s.tgz", platform, version), nil
+	return name, nil
+}
+
+// asset names the release archive built for this machine.
+func asset(version string) (string, error) {
+	name, err := platform()
+	if err != nil {
+		return "", err
+	}
+	return archive(name, version), nil
+}
+
+func archive(platform, version string) string {
+	return fmt.Sprintf("supercov-cli-%s-%s.tgz", platform, version)
+}
+
+// errUnpublished is a release whose archive for this platform is not there.
+var errUnpublished = errors.New("no archive for this platform in that release")
+
+// published is the newest release that actually carries an archive for this
+// machine, which is not always the newest release.
+//
+// A tag is pushed before the workflow that builds its archives runs, so for the
+// twenty minutes that takes, `@latest` resolves to a version nothing can be
+// downloaded for. Every other channel already behaves this way: npm, pip and
+// gem all resolve to the newest version that has an artifact for the machine
+// asking, and fall back to the previous one until it does.
+func published() (string, error) {
+	name, err := platform()
+	if err != nil {
+		return "", err
+	}
+	request, err := http.NewRequest(
+		http.MethodGet,
+		"https://api.github.com/repos/supercorp-ai/supercov/releases?per_page=20",
+		nil,
+	)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Accept", "application/vnd.github+json")
+	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("asking GitHub for releases: %s", response.Status)
+	}
+	var releases []struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name string `json:"name"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&releases); err != nil {
+		return "", err
+	}
+	for _, release := range releases {
+		version := strings.TrimPrefix(release.TagName, "v")
+		if !looksLikeVersion(version) {
+			continue
+		}
+		for _, held := range release.Assets {
+			if held.Name == archive(name, version) {
+				return version, nil
+			}
+		}
+	}
+	return "", errors.New("no release carries an archive for this platform")
 }
 
 func architecture() string {
@@ -209,6 +293,9 @@ func download(url, directory, name string) error {
 		return fmt.Errorf("downloading %s: %w", url, err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return errUnpublished
+	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("downloading %s: %s", url, response.Status)
 	}
