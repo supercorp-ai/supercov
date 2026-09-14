@@ -14,24 +14,7 @@ use supercov_engine::owned_evidence::{
     read_evidence,
 };
 
-fn tool(name: &str) -> Option<PathBuf> {
-    // Homebrew's JDK is keg-only, so `/usr/bin/java` is a stub that finds no
-    // runtime. A frontend that assumed PATH would fail on the common macOS
-    // setup, which is why the search is explicit.
-    [
-        "/opt/homebrew/opt/openjdk/bin/",
-        "/usr/local/opt/openjdk/bin/",
-        "",
-    ]
-    .into_iter()
-    .map(|prefix| PathBuf::from(format!("{prefix}{name}")))
-    .find(|path| {
-        Command::new(path)
-            .arg("-version")
-            .output()
-            .is_ok_and(|out| out.status.success())
-    })
-}
+mod common;
 
 fn temporary(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -65,8 +48,8 @@ const SOURCE: &str = r#"public class Classify {
 
 #[test]
 fn instrumented_java_compiles_and_reports_what_actually_ran() {
-    let (Some(javac), Some(java)) = (tool("javac"), tool("java")) else {
-        eprintln!("[jvm-frontend] skipped: no JDK found");
+    let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
+        common::skip("jvm", "no JDK found");
         return;
     };
     let root = temporary("frontend");
@@ -223,8 +206,10 @@ fn kotlinc() -> Option<PathBuf> {
 fn instrumented_kotlin_compiles_and_reports_what_actually_ran() {
     // Parsing correctly and compiling correctly are different claims, and only
     // the Kotlin compiler can settle the second.
-    let (Some(kotlinc), Some(javac), Some(java)) = (kotlinc(), tool("javac"), tool("java")) else {
-        eprintln!("[jvm-frontend] skipped: no Kotlin toolchain found");
+    let (Some(kotlinc), Some(javac), Some(java)) =
+        (kotlinc(), common::tool("javac"), common::tool("java"))
+    else {
+        common::skip("jvm", "no Kotlin toolchain found");
         return;
     };
     let root = temporary("kotlin");
@@ -403,8 +388,10 @@ fn the_platform_listener_attributes_coverage_without_touching_test_source() {
     // is the whole point of listening to the platform instead of rewriting
     // tests: the same mechanism covers Kotest and Spock, which declare no
     // annotated methods a rewriter could find.
-    let (Some(javac), Some(java), Some(jar)) = (tool("javac"), tool("java"), junit_jar()) else {
-        eprintln!("[jvm-frontend] skipped: no JDK or JUnit runner available");
+    let (Some(javac), Some(java), Some(jar)) =
+        (common::tool("javac"), common::tool("java"), junit_jar())
+    else {
+        common::skip("jvm", "no JDK or JUnit runner available");
         return;
     };
     let root = temporary("junit");
@@ -641,8 +628,8 @@ public final class SupercovConfig {{
 /// reimplementation of either, because the bug lived in the seam between them.
 #[test]
 fn every_test_records_a_vector_it_produces() {
-    let (Some(javac), Some(java)) = (tool("javac"), tool("java")) else {
-        eprintln!("[jvm] skipped: no JDK found");
+    let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
+        common::skip("jvm", "no JDK found");
         return;
     };
     let root = temporary("vector-attribution");
@@ -728,8 +715,8 @@ public class Driver {
 /// an evaluation that never happened and they are dropped rather than shown.
 #[test]
 fn concurrent_tests_lose_attribution_rather_than_get_it_wrong() {
-    let (Some(javac), Some(java)) = (tool("javac"), tool("java")) else {
-        eprintln!("[jvm] skipped: no JDK found");
+    let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
+        common::skip("jvm", "no JDK found");
         return;
     };
     let root = temporary("overlap");

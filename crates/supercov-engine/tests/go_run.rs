@@ -13,6 +13,8 @@ use std::process::Command;
 
 use supercov_engine::go_run::{DirectGoRunRequest, run_direct_go};
 
+mod common;
+
 fn go_binary() -> Option<PathBuf> {
     // Homebrew's Go is not on a non-login shell's PATH on macOS.
     for candidate in ["go", "/opt/homebrew/bin/go", "/usr/local/go/bin/go"] {
@@ -76,7 +78,7 @@ fn fixture(root: &Path) {
 #[test]
 fn a_multi_package_module_runs_and_publishes_what_each_test_reached() {
     let Some(go) = go_binary() else {
-        eprintln!("[go-run] skipped: no Go toolchain found");
+        common::skip("go", "no Go toolchain found");
         return;
     };
     // The lifecycle shells out to the command as given, so `go` has to be
@@ -136,7 +138,7 @@ fn a_multi_package_module_runs_and_publishes_what_each_test_reached() {
 #[test]
 fn decisions_in_different_packages_keep_their_own_condition_state() {
     let Some(go) = go_binary() else {
-        eprintln!("[go-run] skipped: no Go toolchain found");
+        common::skip("go", "no Go toolchain found");
         return;
     };
     // `auth` evaluates `admin && active` and `billing` evaluates

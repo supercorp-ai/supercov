@@ -18,6 +18,8 @@ use supercov_engine::owned_evidence::{
     read_evidence,
 };
 
+mod common;
+
 fn go_binary() -> Option<PathBuf> {
     // Homebrew's Go is not on a non-login shell's PATH on macOS.
     for candidate in ["go", "/opt/homebrew/bin/go", "/usr/local/go/bin/go"] {
@@ -191,7 +193,7 @@ fn unpack(key: u64) -> Vector {
 #[test]
 fn instrumented_go_compiles_and_reports_what_actually_ran() {
     let Some(go) = go_binary() else {
-        eprintln!("[go-frontend] skipped: no Go toolchain on PATH");
+        common::skip("go", "no Go toolchain on PATH");
         return;
     };
     let root = temporary("frontend");

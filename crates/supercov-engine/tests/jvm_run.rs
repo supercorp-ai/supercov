@@ -16,17 +16,7 @@ use std::process::Command;
 use supercov_engine::jvm_project::JvmBuild;
 use supercov_engine::jvm_run::{DirectJvmRunRequest, run_direct_jvm};
 
-fn tool(name: &str) -> Option<PathBuf> {
-    ["/opt/homebrew/bin/", "/usr/local/bin/", "/usr/bin/", ""]
-        .into_iter()
-        .map(|prefix| PathBuf::from(format!("{prefix}{name}")))
-        .find(|path| {
-            Command::new(path)
-                .arg("--version")
-                .output()
-                .is_ok_and(|out| out.status.success())
-        })
-}
+mod common;
 
 fn temporary(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -136,13 +126,16 @@ fn maven_can_resolve(mvn: &Path, root: &Path) -> bool {
 
 #[test]
 fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reached() {
-    let Some(mvn) = tool("mvn") else {
-        eprintln!("[jvm-run] skipped: no Maven found");
+    let Some(mvn) = common::tool("mvn") else {
+        common::skip("jvm", "no Maven found");
         return;
     };
     let warmup = temporary("maven-warmup");
     if !maven_can_resolve(&mvn, &warmup) {
-        eprintln!("[jvm-run] skipped: Maven cannot resolve this project's dependencies here");
+        common::skip(
+            "jvm",
+            "Maven cannot resolve this project's dependencies here",
+        );
         std::fs::remove_dir_all(warmup).ok();
         return;
     }
@@ -262,8 +255,8 @@ fn gradle_fixture(root: &Path) {
 
 #[test]
 fn a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reached() {
-    let Some(gradle) = tool("gradle") else {
-        eprintln!("[jvm-run] skipped: no Gradle found");
+    let Some(gradle) = common::tool("gradle") else {
+        common::skip("jvm", "no Gradle found");
         return;
     };
     let warmup = temporary("gradle-warmup");
@@ -275,7 +268,10 @@ fn a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reac
         .is_ok_and(|out| out.status.success());
     std::fs::remove_dir_all(&warmup).ok();
     if !resolvable {
-        eprintln!("[jvm-run] skipped: Gradle cannot resolve this project's dependencies here");
+        common::skip(
+            "jvm",
+            "Gradle cannot resolve this project's dependencies here",
+        );
         return;
     }
 
@@ -383,8 +379,8 @@ fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
     // TestNG is the one framework the JUnit Platform does not report, so it
     // needs a listener of its own. Kotest and Spock are platform engines and
     // need nothing extra.
-    let Some(mvn) = tool("mvn") else {
-        eprintln!("[jvm-run] skipped: no Maven found");
+    let Some(mvn) = common::tool("mvn") else {
+        common::skip("jvm", "no Maven found");
         return;
     };
     let warmup = temporary("testng-warmup");
@@ -396,7 +392,7 @@ fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
         .is_ok_and(|out| out.status.success());
     std::fs::remove_dir_all(&warmup).ok();
     if !resolvable {
-        eprintln!("[jvm-run] skipped: Maven cannot resolve TestNG here");
+        common::skip("jvm", "Maven cannot resolve TestNG here");
         return;
     }
 
@@ -540,8 +536,8 @@ fn kotlin_fixture(root: &Path) {
 fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
     // Kotlin is instrumented by the same rewriter and attributed by the same
     // listener; what differs is only the grammar the obligations come from.
-    let Some(gradle) = tool("gradle") else {
-        eprintln!("[jvm-run] skipped: no Gradle found");
+    let Some(gradle) = common::tool("gradle") else {
+        common::skip("jvm", "no Gradle found");
         return;
     };
     let warmup = temporary("kotlin-warmup");
@@ -553,7 +549,7 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
         .is_ok_and(|out| out.status.success());
     std::fs::remove_dir_all(&warmup).ok();
     if !resolvable {
-        eprintln!("[jvm-run] skipped: Gradle cannot build this Kotlin project here");
+        common::skip("jvm", "Gradle cannot build this Kotlin project here");
         return;
     }
 
@@ -679,8 +675,8 @@ fn multi_module_maven(root: &Path) {
 
 #[test]
 fn every_module_of_a_multi_module_build_is_measured_and_merged() {
-    let Some(mvn) = tool("mvn") else {
-        eprintln!("[jvm-run] skipped: no Maven found");
+    let Some(mvn) = common::tool("mvn") else {
+        common::skip("jvm", "no Maven found");
         return;
     };
     let warmup = temporary("multi-warmup");
@@ -692,7 +688,10 @@ fn every_module_of_a_multi_module_build_is_measured_and_merged() {
         .is_ok_and(|out| out.status.success());
     std::fs::remove_dir_all(&warmup).ok();
     if !resolvable {
-        eprintln!("[jvm-run] skipped: Maven cannot resolve this project's dependencies here");
+        common::skip(
+            "jvm",
+            "Maven cannot resolve this project's dependencies here",
+        );
         return;
     }
 
@@ -803,8 +802,8 @@ fn multi_project_gradle(root: &Path) {
 /// test sources -- and so the listener Supercov compiles -- actually live.
 #[test]
 fn a_multi_project_gradle_build_reaches_every_subproject() {
-    let Some(gradle) = tool("gradle") else {
-        eprintln!("[jvm-run] skipped: no Gradle found");
+    let Some(gradle) = common::tool("gradle") else {
+        common::skip("jvm", "no Gradle found");
         return;
     };
     let warmup = temporary("multi-gradle-warmup");
@@ -816,7 +815,10 @@ fn a_multi_project_gradle_build_reaches_every_subproject() {
         .is_ok_and(|out| out.status.success());
     std::fs::remove_dir_all(&warmup).ok();
     if !resolvable {
-        eprintln!("[jvm-run] skipped: Gradle cannot resolve this project's dependencies here");
+        common::skip(
+            "jvm",
+            "Gradle cannot resolve this project's dependencies here",
+        );
         return;
     }
 
@@ -852,8 +854,8 @@ fn a_multi_project_gradle_build_reaches_every_subproject() {
 /// announces them like any other engine's.
 #[test]
 fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
-    let Some(gradle) = tool("gradle") else {
-        eprintln!("[jvm-run] skipped: no Gradle found");
+    let Some(gradle) = common::tool("gradle") else {
+        common::skip("jvm", "no Gradle found");
         return;
     };
     let fixture = |root: &Path| {
@@ -882,7 +884,7 @@ fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
         .is_ok_and(|out| out.status.success());
     std::fs::remove_dir_all(&warmup).ok();
     if !resolvable {
-        eprintln!("[jvm-run] skipped: Gradle cannot build this Kotest project here");
+        common::skip("jvm", "Gradle cannot build this Kotest project here");
         return;
     }
 

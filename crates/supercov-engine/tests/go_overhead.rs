@@ -16,6 +16,8 @@ use std::process::Command;
 use supercov_engine::go_instrumenter::{RUNTIME_IMPORT, build_go_obligations, rewrite};
 use supercov_engine::go_test_harness::{probe_array_file, synthesized_harness};
 
+mod common;
+
 fn go_binary() -> Option<PathBuf> {
     for candidate in ["go", "/opt/homebrew/bin/go", "/usr/local/go/bin/go"] {
         let path = PathBuf::from(candidate);
@@ -264,7 +266,7 @@ func BenchmarkPipeline(b *testing.B) {
 #[ignore = "a measurement, not a pass/fail; run with --ignored"]
 fn instrumentation_overhead() {
     let Some(go) = go_binary() else {
-        eprintln!("[go-overhead] skipped: no Go toolchain on PATH");
+        common::skip("go", "no Go toolchain on PATH");
         return;
     };
     println!("\n  workload                       plain      instrumented   overhead  probes");

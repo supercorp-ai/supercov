@@ -16,21 +16,7 @@ use std::process::Command;
 
 use supercov_engine::jvm_instrumenter::{JvmLanguage, build_jvm_obligations, rewrite};
 
-fn tool(name: &str) -> Option<PathBuf> {
-    [
-        "/opt/homebrew/opt/openjdk/bin/",
-        "/usr/local/opt/openjdk/bin/",
-        "",
-    ]
-    .into_iter()
-    .map(|prefix| PathBuf::from(format!("{prefix}{name}")))
-    .find(|path| {
-        Command::new(path)
-            .arg("-version")
-            .output()
-            .is_ok_and(|out| out.status.success())
-    })
-}
+mod common;
 
 fn temporary(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -248,8 +234,8 @@ fn measure(
 #[test]
 #[ignore = "a measurement, not a pass/fail; run with --ignored"]
 fn instrumentation_overhead() {
-    let (Some(javac), Some(java)) = (tool("javac"), tool("java")) else {
-        eprintln!("[jvm-overhead] skipped: no JDK found");
+    let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
+        common::skip("jvm", "no JDK found");
         return;
     };
     println!("\n  workload                       plain     instrumented   overhead  probes");

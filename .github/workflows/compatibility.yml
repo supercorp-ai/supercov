@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Comma-separated job names to run (node, runners, browsers, filesystems, python, ruby, rust, released). Empty runs every job except released."
+        description: "Comma-separated job names to run (node, runners, browsers, filesystems, python, ruby, rust, go, jvm, released). Empty runs every job except released."
         default: ""
         type: string
       os:
@@ -189,6 +189,62 @@ jobs:
           tool: cargo-nextest@0.9.140
       - run: npm ci
       - run: npm run test:rust-public-cargo
+
+  go:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',go,') }}
+    name: Go ${{ matrix.go }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        # 1.22 is the oldest the generated harness targets; the rest is what
+        # projects are actually on.
+        go: ["1.22", "1.25"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run test:go
+        env:
+          # Without this a job whose toolchain setup failed would skip every
+          # test and report success, and Go would look verified on a machine
+          # that never ran it.
+          SUPERCOV_REQUIRE_GO: "1"
+
+  jvm:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,') }}
+    name: JDK ${{ matrix.java }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        # 17 is the floor the documentation claims; 21 is the current LTS.
+        java: ["17", "21"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - uses: gradle/actions/setup-gradle@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run test:jvm
+        env:
+          SUPERCOV_REQUIRE_JVM: "1"
 
   # The binary we ship, on the machine it is shipped for. Three of the eight
   # native packages had never executed anywhere but the cross-compiler.
