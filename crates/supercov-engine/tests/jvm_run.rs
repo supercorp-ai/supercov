@@ -450,3 +450,136 @@ fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+const KOTLIN_BUILD_GRADLE: &str = r#"plugins {
+    id 'org.jetbrains.kotlin.jvm' version '2.2.20'
+}
+
+repositories {
+    mavenCentral()
+}
+
+// Pinned so the Java and Kotlin compilers agree on a target; Gradle refuses
+// the build otherwise, and what is under test here is Supercov, not a
+// toolchain mismatch.
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testImplementation 'org.jetbrains.kotlin:kotlin-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+"#;
+
+const KOTLIN_SOURCE: &str = r#"package app
+
+object Calculator {
+    fun size(a: Int, loud: Boolean): String {
+        if (a > 10 && loud) {
+            return "BIG"
+        }
+        return "small"
+    }
+}
+"#;
+
+const KOTLIN_SUITE: &str = r#"package app
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class CalculatorTest {
+    @Test
+    fun bigWhenLoudAndLarge() {
+        assertEquals("BIG", Calculator.size(20, true))
+    }
+
+    @Test
+    fun smallOtherwise() {
+        assertEquals("small", Calculator.size(1, false))
+    }
+}
+"#;
+
+fn kotlin_fixture(root: &Path) {
+    write(root, "settings.gradle", "rootProject.name = 'demo'\n");
+    write(root, "build.gradle", KOTLIN_BUILD_GRADLE);
+    write(root, "src/main/kotlin/app/Calculator.kt", KOTLIN_SOURCE);
+    write(root, "src/test/kotlin/app/CalculatorTest.kt", KOTLIN_SUITE);
+}
+
+#[test]
+fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
+    // Kotlin is instrumented by the same rewriter and attributed by the same
+    // listener; what differs is only the grammar the obligations come from.
+    let Some(gradle) = tool("gradle") else {
+        eprintln!("[jvm-run] skipped: no Gradle found");
+        return;
+    };
+    let warmup = temporary("kotlin-warmup");
+    kotlin_fixture(&warmup);
+    let resolvable = Command::new(&gradle)
+        .args(["--quiet", "--console=plain", "test"])
+        .current_dir(&warmup)
+        .output()
+        .is_ok_and(|out| out.status.success());
+    std::fs::remove_dir_all(&warmup).ok();
+    if !resolvable {
+        eprintln!("[jvm-run] skipped: Gradle cannot build this Kotlin project here");
+        return;
+    }
+
+    let root = temporary("kotlin");
+    kotlin_fixture(&root);
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![
+            gradle.display().to_string(),
+            "--console=plain".into(),
+            "test".into(),
+        ],
+        run_id: "run-jvm-kotlin".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.tests, 2);
+    assert_eq!(result.source_files, 1);
+
+    // The decision the Kotlin source declares is in the published manifest,
+    // which is what the numbers are measured against.
+    let entries =
+        supercov_engine::evidence_archive::read_archive(&result.run_directory.join("evidence.raw.gz"))
+            .expect("published archive");
+    let manifest = String::from_utf8(
+        entries
+            .into_iter()
+            .find(|entry| entry.path == "manifest.json")
+            .expect("manifest")
+            .contents,
+    )
+    .expect("utf-8");
+    assert!(manifest.contains("Calculator.kt"), "{manifest}");
+    assert_eq!(manifest.matches("\"conditions\"").count(), 1, "{manifest}");
+    std::fs::remove_dir_all(root).ok();
+}
