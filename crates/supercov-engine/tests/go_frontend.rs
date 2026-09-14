@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use supercov_engine::go_evidence::{GoTestOutcome, build_go_frontend_run, read_evidence};
 use supercov_engine::go_instrumenter::{RUNTIME_IMPORT, build_go_obligations, rewrite};
 use supercov_engine::go_test_harness::{
     instrument_test_file, probe_array_file, synthesized_harness,
@@ -308,6 +309,66 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
     assert_eq!(
         evidence.global.iter().filter(|value| **value != 0).count(),
         reached.len()
+    );
+
+    // And the engine's own decoder turns that transport into a coverage report
+    // whose numbers match the obligations the manifest declared. A frontend
+    // that records correctly but cannot be read is not yet a frontend.
+    let raw = std::fs::read(root.join("evidence.bin")).expect("evidence");
+    let decoded = read_evidence(&raw).expect("decode");
+    let run = build_go_frontend_run(
+        &obligations.manifest,
+        &obligations.probes,
+        &decoded,
+        &[
+            GoTestOutcome {
+                name: "TestBig".into(),
+                package: "example.com/probe".into(),
+                file: Some("main_test.go".into()),
+                status: "passed".into(),
+            },
+            GoTestOutcome {
+                name: "TestZero".into(),
+                package: "example.com/probe".into(),
+                file: Some("main_test.go".into()),
+                status: "passed".into(),
+            },
+        ],
+        "run_go",
+        "now",
+        0,
+    )
+    .expect("frontend run");
+    assert_eq!(run.tests, 2);
+    let report =
+        supercov_engine::coverage_report::analyze_coverage_results(&run.request).expect("report");
+    let summary = &report.filters.passed.summary;
+
+    // Every obligation the manifest declared is in the denominator, and the
+    // covered counts are the ones the two tests actually reached.
+    // Every measured statement the manifest declared is in the denominator,
+    // and only what the two tests reached is in the numerator.
+    assert!(summary.lines.total > 0);
+    assert!(summary.lines.covered > 0);
+    assert!(
+        summary.lines.covered < summary.lines.total,
+        "neither test enters the loop body, so something must stay uncovered: {}/{}",
+        summary.lines.covered,
+        summary.lines.total
+    );
+    assert_eq!(summary.conditions, 2, "one decision of two conditions");
+    assert!(
+        summary.branches.total > 0,
+        "the if, the loop and the switch all declared arms"
+    );
+    // TestBig returns before the switch and TestZero never enters the loop, so
+    // some arms are genuinely untaken: a report that showed everything covered
+    // would be the wrong answer.
+    assert!(
+        summary.branches.covered < summary.branches.total,
+        "{}/{}",
+        summary.branches.covered,
+        summary.branches.total
     );
 
     std::fs::remove_dir_all(root).unwrap();

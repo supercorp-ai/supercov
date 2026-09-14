@@ -18,6 +18,11 @@ use crate::go_instrumenter::{GoEdit, GoInstrumenterError, RUNTIME_IMPORT, import
 pub struct GoTestFile {
     /// Test functions this file declares, in source order.
     pub tests: Vec<String>,
+    /// Tests that call `t.Parallel()`. Go runs these alongside each other, so
+    /// work they do after that call belongs to no single test and attributing
+    /// it to whichever was current would be a guess presented as a
+    /// measurement.
+    pub parallel: Vec<String>,
     /// True when this file declares `TestMain`, which the package may only
     /// have one of.
     pub declares_test_main: bool,
@@ -61,6 +66,7 @@ pub fn instrument_test_file(
     let tree = parse(source)?;
     let mut file = GoTestFile {
         tests: Vec::new(),
+        parallel: Vec::new(),
         declares_test_main: false,
         edits: Vec::new(),
     };
@@ -96,6 +102,14 @@ pub fn instrument_test_file(
             continue;
         }
         file.tests.push(name.clone());
+        if calls_parallel(body, source) {
+            // Announcing it would bind whatever runs next to this test, and
+            // what runs next includes the other parallel tests. Its coverage
+            // still counts run-wide; it simply belongs to no test, which is
+            // the truth rather than a guess dressed as a measurement.
+            file.parallel.push(name.clone());
+            continue;
+        }
         file.edits.push(GoEdit {
             at: body.start_byte() + 1,
             rank: 100,
@@ -110,6 +124,26 @@ pub fn instrument_test_file(
         file.edits.push(import);
     }
     Ok(file)
+}
+
+/// Whether a test hands itself to Go's parallel scheduler.
+///
+/// Detected from the source rather than at runtime, because by the time
+/// `t.Parallel()` returns the test has already been descheduled and anything
+/// observed afterwards may belong to another one.
+fn calls_parallel(node: Node, source: &str) -> bool {
+    if node.kind() == "call_expression"
+        && let Some(function) = node.child_by_field_name("function")
+        && source[function.byte_range()]
+            .trim_end()
+            .ends_with(".Parallel")
+    {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(Node::is_named)
+        .any(|child| calls_parallel(child, source))
 }
 
 fn wrap_run_calls(node: Node, source: &str, alias: &str, evidence: &str, edits: &mut Vec<GoEdit>) {
@@ -270,6 +304,23 @@ mod tests {
         assert!(
             alongside.contains("var _ = __supercov.Arm"),
             "the import must stay used"
+        );
+    }
+
+    #[test]
+    fn a_parallel_test_is_named_rather_than_attributed_by_guesswork() {
+        // Go runs these alongside each other. Binding probes to whichever was
+        // most recently announced would produce per-test numbers that look
+        // exact and are not; the coverage still counts run-wide.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestSerial(t *testing.T) {\n\tdoWork()\n}\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tdoWork()\n}\n",
+        );
+        assert_eq!(file.tests, ["TestSerial", "TestParallel"]);
+        assert_eq!(file.parallel, ["TestParallel"]);
+        assert!(out.contains("EnterTest(\"TestSerial\")"), "{out}");
+        assert!(
+            !out.contains("EnterTest(\"TestParallel\")"),
+            "a parallel test must not claim what ran beside it:\n{out}"
         );
     }
 

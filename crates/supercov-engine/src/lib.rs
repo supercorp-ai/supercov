@@ -17,6 +17,7 @@ pub mod coverage_report;
 pub mod evidence_archive;
 pub mod frontend_detection;
 pub mod frontend_protocol;
+pub mod go_evidence;
 pub mod go_instrumenter;
 pub mod go_project;
 pub mod go_test_harness;
