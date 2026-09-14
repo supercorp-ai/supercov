@@ -34,6 +34,9 @@ public final class SupercovListener implements TestExecutionListener {
    */
   private static final String CONFIG = "com.supercorp.supercov.SupercovConfig";
 
+  /** The runner this listener speaks for, as the frontend declares it. */
+  private static final String RUNNER = "junit-platform";
+
   private String evidencePath = "supercov-evidence.bin";
   private TestPlan plan;
 
@@ -56,7 +59,7 @@ public final class SupercovListener implements TestExecutionListener {
   @Override
   public void executionStarted(TestIdentifier identifier) {
     if (identifier.isTest()) {
-      Supercov.enterTest(name(identifier));
+      Supercov.enterTest(name(identifier), RUNNER);
     }
   }
 
@@ -76,7 +79,7 @@ public final class SupercovListener implements TestExecutionListener {
   @Override
   public void executionSkipped(TestIdentifier identifier, String reason) {
     if (identifier.isTest()) {
-      Supercov.enterTest(name(identifier));
+      Supercov.enterTest(name(identifier), RUNNER);
       Supercov.exitTest("skipped");
     }
   }

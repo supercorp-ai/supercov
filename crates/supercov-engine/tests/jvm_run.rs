@@ -223,6 +223,12 @@ fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reach
             .any(|record| record.contains("CalculatorTest#bigWhenLoudAndLarge()")),
         "tests carry the names the framework itself chose"
     );
+    assert!(
+        records
+            .iter()
+            .all(|record| record.contains("\"runner\":\"junit-platform\"")),
+        "{records:?}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -447,6 +453,15 @@ fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
             .count(),
         1,
         "the skipped test is recorded as one: {records:?}"
+    );
+    // Attributed by the lifecycle that actually saw it. A project can run both
+    // frameworks in one JVM, so a result naming the platform here would claim
+    // it was announced by something that never saw it.
+    assert!(
+        records
+            .iter()
+            .all(|record| record.contains("\"runner\":\"testng\"")),
+        "{records:?}"
     );
     std::fs::remove_dir_all(root).ok();
 }

@@ -32,6 +32,9 @@ public final class SupercovTestNGListener implements IExecutionListener, ITestLi
    */
   private static final String CONFIG = "com.supercorp.supercov.SupercovConfig";
 
+  /** The runner this listener speaks for, as the frontend declares it. */
+  private static final String RUNNER = "testng";
+
   private String evidencePath = "supercov-evidence.bin";
 
   /**
@@ -62,7 +65,7 @@ public final class SupercovTestNGListener implements IExecutionListener, ITestLi
 
   @Override
   public void onTestStart(ITestResult result) {
-    Supercov.enterTest(name(result));
+    Supercov.enterTest(name(result), RUNNER);
   }
 
   @Override
