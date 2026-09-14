@@ -626,7 +626,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         .map(|test| (test.name.clone(), test))
         .collect::<BTreeMap<_, _>>();
     let empty = OwnedTestEvidence::default();
-    let raw_results = outcomes
+    let mut raw_results = outcomes
         .iter()
         .map(|outcome| {
             let test = recorded.get(&outcome.name).copied().unwrap_or(&empty);
@@ -695,6 +695,99 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             }
         })
         .collect::<Vec<_>>();
+    // Everything the run reached that no test claimed.
+    //
+    // A Go test that calls t.Parallel() is deliberately left unattributed:
+    // probes are a store into one shared array, so what it reaches while
+    // others run beside it cannot be credited to it. The declaration says that
+    // coverage still counts run-wide -- and until now nothing carried it, so a
+    // suite written the way Go suites are written measured almost nothing and
+    // was told nothing about why. samber/lo calls t.Parallel() 1606 times.
+    //
+    // It is recorded as its own record, under a role that is not a test,
+    // holding only what the tests did not claim: reached, by nobody nameable.
+    let claimed = evidence
+        .tests
+        .iter()
+        .flat_map(|test| test.probes.keys().copied())
+        .collect::<BTreeSet<_>>();
+    let unclaimed = evidence
+        .global
+        .iter()
+        .enumerate()
+        .filter(|(index, mask)| **mask != 0 && !claimed.contains(&(*index as u32)))
+        .map(|(index, mask)| (index as u32, *mask))
+        .collect::<BTreeMap<_, _>>();
+    if !unclaimed.is_empty() {
+        // Whether this counts as coverage turns on whether it was produced by
+        // something that passed, which is the same rule every test record
+        // obeys: a failing test's coverage is not evidence that anything
+        // works. Here the producers cannot be named individually, so the
+        // question is asked of the run: if every test passed, everything this
+        // holds was produced by a passing test. If any failed, there is no
+        // telling which of this came from it, and none of it counts.
+        let status = if test_exit_code == 0 {
+            "passed"
+        } else {
+            "failed"
+        };
+        let test_id = format!("{}::background", declaration.language);
+        let phase = test_phase(&test_id);
+        let background = OwnedTestEvidence {
+            name: "background".into(),
+            status: "unknown".into(),
+            runner: String::new(),
+            probes: unclaimed,
+            vectors: Vec::new(),
+        };
+        raw_results.push(RawTestResult {
+            scope: Some(ExecutionScope {
+                version: 1,
+                run_id: run_id.to_owned(),
+                worker_id: "background".into(),
+                test_id: test_id.clone(),
+                test_key: stable_id("owned-background", &[run_id]),
+                retry: 0,
+                attempt_id: stable_id("owned-background-attempt", &[run_id]),
+            }),
+            test_id: Some(test_id),
+            test: "execution no test could be credited with".into(),
+            test_file: None,
+            title: None,
+            retry: Some(0),
+            status: Some(status.into()),
+            expected_status: None,
+            flaky: false,
+            provenance: TestProvenance {
+                runner: default_runner.clone(),
+                kind: "background".into(),
+                project: None,
+                source: source.clone(),
+            },
+            role: "background".into(),
+            phases: vec![CoveragePhase {
+                id: phase.clone(),
+                kind: "background".into(),
+                operation: "execution outside any test".into(),
+                source: None,
+                caused_by_phase_id: None,
+                started_at_ms: 0,
+                ended_at_ms: Some(0),
+                status: Some(status.into()),
+                error: None,
+            }],
+            runtime: vec![snapshot(
+                environment,
+                &background,
+                manifest,
+                &by_probe,
+                &phase,
+            )],
+            browser: Vec::new(),
+            server: Vec::new(),
+        });
+    }
+
     // A declaration naming a runner that produced nothing claims something the
     // run did not do, and the reader refuses it — rightly. A JVM frontend can
     // drive JUnit and TestNG, but any one project usually runs one of them, so

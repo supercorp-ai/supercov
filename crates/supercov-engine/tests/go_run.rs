@@ -334,3 +334,80 @@ fn a_nested_module_does_not_break_the_build_around_it() {
     assert_eq!(result.tests, 1);
     std::fs::remove_dir_all(root).ok();
 }
+
+/// A Go test that calls `t.Parallel()` is deliberately left unattributed:
+/// probes are a store into one shared array, so what it reaches while others
+/// run beside it cannot be credited to it. The declaration says its coverage
+/// still counts run-wide — and until there was a record to carry it, nothing
+/// did. A suite written the way Go suites are written measured almost nothing
+/// and was told nothing about why: samber/lo calls `t.Parallel()` 1606 times
+/// across 548 tests, and reported 0.26% of its statements.
+#[test]
+fn a_parallel_tests_coverage_counts_even_though_no_test_can_claim_it() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("parallel");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/par\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package par\n\nfunc Serial(x bool) int {\n\tif x {\n\t\treturn 1\n\t}\n\treturn 0\n}\n\nfunc Parallel(x bool) int {\n\tif x {\n\t\treturn 2\n\t}\n\treturn 0\n}\n\nfunc Never(x bool) int {\n\tif x {\n\t\treturn 3\n\t}\n\treturn 0\n}\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package par\n\nimport \"testing\"\n\nfunc TestSerial(t *testing.T) {\n\tif Serial(true) != 1 {\n\t\tt.Fatal(\"serial\")\n\t}\n}\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tif Parallel(true) != 2 {\n\t\tt.Fatal(\"parallel\")\n\t}\n}\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-parallel".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    // Only the serial one can be named.
+    assert_eq!(result.tests, 1);
+
+    let records = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .filter(|entry| entry.path.ends_with("mcdc.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .collect::<Vec<_>>();
+
+    let background = records
+        .iter()
+        .find(|record| record.contains("\"role\":\"background\""))
+        .expect("the run carries what no test could claim");
+    // What the parallel test reached is in it, and what nothing reached is not.
+    assert!(background.contains("go:statement:"), "{background}");
+    // It counts as coverage only because the run passed. A failing run cannot
+    // say which of this came from the test that failed, so it would not.
+    assert!(background.contains("\"status\":\"passed\""), "{background}");
+    // And the serial test still claims its own, rather than everything being
+    // swept into the background record.
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("TestSerial") && record.contains("go:statement:")),
+        "{records:?}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

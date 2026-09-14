@@ -234,8 +234,16 @@ already says otherwise, and tells you it did.
 
 A test that calls `t.Parallel()` runs alongside others. Probes are a store into
 one array shared by the process, so nothing can say which of two concurrent
-tests reached a line; that coverage counts run-wide rather than being assigned
-to a test by guesswork.
+tests reached a line. That coverage is reported against the run rather than
+assigned to a test by guesswork: the lines count as covered, and no test claims
+them. It counts only when the run passed, for the same reason a failing test's
+coverage never counts — a failed run cannot say which of it came from the test
+that failed.
+
+Supercov also writes evidence as the suite runs, not only at the end. Go offers
+no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`
+call Supercov wraps — `goleak.VerifyTestMain(m)` runs the suite and exits
+itself. Without periodic writes such a run recorded nothing at all.
 
 For assertion maps, `t.Error`, `t.Errorf`, `t.Fatal`, `t.Fatalf` and testify's
 `assert` and `require` are inventoried. A Go test states its claim with an `if`

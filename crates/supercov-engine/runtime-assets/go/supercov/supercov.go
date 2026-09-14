@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 )
 
 // What one test reached: the probes it set and the decision vectors it
@@ -116,6 +117,9 @@ var (
 	// the records because the decision table describes the run, and so stands
 	// even when attribution does not.
 	runWide [][]uint64
+	// Where to write, and when it was last written. See Destination.
+	destination string
+	lastFlush   time.Time
 )
 
 // Arm records how many conditions each decision has. The probe array is
@@ -180,7 +184,45 @@ func EnterTest(name string) func() {
 			open--
 		}
 		current = -1
+		flush()
 		mu.Unlock()
+	}
+}
+
+// Destination says where evidence should be written, so that it can be
+// written before the process ends rather than only at the end.
+//
+// Go gives a program no way to run code on os.Exit, and a TestMain does not
+// have to reach the m.Run() call the harness wraps: goleak's VerifyTestMain
+// takes m, runs it, and exits itself, and testcontainers and hand-written
+// harnesses do the same. A run like that used to write nothing at all --
+// samber/lo has 548 tests and recorded none of them.
+//
+// So the evidence is also flushed at test boundaries, at most every flushWindow
+// so the cost stays proportional to time rather than to the number of tests.
+// What that cannot save is whatever the last window held, which is a great
+// deal better than everything.
+func Destination(path string) {
+	mu.Lock()
+	destination = path
+	mu.Unlock()
+}
+
+// How often a boundary flush may write. Small enough that little is lost to an
+// exit nobody can intercept, large enough that a suite of many short tests
+// does not spend its time writing the same file.
+const flushWindow = 250 * time.Millisecond
+
+// Caller holds mu.
+func flush() {
+	if destination == "" || time.Since(lastFlush) < flushWindow {
+		return
+	}
+	lastFlush = time.Now()
+	if err := writeLocked(destination); err != nil {
+		// A failed flush is not worth failing the suite over: the run still
+		// has its end-of-run write, and the tests are what matter.
+		os.Stderr.WriteString("supercov: could not flush coverage evidence: " + err.Error() + "\n")
 	}
 }
 
@@ -461,6 +503,11 @@ func Finish(code int, path string) int {
 func Write(path string) error {
 	mu.Lock()
 	defer mu.Unlock()
+	return writeLocked(path)
+}
+
+// Caller holds mu.
+func writeLocked(path string) error {
 	harvest()
 	file, err := os.Create(path)
 	if err != nil {

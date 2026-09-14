@@ -106,9 +106,17 @@ pub fn instrument_test_file(
             file.edits.push(GoEdit {
                 at: body.start_byte() + 1,
                 rank: 100,
-                text: format!("\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n"),
+                text: format!(
+                    "\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n\t{alias}.Destination(\"{evidence_path}\")\n"
+                ),
             });
             // Wrap the m.Run() call itself rather than deferring after it.
+            //
+            // A TestMain does not have to make that call where we can see it.
+            // goleak's VerifyTestMain takes `m`, runs it, and exits itself, and
+            // hand-written harnesses do the same — so naming the destination
+            // above is what lets the runtime write at test boundaries instead,
+            // and a run like that record anything at all.
             wrap_run_calls(body, source, alias, evidence_path, &mut file.edits);
             continue;
         }
@@ -260,7 +268,7 @@ pub fn synthesized_harness(
         return out;
     }
     out.push_str(&format!(
-        "func TestMain(m *testing.M) {{\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n\tos.Exit({alias}.Finish(m.Run(), \"{evidence_path}\"))\n}}\n"
+        "func TestMain(m *testing.M) {{\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n\t{alias}.Destination(\"{evidence_path}\")\n\tos.Exit({alias}.Finish(m.Run(), \"{evidence_path}\"))\n}}\n"
     ));
     out.replace("\t\"testing\"\n", "\t\"os\"\n\t\"testing\"\n")
 }
