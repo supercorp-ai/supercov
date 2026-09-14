@@ -10,6 +10,7 @@ jobs:
   test262:
     name: Test262 ${{ matrix.shard }}/16
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

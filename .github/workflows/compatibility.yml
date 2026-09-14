@@ -19,6 +19,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',node,') }}
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +40,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,') }}
     name: ${{ matrix.name }} runners
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -72,6 +74,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,') }}
     name: Playwright ${{ matrix.browser }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +97,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,') }}
     name: Filesystem safety (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -117,6 +121,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',python,') }}
     name: CPython ${{ matrix.python }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -141,6 +146,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,') }}
     name: Ruby ${{ matrix.ruby }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -169,6 +175,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,') }}
     name: Rust suites (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -194,6 +201,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',go,') }}
     name: Go ${{ matrix.go }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -223,6 +231,7 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,') }}
     name: JDK ${{ matrix.java }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -278,6 +287,7 @@ jobs:
     if: ${{ contains(format(',{0},', inputs.only), ',released,') }}
     name: Released binary (${{ matrix.native }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
