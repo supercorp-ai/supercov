@@ -51,6 +51,7 @@ public final class Supercov {
   private static int current = -1;
   private static int open = 0;
   private static boolean overlapped = false;
+  private static boolean armed = false;
 
   private static final int VALUE_SHIFT = 24;
   private static final int OUTCOME_SHIFT = 48;
@@ -58,6 +59,10 @@ public final class Supercov {
 
   private static final class Record {
     final String name;
+    /// Which framework announced this test. A project can run JUnit and
+    /// TestNG in one JVM, and a report that named the wrong one would say the
+    /// test was attributed by a lifecycle that never saw it.
+    String runner = "";
     // How the test ended, as the framework saw it. Defaulted rather than
     // required: a test that reports nothing finished normally, and the
     // runtime should not need the framework's cooperation to say so.
@@ -72,6 +77,14 @@ public final class Supercov {
 
   /** Prepares the runtime for a run of {@code probes} probes. */
   public static synchronized void arm(int probes, int[] conditions) {
+    // A project running both JUnit and TestNG installs two listeners in one
+    // JVM, and each arms the runtime at its own start. Re-arming would throw
+    // away everything the framework that went first had recorded, so a second
+    // call describing the same run is left alone.
+    if (armed && HITS.length == probes && widths.length == conditions.length) {
+      return;
+    }
+    armed = true;
     HITS = new int[probes];
     global = new int[probes];
     widths = conditions;
@@ -99,6 +112,11 @@ public final class Supercov {
    * is swept into their record and cleared.
    */
   public static synchronized void enterTest(String name) {
+    enterTest(name, "");
+  }
+
+  /** Binds every probe that fires next to this test of this runner. */
+  public static synchronized void enterTest(String name, String runner) {
     harvest();
     if (open > 0) {
       overlap();
@@ -107,7 +125,9 @@ public final class Supercov {
     if (overlapped) {
       return;
     }
-    records.add(new Record(name));
+    Record record = new Record(name);
+    record.runner = runner;
+    records.add(record);
     current = records.size() - 1;
   }
 
@@ -316,6 +336,9 @@ public final class Supercov {
         byte[] status = record.status.getBytes("UTF-8");
         putLong(out, status.length);
         out.write(status);
+        byte[] runner = record.runner.getBytes("UTF-8");
+        putLong(out, runner.length);
+        out.write(runner);
         putLong(out, record.probes.size());
         for (int[] hit : record.probes) {
           putLong(out, hit[0]);

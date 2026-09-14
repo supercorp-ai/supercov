@@ -29,7 +29,6 @@ pub mod js_instrumenter;
 pub mod jvm_instrumenter;
 pub mod jvm_project;
 pub mod jvm_run;
-pub mod jvm_test_harness;
 pub mod lifecycle;
 pub mod orchestration;
 pub mod owned_evidence;

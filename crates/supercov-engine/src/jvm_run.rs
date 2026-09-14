@@ -57,12 +57,46 @@ const RUNTIME_SOURCE: &str =
 const LISTENER_SOURCE: &str =
     include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovListener.java");
 
+const TESTNG_LISTENER_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovTestNGListener.java");
+
 const PACKAGE_DIRECTORY: &str = "com/supercorp/supercov";
 
 /// Where the JUnit Platform looks for listeners to register.
 const SERVICES_FILE: &str = "META-INF/services/org.junit.platform.launcher.TestExecutionListener";
 
 const LISTENER_CLASS: &str = "com.supercorp.supercov.SupercovListener";
+
+/// Where TestNG looks for listeners to register.
+const TESTNG_SERVICES_FILE: &str = "META-INF/services/org.testng.ITestNGListener";
+
+const TESTNG_LISTENER_CLASS: &str = "com.supercorp.supercov.SupercovTestNGListener";
+
+/// Which test frameworks a project actually depends on.
+///
+/// This decides which listeners are written, and it has to: each is compiled
+/// from the project's own test sources, so one whose framework is absent would
+/// fail on imports the project never asked for. A project that names neither
+/// gets the platform listener, which is what nearly every JVM suite runs on
+/// and what Kotest and Spock report through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Frameworks {
+    platform: bool,
+    testng: bool,
+}
+
+fn frameworks(build_file: &str) -> Frameworks {
+    let testng = build_file.contains("testng");
+    let platform = build_file.contains("junit")
+        || build_file.contains("kotest")
+        || build_file.contains("spock");
+    Frameworks {
+        // A TestNG-only project would fail to compile a platform listener, so
+        // the fallback applies only when nothing at all was recognised.
+        platform: platform || !testng,
+        testng,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -346,17 +380,39 @@ fn instrument_workspace(
 
     // The listener and its configuration go in the test source set, because
     // only the test classpath has the JUnit Platform to listen to.
+    // Which listeners can be compiled at all depends on what the project
+    // depends on, so read the build file before writing any of them.
+    let build_file = ["pom.xml", "build.gradle.kts", "build.gradle"]
+        .iter()
+        .find_map(|name| fs::read_to_string(workspace.join(name)).ok())
+        .unwrap_or_default();
+    let frameworks = frameworks(&build_file);
+
     let test = workspace.join(source_root("test")).join(PACKAGE_DIRECTORY);
-    write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
     write(
         &test.join("SupercovConfig.java"),
         &configuration(probe_count, &project.decision_widths, &evidence),
     )?;
+    if frameworks.platform {
+        write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
+    }
+    if frameworks.testng {
+        write(
+            &test.join("SupercovTestNGListener.java"),
+            TESTNG_LISTENER_SOURCE,
+        )?;
+    }
 
-    // The listener is compiled from the project's own test sources, so the
-    // launcher API it implements has to be on the compile classpath.
+    // The platform listener is compiled from the project's own test sources,
+    // so the launcher API it implements has to be on the compile classpath. A
+    // TestNG-only project needs none of that: it already depends on the
+    // framework its own listener implements.
     let mut added_launcher = None;
-    match build {
+    match if frameworks.platform {
+        build
+    } else {
+        JvmBuild::Plain
+    } {
         JvmBuild::Maven => {
             let pom = workspace.join("pom.xml");
             if let Ok(existing) = fs::read_to_string(&pom)
@@ -389,13 +445,21 @@ fn instrument_workspace(
     }
 
     let resources = workspace.join("src/test/resources");
-    write(
-        &resources.join(SERVICES_FILE),
-        &format!("{LISTENER_CLASS}\n"),
-    )?;
-    let properties = resources.join("junit-platform.properties");
-    let existing = fs::read_to_string(&properties).ok();
-    write(&properties, &sequential_properties(existing.as_deref()))?;
+    if frameworks.platform {
+        write(
+            &resources.join(SERVICES_FILE),
+            &format!("{LISTENER_CLASS}\n"),
+        )?;
+        let properties = resources.join("junit-platform.properties");
+        let existing = fs::read_to_string(&properties).ok();
+        write(&properties, &sequential_properties(existing.as_deref()))?;
+    }
+    if frameworks.testng {
+        write(
+            &resources.join(TESTNG_SERVICES_FILE),
+            &format!("{TESTNG_LISTENER_CLASS}\n"),
+        )?;
+    }
 
     // A test class's file, so a result can name where it came from. Matched on
     // the class rather than the test, because the name a framework reports for
@@ -553,6 +617,7 @@ pub fn run_direct_jvm(
             .iter()
             .map(|test| OwnedTestOutcome {
                 name: test.name.clone(),
+                runner: test.runner.clone(),
                 // The class is the unit a JVM suite reports under, and it is
                 // what a reader looks for when matching a coverage report
                 // against a test report.
@@ -832,5 +897,32 @@ mod tests {
             ),
             "{updated}"
         );
+    }
+
+    #[test]
+    fn only_the_listeners_a_project_can_compile_are_written() {
+        // Each listener is compiled from the project's own test sources, so
+        // one whose framework is absent would fail on imports the project
+        // never asked for.
+        let junit = frameworks("<artifactId>junit-jupiter</artifactId>");
+        assert!(junit.platform && !junit.testng);
+
+        let testng = frameworks("<artifactId>testng</artifactId>");
+        assert!(testng.testng && !testng.platform);
+
+        // A migration in progress runs both, and both listeners fire in one
+        // JVM against one runtime.
+        let both = frameworks("testng ... junit-jupiter");
+        assert!(both.platform && both.testng);
+
+        // Kotest and Spock are platform engines, so the platform listener
+        // reports their tests without either being named.
+        assert!(frameworks("io.kotest:kotest-runner-junit5").platform);
+        assert!(frameworks("org.spockframework:spock-core").platform);
+
+        // And a project naming nothing recognisable gets the platform, which
+        // is what nearly every JVM suite runs on.
+        let unknown = frameworks("<artifactId>demo</artifactId>");
+        assert!(unknown.platform && !unknown.testng);
     }
 }

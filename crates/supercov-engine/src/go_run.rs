@@ -460,6 +460,7 @@ pub fn run_direct_go(
             for test in &evidence.tests {
                 outcomes.push(OwnedTestOutcome {
                     name: test.name.clone(),
+                    runner: test.runner.clone(),
                     package: package.directory.clone(),
                     file: package.declared_in.get(&test.name).cloned(),
                     status: test.status.clone(),

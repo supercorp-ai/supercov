@@ -498,6 +498,12 @@ func Write(path string) error {
 		if _, err := out.WriteString(record.status); err != nil {
 			return err
 		}
+		// Which runner announced the test. Go has one, so the record leaves it
+		// empty and the engine reads the frontend's own; a JVM project can run
+		// two frameworks at once and has to say.
+		if err := put(0); err != nil {
+			return err
+		}
 		// Sparse: only what this test reached, so the transport is
 		// proportional to what ran rather than to the size of the project.
 		if err := put(uint64(len(record.probes))); err != nil {

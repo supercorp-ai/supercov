@@ -594,6 +594,7 @@ public final class SupercovConfig {{
         .iter()
         .map(|test| OwnedTestOutcome {
             name: test.name.clone(),
+            runner: String::new(),
             package: "CalculatorTest".into(),
             file: Some("CalculatorTest.java".into()),
             status: "passed".into(),

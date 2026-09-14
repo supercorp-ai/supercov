@@ -69,6 +69,9 @@ pub struct OwnedTestEvidence {
     /// How the test ended, as the framework saw it: `passed`, `failed` or
     /// `skipped`.
     pub status: String,
+    /// Which runner announced it. Empty where the frontend has only one, in
+    /// which case that one is the answer.
+    pub runner: String,
     /// Probe id to the bitmask it was observed with.
     pub probes: BTreeMap<u32, u32>,
     pub vectors: Vec<PackedVector>,
@@ -129,6 +132,8 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
         let name = cursor.text(length, "test name")?;
         let status_length = cursor.u64("test status")? as usize;
         let status = cursor.text(status_length, "test status")?;
+        let runner_length = cursor.u64("test runner")? as usize;
+        let runner = cursor.text(runner_length, "test runner")?;
         let hits = cursor.u64("test probes")? as usize;
         let mut probes = BTreeMap::new();
         for _ in 0..hits {
@@ -147,6 +152,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
         tests.push(OwnedTestEvidence {
             name,
             status,
+            runner,
             probes,
             vectors,
         });
@@ -202,6 +208,9 @@ pub struct OwnedTestOutcome {
     pub file: Option<String>,
     /// `passed`, `failed` or `skipped`, as the runner reported it.
     pub status: String,
+    /// Which runner announced it, as the frontend declares that runner. Empty
+    /// where the frontend has only one.
+    pub runner: String,
 }
 
 /// How a language's runner attributes what it records.
@@ -262,40 +271,41 @@ pub fn go_coverage_model() -> CoverageModelDeclaration {
     }
 }
 
-/// The JVM's, where the JUnit Platform reports each test's start and finish so
-/// attribution follows the framework's own lifecycle.
+/// The JVM's, where each framework reports a test's start and finish and
+/// attribution follows the lifecycle the framework itself defines.
+///
+/// Two runners, because there are two lifecycles. The JUnit Platform covers
+/// every engine built on it — Jupiter, Vintage, Kotest, Spock — and TestNG,
+/// which is not one, reports through its own listener interface. They measure
+/// the same way and say so with the same precision; what differs is who does
+/// the announcing.
 pub fn jvm_declaration() -> FrontendRunDeclaration {
+    let runner = |name: &str, concurrency: &str| FrontendRunnerDeclaration {
+        runner: name.into(),
+        execution_model: ExecutionModel::SerialInProcess,
+        attribution: exact_per_test(),
+        limitations: {
+            let mut limitations = owned_attribution_limitations(name);
+            limitations.push(FrontendLimitation {
+                id: format!("{name}-parallel-execution"),
+                scopes: vec![FrontendLimitationScope::Test],
+                reason: format!(
+                    "with {concurrency}, tests overlap in one process; work they do concurrently is recorded run-wide rather than against a single test, and condition coverage is dropped because concurrent evaluations corrupt it"
+                ),
+            });
+            limitations
+        },
+    };
     FrontendRunDeclaration {
         protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
         frontend_id: "supercov-jvm".into(),
         frontend_version: "jvm-owned-v1".into(),
         language: "jvm".into(),
         structural_source: supercov_contracts::StructuralSource::OwnedProbes,
-        runners: vec![FrontendRunnerDeclaration {
-            runner: "junit-platform".into(),
-            execution_model: ExecutionModel::SerialInProcess,
-            attribution: exact_per_test(),
-            limitations: {
-                let mut limitations = owned_attribution_limitations("jvm");
-                limitations.extend([
-                FrontendLimitation {
-                    id: "jvm-parallel-execution".into(),
-                    scopes: vec![FrontendLimitationScope::Test],
-                    reason:
-                        "with JUnit parallel execution enabled, tests overlap in one process and work they do concurrently is recorded run-wide rather than against a single test"
-                            .into(),
-                },
-                FrontendLimitation {
-                    id: "jvm-testng".into(),
-                    scopes: vec![FrontendLimitationScope::Test],
-                    reason:
-                        "TestNG is not a JUnit Platform engine, so its tests are attributed only where Supercov could rewrite their annotated methods"
-                            .into(),
-                },
-                ]);
-                limitations
-            },
-        }],
+        runners: vec![
+            runner("junit-platform", "JUnit parallel execution enabled"),
+            runner("testng", "TestNG's parallel suites or methods"),
+        ],
         structural_limitations: Vec::new(),
     }
 }
@@ -560,11 +570,16 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     // The runner every result claims must be one the declaration names: a
     // result attributed to a runner nobody declared is a result nothing can
     // say the precision of, and the reader refuses it rather than guess.
-    let runner = declaration
+    let default_runner = declaration
         .runners
         .first()
         .map(|runner| runner.runner.clone())
         .ok_or(OwnedEvidenceError::NoTests)?;
+    let declared = declaration
+        .runners
+        .iter()
+        .map(|runner| runner.runner.as_str())
+        .collect::<BTreeSet<_>>();
     let source = declaration.frontend_version.clone();
     let by_probe = obligations(probes);
     let recorded = evidence
@@ -579,6 +594,20 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             let test = recorded.get(&outcome.name).copied().unwrap_or(&empty);
             let test_id = format!("{}::{}", outcome.package, outcome.name);
             let phase = test_phase(&test_id);
+            let provenance = TestProvenance {
+                // What the record says, when the frontend declares it. A JVM
+                // project can run JUnit and TestNG in one JVM, and a result
+                // naming the wrong one would claim it was attributed by a
+                // lifecycle that never saw it.
+                runner: if declared.contains(outcome.runner.as_str()) {
+                    outcome.runner.clone()
+                } else {
+                    default_runner.clone()
+                },
+                kind: "unit".into(),
+                project: Some(outcome.package.clone()),
+                source: source.clone(),
+            };
             RawTestResult {
                 scope: Some(ExecutionScope {
                     version: 1,
@@ -604,12 +633,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 status: Some(outcome.status.clone()),
                 expected_status: None,
                 flaky: false,
-                provenance: TestProvenance {
-                    runner: runner.clone(),
-                    kind: "unit".into(),
-                    project: Some(outcome.package.clone()),
-                    source: source.clone(),
-                },
+                provenance: provenance.clone(),
                 role: "test".into(),
                 // Every event a probe produces belongs to the test body: the
                 // runtime binds coverage at the test boundary and knows
@@ -619,7 +643,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 phases: vec![CoveragePhase {
                     id: phase.clone(),
                     kind: "test".into(),
-                    operation: format!("{runner} {}", outcome.name),
+                    operation: format!("{} {}", provenance.runner, outcome.name),
                     source: outcome.file.clone(),
                     caused_by_phase_id: None,
                     started_at_ms: 0,
@@ -633,6 +657,24 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             }
         })
         .collect::<Vec<_>>();
+    // A declaration naming a runner that produced nothing claims something the
+    // run did not do, and the reader refuses it — rightly. A JVM frontend can
+    // drive JUnit and TestNG, but any one project usually runs one of them, so
+    // the run declares the ones it actually observed.
+    let observed = raw_results
+        .iter()
+        .map(|result| result.provenance.runner.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut declaration = declaration;
+    if declaration
+        .runners
+        .iter()
+        .any(|runner| observed.contains(runner.runner.as_str()))
+    {
+        declaration
+            .runners
+            .retain(|runner| observed.contains(runner.runner.as_str()));
+    }
     Ok(OwnedFrontendRun {
         declaration,
         tests: raw_results.len(),
@@ -736,8 +778,18 @@ mod tests {
             .iter()
             .map(|limitation| limitation.id.as_str())
             .collect::<Vec<_>>();
-        assert!(gaps.contains(&"jvm-parallel-execution"), "{gaps:?}");
-        assert!(gaps.contains(&"jvm-testng"), "{gaps:?}");
+        assert!(
+            gaps.contains(&"junit-platform-parallel-execution"),
+            "{gaps:?}"
+        );
+        // TestNG is a runner of its own rather than a gap in another: it is
+        // not a platform engine, so it reports through its own listener.
+        let named = jvm
+            .runners
+            .iter()
+            .map(|runner| runner.runner.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(named, ["junit-platform", "testng"]);
     }
 
     #[test]
@@ -789,6 +841,7 @@ mod tests {
             evidence: &OwnedEvidence::default(),
             outcomes: &[OwnedTestOutcome {
                 name: "TestSilent".into(),
+                runner: String::new(),
                 package: "example.com/p".into(),
                 file: Some("p/x_test.go".into()),
                 status: "passed".into(),

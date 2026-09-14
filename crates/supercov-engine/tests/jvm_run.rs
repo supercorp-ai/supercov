@@ -308,3 +308,145 @@ fn a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reac
     assert_eq!(result.tests, 3);
     std::fs::remove_dir_all(root).ok();
 }
+
+const TESTNG_POM: &str = r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>example</groupId>
+  <artifactId>demo</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.testng</groupId>
+      <artifactId>testng</artifactId>
+      <version>7.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#;
+
+/// TestNG's own idioms: a data provider that runs one method several times,
+/// and a skip. Neither has a JUnit Platform equivalent to fall back on.
+const TESTNG_SUITE: &str = r#"package app;
+
+import org.testng.SkipException;
+import org.testng.annotations.DataProvider;
+import org.testng.annotations.Test;
+import static org.testng.Assert.assertEquals;
+
+public class CalculatorTest {
+    @DataProvider(name = "sizes")
+    public Object[][] sizes() {
+        return new Object[][] {{20, true, "BIG"}, {1, false, "small"}};
+    }
+
+    @Test(dataProvider = "sizes")
+    public void sizesAreNamed(int a, boolean loud, String expected) {
+        assertEquals(Calculator.size(a, loud), expected);
+    }
+
+    @Test
+    public void notToday() {
+        throw new SkipException("nothing to do here");
+    }
+}
+"#;
+
+fn testng_fixture(root: &Path) {
+    write(root, "pom.xml", TESTNG_POM);
+    write(root, "src/main/java/app/Calculator.java", SOURCE);
+    write(root, "src/test/java/app/CalculatorTest.java", TESTNG_SUITE);
+}
+
+#[test]
+fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
+    // TestNG is the one framework the JUnit Platform does not report, so it
+    // needs a listener of its own. Kotest and Spock are platform engines and
+    // need nothing extra.
+    let Some(mvn) = tool("mvn") else {
+        eprintln!("[jvm-run] skipped: no Maven found");
+        return;
+    };
+    let warmup = temporary("testng-warmup");
+    testng_fixture(&warmup);
+    let resolvable = Command::new(&mvn)
+        .args(["-q", "test"])
+        .current_dir(&warmup)
+        .output()
+        .is_ok_and(|out| out.status.success());
+    std::fs::remove_dir_all(&warmup).ok();
+    if !resolvable {
+        eprintln!("[jvm-run] skipped: Maven cannot resolve TestNG here");
+        return;
+    }
+
+    let root = temporary("testng");
+    testng_fixture(&root);
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![mvn.display().to_string(), "-q".into(), "test".into()],
+        run_id: "run-jvm-testng".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+
+    // Two data-provider invocations and the skip. The invocations are separate
+    // tests because they reach different code, which is the point of a data
+    // provider: collapsing them would credit one with what the other proved.
+    assert_eq!(
+        result.tests,
+        3,
+        "{diagnostics:?}",
+        diagnostics = String::from_utf8_lossy(&diagnostics)
+    );
+
+    let archive = result.run_directory.join("evidence.raw.gz");
+    let records = supercov_engine::evidence_archive::read_archive(&archive)
+        .expect("published archive")
+        .into_iter()
+        .filter(|entry| entry.path.ends_with("mcdc.json"))
+        .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+        .collect::<Vec<_>>();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("CalculatorTest#sizesAreNamed()")),
+        "{records:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("CalculatorTest#sizesAreNamed()[1]")),
+        "a second invocation is its own test: {records:?}"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.contains("\"status\":\"skipped\""))
+            .count(),
+        1,
+        "the skipped test is recorded as one: {records:?}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

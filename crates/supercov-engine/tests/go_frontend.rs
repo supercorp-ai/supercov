@@ -142,6 +142,10 @@ fn decode(bytes: &[u8]) -> Evidence {
         let name = cursor.text(length);
         let status_length = cursor.u64() as usize;
         statuses.insert(name.clone(), cursor.text(status_length));
+        // Which runner announced it. Go has one, so its records leave this
+        // empty and the engine reads the frontend's own.
+        let runner_length = cursor.u64() as usize;
+        assert_eq!(runner_length, 0, "Go declares a single runner");
         let entries = cursor.u64() as usize;
         let mut probes = std::collections::BTreeMap::new();
         for _ in 0..entries {
@@ -347,12 +351,14 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
         outcomes: &[
             OwnedTestOutcome {
                 name: "TestBig".into(),
+                runner: String::new(),
                 package: "example.com/probe".into(),
                 file: Some("main_test.go".into()),
                 status: "passed".into(),
             },
             OwnedTestOutcome {
                 name: "TestZero".into(),
+                runner: String::new(),
                 package: "example.com/probe".into(),
                 file: Some("main_test.go".into()),
                 status: "passed".into(),

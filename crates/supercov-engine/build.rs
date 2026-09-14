@@ -136,7 +136,6 @@ fn main() {
     let mut jvm_frontend = vec![
         crate_root.join("src/jvm_instrumenter.rs"),
         crate_root.join("src/jvm_project.rs"),
-        crate_root.join("src/jvm_test_harness.rs"),
         crate_root.join("src/owned_evidence.rs"),
         crate_root.join("Cargo.toml"),
     ];

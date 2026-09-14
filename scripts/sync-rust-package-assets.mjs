@@ -88,6 +88,7 @@ const mappings = [
   ...runtimeFiles("jvm", [
     "com/supercorp/supercov/Supercov.java",
     "com/supercorp/supercov/SupercovListener.java",
+    "com/supercorp/supercov/SupercovTestNGListener.java",
   ]),
   ...runtimeFiles("ruby", [
     "supercov_cucumber.rb",
