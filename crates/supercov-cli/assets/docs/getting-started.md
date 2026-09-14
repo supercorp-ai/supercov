@@ -108,6 +108,8 @@ if anything is missing.
 - a working test command, including its dependencies, environment variables,
   and any local services;
 - for Rust, the Rust 1.95 toolchain;
+- for Go, Go 1.22 or newer;
+- for Java and Kotlin, JDK 17 or newer, with Maven or Gradle;
 - for Python, CPython 3.12 or newer with pytest or unittest;
 - for Ruby, Ruby 3.4 or newer with RSpec, Minitest, test-unit or Cucumber (3.3 measures lines, methods and simple branches only).
 
