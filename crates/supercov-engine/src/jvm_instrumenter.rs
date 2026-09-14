@@ -59,7 +59,9 @@ pub fn parse(
         .parse(source, None)
         .ok_or_else(|| JvmInstrumenterError::Parse("parser returned no tree".into()))?;
     if tree.root_node().has_error() {
-        return Err(JvmInstrumenterError::Parse("source does not parse".into()));
+        return Err(JvmInstrumenterError::Parse(
+            crate::go_instrumenter::parse_failure(&tree, source),
+        ));
     }
     Ok(tree)
 }
@@ -846,6 +848,44 @@ mod tests {
         kinds.sort();
         kinds.dedup();
         kinds
+    }
+
+    /// A file that does not parse has to say where, or nobody can act on it.
+    /// square/moshi's JsonReader.kt is this shape: nine hundred lines, and a
+    /// nested class whose primary constructor is written on the line after its
+    /// name, which tree-sitter-kotlin-ng 1.1.0 does not accept. The message
+    /// said "source does not parse" and left the reader to find it.
+    #[test]
+    fn a_file_that_does_not_parse_says_where() {
+        const NESTED: &str = r#"package app
+
+class Outer {
+  public class Options
+  private constructor(
+    internal val strings: Array<out String>,
+  ) {
+  }
+}
+"#;
+        let message = parse(NESTED, JvmLanguage::Kotlin)
+            .expect_err("does not parse")
+            .to_string();
+        // Where the parser gave up, and how far it gave up for -- a class it
+        // could not read is not a one-line problem, and saying "line 3" alone
+        // reads as though it were.
+        assert!(message.contains("line 3"), "{message}");
+        // The extent is tree-sitter's own account of how far it recovered, so
+        // the test holds that a range is given rather than pinning its end.
+        assert!(message.contains("through line "), "{message}");
+        assert!(message.contains("class Outer"), "{message}");
+
+        // An error inside an otherwise valid file is named where it is,
+        // which is the case a reader meets most often.
+        let local = "class A {\n    fun f(): Int {\n        return 1 )\n    }\n}\n";
+        let message = parse(local, JvmLanguage::Kotlin)
+            .expect_err("does not parse")
+            .to_string();
+        assert!(message.contains("line 3"), "{message}");
     }
 
     #[test]

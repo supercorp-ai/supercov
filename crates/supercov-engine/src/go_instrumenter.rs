@@ -114,22 +114,67 @@ pub fn parse(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
         .parse(source, None)
         .ok_or_else(|| GoInstrumenterError::Parse("parser returned no tree".into()))?;
     if tree.root_node().has_error() {
-        return Err(GoInstrumenterError::Parse(format!(
-            "syntax error near byte {}",
-            first_error_offset(tree.root_node()).unwrap_or(0)
-        )));
+        return Err(GoInstrumenterError::Parse(parse_failure(&tree, source)));
     }
     Ok(tree)
 }
 
-fn first_error_offset(node: Node) -> Option<usize> {
-    if node.is_error() || node.is_missing() {
-        return Some(node.start_byte());
+/// Where a parse went wrong, phrased so a reader knows where to look.
+///
+/// "source does not parse" for a nine-hundred-line file, or a byte offset into
+/// it, says only that something is wrong. tree-sitter recovers as it goes, so
+/// the outermost error node routinely spans a whole class while the token it
+/// actually choked on is deep inside: the innermost one is the one worth
+/// naming.
+pub(crate) fn parse_failure(tree: &tree_sitter::Tree, source: &str) -> String {
+    let mut deepest: Option<(usize, Node)> = None;
+    let mut stack = vec![(0_usize, tree.root_node())];
+    while let Some((depth, node)) = stack.pop() {
+        if (node.is_error() || node.is_missing()) && deepest.is_none_or(|(found, _)| depth > found)
+        {
+            deepest = Some((depth, node));
+        }
+        // Every child, not only those that report an error of their own: an
+        // ERROR node holds the tokens it did manage to read, and the one that
+        // actually failed is among them.
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push((depth + 1, child));
+        }
     }
-    let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .filter(|child| child.has_error())
-        .find_map(first_error_offset)
+    let Some((_, node)) = deepest else {
+        return "source does not parse".to_owned();
+    };
+    let start = node.start_position();
+    let mut line = source
+        .lines()
+        .nth(start.row)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if line.chars().count() > 120 {
+        line = line.chars().take(117).collect::<String>() + "...";
+    }
+    let what = if node.is_missing() {
+        "missing syntax"
+    } else {
+        "unexpected syntax"
+    };
+    // A recovered ERROR node can swallow everything from the construct it
+    // opened to the end of it, and the reader needs to know how far that is:
+    // "line 174" alone reads as a one-line problem when the parser gave up on
+    // four hundred.
+    let end = node.end_position().row + 1;
+    let through = if end > start.row + 1 {
+        format!(" (through line {end})")
+    } else {
+        String::new()
+    };
+    format!(
+        "{what} at line {}, column {}{through}: {line}",
+        start.row + 1,
+        start.column + 1,
+    )
 }
 
 /// Statements Go nests directly inside a block. Declarations that cannot
@@ -718,6 +763,19 @@ mod tests {
         kinds.sort();
         kinds.dedup();
         kinds
+    }
+
+    /// A byte offset says a file is broken without saying where to look.
+    #[test]
+    fn a_file_that_does_not_parse_says_where() {
+        let broken = "package main\n\nfunc f() int {\n\treturn 1 )\n}\n";
+        let message = parse(broken).expect_err("does not parse").to_string();
+        assert!(message.contains("line 4"), "{message}");
+        assert!(message.contains("return 1"), "{message}");
+        assert!(
+            !message.contains("byte"),
+            "an offset is not somewhere a reader can look: {message}"
+        );
     }
 
     #[test]
