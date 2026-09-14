@@ -222,6 +222,7 @@ npx supercov -- bin/rails test
 | --- | --- | --- |
 | `go test` | Exact per test | Go 1.22 or newer |
 | A test that calls `t.Parallel()` | Aggregate: its coverage counts run-wide | — |
+| An `Example` with an `Output` comment, and a `Fuzz` target's seed corpus | Aggregate: measured, but named by no test | — |
 
 Supercov instruments an isolated copy of the module and runs your own command
 against it. Your tree is not touched, and your test sources are not rewritten
@@ -239,6 +240,10 @@ assigned to a test by guesswork: the lines count as covered, and no test claims
 them. It counts only when the run passed, for the same reason a failing test's
 coverage never counts — a failed run cannot say which of it came from the test
 that failed.
+
+An `Example` with an `Output` comment and a `Fuzz` target's seed corpus are
+measured the same way. `go test` runs both, so what they reach is real
+coverage, but neither takes a `*testing.T` for a result to be named by.
 
 Supercov also writes evidence as the suite runs, not only at the end. Go offers
 no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`
