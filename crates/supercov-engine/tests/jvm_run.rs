@@ -583,9 +583,10 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
 
     // The decision the Kotlin source declares is in the published manifest,
     // which is what the numbers are measured against.
-    let entries =
-        supercov_engine::evidence_archive::read_archive(&result.run_directory.join("evidence.raw.gz"))
-            .expect("published archive");
+    let entries = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive");
     let manifest = String::from_utf8(
         entries
             .into_iter()
