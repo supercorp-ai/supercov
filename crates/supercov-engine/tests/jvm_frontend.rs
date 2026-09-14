@@ -10,6 +10,7 @@ use std::process::Command;
 
 use supercov_engine::go_evidence::read_evidence;
 use supercov_engine::jvm_instrumenter::{JvmLanguage, build_jvm_obligations, rewrite};
+use supercov_engine::jvm_test_harness::instrument_test_file;
 
 fn tool(name: &str) -> Option<PathBuf> {
     // Homebrew's JDK is keg-only, so `/usr/bin/java` is a stub that finds no
@@ -318,6 +319,221 @@ fun main() {{
     assert!(seen.contains(&(0b01, 0b00, false)), "{seen:?}");
     assert!(seen.contains(&(0b11, 0b11, true)), "{seen:?}");
     assert_eq!(evidence.tests.len(), 2);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The JUnit 5 standalone runner, if one is already on this machine.
+///
+/// Deliberately not downloaded by the suite. A test that reaches the network
+/// fails on a plane, fails behind a proxy, and turns an unrelated outage into
+/// a red build. To enable this test, put the jar somewhere it looks:
+///
+/// ```text
+/// curl -sSLo /tmp/junit5/junit-platform-console-standalone.jar \
+///   https://repo1.maven.org/maven2/org/junit/platform/\
+///   junit-platform-console-standalone/1.11.4/\
+///   junit-platform-console-standalone-1.11.4.jar
+/// ```
+fn junit_jar() -> Option<PathBuf> {
+    ["JUNIT_CONSOLE_JAR"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(PathBuf::from)
+        .chain(
+            ["/tmp/junit5/junit-platform-console-standalone.jar"]
+                .into_iter()
+                .map(PathBuf::from),
+        )
+        .find(|path| path.is_file())
+}
+
+const UNDER_TEST: &str = r#"public class Calculator {
+    public static String size(int a, boolean loud) {
+        if (a > 10 && loud) {
+            return "BIG";
+        }
+        if (a == 0) return "zero";
+        return "small";
+    }
+}
+"#;
+
+const SUITE: &str = r#"import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class CalculatorTest {
+    @Test
+    void zeroIsNamed() {
+        assertEquals("zero", Calculator.size(0, false));
+    }
+
+    @Test
+    void loudAndLargeIsBig() {
+        assertEquals("BIG", Calculator.size(20, true));
+    }
+}
+"#;
+
+#[test]
+fn a_real_junit_5_run_attributes_coverage_to_the_test_that_produced_it() {
+    // The parser tests say the harness produces valid source. Only JUnit can
+    // say the announcements land where a real framework puts its test
+    // lifecycle, which is the thing attribution depends on.
+    let (Some(javac), Some(java), Some(jar)) = (tool("javac"), tool("java"), junit_jar()) else {
+        eprintln!("[jvm-frontend] skipped: no JDK or JUnit runner available");
+        return;
+    };
+    let root = temporary("junit");
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/jvm/com/supercorp/supercov/Supercov.java");
+    write(
+        &root,
+        "com/supercorp/supercov/Supercov.java",
+        &std::fs::read_to_string(runtime).expect("runtime source"),
+    );
+
+    let mut next = 0;
+    let obligations =
+        build_jvm_obligations("Calculator.java", UNDER_TEST, JvmLanguage::Java, &mut next)
+            .expect("obligations");
+    write(
+        &root,
+        "Calculator.java",
+        &rewrite(UNDER_TEST, &obligations.edits),
+    );
+
+    let harness = instrument_test_file(SUITE, JvmLanguage::Java).expect("harness");
+    assert_eq!(
+        harness.tests,
+        [
+            "CalculatorTest#zeroIsNamed",
+            "CalculatorTest#loudAndLargeIsBig"
+        ]
+    );
+    write(
+        &root,
+        "CalculatorTest.java",
+        &rewrite(SUITE, &harness.edits),
+    );
+
+    // Arming and writing hang off JUnit's own lifecycle callbacks, which is
+    // how a generated harness will do it for a real project.
+    let probes = obligations.probes.len() + 1;
+    let widths = obligations
+        .decision_widths
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    write(
+        &root,
+        "SupercovListener.java",
+        &format!(
+            r#"import com.supercorp.supercov.Supercov;
+import org.junit.platform.launcher.TestExecutionListener;
+import org.junit.platform.launcher.TestPlan;
+
+public class SupercovListener implements TestExecutionListener {{
+    @Override public void testPlanExecutionStarted(TestPlan plan) {{
+        Supercov.arm({probes}, new int[] {{{widths}}});
+    }}
+    @Override public void testPlanExecutionFinished(TestPlan plan) {{
+        try {{ Supercov.write("evidence.bin"); }} catch (Exception e) {{ throw new RuntimeException(e); }}
+    }}
+}}
+"#
+        ),
+    );
+    write(
+        &root,
+        "META-INF/services/org.junit.platform.launcher.TestExecutionListener",
+        "SupercovListener
+",
+    );
+
+    let classpath = format!("{}:.", jar.display());
+    let compile = Command::new(&javac)
+        .args([
+            "-cp",
+            &classpath,
+            "-d",
+            ".",
+            "com/supercorp/supercov/Supercov.java",
+            "Calculator.java",
+            "CalculatorTest.java",
+            "SupercovListener.java",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "javac rejected the instrumented suite:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(&java)
+        .args([
+            "-jar",
+            &jar.display().to_string(),
+            "execute",
+            "--class-path",
+            ".",
+            "--select-class",
+            "CalculatorTest",
+            "--details=none",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "JUnit reported failures:\n{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let evidence = read_evidence(&std::fs::read(root.join("evidence.bin")).expect("evidence"))
+        .expect("decode");
+    let named = evidence
+        .tests
+        .iter()
+        .map(|t| t.name.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        named.contains(&"CalculatorTest#zeroIsNamed".to_owned()),
+        "{named:?}"
+    );
+    assert!(
+        named.contains(&"CalculatorTest#loudAndLargeIsBig".to_owned()),
+        "{named:?}"
+    );
+
+    let zero = evidence
+        .tests
+        .iter()
+        .find(|t| t.name.ends_with("zeroIsNamed"))
+        .unwrap();
+    let big = evidence
+        .tests
+        .iter()
+        .find(|t| t.name.ends_with("loudAndLargeIsBig"))
+        .unwrap();
+    // Each test reached different code, and neither claims the other's.
+    assert_ne!(zero.probes, big.probes);
+    // Only the test that passed a large, loud value evaluated the second
+    // condition; the other short-circuited before reaching it.
+    assert!(
+        big.vectors.iter().any(|v| v.key & 0b11 == 0b11),
+        "the big case evaluated both conditions: {:?}",
+        big.vectors
+    );
+    assert!(
+        zero.vectors.iter().all(|v| v.key & 0b10 == 0),
+        "the zero case must never evaluate the second condition: {:?}",
+        zero.vectors
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }
