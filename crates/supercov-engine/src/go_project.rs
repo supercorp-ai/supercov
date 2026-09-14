@@ -82,7 +82,60 @@ pub fn is_test_file(relative: &str) -> bool {
         .is_some_and(|name| name.ends_with("_test.go"))
 }
 
+/// The module directories a `go.work` declares, relative to the workspace root
+/// and `/`-separated.
+///
+/// Empty when there is no workspace, which is also the answer for a repository
+/// that simply has one module at its root.
+pub fn workspace_modules(root: &Path) -> BTreeSet<String> {
+    let Ok(text) = std::fs::read_to_string(root.join("go.work")) else {
+        return BTreeSet::new();
+    };
+    let mut modules = BTreeSet::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        // `use ./a`, or a `use (` block of one directory per line.
+        let entry = if in_block {
+            if line == ")" {
+                in_block = false;
+                continue;
+            }
+            Some(line)
+        } else if let Some(rest) = line.strip_prefix("use ") {
+            let rest = rest.trim();
+            if rest == "(" {
+                in_block = true;
+                continue;
+            }
+            Some(rest)
+        } else {
+            if line.starts_with("use(") {
+                in_block = true;
+            }
+            None
+        };
+        if let Some(entry) = entry {
+            let entry = entry.trim_matches('"').trim();
+            let entry = entry.strip_prefix("./").unwrap_or(entry);
+            let entry = entry.trim_end_matches('/');
+            if !entry.is_empty() {
+                modules.insert(if entry == "." {
+                    ".".to_owned()
+                } else {
+                    entry.replace('\\', "/")
+                });
+            }
+        }
+    }
+    modules
+}
+
 fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String> {
+    let members = workspace_modules(root);
     let entries = std::fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     let mut sorted = entries
@@ -107,6 +160,17 @@ fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String
                 files
                     .excluded
                     .push((relative, "tooling or vendored directory"));
+                continue;
+            }
+            // A directory with a go.mod of its own is a different module. The
+            // toolchain does not compile it as part of this one -- `go test
+            // ./...` walks straight past it -- so measuring it would put
+            // obligations in the denominator that no test here can reach, and
+            // writing a probe file there would import a runtime the nested
+            // module cannot resolve. That turns a build that worked into one
+            // that does not.
+            if path.join("go.mod").is_file() && !members.contains(&relative) {
+                files.excluded.push((relative, "a module of its own"));
                 continue;
             }
             walk(root, &path, files)?;
@@ -364,5 +428,106 @@ mod tests {
             &["go".to_owned(), "test".to_owned(), "./...".to_owned()],
         );
         assert_eq!(inputs.execution_configuration, b"go\0test\0./...");
+    }
+
+    #[test]
+    fn a_nested_module_belongs_to_itself() {
+        // `go test ./...` walks straight past a directory with a go.mod of its
+        // own, so measuring it would put obligations in the denominator that
+        // no test here can reach -- and a probe file written there would
+        // import a runtime the nested module cannot resolve, which stops the
+        // build that worked before Supercov was asked to measure it.
+        let root = fixture("nested-module");
+        fs::write(root.join("go.mod"), "module example.com/root\n").unwrap();
+        fs::write(root.join("root.go"), "package root\n\nfunc A() {}\n").unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/go.mod"), "module example.com/sub\n").unwrap();
+        fs::write(root.join("sub/sub.go"), "package sub\n\nfunc B() {}\n").unwrap();
+        // A plain subdirectory of this module is still measured.
+        fs::create_dir_all(root.join("internal")).unwrap();
+        fs::write(
+            root.join("internal/helper.go"),
+            "package internal\n\nfunc C() {}\n",
+        )
+        .unwrap();
+
+        let files = discover_go_files(&root).expect("discovery");
+        assert_eq!(files.sources, ["internal/helper.go", "root.go"]);
+        assert!(
+            files
+                .excluded
+                .iter()
+                .any(|(path, reason)| path == "sub" && *reason == "a module of its own"),
+            "{:?}",
+            files.excluded
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_names_the_modules_it_uses() {
+        // go.work writes `use` either inline or as a block, with comments and
+        // quoting allowed. Its members are modules Supercov must measure --
+        // the opposite of a nested module it must leave alone -- so reading
+        // the file wrong means either measuring nothing or breaking a build.
+        let root = fixture("go-work");
+        fs::write(
+            root.join("go.work"),
+            "go 1.22\n\n// the services\nuse (\n\t./core\n\t\"./app\"  // quoted\n\t./tools/gen\n)\n",
+        )
+        .unwrap();
+        let modules = workspace_modules(&root);
+        assert_eq!(
+            modules.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["app", "core", "tools/gen"]
+        );
+
+        // The inline form says the same thing.
+        fs::write(root.join("go.work"), "go 1.22\n\nuse ./only\n").unwrap();
+        assert_eq!(
+            workspace_modules(&root)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["only"]
+        );
+
+        // And a repository with no workspace has none, which is how a single
+        // module at the root is told apart from a workspace member.
+        fs::remove_file(root.join("go.work")).unwrap();
+        assert!(workspace_modules(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_member_is_measured_where_a_nested_module_is_not() {
+        // Both are directories with a go.mod under the root. One is part of
+        // what the command runs and one is not, and only go.work says which.
+        let root = fixture("go-work-members");
+        fs::write(root.join("go.work"), "go 1.22\n\nuse (\n\t./core\n)\n").unwrap();
+        for module in ["core", "vendored"] {
+            fs::create_dir_all(root.join(module)).unwrap();
+            fs::write(
+                root.join(module).join("go.mod"),
+                format!("module example.com/{module}\n"),
+            )
+            .unwrap();
+            fs::write(
+                root.join(module).join("code.go"),
+                format!("package {module}\n\nfunc A() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let files = discover_go_files(&root).expect("discovery");
+        assert_eq!(files.sources, ["core/code.go"]);
+        assert!(
+            files
+                .excluded
+                .iter()
+                .any(|(path, reason)| path == "vendored" && *reason == "a module of its own"),
+            "{:?}",
+            files.excluded
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

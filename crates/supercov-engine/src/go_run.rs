@@ -169,17 +169,44 @@ fn instrument_workspace(
     evidence_directory: &Path,
 ) -> Result<InstrumentedWorkspace, String> {
     let project = prepare_go_project(workspace)?;
-    let module = module_path(workspace).ok_or_else(|| {
-        format!(
-            "{}: no module path in go.mod, so Supercov cannot name the package its runtime is imported from",
-            workspace.display()
-        )
-    })?;
-    let local_import = format!("{module}/{RUNTIME_DIRECTORY}");
-    write(
-        &workspace.join(RUNTIME_DIRECTORY).join("supercov.go"),
-        RUNTIME_SOURCE,
-    )?;
+
+    // A go.work repository has several modules and no module at its root, so
+    // each gets a runtime of its own: an import is resolved against the module
+    // that names it, and one module cannot import a package inside another.
+    let members = crate::go_project::workspace_modules(workspace);
+    let directories = if members.is_empty() {
+        vec![".".to_owned()]
+    } else {
+        members.into_iter().collect::<Vec<_>>()
+    };
+    let mut runtimes: Vec<(String, String)> = Vec::new();
+    for directory in &directories {
+        let at = workspace.join(directory);
+        let module = module_path(&at).ok_or_else(|| {
+            format!(
+                "{}: no module path in go.mod, so Supercov cannot name the package its runtime is imported from",
+                at.display()
+            )
+        })?;
+        write(
+            &at.join(RUNTIME_DIRECTORY).join("supercov.go"),
+            RUNTIME_SOURCE,
+        )?;
+        runtimes.push((directory.clone(), format!("{module}/{RUNTIME_DIRECTORY}")));
+    }
+    // Longest first, so a nested module wins over the root it sits under.
+    runtimes.sort_by_key(|(directory, _)| std::cmp::Reverse(directory.len()));
+    let import_for = |relative: &str| -> &str {
+        runtimes
+            .iter()
+            .find(|(directory, _)| {
+                directory == "."
+                    || relative == directory
+                    || relative.starts_with(&format!("{directory}/"))
+            })
+            .map(|(_, import)| import.as_str())
+            .unwrap_or_default()
+    };
 
     // Probe ids are handed out across the whole module, so every package
     // reserves the same total: a probe from one package is the same index in
@@ -192,7 +219,7 @@ fn instrument_workspace(
 
     let mut source_packages: BTreeMap<String, String> = BTreeMap::new();
     for (relative, instrumented) in &project.instrumented {
-        let instrumented = instrumented.replace(RUNTIME_IMPORT, &local_import);
+        let instrumented = instrumented.replace(RUNTIME_IMPORT, import_for(relative));
         let path = workspace.join(relative);
         if let Some(name) = package_name(&instrumented) {
             source_packages
@@ -204,7 +231,12 @@ fn instrument_workspace(
     for (directory, package) in &source_packages {
         write(
             &workspace.join(directory).join(PROBE_FILE),
-            &probe_array_file(package, RUNTIME_ALIAS, &local_import, probe_count),
+            &probe_array_file(
+                package,
+                RUNTIME_ALIAS,
+                import_for(&format!("{directory}/x.go")),
+                probe_count,
+            ),
         )?;
     }
 
@@ -245,7 +277,7 @@ fn instrument_workspace(
             if !file.edits.is_empty() {
                 write(
                     &path,
-                    &rewrite(&source, &file.edits).replace(RUNTIME_IMPORT, &local_import),
+                    &rewrite(&source, &file.edits).replace(RUNTIME_IMPORT, import_for(relative)),
                 )?;
             }
         }
@@ -257,7 +289,7 @@ fn instrument_workspace(
             &synthesized_harness(
                 &package,
                 RUNTIME_ALIAS,
-                &local_import,
+                import_for(&format!("{directory}/x.go")),
                 probe_count,
                 &project.decision_widths,
                 &evidence_literal,

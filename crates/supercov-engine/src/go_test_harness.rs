@@ -106,7 +106,7 @@ pub fn instrument_test_file(
             file.edits.push(GoEdit {
                 at: body.start_byte() + 1,
                 rank: 100,
-                text: format!("\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)"),
+                text: format!("\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n"),
             });
             // Wrap the m.Run() call itself rather than deferring after it.
             wrap_run_calls(body, source, alias, evidence_path, &mut file.edits);
@@ -132,11 +132,14 @@ pub fn instrument_test_file(
         // Through the generated helper rather than the runtime directly, so
         // the announcement can read the outcome off the test's own *testing.T
         // without the runtime ever importing `testing`.
+        // The trailing newline matters: a body written on one line puts its
+        // first statement immediately after the brace, and an announcement
+        // with nothing after it would run into that statement and not compile.
         let announcement = match parameter_name(child, source) {
             Some(parameter) => {
-                format!("\n\tdefer {HARNESS_ENTER}({parameter}, \"{name}\")()")
+                format!("\n\tdefer {HARNESS_ENTER}({parameter}, \"{name}\")()\n")
             }
-            None => format!("\n\tdefer {alias}.EnterTest(\"{name}\")()"),
+            None => format!("\n\tdefer {alias}.EnterTest(\"{name}\")()\n"),
         };
         if announcement.contains(&format!("{alias}.")) {
             needs_runtime = true;
@@ -404,5 +407,26 @@ mod tests {
             .expect("announcement");
         let work = out.find("doWork()").unwrap();
         assert!(body < enter && enter < work, "{out}");
+    }
+
+    #[test]
+    fn a_test_written_on_one_line_still_compiles() {
+        // A body on one line puts its first statement immediately after the
+        // brace. An announcement inserted there with nothing after it runs
+        // straight into that statement, and the file stops being Go -- so
+        // Supercov breaks the suite it was asked to measure.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) { if work() != 1 { t.Fatal(\"no\") } }\n",
+        );
+        assert_eq!(file.tests, ["TestOne"]);
+        // `instrumented` parses the result, so reaching here is most of the
+        // claim; this says the announcement is on a line of its own.
+        assert!(out.contains("__supercovTest(t, \"TestOne\")()\n"), "{out}");
+
+        // The same for a TestMain nobody spread over several lines.
+        let (_, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestMain(m *testing.M) { os.Exit(m.Run()) }\n",
+        );
+        assert!(out.contains("__supercovDecisionWidths)\n"), "{out}");
     }
 }

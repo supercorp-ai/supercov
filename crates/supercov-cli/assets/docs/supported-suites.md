@@ -241,9 +241,16 @@ For assertion maps, `t.Error`, `t.Errorf`, `t.Fatal`, `t.Fatalf` and testify's
 `assert` and `require` are inventoried. A Go test states its claim with an `if`
 and reports the violation, so the report is the site.
 
+A repository with several modules works either way it is laid out. A directory
+with a `go.mod` of its own that no `go.work` names is a different module, and
+`go test ./...` walks past it, so Supercov leaves it alone. A `go.work`
+workspace has no module at its root, so each module it names gets a runtime of
+its own.
+
 ```sh
 npx supercov -- go test ./...
 npx supercov -- go test -run TestParser ./internal/...
+npx supercov -- go test ./core/... ./app/...
 ```
 
 ## Java and Kotlin
@@ -255,6 +262,10 @@ npx supercov -- go test -run TestParser ./internal/...
 | Kotest | Exact per test, under the names Kotest itself reports | — |
 | Spock | Exact per feature, under the names Spock itself reports | — |
 | TestNG | Exact per test, each data-provider invocation its own | — |
+
+Multi-module builds are measured module by module: each compiles its own source
+set and forks its own JVM, so each gets a runtime and records evidence of its
+own, and the run merges them.
 
 Attribution comes from the framework's own lifecycle rather than from rewritten
 test sources: a JUnit Platform listener sees every engine built on the platform,

@@ -186,3 +186,151 @@ fn decisions_in_different_packages_keep_their_own_condition_state() {
     assert!(manifest.contains("auth/auth.go"), "{manifest}");
     assert!(manifest.contains("billing/billing.go"), "{manifest}");
 }
+
+/// A go.work repository has several modules and no module at its root. Each
+/// needs a runtime of its own, because an import resolves against the module
+/// that names it and one module cannot import a package inside another.
+#[test]
+fn every_module_of_a_workspace_is_measured_and_merged() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("workspace");
+    write(
+        root.as_path(),
+        "go.work",
+        "go 1.22\n\nuse (\n\t./core\n\t./app\n)\n",
+    );
+    write(
+        root.as_path(),
+        "core/go.mod",
+        "module example.com/core\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "core/calc.go",
+        "package core\n\nfunc Allow(admin, active bool) bool {\n\tif admin && active {\n\t\treturn true\n\t}\n\treturn false\n}\n",
+    );
+    write(
+        root.as_path(),
+        "core/calc_test.go",
+        "package core\n\nimport \"testing\"\n\nfunc TestAllow(t *testing.T) {\n\tif !Allow(true, true) {\n\t\tt.Fatal(\"expected allow\")\n\t}\n}\n",
+    );
+    write(
+        root.as_path(),
+        "app/go.mod",
+        "module example.com/app\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "app/greet.go",
+        "package app\n\nfunc Hi(loud bool) string {\n\tif loud {\n\t\treturn \"HI\"\n\t}\n\treturn \"hi\"\n}\n",
+    );
+    // One line, brace to brace: an announcement inserted after the brace with
+    // nothing following it would run into this statement and stop being Go.
+    write(
+        root.as_path(),
+        "app/greet_test.go",
+        "package app\n\nimport \"testing\"\n\nfunc TestHi(t *testing.T) { if Hi(true) != \"HI\" { t.Fatal(\"expected HI\") } }\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![
+            go.display().to_string(),
+            "test".into(),
+            "./core/...".into(),
+            "./app/...".into(),
+        ],
+        run_id: "run-go-workspace".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.packages, 2);
+    assert_eq!(result.source_files, 2);
+    assert_eq!(result.tests, 2);
+
+    let entries = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive");
+    let manifest = String::from_utf8(
+        entries
+            .into_iter()
+            .find(|entry| entry.path == "manifest.json")
+            .expect("manifest")
+            .contents,
+    )
+    .expect("utf-8");
+    assert!(manifest.contains("core/calc.go"), "{manifest}");
+    assert!(manifest.contains("app/greet.go"), "{manifest}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A directory with a go.mod that the workspace does not name is a different
+/// module. `go test ./...` walks straight past it, so instrumenting it puts
+/// obligations in the denominator no test can reach and writes a probe file
+/// importing a runtime that module cannot resolve -- which stops a build that
+/// worked before Supercov was asked to measure it.
+#[test]
+fn a_nested_module_does_not_break_the_build_around_it() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("nested");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/root\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "top.go",
+        "package root\n\nfunc Top(x bool) int {\n\tif x {\n\t\treturn 1\n\t}\n\treturn 0\n}\n",
+    );
+    write(
+        root.as_path(),
+        "top_test.go",
+        "package root\n\nimport \"testing\"\n\nfunc TestTop(t *testing.T) { if Top(true) != 1 { t.Fatal(\"no\") } }\n",
+    );
+    write(
+        root.as_path(),
+        "sub/go.mod",
+        "module example.com/sub\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "sub/sub.go",
+        "package sub\n\nfunc Inner(x bool) int {\n\tif x {\n\t\treturn 2\n\t}\n\treturn 0\n}\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-nested".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0, "the build must still work");
+    // Only the root module's source: the nested one is not part of this run.
+    assert_eq!(result.source_files, 1);
+    assert_eq!(result.tests, 1);
+    std::fs::remove_dir_all(root).ok();
+}
