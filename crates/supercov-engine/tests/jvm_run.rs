@@ -599,3 +599,249 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
     assert_eq!(manifest.matches("\"conditions\"").count(), 1, "{manifest}");
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Two modules, each with its own source set and its own test JVM. This is
+/// the shape most real Java projects have, and almost nothing about a
+/// single-module build generalises to it on its own: each module compiles only
+/// its own sources, so a runtime written once at the top is invisible to every
+/// one of them, and each forks a JVM of its own, so one evidence path would be
+/// overwritten by whichever module finished last.
+fn multi_module_maven(root: &Path) {
+    write(
+        root,
+        "pom.xml",
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>example</groupId>
+  <artifactId>parent</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+  <modules>
+    <module>core</module>
+    <module>app</module>
+  </modules>
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+"#,
+    );
+    for module in ["core", "app"] {
+        write(
+            root,
+            &format!("{module}/pom.xml"),
+            &format!(
+                r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1.0</version>
+  </parent>
+  <artifactId>{module}</artifactId>
+</project>
+"#
+            ),
+        );
+    }
+    write(
+        root,
+        "core/src/main/java/core/Calc.java",
+        &SOURCE
+            .replace("package app;", "package core;")
+            .replace("class Calculator", "class Calc"),
+    );
+    write(
+        root,
+        "core/src/test/java/core/CalcTest.java",
+        "package core;\n\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nclass CalcTest {\n    @Test void big() { assertEquals(\"BIG\", Calc.size(20, true)); }\n    @Test void small() { assertEquals(\"small\", Calc.size(1, false)); }\n}\n",
+    );
+    write(
+        root,
+        "app/src/main/java/app/Greet.java",
+        "package app;\n\npublic class Greet {\n    public static String hi(boolean loud) {\n        if (loud) { return \"HI\"; }\n        return \"hi\";\n    }\n}\n",
+    );
+    write(
+        root,
+        "app/src/test/java/app/GreetTest.java",
+        "package app;\n\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nclass GreetTest {\n    @Test void loud() { assertEquals(\"HI\", Greet.hi(true)); }\n}\n",
+    );
+}
+
+#[test]
+fn every_module_of_a_multi_module_build_is_measured_and_merged() {
+    let Some(mvn) = tool("mvn") else {
+        eprintln!("[jvm-run] skipped: no Maven found");
+        return;
+    };
+    let warmup = temporary("multi-warmup");
+    multi_module_maven(&warmup);
+    let resolvable = Command::new(&mvn)
+        .args(["-q", "test"])
+        .current_dir(&warmup)
+        .output()
+        .is_ok_and(|out| out.status.success());
+    std::fs::remove_dir_all(&warmup).ok();
+    if !resolvable {
+        eprintln!("[jvm-run] skipped: Maven cannot resolve this project's dependencies here");
+        return;
+    }
+
+    let root = temporary("multi");
+    multi_module_maven(&root);
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![mvn.display().to_string(), "-q".into(), "test".into()],
+        run_id: "run-jvm-multi".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.modules, 2);
+    assert_eq!(result.source_files, 2);
+    // Every module's tests, not just the last one to finish.
+    assert_eq!(result.tests, 3);
+
+    let entries = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive");
+    let records = entries
+        .iter()
+        .filter(|entry| entry.path.ends_with("mcdc.json"))
+        .map(|entry| String::from_utf8(entry.contents.clone()).expect("utf-8"))
+        .collect::<Vec<_>>();
+    // The module is the worker, because the module is what forked a JVM.
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("\"workerId\":\"core\"")),
+        "{records:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("\"workerId\":\"app\"")),
+        "{records:?}"
+    );
+    // And both modules' obligations are in the one manifest the numbers are
+    // measured against.
+    let manifest = String::from_utf8(
+        entries
+            .into_iter()
+            .find(|entry| entry.path == "manifest.json")
+            .expect("manifest")
+            .contents,
+    )
+    .expect("utf-8");
+    assert!(
+        manifest.contains("core/src/main/java/core/Calc.java"),
+        "{manifest}"
+    );
+    assert!(
+        manifest.contains("app/src/main/java/app/Greet.java"),
+        "{manifest}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn multi_project_gradle(root: &Path) {
+    write(
+        root,
+        "settings.gradle",
+        "rootProject.name = 'demo'\ninclude 'core', 'app'\n",
+    );
+    // The root only aggregates: it has no source set of its own, which is the
+    // usual shape and the one a root-only dependency declaration would miss.
+    write(
+        root,
+        "build.gradle",
+        "subprojects {\n    apply plugin: 'java'\n    repositories { mavenCentral() }\n    dependencies {\n        testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'\n        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n    }\n    test { useJUnitPlatform() }\n}\n",
+    );
+    write(root, "core/build.gradle", "");
+    write(root, "app/build.gradle", "");
+    write(
+        root,
+        "core/src/main/java/core/Calc.java",
+        "package core;\n\npublic class Calc {\n    public static String size(int a, boolean loud) {\n        if (a > 10 && loud) { return \"BIG\"; }\n        return \"small\";\n    }\n}\n",
+    );
+    write(
+        root,
+        "core/src/test/java/core/CalcTest.java",
+        "package core;\n\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nclass CalcTest {\n    @Test void big() { assertEquals(\"BIG\", Calc.size(20, true)); }\n}\n",
+    );
+    write(
+        root,
+        "app/src/main/java/app/Greet.java",
+        "package app;\n\npublic class Greet {\n    public static String hi(boolean loud) {\n        if (loud) { return \"HI\"; }\n        return \"hi\";\n    }\n}\n",
+    );
+    write(
+        root,
+        "app/src/test/java/app/GreetTest.java",
+        "package app;\n\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nclass GreetTest {\n    @Test void loud() { assertEquals(\"HI\", Greet.hi(true)); }\n}\n",
+    );
+}
+
+/// A Gradle build whose root only aggregates. A dependency declared in the
+/// root reaches none of the subprojects, and the subprojects are where the
+/// test sources -- and so the listener Supercov compiles -- actually live.
+#[test]
+fn a_multi_project_gradle_build_reaches_every_subproject() {
+    let Some(gradle) = tool("gradle") else {
+        eprintln!("[jvm-run] skipped: no Gradle found");
+        return;
+    };
+    let warmup = temporary("multi-gradle-warmup");
+    multi_project_gradle(&warmup);
+    let resolvable = Command::new(&gradle)
+        .args(["--quiet", "--console=plain", "test"])
+        .current_dir(&warmup)
+        .output()
+        .is_ok_and(|out| out.status.success());
+    std::fs::remove_dir_all(&warmup).ok();
+    if !resolvable {
+        eprintln!("[jvm-run] skipped: Gradle cannot resolve this project's dependencies here");
+        return;
+    }
+
+    let root = temporary("multi-gradle");
+    multi_project_gradle(&root);
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![
+            gradle.display().to_string(),
+            "--console=plain".into(),
+            "test".into(),
+        ],
+        run_id: "run-jvm-multi-gradle".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.modules, 2);
+    assert_eq!(result.tests, 2);
+    std::fs::remove_dir_all(root).ok();
+}

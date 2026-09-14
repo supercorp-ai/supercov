@@ -2239,8 +2239,8 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     result.run_directory.join("evidence.raw.gz").display()
                 );
                 eprintln!(
-                    "[supercov] JVM coverage: {} test(s) across {} source file(s)",
-                    result.tests, result.source_files
+                    "[supercov] JVM coverage: {} test(s) across {} source file(s) in {} module(s)",
+                    result.tests, result.source_files, result.modules
                 );
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(

@@ -45,7 +45,7 @@ use crate::{
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     owned_evidence::{
         OwnedRunInputs, OwnedTestOutcome, build_frontend_run, jvm_coverage_model, jvm_declaration,
-        read_evidence,
+        merge_evidence, read_evidence,
     },
     process_supervision::{CommandSpec, SupervisionOptions},
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
@@ -114,6 +114,7 @@ pub struct DirectJvmRunResult {
     pub exit_code: i32,
     pub tests: usize,
     pub source_files: usize,
+    pub modules: usize,
     pub build: JvmBuild,
     pub recovered_runs: Vec<String>,
     pub metadata: RunMetadata,
@@ -265,6 +266,40 @@ fn maven_with_launcher(pom: &str) -> Option<String> {
     }
 }
 
+/// Every build file in the tree, concatenated.
+///
+/// A multi-module build usually declares its frameworks once in the parent and
+/// lets the modules inherit, but either may name them, so the question "what
+/// does this project depend on" is asked of all of them at once.
+fn build_files(workspace: &Path) -> String {
+    let mut out = String::new();
+    let mut directories = vec![workspace.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                // Nothing under a source set or a build output is a build file.
+                if !name.starts_with('.') && !matches!(name.as_ref(), "src" | "target" | "build") {
+                    directories.push(path);
+                }
+            } else if matches!(
+                name.as_ref(),
+                "pom.xml" | "build.gradle" | "build.gradle.kts" | "libs.versions.toml"
+            ) && let Ok(text) = fs::read_to_string(&path)
+            {
+                out.push_str(&text);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 /// Whether a Gradle script already puts the launcher where test *sources* can
 /// see it.
 ///
@@ -297,13 +332,21 @@ fn gradle_with_launcher(build_file: &str, kotlin: bool) -> Option<String> {
         Some(version) => format!("org.junit.platform:{LAUNCHER_ARTIFACT}:{version}"),
         None => format!("org.junit.platform:{LAUNCHER_ARTIFACT}"),
     };
+    // `allprojects` rather than a bare `dependencies` block, because a
+    // multi-project build compiles each subproject's test sources against that
+    // subproject's own classpath and a declaration in the root reaches none of
+    // them. Guarded by the java plugin so a root that only aggregates — which
+    // has no test source set and no configurations to add to — is left alone.
+    // In the Kotlin DSL the typed accessor does not exist inside `allprojects`,
+    // so the configuration is named as a string.
     let line = if kotlin {
-        format!("    testImplementation(\"{coordinate}\")")
+        format!("            \"testImplementation\"(\"{coordinate}\")")
     } else {
-        format!("    testImplementation '{coordinate}'")
+        format!("            testImplementation '{coordinate}'")
     };
+    let plugin = if kotlin { "\"java\"" } else { "'java'" };
     Some(format!(
-        "{build_file}\n// Added by Supercov: the JUnit Platform listener that attributes coverage\n// to each test is compiled from this project's test sources, and the launcher\n// API it implements is on the test runtime classpath but not the compile one.\ndependencies {{\n{line}\n}}\n"
+        "{build_file}\n// Added by Supercov: the JUnit Platform listener that attributes coverage\n// to each test is compiled from each project's own test sources, and the\n// launcher API it implements is on the test runtime classpath but not the\n// compile one.\nallprojects {{\n    plugins.withId({plugin}) {{\n        dependencies {{\n{line}\n        }}\n    }}\n}}\n"
     ))
 }
 
@@ -339,14 +382,44 @@ fn command_with_fresh_results(
     }
 }
 
+/// One module of the build, and where its evidence lands.
+///
+/// A single-project build has exactly one of these, rooted at the workspace.
+/// A multi-module build has one per module, because each module compiles only
+/// its own source set and forks its own JVM to run its tests: a runtime
+/// written once at the top would be invisible to every module, and one
+/// evidence path shared by every module's JVM would be overwritten by
+/// whichever finished last.
+#[derive(Debug, Clone)]
+struct JvmModule {
+    /// Relative to the workspace, `/`-separated; `.` for the build root.
+    directory: String,
+    evidence: PathBuf,
+    has_tests: bool,
+}
+
 struct InstrumentedWorkspace {
     project: PreparedJvmProject,
     build: JvmBuild,
-    evidence: PathBuf,
+    modules: Vec<JvmModule>,
     /// Which file declared each test class, so a result can point at a source.
     declared_in: BTreeMap<String, String>,
     /// The build file the launcher dependency was added to, if it was.
     added_launcher: Option<&'static str>,
+}
+
+/// The module a `src/main/...` or `src/test/...` path belongs to.
+///
+/// The build root for a single-project build, and the subdirectory holding
+/// that source set otherwise. Derived from the paths themselves rather than
+/// from the build file, because Maven's `<modules>` and Gradle's
+/// `settings.gradle` say the same thing in two languages and the layout says
+/// it in one.
+fn module_of(relative: &str) -> String {
+    match relative.find("src/") {
+        Some(0) | None => ".".to_owned(),
+        Some(at) => relative[..at].trim_end_matches('/').to_owned(),
+    }
 }
 
 /// The class a test's reported name belongs to, as JUnit names it:
@@ -361,7 +434,6 @@ fn instrument_workspace(
 ) -> Result<InstrumentedWorkspace, String> {
     let project = prepare_jvm_project(workspace)?;
     let build = detect_build(workspace);
-    let evidence = evidence_directory.join("evidence.bin");
 
     for (relative, instrumented) in &project.instrumented {
         write(&workspace.join(relative), instrumented)?;
@@ -373,34 +445,72 @@ fn instrument_workspace(
         .max()
         .map_or(0, |highest| *highest as usize + 1);
 
-    // The runtime goes in the main source set: instrumented product code
-    // stores into its array, so it has to compile with the product.
-    let main = workspace.join(source_root("main")).join(PACKAGE_DIRECTORY);
-    write(&main.join("Supercov.java"), RUNTIME_SOURCE)?;
-
-    // The listener and its configuration go in the test source set, because
-    // only the test classpath has the JUnit Platform to listen to.
     // Which listeners can be compiled at all depends on what the project
-    // depends on, so read the build file before writing any of them.
-    let build_file = ["pom.xml", "build.gradle.kts", "build.gradle"]
-        .iter()
-        .find_map(|name| fs::read_to_string(workspace.join(name)).ok())
-        .unwrap_or_default();
+    // depends on, so read the build files before writing any of them. Every
+    // one of them: in a multi-module build the frameworks are usually declared
+    // in the parent and the modules inherit, but either may name them.
+    let build_file = build_files(workspace);
     let frameworks = frameworks(&build_file);
 
-    let test = workspace.join(source_root("test")).join(PACKAGE_DIRECTORY);
-    write(
-        &test.join("SupercovConfig.java"),
-        &configuration(probe_count, &project.decision_widths, &evidence),
-    )?;
-    if frameworks.platform {
-        write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
+    // One entry per module that has a main or a test source set, keyed by
+    // directory so a module contributing both is listed once.
+    let mut modules: BTreeMap<String, bool> = BTreeMap::new();
+    for (relative, _) in &project.files.sources {
+        modules.entry(module_of(relative)).or_insert(false);
     }
-    if frameworks.testng {
+    for (relative, _) in &project.files.tests {
+        *modules.entry(module_of(relative)).or_default() = true;
+    }
+    if modules.is_empty() {
+        modules.insert(".".to_owned(), true);
+    }
+
+    let modules = modules
+        .into_iter()
+        .map(|(directory, has_tests)| JvmModule {
+            evidence: evidence_directory.join(format!(
+                "{}.bin",
+                directory
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect::<String>()
+            )),
+            directory,
+            has_tests,
+        })
+        .collect::<Vec<_>>();
+
+    for module in &modules {
+        let at = |source_set: &str| {
+            workspace
+                .join(&module.directory)
+                .join(source_root(source_set))
+                .join(PACKAGE_DIRECTORY)
+        };
+        // The runtime goes in every module's main source set: instrumented
+        // product code stores into its array, and a module compiles only its
+        // own sources. The class is identical everywhere, and each module's
+        // tests fork a JVM that loads exactly one of them.
+        write(&at("main").join("Supercov.java"), RUNTIME_SOURCE)?;
+        if !module.has_tests {
+            continue;
+        }
+        // The listeners and their configuration go in the test source set,
+        // because only the test classpath has the frameworks to listen to.
+        let test = at("test");
         write(
-            &test.join("SupercovTestNGListener.java"),
-            TESTNG_LISTENER_SOURCE,
+            &test.join("SupercovConfig.java"),
+            &configuration(probe_count, &project.decision_widths, &module.evidence),
         )?;
+        if frameworks.platform {
+            write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
+        }
+        if frameworks.testng {
+            write(
+                &test.join("SupercovTestNGListener.java"),
+                TESTNG_LISTENER_SOURCE,
+            )?;
+        }
     }
 
     // The platform listener is compiled from the project's own test sources,
@@ -444,21 +554,23 @@ fn instrument_workspace(
         JvmBuild::Plain => {}
     }
 
-    let resources = workspace.join("src/test/resources");
-    if frameworks.platform {
-        write(
-            &resources.join(SERVICES_FILE),
-            &format!("{LISTENER_CLASS}\n"),
-        )?;
-        let properties = resources.join("junit-platform.properties");
-        let existing = fs::read_to_string(&properties).ok();
-        write(&properties, &sequential_properties(existing.as_deref()))?;
-    }
-    if frameworks.testng {
-        write(
-            &resources.join(TESTNG_SERVICES_FILE),
-            &format!("{TESTNG_LISTENER_CLASS}\n"),
-        )?;
+    for module in modules.iter().filter(|module| module.has_tests) {
+        let resources = workspace.join(&module.directory).join("src/test/resources");
+        if frameworks.platform {
+            write(
+                &resources.join(SERVICES_FILE),
+                &format!("{LISTENER_CLASS}\n"),
+            )?;
+            let properties = resources.join("junit-platform.properties");
+            let existing = fs::read_to_string(&properties).ok();
+            write(&properties, &sequential_properties(existing.as_deref()))?;
+        }
+        if frameworks.testng {
+            write(
+                &resources.join(TESTNG_SERVICES_FILE),
+                &format!("{TESTNG_LISTENER_CLASS}\n"),
+            )?;
+        }
     }
 
     // A test class's file, so a result can name where it came from. Matched on
@@ -478,7 +590,7 @@ fn instrument_workspace(
     Ok(InstrumentedWorkspace {
         project,
         build,
-        evidence,
+        modules,
         declared_in,
         added_launcher,
     })
@@ -605,34 +717,52 @@ pub fn run_direct_jvm(
         let exit_code = execution.exit_code;
 
         let publication_started = Instant::now();
-        let bytes = fs::read(&instrumented.evidence).map_err(|_| {
-            format!(
-                "the test run wrote no coverage evidence (the command exited {exit_code}). Supercov listens through the JUnit Platform, so the suite has to run on it: a TestNG-only suite is not measured this way."
-            )
-        })?;
-        let evidence = read_evidence(&bytes)
-            .map_err(|error| format!("{}: {error}", instrumented.evidence.display()))?;
-        let outcomes = evidence
-            .tests
+        // One JVM per module, so one evidence file per module.
+        let mut parts = Vec::new();
+        let mut outcomes = Vec::new();
+        let mut silent = Vec::new();
+        for module in instrumented
+            .modules
             .iter()
-            .map(|test| OwnedTestOutcome {
-                name: test.name.clone(),
-                runner: test.runner.clone(),
-                // The class is the unit a JVM suite reports under, and it is
-                // what a reader looks for when matching a coverage report
-                // against a test report.
-                package: class_of(&test.name).unwrap_or("tests").to_owned(),
-                file: class_of(&test.name)
-                    .and_then(|class| instrumented.declared_in.get(class))
-                    .cloned(),
-                status: test.status.clone(),
-            })
-            .collect::<Vec<_>>();
+            .filter(|module| module.has_tests)
+        {
+            let Ok(bytes) = fs::read(&module.evidence) else {
+                silent.push(module.directory.clone());
+                continue;
+            };
+            let evidence = read_evidence(&bytes)
+                .map_err(|error| format!("{}: {error}", module.evidence.display()))?;
+            for test in &evidence.tests {
+                outcomes.push(OwnedTestOutcome {
+                    name: test.name.clone(),
+                    runner: test.runner.clone(),
+                    // The module is the unit that forked a JVM of its own, so
+                    // it is what a worker identity means here. The class is
+                    // already in the name the framework reported.
+                    package: module.directory.clone(),
+                    file: class_of(&test.name)
+                        .and_then(|class| instrumented.declared_in.get(class))
+                        .cloned(),
+                    status: test.status.clone(),
+                });
+            }
+            parts.push(evidence);
+        }
+        if !silent.is_empty() {
+            writeln!(
+                diagnostics,
+                "[supercov] {} module(s) wrote no evidence and are absent from this run: {}",
+                silent.len(),
+                silent.join(", ")
+            )
+            .map_err(|error| error.to_string())?;
+        }
         if outcomes.is_empty() {
             return Err(format!(
-                "no JVM test recorded evidence (the command exited {exit_code}); a run that measured nothing is not published"
+                "the test run wrote no coverage evidence (the command exited {exit_code}). Supercov attributes through each framework's own lifecycle, so the suite has to run on the JUnit Platform or TestNG."
             ));
         }
+        let evidence = merge_evidence(parts);
         let run = build_frontend_run(OwnedRunInputs {
             declaration: jvm_declaration(),
             environment: "jvm",
@@ -701,6 +831,7 @@ pub fn run_direct_jvm(
                 .collect::<BTreeSet<_>>()
                 .len(),
             source_files: instrumented.project.instrumented.len(),
+            modules: instrumented.modules.len(),
             build: instrumented.build,
             recovered_runs,
             metadata,
@@ -893,10 +1024,11 @@ mod tests {
         let updated = gradle_with_launcher(kotlin, true).expect("the launcher is missing");
         assert!(
             updated.contains(
-                "testImplementation(\"org.junit.platform:junit-platform-launcher:1.10.2\")"
+                "\"testImplementation\"(\"org.junit.platform:junit-platform-launcher:1.10.2\")"
             ),
-            "{updated}"
+            "the Kotlin DSL has no typed accessor inside allprojects:\n{updated}"
         );
+        assert!(updated.contains("plugins.withId(\"java\")"), "{updated}");
     }
 
     #[test]

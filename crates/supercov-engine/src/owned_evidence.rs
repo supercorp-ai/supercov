@@ -378,6 +378,44 @@ fn exact_per_test() -> FrontendAttribution {
     }
 }
 
+/// Merge what several processes recorded into one run's evidence.
+///
+/// Both owned frontends need this, because both run a suite as more than one
+/// process: `go test` builds a binary per package, and a multi-module JVM
+/// build forks a JVM per module. Probe indices are project-wide, so run-wide
+/// totals are a union of equal-length arrays, and test records simply
+/// accumulate — each belongs to exactly the process that produced it.
+pub fn merge_evidence(parts: Vec<OwnedEvidence>) -> OwnedEvidence {
+    let mut merged = OwnedEvidence::default();
+    for part in parts {
+        if merged.global.len() < part.global.len() {
+            merged.global.resize(part.global.len(), 0);
+        }
+        for (slot, value) in merged.global.iter_mut().zip(part.global) {
+            *slot |= value;
+        }
+        if merged.widths.len() < part.widths.len() {
+            merged.widths.resize(part.widths.len(), 0);
+            merged
+                .decision_vectors
+                .resize(part.widths.len(), Vec::new());
+        }
+        for (id, width) in part.widths.into_iter().enumerate() {
+            merged.widths[id] = merged.widths[id].max(width);
+        }
+        for (id, keys) in part.decision_vectors.into_iter().enumerate() {
+            let seen = &mut merged.decision_vectors[id];
+            for key in keys {
+                if !seen.contains(&key) {
+                    seen.push(key);
+                }
+            }
+        }
+        merged.tests.extend(part.tests);
+    }
+    merged
+}
+
 /// A short, stable identity derived from what makes the thing itself, so two
 /// runs of the same test agree on what to call it.
 fn stable_id(prefix: &str, values: &[&str]) -> String {
@@ -870,5 +908,42 @@ mod tests {
             supercov_contracts::validate_frontend_run_declaration(&declaration)
                 .unwrap_or_else(|error| panic!("{language} declaration is unreadable: {error}"));
         }
+    }
+    #[test]
+    fn merging_processes_unions_the_run_and_keeps_every_test() {
+        let left = OwnedEvidence {
+            global: vec![0b01, 0b00],
+            tests: vec![OwnedTestEvidence {
+                name: "TestA".into(),
+                status: "passed".into(),
+                ..Default::default()
+            }],
+            widths: vec![2],
+            decision_vectors: vec![vec![0b01]],
+        };
+        let right = OwnedEvidence {
+            global: vec![0b10, 0b10],
+            tests: vec![OwnedTestEvidence {
+                name: "TestB".into(),
+                status: "failed".into(),
+                ..Default::default()
+            }],
+            widths: vec![2],
+            decision_vectors: vec![vec![0b01, 0b11]],
+        };
+        let merged = merge_evidence(vec![left, right]);
+        // Run-wide totals are a union: a probe any package reached is reached.
+        assert_eq!(merged.global, [0b11, 0b10]);
+        // Tests accumulate, because each belongs to exactly one binary.
+        assert_eq!(
+            merged
+                .tests
+                .iter()
+                .map(|test| test.name.as_str())
+                .collect::<Vec<_>>(),
+            ["TestA", "TestB"]
+        );
+        // And a vector seen in both packages is one vector, not two.
+        assert_eq!(merged.decision_vectors, [vec![0b01, 0b11]]);
     }
 }

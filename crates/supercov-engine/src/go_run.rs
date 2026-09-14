@@ -41,8 +41,8 @@ use crate::{
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     owned_evidence::{
-        OwnedEvidence, OwnedRunInputs, OwnedTestOutcome, build_frontend_run, go_coverage_model,
-        go_declaration, read_evidence,
+        OwnedRunInputs, OwnedTestOutcome, build_frontend_run, go_coverage_model, go_declaration,
+        merge_evidence, read_evidence,
     },
     process_supervision::{CommandSpec, SupervisionOptions},
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
@@ -291,42 +291,6 @@ fn command_with_fresh_results(command: &[String]) -> (Vec<String>, bool) {
     (updated, true)
 }
 
-/// Merge what each package's test binary recorded into one run's evidence.
-///
-/// Probe indices are module-wide, so the run-wide totals are a union of equal
-/// length arrays. Test records simply accumulate: each belongs to exactly the
-/// binary that produced it.
-fn merge(parts: Vec<OwnedEvidence>) -> OwnedEvidence {
-    let mut merged = OwnedEvidence::default();
-    for part in parts {
-        if merged.global.len() < part.global.len() {
-            merged.global.resize(part.global.len(), 0);
-        }
-        for (slot, value) in merged.global.iter_mut().zip(part.global) {
-            *slot |= value;
-        }
-        if merged.widths.len() < part.widths.len() {
-            merged.widths.resize(part.widths.len(), 0);
-            merged
-                .decision_vectors
-                .resize(part.widths.len(), Vec::new());
-        }
-        for (id, width) in part.widths.into_iter().enumerate() {
-            merged.widths[id] = merged.widths[id].max(width);
-        }
-        for (id, keys) in part.decision_vectors.into_iter().enumerate() {
-            let seen = &mut merged.decision_vectors[id];
-            for key in keys {
-                if !seen.contains(&key) {
-                    seen.push(key);
-                }
-            }
-        }
-        merged.tests.extend(part.tests);
-    }
-    merged
-}
-
 /// The fingerprint a later query compares against the stored run.
 pub fn current_go_integrity(
     root: &Path,
@@ -482,7 +446,7 @@ pub fn run_direct_go(
                 "no Go test recorded evidence (the command exited {exit_code}); a run that measured nothing is not published"
             ));
         }
-        let evidence = merge(parts);
+        let evidence = merge_evidence(parts);
         let run = build_frontend_run(OwnedRunInputs {
             declaration: go_declaration(),
             environment: "go",
@@ -624,43 +588,5 @@ mod tests {
         assert_ne!(evidence_name("internal/auth"), evidence_name("internal/db"));
         assert_eq!(evidence_name("."), "_.bin");
         assert!(!evidence_name("internal/auth").contains('/'));
-    }
-
-    #[test]
-    fn merging_unions_the_run_and_keeps_every_test() {
-        let left = OwnedEvidence {
-            global: vec![0b01, 0b00],
-            tests: vec![crate::owned_evidence::OwnedTestEvidence {
-                name: "TestA".into(),
-                status: "passed".into(),
-                ..Default::default()
-            }],
-            widths: vec![2],
-            decision_vectors: vec![vec![0b01]],
-        };
-        let right = OwnedEvidence {
-            global: vec![0b10, 0b10],
-            tests: vec![crate::owned_evidence::OwnedTestEvidence {
-                name: "TestB".into(),
-                status: "failed".into(),
-                ..Default::default()
-            }],
-            widths: vec![2],
-            decision_vectors: vec![vec![0b01, 0b11]],
-        };
-        let merged = merge(vec![left, right]);
-        // Run-wide totals are a union: a probe any package reached is reached.
-        assert_eq!(merged.global, [0b11, 0b10]);
-        // Tests accumulate, because each belongs to exactly one binary.
-        assert_eq!(
-            merged
-                .tests
-                .iter()
-                .map(|test| test.name.as_str())
-                .collect::<Vec<_>>(),
-            ["TestA", "TestB"]
-        );
-        // And a vector seen in both packages is one vector, not two.
-        assert_eq!(merged.decision_vectors, [vec![0b01, 0b11]]);
     }
 }
