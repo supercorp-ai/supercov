@@ -19,6 +19,10 @@ to add a test in your own project, with a recorded example to follow along.
 npx supercov -- npm test
 ```
 
+Other ways in, all the same binary at the same version: `brew install
+supercorp-ai/tap/supercov`, or for a Go project `go run
+github.com/supercorp-ai/supercov/cmd/supercov@latest`.
+
 Everything after `--` is your test command. Supercov runs it without changing your source, tests, runner configuration, or normal build output.
 
 Then ask what is still uncovered:
