@@ -126,6 +126,7 @@ fn maven_can_resolve(mvn: &Path, root: &Path) -> bool {
 
 #[test]
 fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reached() {
+    let _building = common::building();
     let Some(mvn) = common::tool("mvn") else {
         common::skip("jvm", "no Maven found");
         return;
@@ -258,6 +259,7 @@ fn gradle_fixture(root: &Path) {
 
 #[test]
 fn a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reached() {
+    let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
         common::skip("jvm", "no Gradle found");
         return;
@@ -382,6 +384,7 @@ fn testng_fixture(root: &Path) {
 
 #[test]
 fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
+    let _building = common::building();
     // TestNG is the one framework the JUnit Platform does not report, so it
     // needs a listener of its own. Kotest and Spock are platform engines and
     // need nothing extra.
@@ -543,6 +546,7 @@ fn kotlin_fixture(root: &Path) {
 
 #[test]
 fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
+    let _building = common::building();
     // Kotlin is instrumented by the same rewriter and attributed by the same
     // listener; what differs is only the grammar the obligations come from.
     let Some(gradle) = common::tool("gradle") else {
@@ -687,6 +691,7 @@ fn multi_module_maven(root: &Path) {
 
 #[test]
 fn every_module_of_a_multi_module_build_is_measured_and_merged() {
+    let _building = common::building();
     let Some(mvn) = common::tool("mvn") else {
         common::skip("jvm", "no Maven found");
         return;
@@ -817,6 +822,7 @@ fn multi_project_gradle(root: &Path) {
 /// test sources -- and so the listener Supercov compiles -- actually live.
 #[test]
 fn a_multi_project_gradle_build_reaches_every_subproject() {
+    let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
         common::skip("jvm", "no Gradle found");
         return;
@@ -872,6 +878,7 @@ fn a_multi_project_gradle_build_reaches_every_subproject() {
 /// announces them like any other engine's.
 #[test]
 fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
+    let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
         common::skip("jvm", "no Gradle found");
         return;
@@ -981,6 +988,7 @@ fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
 /// into a failing one.
 #[test]
 fn a_spock_specification_is_measured_though_its_tests_are_groovy() {
+    let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
         common::skip("jvm", "no Gradle found");
         return;
@@ -1071,6 +1079,7 @@ fn a_spock_specification_is_measured_though_its_tests_are_groovy() {
 /// finished last — 49 of the 406 tests RxJava had actually run.
 #[test]
 fn every_forked_jvm_is_merged_rather_than_overwriting_the_last() {
+    let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
         common::skip("jvm", "no Gradle found");
         return;

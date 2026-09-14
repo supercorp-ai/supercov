@@ -113,3 +113,28 @@ pub fn java_release(javac: &std::path::Path) -> Option<u32> {
     text.split_whitespace()
         .find_map(|word| word.split('.').next()?.parse::<u32>().ok())
 }
+
+/// Serialise the tests that drive a real Maven or Gradle build.
+///
+/// `npm run test:jvm` passes `--test-threads=1`, which says plainly that these
+/// cannot run alongside each other -- but `cargo test --workspace` does not,
+/// and three CI jobs plus `release:check` use exactly that. On macOS and Linux
+/// the parallel run is merely faster; on Windows it stops. The filesystem job
+/// went from eleven minutes on main to over seventy on the branch that added
+/// these tests, on both Windows runners, while macOS ran the same command in
+/// eleven and Linux in seven.
+///
+/// A flag on one script cannot protect a command someone else runs, so the
+/// rule belongs in the test rather than in the way it is invoked. Cargo runs
+/// test binaries one at a time, so a lock per process is enough.
+///
+/// A panicking test poisons the mutex; the guard is taken anyway, because a
+/// failed test must not turn every later one into a second failure that hides
+/// it.
+#[allow(dead_code)]
+pub fn building() -> std::sync::MutexGuard<'static, ()> {
+    static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    BUILD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}

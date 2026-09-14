@@ -51,6 +51,7 @@ const SOURCE: &str = r#"public class Classify {
 
 #[test]
 fn instrumented_java_compiles_and_reports_what_actually_ran() {
+    let _building = common::building();
     let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
         common::skip("jvm", "no JDK found");
         return;
@@ -201,6 +202,7 @@ fn kotlinc() -> Option<PathBuf> {
 
 #[test]
 fn instrumented_kotlin_compiles_and_reports_what_actually_ran() {
+    let _building = common::building();
     // Parsing correctly and compiling correctly are different claims, and only
     // the Kotlin compiler can settle the second.
     let (Some(kotlinc), Some(javac), Some(java)) =
@@ -381,6 +383,7 @@ class CalculatorTest {
 
 #[test]
 fn the_platform_listener_attributes_coverage_without_touching_test_source() {
+    let _building = common::building();
     // The test source goes in untouched and still comes out attributed, which
     // is the whole point of listening to the platform instead of rewriting
     // tests: the same mechanism covers Kotest and Spock, which declare no
@@ -633,6 +636,7 @@ public final class SupercovConfig {{
 /// reimplementation of either, because the bug lived in the seam between them.
 #[test]
 fn every_test_records_a_vector_it_produces() {
+    let _building = common::building();
     let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
         common::skip("jvm", "no JDK found");
         return;
@@ -720,6 +724,7 @@ public class Driver {
 /// an evaluation that never happened and they are dropped rather than shown.
 #[test]
 fn concurrent_tests_lose_attribution_rather_than_get_it_wrong() {
+    let _building = common::building();
     let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
         common::skip("jvm", "no JDK found");
         return;
@@ -831,6 +836,7 @@ public class Driver {
 /// thing being measured is not.
 #[test]
 fn instrumented_code_runs_correctly_when_nothing_arms_the_runtime() {
+    let _building = common::building();
     let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
         common::skip("jvm", "no JDK found");
         return;
@@ -923,6 +929,7 @@ fn instrumented_code_runs_correctly_when_nothing_arms_the_runtime() {
 /// compile without this.
 #[test]
 fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
+    let _building = common::building();
     let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
         common::skip("jvm", "no JDK found");
         return;
@@ -1049,6 +1056,7 @@ fn a_condition_the_compiler_reads_is_left_for_it_to_read() {
 /// narrows the type below it.
 #[test]
 fn kotlins_smart_casts_survive_instrumentation() {
+    let _building = common::building();
     let (Some(kotlinc), Some(java)) = (kotlinc(), common::tool("java")) else {
         common::skip("jvm", "no Kotlin toolchain found");
         return;
@@ -1175,6 +1183,7 @@ object Smart {
 /// missing.
 #[test]
 fn a_record_pattern_is_a_binding_too() {
+    let _building = common::building();
     let (Some(javac), Some(java)) = (common::tool("javac"), common::tool("java")) else {
         common::skip("jvm", "no JDK found");
         return;
@@ -1292,6 +1301,7 @@ fn a_record_pattern_is_a_binding_too() {
 /// four of its files stopped compiling.
 #[test]
 fn a_synthesised_else_lands_outside_the_arm_it_follows() {
+    let _building = common::building();
     let root = temporary("one-line-if");
     const TERSE: &str = r#"package app
 
@@ -1459,6 +1469,7 @@ fn kotlin_still_compiles(name: &str, source: &str, obligations: &JvmFileObligati
 /// one no test could ever close, and says so in the manifest.
 #[test]
 fn a_loop_condition_that_narrows_a_type_is_left_alone() {
+    let _building = common::building();
     const WALK: &str = r#"package app
 
 class Node(val value: Int, val next: Node?)
@@ -1518,6 +1529,7 @@ object Walk {
 /// callers' return types with it.
 #[test]
 fn a_contract_stays_the_first_statement() {
+    let _building = common::building();
     const CONTRACT: &str = r#"package app
 
 import kotlin.contracts.ExperimentalContracts
@@ -1585,6 +1597,7 @@ object Holder {
 /// can still express 8.
 #[test]
 fn the_runtime_compiles_at_the_oldest_release_a_project_may_ask_for() {
+    let _building = common::building();
     let Some(javac) = common::tool("javac") else {
         common::skip("jvm", "no JDK found");
         return;
