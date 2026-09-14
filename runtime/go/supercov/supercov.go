@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -76,10 +77,29 @@ var (
 	// Evaluations interrupted by recursion through one of their own operands.
 	// `if valid(n-1) && x` can re-enter the same decision, and without this the
 	// inner evaluation would consume the outer one's partial vector.
-	suspended []suspension
+	//
+	// A fixed stack rather than a slice, because instrumented product code
+	// reaches it and a test may run that code from as many goroutines as it
+	// likes. Two of them appending to one slice is a race whose next reader
+	// panics with "slice bounds out of range [:-1]" -- samber/lo did, and a
+	// panic out of Supercov fails tests that were passing. Every index here is
+	// checked against a constant, so concurrent evaluations can still produce
+	// a vector describing an evaluation that never happened -- which is what
+	// overlap already drops them for -- but nothing can go out of bounds.
+	suspended      [suspendedDepth]suspension
+	suspendedCount int
 	// Vectors from decisions too wide for their inline room. A map because
 	// nothing reaches it in practice, and one never touched costs nothing.
 	overflow = map[uint32]map[uint64]bool{}
+	// Guards overflow alone. A Go map written by two goroutines at once is a
+	// fatal error the program cannot recover from, and this map is reached
+	// from instrumented product code, which a test is free to run from as
+	// many goroutines as it likes. samber/lo's TestAllCase did, and Supercov
+	// killed the suite with "concurrent map writes" -- measurement is not
+	// worth a crash. It is the cold path by construction: a decision has to
+	// produce more distinct vectors than fit inline before it is reached at
+	// all, so the lock is never taken on the path that matters.
+	overflowMu sync.Mutex
 )
 
 type suspension struct {
@@ -87,6 +107,12 @@ type suspension struct {
 	evaluating uint64
 	truth      uint64
 }
+
+// How deep recursion through a decision's own operands is restored. Beyond it
+// the outer evaluation is not put back and its vector is dropped, which is a
+// bounded loss; growing without bound is how the slice this replaced became a
+// crash.
+const suspendedDepth = 256
 
 const (
 	packedValueShift   = 24
@@ -139,15 +165,17 @@ func Arm(count int, conditions []uint8) {
 	for index, width := range conditions {
 		states[index].width = width
 	}
-	suspended = suspended[:0]
+	suspendedCount = 0
 	current = -1
 	open = 0
 	overlapped = false
 	records = nil
 	runWide = make([][]uint64, len(conditions))
+	overflowMu.Lock()
 	for id := range overflow {
 		delete(overflow, id)
 	}
+	overflowMu.Unlock()
 }
 
 // EnterTest binds every probe that fires next to this test, and returns the
@@ -318,6 +346,25 @@ func harvest() {
 		into = &records[current]
 	}
 	for index, value := range hits {
+		// The plain read is the filter and costs what it always did. Only a
+		// slot that actually holds something is swapped, so the atomic is paid
+		// per line that ran rather than per line that exists.
+		if value == 0 {
+			continue
+		}
+		// Read and clear have to be one operation. As three -- read, OR into
+		// the union, store zero -- a probe storing between the first and the
+		// last leaves nothing behind, and a line reached only in that window
+		// is reported uncovered. Probes are bare stores from whatever
+		// goroutine the code is running on, so the window is open whenever a
+		// test spawns one: samber/lo runs its subtests in parallel and lost
+		// between five and fifty points of line coverage, a different amount
+		// every run, against a suite `go test -cover` measures at 98.9%.
+		//
+		// A swap cannot lose: it returns either the value the probe stored or
+		// the one before it, and in the second case the slot is left set and
+		// the next sweep takes it.
+		value = atomic.SwapUint32(&hits[index], 0)
 		if value == 0 {
 			continue
 		}
@@ -325,7 +372,6 @@ func harvest() {
 		if into != nil {
 			into.probes = append(into.probes, probeHit{uint32(index), value})
 		}
-		hits[index] = 0
 	}
 	for id := range states {
 		state := &states[id]
@@ -344,6 +390,7 @@ func harvest() {
 		// vector would be credited only to whichever test reached it first.
 		state.recent[0], state.recent[1] = 0, 0
 	}
+	overflowMu.Lock()
 	for id, keys := range overflow {
 		if !overlapped {
 			for key := range keys {
@@ -355,6 +402,7 @@ func harvest() {
 		}
 		delete(overflow, id)
 	}
+	overflowMu.Unlock()
 }
 
 // including returns keys with key in it, which may be keys itself.
@@ -414,8 +462,9 @@ func C(id uint32, index uint8, value bool) bool {
 		// B clears the mask when it closes an evaluation, so a non-zero mask
 		// here means this decision is already open: recursion arrived through
 		// one of its own operands.
-		if state.evaluating != 0 {
-			suspended = append(suspended, suspension{id, state.evaluating, state.truth})
+		if state.evaluating != 0 && suspendedCount >= 0 && suspendedCount < suspendedDepth {
+			suspended[suspendedCount] = suspension{id, state.evaluating, state.truth}
+			suspendedCount++
 		}
 		state.evaluating, state.truth = bit, 0
 	} else {
@@ -470,7 +519,7 @@ func BD(whenTrue, whenFalse, id uint32, value bool) bool {
 	state.evaluating = 0
 	// Nothing is suspended in the ordinary case, so no outer evaluation is
 	// waiting to be restored and a cached key can return at once.
-	if len(suspended) == 0 && (key == state.recent[0] || key == state.recent[1]) {
+	if suspendedCount == 0 && (key == state.recent[0] || key == state.recent[1]) {
 		return value
 	}
 	remember(state, id, key)
@@ -483,10 +532,12 @@ func BD(whenTrue, whenFalse, id uint32, value bool) bool {
 //
 //go:noinline
 func remember(state *decisionState, id uint32, key uint64) {
-	if len(suspended) > 0 {
-		if last := suspended[len(suspended)-1]; last.id == id {
+	// Read the depth once: another goroutine may change it between the check
+	// and the index, and a stale-but-bounded read is the whole point.
+	if depth := suspendedCount; depth > 0 && depth <= suspendedDepth {
+		if last := suspended[depth-1]; last.id == id {
 			state.evaluating, state.truth = last.evaluating, last.truth
-			suspended = suspended[:len(suspended)-1]
+			suspendedCount = depth - 1
 		}
 	}
 	mask := key & ((1 << packedValueShift) - 1)
@@ -509,6 +560,8 @@ func remember(state *decisionState, id uint32, key uint64) {
 }
 
 func rare(id uint32, key uint64) {
+	overflowMu.Lock()
+	defer overflowMu.Unlock()
 	keys := overflow[id]
 	if keys == nil {
 		keys = map[uint64]bool{}

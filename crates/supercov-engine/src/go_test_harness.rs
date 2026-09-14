@@ -47,6 +47,30 @@ fn is_test_function(name: &str) -> bool {
         .is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_lowercase()))
 }
 
+/// `go test` runs more than `TestX`. An `ExampleX` with an "Output:" comment
+/// runs like any other test, and a `FuzzX` runs its seed corpus. Neither takes
+/// a `*testing.T`, so neither can be announced -- but both reach product code,
+/// and where the end-of-run write is never made, everything they reach has to
+/// be swept before they return or it is never recorded at all.
+///
+/// samber/lo has three and a half thousand lines of examples and a TestMain
+/// that ends in goleak's VerifyTestMain, which exits the process itself. Its
+/// example coverage survived or did not according to which test happened to
+/// checkpoint last, and the run reported anywhere between 74% and 95% of the
+/// same suite.
+fn is_checkpoint_only_function(name: &str, node: Node, source: &str) -> bool {
+    let after = |prefix: &str| {
+        name.strip_prefix(prefix)
+            .is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_lowercase()))
+    };
+    if after("Example") {
+        // An example takes nothing and returns nothing; anything else that
+        // starts with the word is an ordinary function.
+        return first_parameter(node).is_none();
+    }
+    after("Fuzz") && parameter_type(node, source).as_deref() == Some("*testing.F")
+}
+
 fn first_parameter<'t>(node: Node<'t>) -> Option<Node<'t>> {
     let parameters = node.child_by_field_name("parameters")?;
     let mut cursor = parameters.walk();
@@ -120,6 +144,15 @@ pub fn instrument_test_file(
             continue;
         }
         if !is_test_function(&name) {
+            if is_checkpoint_only_function(&name, child, source) {
+                needs_runtime = true;
+                file.parallel.push(name.clone());
+                file.edits.push(GoEdit {
+                    at: body.start_byte() + 1,
+                    rank: 100,
+                    text: format!("\n\tdefer {alias}.Checkpoint()\n"),
+                });
+            }
             continue;
         }
         // `func TestX(t *testing.T)` is a test; `func TestX(b *testing.B)` is
@@ -390,6 +423,34 @@ mod tests {
             !out.contains("\"TestParallel\""),
             "a parallel test must not claim what ran beside it:\n{out}"
         );
+    }
+
+    #[test]
+    fn an_example_is_swept_even_though_it_cannot_be_announced() {
+        // `go test` runs an Example with an Output comment like any other
+        // test, and a Fuzz target runs its seed corpus, but neither takes a
+        // *testing.T and neither can be attributed. What they reach still has
+        // to be swept before they return: where TestMain never returns --
+        // goleak's VerifyTestMain exits the process itself -- the only writes
+        // are the ones made at a boundary, and anything reached after the last
+        // one is never recorded. samber/lo has three and a half thousand lines
+        // of examples, and reported between 74% and 95% of one unchanged suite
+        // depending on which test finished last.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc ExampleWork() {\n\tdoWork()\n\t// Output: 1\n}\n\nfunc FuzzWork(f *testing.F) {\n\tdoWork()\n}\n\nfunc Examples(t *testing.T) {\n\tdoWork()\n}\n\nfunc ExampleHelper(x int) {\n\tdoWork()\n}\n",
+        );
+        assert_eq!(out.matches("Checkpoint()").count(), 2, "{out}");
+        assert!(
+            file.parallel.contains(&"ExampleWork".to_owned()),
+            "{file:?}"
+        );
+        assert!(file.parallel.contains(&"FuzzWork".to_owned()), "{file:?}");
+        // `Examples` is an ordinary function whose name starts with the word,
+        // exactly as `Testify` is, and one taking arguments is not an example
+        // `go test` will ever run.
+        assert!(file.tests.is_empty(), "{file:?}");
+        assert!(!out.contains("\"Examples\""), "{out}");
+        assert!(!out.contains("\"ExampleHelper\""), "{out}");
     }
 
     #[test]
