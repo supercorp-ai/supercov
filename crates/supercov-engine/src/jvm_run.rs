@@ -88,6 +88,89 @@ struct Frameworks {
     junit4: bool,
 }
 
+/// A Gradle version catalog, read as the accessors a build file writes.
+///
+/// `testImplementation(libs.junit)` says nothing about which framework that is.
+/// `gradle/libs.versions.toml` says `junit = "junit:junit:4.13.2"`. A catalog
+/// is how Gradle builds are written now, and to a reader that does not open one
+/// every dependency declared through it is invisible: moshi's suite is JUnit 4,
+/// was taken for a platform one because nothing said otherwise, and recorded
+/// nothing at all while its 25 test classes passed.
+///
+/// An alias is addressed with dots where it is declared with dashes, so
+/// `kotlin-reflect` is written `libs.kotlin.reflect`. Coordinates come back
+/// quoted, the shape they would have had written inline, because that is what
+/// `frameworks` reads.
+fn version_catalog(workspace: &Path) -> BTreeMap<String, String> {
+    let mut resolved = BTreeMap::new();
+    let Ok(text) = fs::read_to_string(workspace.join("gradle/libs.versions.toml")) else {
+        return resolved;
+    };
+    let Ok(catalog) = text.parse::<toml::Table>() else {
+        return resolved;
+    };
+    let accessor = |alias: &str| alias.replace(['-', '_'], ".");
+    if let Some(libraries) = catalog.get("libraries").and_then(toml::Value::as_table) {
+        for (alias, value) in libraries {
+            let coordinates = match value {
+                toml::Value::String(coordinates) => coordinates.clone(),
+                toml::Value::Table(table) => {
+                    match table.get("module").and_then(toml::Value::as_str) {
+                        Some(module) => module.to_owned(),
+                        None => match (
+                            table.get("group").and_then(toml::Value::as_str),
+                            table.get("name").and_then(toml::Value::as_str),
+                        ) {
+                            (Some(group), Some(name)) => format!("{group}:{name}"),
+                            _ => continue,
+                        },
+                    }
+                }
+                _ => continue,
+            };
+            resolved.insert(accessor(alias), format!("\"{coordinates}\""));
+        }
+    }
+    // Naming a bundle depends on every library in it. A bundle is addressed
+    // under `libs.bundles.`, a library directly under `libs.`.
+    if let Some(bundles) = catalog.get("bundles").and_then(toml::Value::as_table) {
+        let libraries = resolved.clone();
+        for (alias, value) in bundles {
+            let Some(members) = value.as_array() else {
+                continue;
+            };
+            let expanded = members
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .filter_map(|member| libraries.get(&accessor(member)).cloned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            resolved.insert(format!("bundles.{}", accessor(alias)), expanded);
+        }
+    }
+    resolved
+}
+
+/// The build text with the coordinates of every catalog accessor it names.
+fn with_catalog(text: &str, catalog: &BTreeMap<String, String>) -> String {
+    let mut out = text.to_owned();
+    for (accessor, coordinates) in catalog {
+        // `libs.kotlin` must not answer for `libs.kotlin.reflect`.
+        let needle = format!("libs.{accessor}");
+        let named = text.match_indices(&needle).any(|(at, _)| {
+            text[at + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !next.is_alphanumeric() && !matches!(next, '.' | '_' | '-'))
+        });
+        if named {
+            out.push('\n');
+            out.push_str(coordinates);
+        }
+    }
+    out
+}
+
 fn frameworks(build_file: &str) -> Frameworks {
     let testng = build_file.contains("testng");
     // The platform is what Jupiter, Vintage, Kotest and Spock all run on.
@@ -571,6 +654,8 @@ struct InstrumentedWorkspace {
     /// Modules Supercov instrumented but cannot attribute, and why they were
     /// left without a listener rather than broken by one.
     unmeasurable: Vec<String>,
+    /// Modules whose tests are a named JPMS module, which cannot take a listener.
+    modular: Vec<String>,
 }
 
 /// The module a `src/main/...` or `src/test/...` path belongs to.
@@ -615,6 +700,7 @@ fn instrument_workspace(
     // the whole tree at once answers neither: the platform listener would go
     // into the JUnit 4 module, where it cannot work, and the launcher with it,
     // where it makes the build choose a provider that finds no engine.
+    let catalog = version_catalog(workspace);
     let frameworks_of = |directory: &str| -> Frameworks {
         let names = ["pom.xml", "build.gradle.kts", "build.gradle"];
         let mut text = names
@@ -628,9 +714,10 @@ fn instrument_workspace(
                 break;
             }
         }
-        frameworks(&text)
+        frameworks(&with_catalog(&text, &catalog))
     };
     let mut unmeasurable: Vec<String> = Vec::new();
+    let mut modular: Vec<String> = Vec::new();
 
     // One entry per module that has a main or a test source set, keyed by
     // directory so a module contributing both is listed once.
@@ -696,6 +783,24 @@ fn instrument_workspace(
             unmeasurable.push(module.directory.clone());
             continue;
         }
+        // A test source set with a module-info.java is a named JPMS module,
+        // and a named module is closed: every package it holds is its own and
+        // every dependency has to be declared in that file. A listener written
+        // into it imports org.junit.platform, which the module does not
+        // require, and reads the runtime from a package its main module does
+        // not export -- so the module stops compiling and takes the build with
+        // it. gson's test-jpms is exactly this, and it tests module boundaries
+        // rather than product logic, so leaving it alone costs the report
+        // nothing it could have had.
+        if workspace
+            .join(&module.directory)
+            .join(source_root("test"))
+            .join("module-info.java")
+            .exists()
+        {
+            modular.push(module.directory.clone());
+            continue;
+        }
         // The listeners and their configuration go in the test source set,
         // because only the test classpath has the frameworks to listen to.
         let test = at("test");
@@ -755,7 +860,11 @@ fn instrument_workspace(
         JvmBuild::Maven => {
             for module in modules
                 .iter()
-                .filter(|module| module.has_tests && !unmeasurable.contains(&module.directory))
+                .filter(|module| {
+                    module.has_tests
+                        && !unmeasurable.contains(&module.directory)
+                        && !modular.contains(&module.directory)
+                })
                 // A TestNG module needs none of this: it already depends on
                 // the framework its own listener implements, and the launcher
                 // would only change which provider the build chooses.
@@ -809,10 +918,11 @@ fn instrument_workspace(
         JvmBuild::Plain => {}
     }
 
-    for module in modules
-        .iter()
-        .filter(|module| module.has_tests && !unmeasurable.contains(&module.directory))
-    {
+    for module in modules.iter().filter(|module| {
+        module.has_tests
+            && !unmeasurable.contains(&module.directory)
+            && !modular.contains(&module.directory)
+    }) {
         let frameworks = frameworks_of(&module.directory);
         let resources = workspace.join(&module.directory).join("src/test/resources");
         if frameworks.platform || frameworks.junit4 {
@@ -855,6 +965,7 @@ fn instrument_workspace(
         added_vintage,
         relaxed,
         unmeasurable,
+        modular,
     })
 }
 
@@ -952,6 +1063,15 @@ pub fn run_direct_jvm(
             writeln!(
                 diagnostics,
                 "[supercov] added junit-vintage-engine to the workspace copy: JUnit 4 is not a JUnit Platform engine, and Vintage is the platform's own way of running exactly these tests through the lifecycle Supercov listens to. Your own build still runs JUnit 4 as it did."
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        if !instrumented.modular.is_empty() {
+            writeln!(
+                diagnostics,
+                "[supercov] {} module(s) declare their tests as a Java module and are not attributed: {}. A named module names every package it holds and every dependency it may use, in its own module-info.java, so a listener added to it would not compile -- and neither would the module. Supercov leaves those tests to run exactly as they did.",
+                instrumented.modular.len(),
+                instrumented.modular.join(", ")
             )
             .map_err(|error| error.to_string())?;
         }
@@ -1400,6 +1520,132 @@ mod tests {
         assert!(frameworks("testImplementation 'junit:junit:4.13.2'").junit4);
         assert!(frameworks("testImplementation(\"junit:junit:4.13.2\")").junit4);
         assert!(!frameworks("testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'").junit4);
+    }
+
+    #[test]
+    fn a_module_whose_tests_are_a_java_module_is_left_to_run_as_it_did() {
+        // gson's test-jpms declares `module com.google.gson.jpms_test`, which
+        // requires com.google.gson, junit and truth and nothing else. A
+        // listener written into it imports org.junit.platform -- not visible
+        // -- and reads a runtime from a package the main module does not
+        // export. The module stops compiling and takes the reactor with it,
+        // for tests that check module boundaries rather than product logic.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-jpms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write(&root.join("pom.xml"), "<project>\n  <modules>\n    <module>lib</module>\n    <module>boundaries</module>\n  </modules>\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n    </dependency>\n  </dependencies>\n</project>\n").unwrap();
+        for module in ["lib", "boundaries"] {
+            write(&root.join(module).join("pom.xml"), "<project/>").unwrap();
+            write(
+                &root.join(module).join("src/main/java/app/Api.java"),
+                "package app;\npublic class Api { public int one() { return 1; } }\n",
+            )
+            .unwrap();
+            write(
+                &root.join(module).join("src/test/java/app/ApiTest.java"),
+                "package app;\nclass ApiTest { void t() {} }\n",
+            )
+            .unwrap();
+        }
+        write(
+            &root.join("boundaries/src/test/java/module-info.java"),
+            "module app.boundaries {\n  requires app.lib;\n}\n",
+        )
+        .unwrap();
+
+        let evidence = root.join("evidence");
+        let instrumented = instrument_workspace(&root, &evidence).expect("instrument");
+        assert_eq!(instrumented.modular, ["boundaries"]);
+
+        // The listener goes into the ordinary module and not the named one.
+        assert!(
+            root.join("lib/src/test/java/com/supercorp/supercov/SupercovListener.java")
+                .exists()
+        );
+        for name in ["SupercovListener.java", "SupercovConfig.java"] {
+            assert!(
+                !root
+                    .join("boundaries/src/test/java/com/supercorp/supercov")
+                    .join(name)
+                    .exists(),
+                "{name} must not be written into a named module"
+            );
+        }
+        assert!(
+            !root
+                .join("boundaries/src/test/resources")
+                .join(SERVICES_FILE)
+                .exists(),
+            "and nothing registers a listener that is not there"
+        );
+        // Its product code is still instrumented, and the runtime it stores
+        // into is a package of the module's own -- which a named module may
+        // hold without exporting.
+        assert!(
+            root.join("boundaries/src/main/java/com/supercorp/supercov/Supercov.java")
+                .exists()
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_framework_declared_through_a_version_catalog_is_still_recognised() {
+        // moshi is JUnit 4 and writes `testImplementation(libs.junit)`. Read
+        // without the catalog the build file names no framework at all, the
+        // fallback takes it for a platform project, and a listener goes in
+        // that nothing will ever call: the suite passes and records nothing.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-catalog-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write(
+            &root.join("gradle/libs.versions.toml"),
+            "[versions]\nkotlin = \"2.0.0\"\n\n[libraries]\njunit = \"junit:junit:4.13.2\"\nkotlin-reflect = { module = \"org.jetbrains.kotlin:kotlin-reflect\", version.ref = \"kotlin\" }\njupiter = { group = \"org.junit.jupiter\", name = \"junit-jupiter\" }\n\n[bundles]\nunit = [\"junit\", \"kotlin-reflect\"]\n",
+        )
+        .unwrap();
+        let catalog = version_catalog(&root);
+
+        let junit4 = frameworks(&with_catalog(
+            "dependencies { testImplementation(libs.junit) }",
+            &catalog,
+        ));
+        assert!(junit4.junit4 && !junit4.platform, "{junit4:?}");
+
+        // An accessor is a prefix of a longer one, and must not answer for it.
+        let reflect = frameworks(&with_catalog(
+            "dependencies { testImplementation(libs.kotlin.reflect) }",
+            &catalog,
+        ));
+        assert!(!reflect.junit4, "{reflect:?}");
+
+        let jupiter = frameworks(&with_catalog(
+            "dependencies { testImplementation(libs.jupiter) }",
+            &catalog,
+        ));
+        assert!(jupiter.platform && !jupiter.junit4, "{jupiter:?}");
+
+        // A bundle stands for every library in it.
+        let bundle = frameworks(&with_catalog(
+            "dependencies { testImplementation(libs.bundles.unit) }",
+            &catalog,
+        ));
+        assert!(bundle.junit4 && !bundle.platform, "{bundle:?}");
+
+        // A build that names no accessor is unchanged by a catalog.
+        let plain = "dependencies { testImplementation(\"org.testng:testng:7.10.2\") }";
+        assert_eq!(with_catalog(plain, &catalog), plain);
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
