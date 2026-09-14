@@ -191,15 +191,9 @@ const KOTLIN_SOURCE: &str = r#"object Classify {
 "#;
 
 fn kotlinc() -> Option<PathBuf> {
-    ["/opt/homebrew/bin/kotlinc", "kotlinc"]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| {
-            Command::new(path)
-                .arg("-version")
-                .output()
-                .is_ok_and(|out| out.status.success())
-        })
+    // Through the shared lookup, which knows that on Windows this is a .bat
+    // and that a bare name there resolves to .exe and nothing else.
+    common::tool("kotlinc")
 }
 
 #[test]

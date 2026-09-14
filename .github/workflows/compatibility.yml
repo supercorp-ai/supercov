@@ -229,6 +229,10 @@ jobs:
         os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         # 17 is the floor the documentation claims; 21 is the current LTS.
         java: ["17", "21"]
+        exclude:
+          # Temurin publishes no 17 for arm64 Windows; 21 is the first.
+          - os: windows-11-arm
+            java: "17"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -243,6 +247,18 @@ jobs:
       # The platform's own console runner, which one test drives directly to
       # prove the listener attributes through the platform rather than through
       # anything Maven or Gradle does around it.
+      # Not preinstalled on any runner. One test compiles Kotlin with the
+      # standalone compiler rather than through Gradle, so that what the
+      # rewriter produces is known to be Kotlin the compiler accepts and not
+      # only something a build plugin tolerated.
+      - name: Install the Kotlin compiler
+        shell: bash
+        run: |
+          version=2.2.20
+          curl -sSL --retry 3 -o "$RUNNER_TEMP/kotlin.zip" \
+            "https://github.com/JetBrains/kotlin/releases/download/v$version/kotlin-compiler-$version.zip"
+          unzip -q "$RUNNER_TEMP/kotlin.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/kotlinc/bin" >> "$GITHUB_PATH"
       - name: Fetch the JUnit Platform console runner
         shell: bash
         run: |
