@@ -343,13 +343,22 @@ public final class Supercov {
    * sets the first to the number of processors. Every one of them runs this
    * listener, so a single agreed path means each fork overwrites the last and
    * the run keeps whichever finished last: 49 tests of the 406 that ran.
+   *
+   * <p>The name is a UUID rather than the process id. Nothing reads the name
+   * -- the engine merges every file it finds -- so all it has to be is unique
+   * per JVM and the same each time this JVM writes. ProcessHandle would say
+   * the same thing and is Java 9, and a great many libraries still compile
+   * their main source at 8: moshi, gson and OkHttp all do, and the runtime is
+   * compiled by the project's own javac, at whatever release the project set.
    */
+  private static final String JVM = java.util.UUID.randomUUID().toString();
+
   public static synchronized void writeInto(String directory) throws IOException {
     java.io.File target = new java.io.File(directory);
     if (!target.isDirectory() && !target.mkdirs() && !target.isDirectory()) {
       throw new IOException("could not create " + directory);
     }
-    write(new java.io.File(target, ProcessHandle.current().pid() + ".bin").getPath());
+    write(new java.io.File(target, JVM + ".bin").getPath());
   }
 
   /** Writes the evidence transport the engine reads. */
