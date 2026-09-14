@@ -221,6 +221,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run test:go
+      # The launcher is the way a Go project gets Supercov at all, and its
+      # tests are what caught it building a download URL from a version no
+      # release was ever published under. They ran nowhere until here.
+      - run: npm run test:launcher
         env:
           # Without this a job whose toolchain setup failed would skip every
           # test and report success, and Go would look verified on a machine
