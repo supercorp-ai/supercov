@@ -240,6 +240,16 @@ jobs:
           distribution: temurin
           java-version: ${{ matrix.java }}
       - uses: gradle/actions/setup-gradle@v5
+      # The platform's own console runner, which one test drives directly to
+      # prove the listener attributes through the platform rather than through
+      # anything Maven or Gradle does around it.
+      - name: Fetch the JUnit Platform console runner
+        shell: bash
+        run: |
+          jar="$RUNNER_TEMP/junit-platform-console-standalone.jar"
+          curl -sSL --retry 3 -o "$jar" \
+            https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
+          echo "JUNIT_CONSOLE_JAR=$jar" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run test:jvm

@@ -513,8 +513,9 @@ struct InstrumentedWorkspace {
     declared_in: BTreeMap<String, String>,
     /// The build file the launcher dependency was added to, if it was.
     added_launcher: Option<&'static str>,
-    /// Whether a warnings-as-errors policy had to be relaxed in the copy.
-    relaxed_warnings: bool,
+    /// What had to be relaxed in the copy's build files for instrumented code
+    /// to compile, named so the user knows rather than infers.
+    relaxed: Vec<&'static str>,
     /// Modules Supercov instrumented but cannot attribute, and why they were
     /// left without a listener rather than broken by one.
     unmeasurable: Vec<String>,
@@ -663,16 +664,31 @@ fn instrument_workspace(
 
     // A project's warning policy applies to code it wrote. The copy holds code
     // it did not.
-    let mut relaxed = Vec::new();
+    let mut relaxed: Vec<&'static str> = Vec::new();
     for name in ["pom.xml", "build.gradle.kts", "build.gradle"] {
         let path = workspace.join(name);
-        if let Ok(existing) = fs::read_to_string(&path)
-            && let Some(updated) = without_warnings_as_errors(&existing)
+        let Ok(existing) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(updated) = without_warnings_as_errors(&existing) else {
+            continue;
+        };
+        // Named separately, because switching a static analyser off is a
+        // bigger thing than not failing on a warning and the user should hear
+        // it said rather than work it out.
+        if !relaxed.contains(&"stopped the build failing on warnings")
+            && updated.contains("<failOnWarning>false</failOnWarning>")
+                != existing.contains("<failOnWarning>false</failOnWarning>")
+            || existing.contains("-Werror") && !updated.contains("-Werror")
         {
-            write(&path, &updated)?;
-            relaxed.push(name);
+            relaxed.push("stopped the build failing on warnings");
         }
+        if existing.contains("Xplugin:ErrorProne") && !updated.contains("Xplugin:ErrorProne") {
+            relaxed.push("switched Error Prone off");
+        }
+        write(&path, &updated)?;
     }
+    relaxed.dedup();
 
     // The platform listener is compiled from the project's own test sources,
     // so the launcher API it implements has to be on the compile classpath. A
@@ -770,7 +786,7 @@ fn instrument_workspace(
         modules,
         declared_in,
         added_launcher,
-        relaxed_warnings: !relaxed.is_empty(),
+        relaxed,
         unmeasurable,
     })
 }
@@ -857,10 +873,11 @@ pub fn run_direct_jvm(
             )
             .map_err(|error| error.to_string())?;
         }
-        if instrumented.relaxed_warnings {
+        if !instrumented.relaxed.is_empty() {
             writeln!(
                 diagnostics,
-                "[supercov] relaxed warnings-as-errors in the workspace's build file: the copy holds instrumented code your project never wrote a style policy for. Warnings are still reported, and your own build file is untouched."
+                "[supercov] in the workspace copy only: {}. The copy holds instrumented code your project never wrote a policy for, and a rule about the shape of a method is one no instrumentation can satisfy. Warnings are still reported, your build file is untouched, and your own build still runs every check in full.",
+                instrumented.relaxed.join("; ")
             )
             .map_err(|error| error.to_string())?;
         }
@@ -1336,5 +1353,16 @@ mod tests {
 
         // A project with no such policy is left exactly as it is.
         assert_eq!(without_warnings_as_errors("<project></project>"), None);
+
+        // Failing on warnings and running a static analyser are separate
+        // things, and a project may do either without the other.
+        let only_warnings = "<project><failOnWarning>true</failOnWarning></project>";
+        let updated = without_warnings_as_errors(only_warnings).expect("a policy to relax");
+        assert!(updated.contains("<failOnWarning>false</failOnWarning>"));
+
+        let only_analyser =
+            "<project><compilerArgs><arg>-Xplugin:ErrorProne</arg></compilerArgs></project>";
+        let updated = without_warnings_as_errors(only_analyser).expect("an analyser to switch off");
+        assert!(!updated.contains("ErrorProne"), "{updated}");
     }
 }
