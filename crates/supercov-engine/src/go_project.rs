@@ -246,6 +246,12 @@ pub fn prepare_go_project(root: &Path) -> Result<PreparedGoProject, String> {
                 manifest.decisions.extend(obligations.manifest.decisions);
                 manifest.points.extend(obligations.manifest.points);
                 manifest.branches.extend(obligations.manifest.branches);
+                // What the file could not be measured for travels with what it
+                // could. Dropping these left the manifest silently claiming a
+                // completeness it had not established.
+                manifest
+                    .limitations
+                    .extend(obligations.manifest.limitations);
                 probes.extend(obligations.probes);
                 decision_widths.extend(obligations.decision_widths);
                 instrumented.push((

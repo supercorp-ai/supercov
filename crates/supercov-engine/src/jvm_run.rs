@@ -288,17 +288,63 @@ fn jupiter_version(build_file: &str) -> Option<String> {
 
 const DEFAULT_LAUNCHER_VERSION: &str = "1.10.2";
 
+/// The engine version matching a platform version: 1.N.P becomes 5.N.P.
+fn engine_version_of_platform(platform: &str) -> String {
+    match platform.strip_prefix("1.") {
+        Some(rest) => format!("5.{rest}"),
+        None => platform.to_owned(),
+    }
+}
+
 /// `pom.xml` with the launcher among its test dependencies.
 fn maven_with_launcher(pom: &str) -> Option<String> {
-    if pom.contains(LAUNCHER_ARTIFACT) {
+    maven_with_test_artifacts(pom, &[LAUNCHER_ARTIFACT])
+}
+
+/// The engine that runs JUnit 4 tests on the JUnit Platform.
+///
+/// A JUnit 4 suite is not a platform one and cannot be attributed as it
+/// stands. Vintage is the platform's own answer: it discovers and runs exactly
+/// the same JUnit 4 tests, through the lifecycle Supercov listens to. Adding
+/// it to the copy turns a suite Supercov could only decline into one it can
+/// measure, and the author's own build still runs JUnit 4 as before.
+const VINTAGE_ARTIFACT: &str = "junit-vintage-engine";
+
+fn maven_with_vintage(pom: &str) -> Option<String> {
+    maven_with_test_artifacts(pom, &[LAUNCHER_ARTIFACT, VINTAGE_ARTIFACT])
+}
+
+fn maven_with_test_artifacts(pom: &str, artifacts: &[&str]) -> Option<String> {
+    let missing = artifacts
+        .iter()
+        .filter(|artifact| !pom.contains(**artifact))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
         return None;
     }
-    let version = launcher_version(pom)
-        .map(|version| format!("\n      <version>{version}</version>"))
-        .unwrap_or_default();
-    let dependency = format!(
-        "    <dependency>\n      <groupId>org.junit.platform</groupId>\n      <artifactId>{LAUNCHER_ARTIFACT}</artifactId>{version}\n      <scope>test</scope>\n    </dependency>\n"
-    );
+    let platform = launcher_version(pom);
+    let dependency = missing
+        .iter()
+        .map(|artifact| {
+            // Vintage is versioned with Jupiter, not with the platform: JUnit
+            // numbers the engines 5.N and the platform 1.N, and asking for
+            // vintage 1.N asks for something that was never published.
+            let (group, version) = if **artifact == VINTAGE_ARTIFACT {
+                (
+                    "org.junit.vintage",
+                    platform.as_deref().map(engine_version_of_platform),
+                )
+            } else {
+                ("org.junit.platform", platform.clone())
+            };
+            let version = version
+                .map(|version| format!("\n      <version>{version}</version>"))
+                .unwrap_or_default();
+            format!(
+                "    <dependency>\n      <groupId>{group}</groupId>\n      <artifactId>{artifact}</artifactId>{version}\n      <scope>test</scope>\n    </dependency>\n"
+            )
+        })
+        .collect::<String>();
     match project_dependencies_end(pom) {
         Some(at) => Some(format!("{}{dependency}{}", &pom[..at], &pom[at..])),
         // A project with no dependencies block of its own still needs one.
@@ -513,6 +559,9 @@ struct InstrumentedWorkspace {
     declared_in: BTreeMap<String, String>,
     /// The build file the launcher dependency was added to, if it was.
     added_launcher: Option<&'static str>,
+    /// Whether a JUnit 4 module was given the engine that runs it on the
+    /// platform, so the user hears that their suite ran a different way.
+    added_vintage: bool,
     /// What had to be relaxed in the copy's build files for instrumented code
     /// to compile, named so the user knows rather than infers.
     relaxed: Vec<&'static str>,
@@ -638,9 +687,10 @@ fn instrument_workspace(
         if !module.has_tests {
             continue;
         }
-        if frameworks.junit4 {
-            // Attributing it is impossible and trying would break it, so the
-            // module keeps its probes and gets no listener.
+        if frameworks.junit4 && build != JvmBuild::Maven {
+            // Only Maven's copy gets Vintage added below; elsewhere the module
+            // keeps its probes and gets no listener, because attributing it is
+            // impossible and trying would break it.
             unmeasurable.push(module.directory.clone());
             continue;
         }
@@ -651,7 +701,7 @@ fn instrument_workspace(
             &test.join("SupercovConfig.java"),
             &configuration(probe_count, &project.decision_widths, &module.evidence),
         )?;
-        if frameworks.platform {
+        if frameworks.platform || frameworks.junit4 {
             write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
         }
         if frameworks.testng {
@@ -695,6 +745,7 @@ fn instrument_workspace(
     // TestNG-only project needs none of that: it already depends on the
     // framework its own listener implements.
     let mut added_launcher = None;
+    let mut added_vintage = false;
     match build {
         // Per module, not once at the top: the module's own pom is where its
         // JUnit version is in scope, and a module that runs JUnit 4 must not
@@ -706,12 +757,25 @@ fn instrument_workspace(
                 // A TestNG module needs none of this: it already depends on
                 // the framework its own listener implements, and the launcher
                 // would only change which provider the build chooses.
-                .filter(|module| frameworks_of(&module.directory).platform)
+                .filter(|module| {
+                    let frameworks = frameworks_of(&module.directory);
+                    frameworks.platform || frameworks.junit4
+                })
             {
                 let pom = workspace.join(&module.directory).join("pom.xml");
-                if let Ok(existing) = fs::read_to_string(&pom)
-                    && let Some(updated) = maven_with_launcher(&existing)
-                {
+                let Ok(existing) = fs::read_to_string(&pom) else {
+                    continue;
+                };
+                // A JUnit 4 module also needs the engine that runs JUnit 4
+                // tests on the platform; without it the launcher would find no
+                // engine at all.
+                let updated = if frameworks_of(&module.directory).junit4 {
+                    added_vintage = true;
+                    maven_with_vintage(&existing)
+                } else {
+                    maven_with_launcher(&existing)
+                };
+                if let Some(updated) = updated {
                     write(&pom, &updated)?;
                     added_launcher = Some("pom.xml");
                 }
@@ -749,7 +813,7 @@ fn instrument_workspace(
     {
         let frameworks = frameworks_of(&module.directory);
         let resources = workspace.join(&module.directory).join("src/test/resources");
-        if frameworks.platform {
+        if frameworks.platform || frameworks.junit4 {
             write(
                 &resources.join(SERVICES_FILE),
                 &format!("{LISTENER_CLASS}\n"),
@@ -786,6 +850,7 @@ fn instrument_workspace(
         modules,
         declared_in,
         added_launcher,
+        added_vintage,
         relaxed,
         unmeasurable,
     })
@@ -878,6 +943,13 @@ pub fn run_direct_jvm(
                 diagnostics,
                 "[supercov] in the workspace copy only: {}. The copy holds instrumented code your project never wrote a policy for, and a rule about the shape of a method is one no instrumentation can satisfy. Warnings are still reported, your build file is untouched, and your own build still runs every check in full.",
                 instrumented.relaxed.join("; ")
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        if instrumented.added_vintage {
+            writeln!(
+                diagnostics,
+                "[supercov] added junit-vintage-engine to the workspace copy: JUnit 4 is not a JUnit Platform engine, and Vintage is the platform's own way of running exactly these tests through the lifecycle Supercov listens to. Your own build still runs JUnit 4 as it did."
             )
             .map_err(|error| error.to_string())?;
         }
@@ -1364,5 +1436,36 @@ mod tests {
             "<project><compilerArgs><arg>-Xplugin:ErrorProne</arg></compilerArgs></project>";
         let updated = without_warnings_as_errors(only_analyser).expect("an analyser to switch off");
         assert!(!updated.contains("ErrorProne"), "{updated}");
+    }
+
+    #[test]
+    fn vintage_carries_the_engine_version_not_the_platform_one() {
+        // JUnit numbers the engines 5.N and the platform 1.N, so asking for
+        // vintage 1.N asks for something that was never published and the
+        // build stops at dependency resolution.
+        assert_eq!(engine_version_of_platform("1.10.2"), "5.10.2");
+        assert_eq!(engine_version_of_platform("1.13.1"), "5.13.1");
+
+        let pom = "<project>\n  <dependencies>\n    <dependency>\n      <groupId>junit</groupId>\n      <artifactId>junit</artifactId>\n      <version>4.13.2</version>\n    </dependency>\n  </dependencies>\n</project>\n";
+        let updated = maven_with_vintage(pom).expect("a JUnit 4 project needs both");
+        assert!(updated.contains("<artifactId>junit-platform-launcher</artifactId>"));
+        assert!(updated.contains("<artifactId>junit-vintage-engine</artifactId>"));
+        assert!(
+            updated.contains("<groupId>org.junit.vintage</groupId>"),
+            "{updated}"
+        );
+        // The launcher takes the platform version and the engine the Jupiter
+        // one, in the same pom.
+        assert!(updated.contains(&format!("<version>{DEFAULT_LAUNCHER_VERSION}</version>")));
+        assert!(
+            updated.contains(&format!(
+                "<version>{}</version>",
+                engine_version_of_platform(DEFAULT_LAUNCHER_VERSION)
+            )),
+            "{updated}"
+        );
+
+        // A project that already has both is left alone.
+        assert_eq!(maven_with_vintage(&updated), None);
     }
 }

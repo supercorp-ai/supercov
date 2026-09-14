@@ -1,6 +1,7 @@
 package com.supercorp.supercov;
 
 import org.junit.platform.engine.TestExecutionResult;
+import org.junit.platform.engine.support.descriptor.ClassSource;
 import org.junit.platform.launcher.TestExecutionListener;
 import org.junit.platform.launcher.TestIdentifier;
 import org.junit.platform.launcher.TestPlan;
@@ -119,10 +120,28 @@ public final class SupercovListener implements TestExecutionListener {
       if (parent == null || !plan.getParent(parent).isPresent()) {
         break;
       }
-      qualified.insert(0, parent.getDisplayName() + "#");
+      qualified.insert(0, containerName(parent) + "#");
       current = parent;
     }
     return qualified.toString();
+  }
+
+  /**
+   * What to call a container: its class's fully qualified name where the
+   * platform reports one, and its display name otherwise.
+   *
+   * <p>A display name is the simple class name, and two classes with the same
+   * simple name in different packages are different tests — gson has several.
+   * Naming them the same makes two tests one, which the reader refuses
+   * outright rather than silently merge. Anything without a class source, such
+   * as a Kotest or Spock nesting level, keeps the wording its author chose.
+   */
+  private static String containerName(TestIdentifier identifier) {
+    return identifier
+        .getSource()
+        .filter(source -> source instanceof ClassSource)
+        .map(source -> ((ClassSource) source).getClassName())
+        .orElseGet(identifier::getDisplayName);
   }
 
   @Override

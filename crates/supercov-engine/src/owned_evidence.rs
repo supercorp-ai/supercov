@@ -704,6 +704,20 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         .map(|result| result.provenance.runner.as_str())
         .collect::<BTreeSet<_>>();
     let mut declaration = declaration;
+
+    // What the manifest says could not be measured, the declaration has to
+    // name too: the reader checks that the two agree, so a limitation cannot
+    // appear in one and be missing from the other. The ids are derived per
+    // obligation from the file and the node, so a static declaration could
+    // never have listed them and this is the only place that knows them.
+    declaration.structural_limitations = manifest
+        .limitations
+        .iter()
+        .filter_map(|limitation| limitation.get("id")?.as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
     if declaration
         .runners
         .iter()

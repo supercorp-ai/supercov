@@ -227,6 +227,14 @@ impl<'a> Collector<'a> {
         stable_obligation_id("go", self.file, kind, node.start_byte(), node.end_byte())
     }
 
+    /// A limitation's identity. The contract requires one, and requires it to
+    /// be unique: a manifest whose limitations cannot be told apart cannot say
+    /// which surface each one is about, so the reader refuses the run rather
+    /// than present a list nobody can act on.
+    fn limitation_id(&mut self, node: Node, kind: &str) -> String {
+        self.id(node, kind)
+    }
+
     fn probe(&mut self, target: GoProbeTarget, at: usize) -> u64 {
         *self.next_probe += 1;
         let id = *self.next_probe;
@@ -420,7 +428,9 @@ impl<'a> Collector<'a> {
                     }
                     None => {
                         let (line, column) = self.position(node);
+                        let limitation = self.limitation_id(node, "loop-without-condition");
                         self.limitations.push(serde_json::json!({
+                            "id": limitation,
                             "kind": "loop-without-condition",
                             "file": self.file,
                             "line": line,

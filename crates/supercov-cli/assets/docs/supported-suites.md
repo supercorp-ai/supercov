@@ -262,7 +262,7 @@ npx supercov -- go test ./core/... ./app/...
 | Kotest | Exact per test, under the names Kotest itself reports | — |
 | Spock | Exact per feature, under the names Spock itself reports | — |
 | TestNG | Exact per test, each data-provider invocation its own | — |
-| JUnit 4 alone | Not measured — see below | — |
+| JUnit 4 alone | Exact per test, through Vintage — see below | Maven |
 
 Multi-module builds are measured module by module: each compiles its own source
 set and forks its own JVM, so each gets a runtime and records evidence of its
@@ -278,9 +278,10 @@ report name the same thing.
 JUnit 4 on its own is not a platform engine and does not run on one. Maven and
 Gradle choose a test provider from what is on the classpath, so putting the
 platform there makes the build pick a provider that finds no engine and fail.
-Supercov leaves such a module alone and says so rather than break it; adding
-`junit-vintage-engine` runs the same tests on the platform, and Supercov
-measures them.
+For a Maven module, Supercov adds `junit-vintage-engine` to the copy — the
+platform's own way of running exactly those JUnit 4 tests through the lifecycle
+it listens to — and measures them; your own build still runs JUnit 4 as it did.
+A Gradle module is left alone and told about rather than broken.
 
 Supercov instruments an isolated copy and leaves your build file alone. In the
 copy it adds a test-scoped `junit-platform-launcher`, because the listener is

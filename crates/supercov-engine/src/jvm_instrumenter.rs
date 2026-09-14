@@ -159,6 +159,14 @@ impl Collector<'_> {
         )
     }
 
+    /// A limitation's identity. The contract requires one, and requires it to
+    /// be unique: a manifest whose limitations cannot be told apart cannot say
+    /// which surface each one is about, so the reader refuses the run rather
+    /// than present a list nobody can act on.
+    fn limitation_id(&mut self, node: Node, kind: &str) -> String {
+        self.id(node, kind)
+    }
+
     fn probe(&mut self, target: GoProbeTarget, at: usize) -> u64 {
         *self.next_probe += 1;
         let id = *self.next_probe;
@@ -498,7 +506,10 @@ fn walk(collector: &mut Collector, node: Node) {
                         "true" | "false"
                     ) {
                         let (line, column) = collector.position(node);
+                        let limitation =
+                            collector.limitation_id(node, "loop-with-constant-condition");
                         collector.limitations.push(serde_json::json!({
+                            "id": limitation,
                             "kind": "loop-with-constant-condition",
                             "file": collector.file,
                             "line": line,
@@ -521,7 +532,9 @@ fn walk(collector: &mut Collector, node: Node) {
                 }
                 None => {
                     let (line, column) = collector.position(node);
+                    let limitation = collector.limitation_id(node, "loop-without-condition");
                     collector.limitations.push(serde_json::json!({
+                        "id": limitation,
                         "kind": "loop-without-condition",
                         "file": collector.file,
                         "line": line,
@@ -536,7 +549,9 @@ fn walk(collector: &mut Collector, node: Node) {
         }
         "enhanced_for_statement" => {
             let (line, column) = collector.position(node);
+            let limitation = collector.limitation_id(node, "loop-without-condition");
             collector.limitations.push(serde_json::json!({
+                "id": limitation,
                 "kind": "loop-without-condition",
                 "file": collector.file,
                 "line": line,
