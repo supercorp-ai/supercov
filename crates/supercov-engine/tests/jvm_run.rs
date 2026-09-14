@@ -9,6 +9,19 @@
 //!
 //! Needs Maven and a JDK, and Maven needs its dependencies resolvable. Skips
 //! otherwise rather than failing a suite the machine cannot run.
+//!
+//! Every test here is `#[ignore]`, and `npm run test:jvm` passes
+//! `--include-ignored`. Not because they are unimportant -- they are the only
+//! proof the JVM frontend works at all -- but because running a real Gradle or
+//! Maven build belongs to a job that provisioned one. The CI job that does
+//! sets up a JDK, Gradle with its cache, the Kotlin compiler and the JUnit
+//! console runner, and finishes in twelve minutes. `cargo test --workspace`
+//! picks them up on any runner that merely happens to have a JDK on it, cold
+//! caches and all: the filesystem-safety job went from eleven minutes to over
+//! seventy on Windows that way, and would now hit its timeout and fail.
+//!
+//! A test that needs a toolchain provisioned for it should say so rather than
+//! run wherever one is lying around.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -125,6 +138,7 @@ fn maven_can_resolve(mvn: &Path, root: &Path) -> bool {
 }
 
 #[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
 fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reached() {
     let _building = common::building();
     let Some(mvn) = common::tool("mvn") else {
@@ -258,6 +272,7 @@ fn gradle_fixture(root: &Path) {
 }
 
 #[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
 fn a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reached() {
     let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
@@ -383,6 +398,7 @@ fn testng_fixture(root: &Path) {
 }
 
 #[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
 fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
     let _building = common::building();
     // TestNG is the one framework the JUnit Platform does not report, so it
@@ -545,6 +561,7 @@ fn kotlin_fixture(root: &Path) {
 }
 
 #[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
 fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
     let _building = common::building();
     // Kotlin is instrumented by the same rewriter and attributed by the same
@@ -690,6 +707,7 @@ fn multi_module_maven(root: &Path) {
 }
 
 #[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
 fn every_module_of_a_multi_module_build_is_measured_and_merged() {
     let _building = common::building();
     let Some(mvn) = common::tool("mvn") else {
@@ -821,6 +839,7 @@ fn multi_project_gradle(root: &Path) {
 /// root reaches none of the subprojects, and the subprojects are where the
 /// test sources -- and so the listener Supercov compiles -- actually live.
 #[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
 fn a_multi_project_gradle_build_reaches_every_subproject() {
     let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
@@ -877,6 +896,7 @@ fn a_multi_project_gradle_build_reaches_every_subproject() {
 /// methods, so nothing that reads test source can find them. The platform
 /// announces them like any other engine's.
 #[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
 fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
     let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
@@ -987,6 +1007,7 @@ fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
 /// then threw on the first instrumented line. Supercov turned a passing suite
 /// into a failing one.
 #[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
 fn a_spock_specification_is_measured_though_its_tests_are_groovy() {
     let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
@@ -1078,6 +1099,7 @@ fn a_spock_specification_is_measured_though_its_tests_are_groovy() {
 /// single agreed path meant each overwrote the last and the run kept whichever
 /// finished last — 49 of the 406 tests RxJava had actually run.
 #[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
 fn every_forked_jvm_is_merged_rather_than_overwriting_the_last() {
     let _building = common::building();
     let Some(gradle) = common::tool("gradle") else {
