@@ -144,6 +144,19 @@ struct Collector<'a> {
     counter: usize,
 }
 
+/// A branch whose condition is a single operand needs no independence
+/// obligation; the runtime's sentinel says so.
+/// The wrapper a branch needs. A single-operand condition has no independence
+/// obligation, so it gets the form with no decision argument — which is the
+/// one small enough for Go to inline, and the majority of branches in real
+/// code.
+fn branch_wrapper(alias: &str, when_true: u64, when_false: u64, decision: Option<usize>) -> String {
+    match decision {
+        Some(index) => format!("{alias}.BD({when_true}, {when_false}, {index}, "),
+        None => format!("{alias}.B({when_true}, {when_false}, "),
+    }
+}
+
 /// Whether a probe may be placed before this node.
 ///
 /// Go has slots that hold a statement but are not statement positions: the
@@ -227,8 +240,10 @@ impl<'a> Collector<'a> {
             PointKind::Statement => node.start_byte(),
         };
         let probe = self.probe(target, at);
-        let alias = self.alias.to_owned();
-        self.call_before(at, format!("{alias}.P({probe})"));
+        // A direct store into the array this package already holds, not a call
+        // that would have to find it first. This is the shape Go's own cover
+        // tool and JaCoCo both settled on: one move instruction.
+        self.call_before(at, format!("{HITS_VARIABLE}[{probe}] = 2"));
         self.points.push(PointMeta {
             id,
             kind,
@@ -276,11 +291,13 @@ impl<'a> Collector<'a> {
     /// Record a boolean expression as a decision when it has more than one
     /// condition. A single condition needs no MC/DC obligation: its branch
     /// outcomes already say everything independence could.
-    fn add_decision(&mut self, node: Node, kind: &str) {
+    /// Returns the runtime's index for this decision, or `None` when the
+    /// expression has a single condition and needs no independence obligation.
+    fn add_decision(&mut self, node: Node, kind: &str) -> Option<usize> {
         let mut leaves = Vec::new();
         condition_nodes(node, self.source, &mut leaves);
         if leaves.len() < 2 {
-            return;
+            return None;
         }
         let conditions = leaves
             .iter()
@@ -308,12 +325,6 @@ impl<'a> Collector<'a> {
             );
             self.edit(leaf.end_byte(), 20, ")".to_owned());
         }
-        self.edit(
-            node.start_byte(),
-            10,
-            format!("{alias}.D({index_of_decision}, "),
-        );
-        self.edit(node.end_byte(), 10, ")".to_owned());
         self.decisions.push(DecisionMeta {
             id,
             file: self.file.to_owned(),
@@ -323,6 +334,7 @@ impl<'a> Collector<'a> {
             conditions,
             kind: kind.to_owned(),
         });
+        Some(index_of_decision)
     }
 
     fn walk(&mut self, node: Node) {
@@ -341,13 +353,13 @@ impl<'a> Collector<'a> {
                     // records the arm that was *not* taken by never setting its
                     // bit, which is what makes an untested guard visible.
                     let probes = self.add_branch(node, "if", &["true", "false"]);
+                    let decision = self.add_decision(condition, "if");
                     self.edit(
                         condition.start_byte(),
                         5,
-                        format!("{alias}.B({}, {}, ", probes[0], probes[1]),
+                        branch_wrapper(&alias, probes[0], probes[1], decision),
                     );
                     self.edit(condition.end_byte(), 5, ")".to_owned());
-                    self.add_decision(condition, "if");
                 }
             }
             "for_statement" => {
@@ -358,13 +370,13 @@ impl<'a> Collector<'a> {
                 match loop_condition(node) {
                     Some(condition) => {
                         let probes = self.add_branch(node, "loop", &["true", "false"]);
+                        let decision = self.add_decision(condition, "loop");
                         self.edit(
                             condition.start_byte(),
                             5,
-                            format!("{alias}.B({}, {}, ", probes[0], probes[1]),
+                            branch_wrapper(&alias, probes[0], probes[1], decision),
                         );
                         self.edit(condition.end_byte(), 5, ")".to_owned());
-                        self.add_decision(condition, "loop");
                     }
                     None => {
                         let (line, column) = self.position(node);
@@ -546,6 +558,10 @@ pub fn build_go_obligations(
 /// collide with an identifier a project already uses.
 pub const RUNTIME_ALIAS: &str = "__supercov";
 
+/// The package-level array every probe stores into. Declared once per package
+/// by a generated file, so a probe is an array index rather than a call.
+pub const HITS_VARIABLE: &str = "__supercovHits";
+
 /// The module path the rewritten source imports the runtime from.
 pub const RUNTIME_IMPORT: &str = "github.com/supercorp-ai/supercov/runtime/go/supercov";
 
@@ -577,10 +593,13 @@ pub fn build_go_obligations_with_alias(
         }
     }
     let mut edits = collector.edits;
-    // Only a file that gained a probe gets the import; Go rejects an unused one.
-    if !edits.is_empty()
-        && let Some(import) = import_edit(source, alias, RUNTIME_IMPORT)
-    {
+    // The import is only needed by files that call the runtime — decisions and
+    // branches do, a file of plain statements does not, and Go rejects an
+    // unused import.
+    let calls_runtime = edits
+        .iter()
+        .any(|edit| edit.text.contains(&format!("{alias}.")));
+    if calls_runtime && let Some(import) = import_edit(source, alias, RUNTIME_IMPORT) {
         edits.push(import);
     }
     Ok(GoFileObligations {
@@ -668,8 +687,8 @@ func classify(a int, b bool) string {
     fn wrapping_a_condition_preserves_short_circuit_order() {
         // Go evaluates a call argument only when the call is reached, so a
         // wrapped right-hand operand runs exactly when the unwrapped one would
-        // have. The wrappers must nest outcome-outside-conditions, or the
-        // decision would be observed before its operands.
+        // have. The branch wrapper must enclose the conditions, or the decision
+        // would be closed before its operands had been observed.
         let out = rewritten(
             "package main\nfunc f(a int, b bool) bool {\n\tif a > 10 && b {\n\t\treturn true\n\t}\n\treturn false\n}\n",
         );
@@ -677,20 +696,33 @@ func classify(a int, b bool) string {
             .lines()
             .find(|line| line.contains("if "))
             .expect("the if survived");
-        let outcome = condition.find(".D(").expect("outcome wrapper");
+        let branch = condition.find(".BD(").expect("branch and decision wrapper");
         let first = condition.find(".C(").expect("first condition wrapper");
         assert!(
-            outcome < first,
-            "the outcome must enclose its conditions: {condition}"
+            branch < first,
+            "the branch must enclose its conditions: {condition}"
         );
-        assert!(
-            condition.matches(".C(").count() == 2,
+        assert_eq!(
+            condition.matches(".C(").count(),
+            2,
             "one wrapper per condition: {condition}"
         );
         assert!(
             condition.contains("&&"),
             "the operator itself is untouched: {condition}"
         );
+    }
+
+    #[test]
+    fn a_single_condition_branch_uses_the_wrapper_that_inlines() {
+        // Most branches in real code have one operand and no independence
+        // obligation. They take the form with no decision argument, which is
+        // the one small enough for the Go compiler to inline.
+        let out = rewritten(
+            "package main\nfunc f(a int) bool {\n\tif a > 10 {\n\t\treturn true\n\t}\n\treturn false\n}\n",
+        );
+        assert!(out.contains(".B("), "{out}");
+        assert!(!out.contains(".BD("), "no decision here to close:\n{out}");
     }
 
     #[test]

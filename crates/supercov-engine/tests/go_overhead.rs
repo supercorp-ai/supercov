@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use supercov_engine::go_instrumenter::{RUNTIME_IMPORT, build_go_obligations, rewrite};
-use supercov_engine::go_test_harness::synthesized_harness;
+use supercov_engine::go_test_harness::{probe_array_file, synthesized_harness};
 
 fn go_binary() -> Option<PathBuf> {
     for candidate in ["go", "/opt/homebrew/bin/go", "/usr/local/go/bin/go"] {
@@ -52,7 +52,18 @@ fn write(root: &Path, relative: &str, contents: &str) {
 /// Nanoseconds per operation, from `go test -bench`.
 fn bench(go: &Path, root: &Path) -> f64 {
     let output = Command::new(go)
-        .args(["test", "-bench=.", "-benchtime=20x", "-run=NONE", "./..."])
+        // Time-based rather than a fixed iteration count, and repeated: a
+        // twenty-iteration run varied by 20% between invocations on this
+        // machine, which is more than several of the differences being
+        // measured. Tuning against that is tuning against noise.
+        .args([
+            "test",
+            "-bench=.",
+            "-benchtime=1s",
+            "-count=5",
+            "-run=NONE",
+            "./...",
+        ])
         .current_dir(root)
         .output()
         .unwrap();
@@ -62,14 +73,20 @@ fn bench(go: &Path, root: &Path) -> f64 {
         "benchmark failed:\n{text}{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    text.lines()
-        .find(|line| line.starts_with("Benchmark"))
-        .and_then(|line| {
+    // The median of the repeats, so one scheduling hiccup cannot move the
+    // answer the way a mean would.
+    let mut samples = text
+        .lines()
+        .filter(|line| line.starts_with("Benchmark"))
+        .filter_map(|line| {
             let fields = line.split_whitespace().collect::<Vec<_>>();
             let index = fields.iter().position(|field| *field == "ns/op")?;
             fields.get(index - 1)?.replace(',', "").parse::<f64>().ok()
         })
-        .unwrap_or_else(|| panic!("no benchmark line in:\n{text}"))
+        .collect::<Vec<_>>();
+    assert!(!samples.is_empty(), "no benchmark line in:\n{text}");
+    samples.sort_by(f64::total_cmp);
+    samples[samples.len() / 2]
 }
 
 fn measure(go: &Path, label: &str, source: &str, bench_source: &str) -> (f64, f64, usize) {
@@ -99,6 +116,11 @@ fn measure(go: &Path, label: &str, source: &str, bench_source: &str) -> (f64, f6
         &instrumented,
         "work.go",
         &rewrite(source, &obligations.edits).replace(RUNTIME_IMPORT, local),
+    );
+    write(
+        &instrumented,
+        "supercov_probes.go",
+        &probe_array_file("main", "__supercov", local, obligations.probes.len() + 1),
     );
     write(&instrumented, "bench_test.go", bench_source);
     write(

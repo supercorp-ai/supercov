@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use supercov_engine::go_instrumenter::{RUNTIME_IMPORT, build_go_obligations, rewrite};
-use supercov_engine::go_test_harness::{instrument_test_file, synthesized_harness};
+use supercov_engine::go_test_harness::{
+    instrument_test_file, probe_array_file, synthesized_harness,
+};
 
 fn go_binary() -> Option<PathBuf> {
     // Homebrew's Go is not on a non-login shell's PATH on macOS.
@@ -190,6 +192,11 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
     let local = "example.com/probe/supercov";
     let instrumented = rewrite(SOURCE, &obligations.edits).replace(RUNTIME_IMPORT, local);
     write(&root, "classify.go", &instrumented);
+    write(
+        &root,
+        "supercov_probes.go",
+        &probe_array_file("main", "__supercov", local, 256),
+    );
 
     // The test file goes in as the author wrote it and comes out bound to its
     // evidence, which is the whole point of the harness generator.

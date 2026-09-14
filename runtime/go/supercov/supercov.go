@@ -13,23 +13,24 @@ import (
 	"encoding/binary"
 	"os"
 	"sync"
-	"sync/atomic"
 )
 
-// A bucket is one slice of per-probe bitmasks: bit 0 for false, bit 1 for
-// true. A point or an alternative only ever sets bit 1.
-//
-// There is always exactly one active bucket, so the hot path never asks
-// whether a test is running. Execution outside any test — package
-// initialisers, and anything a leaked goroutine does after its test finished —
-// lands in bucket zero rather than being charged to whichever test was current.
-type bucket struct {
-	name   string
-	probes []uint32
-	// Distinct decision vectors this test produced, one slice per decision.
-	// They live here rather than globally because MC/DC evidence is only
-	// useful if it says which test established independence.
-	vectors [][]uint64
+// What one test reached: the probes it set and the decision vectors it
+// established, as sparse pairs rather than a copy of the whole array.
+type testRecord struct {
+	name    string
+	probes  []probeHit
+	vectors []vectorHit
+}
+
+type probeHit struct {
+	index uint32
+	value uint32
+}
+
+type vectorHit struct {
+	decision uint32
+	key      uint64
 }
 
 // One decision's entire state, in one struct.
@@ -46,6 +47,11 @@ type bucket struct {
 type decisionState struct {
 	evaluating uint64
 	truth      uint64
+	// The keys most recently recorded, so a decision evaluated in a loop can
+	// answer "seen this already" without a call. Two entries because the
+	// common shape is a condition alternating between outcomes; a third
+	// distinct vector simply pays for the call.
+	recent     [2]uint64
 	width      uint8
 	count      uint8
 	// Distinct vectors seen in the current test. Inline rather than a slice:
@@ -83,135 +89,147 @@ const (
 	packedMaxWidth = 24
 )
 
-var empty = &bucket{}
-
 var (
-	active  atomic.Pointer[bucket]
-	buckets []*bucket
+	// The array instrumented packages store into. Its contents are reset at
+	// every test boundary; the header never changes after Reserve, so a probe
+	// running on a leaked goroutine cannot see a torn slice.
+	hits    []uint32
+	global  []uint32
+	records []testRecord
+	current int
 	widths  []uint8
 	size    int
 	mu      sync.Mutex
 )
 
-func init() { active.Store(empty) }
-
-// Arm prepares the runtime for a run of `count` probes, where `conditions`
-// gives the number of conditions in each decision. The generated harness calls
-// it before any test runs.
+// Arm records how many conditions each decision has. The probe array is
+// already in place by then: packages reserve it as they initialise.
 func Arm(count int, conditions []uint8) {
 	mu.Lock()
 	defer mu.Unlock()
-	size = count
+	if hits == nil {
+		hits = make([]uint32, count)
+		global = make([]uint32, count)
+		size = count
+	}
 	widths = conditions
 	states = make([]decisionState, len(conditions))
 	for index, width := range conditions {
 		states[index].width = width
 	}
 	suspended = suspended[:0]
+	current = -1
 	for id := range overflow {
 		delete(overflow, id)
-	}
-	outside := newBucket("")
-	buckets = []*bucket{outside}
-	active.Store(outside)
-}
-
-func newBucket(name string) *bucket {
-	return &bucket{
-		name:    name,
-		probes:  make([]uint32, size),
-		vectors: make([][]uint64, len(widths)),
 	}
 }
 
 // EnterTest binds every probe that fires next to this test, and returns the
 // function that unbinds it.
 //
-// Go runs a package's test functions sequentially unless one opts into
-// parallelism, and Supercov runs one package at a time, so a single active
-// bucket is exact rather than approximate.
+// Attribution is a harvest at the boundary rather than a lookup on every
+// probe: whatever the array holds now belongs to whoever was running, so it is
+// swept into their record and cleared. That is one pass over the probes per
+// test — a few microseconds — in exchange for removing an indirection from the
+// hottest path a coverage tool has.
 func EnterTest(name string) func() {
-	previous := active.Load()
-	if previous == empty {
-		return func() {}
-	}
 	mu.Lock()
-	flushVectors(previous)
-	next := newBucket(name)
-	buckets = append(buckets, next)
+	harvest()
+	records = append(records, testRecord{name: name})
+	current = len(records) - 1
 	mu.Unlock()
-	active.Store(next)
 	return func() {
 		mu.Lock()
-		flushVectors(next)
+		harvest()
+		current = -1
 		mu.Unlock()
-		active.Store(previous)
 	}
 }
 
-// flushVectors hands the vectors recorded since the last change to the test
-// that produced them, and clears the counters for the next one.
-func flushVectors(into *bucket) {
-	if into == nil || into == empty {
-		return
+// harvest moves everything the probe array holds into the running test's
+// record and clears it. Execution outside any test still reaches the run-wide
+// totals; it simply belongs to no test.
+func harvest() {
+	var into *testRecord
+	if current >= 0 && current < len(records) {
+		into = &records[current]
+	}
+	for index, value := range hits {
+		if value == 0 {
+			continue
+		}
+		global[index] |= value
+		if into != nil {
+			into.probes = append(into.probes, probeHit{uint32(index), value})
+		}
+		hits[index] = 0
 	}
 	for id := range states {
 		state := &states[id]
-		if state.count > 0 && id < len(into.vectors) {
-			into.vectors[id] = append(into.vectors[id], state.slots[:state.count]...)
+		if state.count > 0 && into != nil {
+			for _, key := range state.slots[:state.count] {
+				into.vectors = append(into.vectors, vectorHit{uint32(id), key})
+			}
 		}
 		state.count = 0
 	}
 	for id, keys := range overflow {
-		if int(id) < len(into.vectors) {
+		if into != nil {
 			for key := range keys {
-				into.vectors[id] = append(into.vectors[id], key)
+				into.vectors = append(into.vectors, vectorHit{id, key})
 			}
 		}
 		delete(overflow, id)
 	}
 }
 
-// P records that a point — a statement or a function — was reached.
+// Reserve hands every instrumented package the one array their probes store
+// into, allocating it on the first call.
+//
+// This is the shape Go's own cover tool and JaCoCo both settled on, and for
+// the same reason: a probe should be a single store into an array the code
+// already holds, not a call that has to find the array first. `hits[5] = 2`
+// compiles to one move; reaching the same word through a function means a
+// global load and a bounds check before anything is written.
+//
+// Package-level variables initialise in dependency order, so this package's
+// own init has run before any generated `var _ = supercov.Reserve(...)`.
+func Reserve(count int) []uint32 {
+	mu.Lock()
+	defer mu.Unlock()
+	if hits == nil {
+		hits = make([]uint32, count)
+		global = make([]uint32, count)
+		size = count
+	}
+	return hits
+}
+
+// P records that a point was reached, for callers that hold no array — the
+// generated harness rather than generated probes.
 func P(id uint32) {
-	b := active.Load()
-	if int(id) < len(b.probes) {
-		// A plain store, not `|=`. A point only ever records "reached", so
-		// there is no earlier bit to preserve and no reason to read the word
-		// back before writing it.
-		b.probes[id] = 2
+	if int(id) < len(hits) {
+		hits[id] = 2
 	}
 }
 
 // A records that a branch alternative was taken.
 func A(id uint32) { P(id) }
 
-// B records which arm of a branch a condition selects, and returns the value
-// unchanged. The arm that was not taken stays unset, which is what makes an
-// untested guard visible rather than invisible.
-func B(whenTrue, whenFalse uint32, value bool) bool {
-	if value {
-		P(whenTrue)
-	} else {
-		P(whenFalse)
-	}
-	return value
-}
-
 // C observes one condition of a decision and returns its value unchanged, so
 // wrapping an operand cannot change what the expression evaluates to. Go
 // evaluates a call argument only when the call is reached, which is what keeps
 // `&&` and `||` short-circuiting through the wrapper.
 func C(id uint32, index uint8, value bool) bool {
-	if int(id) >= len(states) || index >= 64 {
+	if uint(id) >= uint(len(states)) || index >= 64 {
 		return value
 	}
 	state := &states[id]
 	bit := uint64(1) << index
 	if index == 0 {
-		// D clears both words when it consumes an evaluation, so a non-zero
-		// mask here means this decision is already open: recursion arrived
-		// through one of its own operands.
+		// B clears the mask when it closes an evaluation, so a non-zero mask
+		// here means this decision is already open: recursion arrived through
+		// one of its own operands.
 		if state.evaluating != 0 {
 			suspended = append(suspended, suspension{id, state.evaluating, state.truth})
 		}
@@ -225,48 +243,85 @@ func C(id uint32, index uint8, value bool) bool {
 	return value
 }
 
-// D observes a decision's outcome and returns it unchanged, closing the
-// evaluation its conditions opened and recording the vector against the test
-// that produced it.
+// B records which arm of a branch a condition selects and returns the value
+// unchanged.
 //
-// Neither C nor D records a point. The vector already says exactly which
-// conditions were evaluated and what the decision came to, so a probe beside
-// it would be the same fact stored twice, paid for on the hottest path
-// instrumentation has.
-func D(id uint32, value bool) bool {
-	if int(id) >= len(states) {
+// The form for a branch whose condition is a single operand, which is most of
+// them: no independence obligation, no call, and small enough that the
+// compiler inlines it into the caller.
+func B(whenTrue, whenFalse uint32, value bool) bool {
+	if value {
+		if int(whenTrue) < len(hits) {
+			hits[whenTrue] = 2
+		}
+	} else if int(whenFalse) < len(hits) {
+		hits[whenFalse] = 2
+	}
+	return value
+}
+
+// BD is B for a branch whose condition has more than one operand: it also
+// closes the decision those operands opened.
+//
+// One call rather than two. Every decision Supercov records sits in an `if` or
+// a `for`, so its outcome is the value this wrapper already holds — a separate
+// outcome wrapper would observe it a second time, and profiling put 38% of an
+// instrumented tight loop in exactly that second call.
+func BD(whenTrue, whenFalse, id uint32, value bool) bool {
+	if value {
+		if int(whenTrue) < len(hits) {
+			hits[whenTrue] = 2
+		}
+	} else if int(whenFalse) < len(hits) {
+		hits[whenFalse] = 2
+	}
+	if uint(id) >= uint(len(states)) {
 		return value
 	}
 	state := &states[id]
-	mask, values := state.evaluating, state.truth
-	state.evaluating, state.truth = 0, 0
+	key := state.evaluating | state.truth<<packedValueShift
+	if value {
+		key |= 1 << packedOutcomeShift
+	}
+	state.evaluating = 0
+	// Nothing is suspended in the ordinary case, so no outer evaluation is
+	// waiting to be restored and a cached key can return at once.
+	if len(suspended) == 0 && (key == state.recent[0] || key == state.recent[1]) {
+		return value
+	}
+	remember(state, id, key)
+	return value
+}
+
+// remember holds everything B does not need on the path most evaluations
+// take: restoring an evaluation that recursion interrupted, and recording a
+// vector this test has not produced before.
+//
+//go:noinline
+func remember(state *decisionState, id uint32, key uint64) {
 	if len(suspended) > 0 {
 		if last := suspended[len(suspended)-1]; last.id == id {
 			state.evaluating, state.truth = last.evaluating, last.truth
 			suspended = suspended[:len(suspended)-1]
 		}
 	}
+	mask := key & ((1 << packedValueShift) - 1)
 	if mask == 0 || state.width > packedMaxWidth {
-		return value
+		return
 	}
-	key := mask | values<<packedValueShift
-	if value {
-		key |= 1 << packedOutcomeShift
-	}
-	// A handful of register compares over words that share a cache line with
-	// the state just read, which is why this beats hashing per evaluation.
+	state.recent[1] = state.recent[0]
+	state.recent[0] = key
 	for offset := uint8(0); offset < state.count; offset++ {
 		if state.slots[offset] == key {
-			return value
+			return
 		}
 	}
 	if state.count < inlineSlots {
 		state.slots[state.count] = key
 		state.count++
-		return value
+		return
 	}
 	rare(id, key)
-	return value
 }
 
 func rare(id uint32, key uint64) {
@@ -290,19 +345,13 @@ func Finish(code int, path string) int {
 	return code
 }
 
-// Write emits the evidence transport the engine reads. The run-wide totals are
-// the union of every bucket, so they cannot disagree with the per-test records
-// they are derived from.
+// Write emits the evidence transport the engine reads. The run-wide totals
+// accumulate as tests are harvested, so they cannot disagree with the per-test
+// records they come from.
 func Write(path string) error {
 	mu.Lock()
 	defer mu.Unlock()
-	flushVectors(active.Load())
-	global := make([]uint32, size)
-	for _, b := range buckets {
-		for index, value := range b.probes {
-			global[index] |= value
-		}
-	}
+	harvest()
 	file, err := os.Create(path)
 	if err != nil {
 		return err
@@ -323,56 +372,40 @@ func Write(path string) error {
 			return err
 		}
 	}
-	named := buckets[1:]
-	if err := put(uint64(len(named))); err != nil {
+	if err := put(uint64(len(records))); err != nil {
 		return err
 	}
-	for _, b := range named {
-		if err := put(uint64(len(b.name))); err != nil {
+	for _, record := range records {
+		if err := put(uint64(len(record.name))); err != nil {
 			return err
 		}
-		if _, err := out.WriteString(b.name); err != nil {
+		if _, err := out.WriteString(record.name); err != nil {
 			return err
 		}
-		// Only probes this test reached, so the transport is proportional to
-		// what ran rather than to the size of the project.
-		count := 0
-		for _, value := range b.probes {
-			if value != 0 {
-				count++
-			}
-		}
-		if err := put(uint64(count)); err != nil {
+		// Sparse: only what this test reached, so the transport is
+		// proportional to what ran rather than to the size of the project.
+		if err := put(uint64(len(record.probes))); err != nil {
 			return err
 		}
-		for index, value := range b.probes {
-			if value == 0 {
-				continue
-			}
-			if err := put(uint64(index)); err != nil {
+		for _, hit := range record.probes {
+			if err := put(uint64(hit.index)); err != nil {
 				return err
 			}
-			if err := put(uint64(value)); err != nil {
+			if err := put(uint64(hit.value)); err != nil {
 				return err
 			}
 		}
 		// The vectors this test established, so independence can be traced to
 		// the test that proved it rather than to the run as a whole.
-		vectorCount := 0
-		for _, keys := range b.vectors {
-			vectorCount += len(keys)
-		}
-		if err := put(uint64(vectorCount)); err != nil {
+		if err := put(uint64(len(record.vectors))); err != nil {
 			return err
 		}
-		for index, keys := range b.vectors {
-			for _, key := range keys {
-				if err := put(uint64(index)); err != nil {
-					return err
-				}
-				if err := put(key); err != nil {
-					return err
-				}
+		for _, hit := range record.vectors {
+			if err := put(uint64(hit.decision)); err != nil {
+				return err
+			}
+			if err := put(hit.key); err != nil {
+				return err
 			}
 		}
 	}
@@ -383,23 +416,21 @@ func Write(path string) error {
 		if err := put(uint64(width)); err != nil {
 			return err
 		}
-		// The run-wide set is the union of what the tests saw, so it cannot
-		// disagree with the per-test records it comes from.
 		union := []uint64{}
-		for _, b := range buckets {
-			if index >= len(b.vectors) {
-				continue
-			}
-			for _, key := range b.vectors[index] {
+		for _, record := range records {
+			for _, hit := range record.vectors {
+				if int(hit.decision) != index {
+					continue
+				}
 				found := false
 				for _, existing := range union {
-					if existing == key {
+					if existing == hit.key {
 						found = true
 						break
 					}
 				}
 				if !found {
-					union = append(union, key)
+					union = append(union, hit.key)
 				}
 			}
 		}
