@@ -10,7 +10,6 @@ use std::process::Command;
 
 use supercov_engine::go_evidence::read_evidence;
 use supercov_engine::jvm_instrumenter::{JvmLanguage, build_jvm_obligations, rewrite};
-use supercov_engine::jvm_test_harness::instrument_test_file;
 
 fn tool(name: &str) -> Option<PathBuf> {
     // Homebrew's JDK is keg-only, so `/usr/bin/java` is a stub that finds no
@@ -376,10 +375,11 @@ class CalculatorTest {
 "#;
 
 #[test]
-fn a_real_junit_5_run_attributes_coverage_to_the_test_that_produced_it() {
-    // The parser tests say the harness produces valid source. Only JUnit can
-    // say the announcements land where a real framework puts its test
-    // lifecycle, which is the thing attribution depends on.
+fn the_platform_listener_attributes_coverage_without_touching_test_source() {
+    // The test source goes in untouched and still comes out attributed, which
+    // is the whole point of listening to the platform instead of rewriting
+    // tests: the same mechanism covers Kotest and Spock, which declare no
+    // annotated methods a rewriter could find.
     let (Some(javac), Some(java), Some(jar)) = (tool("javac"), tool("java"), junit_jar()) else {
         eprintln!("[jvm-frontend] skipped: no JDK or JUnit runner available");
         return;
@@ -392,6 +392,13 @@ fn a_real_junit_5_run_attributes_coverage_to_the_test_that_produced_it() {
         "com/supercorp/supercov/Supercov.java",
         &std::fs::read_to_string(runtime).expect("runtime source"),
     );
+    let listener = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/jvm/com/supercorp/supercov/SupercovListener.java");
+    write(
+        &root,
+        "com/supercorp/supercov/SupercovListener.java",
+        &std::fs::read_to_string(listener).expect("listener source"),
+    );
 
     let mut next = 0;
     let obligations =
@@ -403,22 +410,12 @@ fn a_real_junit_5_run_attributes_coverage_to_the_test_that_produced_it() {
         &rewrite(UNDER_TEST, &obligations.edits),
     );
 
-    let harness = instrument_test_file(SUITE, JvmLanguage::Java).expect("harness");
-    assert_eq!(
-        harness.tests,
-        [
-            "CalculatorTest#zeroIsNamed",
-            "CalculatorTest#loudAndLargeIsBig"
-        ]
-    );
-    write(
-        &root,
-        "CalculatorTest.java",
-        &rewrite(SUITE, &harness.edits),
-    );
+    // The test source goes in exactly as its author wrote it. Attribution
+    // comes from the JUnit Platform listener, which sees every engine's tests
+    // — including Kotest's and Spock's, which declare no annotated methods for
+    // a rewriter to find.
+    write(&root, "CalculatorTest.java", SUITE);
 
-    // Arming and writing hang off JUnit's own lifecycle callbacks, which is
-    // how a generated harness will do it for a real project.
     let probes = obligations.probes.len() + 1;
     let widths = obligations
         .decision_widths
@@ -428,19 +425,14 @@ fn a_real_junit_5_run_attributes_coverage_to_the_test_that_produced_it() {
         .join(", ");
     write(
         &root,
-        "SupercovListener.java",
+        "com/supercorp/supercov/SupercovConfig.java",
         &format!(
-            r#"import com.supercorp.supercov.Supercov;
-import org.junit.platform.launcher.TestExecutionListener;
-import org.junit.platform.launcher.TestPlan;
+            r#"package com.supercorp.supercov;
 
-public class SupercovListener implements TestExecutionListener {{
-    @Override public void testPlanExecutionStarted(TestPlan plan) {{
-        Supercov.arm({probes}, new int[] {{{widths}}});
-    }}
-    @Override public void testPlanExecutionFinished(TestPlan plan) {{
-        try {{ Supercov.write("evidence.bin"); }} catch (Exception e) {{ throw new RuntimeException(e); }}
-    }}
+public final class SupercovConfig {{
+    public static final int PROBES = {probes};
+    public static final int[] WIDTHS = new int[] {{{widths}}};
+    public static final String EVIDENCE = "evidence.bin";
 }}
 "#
         ),
@@ -448,8 +440,7 @@ public class SupercovListener implements TestExecutionListener {{
     write(
         &root,
         "META-INF/services/org.junit.platform.launcher.TestExecutionListener",
-        "SupercovListener
-",
+        "com.supercorp.supercov.SupercovListener\n",
     );
 
     let classpath = format!("{}:.", jar.display());
@@ -460,9 +451,10 @@ public class SupercovListener implements TestExecutionListener {{
             "-d",
             ".",
             "com/supercorp/supercov/Supercov.java",
+            "com/supercorp/supercov/SupercovListener.java",
+            "com/supercorp/supercov/SupercovConfig.java",
             "Calculator.java",
             "CalculatorTest.java",
-            "SupercovListener.java",
         ])
         .current_dir(&root)
         .output()
@@ -501,24 +493,27 @@ public class SupercovListener implements TestExecutionListener {{
         .iter()
         .map(|t| t.name.clone())
         .collect::<Vec<_>>();
+    // The names are the framework's own — class then method, as JUnit reports
+    // them — so a reader matching this against a test report does not have to
+    // translate between two naming schemes.
     assert!(
-        named.contains(&"CalculatorTest#zeroIsNamed".to_owned()),
+        named.contains(&"CalculatorTest#zeroIsNamed()".to_owned()),
         "{named:?}"
     );
     assert!(
-        named.contains(&"CalculatorTest#loudAndLargeIsBig".to_owned()),
+        named.contains(&"CalculatorTest#loudAndLargeIsBig()".to_owned()),
         "{named:?}"
     );
 
     let zero = evidence
         .tests
         .iter()
-        .find(|t| t.name.ends_with("zeroIsNamed"))
+        .find(|t| t.name.contains("zeroIsNamed"))
         .unwrap();
     let big = evidence
         .tests
         .iter()
-        .find(|t| t.name.ends_with("loudAndLargeIsBig"))
+        .find(|t| t.name.contains("loudAndLargeIsBig"))
         .unwrap();
     // Each test reached different code, and neither claims the other's.
     assert_ne!(zero.probes, big.probes);

@@ -1,10 +1,18 @@
-//! Binding JVM test methods to the evidence they produce.
+//! Binding JVM test methods to their evidence by rewriting them.
 //!
-//! Every framework worth supporting here marks its tests with an annotation —
-//! JUnit 4 and 5, TestNG, and the annotation-based half of Kotlin testing all
-//! do. Recognising the annotation rather than the framework means one rule
-//! covers them, and a framework that adopts the same convention tomorrow works
-//! without being named.
+//! This is the fallback, not the main path. Anything that runs on the JUnit
+//! Platform — JUnit 4 through the vintage engine, JUnit 5, Kotest, Spock —
+//! is attributed by `SupercovListener` instead, which sees every engine's
+//! tests under the names the framework itself chose and leaves test sources
+//! completely untouched. Supercov rewrites product source because it must;
+//! rewriting tests as well would put edits in files people read constantly,
+//! for a measurement it can get without them.
+//!
+//! What remains is TestNG, which is not a platform engine and reports through
+//! its own listener interface. Until that adapter exists, an annotated method
+//! can still be bound here, and the rule is the annotation rather than the
+//! framework: JUnit and TestNG both spell theirs `@Test`, so one rule covers
+//! them and a framework adopting the convention works without being named.
 //!
 //! The announcement is wrapped in `try`/`finally`, not appended. A failing
 //! test throws, and a test that ends by throwing is exactly the one whose

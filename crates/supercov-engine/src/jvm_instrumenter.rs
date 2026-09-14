@@ -24,7 +24,7 @@ pub const RUNTIME_CLASS: &str = "com.supercorp.supercov.Supercov";
 /// The array probes store into, qualified so no import is needed.
 pub const HITS: &str = "com.supercorp.supercov.Supercov.HITS";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum JvmLanguage {
     Java,
     Kotlin,
