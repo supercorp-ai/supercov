@@ -1230,3 +1230,55 @@ fn editor_schema_accepts_explicit_null_basis_and_requires_the_field() {
         );
     }
 }
+
+/// "dependency file changed: src/a.js" names a file and leaves the author to
+/// work out what it has to do with this claim. A flow depends on a file for one
+/// of four reasons and they call for different judgements, so the reason says
+/// which, and where the flow's nodes sit in it.
+#[test]
+fn a_changed_dependency_says_why_it_is_one_and_where_the_flow_sits() {
+    let (inputs, mut map, state) = fixture();
+    map.assertions[0].flows[0].watch = vec!["test.js".into()];
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    let mut new = inputs.clone();
+    new.files
+        .get_mut("src/a.js")
+        .unwrap()
+        .push_str("// a note\n");
+    let (next, next_state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
+    let a = &next.assertions[0];
+    let why = reasons(a, &a.flows[0], &next, &next_state, &new);
+    let named = why
+        .iter()
+        .find(|r| r.starts_with("dependency file changed or removed: src/a.js"))
+        .unwrap_or_else(|| panic!("{why:?}"));
+    // The node's role and its line, so the author can look rather than reread.
+    assert!(named.contains("holds this flow's"), "{named}");
+    assert!(named.contains("return:1"), "{named}");
+    // And not a role it does not have: src/a.js is not watched here, test.js is.
+    assert!(!named.contains("watched"), "{named}");
+}
+
+/// A watched file is the author's own "tell me if this changes", and reads
+/// differently from a file that merely holds a node.
+#[test]
+fn a_watched_file_is_named_as_watched() {
+    let (inputs, mut map, state) = fixture();
+    map.assertions[0].flows[0].watch = vec!["src/helper.js".into()];
+    map.assertions[0].flows[0].nodes[0].at = anchor("src/a.js", "return 1;\n", "return 1;");
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    let mut new = inputs.clone();
+    new.files
+        .get_mut("src/helper.js")
+        .unwrap()
+        .push_str("more();\n");
+    let (next, next_state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
+    let a = &next.assertions[0];
+    let why = reasons(a, &a.flows[0], &next, &next_state, &new);
+    let named = why
+        .iter()
+        .find(|r| r.contains("src/helper.js"))
+        .unwrap_or_else(|| panic!("{why:?}"));
+    assert!(named.contains("is watched by this flow"), "{named}");
+    assert!(!named.contains("holds this flow's"), "{named}");
+}
