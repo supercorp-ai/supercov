@@ -81,7 +81,7 @@ pub fn instrument_test_file(
             file.edits.push(GoEdit {
                 at: body.start_byte() + 1,
                 rank: 100,
-                text: format!("\n\t{alias}.Arm(__supercovProbeCount)"),
+                text: format!("\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)"),
             });
             // Wrap the m.Run() call itself rather than deferring after it.
             wrap_run_calls(body, source, alias, evidence_path, &mut file.edits);
@@ -144,6 +144,7 @@ pub fn synthesized_harness(
     alias: &str,
     import: &str,
     probe_count: usize,
+    decision_widths: &[u8],
     evidence_path: &str,
     declares_test_main: bool,
 ) -> String {
@@ -153,15 +154,26 @@ pub fn synthesized_harness(
         out.push_str("\t\"testing\"\n\n");
     }
     out.push_str(&format!("\t{alias} \"{import}\"\n)\n\n"));
-    out.push_str(&format!("const __supercovProbeCount = {probe_count}\n\n"));
+    // The runtime sizes each decision's vector from this, so a width the
+    // harness got wrong would record vectors of the wrong shape.
+    let widths = decision_widths
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "const __supercovProbeCount = {probe_count}\n\nvar __supercovDecisionWidths = []uint8{{{widths}}}\n\n"
+    ));
     // Referencing the alias keeps the import used even when this file is the
     // only thing that needs it, which Go requires.
     if declares_test_main {
-        out.push_str(&format!("var _ = {alias}.Arm\n"));
+        out.push_str(&format!(
+            "var _ = {alias}.Arm\nvar _ = __supercovDecisionWidths\n"
+        ));
         return out;
     }
     out.push_str(&format!(
-        "func TestMain(m *testing.M) {{\n\t{alias}.Arm(__supercovProbeCount)\n\tos.Exit({alias}.Finish(m.Run(), \"{evidence_path}\"))\n}}\n"
+        "func TestMain(m *testing.M) {{\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n\tos.Exit({alias}.Finish(m.Run(), \"{evidence_path}\"))\n}}\n"
     ));
     out.replace("\t\"testing\"\n", "\t\"os\"\n\t\"testing\"\n")
 }
@@ -204,7 +216,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("__supercov.Arm(__supercovProbeCount)"),
+            out.contains("__supercov.Arm(__supercovProbeCount, __supercovDecisionWidths)"),
             "{out}"
         );
         assert!(
@@ -217,8 +229,19 @@ mod tests {
     fn a_package_without_test_main_gets_one_and_never_two() {
         // Go allows a package exactly one TestMain, so the generated file must
         // declare it only when the package has none.
-        let generated =
-            synthesized_harness("p", "__supercov", "example.com/rt", 42, "e.bin", false);
+        let generated = synthesized_harness(
+            "p",
+            "__supercov",
+            "example.com/rt",
+            42,
+            &[2, 3],
+            "e.bin",
+            false,
+        );
+        assert!(
+            generated.contains("[]uint8{2, 3}"),
+            "the runtime sizes its vectors from this:\n{generated}"
+        );
         assert!(
             generated.contains("func TestMain(m *testing.M)"),
             "{generated}"
@@ -229,7 +252,8 @@ mod tests {
             "the generated harness preserves the exit code"
         );
 
-        let alongside = synthesized_harness("p", "__supercov", "example.com/rt", 42, "e.bin", true);
+        let alongside =
+            synthesized_harness("p", "__supercov", "example.com/rt", 42, &[], "e.bin", true);
         assert!(!alongside.contains("func TestMain"), "{alongside}");
         assert!(
             alongside.contains("var _ = __supercov.Arm"),

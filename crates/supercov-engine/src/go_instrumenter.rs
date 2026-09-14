@@ -42,19 +42,14 @@ pub enum GoProbeTarget {
         id: String,
     },
     /// One arm of a branch: the runtime records which alternative ran.
+    ///
+    /// Conditions and decision outcomes deliberately have no probe. The
+    /// recorded vector already says which conditions were evaluated and what
+    /// the decision came to, so a probe beside it would store the same fact
+    /// twice and charge for it on the hottest path instrumentation has.
     Alternative {
         branch: String,
         alternative: String,
-    },
-    /// One condition inside a decision, with its position in the tree, so the
-    /// runtime can report the vector MC/DC needs rather than a single bit.
-    Condition {
-        decision: String,
-        index: usize,
-    },
-    /// The decision's own outcome.
-    Outcome {
-        decision: String,
     },
 }
 
@@ -72,6 +67,9 @@ pub struct GoFileObligations {
     pub probes: BTreeMap<u64, GoProbe>,
     /// Everything the rewriter must insert to observe these obligations.
     pub edits: Vec<GoEdit>,
+    /// Conditions per decision, in the order the runtime indexes them. The
+    /// harness passes this to `Arm` so the runtime can size its vectors.
+    pub decision_widths: Vec<u8>,
 }
 
 pub fn parse(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
@@ -142,6 +140,7 @@ struct Collector<'a> {
     decisions: Vec<DecisionMeta>,
     probes: BTreeMap<u64, GoProbe>,
     limitations: Vec<serde_json::Value>,
+    widths: Vec<u8>,
     counter: usize,
 }
 
@@ -289,28 +288,31 @@ impl<'a> Collector<'a> {
             .collect::<Vec<_>>();
         let (line, column) = self.position(node);
         let id = self.id("d");
+        // The runtime indexes decisions by position, so the index a wrapper
+        // carries is this decision's place in the file's width table.
+        let index_of_decision = self.widths.len();
+        self.widths.push(leaves.len().min(64) as u8);
         let alias = self.alias.to_owned();
+        // No probe per condition or outcome. The recorded vector already says
+        // which conditions were evaluated and what the decision came to, so a
+        // probe beside it would store the same fact twice and charge for it on
+        // every evaluation.
         for (index, leaf) in leaves.iter().enumerate() {
-            let probe = self.probe(
-                GoProbeTarget::Condition {
-                    decision: id.clone(),
-                    index,
-                },
-                leaf.start_byte(),
-            );
             // Wrapping an operand keeps short-circuiting intact: Go evaluates a
             // call argument only when the call is reached, so the right-hand
             // wrapper runs exactly when the unwrapped operand would have.
-            self.edit(leaf.start_byte(), 20, format!("{alias}.C({probe}, "));
+            self.edit(
+                leaf.start_byte(),
+                20,
+                format!("{alias}.C({index_of_decision}, {index}, "),
+            );
             self.edit(leaf.end_byte(), 20, ")".to_owned());
         }
-        let outcome = self.probe(
-            GoProbeTarget::Outcome {
-                decision: id.clone(),
-            },
+        self.edit(
             node.start_byte(),
+            10,
+            format!("{alias}.D({index_of_decision}, "),
         );
-        self.edit(node.start_byte(), 10, format!("{alias}.D({outcome}, "));
         self.edit(node.end_byte(), 10, ")".to_owned());
         self.decisions.push(DecisionMeta {
             id,
@@ -565,6 +567,7 @@ pub fn build_go_obligations_with_alias(
         decisions: Vec::new(),
         probes: BTreeMap::new(),
         limitations: Vec::new(),
+        widths: Vec::new(),
         counter: 0,
     };
     let mut cursor = tree.root_node().walk();
@@ -591,6 +594,7 @@ pub fn build_go_obligations_with_alias(
         },
         probes: collector.probes,
         edits,
+        decision_widths: collector.widths,
     })
 }
 
@@ -884,13 +888,14 @@ func classify(a int, b bool) string {
                 .branches
                 .iter()
                 .map(|b| b.alternatives.len())
-                .sum::<usize>()
-            + go.manifest
-                .decisions
-                .iter()
-                .map(|d| d.conditions.len() + 1)
                 .sum::<usize>();
+        // Points and branch alternatives carry probes. Conditions and outcomes
+        // do not: their vector already says which ran and what the decision
+        // came to, so a probe would be the same fact stored twice.
         assert_eq!(go.probes.len(), expected);
+        // A decision is still an obligation, answered by the width the runtime
+        // sizes its vector from rather than by a probe.
+        assert_eq!(go.decision_widths.len(), go.manifest.decisions.len());
 
         // Guessing at a file that does not parse would put obligations on lines
         // that may not exist.

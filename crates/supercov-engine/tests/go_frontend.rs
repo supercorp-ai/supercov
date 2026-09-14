@@ -83,9 +83,18 @@ func TestZero(t *testing.T) {
 }
 "#;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Vector {
+    evaluated: u64,
+    values: u64,
+    outcome: bool,
+}
+
 struct Evidence {
     global: Vec<u64>,
     tests: std::collections::BTreeMap<String, std::collections::BTreeMap<usize, u64>>,
+    test_vectors: std::collections::BTreeMap<String, Vec<(usize, Vector)>>,
+    decisions: Vec<(u8, Vec<Vector>)>,
 }
 
 struct Cursor<'a> {
@@ -115,6 +124,7 @@ fn decode(bytes: &[u8]) -> Evidence {
     let global = (0..count).map(|_| cursor.u64()).collect::<Vec<_>>();
     let test_count = cursor.u64() as usize;
     let mut tests = std::collections::BTreeMap::new();
+    let mut test_vectors = std::collections::BTreeMap::new();
     for _ in 0..test_count {
         let length = cursor.u64() as usize;
         let name = cursor.text(length);
@@ -124,9 +134,39 @@ fn decode(bytes: &[u8]) -> Evidence {
             let index = cursor.u64() as usize;
             probes.insert(index, cursor.u64());
         }
-        tests.insert(name, probes);
+        let vector_entries = cursor.u64() as usize;
+        let mut vectors = Vec::new();
+        for _ in 0..vector_entries {
+            let decision = cursor.u64() as usize;
+            vectors.push((decision, unpack(cursor.u64())));
+        }
+        tests.insert(name.clone(), probes);
+        test_vectors.insert(name, vectors);
     }
-    Evidence { global, tests }
+    let decision_count = cursor.u64() as usize;
+    let mut decisions = Vec::new();
+    for _ in 0..decision_count {
+        let width = cursor.u64() as u8;
+        let keys = cursor.u64() as usize;
+        let seen = (0..keys).map(|_| unpack(cursor.u64())).collect::<Vec<_>>();
+        decisions.push((width, seen));
+    }
+    Evidence {
+        global,
+        tests,
+        test_vectors,
+        decisions,
+    }
+}
+
+/// The runtime packs one evaluation into a word: evaluated mask, then the
+/// values shifted above it, then the outcome.
+fn unpack(key: u64) -> Vector {
+    Vector {
+        evaluated: key & 0xFF_FFFF,
+        values: (key >> 24) & 0xFF_FFFF,
+        outcome: (key >> 48) & 1 == 1,
+    }
 }
 
 #[test]
@@ -164,7 +204,15 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
     write(
         &root,
         "supercov_generated_test.go",
-        &synthesized_harness("main", "__supercov", local, 256, "evidence.bin", false),
+        &synthesized_harness(
+            "main",
+            "__supercov",
+            local,
+            256,
+            &obligations.decision_widths,
+            "evidence.bin",
+            false,
+        ),
     );
 
     // `go vet` is stricter than the compiler and catches shapes that compile
@@ -194,51 +242,66 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
     );
 
     let evidence = decode(&std::fs::read(root.join("evidence.bin")).expect("evidence"));
-    let probe_of =
-        |predicate: &dyn Fn(&supercov_engine::go_instrumenter::GoProbeTarget) -> bool| {
-            obligations
-                .probes
-                .values()
-                .find(|probe| predicate(&probe.target))
-                .map(|probe| probe.id as usize)
-                .expect("probe")
-        };
-    use supercov_engine::go_instrumenter::GoProbeTarget;
-    let first_condition =
-        probe_of(&|target| matches!(target, GoProbeTarget::Condition { index: 0, .. }));
-    let second_condition =
-        probe_of(&|target| matches!(target, GoProbeTarget::Condition { index: 1, .. }));
-
     let big = &evidence.tests["TestBig"];
     let zero = &evidence.tests["TestZero"];
-
-    // The decisive one: `b` is only evaluated when `a > 10` is true. If the
-    // wrapper broke short-circuiting, TestZero would have observed it too --
-    // and the instrumented program would behave differently from the original.
-    assert_eq!(
-        big.get(&second_condition).copied(),
-        Some(2),
-        "TestBig saw b as true"
-    );
-    assert_eq!(
-        zero.get(&second_condition),
-        None,
-        "TestZero must never evaluate b: `a > 10` was false, so `&&` short-circuits"
-    );
-
-    // Both outcomes of the first condition were seen, by different tests.
-    assert_eq!(big.get(&first_condition).copied(), Some(2));
-    assert_eq!(zero.get(&first_condition).copied(), Some(1));
-    // Globally that condition is fully exercised, which is what the report adds up.
-    assert_eq!(
-        evidence.global[first_condition], 3,
-        "true and false both observed"
-    );
 
     // Attribution is exact rather than approximate: neither test claims the
     // other's evidence.
     assert!(!big.is_empty() && !zero.is_empty());
     assert_ne!(big, zero);
+
+    // MC/DC needs vectors, not per-condition bits. The decisive distinction is
+    // that a short-circuited operand is *unevaluated*, which is a different
+    // fact from being false -- and the only thing that lets independence be
+    // judged at all.
+    assert_eq!(
+        obligations.decision_widths,
+        [2],
+        "one decision of two conditions"
+    );
+    let (width, vectors) = &evidence.decisions[0];
+    assert_eq!(*width, 2);
+
+    // TestZero: `a > 10` was false, so `b` was never evaluated. If wrapping had
+    // broken short-circuiting, bit 1 would be set here and the instrumented
+    // program would have computed something the original never would.
+    let short_circuited = Vector {
+        evaluated: 0b01,
+        values: 0b00,
+        outcome: false,
+    };
+    // TestBig: both evaluated, both true.
+    let both_true = Vector {
+        evaluated: 0b11,
+        values: 0b11,
+        outcome: true,
+    };
+    assert!(vectors.contains(&short_circuited), "{vectors:?}");
+    assert!(vectors.contains(&both_true), "{vectors:?}");
+    // Two evaluations, two distinct vectors: recording de-duplicates rather
+    // than accumulating one entry per loop iteration.
+    assert_eq!(vectors.len(), 2, "{vectors:?}");
+
+    // And each vector belongs to the test that established it. MC/DC evidence
+    // that cannot name the test which proved independence is far less use.
+    assert_eq!(evidence.test_vectors["TestBig"], [(0, both_true)]);
+    assert_eq!(evidence.test_vectors["TestZero"], [(0, short_circuited)]);
+
+    // The run-wide totals are the union of the per-test records, so a probe any
+    // test reached is reached run-wide, and the union invents nothing of its
+    // own.
+    let reached = big
+        .keys()
+        .chain(zero.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    for probe in &reached {
+        assert_eq!(evidence.global[*probe], 2, "probe {probe} was reached");
+    }
+    assert_eq!(
+        evidence.global.iter().filter(|value| **value != 0).count(),
+        reached.len()
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }

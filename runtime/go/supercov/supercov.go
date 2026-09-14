@@ -1,11 +1,11 @@
 // Package supercov is the runtime half of Supercov's Go frontend.
 //
-// Instrumented source calls into it on every obligation, so the cost of a
-// probe is the cost of this package's hot path and nothing else. That path is
-// a single store into a preallocated slice: no locks, no allocation, no map
-// lookup, no interface dispatch. Anything that cannot be done in a store is
-// done at a test boundary instead, where it is paid once per test rather than
-// once per statement.
+// Instrumented source calls into it on every obligation, so a probe costs
+// exactly what this package's hot path costs. For a point that is one atomic
+// pointer load, one bounds check and one store — small enough that the
+// compiler inlines it into the caller. Anything that cannot be done in a store
+// happens at a test boundary instead, where it is paid once per test rather
+// than once per statement.
 package supercov
 
 import (
@@ -16,49 +16,112 @@ import (
 	"sync/atomic"
 )
 
-// Probe kinds, matching the manifest the engine wrote.
-const (
-	kindPoint       = 0
-	kindAlternative = 1
-	kindCondition   = 2
-	kindOutcome     = 3
-)
-
 // A bucket is one slice of per-probe bitmasks: bit 0 for false, bit 1 for
 // true. A point or an alternative only ever sets bit 1.
 //
-// There is always exactly one active bucket, so the hot path never has to ask
-// whether a test is running. Execution outside any test -- package
-// initialisers, and anything a leaked goroutine does after its test finished --
-// lands in bucket zero rather than being attributed to whichever test happened
-// to be current.
+// There is always exactly one active bucket, so the hot path never asks
+// whether a test is running. Execution outside any test — package
+// initialisers, and anything a leaked goroutine does after its test finished —
+// lands in bucket zero rather than being charged to whichever test was current.
 type bucket struct {
 	name   string
 	probes []uint32
+	// Distinct decision vectors this test produced, one slice per decision.
+	// They live here rather than globally because MC/DC evidence is only
+	// useful if it says which test established independence.
+	vectors [][]uint64
 }
 
-// Never nil, so the hot path needs no nil check: before Arm, the bucket is
-// empty and every bounds check simply fails.
+// One decision's entire state, in one struct.
+//
+// C and D touch all of it on every evaluation, so splitting it across parallel
+// arrays costs a separate global slice header load per field. Held together,
+// `&states[id]` is one header load and one bounds check, and everything after
+// is an offset from that pointer.
+//
+// Short-circuiting means a condition may not be evaluated at all, and MC/DC
+// asks a different question of an unevaluated operand than of a false one.
+// Keeping `evaluating` separate from `truth` preserves that; collapsing them
+// would report `a && b` with `a` false as though `b` had been tested.
+type decisionState struct {
+	evaluating uint64
+	truth      uint64
+	width      uint8
+	count      uint8
+	// Distinct vectors seen in the current test. Inline rather than a slice:
+	// a decision of n conditions has at most 2^(n+1) of them, so three
+	// conditions fit exactly and wider ones spill to a map nothing reaches in
+	// practice.
+	slots [16]uint64
+}
+
+const inlineSlots = 16
+
+var (
+	states []decisionState
+	// Evaluations interrupted by recursion through one of their own operands.
+	// `if valid(n-1) && x` can re-enter the same decision, and without this the
+	// inner evaluation would consume the outer one's partial vector.
+	suspended []suspension
+	// Vectors from decisions too wide for their inline room. A map because
+	// nothing reaches it in practice, and one never touched costs nothing.
+	overflow = map[uint32]map[uint64]bool{}
+)
+
+type suspension struct {
+	id         uint32
+	evaluating uint64
+	truth      uint64
+}
+
+const (
+	packedValueShift   = 24
+	packedOutcomeShift = 48
+	// Above this a vector no longer fits one word. No real decision has 24
+	// independent conditions; one that did would be unreadable long before it
+	// was untestable.
+	packedMaxWidth = 24
+)
+
 var empty = &bucket{}
 
 var (
 	active  atomic.Pointer[bucket]
 	buckets []*bucket
+	widths  []uint8
 	size    int
 	mu      sync.Mutex
 )
 
-// Arm prepares the runtime for a run of `count` probes. The generated harness
-// calls it before any test runs.
 func init() { active.Store(empty) }
 
-func Arm(count int) {
+// Arm prepares the runtime for a run of `count` probes, where `conditions`
+// gives the number of conditions in each decision. The generated harness calls
+// it before any test runs.
+func Arm(count int, conditions []uint8) {
 	mu.Lock()
 	defer mu.Unlock()
 	size = count
-	outside := &bucket{name: "", probes: make([]uint32, count)}
+	widths = conditions
+	states = make([]decisionState, len(conditions))
+	for index, width := range conditions {
+		states[index].width = width
+	}
+	suspended = suspended[:0]
+	for id := range overflow {
+		delete(overflow, id)
+	}
+	outside := newBucket("")
 	buckets = []*bucket{outside}
 	active.Store(outside)
+}
+
+func newBucket(name string) *bucket {
+	return &bucket{
+		name:    name,
+		probes:  make([]uint32, size),
+		vectors: make([][]uint64, len(widths)),
+	}
 }
 
 // EnterTest binds every probe that fires next to this test, and returns the
@@ -66,45 +129,66 @@ func Arm(count int) {
 //
 // Go runs a package's test functions sequentially unless one opts into
 // parallelism, and Supercov runs one package at a time, so a single active
-// bucket is exact rather than approximate. A test that calls t.Parallel() is
-// reported as a limitation instead of being attributed by guesswork.
+// bucket is exact rather than approximate.
 func EnterTest(name string) func() {
 	previous := active.Load()
 	if previous == empty {
 		return func() {}
 	}
 	mu.Lock()
-	next := &bucket{name: name, probes: make([]uint32, size)}
+	flushVectors(previous)
+	next := newBucket(name)
 	buckets = append(buckets, next)
 	mu.Unlock()
 	active.Store(next)
-	return func() { active.Store(previous) }
+	return func() {
+		mu.Lock()
+		flushVectors(next)
+		mu.Unlock()
+		active.Store(previous)
+	}
 }
 
-// P records that a point -- a statement or a function -- was reached.
-//
-// The whole hot path: one atomic pointer load, one bounds check, one store. No
-// lock, no allocation, no map lookup, no interface dispatch, and small enough
-// for the compiler to inline into the caller.
+// flushVectors hands the vectors recorded since the last change to the test
+// that produced them, and clears the counters for the next one.
+func flushVectors(into *bucket) {
+	if into == nil || into == empty {
+		return
+	}
+	for id := range states {
+		state := &states[id]
+		if state.count > 0 && id < len(into.vectors) {
+			into.vectors[id] = append(into.vectors[id], state.slots[:state.count]...)
+		}
+		state.count = 0
+	}
+	for id, keys := range overflow {
+		if int(id) < len(into.vectors) {
+			for key := range keys {
+				into.vectors[id] = append(into.vectors[id], key)
+			}
+		}
+		delete(overflow, id)
+	}
+}
+
+// P records that a point — a statement or a function — was reached.
 func P(id uint32) {
 	b := active.Load()
 	if int(id) < len(b.probes) {
-		// A plain store, not `|=`. A point or an alternative only ever records
-		// "reached", so there is no earlier bit to preserve and no reason to
-		// read the word back before writing it.
+		// A plain store, not `|=`. A point only ever records "reached", so
+		// there is no earlier bit to preserve and no reason to read the word
+		// back before writing it.
 		b.probes[id] = 2
 	}
 }
 
 // A records that a branch alternative was taken.
-func A(id uint32) {
-	P(id)
-}
+func A(id uint32) { P(id) }
 
 // B records which arm of a branch a condition selects, and returns the value
-// unchanged. One call rather than two probes keeps the hot path to a single
-// record, and the arm that was not taken stays unset -- which is what makes an
-// untested guard visible instead of invisible.
+// unchanged. The arm that was not taken stays unset, which is what makes an
+// untested guard visible rather than invisible.
 func B(whenTrue, whenFalse uint32, value bool) bool {
 	if value {
 		P(whenTrue)
@@ -114,30 +198,84 @@ func B(whenTrue, whenFalse uint32, value bool) bool {
 	return value
 }
 
-// C observes one condition's value and returns it unchanged, so wrapping an
-// operand cannot change what the expression evaluates to. Go evaluates a call
-// argument only when the call is reached, which is what keeps `&&` and `||`
-// short-circuiting through the wrapper.
-func C(id uint32, value bool) bool {
-	b := active.Load()
-	if int(id) < len(b.probes) {
-		// A condition genuinely accumulates: seeing it false must not forget
-		// that it was once true, because MC/DC asks about both.
-		b.probes[id] |= mask(value)
+// C observes one condition of a decision and returns its value unchanged, so
+// wrapping an operand cannot change what the expression evaluates to. Go
+// evaluates a call argument only when the call is reached, which is what keeps
+// `&&` and `||` short-circuiting through the wrapper.
+func C(id uint32, index uint8, value bool) bool {
+	if int(id) >= len(states) || index >= 64 {
+		return value
+	}
+	state := &states[id]
+	bit := uint64(1) << index
+	if index == 0 {
+		// D clears both words when it consumes an evaluation, so a non-zero
+		// mask here means this decision is already open: recursion arrived
+		// through one of its own operands.
+		if state.evaluating != 0 {
+			suspended = append(suspended, suspension{id, state.evaluating, state.truth})
+		}
+		state.evaluating, state.truth = bit, 0
+	} else {
+		state.evaluating |= bit
+	}
+	if value {
+		state.truth |= bit
 	}
 	return value
 }
 
-// D observes a decision's outcome and returns it unchanged.
+// D observes a decision's outcome and returns it unchanged, closing the
+// evaluation its conditions opened and recording the vector against the test
+// that produced it.
+//
+// Neither C nor D records a point. The vector already says exactly which
+// conditions were evaluated and what the decision came to, so a probe beside
+// it would be the same fact stored twice, paid for on the hottest path
+// instrumentation has.
 func D(id uint32, value bool) bool {
-	return C(id, value)
+	if int(id) >= len(states) {
+		return value
+	}
+	state := &states[id]
+	mask, values := state.evaluating, state.truth
+	state.evaluating, state.truth = 0, 0
+	if len(suspended) > 0 {
+		if last := suspended[len(suspended)-1]; last.id == id {
+			state.evaluating, state.truth = last.evaluating, last.truth
+			suspended = suspended[:len(suspended)-1]
+		}
+	}
+	if mask == 0 || state.width > packedMaxWidth {
+		return value
+	}
+	key := mask | values<<packedValueShift
+	if value {
+		key |= 1 << packedOutcomeShift
+	}
+	// A handful of register compares over words that share a cache line with
+	// the state just read, which is why this beats hashing per evaluation.
+	for offset := uint8(0); offset < state.count; offset++ {
+		if state.slots[offset] == key {
+			return value
+		}
+	}
+	if state.count < inlineSlots {
+		state.slots[state.count] = key
+		state.count++
+		return value
+	}
+	rare(id, key)
+	return value
 }
 
-func mask(value bool) uint32 {
-	if value {
-		return 2
+func rare(id uint32, key uint64) {
+	keys := overflow[id]
+	if keys == nil {
+		keys = map[uint64]bool{}
+		overflow[id] = keys
 	}
-	return 1
+	keys[key] = true
 }
 
 // Finish writes the evidence and returns the exit code it was given.
@@ -158,6 +296,7 @@ func Finish(code int, path string) int {
 func Write(path string) error {
 	mu.Lock()
 	defer mu.Unlock()
+	flushVectors(active.Load())
 	global := make([]uint32, size)
 	for _, b := range buckets {
 		for index, value := range b.probes {
@@ -214,6 +353,61 @@ func Write(path string) error {
 				return err
 			}
 			if err := put(uint64(value)); err != nil {
+				return err
+			}
+		}
+		// The vectors this test established, so independence can be traced to
+		// the test that proved it rather than to the run as a whole.
+		vectorCount := 0
+		for _, keys := range b.vectors {
+			vectorCount += len(keys)
+		}
+		if err := put(uint64(vectorCount)); err != nil {
+			return err
+		}
+		for index, keys := range b.vectors {
+			for _, key := range keys {
+				if err := put(uint64(index)); err != nil {
+					return err
+				}
+				if err := put(key); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if err := put(uint64(len(widths))); err != nil {
+		return err
+	}
+	for index, width := range widths {
+		if err := put(uint64(width)); err != nil {
+			return err
+		}
+		// The run-wide set is the union of what the tests saw, so it cannot
+		// disagree with the per-test records it comes from.
+		union := []uint64{}
+		for _, b := range buckets {
+			if index >= len(b.vectors) {
+				continue
+			}
+			for _, key := range b.vectors[index] {
+				found := false
+				for _, existing := range union {
+					if existing == key {
+						found = true
+						break
+					}
+				}
+				if !found {
+					union = append(union, key)
+				}
+			}
+		}
+		if err := put(uint64(len(union))); err != nil {
+			return err
+		}
+		for _, key := range union {
+			if err := put(key); err != nil {
 				return err
 			}
 		}
