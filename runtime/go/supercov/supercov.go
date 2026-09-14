@@ -47,10 +47,12 @@ type vectorHit struct {
 type decisionState struct {
 	evaluating uint64
 	truth      uint64
-	// The keys most recently recorded, so a decision evaluated in a loop can
-	// answer "seen this already" without a call. Two entries because the
-	// common shape is a condition alternating between outcomes; a third
-	// distinct vector simply pays for the call.
+	// The keys most recently recorded *for the current test*, so a decision
+	// evaluated in a loop can answer "seen this already" without a call. Two
+	// entries because the common shape is a condition alternating between
+	// outcomes; a third distinct vector simply pays for the call. Cleared by
+	// harvest, alongside the slots it stands in for. A recorded key always has
+	// a condition bit set, so zero is free to mean empty.
 	recent     [2]uint64
 	width      uint8
 	count      uint8
@@ -172,6 +174,11 @@ func harvest() {
 			}
 		}
 		state.count = 0
+		// The cache answers "this test already recorded that vector", so it
+		// expires with the slots it stands in for. Leaving it set would let a
+		// later test that produces the same vector skip recording it, and the
+		// vector would be credited only to whichever test reached it first.
+		state.recent[0], state.recent[1] = 0, 0
 	}
 	for id, keys := range overflow {
 		if into != nil {

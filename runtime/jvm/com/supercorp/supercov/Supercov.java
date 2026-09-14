@@ -37,6 +37,14 @@ public final class Supercov {
   private static long[] evaluating = new long[0];
   private static long[] truth = new long[0];
   private static int[] widths = new int[0];
+  // The keys most recently recorded *for the running test*, so a decision
+  // evaluated in a loop can answer "seen this already" without taking the
+  // monitor. Two entries because the common shape is a condition alternating
+  // between outcomes; a third distinct vector simply pays for the call.
+  // Cleared by harvest alongside the vectors they stand in for — a recorded
+  // key always has a condition bit set, so zero is free to mean empty.
+  private static long[] recentFirst = new long[0];
+  private static long[] recentSecond = new long[0];
   private static List<long[]> seen = new ArrayList<>();
   private static final List<Record> records = new ArrayList<>();
   private static int current = -1;
@@ -62,6 +70,8 @@ public final class Supercov {
     widths = conditions;
     evaluating = new long[conditions.length];
     truth = new long[conditions.length];
+    recentFirst = new long[conditions.length];
+    recentSecond = new long[conditions.length];
     seen = new ArrayList<>();
     for (int i = 0; i < conditions.length; i++) {
       seen.add(new long[0]);
@@ -112,6 +122,8 @@ public final class Supercov {
       if (keys.length > 0) {
         seen.set(id, new long[0]);
       }
+      recentFirst[id] = 0L;
+      recentSecond[id] = 0L;
     }
   }
 
@@ -175,11 +187,20 @@ public final class Supercov {
     if (mask == 0L || widths[id] > MAX_WIDTH) {
       return value;
     }
+    // Everything above is a handful of array accesses; `remember` takes a
+    // monitor. A decision inside a loop almost always produces the vector it
+    // produced last time, so answering from the cache keeps the lock off the
+    // path that runs millions of times and leaves it for the rare new vector.
+    if (key == recentFirst[id] || key == recentSecond[id]) {
+      return value;
+    }
     remember(id, key);
     return value;
   }
 
   private static synchronized void remember(int id, long key) {
+    recentSecond[id] = recentFirst[id];
+    recentFirst[id] = key;
     long[] keys = seen.get(id);
     for (long existing : keys) {
       if (existing == key) {
