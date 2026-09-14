@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use supercov_engine::go_instrumenter::{RUNTIME_IMPORT, build_go_obligations, rewrite};
+use supercov_engine::go_test_harness::{instrument_test_file, synthesized_harness};
 
 fn go_binary() -> Option<PathBuf> {
     // Homebrew's Go is not on a non-login shell's PATH on macOS.
@@ -62,33 +63,22 @@ func classify(a int, b bool) string {
 }
 "#;
 
+/// Ordinary Go tests. Nothing here mentions Supercov: binding them to their
+/// evidence is the harness generator's job, and if it needed help from the
+/// author it would not be usable.
 const TESTS: &str = r#"package main
 
-import (
-	"testing"
-
-	__supercov "example.com/probe/supercov"
-)
+import "testing"
 
 func TestBig(t *testing.T) {
-	defer __supercov.EnterTest("TestBig")()
 	if got := classify(20, true); got != "big" {
 		t.Fatalf("got %q", got)
 	}
 }
 
 func TestZero(t *testing.T) {
-	defer __supercov.EnterTest("TestZero")()
 	if got := classify(0, false); got != "zero" {
 		t.Fatalf("got %q", got)
-	}
-}
-
-func TestMain(m *testing.M) {
-	__supercov.Arm(256)
-	m.Run()
-	if err := __supercov.Write("evidence.bin"); err != nil {
-		panic(err)
 	}
 }
 "#;
@@ -157,10 +147,25 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
 
     let mut next = 0;
     let obligations = build_go_obligations("classify.go", SOURCE, &mut next).expect("obligations");
-    let instrumented =
-        rewrite(SOURCE, &obligations.edits).replace(RUNTIME_IMPORT, "example.com/probe/supercov");
+    let local = "example.com/probe/supercov";
+    let instrumented = rewrite(SOURCE, &obligations.edits).replace(RUNTIME_IMPORT, local);
     write(&root, "classify.go", &instrumented);
-    write(&root, "main_test.go", TESTS);
+
+    // The test file goes in as the author wrote it and comes out bound to its
+    // evidence, which is the whole point of the harness generator.
+    let harness = instrument_test_file(TESTS, "__supercov", "evidence.bin").expect("harness");
+    assert_eq!(harness.tests, ["TestBig", "TestZero"]);
+    assert!(!harness.declares_test_main);
+    write(
+        &root,
+        "main_test.go",
+        &rewrite(TESTS, &harness.edits).replace(RUNTIME_IMPORT, local),
+    );
+    write(
+        &root,
+        "supercov_generated_test.go",
+        &synthesized_harness("main", "__supercov", local, 256, "evidence.bin", false),
+    );
 
     // `go vet` is stricter than the compiler and catches shapes that compile
     // but that no Go author would accept in their tree.

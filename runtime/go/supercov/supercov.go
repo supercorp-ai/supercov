@@ -24,73 +24,92 @@ const (
 	kindOutcome     = 3
 )
 
-// hits is indexed by probe id. Each entry is a bitmask of the values that
-// probe was observed with: bit 0 for false, bit 1 for true. A point or an
-// alternative only ever records bit 1.
+// A bucket is one slice of per-probe bitmasks: bit 0 for false, bit 1 for
+// true. A point or an alternative only ever sets bit 1.
 //
-// Preallocated once, so a probe never grows a slice and never allocates.
-var (
-	hits    []uint32
-	current atomic.Int32
-	tests   []testRecord
-	mu      sync.Mutex
-	armed   atomic.Bool
-)
-
-type testRecord struct {
+// There is always exactly one active bucket, so the hot path never has to ask
+// whether a test is running. Execution outside any test -- package
+// initialisers, and anything a leaked goroutine does after its test finished --
+// lands in bucket zero rather than being attributed to whichever test happened
+// to be current.
+type bucket struct {
 	name   string
-	first  int
 	probes []uint32
 }
 
-// Arm prepares the runtime for a run of `size` probes. The generated package
-// initialiser calls it before any test runs.
-func Arm(size int) {
+// Never nil, so the hot path needs no nil check: before Arm, the bucket is
+// empty and every bounds check simply fails.
+var empty = &bucket{}
+
+var (
+	active  atomic.Pointer[bucket]
+	buckets []*bucket
+	size    int
+	mu      sync.Mutex
+)
+
+// Arm prepares the runtime for a run of `count` probes. The generated harness
+// calls it before any test runs.
+func init() { active.Store(empty) }
+
+func Arm(count int) {
 	mu.Lock()
 	defer mu.Unlock()
-	hits = make([]uint32, size)
-	current.Store(-1)
-	armed.Store(true)
+	size = count
+	outside := &bucket{name: "", probes: make([]uint32, count)}
+	buckets = []*bucket{outside}
+	active.Store(outside)
 }
 
 // EnterTest binds every probe that fires next to this test, and returns the
 // function that unbinds it.
 //
-// Go runs the test functions of one package sequentially unless a test calls
-// t.Parallel(), and Supercov runs one package at a time, so a single current
-// index is exact rather than approximate. A test that opts into parallelism is
+// Go runs a package's test functions sequentially unless one opts into
+// parallelism, and Supercov runs one package at a time, so a single active
+// bucket is exact rather than approximate. A test that calls t.Parallel() is
 // reported as a limitation instead of being attributed by guesswork.
 func EnterTest(name string) func() {
-	if !armed.Load() {
+	previous := active.Load()
+	if previous == empty {
 		return func() {}
 	}
 	mu.Lock()
-	index := len(tests)
-	tests = append(tests, testRecord{name: name, probes: make([]uint32, len(hits))})
+	next := &bucket{name: name, probes: make([]uint32, size)}
+	buckets = append(buckets, next)
 	mu.Unlock()
-	previous := current.Swap(int32(index))
-	return func() { current.Store(previous) }
+	active.Store(next)
+	return func() { active.Store(previous) }
 }
 
 // P records that a point -- a statement or a function -- was reached.
+//
+// The whole hot path: one atomic pointer load, one bounds check, one store. No
+// lock, no allocation, no map lookup, no interface dispatch, and small enough
+// for the compiler to inline into the caller.
 func P(id uint32) {
-	record(id, 2)
+	b := active.Load()
+	if int(id) < len(b.probes) {
+		// A plain store, not `|=`. A point or an alternative only ever records
+		// "reached", so there is no earlier bit to preserve and no reason to
+		// read the word back before writing it.
+		b.probes[id] = 2
+	}
 }
 
 // A records that a branch alternative was taken.
 func A(id uint32) {
-	record(id, 2)
+	P(id)
 }
 
 // B records which arm of a branch a condition selects, and returns the value
 // unchanged. One call rather than two probes keeps the hot path to a single
-// record, and records the arm that was *not* taken by never setting its bit --
-// which is what makes an untested guard visible instead of invisible.
+// record, and the arm that was not taken stays unset -- which is what makes an
+// untested guard visible instead of invisible.
 func B(whenTrue, whenFalse uint32, value bool) bool {
 	if value {
-		record(whenTrue, 2)
+		P(whenTrue)
 	} else {
-		record(whenFalse, 2)
+		P(whenFalse)
 	}
 	return value
 }
@@ -100,14 +119,18 @@ func B(whenTrue, whenFalse uint32, value bool) bool {
 // argument only when the call is reached, which is what keeps `&&` and `||`
 // short-circuiting through the wrapper.
 func C(id uint32, value bool) bool {
-	record(id, mask(value))
+	b := active.Load()
+	if int(id) < len(b.probes) {
+		// A condition genuinely accumulates: seeing it false must not forget
+		// that it was once true, because MC/DC asks about both.
+		b.probes[id] |= mask(value)
+	}
 	return value
 }
 
 // D observes a decision's outcome and returns it unchanged.
 func D(id uint32, value bool) bool {
-	record(id, mask(value))
-	return value
+	return C(id, value)
 }
 
 func mask(value bool) uint32 {
@@ -117,26 +140,30 @@ func mask(value bool) uint32 {
 	return 1
 }
 
-// record is the hot path: two bounds-checked slice stores and nothing else.
-func record(id uint32, bits uint32) {
-	index := int(id)
-	if index >= len(hits) {
-		return
+// Finish writes the evidence and returns the exit code it was given.
+//
+// It wraps `m.Run()` rather than deferring, because the idiomatic TestMain
+// ends in `os.Exit(m.Run())` and os.Exit runs no deferred function. Writing on
+// the way through is the only placement that survives both shapes.
+func Finish(code int, path string) int {
+	if err := Write(path); err != nil {
+		os.Stderr.WriteString("supercov: could not write coverage evidence: " + err.Error() + "\n")
 	}
-	hits[index] |= bits
-	if at := current.Load(); at >= 0 {
-		test := &tests[at]
-		if index < len(test.probes) {
-			test.probes[index] |= bits
-		}
-	}
+	return code
 }
 
-// Write emits the evidence transport the engine reads. The generated harness
-// calls it once, after every test in the package has finished.
+// Write emits the evidence transport the engine reads. The run-wide totals are
+// the union of every bucket, so they cannot disagree with the per-test records
+// they are derived from.
 func Write(path string) error {
 	mu.Lock()
 	defer mu.Unlock()
+	global := make([]uint32, size)
+	for _, b := range buckets {
+		for index, value := range b.probes {
+			global[index] |= value
+		}
+	}
 	file, err := os.Create(path)
 	if err != nil {
 		return err
@@ -149,28 +176,29 @@ func Write(path string) error {
 		_, err := out.Write(scratch[:])
 		return err
 	}
-	if err := put(uint64(len(hits))); err != nil {
+	if err := put(uint64(len(global))); err != nil {
 		return err
 	}
-	for _, value := range hits {
+	for _, value := range global {
 		if err := put(uint64(value)); err != nil {
 			return err
 		}
 	}
-	if err := put(uint64(len(tests))); err != nil {
+	named := buckets[1:]
+	if err := put(uint64(len(named))); err != nil {
 		return err
 	}
-	for _, test := range tests {
-		if err := put(uint64(len(test.name))); err != nil {
+	for _, b := range named {
+		if err := put(uint64(len(b.name))); err != nil {
 			return err
 		}
-		if _, err := out.WriteString(test.name); err != nil {
+		if _, err := out.WriteString(b.name); err != nil {
 			return err
 		}
-		// Only probes this test actually reached, so the transport is
-		// proportional to what ran rather than to the size of the project.
+		// Only probes this test reached, so the transport is proportional to
+		// what ran rather than to the size of the project.
 		count := 0
-		for _, value := range test.probes {
+		for _, value := range b.probes {
 			if value != 0 {
 				count++
 			}
@@ -178,7 +206,7 @@ func Write(path string) error {
 		if err := put(uint64(count)); err != nil {
 			return err
 		}
-		for index, value := range test.probes {
+		for index, value := range b.probes {
 			if value == 0 {
 				continue
 			}
