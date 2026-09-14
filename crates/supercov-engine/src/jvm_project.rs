@@ -219,6 +219,7 @@ pub fn prepare_jvm_project(root: &Path) -> Result<PreparedJvmProject, String> {
     let mut widths = Vec::new();
     let mut unparseable = Vec::new();
     let mut next_probe = 0_u64;
+    let mut next_decision = 0_u32;
     for (relative, language) in &files.sources {
         let path = root.join(relative);
         let Ok(source) = std::fs::read_to_string(&path) else {
@@ -228,7 +229,13 @@ pub fn prepare_jvm_project(root: &Path) -> Result<PreparedJvmProject, String> {
             ));
             continue;
         };
-        match build_jvm_obligations(relative, &source, *language, &mut next_probe) {
+        match build_jvm_obligations(
+            relative,
+            &source,
+            *language,
+            &mut next_probe,
+            &mut next_decision,
+        ) {
             Ok(obligations) => {
                 manifest.decisions.extend(obligations.manifest.decisions);
                 manifest.points.extend(obligations.manifest.points);

@@ -19,6 +19,7 @@ pub mod frontend_detection;
 pub mod frontend_protocol;
 pub mod go_instrumenter;
 pub mod go_project;
+pub mod go_run;
 pub mod go_test_harness;
 pub mod indexed_query;
 pub mod integrity;

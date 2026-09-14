@@ -58,6 +58,15 @@ pub struct PreparedGoProject {
     pub files: GoFiles,
     pub manifest: CoverageManifest,
     pub probes: std::collections::BTreeMap<u64, GoProbe>,
+    /// Each measured source and what it becomes once instrumented, in
+    /// discovery order. Carried rather than recomputed: preparing the
+    /// obligations already parsed and rewrote every file, and parsing a
+    /// project twice to get the same answer is the kind of cost that shows up
+    /// as a slow tool with no explanation.
+    pub instrumented: Vec<(String, String)>,
+    /// Conditions per decision, indexed the way the runtime indexes its
+    /// decision state.
+    pub decision_widths: Vec<u8>,
     /// Files that did not parse, with the reason. They are reported rather
     /// than skipped silently: a file Supercov cannot read is a hole in the
     /// denominator, and a hole nobody is told about is a wrong number.
@@ -154,8 +163,11 @@ pub fn prepare_go_project(root: &Path) -> Result<PreparedGoProject, String> {
         scope: None,
     };
     let mut probes = std::collections::BTreeMap::new();
+    let mut instrumented = Vec::new();
+    let mut decision_widths = Vec::new();
     let mut unparseable = Vec::new();
     let mut next_probe = 0_u64;
+    let mut next_decision = 0_u32;
     for relative in &files.sources {
         let path = root.join(relative);
         let Ok(source) = std::fs::read_to_string(&path) else {
@@ -165,12 +177,17 @@ pub fn prepare_go_project(root: &Path) -> Result<PreparedGoProject, String> {
             ));
             continue;
         };
-        match build_go_obligations(relative, &source, &mut next_probe) {
+        match build_go_obligations(relative, &source, &mut next_probe, &mut next_decision) {
             Ok(obligations) => {
                 manifest.decisions.extend(obligations.manifest.decisions);
                 manifest.points.extend(obligations.manifest.points);
                 manifest.branches.extend(obligations.manifest.branches);
                 probes.extend(obligations.probes);
+                decision_widths.extend(obligations.decision_widths);
+                instrumented.push((
+                    relative.clone(),
+                    crate::go_instrumenter::rewrite(&source, &obligations.edits),
+                ));
             }
             Err(error) => unparseable.push((relative.clone(), error.to_string())),
         }
@@ -180,6 +197,8 @@ pub fn prepare_go_project(root: &Path) -> Result<PreparedGoProject, String> {
         files,
         manifest,
         probes,
+        instrumented,
+        decision_widths,
         unparseable,
     })
 }

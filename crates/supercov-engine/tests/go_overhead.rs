@@ -110,7 +110,9 @@ fn measure(go: &Path, label: &str, source: &str, bench_source: &str) -> (f64, f6
         &std::fs::read_to_string(runtime).expect("runtime"),
     );
     let mut next = 0;
-    let obligations = build_go_obligations("work.go", source, &mut next).expect("obligations");
+    let mut decisions = 0;
+    let obligations =
+        build_go_obligations("work.go", source, &mut next, &mut decisions).expect("obligations");
     let local = "example.com/probe/supercov";
     write(
         &instrumented,

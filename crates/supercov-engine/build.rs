@@ -58,11 +58,15 @@ fn main() {
     let runtime_root = crate_root.join("runtime-assets/javascript");
     let python_runtime_root = crate_root.join("runtime-assets/python");
     let ruby_runtime_root = crate_root.join("runtime-assets/ruby");
+    let go_runtime_root = crate_root.join("runtime-assets/go");
+    let jvm_runtime_root = crate_root.join("runtime-assets/jvm");
     let mut files = Vec::new();
     collect_files(&crate_root.join("src"), &mut files);
     collect_files(&runtime_root, &mut files);
     collect_files(&python_runtime_root, &mut files);
     collect_files(&ruby_runtime_root, &mut files);
+    collect_files(&go_runtime_root, &mut files);
+    collect_files(&jvm_runtime_root, &mut files);
     files.extend([crate_root.join("build.rs"), crate_root.join("Cargo.toml")]);
     files.sort();
     files.dedup();
@@ -114,5 +118,33 @@ fn main() {
     println!(
         "cargo:rustc-env=SUPERCOV_RUBY_FRONTEND_SOURCE_SHA256={}",
         digest_files(&ruby_frontend, &crate_root)
+    );
+    let mut go_frontend = vec![
+        crate_root.join("src/go_instrumenter.rs"),
+        crate_root.join("src/go_project.rs"),
+        crate_root.join("src/go_test_harness.rs"),
+        crate_root.join("src/owned_evidence.rs"),
+        crate_root.join("Cargo.toml"),
+    ];
+    collect_files(&go_runtime_root, &mut go_frontend);
+    go_frontend.sort();
+    go_frontend.dedup();
+    println!(
+        "cargo:rustc-env=SUPERCOV_GO_FRONTEND_SOURCE_SHA256={}",
+        digest_files(&go_frontend, &crate_root)
+    );
+    let mut jvm_frontend = vec![
+        crate_root.join("src/jvm_instrumenter.rs"),
+        crate_root.join("src/jvm_project.rs"),
+        crate_root.join("src/jvm_test_harness.rs"),
+        crate_root.join("src/owned_evidence.rs"),
+        crate_root.join("Cargo.toml"),
+    ];
+    collect_files(&jvm_runtime_root, &mut jvm_frontend);
+    jvm_frontend.sort();
+    jvm_frontend.dedup();
+    println!(
+        "cargo:rustc-env=SUPERCOV_JVM_FRONTEND_SOURCE_SHA256={}",
+        digest_files(&jvm_frontend, &crate_root)
     );
 }

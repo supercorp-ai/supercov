@@ -141,6 +141,11 @@ struct Collector<'a> {
     probes: BTreeMap<u64, GoProbe>,
     limitations: Vec<serde_json::Value>,
     widths: Vec<u8>,
+    /// How many decisions the module already numbered before this file. The
+    /// runtime holds one decision-state array for the whole module, so an
+    /// index that meant "the first decision in this file" would land on every
+    /// other file's first decision too.
+    decision_base: u32,
     counter: usize,
 }
 
@@ -305,9 +310,10 @@ impl<'a> Collector<'a> {
             .collect::<Vec<_>>();
         let (line, column) = self.position(node);
         let id = self.id("d");
-        // The runtime indexes decisions by position, so the index a wrapper
-        // carries is this decision's place in the file's width table.
-        let index_of_decision = self.widths.len();
+        // The runtime indexes decisions by position across the whole module,
+        // so the index a wrapper carries is this decision's place in the
+        // module's width table, not in this file's.
+        let index_of_decision = self.decision_base as usize + self.widths.len();
         self.widths.push(leaves.len().min(64) as u8);
         let alias = self.alias.to_owned();
         // No probe per condition or outcome. The recorded vector already says
@@ -550,8 +556,9 @@ pub fn build_go_obligations(
     file: &str,
     source: &str,
     next_probe: &mut u64,
+    next_decision: &mut u32,
 ) -> Result<GoFileObligations, GoInstrumenterError> {
-    build_go_obligations_with_alias(file, source, next_probe, RUNTIME_ALIAS)
+    build_go_obligations_with_alias(file, source, next_probe, next_decision, RUNTIME_ALIAS)
 }
 
 /// The name rewritten source calls the runtime by. Deliberately unlikely to
@@ -569,14 +576,17 @@ pub fn build_go_obligations_with_alias(
     file: &str,
     source: &str,
     next_probe: &mut u64,
+    next_decision: &mut u32,
     alias: &str,
 ) -> Result<GoFileObligations, GoInstrumenterError> {
     let tree = parse(source)?;
+    let decision_base = *next_decision;
     let mut collector = Collector {
         file,
         source,
         alias,
         next_probe,
+        decision_base,
         edits: Vec::new(),
         points: Vec::new(),
         branches: Vec::new(),
@@ -592,6 +602,7 @@ pub fn build_go_obligations_with_alias(
             collector.walk(child);
         }
     }
+    *next_decision += collector.widths.len() as u32;
     let mut edits = collector.edits;
     // The import is only needed by files that call the runtime — decisions and
     // branches do, a file of plain statements does not, and Go rejects an
@@ -643,14 +654,17 @@ func classify(a int, b bool) string {
 
     fn obligations(source: &str) -> GoFileObligations {
         let mut next = 0;
-        build_go_obligations("main.go", source, &mut next).expect("obligations")
+        let mut decisions = 0;
+        build_go_obligations("main.go", source, &mut next, &mut decisions).expect("obligations")
     }
 
     /// Rewriting must never produce source Go cannot compile. Re-parsing the
     /// output catches that without a toolchain, on every machine, every run.
     fn rewritten(source: &str) -> String {
         let mut next = 0;
-        let go = build_go_obligations("x.go", source, &mut next).expect("obligations");
+        let mut decisions = 0;
+        let go =
+            build_go_obligations("x.go", source, &mut next, &mut decisions).expect("obligations");
         let out = rewrite(source, &go.edits);
         parse(&out)
             .unwrap_or_else(|error| panic!("rewritten source does not parse: {error}\n{out}"));
@@ -747,10 +761,12 @@ func classify(a int, b bool) string {
         // Declaring a branch nothing can measure would put an obligation in the
         // denominator that no test could ever satisfy.
         let mut next = 0;
+        let mut decisions = 0;
         let go = build_go_obligations(
             "x.go",
             "package main\nfunc f(xs []int) {\n\tfor _, x := range xs {\n\t\t_ = x\n\t}\n\tfor {\n\t\tbreak\n\t}\n}\n",
             &mut next,
+            &mut decisions,
         )
         .unwrap();
         assert!(
@@ -778,8 +794,14 @@ func classify(a int, b bool) string {
         );
 
         let mut next = 0;
-        let bare =
-            build_go_obligations("t.go", "package main\n\ntype T struct{}\n", &mut next).unwrap();
+        let mut decisions = 0;
+        let bare = build_go_obligations(
+            "t.go",
+            "package main\n\ntype T struct{}\n",
+            &mut next,
+            &mut decisions,
+        )
+        .unwrap();
         assert!(bare.edits.is_empty(), "{:?}", bare.edits);
         assert_eq!(
             rewrite("package main\n\ntype T struct{}\n", &bare.edits),
@@ -932,9 +954,62 @@ func classify(a int, b bool) string {
         // Guessing at a file that does not parse would put obligations on lines
         // that may not exist.
         let mut next = 0;
+        let mut decisions = 0;
         assert!(matches!(
-            build_go_obligations("broken.go", "package main\nfunc f( {", &mut next),
+            build_go_obligations(
+                "broken.go",
+                "package main\nfunc f( {",
+                &mut next,
+                &mut decisions
+            ),
             Err(GoInstrumenterError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn decisions_are_numbered_across_the_module_not_within_a_file() {
+        // The runtime holds one decision-state array for the whole module, so
+        // an index meaning "the first decision in this file" would land on
+        // every other file's first decision: two files would share condition
+        // state, and the vectors both produced would describe neither.
+        let mut next = 0;
+        let mut decisions = 0;
+        let first = build_go_obligations(
+            "a.go",
+            "package p\n\nfunc A(x, y bool) bool {\n\tif x && y {\n\t\treturn true\n\t}\n\treturn false\n}\n",
+            &mut next,
+            &mut decisions,
+        )
+        .unwrap();
+        let second = build_go_obligations(
+            "b.go",
+            "package p\n\nfunc B(x, y bool) bool {\n\tif x || y {\n\t\treturn true\n\t}\n\treturn false\n}\n",
+            &mut next,
+            &mut decisions,
+        )
+        .unwrap();
+
+        let referenced = |obligations: &GoFileObligations| {
+            obligations
+                .edits
+                .iter()
+                .filter_map(|edit| {
+                    let at = edit.text.find(".C(")?;
+                    edit.text[at + 3..]
+                        .split(',')
+                        .next()?
+                        .trim()
+                        .parse::<u32>()
+                        .ok()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(referenced(&first), [0].into());
+        assert_eq!(referenced(&second), [1].into());
+        assert_eq!(decisions, 2, "the module numbered two decisions in all");
+        // And the widths each file reports stay in the order the ids assume,
+        // so the concatenated table lines up with the concatenated manifest.
+        assert_eq!(first.decision_widths, [2]);
+        assert_eq!(second.decision_widths, [2]);
     }
 }

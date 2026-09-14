@@ -10,7 +10,8 @@ use std::process::Command;
 
 use supercov_engine::jvm_instrumenter::{JvmLanguage, build_jvm_obligations, rewrite};
 use supercov_engine::owned_evidence::{
-    OwnedRunInputs, OwnedTestOutcome, build_frontend_run, jvm_declaration, read_evidence,
+    OwnedRunInputs, OwnedTestOutcome, build_frontend_run, jvm_coverage_model, jvm_declaration,
+    read_evidence,
 };
 
 fn tool(name: &str) -> Option<PathBuf> {
@@ -78,8 +79,15 @@ fn instrumented_java_compiles_and_reports_what_actually_ran() {
     );
 
     let mut next = 0;
-    let obligations = build_jvm_obligations("Classify.java", SOURCE, JvmLanguage::Java, &mut next)
-        .expect("obligations");
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Classify.java",
+        SOURCE,
+        JvmLanguage::Java,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
     write(&root, "Classify.java", &rewrite(SOURCE, &obligations.edits));
 
     // The harness a generator will produce; written by hand here so the
@@ -239,9 +247,15 @@ fn instrumented_kotlin_compiles_and_reports_what_actually_ran() {
     );
 
     let mut next = 0;
-    let obligations =
-        build_jvm_obligations("Classify.kt", KOTLIN_SOURCE, JvmLanguage::Kotlin, &mut next)
-            .expect("obligations");
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Classify.kt",
+        KOTLIN_SOURCE,
+        JvmLanguage::Kotlin,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
     let instrumented = rewrite(KOTLIN_SOURCE, &obligations.edits);
     write(&root, "Classify.kt", &instrumented);
 
@@ -410,9 +424,15 @@ fn the_platform_listener_attributes_coverage_without_touching_test_source() {
     );
 
     let mut next = 0;
-    let obligations =
-        build_jvm_obligations("Calculator.java", UNDER_TEST, JvmLanguage::Java, &mut next)
-            .expect("obligations");
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Calculator.java",
+        UNDER_TEST,
+        JvmLanguage::Java,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
     write(
         &root,
         "Calculator.java",
@@ -589,6 +609,7 @@ public final class SupercovConfig {{
         run_id: "run_jvm",
         generated_at: "now",
         test_exit_code: 0,
+        coverage_model: jvm_coverage_model(),
     })
     .expect("frontend run");
     let report =

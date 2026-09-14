@@ -21,9 +21,11 @@ use supercov_contracts::{
 
 use crate::coverage_analysis::McdcVector;
 use crate::coverage_report::{
-    CoverageManifest, CoverageReportRequest, DecisionSnapshot, ExitCodeInput, RawTestResult,
-    RuntimeEvent, RuntimeSnapshot, TestProvenance,
+    CoverageManifest, CoverageModelDeclaration, CoverageReportRequest, DecisionSnapshot,
+    ExitCodeInput, PersistedCoverageModel, RawTestResult, RuntimeEvent, RuntimeSnapshot,
+    TestProvenance,
 };
+use crate::evidence_archive::EvidenceArchiveEntry;
 use crate::go_instrumenter::{GoProbe, GoProbeTarget};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +228,28 @@ pub fn go_declaration() -> FrontendRunDeclaration {
     }
 }
 
+/// What a Go run's numbers mean, so a reader is never left to infer it.
+pub fn go_coverage_model() -> CoverageModelDeclaration {
+    CoverageModelDeclaration {
+        language: "go".into(),
+        variant: "go-owned-probes-v1".into(),
+        name: "supercov-go-owned-v1".into(),
+        completeness_meaning: "Every obligation Supercov derived from the module's own Go sources was observed; explicit manifest limitations identify unmeasured Go surfaces.".into(),
+        measured: vec![
+            "owned Go statements and function entries".into(),
+            "owned atomic condition vectors and decision outcomes".into(),
+            "exact per-test attribution for tests that do not call t.Parallel()".into(),
+        ],
+        not_measured: vec![
+            "generated code, vendored packages and testdata".into(),
+            "work a test does after calling t.Parallel(), which counts run-wide".into(),
+            "causal linkage to individual actions".into(),
+            "all input values, semantic partitions, paths, or concurrency interleavings".into(),
+            "mutation score or assertion fault-detection strength".into(),
+        ],
+    }
+}
+
 /// The JVM's, where the JUnit Platform reports each test's start and finish so
 /// attribution follows the framework's own lifecycle.
 pub fn jvm_declaration() -> FrontendRunDeclaration {
@@ -257,6 +281,28 @@ pub fn jvm_declaration() -> FrontendRunDeclaration {
             ],
         }],
         structural_limitations: Vec::new(),
+    }
+}
+
+/// What a JVM run's numbers mean.
+pub fn jvm_coverage_model() -> CoverageModelDeclaration {
+    CoverageModelDeclaration {
+        language: "jvm".into(),
+        variant: "jvm-owned-probes-v1".into(),
+        name: "supercov-jvm-owned-v1".into(),
+        completeness_meaning: "Every obligation Supercov derived from the project's own Java and Kotlin sources was observed; explicit manifest limitations identify unmeasured JVM surfaces.".into(),
+        measured: vec![
+            "owned Java and Kotlin statements and method entries".into(),
+            "owned atomic condition vectors and decision outcomes".into(),
+            "exact per-test attribution through the JUnit Platform's own lifecycle".into(),
+        ],
+        not_measured: vec![
+            "generated sources, and bytecode with no source in the project".into(),
+            "tests run concurrently, which count run-wide and drop condition coverage".into(),
+            "causal linkage to individual actions".into(),
+            "all input values, semantic partitions, paths, or concurrency interleavings".into(),
+            "mutation score or assertion fault-detection strength".into(),
+        ],
     }
 }
 
@@ -361,6 +407,41 @@ pub struct OwnedFrontendRun {
     pub tests: usize,
 }
 
+impl OwnedFrontendRun {
+    /// The archive a run publishes: what the numbers mean, who produced them,
+    /// the obligations they are measured against, and one record per test.
+    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+        let model = PersistedCoverageModel::from_declaration(
+            self.request
+                .coverage_model
+                .as_ref()
+                .expect("an owned frontend always declares a coverage model"),
+        )
+        .expect("owned coverage models are contract-valid");
+        let mut entries = vec![
+            EvidenceArchiveEntry {
+                path: "coverage-model.json".into(),
+                contents: serde_json::to_vec(&model)?,
+            },
+            EvidenceArchiveEntry {
+                path: "frontend.json".into(),
+                contents: serde_json::to_vec(&self.declaration)?,
+            },
+            EvidenceArchiveEntry {
+                path: "manifest.json".into(),
+                contents: serde_json::to_vec(&self.request.manifest)?,
+            },
+        ];
+        for (index, result) in self.request.raw_results.iter().enumerate() {
+            entries.push(EvidenceArchiveEntry {
+                path: format!("results/{index:08}/mcdc.json"),
+                contents: serde_json::to_vec(result)?,
+            });
+        }
+        Ok(entries)
+    }
+}
+
 /// Build the report request from what the run recorded.
 ///
 /// A test the runner reported but that announced nothing still becomes a
@@ -380,6 +461,9 @@ pub struct OwnedRunInputs<'a> {
     pub run_id: &'a str,
     pub generated_at: &'a str,
     pub test_exit_code: i32,
+    /// What the numbers mean. Carried rather than inferred from the language,
+    /// so a frontend cannot quietly inherit another's claims.
+    pub coverage_model: CoverageModelDeclaration,
 }
 
 /// Build the report request from what the run recorded.
@@ -399,6 +483,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         run_id,
         generated_at,
         test_exit_code,
+        coverage_model,
     } = inputs;
     if outcomes.is_empty() {
         return Err(OwnedEvidenceError::NoTests);
@@ -441,7 +526,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             manifest: manifest.clone(),
             raw_results,
             generated_at: generated_at.to_owned(),
-            coverage_model: None,
+            coverage_model: Some(coverage_model),
             integrity: None,
             test_exit_code: ExitCodeInput::Present(Some(test_exit_code)),
         },
@@ -516,6 +601,7 @@ mod tests {
                 run_id: "run",
                 generated_at: "now",
                 test_exit_code: 0,
+                coverage_model: go_coverage_model(),
             })
             .err(),
             Some(OwnedEvidenceError::NoTests)
@@ -580,6 +666,7 @@ mod tests {
             run_id: "run",
             generated_at: "now",
             test_exit_code: 0,
+            coverage_model: go_coverage_model(),
         })
         .expect("run");
         assert_eq!(run.tests, 1);

@@ -14,7 +14,8 @@ use supercov_engine::go_test_harness::{
     instrument_test_file, probe_array_file, synthesized_harness,
 };
 use supercov_engine::owned_evidence::{
-    OwnedRunInputs, OwnedTestOutcome, build_frontend_run, go_declaration, read_evidence,
+    OwnedRunInputs, OwnedTestOutcome, build_frontend_run, go_coverage_model, go_declaration,
+    read_evidence,
 };
 
 fn go_binary() -> Option<PathBuf> {
@@ -200,7 +201,9 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
     );
 
     let mut next = 0;
-    let obligations = build_go_obligations("classify.go", SOURCE, &mut next).expect("obligations");
+    let mut decisions = 0;
+    let obligations = build_go_obligations("classify.go", SOURCE, &mut next, &mut decisions)
+        .expect("obligations");
     let local = "example.com/probe/supercov";
     let instrumented = rewrite(SOURCE, &obligations.edits).replace(RUNTIME_IMPORT, local);
     write(&root, "classify.go", &instrumented);
@@ -358,6 +361,7 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
         run_id: "run_go",
         generated_at: "now",
         test_exit_code: 0,
+        coverage_model: go_coverage_model(),
     })
     .expect("frontend run");
     assert_eq!(run.tests, 2);

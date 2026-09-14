@@ -125,6 +125,15 @@ struct Collector<'a> {
     probes: BTreeMap<u64, GoProbe>,
     limitations: Vec<serde_json::Value>,
     widths: Vec<u8>,
+    /// How many decisions the project already numbered before this file. The
+    /// runtime holds one decision-state array for the whole run, so an index
+    /// that meant "the first decision in this file" would land on every other
+    /// file's first decision too.
+    decision_base: u32,
+    /// How many decisions the project already numbered before this file. The
+    /// runtime holds one decision-state array for the whole run, so an index
+    /// that meant "the first decision in this file" would land on every other
+    /// file's first decision too.
     counter: usize,
 }
 
@@ -245,7 +254,7 @@ impl Collector<'_> {
             .collect::<Vec<_>>();
         let (line, column) = self.position(node);
         let id = self.id("d");
-        let index = self.widths.len();
+        let index = self.decision_base as usize + self.widths.len();
         self.widths.push(leaves.len().min(64) as u8);
         for (position, leaf) in leaves.iter().enumerate() {
             // Java and Kotlin both evaluate an argument only when the call is
@@ -364,13 +373,16 @@ pub fn build_jvm_obligations(
     source: &str,
     language: JvmLanguage,
     next_probe: &mut u64,
+    next_decision: &mut u32,
 ) -> Result<JvmFileObligations, JvmInstrumenterError> {
     let tree = parse(source, language)?;
+    let decision_base = *next_decision;
     let mut collector = Collector {
         file,
         source,
         language,
         next_probe,
+        decision_base,
         edits: Vec::new(),
         points: Vec::new(),
         branches: Vec::new(),
@@ -381,6 +393,7 @@ pub fn build_jvm_obligations(
         counter: 0,
     };
     walk(&mut collector, tree.root_node());
+    *next_decision += collector.widths.len() as u32;
     Ok(JvmFileObligations {
         manifest: CoverageManifest {
             decisions: collector.decisions,
@@ -525,8 +538,15 @@ mod tests {
 
     fn java(source: &str) -> (JvmFileObligations, String) {
         let mut next = 0;
-        let obligations =
-            build_jvm_obligations("X.java", source, JvmLanguage::Java, &mut next).expect("java");
+        let mut decisions = 0;
+        let obligations = build_jvm_obligations(
+            "X.java",
+            source,
+            JvmLanguage::Java,
+            &mut next,
+            &mut decisions,
+        )
+        .expect("java");
         let out = rewrite(source, &obligations.edits);
         parse(&out, JvmLanguage::Java)
             .unwrap_or_else(|error| panic!("rewritten Java does not parse: {error}\n{out}"));
@@ -627,8 +647,15 @@ mod tests {
         // parenthesised, so the wrapper has to find a different child.
         let source = "fun f(a: Int, b: Boolean): String {\n    if (a > 10 && b) {\n        return \"big\"\n    }\n    return \"small\"\n}\n";
         let mut next = 0;
-        let obligations =
-            build_jvm_obligations("X.kt", source, JvmLanguage::Kotlin, &mut next).expect("kotlin");
+        let mut decisions = 0;
+        let obligations = build_jvm_obligations(
+            "X.kt",
+            source,
+            JvmLanguage::Kotlin,
+            &mut next,
+            &mut decisions,
+        )
+        .expect("kotlin");
         assert_eq!(
             obligations.manifest.decisions[0].conditions,
             ["a > 10", "b"]
@@ -641,5 +668,52 @@ mod tests {
             out.contains(".c(0, 0, ") && out.contains(".c(0, 1, "),
             "{out}"
         );
+    }
+
+    #[test]
+    fn decisions_are_numbered_across_the_project_not_within_a_file() {
+        // The runtime holds one decision-state array for the whole run, so an
+        // index meaning "the first decision in this file" would land on every
+        // other file's first decision: two classes would share condition
+        // state, and the vectors both produced would describe neither.
+        let mut next = 0;
+        let mut decisions = 0;
+        let java = build_jvm_obligations(
+            "A.java",
+            "class A { static boolean f(boolean x, boolean y) { if (x && y) { return true; } return false; } }",
+            JvmLanguage::Java,
+            &mut next,
+            &mut decisions,
+        )
+        .unwrap();
+        let kotlin = build_jvm_obligations(
+            "B.kt",
+            "fun g(x: Boolean, y: Boolean): Boolean {\n    if (x || y) {\n        return true\n    }\n    return false\n}\n",
+            JvmLanguage::Kotlin,
+            &mut next,
+            &mut decisions,
+        )
+        .unwrap();
+
+        let referenced = |obligations: &JvmFileObligations| {
+            obligations
+                .edits
+                .iter()
+                .filter_map(|edit| {
+                    let at = edit.text.find(".c(")?;
+                    edit.text[at + 3..]
+                        .split(',')
+                        .next()?
+                        .trim()
+                        .parse::<u32>()
+                        .ok()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(referenced(&java), [0].into());
+        assert_eq!(referenced(&kotlin), [1].into());
+        assert_eq!(decisions, 2, "the project numbered two decisions in all");
+        assert_eq!(java.decision_widths, [2]);
+        assert_eq!(kotlin.decision_widths, [2]);
     }
 }

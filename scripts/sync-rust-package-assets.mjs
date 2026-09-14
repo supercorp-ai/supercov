@@ -82,6 +82,13 @@ const mappings = [
     "supercov_runtime.py",
     "supercov_unittest.py",
   ]),
+  // Nested rather than flat: a Go package is a directory and a JVM class is
+  // its package path, so the layout is part of what makes these compile.
+  ...runtimeFiles("go", ["supercov/supercov.go"]),
+  ...runtimeFiles("jvm", [
+    "com/supercorp/supercov/Supercov.java",
+    "com/supercorp/supercov/SupercovListener.java",
+  ]),
   ...runtimeFiles("ruby", [
     "supercov_cucumber.rb",
     "supercov_minitest.rb",

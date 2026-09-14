@@ -194,8 +194,15 @@ fn measure(
         &std::fs::read_to_string(runtime).expect("runtime"),
     );
     let mut next = 0;
-    let obligations = build_jvm_obligations("Work.java", source, JvmLanguage::Java, &mut next)
-        .expect("obligations");
+    let mut decisions = 0;
+    let obligations = build_jvm_obligations(
+        "Work.java",
+        source,
+        JvmLanguage::Java,
+        &mut next,
+        &mut decisions,
+    )
+    .expect("obligations");
     write(
         &instrumented,
         "Work.java",
