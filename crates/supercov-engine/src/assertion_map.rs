@@ -656,18 +656,13 @@ fn flow_keys(map: &AssertionMap) -> BTreeSet<String> {
         .flat_map(|a| a.flows.iter().map(move |f| flow_key(a, f)))
         .collect()
 }
-pub fn change_errors(
-    map: &AssertionMap,
-    change: &Change,
-    response: &ChangeAssessment,
-) -> Vec<String> {
-    change_errors_with(&flow_keys(map), change, response)
+/// An assessment is the author's judgement, so it is validated against the
+/// map it names flows in -- not against the change. The change no longer
+/// determines any part of a well-formed response.
+pub fn change_errors(map: &AssertionMap, response: &ChangeAssessment) -> Vec<String> {
+    change_errors_with(&flow_keys(map), response)
 }
-fn change_errors_with(
-    keys: &BTreeSet<String>,
-    change: &Change,
-    response: &ChangeAssessment,
-) -> Vec<String> {
+fn change_errors_with(keys: &BTreeSet<String>, response: &ChangeAssessment) -> Vec<String> {
     let affected = response
         .affected_flows
         .iter()
@@ -683,13 +678,21 @@ fn change_errors_with(
     if !affected.is_subset(keys) {
         errors.push("unknown affected flow".into());
     }
-    if !change
-        .known_flows
-        .intersection(keys)
-        .all(|k| affected.contains(k))
-    {
-        errors.push("known dependent flows must be included unless removed from the map".into());
-    }
+    // `affectedFlows` is the author's judgement -- the dependents this change
+    // actually invalidates -- not a restatement of `knownFlows`.
+    //
+    // Requiring the exhaustive set made the field carry no judgement at all: it
+    // was fully determined by data Supercov already holds, and every flow it
+    // named lost its acknowledgement. On a real map that meant one no-op
+    // manifest edit took 657 flows to zero, so the only ways forward were to
+    // copy 653 basis tokens for claims nobody had read, or leave the change
+    // pending and keep no percentage. That is the rubber-stamping the whole
+    // invalidation rule exists to prevent, one step further down.
+    //
+    // There is deliberately no floor -- not even "name everything whose test
+    // ran the change". Under an integration suite every test runs everything,
+    // so that floor is the same cascade wearing a different hat. Exposure is
+    // reported so the author can judge; it does not judge for them.
     errors
 }
 pub fn expected_change_basis(
@@ -745,7 +748,7 @@ impl<'a> Ledger<'a> {
                     .filter(|r| r.id == change.id)
                     .collect::<Vec<_>>();
                 match responses.as_slice() {
-                    [r] if change_errors_with(&keys, change, r).is_empty()
+                    [r] if change_errors_with(&keys, r).is_empty()
                         && r.basis.as_deref()
                             == Some(
                                 expected_change_basis_with(change, r, &inputs_digest).as_str(),
@@ -770,8 +773,8 @@ impl<'a> Ledger<'a> {
     pub fn expected_change_basis(&self, change: &Change, response: &ChangeAssessment) -> String {
         expected_change_basis_with(change, response, &self.inputs_digest)
     }
-    pub fn change_errors(&self, change: &Change, response: &ChangeAssessment) -> Vec<String> {
-        change_errors_with(&self.keys, change, response)
+    pub fn change_errors(&self, response: &ChangeAssessment) -> Vec<String> {
+        change_errors_with(&self.keys, response)
     }
 }
 /// Why a file is one of a flow's dependencies, and where the flow sits in it.
@@ -1097,10 +1100,11 @@ pub fn validation(map: &AssertionMap, state: &State, inputs: &Inputs) -> serde_j
         .collect::<BTreeMap<_, _>>();
     let changes = state.changes.iter().map(|c| {
         let response = map.change_assessments.iter().find(|r| r.id == c.id);
-        let faults = response.map(|r| ledger.change_errors(c, r)).unwrap_or_default();
+        let faults = response.map(|r| ledger.change_errors(r)).unwrap_or_default();
         errors.extend(faults.iter().map(|e| format!("{}: {e}", c.id)));
         let tests = c.exposed.iter().filter_map(|k| selectors.get(k)).flat_map(|t| t.iter()).collect::<BTreeSet<_>>();
-        json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,"knownFlows":c.known_flows,
+        json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,
+            "knownFlows":{"flows":c.known_flows.len(),"sample":c.known_flows.iter().take(8).collect::<Vec<_>>()},
             "exposed":{"flows":c.exposed.len(),"tests":tests,"sample":c.exposed.iter().take(8).collect::<Vec<_>>()},
             "current":ledger.current(&c.id),"assessment":response,"errors":faults,
             "expectedBasis":response.map(|r| ledger.expected_change_basis(c,r))})

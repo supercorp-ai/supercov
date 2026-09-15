@@ -6,8 +6,13 @@
 
 - The map report says when a `watch` entry changes what a flow rests on. Naming a file that already holds the flow's nodes widens it from the declarations holding those nodes to the whole file, so a neighbouring function's body is a review again -- sometimes what the author means, never something that should happen unsaid. Naming a file the flow already depends on whole, such as its own test, is reported as redundant alongside the existing manifest advisory.
 
+**Changed**
+
+- A change assessment's `affectedFlows` is the author's judgement -- the flows this change invalidates -- and no longer has to restate every known dependent. Only the flows it names lose their acknowledgement, so one explanation can answer for a change that touches no claim, as `docs assertion-maps` has always described. The change view reports `knownFlows` as a count with a sample rather than every key, since nothing now asks the author to retype it.
+
 **Fixed**
 
+- Recording a change assessment no longer de-acknowledges every flow it merely names. The exhaustive list was mandatory and naming a flow cost its credit, so one no-op manifest edit could take a whole map to zero asserted statements and leave the author copying hundreds of acknowledgement tokens for claims nobody had read.
 - A reason for a change in a whole-file dependency no longer blames the declaration that changed for holding a node it does not hold. `src/a.js: other (line 4) changed (holds this flow's n:2)` named the neighbour of the node's declaration as its holder; it now reads `... (is watched by this flow; this flow's n:2 sits in work (line 1))`, which says why the change counts and where the claim sits.
 - Removing a `watch` entry that Supercov itself reports as redundant no longer restates the claim. A manifest, lockfile or runner configuration named in `watch` is tracked for the whole run, so it never became one of the flow's dependencies -- but it was still part of what the acknowledgement was computed over, so deleting the entry the report advised deleting cost a full re-acknowledgement. Writing one and removing one are now both free. Flows that never named such a file keep their existing tokens; only a flow carrying a redundant entry is re-based, onto the token it would have had without it.
 

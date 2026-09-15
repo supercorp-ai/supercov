@@ -5,8 +5,10 @@ export function acknowledgeMap(query, mapFile, map = JSON.parse(readFileSync(map
   const write = () => writeFileSync(mapFile, JSON.stringify(map, null, 2) + '\n');
   const changes = query('report', '--view', 'changes', '--limit', '1000').items;
   if (changes.length) {
-    const keys = new Set(map.assertions.flatMap(a => a.flows.map(f => `${a.id}/${f.id}`)));
-    map.changeAssessments = changes.map(c => ({id:c.id,basis:null,affectedFlows:c.knownFlows.filter(k => keys.has(k)),explanation:'Fixture author inspected this source edit and the affected claims.'}));
+    // affectedFlows is the author's judgement, not a restatement of knownFlows.
+    // This fixture author reads the edit and finds no claim it invalidates,
+    // which is the ordinary outcome and the one worth exercising here.
+    map.changeAssessments = changes.map(c => ({id:c.id,basis:null,affectedFlows:[],explanation:'Fixture author inspected this source edit and the claims that depend on it.'}));
     write();
     const validation = query('validate');
     for (const r of map.changeAssessments) r.basis = validation.changes.find(c => c.id === r.id).expectedBasis;

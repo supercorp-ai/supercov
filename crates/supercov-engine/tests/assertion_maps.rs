@@ -1174,7 +1174,7 @@ fn change_impact_can_invalidate_an_unwatched_sibling_and_folds_without_churning_
 }
 
 #[test]
-fn missing_impact_responses_cannot_clear_changes_and_known_dependencies_cannot_be_omitted() {
+fn missing_impact_responses_cannot_clear_changes_and_an_empty_judgement_needs_a_reason() {
     let (old, map, state) = fixture();
     let mut new = old.clone();
     new.files
@@ -1183,6 +1183,21 @@ fn missing_impact_responses_cannot_clear_changes_and_known_dependencies_cannot_b
         .push_str("// changed");
     let (mut map, state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
     let c = &state.changes[0];
+    // An explanation is what the channel asks for. Without one there is no
+    // assessment, whatever the flow list says.
+    let mut r = ChangeAssessment {
+        id: c.id.clone(),
+        basis: None,
+        affected_flows: vec![],
+        explanation: "   ".into(),
+    };
+    r.basis = Some(expected_change_basis(c, &r, &new.manifest()));
+    map.change_assessments.push(r);
+    assert!(!change_current(&map, c, &new.manifest()));
+    assert_eq!(validation(&map, &state, &new)["valid"], false);
+    // With one, an empty judgement is the documented contract: one explanation
+    // answers for the change.
+    map.change_assessments.clear();
     let mut r = ChangeAssessment {
         id: c.id.clone(),
         basis: None,
@@ -1191,10 +1206,8 @@ fn missing_impact_responses_cannot_clear_changes_and_known_dependencies_cannot_b
     };
     r.basis = Some(expected_change_basis(c, &r, &new.manifest()));
     map.change_assessments.push(r);
-    assert!(!change_current(&map, c, &new.manifest()));
-    assert_eq!(validation(&map, &state, &new)["valid"], false);
-    acknowledge(&mut map, &state, &new, &BTreeSet::new(), true, true).unwrap();
     assert!(change_current(&map, c, &new.manifest()));
+    assert_eq!(validation(&map, &state, &new)["valid"], true);
     map.change_assessments.clear();
     let (next, next_state) = carry(&map, &state, &new.manifest(), &new, "three", false).unwrap();
     assert_eq!(next_state.changes.len(), 1);
@@ -1664,5 +1677,88 @@ fn a_whole_file_reason_does_not_blame_the_declaration_that_holds_no_node() {
     assert!(
         !named.contains("holds this flow's"),
         "the changed declaration holds no node: {named}"
+    );
+}
+
+/// B15: recording an assessment used to de-acknowledge every flow it named,
+/// and the exhaustive list was mandatory -- so one no-op manifest edit took a
+/// 657-flow map to zero asserted statements. The author's only ways out were
+/// to copy hundreds of basis tokens for claims nobody had read, or leave the
+/// change pending and keep no percentage.
+///
+/// A test that only checks the assessment is accepted does not catch this. It
+/// has to measure the credit before and after.
+#[test]
+fn assessing_a_change_costs_only_the_flows_the_author_judges_affected() {
+    let (old, map, state) = fixture();
+    let mut new = old.clone();
+    new.files
+        .get_mut("src/a.js")
+        .unwrap()
+        .push_str("// changed");
+    let (mut map, state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
+    let c = state.changes[0].clone();
+    let dependents = c
+        .known_flows
+        .iter()
+        .filter(|k| {
+            map.assertions
+                .iter()
+                .any(|a| a.flows.iter().any(|f| flow_key(a, f) == **k))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(!dependents.is_empty(), "the change has live dependents");
+
+    // The author rereads the claims the edit touched and re-acknowledges them.
+    acknowledge(&mut map, &state, &new, &BTreeSet::new(), true, false).unwrap();
+    assert_eq!(current(&map, &state, &new), 2, "re-acknowledged");
+
+    // One explanation answers for the change. The dependents keep their credit.
+    let assess_with = |map: &mut AssertionMap, affected: Vec<String>, why: &str| {
+        map.change_assessments.clear();
+        let mut r = ChangeAssessment {
+            id: c.id.clone(),
+            basis: None,
+            affected_flows: affected,
+            explanation: why.into(),
+        };
+        r.basis = Some(expected_change_basis(&c, &r, &new.manifest()));
+        map.change_assessments.push(r);
+    };
+    assess_with(
+        &mut map,
+        vec![],
+        "The edit is a comment; no claim rests on it",
+    );
+    assert!(change_current(&map, &c, &new.manifest()));
+    assert_eq!(
+        current(&map, &state, &new),
+        2,
+        "assessing the change cost the flows their acknowledgement"
+    );
+
+    // Naming one is a judgement about that one, and costs exactly it.
+    assess_with(
+        &mut map,
+        vec![dependents[0].clone()],
+        "This claim reads the edited line",
+    );
+    assert!(change_current(&map, &c, &new.manifest()));
+    assert_eq!(
+        current(&map, &state, &new),
+        1,
+        "exactly the flow the author named should go stale"
+    );
+
+    // Naming a flow that is not in the map is still an error.
+    assess_with(&mut map, vec!["nope/flow".into()], "typo");
+    assert!(!change_current(&map, &c, &new.manifest()));
+    assert!(
+        validation(&map, &state, &new)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("unknown affected flow"))
     );
 }
