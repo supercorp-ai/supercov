@@ -39,6 +39,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - run: npm ci
       - run: npx playwright install --with-deps chromium
+      - run: npm ci
+        working-directory: examples/react-verification
+      - run: npx playwright install --with-deps chromium
+        working-directory: examples/react-verification
       - run: cargo build -p supercov
       - run: npm run test:runtime
       - run: node scripts/rust-direct-jest-integration.mjs

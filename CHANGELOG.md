@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.55
+
+**Fixed**
+
+- Mixed Vitest Node and Browser Mode projects now get the correct runtime and browser evidence commands for each resolved project, including inherited configurations, project globs and project selection. Browser module-initialization coverage is preserved separately from per-test evidence.
+- React Native and Expo JavaScript tests work with Babel-transformed runtime imports and Jest's jsdom setup. Expo's forwarding launcher preserves the original Jest configuration instead of recursively loading the generated configuration.
+- Manifest-declared Jest setup files are excluded from application instrumentation, so injected bindings do not break hoisted mock factories. Duplicate test names remain distinct from retries, including parameterized cases and delayed retries.
+- Jest captures per-test coverage after teardown, preserving React effect cleanup executed by Testing Library.
+
+**Added**
+
+- A runnable React example shows how displayed values, accessible names, disabled states and error messages can remain unchecked at 100% line coverage, and how targeted assertions catch four concrete regressions.
+- Regression checks cover mixed Vitest projects, React hydration in jsdom and Chromium, and React Native/Expo component tests. Nightly checks run pinned Bulletproof React and Bluesky JavaScript suites with documented configuration and exclusions.
+
 ## 0.0.54
 
 **Added**
