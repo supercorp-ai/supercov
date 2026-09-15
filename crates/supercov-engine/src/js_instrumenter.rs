@@ -15,7 +15,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use oxc_allocator::{Allocator, CloneIn, TakeIn};
 use oxc_ast::{
-    AstBuilder, NONE,
+    AstBuilder, AstKind, NONE,
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
         AssignmentPattern, AssignmentTarget, BindingPattern, CallExpression, CatchClause,
@@ -6012,6 +6012,7 @@ struct ExtendedCollector<'s> {
     source: &'s str,
     file: &'s str,
     source_sensitive_functions: &'s HashSet<SpanKey>,
+    entered_loops: HashSet<SpanKey>,
     unsafe_function_depth: usize,
     with_depth: usize,
     analysis: ExtendedAnalysis,
@@ -6061,6 +6062,12 @@ impl ExtendedCollector<'_> {
     fn enter_loop(&mut self, span: Span, right: &Expression<'_>, kind: &str) {
         let transformed = !self.unsafe_context();
         if !transformed {
+            return;
+        }
+        // One feasible outcome is not a branch. Recording it as one leaves a
+        // permanently unreachable obligation, which is how a project ends up
+        // below 100% with nothing to do about it.
+        if self.entered_loops.contains(&span_key(span)) {
             return;
         }
         let id = stable_id(self.source, self.file, kind, span, "");
@@ -6198,6 +6205,73 @@ impl<'a> Traverse<'a, ()> for ExtendedCollector<'_> {
     }
 }
 
+/// Loops that must run at least once.
+///
+/// A `for...of` over a non-empty array literal has no zero-iteration outcome
+/// for a test to reach, so asking for one is asking for something impossible.
+/// The author's only ways to satisfy it are to fake a test or delete the loop,
+/// and a coverage tool should ask for neither.
+///
+/// This is decided from the syntax tree and symbol resolution alone. It stays
+/// there deliberately: a type would answer more questions, but a type can be
+/// asserted (`as Foo`) or optimistic (`xs[0]` is `T`, and `[][0]` is
+/// `undefined`), and an obligation dropped on a wrong answer is a branch that
+/// runs and is never reported again. Over-asking is recoverable; this is not.
+fn provably_entered_loops(program: &Program<'_>) -> HashSet<SpanKey> {
+    let semantic = SemanticBuilder::new().build(program).semantic;
+    let mut found = HashSet::new();
+    for node in semantic.nodes() {
+        if let AstKind::ForOfStatement(loop_node) = node.kind()
+            && never_empty(&loop_node.right, &semantic)
+        {
+            found.insert(span_key(loop_node.span));
+        }
+    }
+    found
+}
+
+/// Whether an iterable cannot be empty: a non-empty array literal, or a
+/// `const` bound to one that nothing else in the file can reach.
+fn never_empty(expression: &Expression<'_>, semantic: &oxc_semantic::Semantic<'_>) -> bool {
+    match transparent_expression(expression) {
+        Expression::ArrayExpression(array) => has_definite_element(array),
+        Expression::Identifier(identifier) => {
+            let Some(symbol) = referenced_symbol(identifier, semantic.scoping()) else {
+                return false;
+            };
+            // Nothing but this loop may reach the binding. A shrinking method
+            // (`pop`, `splice`, `length = 0`) is an ordinary read of the
+            // identifier, so counting references is what makes this sound --
+            // recognising a list of mutating methods would not be.
+            if semantic.scoping().get_resolved_references(symbol).count() != 1 {
+                return false;
+            }
+            let declaration = semantic.scoping().symbol_declaration(symbol);
+            let AstKind::VariableDeclarator(declarator) =
+                semantic.nodes().get_node(declaration).kind()
+            else {
+                return false;
+            };
+            declarator.kind == VariableDeclarationKind::Const
+                && declarator.init.as_ref().is_some_and(|init| {
+                    matches!(transparent_expression(init), Expression::ArrayExpression(array)
+                        if has_definite_element(array))
+                })
+        }
+        _ => false,
+    }
+}
+
+/// An element that is certainly there. A spread may contribute nothing, so
+/// `[...xs]` is not known to be non-empty; a hole is, since `[,]` has length 1
+/// and yields once.
+fn has_definite_element(array: &oxc_ast::ast::ArrayExpression<'_>) -> bool {
+    array
+        .elements
+        .iter()
+        .any(|element| !matches!(element, ArrayExpressionElement::SpreadElement(_)))
+}
+
 fn collect_extended_branches<'a>(
     allocator: &'a Allocator,
     program: &mut Program<'a>,
@@ -6205,10 +6279,12 @@ fn collect_extended_branches<'a>(
     file: &str,
     source_sensitive_functions: &HashSet<SpanKey>,
 ) -> ExtendedAnalysis {
+    let entered_loops = provably_entered_loops(program);
     let mut collector = ExtendedCollector {
         source,
         file,
         source_sensitive_functions,
+        entered_loops,
         unsafe_function_depth: 0,
         with_depth: 0,
         analysis: ExtendedAnalysis::default(),
@@ -7775,6 +7851,66 @@ mod tests {
                 .map(|decision| decision.kind.as_str())
                 .collect::<Vec<_>>(),
             vec!["ternary", "while", "do-while", "for", "if"]
+        );
+    }
+
+    #[test]
+    fn a_loop_that_must_run_has_no_zero_iteration_obligation() {
+        // B11. `for (const x of [a, b])` cannot iterate zero times, so the
+        // outcome was an obligation no test could ever discharge -- the author
+        // could only fake a test or delete the loop.
+        let entered = |source: &str| {
+            let output = analyze_candidate(source, "src/loops.ts").unwrap();
+            output
+                .branches
+                .iter()
+                .filter(|branch| branch.kind == "for-of" || branch.kind == "for-in")
+                .count()
+        };
+        // Folded: the iterable is certainly non-empty.
+        for source in [
+            "export function f(g) { for (const x of [1, 2]) g(x); }\n",
+            "export function f(g) { for (const x of [1]) g(x); }\n",
+            "export function f(g) { const xs = [1, 2]; for (const x of xs) g(x); }\n",
+            // A hole still yields once: [,].length === 1.
+            "export function f(g) { for (const x of [,]) g(x); }\n",
+            // A spread may contribute nothing, but a definite element is enough.
+            "export function f(g, ys) { for (const x of [...ys, 1]) g(x); }\n",
+        ] {
+            assert_eq!(entered(source), 0, "should be folded: {source}");
+        }
+        // Kept: the loop can genuinely run zero times.
+        for source in [
+            "export function f(g, ys) { for (const x of ys) g(x); }\n",
+            "export function f(g) { for (const x of []) g(x); }\n",
+            "export function f(g, ys) { for (const x of [...ys]) g(x); }\n",
+            "export function f(g) { let xs = [1]; xs = []; for (const x of xs) g(x); }\n",
+            // Anything else may reach the binding, including a shrinking call.
+            "export function f(g) { const xs = [1]; xs.pop(); for (const x of xs) g(x); }\n",
+            "export function f(g) { const xs = [1]; g(xs); for (const x of xs) g(x); }\n",
+            "export function f(g) { const xs = [1]; xs.length = 0; for (const x of xs) g(x); }\n",
+            // A different binding of the same name must not be borrowed.
+            concat!(
+                "const xs = [1, 2];\n",
+                "export function f(g, ys) { const xs = ys; for (const x of xs) g(x); }\n",
+            ),
+            // for-in is about keys, not elements, and is left alone.
+            "export function f(g) { for (const k in [1, 2]) g(k); }\n",
+        ] {
+            assert_eq!(entered(source), 1, "should be kept: {source}");
+        }
+        // The loop body is still measured; only the impossible outcome is gone.
+        let output = analyze_candidate(
+            "export function f(g) { for (const x of [1, 2]) g(x); }\n",
+            "src/loops.ts",
+        )
+        .unwrap();
+        assert!(
+            output
+                .points
+                .iter()
+                .any(|point| point.source.contains("g(x)")),
+            "the body must still be an obligation"
         );
     }
 
