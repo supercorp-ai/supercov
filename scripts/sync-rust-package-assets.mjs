@@ -71,9 +71,11 @@ const mappings = [
     "runtime.mjs",
     "transport.mjs",
     "vitest.mjs",
+    "vitestBrowser.mjs",
     "jest.cjs",
     "jest.config.mjs",
     "jestReporter.mjs",
+    "jestRuntime.cjs",
     "vitestReporter.mjs",
   ]),
   ...runtimeFiles("python", [

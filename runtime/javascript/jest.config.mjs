@@ -30,7 +30,16 @@ export default async function supercovJestConfig() {
         ...config,
         // Concurrent tests in one file would share the worker's scope.
         maxConcurrency: 1,
-        setupFilesAfterEnv: [...asList(config.setupFilesAfterEnv), here("jest.cjs")],
+        setupFiles: [here("jestRuntime.cjs"), ...asList(config.setupFiles)],
+        // Babel-based presets (including React Native) lower the runtime
+        // side-effect import in instrumented tests to require(). Jest cannot
+        // require our ESM shim. Its environment already owns the runtime, so
+        // resolve only our generated import to a CommonJS bridge instead.
+        moduleNameMapper: {
+            "(?:^|/)\\.supercov/node_modules/runtime\\.mjs$": here("jestRuntime.cjs"),
+            ...config.moduleNameMapper,
+        },
+        setupFilesAfterEnv: [here("jest.cjs"), ...asList(config.setupFilesAfterEnv)],
         reporters: [
             ...(config.reporters === undefined ? ["default"] : asList(config.reporters)),
             here("jestReporter.mjs"),

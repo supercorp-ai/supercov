@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.54",
+  "version": "0.0.55",
   "description": "Coverage for coding agents and software factories \ud83c\udf19",
   "license": "MIT",
   "repository": {
@@ -54,6 +54,7 @@
     "test:rustc-backend-spike": "node scripts/rustc-backend-spike.mjs",
     "test:rust-compiler-spikes": "cargo build -p supercov && node scripts/rust-libtest-companion-spike.mjs && node scripts/rust-async-attribution-spike.mjs && node scripts/rust-subprocess-attribution-spike.mjs && node scripts/rust-custom-harness-spike.mjs && node scripts/rust-libtest-builder-lifecycle-spike.mjs",
     "test": "cargo test --workspace",
+    "test:react": "cargo build -p supercov && node scripts/rust-vitest-projects-integration.mjs && npm --prefix examples/react-verification ci && npm --prefix examples/react-verification run demo && node scripts/react-hydration-compatibility.mjs",
     "test:runtime": "node --test tests/runtime/*.test.mjs",
     "test:fixture": "cargo build -p supercov && node scripts/rust-fixture-matrix.mjs",
     "test:packed-npx": "cargo build --release -p supercov && node scripts/packed-npx-integration.mjs",
@@ -97,14 +98,14 @@
     "test:launcher": "go vet ./cmd/... && go test ./cmd/..."
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "0.0.54",
-    "@supercov/cli-darwin-x64": "0.0.54",
-    "@supercov/cli-linux-arm64-gnu": "0.0.54",
-    "@supercov/cli-linux-arm64-musl": "0.0.54",
-    "@supercov/cli-linux-x64-gnu": "0.0.54",
-    "@supercov/cli-linux-x64-musl": "0.0.54",
-    "@supercov/cli-win32-arm64": "0.0.54",
-    "@supercov/cli-win32-x64": "0.0.54"
+    "@supercov/cli-darwin-arm64": "0.0.55",
+    "@supercov/cli-darwin-x64": "0.0.55",
+    "@supercov/cli-linux-arm64-gnu": "0.0.55",
+    "@supercov/cli-linux-arm64-musl": "0.0.55",
+    "@supercov/cli-linux-x64-gnu": "0.0.55",
+    "@supercov/cli-linux-x64-musl": "0.0.55",
+    "@supercov/cli-win32-arm64": "0.0.55",
+    "@supercov/cli-win32-x64": "0.0.55"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",
@@ -126,6 +127,7 @@
     "@playwright/test": "1.62.1",
     "@swc/core": "^1.16.1",
     "@types/node": "^24.0.0",
+    "@vitest/browser-playwright": "4.1.11",
     "esbuild": "^0.28.2",
     "expect": "30.4.1",
     "jest": "30.5.1",

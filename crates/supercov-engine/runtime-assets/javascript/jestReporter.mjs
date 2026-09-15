@@ -30,12 +30,23 @@ function attemptStatus(status) {
  * record carries the attempt's coverage; the report joins the two.
  */
 export default class SupercovJestReporter {
-    onTestCaseResult(test, result) {
+    onTestResult(test, fileResult) {
+        // Jest's final array follows declaration order, including skipped cases.
+        // Completion order does not: retries can finish after a namesake test.
+        const occurrences = new Map();
+        for (const result of fileResult.testResults ?? []) {
+            const occurrence = occurrences.get(result.fullName) ?? 0;
+            occurrences.set(result.fullName, occurrence + 1);
+            this.recordResult(test, result, occurrence);
+        }
+    }
+    recordResult(test, result, occurrence) {
         const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
         if (!evidenceDirectory)
             return;
         const testFile = localFile(test.path);
-        const testId = `jest:${digest(`${testFile}\0${result.fullName}`)}`;
+        const identity = `${testFile}\0${result.fullName}${occurrence ? `\0${occurrence}` : ""}`;
+        const testId = `jest:${digest(identity)}`;
         const retry = Math.max((result.invocations ?? 1) - 1, 0);
         const status = attemptStatus(result.status);
         const provenance = inferTestProvenance({

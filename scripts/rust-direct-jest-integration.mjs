@@ -101,7 +101,7 @@ try {
       '',
     ].join('\n'),
   );
-  const install = spawnSync(windows ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--silent', 'jest@29'], {
+  const install = spawnSync(windows ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--silent', 'jest@29', 'babel-jest@29', 'jest-environment-jsdom@29', '@babel/core@7', '@babel/plugin-transform-modules-commonjs@7'], {
     cwd: project,
     encoding: 'utf8',
     shell: windows,
@@ -146,6 +146,61 @@ try {
 
   const failed = query(run.runId, 'failed', 'summary');
   assert.equal(failed.data.tests, 2, JSON.stringify(failed.data.testOutcomes));
+
+  // React and React Native presets transform ESM/TSX test imports to CJS.
+  // The injected runtime import must resolve without asking Jest to require
+  // an ESM file, and the user's existing aliases must remain effective.
+  writeFileSync(resolve(project, 'babel.config.cjs'),
+    "module.exports = { plugins: ['@babel/plugin-transform-modules-commonjs'] };\n");
+  writeFileSync(resolve(project, 'jest.config.js'),
+    "module.exports = { testEnvironment: 'jsdom', setupFiles: ['<rootDir>/tests/early.js'], testMatch: ['**/transformed.test.js'], moduleNameMapper: { '^@app$': '<rootDir>/src/permission.js' }, setupFilesAfterEnv: ['<rootDir>/tests/setup.js'] };\n");
+  writeFileSync(resolve(project, 'tests/early.js'),
+    "globalThis.__earlyPermission = require('../src/permission').permission(true, false);\n");
+  writeFileSync(resolve(project, 'tests/transformed.test.js'),
+    "import { permission } from '@app';\ntest('Babel imports retain runtime and aliases', () => expect([permission(true, false), globalThis.__earlyPermission, typeof document]).toEqual(['allowed', 'allowed', 'object']));\n");
+  const transformed = rust('__run-js-direct', {
+    root: project, command: ['npm', 'test'], runId: 'rust-babel-jest',
+    startedAt: '2026-09-15T00:00:02.000Z',
+  });
+  assert.equal(transformed.exitCode, 0, 'Babel-transformed ESM test executes under Jest');
+  const transformedSummary = query(transformed.runId, 'all', 'summary');
+  assert.equal(transformedSummary.data.testOutcomes.passed, 1);
+  assert.deepEqual(transformedSummary.data.diagnostics, []);
+  assert.ok(transformedSummary.data.coverage.lines.covered > 0);
+
+  // jest-expo forwards its CLI arguments to another Jest process. The second
+  // preload must not reinterpret our generated --config as the user's config.
+  const proxyDirectory = resolve(project, 'tools/node_modules/.bin');
+  mkdirSync(proxyDirectory, { recursive: true });
+  const proxy = resolve(proxyDirectory, 'jest');
+  writeFileSync(proxy,
+    `const {spawnSync}=require('node:child_process');\nconst result=spawnSync(process.execPath,[${JSON.stringify(resolve(project, 'node_modules/jest/bin/jest.js'))},...process.argv.slice(2)],{stdio:'inherit'});\nprocess.exit(result.status ?? 1);\n`);
+  const forwarded = rust('__run-js-direct', {
+    root: project, command: ['node', proxy, '--config=jest.config.js', '--runInBand'],
+    runId: 'rust-forwarded-jest', startedAt: '2026-09-15T00:00:03.000Z',
+  });
+  assert.equal(forwarded.exitCode, 0, 'forwarded generated config does not recurse');
+  assert.equal(query(forwarded.runId, 'all', 'summary').data.testOutcomes.passed, 1);
+
+  // Arbitrarily named declared setup files remain infrastructure even under src/.
+  // Instrumenting this factory would violate babel-plugin-jest-hoist's scope rule.
+  const manifest = JSON.parse(readFileSync(resolve(project, 'package.json'), 'utf8'));
+  manifest.jest = {testEnvironment: 'jsdom', testMatch: ['**/transformed.test.js'],
+    moduleNameMapper: {'^@app$': '<rootDir>/src/permission.js'},
+    setupFiles: ['<rootDir>/tests/early.js'], setupFilesAfterEnv: ['<rootDir>/src/bootstrap.js']};
+  writeFileSync(resolve(project, 'package.json'), JSON.stringify(manifest));
+  rmSync(resolve(project, 'jest.config.js'));
+  writeFileSync(resolve(project, 'src/bootstrap.js'),
+    "jest.mock('node:os', () => ({hostname: () => 'mock-host'}));\n");
+  writeFileSync(resolve(project, 'tests/transformed.test.js'),
+    "import { permission } from '@app';\nimport {hostname} from 'node:os';\ntest('declared setup keeps hoisted mock factories', () => expect([hostname(), permission(true, false)]).toEqual(['mock-host', 'allowed']));\njest.retryTimes(1);\nlet attempt = 0;\ntest('same title', () => { expect(++attempt).toBe(2); expect(permission(true, false)).toBe('allowed'); });\ntest('same title', () => expect(permission(false, false)).toBe('denied'));\ntest.each([true, false])('same table title', allowed => expect(permission(allowed, false)).toBe(allowed ? 'allowed' : 'denied'));\n");
+  const setupRun = rust('__run-js-direct', {root:project, command:['npm','test'],
+    runId:'rust-declared-setup-jest', startedAt:'2026-09-15T00:00:04.000Z'});
+  assert.equal(setupRun.exitCode, 0, 'declared setup retains hoisted mocks');
+  assert.equal(query(setupRun.runId, 'all', 'summary').data.tests, 5);
+  assert.equal(query(setupRun.runId, 'all', 'summary').data.testOutcomes.passed, 4);
+  assert.equal(query(setupRun.runId, 'all', 'summary').data.testOutcomes.flaky, 1);
+  assert.equal(query(setupRun.runId, 'all', 'summary').data.testOutcomes.unknown, 0);
 
   console.log('[rust-direct-jest] a Jest suite has exact per-test identity, reporter outcomes, its own setup file and assertion phases for the global expect');
 } finally {

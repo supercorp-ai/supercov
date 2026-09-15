@@ -35,6 +35,7 @@ const RUNTIME_FILES: &[&str] = &[
     "jest.cjs",
     "jest.config.mjs",
     "jestReporter.mjs",
+    "jestRuntime.cjs",
     "launchSupervisor.mjs",
     "nodeAssert.mjs",
     "nodeAssertAdapter.mjs",
@@ -456,6 +457,9 @@ fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
         )),
         "jestReporter.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/jestReporter.mjs"
+        )),
+        "jestRuntime.cjs" => Some(include_bytes!(
+            "../runtime-assets/javascript/jestRuntime.cjs"
         )),
         "launchSupervisor.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/launchSupervisor.mjs"
@@ -994,6 +998,28 @@ fn write_vitest_config(
            supercovBrowserMode(config)\n\
              ? {{ browser: {{ commands: supercovBrowserCommands(process.cwd()) }} }}\n\
              : {{}};\n\
+         // Child projects do not inherit root setupFiles. Resolve each project's\n\
+         // environment after Vitest has loaded file/glob/inline configs and\n\
+         // applied --project, preserving the runner's own config semantics.\n\
+         const configureProjects = (projects) => {{\n\
+           const nodeSetup = resolve(process.cwd(), '.supercov/node_modules/vitest.mjs');\n\
+           const browserSetup = resolve(process.cwd(), '.supercov/node_modules/vitestBrowser.mjs');\n\
+           for (const project of projects ?? []) {{\n\
+             const test = project.config;\n\
+             const browser = Boolean(test.browser?.enabled);\n\
+             const setup = browser ? browserSetup : nodeSetup;\n\
+             test.setupFiles = [setup, ...(test.setupFiles ?? []).filter(file => file !== nodeSetup && file !== browserSetup)];\n\
+             test.maxConcurrency = 1;\n\
+             if (browser) {{\n\
+               const commands = supercovBrowserCommands(process.cwd());\n\
+               test.browser.commands = {{ ...test.browser.commands, ...commands }};\n\
+               // Browser instances can already exist when reporters initialize.\n\
+               // Their parent generates the browser command exports.\n\
+               const server = project.browser?.parent ?? project.browser;\n\
+               if (server?.commands) Object.assign(server.commands, commands);\n\
+             }}\n\
+           }}\n\
+         }};\n\
          export default async function supercovVitestConfig(env) {{\n\
            const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;\n\
            const loaded = originalPath ? await loadConfigFromFile(env, originalPath, process.cwd()) : undefined;\n\
@@ -1005,8 +1031,8 @@ fn write_vitest_config(
            const configuredReporters = loaded?.config?.test?.reporters;\n\
            config.test ??= {{}};\n\
            config.test.reporters = configuredReporters\n\
-             ? [...(Array.isArray(configuredReporters) ? configuredReporters : [configuredReporters]), new SupercovVitestReporter()]\n\
-             : ['default', new SupercovVitestReporter()];\n\
+             ? [...(Array.isArray(configuredReporters) ? configuredReporters : [configuredReporters]), new SupercovVitestReporter(configureProjects)]\n\
+             : ['default', new SupercovVitestReporter(configureProjects)];\n\
            return config;\n\
          }}\n"
     );
