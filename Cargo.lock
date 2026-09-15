@@ -1843,7 +1843,7 @@ checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 
 [[package]]
 name = "supercov"
-version = "0.0.53"
+version = "0.0.54"
 dependencies = [
  "serde",
  "serde_json",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "supercov-contracts"
-version = "0.0.53"
+version = "0.0.54"
 dependencies = [
  "serde",
  "serde_json",
@@ -1863,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "supercov-engine"
-version = "0.0.53"
+version = "0.0.54"
 dependencies = [
  "ar_archive_writer",
  "base64",
