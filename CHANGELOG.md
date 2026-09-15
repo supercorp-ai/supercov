@@ -5,7 +5,7 @@
 **Added**
 
 - `supercov runs <id> tests affected` names the tests of a run that the changes since it could have reached: a change in code the test ran, in its test file, or in the shape of a file it ran code in. A change confined to code the test never ran does not count, nor do comments, blank lines or trailing whitespace. `--names` and `--files` print one line per test for a runner's filter; a dependency, configuration or toolchain change affects every test and says so; a file added since the run is outside every record, and the working-tree check says that too.
-- Each run records what every test executed, declaration by declaration, in the run's own state. Assertion change records name the flows whose selected tests ran the changed code as `exposed`, alongside the `knownFlows` the change made stale, so the one assessment a change asks for is asked of the right people -- and a change no selected test ran is not asked about at all.
+- Each run records what every test executed, declaration by declaration, in the run's own state. Assertion change records say which tests ran the changed code and how many flows that exposes (`exposed`), alongside the `knownFlows` the change made stale, so the one assessment a change asks for is asked of the right people -- and a change no selected test ran is not asked about at all.
 
 **Changed**
 
