@@ -1849,3 +1849,98 @@ fn a_change_item_does_not_grow_with_the_map_or_the_suite() {
     // And it fits a page with room to spare, whatever the project does.
     assert!(large < 8_192, "{large} bytes");
 }
+
+/// One edit to a flow, and the part its reason must name.
+type Edit = (&'static str, Box<dyn Fn(&mut Flow)>, &'static str);
+
+/// A map edit used to report `claim or inputs changed; needs rechecking`,
+/// whatever the author had done. Deleting a watch entry and rewriting an
+/// explanation are different acts and deserve different sentences -- the claim
+/// is a structure, and a mismatch can say which part of it moved.
+#[test]
+fn a_map_edit_says_which_part_of_the_claim_moved() {
+    let (inputs, map, state) = fixture();
+    // The state that carries the record is written by a run, so take one.
+    let (map, state) = carry(&map, &state, &inputs.manifest(), &inputs, "two", false).unwrap();
+    let mut map = map;
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    assert_eq!(current(&map, &state, &inputs), 2);
+
+    let why = |map: &AssertionMap| {
+        let a = &map.assertions[0];
+        reasons(a, &a.flows[0], map, &state, &inputs)
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let edits: Vec<Edit> = vec![
+        (
+            "explanation",
+            Box::new(|f: &mut Flow| f.explanation = "A different judgement".into()),
+            "the flow's explanation changed",
+        ),
+        (
+            "watch",
+            Box::new(|f: &mut Flow| f.watch.clear()),
+            "the flow's watch list changed",
+        ),
+        (
+            "questions",
+            Box::new(|f: &mut Flow| f.questions.push("is this right?".into())),
+            "the flow's questions changed",
+        ),
+        (
+            "counted nodes",
+            Box::new(|f: &mut Flow| f.counts_as_asserted.clear()),
+            "the flow's counted nodes changed",
+        ),
+        (
+            "node meaning",
+            Box::new(|f: &mut Flow| f.nodes[0].meaning = "the returned value".into()),
+            "the flow's nodes changed",
+        ),
+    ];
+    for (name, edit, expected) in edits {
+        let mut edited = map.clone();
+        edit(&mut edited.assertions[0].flows[0]);
+        let reported = why(&edited);
+        assert!(
+            reported.contains(expected),
+            "editing the {name} reported {reported:?}"
+        );
+        assert!(
+            !reported.contains("claim or inputs changed"),
+            "editing the {name} fell back to the generic reason: {reported:?}"
+        );
+        // Only the part that moved is named.
+        assert_eq!(
+            reported.matches(" changed").count(),
+            1,
+            "editing the {name} named more than one part: {reported:?}"
+        );
+    }
+
+    // Editing what the assertion observes is not a flow edit, and says so.
+    let mut edited = map.clone();
+    edited.assertions[0].observes = vec!["something else entirely".into()];
+    assert!(
+        why(&edited).contains("what the assertion observes changed"),
+        "{:?}",
+        why(&edited)
+    );
+
+    // A flow with no recorded parts still gets an answer rather than silence.
+    let mut bare = state.clone();
+    for flow in bare.flows.values_mut() {
+        flow.footprint.clear();
+    }
+    let mut edited = map.clone();
+    edited.assertions[0].flows[0].explanation = "Changed".into();
+    let a = &edited.assertions[0];
+    assert!(
+        reasons(a, &a.flows[0], &edited, &bare, &inputs)
+            .iter()
+            .any(|r| r.contains("claim or inputs changed")),
+        "a state written before parts were recorded must still say something"
+    );
+}

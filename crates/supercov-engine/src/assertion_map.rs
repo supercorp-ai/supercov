@@ -349,6 +349,14 @@ pub struct FlowState {
     /// depends on changed only in code its test never ran. Told, not asked.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub notices: BTreeSet<String>,
+    /// What the flow rested on when this state was written, part by part.
+    ///
+    /// `basis` is one hash of everything, so a mismatch can say that
+    /// *something* moved and no more. Recording the parts separately lets a
+    /// later mismatch name the one that moved -- an author who deleted a watch
+    /// entry and one who rewrote an explanation were given the same sentence.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub footprint: BTreeMap<String, String>,
 }
 /// What each test of a run executed, in the units of that run's manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -991,6 +999,57 @@ fn generation(a: &Assertion, f: &Flow, state: &State, ledger: &Ledger<'_>) -> St
         digest(&("supercov-generation-v2", base, impacts))
     }
 }
+/// The parts of `expected_basis` that depend only on the map and the run's
+/// inputs, each digested on its own.
+///
+/// `generation` is deliberately absent: it is a function of the state being
+/// written, and a change assessment naming this flow already explains itself
+/// through the change channel.
+fn footprint(a: &Assertion, f: &Flow, inputs: &InputManifest) -> BTreeMap<String, String> {
+    let claim = claim(f, inputs);
+    BTreeMap::from([
+        (
+            "the run's context".to_owned(),
+            digest(&inputs.context_digest),
+        ),
+        (
+            "the assertion's site".to_owned(),
+            digest(&site(&a.at, inputs)),
+        ),
+        (
+            "what the assertion observes".to_owned(),
+            digest(&a.observes),
+        ),
+        (
+            "the flow's explanation".to_owned(),
+            digest(&claim.explanation),
+        ),
+        (
+            "the test this flow applies to".to_owned(),
+            digest(&claim.applies_to),
+        ),
+        ("the flow's nodes".to_owned(), digest(&claim.nodes)),
+        ("the flow's edges".to_owned(), digest(&claim.edges)),
+        (
+            "the flow's counted nodes".to_owned(),
+            digest(&claim.counts_as_asserted),
+        ),
+        ("the flow's watch list".to_owned(), digest(&claim.watch)),
+        ("the flow's questions".to_owned(), digest(&claim.questions)),
+        (
+            "the files this flow rests on".to_owned(),
+            digest(&footing(a, f, inputs)),
+        ),
+    ])
+}
+/// Which recorded parts no longer match, in the order they are listed above.
+fn moved(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> Vec<String> {
+    after
+        .iter()
+        .filter(|(part, now)| before.get(*part).is_some_and(|then| then != *now))
+        .map(|(part, _)| format!("{part} changed"))
+        .collect()
+}
 pub fn expected_basis(
     a: &Assertion,
     f: &Flow,
@@ -1059,15 +1118,29 @@ pub fn reasons_with(
         reasons.insert("state does not match run inputs".into());
     }
     if f.basis.as_deref() != Some(expected_basis_with(a, f, state, manifest, ledger).as_str()) {
-        reasons.insert(
-            match f.basis.as_deref() {
-                None => "draft: input acknowledgement not recorded",
-                Some(basis) if superseded_basis(basis) => SUPERSEDED_BASIS,
-                Some(_) => "claim or inputs changed; needs rechecking",
+        let recorded = state.flows.get(&flow_key(a, f));
+        match f.basis.as_deref() {
+            None => {
+                reasons.insert("draft: input acknowledgement not recorded".into());
             }
-            .into(),
-        );
-        if let Some(s) = state.flows.get(&flow_key(a, f)) {
+            Some(basis) if superseded_basis(basis) => {
+                reasons.insert(SUPERSEDED_BASIS.into());
+            }
+            Some(_) => {
+                // Say which part moved. One hash over everything can only
+                // report that something did, which gave an author who deleted
+                // a watch entry the same sentence as one who rewrote a claim.
+                let parts = recorded
+                    .map(|s| moved(&s.footprint, &footprint(a, f, manifest)))
+                    .unwrap_or_default();
+                if parts.is_empty() {
+                    reasons.insert("claim or inputs changed; needs rechecking".into());
+                } else {
+                    reasons.extend(parts);
+                }
+            }
+        }
+        if let Some(s) = recorded {
             reasons.extend(s.reasons.iter().cloned());
         }
     }
@@ -1124,13 +1197,19 @@ pub fn invalidate(state: &mut State, map: &AssertionMap, reason: &str) {
     for a in &map.assertions {
         for f in &a.flows {
             let key = flow_key(a, f);
-            let base = state.flows.get(&key).map_or("0", |s| s.generation.as_str());
+            let previous = state.flows.get(&key);
+            let base = previous.map_or("0", |s| s.generation.as_str());
+            // Whole-map invalidation says nothing about the parts, so keep the
+            // record rather than erasing what it knew.
+            let footprint = previous.map(|s| s.footprint.clone()).unwrap_or_default();
+            let generation = digest(&(base, reason, &state.inputs_digest));
             state.flows.insert(
                 key,
                 FlowState {
-                    generation: digest(&(base, reason, &state.inputs_digest)),
+                    generation,
                     reasons: BTreeSet::from([reason.into()]),
                     notices: BTreeSet::new(),
+                    footprint,
                 },
             );
         }
@@ -1620,6 +1699,7 @@ pub fn carry(
                     },
                     reasons: dirty,
                     notices,
+                    footprint: footprint(a, f, &new_manifest),
                 },
             );
         }
