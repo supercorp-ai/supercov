@@ -722,6 +722,7 @@ pub fn assess(
     passed: bool,
 ) -> Value {
     let manifest = inputs.manifest();
+    let ledger = model::Ledger::new(map, state, &manifest);
     let validation = model::validation(map, state, inputs);
     let errors = validation["errors"]
         .as_array()
@@ -873,14 +874,14 @@ pub fn assess(
             .collect::<BTreeSet<_>>();
         let mut flows = Vec::new();
         for f in &a.flows {
-            let dirty = model::reasons_for_manifest(a, f, map, state, inputs, &manifest);
+            let dirty = model::reasons_with(a, f, state, inputs, &manifest, &ledger);
             let valid = model::validate_flow(f, &inputs.files).is_empty()
                 && a.at.offset(&inputs.files).is_some();
             let freshness = if f.basis.is_none() {
                 draft_flows += 1;
                 "draft"
             } else if f.basis.as_deref()
-                != Some(model::expected_basis(a, f, map, state, &manifest).as_str())
+                != Some(model::expected_basis_with(a, f, state, &manifest, &ledger).as_str())
             {
                 stale_flows += 1;
                 "stale"
@@ -1077,7 +1078,7 @@ pub fn assess(
                 .filter(|c| c.exposed.contains(&flow_key(a, f)))
                 .map(|c| c.id.clone())
                 .collect::<Vec<_>>();
-            flows.push(json!({"id":f.id,"freshness":freshness,"valid":valid,"current":dirty.is_empty(),"expectedBasis":model::expected_basis(a,f,map,state,&manifest),"selectors":selectors,"questions":f.questions,"reasons":dirty,"notices":notices,"exposedTo":exposed_to,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines,"nodeCredit":node_credit}));
+            flows.push(json!({"id":f.id,"freshness":freshness,"valid":valid,"current":dirty.is_empty(),"expectedBasis":model::expected_basis_with(a,f,state,&manifest,&ledger),"selectors":selectors,"questions":f.questions,"reasons":dirty,"notices":notices,"exposedTo":exposed_to,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines,"nodeCredit":node_credit}));
         }
         let observation = if !witnesses.is_empty() {
             "Passing assertion occurrence recorded."

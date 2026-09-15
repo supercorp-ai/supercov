@@ -615,16 +615,24 @@ pub fn dependencies<'a>(a: &'a Assertion, f: &'a Flow) -> BTreeSet<&'a str> {
 fn token(value: &impl Serialize) -> String {
     format!("scov3:{}", digest(value))
 }
+fn flow_keys(map: &AssertionMap) -> BTreeSet<String> {
+    map.assertions
+        .iter()
+        .flat_map(|a| a.flows.iter().map(move |f| flow_key(a, f)))
+        .collect()
+}
 pub fn change_errors(
     map: &AssertionMap,
     change: &Change,
     response: &ChangeAssessment,
 ) -> Vec<String> {
-    let keys = map
-        .assertions
-        .iter()
-        .flat_map(|a| a.flows.iter().map(move |f| flow_key(a, f)))
-        .collect::<BTreeSet<_>>();
+    change_errors_with(&flow_keys(map), change, response)
+}
+fn change_errors_with(
+    keys: &BTreeSet<String>,
+    change: &Change,
+    response: &ChangeAssessment,
+) -> Vec<String> {
     let affected = response
         .affected_flows
         .iter()
@@ -637,12 +645,12 @@ pub fn change_errors(
     if affected.len() != response.affected_flows.len() {
         errors.push("duplicate affected flow".into());
     }
-    if !affected.is_subset(&keys) {
+    if !affected.is_subset(keys) {
         errors.push("unknown affected flow".into());
     }
     if !change
         .known_flows
-        .intersection(&keys)
+        .intersection(keys)
         .all(|k| affected.contains(k))
     {
         errors.push("known dependent flows must be included unless removed from the map".into());
@@ -654,22 +662,82 @@ pub fn expected_change_basis(
     response: &ChangeAssessment,
     inputs: &InputManifest,
 ) -> String {
+    expected_change_basis_with(change, response, &digest(inputs))
+}
+fn expected_change_basis_with(
+    change: &Change,
+    response: &ChangeAssessment,
+    inputs_digest: &str,
+) -> String {
     token(&(
         "supercov-change-v2",
         change,
-        digest(inputs),
+        inputs_digest,
         &response.id,
         &response.affected_flows,
         &response.explanation,
     ))
 }
 pub fn change_current(map: &AssertionMap, change: &Change, inputs: &InputManifest) -> bool {
-    let responses = map
-        .change_assessments
-        .iter()
-        .filter(|r| r.id == change.id)
-        .collect::<Vec<_>>();
-    matches!(responses.as_slice(), [r] if change_errors(map, change, r).is_empty() && r.basis.as_deref() == Some(expected_change_basis(change, r, inputs).as_str()))
+    Ledger::with_changes(map, std::slice::from_ref(change), inputs).current(&change.id)
+}
+/// What every token of one run shares, computed once: the manifest's digest,
+/// and each change whose assessment is current with the flows it names.
+///
+/// Computed per flow instead, this serialised the whole manifest once per
+/// flow per pending change -- minutes on a real map with a backlog of
+/// changes, on every carry and every report.
+pub struct Ledger<'a> {
+    pub inputs_digest: String,
+    keys: BTreeSet<String>,
+    /// Current assessments by change id: the basis the author recorded and
+    /// the flows it names.
+    current: BTreeMap<&'a str, (&'a Option<String>, &'a [String])>,
+}
+impl<'a> Ledger<'a> {
+    pub fn new(map: &'a AssertionMap, state: &'a State, inputs: &InputManifest) -> Self {
+        Self::with_changes(map, &state.changes, inputs)
+    }
+    fn with_changes(map: &'a AssertionMap, changes: &'a [Change], inputs: &InputManifest) -> Self {
+        let inputs_digest = digest(inputs);
+        let keys = flow_keys(map);
+        let current = changes
+            .iter()
+            .filter_map(|change| {
+                let responses = map
+                    .change_assessments
+                    .iter()
+                    .filter(|r| r.id == change.id)
+                    .collect::<Vec<_>>();
+                match responses.as_slice() {
+                    [r] if change_errors_with(&keys, change, r).is_empty()
+                        && r.basis.as_deref()
+                            == Some(
+                                expected_change_basis_with(change, r, &inputs_digest).as_str(),
+                            ) =>
+                    {
+                        Some((change.id.as_str(), (&r.basis, r.affected_flows.as_slice())))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        Self {
+            inputs_digest,
+            keys,
+            current,
+        }
+    }
+    /// Whether the change has a valid, current assessment.
+    pub fn current(&self, change: &str) -> bool {
+        self.current.contains_key(change)
+    }
+    pub fn expected_change_basis(&self, change: &Change, response: &ChangeAssessment) -> String {
+        expected_change_basis_with(change, response, &self.inputs_digest)
+    }
+    pub fn change_errors(&self, change: &Change, response: &ChangeAssessment) -> Vec<String> {
+        change_errors_with(&self.keys, change, response)
+    }
 }
 /// Why a file is one of a flow's dependencies, and where the flow sits in it.
 ///
@@ -859,25 +927,14 @@ fn footing<'a>(
         .collect()
 }
 
-fn generation(
-    a: &Assertion,
-    f: &Flow,
-    map: &AssertionMap,
-    state: &State,
-    inputs: &InputManifest,
-) -> String {
+fn generation(a: &Assertion, f: &Flow, state: &State, ledger: &Ledger<'_>) -> String {
     let key = flow_key(a, f);
     let base = state.flows.get(&key).map_or("0", |s| s.generation.as_str());
-    let impacts = state
-        .changes
+    let impacts = ledger
+        .current
         .iter()
-        .filter(|c| change_current(map, c, inputs))
-        .filter_map(|c| {
-            map.change_assessments
-                .iter()
-                .find(|r| r.id == c.id && r.affected_flows.contains(&key))
-                .map(|r| (&c.id, &r.basis))
-        })
+        .filter(|(_, (_, affected))| affected.contains(&key))
+        .map(|(id, (basis, _))| (*id, *basis))
         .collect::<BTreeMap<_, _>>();
     if impacts.is_empty() {
         base.into()
@@ -892,6 +949,17 @@ pub fn expected_basis(
     state: &State,
     inputs: &InputManifest,
 ) -> String {
+    expected_basis_with(a, f, state, inputs, &Ledger::new(map, state, inputs))
+}
+/// The token with the run-wide facts already in hand; what every caller with
+/// more than one flow to judge should use.
+pub fn expected_basis_with(
+    a: &Assertion,
+    f: &Flow,
+    state: &State,
+    inputs: &InputManifest,
+    ledger: &Ledger<'_>,
+) -> String {
     token(&(
         "supercov-flow-v3",
         &inputs.context_digest,
@@ -900,7 +968,7 @@ pub fn expected_basis(
         &a.observes,
         claim(f, inputs),
         footing(a, f, inputs),
-        generation(a, f, map, state, inputs),
+        generation(a, f, state, ledger),
     ))
 }
 pub fn reasons(
@@ -920,11 +988,28 @@ pub fn reasons_for_manifest(
     inputs: &Inputs,
     manifest: &InputManifest,
 ) -> BTreeSet<String> {
+    reasons_with(
+        a,
+        f,
+        state,
+        inputs,
+        manifest,
+        &Ledger::new(map, state, manifest),
+    )
+}
+pub fn reasons_with(
+    a: &Assertion,
+    f: &Flow,
+    state: &State,
+    inputs: &Inputs,
+    manifest: &InputManifest,
+    ledger: &Ledger<'_>,
+) -> BTreeSet<String> {
     let mut reasons = BTreeSet::new();
-    if state.schema_version != 3 || state.inputs_digest != digest(manifest) {
+    if state.schema_version != 3 || state.inputs_digest != ledger.inputs_digest {
         reasons.insert("state does not match run inputs".into());
     }
-    if f.basis.as_deref() != Some(expected_basis(a, f, map, state, manifest).as_str()) {
+    if f.basis.as_deref() != Some(expected_basis_with(a, f, state, manifest, ledger).as_str()) {
         reasons.insert(
             match f.basis.as_deref() {
                 None => "draft: input acknowledgement not recorded",
@@ -950,6 +1035,7 @@ pub fn reasons_for_manifest(
 pub fn validation(map: &AssertionMap, state: &State, inputs: &Inputs) -> serde_json::Value {
     use serde_json::json;
     let manifest = inputs.manifest();
+    let ledger = Ledger::new(map, state, &manifest);
     let mut errors = validate(map, inputs);
     for r in &map.change_assessments {
         if !state.changes.iter().any(|c| c.id == r.id) {
@@ -958,14 +1044,14 @@ pub fn validation(map: &AssertionMap, state: &State, inputs: &Inputs) -> serde_j
     }
     let changes = state.changes.iter().map(|c| {
         let response = map.change_assessments.iter().find(|r| r.id == c.id);
-        let faults = response.map(|r| change_errors(map, c, r)).unwrap_or_default();
+        let faults = response.map(|r| ledger.change_errors(c, r)).unwrap_or_default();
         errors.extend(faults.iter().map(|e| format!("{}: {e}", c.id)));
         json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,"knownFlows":c.known_flows,"exposed":c.exposed,
-            "current":change_current(map,c,&manifest),"assessment":response,"errors":faults,
-            "expectedBasis":response.map(|r| expected_change_basis(c,r,&manifest))})
+            "current":ledger.current(&c.id),"assessment":response,"errors":faults,
+            "expectedBasis":response.map(|r| ledger.expected_change_basis(c,r))})
     }).collect::<Vec<_>>();
     let flows = map.assertions.iter().flat_map(|a| a.flows.iter().map(move |f| (a,f))).map(|(a,f)| {
-        json!({"id":flow_key(a,f),"expectedBasis":expected_basis(a,f,map,state,&manifest),"reasons":reasons_for_manifest(a,f,map,state,inputs,&manifest)})
+        json!({"id":flow_key(a,f),"expectedBasis":expected_basis_with(a,f,state,&manifest,&ledger),"reasons":reasons_with(a,f,state,inputs,&manifest,&ledger)})
     }).collect::<Vec<_>>();
     json!({"valid":errors.is_empty(),"stage":"references","errors":errors,"flows":flows,"changes":changes,
         "meaning":"Authored graph references and input acknowledgements only; no semantic proof or completeness claim"})
@@ -1202,6 +1288,7 @@ pub fn carry(
     if state.inputs_digest != digest(old) || state.schema_version != 3 {
         return Err("old map state does not match its run inputs".into());
     }
+    let ledger = Ledger::new(map, state, old);
     let new_manifest = new.manifest();
     let (mut next, mut next_state) = seed_manifest(&new_manifest, evidence_digest);
     next.assertions.clear();
@@ -1209,7 +1296,7 @@ pub fn carry(
     next_state.changes = state
         .changes
         .iter()
-        .filter(|c| !change_current(map, c, old))
+        .filter(|c| !ledger.current(&c.id))
         .cloned()
         .collect();
     next.change_assessments = map
@@ -1299,14 +1386,14 @@ pub fn carry(
         updated.at = at.clone();
         for (prior, f) in a.flows.iter().zip(&mut updated.flows) {
             let key = flow_key(a, f);
-            let base = generation(a, prior, map, state, old);
+            let base = generation(a, prior, state, &ledger);
             let mut dirty = BTreeSet::new();
             let mut notices = BTreeSet::new();
             match prior.basis.as_deref() {
                 Some(basis) if superseded_basis(basis) => {
                     dirty.insert(SUPERSEDED_BASIS.into());
                 }
-                Some(basis) if basis != expected_basis(a, prior, map, state, old) => {
+                Some(basis) if basis != expected_basis_with(a, prior, state, old, &ledger) => {
                     dirty.insert("inherited claim still needs rechecking".into());
                 }
                 _ => {}
