@@ -349,6 +349,14 @@ pub struct FlowState {
     /// depends on changed only in code its test never ran. Told, not asked.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub notices: BTreeSet<String>,
+    /// What the flow rested on when this state was written, part by part.
+    ///
+    /// `basis` is one hash of everything, so a mismatch can say that
+    /// *something* moved and no more. Recording the parts separately lets a
+    /// later mismatch name the one that moved -- an author who deleted a watch
+    /// entry and one who rewrote an explanation were given the same sentence.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub footprint: BTreeMap<String, String>,
 }
 /// What each test of a run executed, in the units of that run's manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -506,10 +514,37 @@ pub fn advisories(map: &AssertionMap) -> Vec<String> {
     for a in &map.assertions {
         for f in &a.flows {
             for file in &f.watch {
+                let key = flow_key(a, f);
                 if crate::integrity::globally_tracked(file) {
                     out.push(format!(
-                        "{}: watch \"{file}\" is redundant; Supercov invalidates every flow when that file changes",
-                        flow_key(a, f)
+                        "{key}: watch \"{file}\" is redundant; Supercov invalidates every flow when that file changes"
+                    ));
+                    continue;
+                }
+                if a.at.file == *file || f.applies_to.iter().any(|t| t.file == *file) {
+                    out.push(format!(
+                        "{key}: watch \"{file}\" is redundant; this flow already depends on that file as a whole"
+                    ));
+                    continue;
+                }
+                // Not redundant -- it changes what the flow rests on, which is
+                // the part an author cannot see. Naming a file that holds this
+                // flow's nodes takes the file out of declaration-level footing
+                // and puts the whole file back in, so a neighbouring function's
+                // body becomes a review again. That can be exactly what the
+                // author means -- "no other handler in here registers /admin"
+                // is a claim about the file's shape -- so it is said, not
+                // refused.
+                let here = f
+                    .nodes
+                    .iter()
+                    .filter(|n| n.at.file == *file)
+                    .map(|n| format!("{}:{}", n.id, n.at.line))
+                    .collect::<Vec<_>>();
+                if !here.is_empty() {
+                    out.push(format!(
+                        "{key}: watch \"{file}\" widens this flow to the whole file; without it only the declarations holding its nodes ({}) and the file's set of declarations would count. Remove it unless a change anywhere in that file should be a review.",
+                        here.join(", ")
                     ));
                 }
             }
@@ -589,27 +624,35 @@ pub fn validate_flow(flow: &Flow, files: &Files) -> Vec<String> {
     errors
 }
 
+/// The watch entries that are the flow's own.
+///
+/// A manifest, lockfile or runner configuration is tracked for the whole run,
+/// so naming one here catches nothing -- `advisories()` tells the author so.
+/// An entry that catches nothing must also cost nothing, in both directions:
+/// it is not a dependency, and taking it back out is not a new claim. Those
+/// are two different code paths -- `dependencies()` and `claim()` -- and when
+/// only the first filtered, Supercov advised authors to delete an entry it
+/// then charged a full re-acknowledgement for.
+///
+/// Only the watch list is filtered. An anchor or a node in one of those files
+/// is the flow's actual subject -- `setup.py` is a dependency manifest and
+/// measured source at once -- and editing it must still cost a review.
+fn watched(f: &Flow) -> impl Iterator<Item = &str> {
+    f.watch
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !crate::integrity::globally_tracked(path))
+}
 /// Whole-file input dependencies, not a mechanically inferred semantic slice.
 pub fn dependencies<'a>(a: &'a Assertion, f: &'a Flow) -> BTreeSet<&'a str> {
     std::iter::once(a.at.file.as_str())
         .chain(f.applies_to.iter().map(|t| t.file.as_str()))
         .chain(f.nodes.iter().map(|n| n.at.file.as_str()))
-        // A watch on a file Supercov already answers for run-wide contributes
-        // nothing here, and hashing its bytes would quietly undo the manifest
-        // rule: a version bump would still make every flow that names
+        // Hashing a manifest's bytes here would quietly undo the manifest
+        // rule: a version bump would make every flow that names
         // `package.json` stale, which is most of them in a real map. The
         // run-level signal still fires, as a change to assess.
-        //
-        // Only the watch list is filtered. An anchor or a node in one of those
-        // files is the flow's actual subject -- `setup.py` is a dependency
-        // manifest and measured source at once -- and editing it must still
-        // cost a review.
-        .chain(
-            f.watch
-                .iter()
-                .map(String::as_str)
-                .filter(|path| !crate::integrity::globally_tracked(path)),
-        )
+        .chain(watched(f))
         .collect()
 }
 fn token(value: &impl Serialize) -> String {
@@ -621,18 +664,13 @@ fn flow_keys(map: &AssertionMap) -> BTreeSet<String> {
         .flat_map(|a| a.flows.iter().map(move |f| flow_key(a, f)))
         .collect()
 }
-pub fn change_errors(
-    map: &AssertionMap,
-    change: &Change,
-    response: &ChangeAssessment,
-) -> Vec<String> {
-    change_errors_with(&flow_keys(map), change, response)
+/// An assessment is the author's judgement, so it is validated against the
+/// map it names flows in -- not against the change. The change no longer
+/// determines any part of a well-formed response.
+pub fn change_errors(map: &AssertionMap, response: &ChangeAssessment) -> Vec<String> {
+    change_errors_with(&flow_keys(map), response)
 }
-fn change_errors_with(
-    keys: &BTreeSet<String>,
-    change: &Change,
-    response: &ChangeAssessment,
-) -> Vec<String> {
+fn change_errors_with(keys: &BTreeSet<String>, response: &ChangeAssessment) -> Vec<String> {
     let affected = response
         .affected_flows
         .iter()
@@ -648,13 +686,21 @@ fn change_errors_with(
     if !affected.is_subset(keys) {
         errors.push("unknown affected flow".into());
     }
-    if !change
-        .known_flows
-        .intersection(keys)
-        .all(|k| affected.contains(k))
-    {
-        errors.push("known dependent flows must be included unless removed from the map".into());
-    }
+    // `affectedFlows` is the author's judgement -- the dependents this change
+    // actually invalidates -- not a restatement of `knownFlows`.
+    //
+    // Requiring the exhaustive set made the field carry no judgement at all: it
+    // was fully determined by data Supercov already holds, and every flow it
+    // named lost its acknowledgement. On a real map that meant one no-op
+    // manifest edit took 657 flows to zero, so the only ways forward were to
+    // copy 653 basis tokens for claims nobody had read, or leave the change
+    // pending and keep no percentage. That is the rubber-stamping the whole
+    // invalidation rule exists to prevent, one step further down.
+    //
+    // There is deliberately no floor -- not even "name everything whose test
+    // ran the change". Under an integration suite every test runs everything,
+    // so that floor is the same cascade wearing a different hat. Exposure is
+    // reported so the author can judge; it does not judge for them.
     errors
 }
 pub fn expected_change_basis(
@@ -710,7 +756,7 @@ impl<'a> Ledger<'a> {
                     .filter(|r| r.id == change.id)
                     .collect::<Vec<_>>();
                 match responses.as_slice() {
-                    [r] if change_errors_with(&keys, change, r).is_empty()
+                    [r] if change_errors_with(&keys, r).is_empty()
                         && r.basis.as_deref()
                             == Some(
                                 expected_change_basis_with(change, r, &inputs_digest).as_str(),
@@ -735,8 +781,8 @@ impl<'a> Ledger<'a> {
     pub fn expected_change_basis(&self, change: &Change, response: &ChangeAssessment) -> String {
         expected_change_basis_with(change, response, &self.inputs_digest)
     }
-    pub fn change_errors(&self, change: &Change, response: &ChangeAssessment) -> Vec<String> {
-        change_errors_with(&self.keys, change, response)
+    pub fn change_errors(&self, response: &ChangeAssessment) -> Vec<String> {
+        change_errors_with(&self.keys, response)
     }
 }
 /// Why a file is one of a flow's dependencies, and where the flow sits in it.
@@ -750,15 +796,24 @@ impl<'a> Ledger<'a> {
 /// between rereading a claim and glancing at a line number.
 fn roles(a: &Assertion, f: &Flow, file: &str) -> Vec<String> {
     let mut roles: Vec<String> = Vec::new();
-    let lines = f
-        .nodes
-        .iter()
-        .filter(|n| n.at.file == file)
-        .map(|n| format!("{}:{}", n.id, n.at.line))
-        .collect::<Vec<_>>();
+    let lines = node_sites(f, file);
     if !lines.is_empty() {
         roles.push(format!("holds this flow's {}", lines.join(", ")));
     }
+    roles.extend(whole_file_roles(a, f, file));
+    roles
+}
+fn node_sites(f: &Flow, file: &str) -> Vec<String> {
+    f.nodes
+        .iter()
+        .filter(|n| n.at.file == file)
+        .map(|n| format!("{}:{}", n.id, n.at.line))
+        .collect()
+}
+/// Why the flow depends on the file *as a whole*, which is a different claim
+/// from where its nodes sit in it.
+fn whole_file_roles(a: &Assertion, f: &Flow, file: &str) -> Vec<String> {
+    let mut roles: Vec<String> = Vec::new();
     if a.at.file == file {
         roles.push(format!("holds the assertion, line {}", a.at.line));
     }
@@ -850,7 +905,9 @@ struct Claim<'a> {
     nodes: Vec<NodeClaim<'a>>,
     edges: &'a [Edge],
     counts_as_asserted: &'a [String],
-    watch: &'a [String],
+    /// The flow's own watches. A redundant manifest entry is left out so that
+    /// writing one and removing it are both free.
+    watch: Vec<&'a str>,
     questions: &'a [String],
 }
 fn claim<'a>(f: &'a Flow, inputs: &'a InputManifest) -> Claim<'a> {
@@ -870,7 +927,7 @@ fn claim<'a>(f: &'a Flow, inputs: &'a InputManifest) -> Claim<'a> {
             .collect(),
         edges: &f.edges,
         counts_as_asserted: &f.counts_as_asserted,
-        watch: &f.watch,
+        watch: watched(f).collect(),
         questions: &f.questions,
     }
 }
@@ -942,6 +999,57 @@ fn generation(a: &Assertion, f: &Flow, state: &State, ledger: &Ledger<'_>) -> St
         digest(&("supercov-generation-v2", base, impacts))
     }
 }
+/// The parts of `expected_basis` that depend only on the map and the run's
+/// inputs, each digested on its own.
+///
+/// `generation` is deliberately absent: it is a function of the state being
+/// written, and a change assessment naming this flow already explains itself
+/// through the change channel.
+fn footprint(a: &Assertion, f: &Flow, inputs: &InputManifest) -> BTreeMap<String, String> {
+    let claim = claim(f, inputs);
+    BTreeMap::from([
+        (
+            "the run's context".to_owned(),
+            digest(&inputs.context_digest),
+        ),
+        (
+            "the assertion's site".to_owned(),
+            digest(&site(&a.at, inputs)),
+        ),
+        (
+            "what the assertion observes".to_owned(),
+            digest(&a.observes),
+        ),
+        (
+            "the flow's explanation".to_owned(),
+            digest(&claim.explanation),
+        ),
+        (
+            "the test this flow applies to".to_owned(),
+            digest(&claim.applies_to),
+        ),
+        ("the flow's nodes".to_owned(), digest(&claim.nodes)),
+        ("the flow's edges".to_owned(), digest(&claim.edges)),
+        (
+            "the flow's counted nodes".to_owned(),
+            digest(&claim.counts_as_asserted),
+        ),
+        ("the flow's watch list".to_owned(), digest(&claim.watch)),
+        ("the flow's questions".to_owned(), digest(&claim.questions)),
+        (
+            "the files this flow rests on".to_owned(),
+            digest(&footing(a, f, inputs)),
+        ),
+    ])
+}
+/// Which recorded parts no longer match, in the order they are listed above.
+fn moved(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> Vec<String> {
+    after
+        .iter()
+        .filter(|(part, now)| before.get(*part).is_some_and(|then| then != *now))
+        .map(|(part, _)| format!("{part} changed"))
+        .collect()
+}
 pub fn expected_basis(
     a: &Assertion,
     f: &Flow,
@@ -1010,15 +1118,29 @@ pub fn reasons_with(
         reasons.insert("state does not match run inputs".into());
     }
     if f.basis.as_deref() != Some(expected_basis_with(a, f, state, manifest, ledger).as_str()) {
-        reasons.insert(
-            match f.basis.as_deref() {
-                None => "draft: input acknowledgement not recorded",
-                Some(basis) if superseded_basis(basis) => SUPERSEDED_BASIS,
-                Some(_) => "claim or inputs changed; needs rechecking",
+        let recorded = state.flows.get(&flow_key(a, f));
+        match f.basis.as_deref() {
+            None => {
+                reasons.insert("draft: input acknowledgement not recorded".into());
             }
-            .into(),
-        );
-        if let Some(s) = state.flows.get(&flow_key(a, f)) {
+            Some(basis) if superseded_basis(basis) => {
+                reasons.insert(SUPERSEDED_BASIS.into());
+            }
+            Some(_) => {
+                // Say which part moved. One hash over everything can only
+                // report that something did, which gave an author who deleted
+                // a watch entry the same sentence as one who rewrote a claim.
+                let parts = recorded
+                    .map(|s| moved(&s.footprint, &footprint(a, f, manifest)))
+                    .unwrap_or_default();
+                if parts.is_empty() {
+                    reasons.insert("claim or inputs changed; needs rechecking".into());
+                } else {
+                    reasons.extend(parts);
+                }
+            }
+        }
+        if let Some(s) = recorded {
             reasons.extend(s.reasons.iter().cloned());
         }
     }
@@ -1051,11 +1173,17 @@ pub fn validation(map: &AssertionMap, state: &State, inputs: &Inputs) -> serde_j
         .collect::<BTreeMap<_, _>>();
     let changes = state.changes.iter().map(|c| {
         let response = map.change_assessments.iter().find(|r| r.id == c.id);
-        let faults = response.map(|r| ledger.change_errors(c, r)).unwrap_or_default();
+        let faults = response.map(|r| ledger.change_errors(r)).unwrap_or_default();
         errors.extend(faults.iter().map(|e| format!("{}: {e}", c.id)));
+        // Every list a change carries is bounded, or one item outgrows any
+        // page and cannot be fetched at all -- B17. `knownFlows` was the first
+        // to do it; `exposed` inherited the defect the moment it was added,
+        // because its test list grows with the suite, not with the change.
         let tests = c.exposed.iter().filter_map(|k| selectors.get(k)).flat_map(|t| t.iter()).collect::<BTreeSet<_>>();
-        json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,"knownFlows":c.known_flows,
-            "exposed":{"flows":c.exposed.len(),"tests":tests,"sample":c.exposed.iter().take(8).collect::<Vec<_>>()},
+        let shown = tests.iter().take(20).collect::<Vec<_>>();
+        json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,
+            "knownFlows":{"flows":c.known_flows.len(),"sample":c.known_flows.iter().take(8).collect::<Vec<_>>()},
+            "exposed":{"flows":c.exposed.len(),"tests":shown,"testCount":tests.len(),"sample":c.exposed.iter().take(8).collect::<Vec<_>>()},
             "current":ledger.current(&c.id),"assessment":response,"errors":faults,
             "expectedBasis":response.map(|r| ledger.expected_change_basis(c,r))})
     }).collect::<Vec<_>>();
@@ -1069,13 +1197,19 @@ pub fn invalidate(state: &mut State, map: &AssertionMap, reason: &str) {
     for a in &map.assertions {
         for f in &a.flows {
             let key = flow_key(a, f);
-            let base = state.flows.get(&key).map_or("0", |s| s.generation.as_str());
+            let previous = state.flows.get(&key);
+            let base = previous.map_or("0", |s| s.generation.as_str());
+            // Whole-map invalidation says nothing about the parts, so keep the
+            // record rather than erasing what it knew.
+            let footprint = previous.map(|s| s.footprint.clone()).unwrap_or_default();
+            let generation = digest(&(base, reason, &state.inputs_digest));
             state.flows.insert(
                 key,
                 FlowState {
-                    generation: digest(&(base, reason, &state.inputs_digest)),
+                    generation,
                     reasons: BTreeSet::from([reason.into()]),
                     notices: BTreeSet::new(),
+                    footprint,
                 },
             );
         }
@@ -1463,10 +1597,32 @@ pub fn carry(
                         ..
                     }) => {
                         if whole_file(a, prior, file) {
+                            // The file's roles describe the file. Attached to
+                            // the declaration that changed they say something
+                            // false: in `other (line 4) changed (holds this
+                            // flow's n:2)`, `work` holds n:2 and `other` is its
+                            // neighbour. What makes this change count is the
+                            // dependency on the whole file; where the nodes sit
+                            // is context, and is said as context.
+                            let mut why = whole_file_roles(a, prior, file);
+                            let sites = node_sites(prior, file);
+                            if !sites.is_empty() {
+                                let holders = prior
+                                    .nodes
+                                    .iter()
+                                    .filter(|n| n.at.file == file)
+                                    .map(|n| before.unit_at(n.at.line, n.at.column))
+                                    .collect::<BTreeSet<_>>();
+                                why.push(format!(
+                                    "this flow's {} sits in {}",
+                                    sites.join(", "),
+                                    named(holders.iter().map(|i| &before.units[*i]))
+                                ));
+                            }
                             Some(format!(
                                 "{file}: {} changed{}",
                                 describe(before, after, diff),
-                                in_role(&roles)
+                                in_role(&why)
                             ))
                         } else {
                             let holders = prior
@@ -1543,6 +1699,7 @@ pub fn carry(
                     },
                     reasons: dirty,
                     notices,
+                    footprint: footprint(a, f, &new_manifest),
                 },
             );
         }

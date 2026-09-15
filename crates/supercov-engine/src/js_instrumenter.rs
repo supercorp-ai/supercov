@@ -135,9 +135,16 @@ fn restore_comment_text(
         let emitted_text = emitted.span.source_text(generated);
         let (index, original) = loop {
             let Some(original) = program.comments.get(original_index) else {
+                // The counts are usually equal here, so reporting them alone
+                // says the opposite of what happened: nothing was dropped, one
+                // comment was not recognised. Name it.
                 return Err(CandidateError::CommentPreservation {
                     expected: program.comments.len(),
                     actual: reparsed.program.comments.len(),
+                    detail: format!(
+                        "no source comment matches the generated comment {emitted_text:?}                          (matched {} before it)",
+                        edits.len()
+                    ),
                 });
             };
             let index = original_index;
@@ -210,6 +217,9 @@ fn restore_comment_text(
             return Err(CandidateError::CommentPreservation {
                 expected: program.comments.len(),
                 actual: reparsed.program.comments.len(),
+                detail: format!(
+                    "restored comments overlap: {replacement:?} would be placed at byte {start},                      behind byte {cursor} already written"
+                ),
             });
         }
         restored.push_str(&generated[cursor..*start]);
@@ -299,10 +309,39 @@ fn place_restored_comment(
     (start, format!("{text}\n{indentation}"))
 }
 
+/// Whether two comments are the same comment, ignoring how they were laid out
+/// and the one escape a JavaScript code generator introduces into them.
+///
+/// A comment has no escape semantics -- its bytes are its text -- but codegen
+/// still rewrites `</script` to `<\/script` inside one, so the output can sit
+/// inside an HTML `<script>` element without closing it early. Measured
+/// against oxc: that sequence and no other. `</div`, `</style`, `<!--`, `-->`
+/// and a bare `/` are all emitted unchanged, as is a `<\/` the author wrote.
+///
+/// Comparing the two spellings as different text cost the whole file: the
+/// matcher below walks originals in order, so one comment it cannot recognise
+/// consumes every remaining original and fails the run.
 fn equal_ignoring_whitespace(left: &str, right: &str) -> bool {
-    left.chars()
-        .filter(|character| !character.is_whitespace())
-        .eq(right.chars().filter(|character| !character.is_whitespace()))
+    fn significant(text: &str) -> impl Iterator<Item = char> + '_ {
+        let mut rest = text.char_indices();
+        std::iter::from_fn(move || {
+            loop {
+                let (index, character) = rest.next()?;
+                // Normalise both sides, so a `<\/` the author wrote still matches
+                // itself and only the codegen artefact is collapsed.
+                if character == '\\'
+                    && text[index + 1..].starts_with('/')
+                    && text[..index].ends_with('<')
+                {
+                    continue;
+                }
+                if !character.is_whitespace() {
+                    return Some(character);
+                }
+            }
+        })
+    }
+    significant(left).eq(significant(right))
 }
 
 struct Utf16LineIndex<'s> {
@@ -484,7 +523,11 @@ pub struct CandidateLimitation {
 pub enum CandidateError {
     UnknownSourceType(String),
     Parse(Vec<String>),
-    CommentPreservation { expected: usize, actual: usize },
+    CommentPreservation {
+        expected: usize,
+        actual: usize,
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7563,6 +7606,71 @@ mod tests {
             "{}",
             output.code
         );
+    }
+
+    #[test]
+    fn a_comment_mentioning_a_closing_script_tag_still_instruments() {
+        // B10. A code generator rewrites `</script` to `<\/script` inside a
+        // comment so the output cannot close an HTML <script> element early.
+        // The restore compared the two spellings as different text, and because
+        // it walks the source comments in order, one comment it could not
+        // recognise consumed every remaining one and failed the file. That cost
+        // a real project its coverage silently, and later its whole run.
+        //
+        // Prose about HTML is ordinary in web code, which is how this reached a
+        // shipped release and stayed for months: the file was otherwise plain
+        // TypeScript.
+        for source in [
+            "// </script>\nexport const x = 1;\n",
+            "// </script\nexport const x = 1;\n",
+            "// </SCRIPT>\nexport const x = 1;\n",
+            "// see the </script> tag here\nexport const x = 1;\n",
+            "/* block </script> here */\nexport const x = 1;\n",
+            "/** jsdoc </script> */\nexport const x = 1;\n",
+            // A run of comments, as the reported file had.
+            "// one </script>\n// two </script>\n// three\nexport const x = 1;\n",
+        ] {
+            let output = instrument_candidate(source, "src/probe.ts")
+                .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+            let original = source.lines().next().expect("a comment");
+            assert!(
+                output.code.contains(original),
+                "comment was not restored verbatim: {original:?} missing from {:?}",
+                output.code
+            );
+        }
+        // The escape is the generator's, not the author's: a backslash the
+        // author wrote survives as written rather than being collapsed.
+        let written = "// author wrote <\\/script>\nexport const x = 1;\n";
+        let output = instrument_candidate(written, "src/probe.ts").expect("instruments");
+        assert!(
+            output.code.contains("// author wrote <\\/script>"),
+            "{:?}",
+            output.code
+        );
+        // Only that sequence is normalised. Nothing else a comment may contain
+        // is treated as equal to a different spelling.
+        assert!(!equal_ignoring_whitespace("// a/b", "// a\\/b"));
+        assert!(!equal_ignoring_whitespace("// </div>", "// </span>"));
+        assert!(equal_ignoring_whitespace("// </script>", "// <\\/script>"));
+    }
+
+    #[test]
+    fn a_comment_that_cannot_be_restored_says_which_comment_and_why() {
+        // The counts in this error are usually equal, so reporting them alone
+        // says the opposite of what happened -- nothing was dropped, one
+        // comment was not recognised. The reported 116-vs-112 sent the first
+        // reader looking for four missing comments that were never the cause.
+        let error = CandidateError::CommentPreservation {
+            expected: 116,
+            actual: 112,
+            detail:
+                "no source comment matches the generated comment \"// x\" (matched 97 before it)"
+                    .to_owned(),
+        };
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("no source comment matches"), "{rendered}");
+        assert!(rendered.contains("matched 97 before it"), "{rendered}");
     }
 
     #[test]

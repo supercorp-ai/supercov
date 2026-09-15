@@ -961,22 +961,30 @@ fn a_watch_on_a_file_supercov_already_tracks_is_reported_as_redundant() {
     // unsaid it teaches the author that per-flow watching is how dependency
     // drift is caught, and the effort goes to entries that change nothing.
     let (mut inputs, mut map, _) = fixture();
-    assert!(advisories(&map).is_empty());
+    let about = |map: &AssertionMap, file: &str| {
+        advisories(map)
+            .into_iter()
+            .filter(|a| a.contains(&format!("watch \"{file}\"")))
+            .collect::<Vec<_>>()
+    };
     for tracked in ["package-lock.json", "package.json", "Cargo.toml"] {
         // A real project carries these in the inventory, so watching one is a
         // well-formed thing to write. That is exactly why it needs saying.
         inputs.files.insert(tracked.into(), "{}".into());
+        assert!(about(&map, tracked).is_empty());
         map.assertions[0].flows[0].watch = vec![tracked.into()];
+        let advice = about(&map, tracked);
         assert!(
-            advisories(&map).iter().any(|a| a.contains("redundant")),
-            "{tracked} should be reported"
+            advice.iter().any(|a| a.contains("redundant")),
+            "{tracked} should be reported: {advice:?}"
         );
         // It stays an advisory. A redundant watch never fails validation.
         assert!(validate_flow(&map.assertions[0].flows[0], &inputs.files).is_empty());
     }
-    // A file no fingerprint covers is exactly what watch exists for.
+    // A file no fingerprint covers, holding none of the flow's nodes, is
+    // exactly what watch exists for: nothing to say about it.
     map.assertions[0].flows[0].watch = vec!["tests/helpers/peer.js".into()];
-    assert!(advisories(&map).is_empty());
+    assert!(about(&map, "tests/helpers/peer.js").is_empty());
 }
 
 #[test]
@@ -1166,7 +1174,7 @@ fn change_impact_can_invalidate_an_unwatched_sibling_and_folds_without_churning_
 }
 
 #[test]
-fn missing_impact_responses_cannot_clear_changes_and_known_dependencies_cannot_be_omitted() {
+fn missing_impact_responses_cannot_clear_changes_and_an_empty_judgement_needs_a_reason() {
     let (old, map, state) = fixture();
     let mut new = old.clone();
     new.files
@@ -1175,6 +1183,21 @@ fn missing_impact_responses_cannot_clear_changes_and_known_dependencies_cannot_b
         .push_str("// changed");
     let (mut map, state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
     let c = &state.changes[0];
+    // An explanation is what the channel asks for. Without one there is no
+    // assessment, whatever the flow list says.
+    let mut r = ChangeAssessment {
+        id: c.id.clone(),
+        basis: None,
+        affected_flows: vec![],
+        explanation: "   ".into(),
+    };
+    r.basis = Some(expected_change_basis(c, &r, &new.manifest()));
+    map.change_assessments.push(r);
+    assert!(!change_current(&map, c, &new.manifest()));
+    assert_eq!(validation(&map, &state, &new)["valid"], false);
+    // With one, an empty judgement is the documented contract: one explanation
+    // answers for the change.
+    map.change_assessments.clear();
     let mut r = ChangeAssessment {
         id: c.id.clone(),
         basis: None,
@@ -1183,10 +1206,8 @@ fn missing_impact_responses_cannot_clear_changes_and_known_dependencies_cannot_b
     };
     r.basis = Some(expected_change_basis(c, &r, &new.manifest()));
     map.change_assessments.push(r);
-    assert!(!change_current(&map, c, &new.manifest()));
-    assert_eq!(validation(&map, &state, &new)["valid"], false);
-    acknowledge(&mut map, &state, &new, &BTreeSet::new(), true, true).unwrap();
     assert!(change_current(&map, c, &new.manifest()));
+    assert_eq!(validation(&map, &state, &new)["valid"], true);
     map.change_assessments.clear();
     let (next, next_state) = carry(&map, &state, &new.manifest(), &new, "three", false).unwrap();
     assert_eq!(next_state.changes.len(), 1);
@@ -1469,4 +1490,457 @@ fn comments_and_blank_lines_anywhere_leave_an_acknowledgement_standing() {
     let why = reasons(a, f, &next, &next_state, &new);
     assert!(why.is_empty(), "{why:?}");
     assert!(next_state.changes.is_empty(), "{:?}", next_state.changes);
+}
+
+/// B16: Supercov reports a manifest watch as redundant, so taking it back out
+/// must not restate the claim. Writing one and removing one are both free; a
+/// watch on a file the run does not answer for is not.
+#[test]
+fn a_redundant_manifest_watch_is_free_to_write_and_free_to_remove() {
+    let (mut inputs, mut map, state) = fixture();
+    inputs
+        .files
+        .insert("package.json".into(), "{\"name\":\"x\"}\n".into());
+    let state = State {
+        inputs_digest: inputs.identity(),
+        ..state
+    };
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    assert_eq!(current(&map, &state, &inputs), 2);
+
+    // The author follows the documentation and watches the manifest.
+    for a in &mut map.assertions {
+        for f in &mut a.flows {
+            f.watch.push("package.json".into());
+        }
+    }
+    assert_eq!(
+        current(&map, &state, &inputs),
+        2,
+        "writing a redundant watch restated the claim"
+    );
+    let advice = advisories(&map)
+        .into_iter()
+        .filter(|a| a.contains("watch \"package.json\""))
+        .collect::<Vec<_>>();
+    assert_eq!(advice.len(), 2, "{advice:?}");
+    assert!(advice.iter().all(|a| a.contains("redundant")), "{advice:?}");
+    assert!(
+        !dependencies(&map.assertions[0], &map.assertions[0].flows[0]).contains("package.json"),
+        "a redundant watch became a dependency"
+    );
+
+    // Taking the tool's advice must not cost an acknowledgement.
+    for a in &mut map.assertions {
+        for f in &mut a.flows {
+            f.watch.retain(|w| w != "package.json");
+        }
+    }
+    assert_eq!(
+        current(&map, &state, &inputs),
+        2,
+        "removing an entry Supercov calls redundant restated the claim"
+    );
+
+    // A watch the run does not answer for is a real part of the claim, and
+    // dropping it is still a new claim.
+    for a in &mut map.assertions {
+        for f in &mut a.flows {
+            f.watch.retain(|w| w != "test.js");
+        }
+    }
+    assert_eq!(
+        current(&map, &state, &inputs),
+        0,
+        "dropping a real watch kept the acknowledgement"
+    );
+}
+
+/// A watch on a file that holds the flow's own nodes is not redundant -- it
+/// widens the flow from the declarations holding those nodes to the whole
+/// file, so a neighbouring function's body becomes a review again. That can be
+/// what the author means, so it is reported rather than refused; what must not
+/// happen is it taking effect unsaid.
+#[test]
+fn watching_a_file_that_holds_your_nodes_is_reported_and_says_what_it_costs() {
+    let (inputs, map, state) = fixture();
+    // The fixture itself carries the pattern: each flow watches the file its
+    // node is in, and the test file it applies to.
+    let advice = advisories(&map);
+    let widened = advice
+        .iter()
+        .find(|a| a.contains("watch \"src/a.js\""))
+        .unwrap_or_else(|| panic!("{advice:?}"));
+    assert!(
+        widened.contains("widens this flow to the whole file"),
+        "{widened}"
+    );
+    assert!(widened.contains("return:1"), "names the nodes: {widened}");
+    assert!(
+        widened.contains("the declarations holding its nodes"),
+        "says what it would otherwise rest on: {widened}"
+    );
+
+    // Watching the test file adds nothing: the flow already depends on it whole.
+    let test_file = advice
+        .iter()
+        .find(|a| a.contains("watch \"test.js\""))
+        .unwrap_or_else(|| panic!("{advice:?}"));
+    assert!(test_file.contains("redundant"), "{test_file}");
+    assert!(
+        test_file.contains("already depends on that file as a whole"),
+        "{test_file}"
+    );
+
+    // An advisory never fails validation, and never invalidates.
+    assert_eq!(current(&map, &state, &inputs), 2);
+    for a in &map.assertions {
+        for f in &a.flows {
+            assert!(validate_flow(f, &inputs.files).is_empty());
+        }
+    }
+}
+
+/// The roles describe the file. Attached to the declaration that changed they
+/// said something false -- that the neighbour holds the flow's node.
+#[test]
+fn a_whole_file_reason_does_not_blame_the_declaration_that_holds_no_node() {
+    let test = "import assert from 'node:assert/strict';\nassert.equal(result, 1);\n";
+    let source = "function work() {\n  return 1;\n}\nfunction other() {\n  return 2;\n}\n";
+    let inputs = Inputs {
+        schema_version: 1,
+        language: "javascript".into(),
+        context_digest: "context".into(),
+        files: Files::from([
+            ("test.js".into(), test.into()),
+            ("src/a.js".into(), source.into()),
+        ]),
+        assertions: vec![InventorySite {
+            at: anchor("test.js", test, "assert.equal(result, 1)"),
+            operation: "assert.equal".into(),
+        }],
+        limitations: vec![],
+    };
+    let (mut map, state) = seed(&inputs, "archive");
+    let a = &mut map.assertions[0];
+    a.observes = vec!["result equals one".into()];
+    a.flows = vec![Flow {
+        id: "f".into(),
+        basis: None,
+        questions: vec![],
+        explanation: "Author judgement".into(),
+        applies_to: vec![TestSelector {
+            file: "test.js".into(),
+            name: "test".into(),
+        }],
+        nodes: vec![Node {
+            id: "n".into(),
+            at: anchor("src/a.js", source, "return 1;"),
+            role: "value".into(),
+            meaning: String::new(),
+        }],
+        edges: vec![Edge {
+            from: "n".into(),
+            to: "$assertion".into(),
+            kind: "data".into(),
+            basis: String::new(),
+        }],
+        counts_as_asserted: vec!["n".into()],
+        watch: vec!["src/a.js".into()],
+    }];
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    assert_eq!(current(&map, &state, &inputs), 1);
+
+    // Edit only the neighbour. The watch makes this a review; the reason must
+    // say why, and must not claim `other` holds the node.
+    let mut next = inputs.clone();
+    next.files
+        .insert("src/a.js".into(), source.replace("return 2;", "return 3;"));
+    let (map2, state2) = carry(&map, &state, &inputs.manifest(), &next, "new", false).unwrap();
+    assert_eq!(
+        current(&map2, &state2, &next),
+        0,
+        "the watch makes it a review"
+    );
+    let b = &map2.assertions[0];
+    let why = reasons(b, &b.flows[0], &map2, &state2, &next);
+    let named = why
+        .iter()
+        .find(|r| r.contains("src/a.js"))
+        .unwrap_or_else(|| panic!("{why:?}"));
+    assert!(named.contains("other (line 4) changed"), "{named}");
+    assert!(named.contains("is watched by this flow"), "{named}");
+    assert!(
+        named.contains("this flow's n:2 sits in work (line 1)"),
+        "the nodes are located, not blamed: {named}"
+    );
+    assert!(
+        !named.contains("holds this flow's"),
+        "the changed declaration holds no node: {named}"
+    );
+}
+
+/// B15: recording an assessment used to de-acknowledge every flow it named,
+/// and the exhaustive list was mandatory -- so one no-op manifest edit took a
+/// 657-flow map to zero asserted statements. The author's only ways out were
+/// to copy hundreds of basis tokens for claims nobody had read, or leave the
+/// change pending and keep no percentage.
+///
+/// A test that only checks the assessment is accepted does not catch this. It
+/// has to measure the credit before and after.
+#[test]
+fn assessing_a_change_costs_only_the_flows_the_author_judges_affected() {
+    let (old, map, state) = fixture();
+    let mut new = old.clone();
+    new.files
+        .get_mut("src/a.js")
+        .unwrap()
+        .push_str("// changed");
+    let (mut map, state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
+    let c = state.changes[0].clone();
+    let dependents = c
+        .known_flows
+        .iter()
+        .filter(|k| {
+            map.assertions
+                .iter()
+                .any(|a| a.flows.iter().any(|f| flow_key(a, f) == **k))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(!dependents.is_empty(), "the change has live dependents");
+
+    // The author rereads the claims the edit touched and re-acknowledges them.
+    acknowledge(&mut map, &state, &new, &BTreeSet::new(), true, false).unwrap();
+    assert_eq!(current(&map, &state, &new), 2, "re-acknowledged");
+
+    // One explanation answers for the change. The dependents keep their credit.
+    let assess_with = |map: &mut AssertionMap, affected: Vec<String>, why: &str| {
+        map.change_assessments.clear();
+        let mut r = ChangeAssessment {
+            id: c.id.clone(),
+            basis: None,
+            affected_flows: affected,
+            explanation: why.into(),
+        };
+        r.basis = Some(expected_change_basis(&c, &r, &new.manifest()));
+        map.change_assessments.push(r);
+    };
+    assess_with(
+        &mut map,
+        vec![],
+        "The edit is a comment; no claim rests on it",
+    );
+    assert!(change_current(&map, &c, &new.manifest()));
+    assert_eq!(
+        current(&map, &state, &new),
+        2,
+        "assessing the change cost the flows their acknowledgement"
+    );
+
+    // Naming one is a judgement about that one, and costs exactly it.
+    assess_with(
+        &mut map,
+        vec![dependents[0].clone()],
+        "This claim reads the edited line",
+    );
+    assert!(change_current(&map, &c, &new.manifest()));
+    assert_eq!(
+        current(&map, &state, &new),
+        1,
+        "exactly the flow the author named should go stale"
+    );
+
+    // Naming a flow that is not in the map is still an error.
+    assess_with(&mut map, vec!["nope/flow".into()], "typo");
+    assert!(!change_current(&map, &c, &new.manifest()));
+    assert!(
+        validation(&map, &state, &new)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("unknown affected flow"))
+    );
+}
+
+/// B17: one change carried every dependent key and every exposed test, so a
+/// single item outgrew the JSON page cap and could not be fetched at any page
+/// size -- the documented pagination loop returned 48 of 49 changes. The lists
+/// that did it grew with the map and the suite, not with the change.
+///
+/// The invariant is scale invariance: a change item must not grow when the
+/// project does.
+#[test]
+fn a_change_item_does_not_grow_with_the_map_or_the_suite() {
+    let bytes = |flows: usize| {
+        let test = "import assert from 'node:assert/strict';\nassert.equal(result, 1);\n";
+        let source = "helper();\n";
+        let mut files = Files::from([
+            ("test.js".into(), test.into()),
+            ("src/shared.js".into(), source.into()),
+        ]);
+        for i in 0..flows {
+            files.insert(format!("tests/suite{i}.test.js"), test.into());
+        }
+        let inputs = Inputs {
+            schema_version: 1,
+            language: "javascript".into(),
+            context_digest: "context".into(),
+            files,
+            assertions: vec![InventorySite {
+                at: anchor("test.js", test, "assert.equal(result, 1)"),
+                operation: "assert.equal".into(),
+            }],
+            limitations: vec![],
+        };
+        let (mut map, state) = seed(&inputs, "archive");
+        let a = &mut map.assertions[0];
+        a.observes = vec!["result equals one".into()];
+        a.flows = (0..flows)
+            .map(|i| Flow {
+                id: format!("flow-number-{i}"),
+                basis: None,
+                questions: vec![],
+                explanation: format!("Author judgement for flow {i}"),
+                applies_to: vec![TestSelector {
+                    file: format!("tests/suite{i}.test.js"),
+                    name: format!("a reasonably long test name for suite {i}"),
+                }],
+                nodes: vec![Node {
+                    id: "n".into(),
+                    at: anchor("src/shared.js", source, "helper();"),
+                    role: "value".into(),
+                    meaning: String::new(),
+                }],
+                edges: vec![Edge {
+                    from: "n".into(),
+                    to: "$assertion".into(),
+                    kind: "data".into(),
+                    basis: String::new(),
+                }],
+                counts_as_asserted: vec!["n".into()],
+                watch: vec![],
+            })
+            .collect();
+        acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+        let mut new = inputs.clone();
+        new.files
+            .insert("src/shared.js".into(), "helper();\nmore();\n".into());
+        let (map2, state2) = carry(&map, &state, &inputs.manifest(), &new, "two", false).unwrap();
+        let v = validation(&map2, &state2, &new);
+        let changes = v["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 1, "one file changed");
+        let c = &changes[0];
+        // The counts are still exact; only the lists are sampled.
+        assert_eq!(c["knownFlows"]["flows"].as_u64().unwrap() as usize, flows);
+        assert_eq!(c["exposed"]["flows"].as_u64().unwrap() as usize, flows);
+        assert_eq!(c["exposed"]["testCount"].as_u64().unwrap() as usize, flows);
+        serde_json::to_vec(c).unwrap().len()
+    };
+    let small = bytes(50);
+    let large = bytes(400);
+    // Eight times the map and eight times the suite. What is left is the
+    // sampled identifiers getting longer -- `suite399` over `suite49` -- not
+    // the item carrying more of the project.
+    assert!(
+        large.abs_diff(small) < 256,
+        "a change item grew with the project: {small} -> {large} bytes"
+    );
+    // And it fits a page with room to spare, whatever the project does.
+    assert!(large < 8_192, "{large} bytes");
+}
+
+/// One edit to a flow, and the part its reason must name.
+type Edit = (&'static str, Box<dyn Fn(&mut Flow)>, &'static str);
+
+/// A map edit used to report `claim or inputs changed; needs rechecking`,
+/// whatever the author had done. Deleting a watch entry and rewriting an
+/// explanation are different acts and deserve different sentences -- the claim
+/// is a structure, and a mismatch can say which part of it moved.
+#[test]
+fn a_map_edit_says_which_part_of_the_claim_moved() {
+    let (inputs, map, state) = fixture();
+    // The state that carries the record is written by a run, so take one.
+    let (map, state) = carry(&map, &state, &inputs.manifest(), &inputs, "two", false).unwrap();
+    let mut map = map;
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    assert_eq!(current(&map, &state, &inputs), 2);
+
+    let why = |map: &AssertionMap| {
+        let a = &map.assertions[0];
+        reasons(a, &a.flows[0], map, &state, &inputs)
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let edits: Vec<Edit> = vec![
+        (
+            "explanation",
+            Box::new(|f: &mut Flow| f.explanation = "A different judgement".into()),
+            "the flow's explanation changed",
+        ),
+        (
+            "watch",
+            Box::new(|f: &mut Flow| f.watch.clear()),
+            "the flow's watch list changed",
+        ),
+        (
+            "questions",
+            Box::new(|f: &mut Flow| f.questions.push("is this right?".into())),
+            "the flow's questions changed",
+        ),
+        (
+            "counted nodes",
+            Box::new(|f: &mut Flow| f.counts_as_asserted.clear()),
+            "the flow's counted nodes changed",
+        ),
+        (
+            "node meaning",
+            Box::new(|f: &mut Flow| f.nodes[0].meaning = "the returned value".into()),
+            "the flow's nodes changed",
+        ),
+    ];
+    for (name, edit, expected) in edits {
+        let mut edited = map.clone();
+        edit(&mut edited.assertions[0].flows[0]);
+        let reported = why(&edited);
+        assert!(
+            reported.contains(expected),
+            "editing the {name} reported {reported:?}"
+        );
+        assert!(
+            !reported.contains("claim or inputs changed"),
+            "editing the {name} fell back to the generic reason: {reported:?}"
+        );
+        // Only the part that moved is named.
+        assert_eq!(
+            reported.matches(" changed").count(),
+            1,
+            "editing the {name} named more than one part: {reported:?}"
+        );
+    }
+
+    // Editing what the assertion observes is not a flow edit, and says so.
+    let mut edited = map.clone();
+    edited.assertions[0].observes = vec!["something else entirely".into()];
+    assert!(
+        why(&edited).contains("what the assertion observes changed"),
+        "{:?}",
+        why(&edited)
+    );
+
+    // A flow with no recorded parts still gets an answer rather than silence.
+    let mut bare = state.clone();
+    for flow in bare.flows.values_mut() {
+        flow.footprint.clear();
+    }
+    let mut edited = map.clone();
+    edited.assertions[0].flows[0].explanation = "Changed".into();
+    let a = &edited.assertions[0];
+    assert!(
+        reasons(a, &a.flows[0], &edited, &bare, &inputs)
+            .iter()
+            .any(|r| r.contains("claim or inputs changed")),
+        "a state written before parts were recorded must still say something"
+    );
 }

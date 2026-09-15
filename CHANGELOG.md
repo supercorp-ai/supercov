@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.0.52
+
+**Added**
+
+- The map report says when a `watch` entry changes what a flow rests on. Naming a file that already holds the flow's nodes widens it to the whole file, so a neighbouring function's body is a review again -- sometimes what the author means, never something that should happen unsaid. Naming a file it already depends on whole, such as its own test, is redundant and reported.
+
+**Changed**
+
+- A change assessment's `affectedFlows` is the author's judgement -- the flows this change invalidates -- and no longer restates every known dependent. Only the flows it names lose their acknowledgement, so one explanation can answer for a change that touches no claim.
+
+**Fixed**
+
+- A JavaScript or TypeScript comment containing `</script` no longer makes its file impossible to instrument. Code generators rewrite it inside comments so output cannot close an HTML `<script>` element early; the restore read the two spellings as different comments and, matching in source order, one it could not recognise consumed the rest. A comment that genuinely cannot be restored is now named, rather than reported as counts that are usually equal.
+- A word in a test filename no longer overrides a runner that can only drive the whole system. A Playwright spec named `checkout-integration.spec.ts` was reported as an integration test, hiding browser evidence from E2E coverage. A directory still outranks the runner; among path tokens the most specific wins, so a spec under `tests/e2e/` is no longer read as integration.
+- A change in the assertions view no longer grows with the project, so none can outgrow the JSON page cap and become unfetchable. `knownFlows` and `exposed.tests` are now a sample with an exact count (`exposed.testCount` is new); one oversized item made the pagination loop skip a change silently.
+- Recording a change assessment no longer de-acknowledges every flow it names. The exhaustive list was mandatory and naming a flow cost its credit, so one no-op manifest edit could take a whole map to zero asserted statements.
+- A stale flow names what moved. A map edit said `claim or inputs changed; needs rechecking` whatever the author had done, and now names the part -- the explanation, the watch list, the nodes; the basis is one hash, so the parts are recorded separately. A change in a whole-file dependency no longer blames the declaration that changed for holding a node it does not hold.
+- Removing a `watch` entry that Supercov reports as redundant no longer restates the claim. Such an entry never became one of the flow's dependencies, but was still part of what the acknowledgement rested on, so deleting it cost a full re-acknowledgement.
+
 ## 0.0.51
 
 **Added**

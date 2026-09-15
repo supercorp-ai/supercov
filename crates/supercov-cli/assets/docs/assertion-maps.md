@@ -70,7 +70,7 @@ examined and acknowledged.
 | `appliesTo` | Select tests by project-relative file and exact displayed test name. |
 | `nodes`, `edges` | Record source locations and relationships ending at `$assertion`. |
 | `countsAsAsserted` | List the node IDs you judge to be checked by the assertion. |
-| `watch` | List additional files the explanation depends on, such as helpers or configuration. Manifests, lockfiles and runner configuration are already tracked for the whole run; naming one here catches nothing, and the report says so. |
+| `watch` | List additional files the explanation depends on, such as helpers or configuration. A watched file is depended on **as a whole**: any change to it that is not a comment is a review. Use it for a file your claim reasons about but holds no node of yours -- including claims about what a file does *not* contain, which no node can anchor. Naming a file that already holds this flow's nodes widens the flow from those declarations to the whole file, so a neighbouring function's body becomes a review again; that is sometimes what you mean, and the report says when you have done it. Manifests, lockfiles and runner configuration are already tracked for the whole run; naming one catches nothing, and the report says so. A redundant entry is free to take back out: it is not part of what the acknowledgement rests on, so removing one keeps the flow's credit. |
 | `questions` | Record unresolved investigation questions. Questions inside a flow block its credit. |
 
 Source anchors use project-relative paths with `/`, one-based lines and one-based
@@ -279,12 +279,25 @@ response in the map's top-level `changeAssessments` array:
 }
 ```
 
-This is an excerpt to add to your existing map. Include every entry in `knownFlows`
-that still exists and any additional affected flows. `knownFlows` are the flows
-the change has already made stale. `exposed` counts the flows whose selected
-tests ran the changed code and names those tests -- not stale for it, but the
-ones to think about; add the flows the change actually reaches. An empty list needs an explanation of why
-existing claims are unaffected; it does not mean the changed code is tested.
+This is an excerpt to add to your existing map. `affectedFlows` is your
+judgement: the flows this change invalidates, and only those. It is not a
+restatement of `knownFlows` -- Supercov already holds that list and does not
+ask you to retype it. **Every flow you name loses its acknowledgement and has
+to be reread**, so naming a flow is a decision, and naming all of them is the
+expensive one.
+
+To make that judgement, read what the change view gives you. `knownFlows`
+counts the flows the change has already made stale and samples them. `exposed`
+counts the flows whose selected tests ran the changed code and names those
+tests -- not stale for it, but the ones most worth thinking about. Neither is
+a verdict: under an integration suite every test runs most of the code, so
+exposure is a place to look, not a list to copy.
+
+An empty list is the normal outcome for a change that touches no claim, and it
+is the contract this channel exists to provide: one explanation answers for the
+change and every dependent keeps its credit. It still needs an explanation of
+why existing claims are unaffected, and it does not mean the changed code is
+tested.
 
 Save the assessments and graph edits, validate, and copy the examined change
 tokens. Save again, then validate once more before copying final flow tokens.
