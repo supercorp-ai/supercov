@@ -1102,10 +1102,15 @@ pub fn validation(map: &AssertionMap, state: &State, inputs: &Inputs) -> serde_j
         let response = map.change_assessments.iter().find(|r| r.id == c.id);
         let faults = response.map(|r| ledger.change_errors(r)).unwrap_or_default();
         errors.extend(faults.iter().map(|e| format!("{}: {e}", c.id)));
+        // Every list a change carries is bounded, or one item outgrows any
+        // page and cannot be fetched at all -- B17. `knownFlows` was the first
+        // to do it; `exposed` inherited the defect the moment it was added,
+        // because its test list grows with the suite, not with the change.
         let tests = c.exposed.iter().filter_map(|k| selectors.get(k)).flat_map(|t| t.iter()).collect::<BTreeSet<_>>();
+        let shown = tests.iter().take(20).collect::<Vec<_>>();
         json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,
             "knownFlows":{"flows":c.known_flows.len(),"sample":c.known_flows.iter().take(8).collect::<Vec<_>>()},
-            "exposed":{"flows":c.exposed.len(),"tests":tests,"sample":c.exposed.iter().take(8).collect::<Vec<_>>()},
+            "exposed":{"flows":c.exposed.len(),"tests":shown,"testCount":tests.len(),"sample":c.exposed.iter().take(8).collect::<Vec<_>>()},
             "current":ledger.current(&c.id),"assessment":response,"errors":faults,
             "expectedBasis":response.map(|r| ledger.expected_change_basis(c,r))})
     }).collect::<Vec<_>>();

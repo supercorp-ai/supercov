@@ -1762,3 +1762,90 @@ fn assessing_a_change_costs_only_the_flows_the_author_judges_affected() {
             .any(|e| e.as_str().unwrap().contains("unknown affected flow"))
     );
 }
+
+/// B17: one change carried every dependent key and every exposed test, so a
+/// single item outgrew the JSON page cap and could not be fetched at any page
+/// size -- the documented pagination loop returned 48 of 49 changes. The lists
+/// that did it grew with the map and the suite, not with the change.
+///
+/// The invariant is scale invariance: a change item must not grow when the
+/// project does.
+#[test]
+fn a_change_item_does_not_grow_with_the_map_or_the_suite() {
+    let bytes = |flows: usize| {
+        let test = "import assert from 'node:assert/strict';\nassert.equal(result, 1);\n";
+        let source = "helper();\n";
+        let mut files = Files::from([
+            ("test.js".into(), test.into()),
+            ("src/shared.js".into(), source.into()),
+        ]);
+        for i in 0..flows {
+            files.insert(format!("tests/suite{i}.test.js"), test.into());
+        }
+        let inputs = Inputs {
+            schema_version: 1,
+            language: "javascript".into(),
+            context_digest: "context".into(),
+            files,
+            assertions: vec![InventorySite {
+                at: anchor("test.js", test, "assert.equal(result, 1)"),
+                operation: "assert.equal".into(),
+            }],
+            limitations: vec![],
+        };
+        let (mut map, state) = seed(&inputs, "archive");
+        let a = &mut map.assertions[0];
+        a.observes = vec!["result equals one".into()];
+        a.flows = (0..flows)
+            .map(|i| Flow {
+                id: format!("flow-number-{i}"),
+                basis: None,
+                questions: vec![],
+                explanation: format!("Author judgement for flow {i}"),
+                applies_to: vec![TestSelector {
+                    file: format!("tests/suite{i}.test.js"),
+                    name: format!("a reasonably long test name for suite {i}"),
+                }],
+                nodes: vec![Node {
+                    id: "n".into(),
+                    at: anchor("src/shared.js", source, "helper();"),
+                    role: "value".into(),
+                    meaning: String::new(),
+                }],
+                edges: vec![Edge {
+                    from: "n".into(),
+                    to: "$assertion".into(),
+                    kind: "data".into(),
+                    basis: String::new(),
+                }],
+                counts_as_asserted: vec!["n".into()],
+                watch: vec![],
+            })
+            .collect();
+        acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+        let mut new = inputs.clone();
+        new.files
+            .insert("src/shared.js".into(), "helper();\nmore();\n".into());
+        let (map2, state2) = carry(&map, &state, &inputs.manifest(), &new, "two", false).unwrap();
+        let v = validation(&map2, &state2, &new);
+        let changes = v["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 1, "one file changed");
+        let c = &changes[0];
+        // The counts are still exact; only the lists are sampled.
+        assert_eq!(c["knownFlows"]["flows"].as_u64().unwrap() as usize, flows);
+        assert_eq!(c["exposed"]["flows"].as_u64().unwrap() as usize, flows);
+        assert_eq!(c["exposed"]["testCount"].as_u64().unwrap() as usize, flows);
+        serde_json::to_vec(c).unwrap().len()
+    };
+    let small = bytes(50);
+    let large = bytes(400);
+    // Eight times the map and eight times the suite. What is left is the
+    // sampled identifiers getting longer -- `suite399` over `suite49` -- not
+    // the item carrying more of the project.
+    assert!(
+        large.abs_diff(small) < 256,
+        "a change item grew with the project: {small} -> {large} bytes"
+    );
+    // And it fits a page with room to spare, whatever the project does.
+    assert!(large < 8_192, "{large} bytes");
+}
