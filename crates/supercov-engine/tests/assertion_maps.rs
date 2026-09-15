@@ -961,22 +961,30 @@ fn a_watch_on_a_file_supercov_already_tracks_is_reported_as_redundant() {
     // unsaid it teaches the author that per-flow watching is how dependency
     // drift is caught, and the effort goes to entries that change nothing.
     let (mut inputs, mut map, _) = fixture();
-    assert!(advisories(&map).is_empty());
+    let about = |map: &AssertionMap, file: &str| {
+        advisories(map)
+            .into_iter()
+            .filter(|a| a.contains(&format!("watch \"{file}\"")))
+            .collect::<Vec<_>>()
+    };
     for tracked in ["package-lock.json", "package.json", "Cargo.toml"] {
         // A real project carries these in the inventory, so watching one is a
         // well-formed thing to write. That is exactly why it needs saying.
         inputs.files.insert(tracked.into(), "{}".into());
+        assert!(about(&map, tracked).is_empty());
         map.assertions[0].flows[0].watch = vec![tracked.into()];
+        let advice = about(&map, tracked);
         assert!(
-            advisories(&map).iter().any(|a| a.contains("redundant")),
-            "{tracked} should be reported"
+            advice.iter().any(|a| a.contains("redundant")),
+            "{tracked} should be reported: {advice:?}"
         );
         // It stays an advisory. A redundant watch never fails validation.
         assert!(validate_flow(&map.assertions[0].flows[0], &inputs.files).is_empty());
     }
-    // A file no fingerprint covers is exactly what watch exists for.
+    // A file no fingerprint covers, holding none of the flow's nodes, is
+    // exactly what watch exists for: nothing to say about it.
     map.assertions[0].flows[0].watch = vec!["tests/helpers/peer.js".into()];
-    assert!(advisories(&map).is_empty());
+    assert!(about(&map, "tests/helpers/peer.js").is_empty());
 }
 
 #[test]
@@ -1498,7 +1506,10 @@ fn a_redundant_manifest_watch_is_free_to_write_and_free_to_remove() {
         2,
         "writing a redundant watch restated the claim"
     );
-    let advice = advisories(&map);
+    let advice = advisories(&map)
+        .into_iter()
+        .filter(|a| a.contains("watch \"package.json\""))
+        .collect::<Vec<_>>();
     assert_eq!(advice.len(), 2, "{advice:?}");
     assert!(advice.iter().all(|a| a.contains("redundant")), "{advice:?}");
     assert!(
@@ -1529,5 +1540,129 @@ fn a_redundant_manifest_watch_is_free_to_write_and_free_to_remove() {
         current(&map, &state, &inputs),
         0,
         "dropping a real watch kept the acknowledgement"
+    );
+}
+
+/// A watch on a file that holds the flow's own nodes is not redundant -- it
+/// widens the flow from the declarations holding those nodes to the whole
+/// file, so a neighbouring function's body becomes a review again. That can be
+/// what the author means, so it is reported rather than refused; what must not
+/// happen is it taking effect unsaid.
+#[test]
+fn watching_a_file_that_holds_your_nodes_is_reported_and_says_what_it_costs() {
+    let (inputs, map, state) = fixture();
+    // The fixture itself carries the pattern: each flow watches the file its
+    // node is in, and the test file it applies to.
+    let advice = advisories(&map);
+    let widened = advice
+        .iter()
+        .find(|a| a.contains("watch \"src/a.js\""))
+        .unwrap_or_else(|| panic!("{advice:?}"));
+    assert!(
+        widened.contains("widens this flow to the whole file"),
+        "{widened}"
+    );
+    assert!(widened.contains("return:1"), "names the nodes: {widened}");
+    assert!(
+        widened.contains("the declarations holding its nodes"),
+        "says what it would otherwise rest on: {widened}"
+    );
+
+    // Watching the test file adds nothing: the flow already depends on it whole.
+    let test_file = advice
+        .iter()
+        .find(|a| a.contains("watch \"test.js\""))
+        .unwrap_or_else(|| panic!("{advice:?}"));
+    assert!(test_file.contains("redundant"), "{test_file}");
+    assert!(
+        test_file.contains("already depends on that file as a whole"),
+        "{test_file}"
+    );
+
+    // An advisory never fails validation, and never invalidates.
+    assert_eq!(current(&map, &state, &inputs), 2);
+    for a in &map.assertions {
+        for f in &a.flows {
+            assert!(validate_flow(f, &inputs.files).is_empty());
+        }
+    }
+}
+
+/// The roles describe the file. Attached to the declaration that changed they
+/// said something false -- that the neighbour holds the flow's node.
+#[test]
+fn a_whole_file_reason_does_not_blame_the_declaration_that_holds_no_node() {
+    let test = "import assert from 'node:assert/strict';\nassert.equal(result, 1);\n";
+    let source = "function work() {\n  return 1;\n}\nfunction other() {\n  return 2;\n}\n";
+    let inputs = Inputs {
+        schema_version: 1,
+        language: "javascript".into(),
+        context_digest: "context".into(),
+        files: Files::from([
+            ("test.js".into(), test.into()),
+            ("src/a.js".into(), source.into()),
+        ]),
+        assertions: vec![InventorySite {
+            at: anchor("test.js", test, "assert.equal(result, 1)"),
+            operation: "assert.equal".into(),
+        }],
+        limitations: vec![],
+    };
+    let (mut map, state) = seed(&inputs, "archive");
+    let a = &mut map.assertions[0];
+    a.observes = vec!["result equals one".into()];
+    a.flows = vec![Flow {
+        id: "f".into(),
+        basis: None,
+        questions: vec![],
+        explanation: "Author judgement".into(),
+        applies_to: vec![TestSelector {
+            file: "test.js".into(),
+            name: "test".into(),
+        }],
+        nodes: vec![Node {
+            id: "n".into(),
+            at: anchor("src/a.js", source, "return 1;"),
+            role: "value".into(),
+            meaning: String::new(),
+        }],
+        edges: vec![Edge {
+            from: "n".into(),
+            to: "$assertion".into(),
+            kind: "data".into(),
+            basis: String::new(),
+        }],
+        counts_as_asserted: vec!["n".into()],
+        watch: vec!["src/a.js".into()],
+    }];
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    assert_eq!(current(&map, &state, &inputs), 1);
+
+    // Edit only the neighbour. The watch makes this a review; the reason must
+    // say why, and must not claim `other` holds the node.
+    let mut next = inputs.clone();
+    next.files
+        .insert("src/a.js".into(), source.replace("return 2;", "return 3;"));
+    let (map2, state2) = carry(&map, &state, &inputs.manifest(), &next, "new", false).unwrap();
+    assert_eq!(
+        current(&map2, &state2, &next),
+        0,
+        "the watch makes it a review"
+    );
+    let b = &map2.assertions[0];
+    let why = reasons(b, &b.flows[0], &map2, &state2, &next);
+    let named = why
+        .iter()
+        .find(|r| r.contains("src/a.js"))
+        .unwrap_or_else(|| panic!("{why:?}"));
+    assert!(named.contains("other (line 4) changed"), "{named}");
+    assert!(named.contains("is watched by this flow"), "{named}");
+    assert!(
+        named.contains("this flow's n:2 sits in work (line 1)"),
+        "the nodes are located, not blamed: {named}"
+    );
+    assert!(
+        !named.contains("holds this flow's"),
+        "the changed declaration holds no node: {named}"
     );
 }

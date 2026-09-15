@@ -506,10 +506,37 @@ pub fn advisories(map: &AssertionMap) -> Vec<String> {
     for a in &map.assertions {
         for f in &a.flows {
             for file in &f.watch {
+                let key = flow_key(a, f);
                 if crate::integrity::globally_tracked(file) {
                     out.push(format!(
-                        "{}: watch \"{file}\" is redundant; Supercov invalidates every flow when that file changes",
-                        flow_key(a, f)
+                        "{key}: watch \"{file}\" is redundant; Supercov invalidates every flow when that file changes"
+                    ));
+                    continue;
+                }
+                if a.at.file == *file || f.applies_to.iter().any(|t| t.file == *file) {
+                    out.push(format!(
+                        "{key}: watch \"{file}\" is redundant; this flow already depends on that file as a whole"
+                    ));
+                    continue;
+                }
+                // Not redundant -- it changes what the flow rests on, which is
+                // the part an author cannot see. Naming a file that holds this
+                // flow's nodes takes the file out of declaration-level footing
+                // and puts the whole file back in, so a neighbouring function's
+                // body becomes a review again. That can be exactly what the
+                // author means -- "no other handler in here registers /admin"
+                // is a claim about the file's shape -- so it is said, not
+                // refused.
+                let here = f
+                    .nodes
+                    .iter()
+                    .filter(|n| n.at.file == *file)
+                    .map(|n| format!("{}:{}", n.id, n.at.line))
+                    .collect::<Vec<_>>();
+                if !here.is_empty() {
+                    out.push(format!(
+                        "{key}: watch \"{file}\" widens this flow to the whole file; without it only the declarations holding its nodes ({}) and the file's set of declarations would count. Remove it unless a change anywhere in that file should be a review.",
+                        here.join(", ")
                     ));
                 }
             }
@@ -758,15 +785,24 @@ impl<'a> Ledger<'a> {
 /// between rereading a claim and glancing at a line number.
 fn roles(a: &Assertion, f: &Flow, file: &str) -> Vec<String> {
     let mut roles: Vec<String> = Vec::new();
-    let lines = f
-        .nodes
-        .iter()
-        .filter(|n| n.at.file == file)
-        .map(|n| format!("{}:{}", n.id, n.at.line))
-        .collect::<Vec<_>>();
+    let lines = node_sites(f, file);
     if !lines.is_empty() {
         roles.push(format!("holds this flow's {}", lines.join(", ")));
     }
+    roles.extend(whole_file_roles(a, f, file));
+    roles
+}
+fn node_sites(f: &Flow, file: &str) -> Vec<String> {
+    f.nodes
+        .iter()
+        .filter(|n| n.at.file == file)
+        .map(|n| format!("{}:{}", n.id, n.at.line))
+        .collect()
+}
+/// Why the flow depends on the file *as a whole*, which is a different claim
+/// from where its nodes sit in it.
+fn whole_file_roles(a: &Assertion, f: &Flow, file: &str) -> Vec<String> {
+    let mut roles: Vec<String> = Vec::new();
     if a.at.file == file {
         roles.push(format!("holds the assertion, line {}", a.at.line));
     }
@@ -1473,10 +1509,32 @@ pub fn carry(
                         ..
                     }) => {
                         if whole_file(a, prior, file) {
+                            // The file's roles describe the file. Attached to
+                            // the declaration that changed they say something
+                            // false: in `other (line 4) changed (holds this
+                            // flow's n:2)`, `work` holds n:2 and `other` is its
+                            // neighbour. What makes this change count is the
+                            // dependency on the whole file; where the nodes sit
+                            // is context, and is said as context.
+                            let mut why = whole_file_roles(a, prior, file);
+                            let sites = node_sites(prior, file);
+                            if !sites.is_empty() {
+                                let holders = prior
+                                    .nodes
+                                    .iter()
+                                    .filter(|n| n.at.file == file)
+                                    .map(|n| before.unit_at(n.at.line, n.at.column))
+                                    .collect::<BTreeSet<_>>();
+                                why.push(format!(
+                                    "this flow's {} sits in {}",
+                                    sites.join(", "),
+                                    named(holders.iter().map(|i| &before.units[*i]))
+                                ));
+                            }
                             Some(format!(
                                 "{file}: {} changed{}",
                                 describe(before, after, diff),
-                                in_role(&roles)
+                                in_role(&why)
                             ))
                         } else {
                             let holders = prior

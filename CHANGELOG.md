@@ -2,8 +2,13 @@
 
 ## 0.0.52
 
+**Added**
+
+- The map report says when a `watch` entry changes what a flow rests on. Naming a file that already holds the flow's nodes widens it from the declarations holding those nodes to the whole file, so a neighbouring function's body is a review again -- sometimes what the author means, never something that should happen unsaid. Naming a file the flow already depends on whole, such as its own test, is reported as redundant alongside the existing manifest advisory.
+
 **Fixed**
 
+- A reason for a change in a whole-file dependency no longer blames the declaration that changed for holding a node it does not hold. `src/a.js: other (line 4) changed (holds this flow's n:2)` named the neighbour of the node's declaration as its holder; it now reads `... (is watched by this flow; this flow's n:2 sits in work (line 1))`, which says why the change counts and where the claim sits.
 - Removing a `watch` entry that Supercov itself reports as redundant no longer restates the claim. A manifest, lockfile or runner configuration named in `watch` is tracked for the whole run, so it never became one of the flow's dependencies -- but it was still part of what the acknowledgement was computed over, so deleting the entry the report advised deleting cost a full re-acknowledgement. Writing one and removing one are now both free. Flows that never named such a file keep their existing tokens; only a flow carrying a redundant entry is re-based, onto the token it would have had without it.
 
 ## 0.0.51
