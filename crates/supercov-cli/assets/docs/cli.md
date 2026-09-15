@@ -21,6 +21,7 @@ npx supercov --help
 | Inspect one assertion and its flows | `npx supercov runs latest assertion <id>` |
 | Read matching current source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
+| Find the tests a change affects | `npx supercov runs latest tests affected` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
 | Read bundled guides | `npx supercov docs` |
@@ -288,6 +289,27 @@ npx supercov runs latest minimize --metric branches --target 90
 target. It does not edit, delete, or skip tests for you. Treat the result as an
 analysis aid, not permission to remove tests that protect behavior outside the
 selected metric.
+
+## Find the tests a change affects
+
+```sh supercov
+npx supercov runs latest tests affected
+npx supercov runs latest tests affected --files
+npx supercov runs latest tests affected --json
+```
+
+`tests affected` names the tests of a run whose recorded execution the changes
+since that run could have reached: a change in code the test ran, in its test
+file, or in the shape of a file it ran code in -- a declaration added, removed
+or renamed. A change confined to code the test never ran does not count, and
+neither do comments, blank lines or trailing whitespace. A test that did not
+pass in the run is listed regardless.
+
+`--names` prints one affected test name per line and `--files` one test file
+per line, for a runner's filter. A dependency, lockfile, configuration or
+toolchain change affects every test and is reported as such. A source file
+added since the run is outside every test's record; the working-tree check
+says so, and the suite should run in full.
 
 ## Combine shards
 

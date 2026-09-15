@@ -183,7 +183,9 @@ pub fn current_sources(root: &Path, manifest: &InputManifest) -> Result<Inputs, 
                 return None;
             }
             let text = fs::read_to_string(canonical).ok()?;
-            (FileFingerprint::of(&text) == *expected).then_some(text)
+            FileFingerprint::of(&text)
+                .same_bytes(expected)
+                .then_some(text)
         })();
         let Some(source) = source else {
             return Err(format!(

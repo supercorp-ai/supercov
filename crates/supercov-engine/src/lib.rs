@@ -77,6 +77,7 @@ pub mod rust_runtime;
 pub mod rust_test_context;
 pub mod rust_test_runner;
 pub mod source_discovery;
+pub mod source_units;
 mod typescript_imports;
 pub mod workspace;
 

@@ -59,9 +59,10 @@ For each assertion:
 - Put a node in `countsAsAsserted` only when its behavior is checked by this
   assertion. Every counted node needs a recorded path to `$assertion`.
   Counting a guard or block does not count the nested body automatically.
-- Add helper, configuration and other dependency files to `watch`. Assertion,
-  selected-test and node files are already dependencies. Include relevant guards
-  and alternatives even when they do not appear as graph nodes.
+- Add helper, configuration and other dependency files to `watch`. The
+  declarations holding your nodes, the top level of their files, the assertion
+  file and the selected test files are already dependencies. Include relevant
+  guards and alternatives even when they do not appear as graph nodes.
 - Keep uncertainty in `questions`. A flow's unresolved questions block its
   credit. Assertion-level questions record broader unfinished investigation.
 
@@ -97,8 +98,11 @@ back into the map.
 
 ## Assess changes before renewing flows
 
-When inheriting a map, read every entry in `--view changes`. Recorded file
-watches are a starting point; investigate whether other flows are affected too.
+When inheriting a map, read every entry in `--view changes`. Each names the
+flows it already made stale (`knownFlows`) and, under `exposed`, the tests that
+ran the changed code and how many flows they carry; start with those, and
+investigate whether other flows are affected too. A flow's own `notices` list changes near its
+nodes that could not have reached it.
 
 Add a `changeAssessments` entry for each managed change ID. Include all listed
 `knownFlows` that still exist, plus any other affected flows. Explain why the

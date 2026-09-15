@@ -214,7 +214,9 @@ try {
   acknowledgeMap((...args) => query(stillDirty, ...args), query(stillDirty).map);
   assert.equal(query(stillDirty).summary.statements.asserted, 1);
 
-  // Unique snippets relocate automatically, while changed files need review.
+  // Anchors follow their statements when lines are added above them, and a
+  // blank line changes nothing a program can observe: the acknowledgement
+  // stands, credit is kept, and there is no change to assess.
   const testPath = join(root, 'tests/core.test.js');
   const corePath = join(root, 'src/core.js');
   writeFileSync(testPath, '\n' + readFileSync(testPath, 'utf8'));
@@ -225,16 +227,26 @@ try {
   assert.equal(movedMap.assertions[0].id, a.id);
   assert.equal(movedMap.assertions[0].at.line, 6);
   assert.equal(movedMap.assertions[0].flows[0].nodes[0].at.line, 3);
-  assert.equal(movedReport.summary.statements.asserted, 0);
-  assert.equal(movedReport.summary.staleFlows, 1);
-  acknowledgeMap((...args) => query(moved, ...args), movedReport.map, movedMap);
-  assert.equal(query(moved).summary.statements.asserted, 1);
+  assert.equal(movedReport.summary.statements.asserted, 1);
+  assert.equal(movedReport.summary.staleFlows, 0);
+  assert.equal(query(moved, 'report', '--view', 'changes').pagination.total, 0, 'blank lines are not a change to assess');
+  // A statement added to the selected test is a change to the test the claim
+  // applies to, and the reason says so and names what moved.
+  writeFileSync(testPath, readFileSync(testPath, 'utf8').replace("import test from 'node:test';", "import test from 'node:test';\nconst extra = 1;"));
+  const testEdited = run();
+  const testEditedReport = query(testEdited);
+  assert.equal(testEditedReport.summary.statements.asserted, 0);
+  assert.equal(testEditedReport.summary.staleFlows, 1);
+  const testEditedFlow = query(testEdited, 'report', '--view', 'assertions').items[0].flows[0];
+  assert(testEditedFlow.reasons.some(r => r.startsWith('tests/core.test.js: top level changed') && r.includes('is the test this claim applies to')), JSON.stringify(testEditedFlow.reasons));
+  acknowledgeMap((...args) => query(testEdited, ...args), testEditedReport.map, read(testEditedReport.map));
+  assert.equal(query(testEdited).summary.statements.asserted, 1);
 
   // Failed runs still have maps, but cannot inherit passing execution credit.
   writeFileSync(corePath, readFileSync(corePath, 'utf8').replace('return 2 - 1;', 'return 2;'));
   assert.notEqual(executeSupercov(root, ["--", "node", "--test"]).status, 0);
   const failed = latestRun(root);
-  assert.equal(query(failed).inheritance.from, moved);
+  assert.equal(query(failed).inheritance.from, testEdited);
   assert.equal(query(failed).summary.runPassed, false);
   assert.equal(query(failed).summary.statements.asserted, 0);
   assert.deepEqual(readFileSync(initialized.map), firstMapBytes);

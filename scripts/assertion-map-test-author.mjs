@@ -15,7 +15,7 @@ export function acknowledgeMap(query, mapFile, map = JSON.parse(readFileSync(map
   const validation = query('validate');
   for (const a of map.assertions) for (const f of a.flows) {
     f.basis = validation.flows.find(r => r.id === `${a.id}/${f.id}`).expectedBasis;
-    assert.match(f.basis, /^scov2:[a-f0-9]{64}$/);
+    assert.match(f.basis, /^scov3:[a-f0-9]{64}$/);
   }
   write();
   return map;

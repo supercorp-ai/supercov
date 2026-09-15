@@ -174,7 +174,15 @@ pub(super) fn state(
         "Imported legacy map; inspect current source and v2 flow claims",
     );
     for reason in old.scope_review {
-        super::add_change(&mut state, None, None, None, reason, BTreeSet::new());
+        super::add_change(
+            &mut state,
+            None,
+            None,
+            None,
+            reason,
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
     }
     Ok(state)
 }

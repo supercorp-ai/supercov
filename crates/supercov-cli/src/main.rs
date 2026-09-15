@@ -48,6 +48,7 @@ mod assertions_human;
 mod assertions_query;
 mod human_query;
 mod public_query;
+mod tests_query;
 
 use human_query::render_human;
 use public_query::{PublicQueryInvocation, help_for, parse_public_query};
@@ -2845,6 +2846,9 @@ fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
             .is_some_and(|a| matches!(a.as_str(), "assertions" | "assertion" | "source"))
     {
         return assertions_query::command(&arguments);
+    }
+    if command == "runs" && arguments.get(1).is_some_and(|a| a == "tests") {
+        return tests_query::command(&arguments);
     }
     // Both `runs check` (the latest run) and `runs <id> check` reach here.
     if command == "runs"
