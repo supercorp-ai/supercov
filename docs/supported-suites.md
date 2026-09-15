@@ -49,7 +49,7 @@ Supercov reports the level it actually observed. It does not guess.
 | Runner | Attribution |
 | --- | --- |
 | Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
-| Vitest | Exact per test, with setup execution kept separate |
+| Vitest | Exact per test, with setup execution kept separate; Browser Mode included |
 | Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept; passing `expect` occurrences are identified for assertion maps |
 | `node:test` | Exact per test |
 | AVA and Mocha | Aggregate structural coverage |
@@ -58,6 +58,30 @@ Supercov reports the level it actually observed. It does not guess.
 
 One command may launch several runners. Supercov combines their evidence into
 one run and preserves runner identity wherever the runner exposes it.
+
+### Vitest Browser Mode
+
+Vitest Browser Mode runs the test file in a real browser. Supercov measures it
+per test like any other Vitest run: lines, branches, MC/DC and assertion
+coverage, with no extra configuration. Every provider is supported, because
+evidence travels over Vitest's own browser command channel rather than anything
+provider-specific.
+
+Component code is instrumented the same way as any other source, with one
+addition that matters most here. A JSX tree is a single statement, so an
+expression rendered inside it -- `aria-label={label(state)}`, a child
+`{formatted(value)}` -- is measured on its own rather than counted as covered
+because the component rendered once. This is also what lets a UI assertion be
+explained precisely: `toHaveAccessibleName` names the attribute and
+`toHaveTextContent` names the child, and each is credited separately.
+
+Expressions that cannot independently fail to evaluate do not become
+obligations. `{value}` is reached exactly when the tree is, and
+`onClick={() => save()}` is measured where the handler is called rather than
+where it is created.
+
+`expect.element(...)`, `expect.soft(...)` and `expect.poll(...)` are recognised
+as assertions, so their passing occurrences are available to assertion maps.
 
 ### Builds and source formats
 

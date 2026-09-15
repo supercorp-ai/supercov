@@ -23,11 +23,12 @@ use oxc_ast::{
         ConditionalExpression, Declaration, DoWhileStatement, ExportDefaultDeclarationKind,
         Expression, ForInStatement, ForOfStatement, ForStatement, ForStatementLeft,
         FormalParameter, FormalParameterKind, FormalParameters, Function, FunctionBody,
-        IfStatement, ImportDeclarationSpecifier, ImportOrExportKind, LogicalExpression,
-        NewExpression, ObjectPropertyKind, PrivateFieldExpression, Program, PropertyKey,
-        PropertyKind, Statement, StaticMemberExpression, SwitchStatement, TSGlobalDeclaration,
-        TSModuleDeclaration, TryStatement, VariableDeclaration, VariableDeclarationKind,
-        VariableDeclarator, WhileStatement, WithStatement,
+        IfStatement, ImportDeclarationSpecifier, ImportOrExportKind, JSXExpression,
+        JSXExpressionContainer, LogicalExpression, NewExpression, ObjectPropertyKind,
+        PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
+        StaticMemberExpression, SwitchStatement, TSGlobalDeclaration, TSModuleDeclaration,
+        TryStatement, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
+        WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -493,6 +494,7 @@ pub struct CandidateRuntime {
     pub parenthesized_assignment_value: String,
     pub with_request_phase: String,
     pub optional_select: String,
+    pub rendered_value_v2: String,
     pub optional_call_begin: String,
     pub optional_call_reached: String,
     pub optional_call_continued: String,
@@ -1084,14 +1086,31 @@ fn expect_operation(
     let Expression::CallExpression(expect_call) = current else {
         return None;
     };
-    let Expression::Identifier(identifier) = &expect_call.callee else {
+    // `expect(value)` is the usual root, but the assertion APIs wrap it:
+    // `expect.element(locator)` in Vitest Browser Mode, `expect.soft(value)`,
+    // `expect.poll(fn)`. The receiver is still expect and the matcher is still
+    // the assertion, so requiring a bare identifier here made every UI
+    // assertion in a browser-mode test invisible -- and an assertion Supercov
+    // cannot see can never be mapped or earn credit.
+    let mut root = &expect_call.callee;
+    let mut prefix = Vec::new();
+    while let Some(name) = assertion_member_name(root) {
+        prefix.push(name.to_owned());
+        root = assertion_member_object(root)?;
+    }
+    prefix.reverse();
+    let Expression::Identifier(identifier) = root else {
         return None;
     };
     let recognized = match referenced_symbol(identifier, scoping) {
         Some(symbol) => bindings.expects.contains(&symbol),
         None => bindings.global_expect && identifier.name == "expect",
     };
-    recognized.then(|| format!("expect.{}", matchers.join(".")))
+    recognized.then(|| {
+        let mut parts = prefix;
+        parts.extend(matchers.iter().cloned());
+        format!("expect.{}", parts.join("."))
+    })
 }
 
 #[derive(Default)]
@@ -1484,6 +1503,7 @@ struct PointCollector<'s> {
     points: Vec<CandidatePoint>,
     statement_targets: HashMap<SpanKey, Vec<String>>,
     function_targets: HashMap<SpanKey, String>,
+    rendered_targets: HashMap<SpanKey, String>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
     erased_imports: &'s HashSet<SpanKey>,
     unsafe_function_depth: usize,
@@ -1496,6 +1516,7 @@ struct PointAnalysis {
     points: Vec<CandidatePoint>,
     statement_targets: HashMap<SpanKey, Vec<String>>,
     function_targets: HashMap<SpanKey, String>,
+    rendered_targets: HashMap<SpanKey, String>,
 }
 
 #[derive(Clone)]
@@ -1659,6 +1680,36 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
         self.points.push(point);
     }
 
+    // A JSX tree is one statement, so everything rendered inside it -- an
+    // `aria-label={label(state)}`, a child `{formatted(value)}` -- counted as
+    // covered the moment the component rendered once, even when that
+    // expression never evaluated. It is also the seam a UI assertion attaches
+    // to: `toHaveAccessibleName` is about the attribute and `toHaveTextContent`
+    // about the child, and with one statement for the whole tree neither could
+    // be named apart from the other.
+    //
+    // Only expressions that can independently fail to evaluate earn a point.
+    // A bare identifier or member chain cannot -- it is reached exactly when
+    // the enclosing statement is -- and a function is already measured where
+    // it is called rather than where it is created.
+    fn enter_expression(&mut self, node: &mut Expression<'a>, context: &mut TraverseCtx<'a, ()>) {
+        if self.pass != PointPass::Statements
+            || self.unsafe_context()
+            || !matches!(
+                context.ancestors().next(),
+                Some(Ancestor::JSXExpressionContainerExpression(_))
+            )
+            || !rendered_expression_is_measurable(node)
+        {
+            return;
+        }
+        let span = node.span();
+        let point = self.point(span, "statement", Some("jsx-rendered-expression".into()));
+        self.rendered_targets
+            .insert(span_key(span), point.id.clone());
+        self.points.push(point);
+    }
+
     fn enter_declaration(&mut self, node: &mut Declaration<'a>, context: &mut TraverseCtx<'a, ()>) {
         if self.pass != PointPass::Statements
             || self.unsafe_context()
@@ -1817,6 +1868,29 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
     }
 }
 
+/// Whether a JSX expression container holds something that can independently
+/// fail to evaluate, and so is worth a coverage obligation of its own.
+fn rendered_expression_is_measurable(expression: &Expression<'_>) -> bool {
+    match expression {
+        // Already measured where it is called.
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
+        // Reached exactly when the enclosing statement is.
+        Expression::Identifier(_)
+        | Expression::ThisExpression(_)
+        | Expression::StaticMemberExpression(_)
+        | Expression::ComputedMemberExpression(_)
+        | Expression::PrivateFieldExpression(_)
+        | Expression::JSXElement(_)
+        | Expression::JSXFragment(_) => false,
+        // `user?.id` is a member access that happens to short-circuit; it is
+        // reached with the statement like any other. `user?.load()` is not.
+        Expression::ChainExpression(chain) => {
+            matches!(chain.expression, ChainElement::CallExpression(_))
+        }
+        other => !other.is_literal(),
+    }
+}
+
 fn collect_points<'a>(
     allocator: &'a Allocator,
     program: &mut Program<'a>,
@@ -1834,6 +1908,7 @@ fn collect_points<'a>(
             points: Vec::new(),
             statement_targets: HashMap::new(),
             function_targets: HashMap::new(),
+            rendered_targets: HashMap::new(),
             source_sensitive_functions,
             erased_imports,
             unsafe_function_depth: 0,
@@ -1846,6 +1921,7 @@ fn collect_points<'a>(
             .statement_targets
             .extend(collector.statement_targets);
         analysis.function_targets.extend(collector.function_targets);
+        analysis.rendered_targets.extend(collector.rendered_targets);
     }
     analysis
 }
@@ -2582,6 +2658,7 @@ fn instrument_candidate_with_binding(
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
     let with_request_phase = names.allocate("__supercovWithRequestPhase");
     let optional_select = names.allocate("__supercovOptionalSelect");
+    let rendered_value_v2 = names.allocate("__supercovRenderedValueV2");
     let optional_call_begin = names.allocate("__supercovOptionalCallBegin");
     let optional_call_reached = names.allocate("__supercovOptionalCallReached");
     let optional_call_continued = names.allocate("__supercovOptionalCallContinued");
@@ -2636,6 +2713,20 @@ fn instrument_candidate_with_binding(
             )
         })
         .collect();
+    let rendered_targets = point_analysis
+        .rendered_targets
+        .into_iter()
+        .map(|(span, id)| {
+            (
+                span,
+                PointTarget {
+                    index: *point_indices
+                        .get(&id)
+                        .expect("rendered point must have a global index"),
+                },
+            )
+        })
+        .collect();
     let mut statement_transformer = StatementProbeTransformer {
         ast,
         coverage_hit_v2: coverage_hit_v2.clone(),
@@ -2653,6 +2744,14 @@ fn instrument_candidate_with_binding(
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     function_transformer.visit_program(&mut parsed.program);
+    let mut rendered_transformer = RenderedExpressionTransformer {
+        ast,
+        rendered_value_v2: rendered_value_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        targets: rendered_targets,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+    };
+    rendered_transformer.visit_program(&mut parsed.program);
     let mut optional_transformer = OptionalMemberTransformer {
         ast,
         optional_select: optional_select.clone(),
@@ -2804,6 +2903,7 @@ fn instrument_candidate_with_binding(
             &parenthesized_assignment_value,
         ),
         ("optionalSelect", &optional_select),
+        ("renderedValueV2", &rendered_value_v2),
         ("optionalCallBegin", &optional_call_begin),
         ("optionalCallReached", &optional_call_reached),
         ("optionalCallContinued", &optional_call_continued),
@@ -2915,6 +3015,7 @@ fn instrument_candidate_with_binding(
             parenthesized_assignment_value,
             with_request_phase,
             optional_select,
+            rendered_value_v2,
             optional_call_begin,
             optional_call_reached,
             optional_call_continued,
@@ -3078,6 +3179,70 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
     fn visit_for_of_statement(&mut self, statement: &mut ForOfStatement<'a>) {
         self.wrap_bare(&mut statement.body);
         walk_mut::walk_for_of_statement(self, statement);
+    }
+}
+
+/// Wraps a rendered JSX expression in `renderedValueV2(file, i, expression)` so
+/// the expression records its own evaluation. There is nowhere to put a
+/// statement inside JSX, and a sequence expression is not available either --
+/// JSX forbids a bare comma operator, and a container prints its expression
+/// unparenthesised. A call carries the value through instead. It records after
+/// the expression evaluates rather than before, as `optionalSelect` already
+/// does, so an expression that throws is reported unevaluated rather than
+/// covered.
+struct RenderedExpressionTransformer<'a> {
+    ast: AstBuilder<'a>,
+    rendered_value_v2: String,
+    probe_file_v2: String,
+    targets: HashMap<SpanKey, PointTarget>,
+    source_sensitive_functions: HashSet<SpanKey>,
+}
+
+impl<'a> RenderedExpressionTransformer<'a> {
+    fn probe(&self, target: &PointTarget, value: Expression<'a>) -> Expression<'a> {
+        self.ast.expression_call(
+            Span::default(),
+            self.ast
+                .expression_identifier(Span::default(), self.ast.ident(&self.rendered_value_v2)),
+            NONE,
+            self.ast.vec_from_array([
+                Argument::from(
+                    self.ast.expression_identifier(
+                        Span::default(),
+                        self.ast.ident(&self.probe_file_v2),
+                    ),
+                ),
+                Argument::from(self.ast.expression_numeric_literal(
+                    Span::default(),
+                    target.index as f64,
+                    None,
+                    NumberBase::Decimal,
+                )),
+                Argument::from(value),
+            ]),
+            false,
+        )
+    }
+}
+
+impl<'a> VisitMut<'a> for RenderedExpressionTransformer<'a> {
+    fn visit_jsx_expression_container(&mut self, container: &mut JSXExpressionContainer<'a>) {
+        walk_mut::walk_jsx_expression_container(self, container);
+        if matches!(container.expression, JSXExpression::EmptyExpression(_)) {
+            return;
+        }
+        let span = container.expression.span();
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            return;
+        }
+        let Some(target) = self.targets.remove(&span_key(span)) else {
+            return;
+        };
+        let inner = container
+            .expression
+            .take_in(self.ast.allocator)
+            .into_expression();
+        container.expression = JSXExpression::from(self.probe(&target, inner));
     }
 }
 
@@ -7610,6 +7775,115 @@ mod tests {
         let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
         assert_eq!(output.assertions, 1);
         assert!(output.code.contains("expect.toBe"));
+    }
+
+    #[test]
+    fn browser_mode_expect_wrappers_are_attributed_like_a_bare_expect() {
+        // Vitest Browser Mode asserts through `expect.element(locator)`, and
+        // `expect.soft`/`expect.poll` wrap the same way. The chain root is a
+        // member call rather than a bare `expect` identifier, which is the
+        // shape that used to leave every UI assertion unrecognised.
+        for (call, operation) in [
+            (
+                "expect.element(button).toHaveAccessibleName('Copy')",
+                "expect.element.toHaveAccessibleName",
+            ),
+            ("expect.soft(value()).toBe(1)", "expect.soft.toBe"),
+            ("expect.poll(() => value()).toBe(1)", "expect.poll.toBe"),
+        ] {
+            let source = format!(
+                "import {{ expect, test }} from 'vitest';\ntest('value', async () => await {call});\n"
+            );
+            let output = instrument_node_assertion_phases(&source, "tests/value.test.mjs").unwrap();
+            assert_eq!(output.assertions, 1, "{call}");
+            assert!(output.code.contains(operation), "{call} -> {operation}");
+        }
+    }
+
+    #[test]
+    fn a_rendered_jsx_expression_is_measured_apart_from_the_tree_that_holds_it() {
+        // A JSX tree is one statement, so an attribute and a child that call
+        // the same function had no way to be told apart -- which is exactly
+        // what a UI assertion needs, `toHaveAccessibleName` naming the
+        // attribute and `toHaveTextContent` the child.
+        let source = concat!(
+            "export function Button({ label, copied }) {\n",
+            "  return (\n",
+            "    <button aria-label={format(copied)} title={label} onClick={() => tap()}>\n",
+            "      {format(copied)}\n",
+            "    </button>\n",
+            "  );\n",
+            "}\n",
+        );
+        let output = instrument_candidate(source, "src/button.tsx").unwrap();
+        let rendered = output
+            .points
+            .iter()
+            .filter(|point| point.label.as_deref() == Some("jsx-rendered-expression"))
+            .collect::<Vec<_>>();
+        // The attribute and the child are separate obligations at separate
+        // positions, even though they read identically.
+        assert_eq!(rendered.len(), 2, "{:?}", output.points);
+        assert!(
+            rendered
+                .iter()
+                .all(|point| point.source == "format(copied)")
+        );
+        assert_eq!(rendered[0].line, 3);
+        assert_eq!(rendered[1].line, 4);
+        assert!(rendered[0].column != rendered[1].column || rendered[0].line != rendered[1].line);
+        // `{label}` is reached exactly when the tree is, and the handler is
+        // measured where it is called; neither earns an obligation.
+        assert!(!output.code.contains("title={__supercovRenderedValueV2"));
+        // JSX forbids a bare comma operator, so the probe has to carry the
+        // value through a call rather than a sequence expression.
+        assert!(!output.code.contains("), format(copied)}"));
+        assert!(output.code.contains(", format(copied))}"));
+    }
+
+    #[test]
+    fn instrumented_jsx_stays_parseable_through_every_container_shape() {
+        // A JSX container cannot hold a bare comma operator, and a malformed
+        // rewrite would surface only as the project's own build failing. Each
+        // shape below reaches the rewrite by a different route.
+        let source = concat!(
+            "export function Panel({ items, user, error, tone }) {\n",
+            "  return (\n",
+            "    <>\n",
+            "      <Row {...spread(user)} title={`hi ${name(user)}`} />\n",
+            "      <div className={cx('a', tone && 'b')} data-id={user?.id}>\n",
+            "        {error ? <Alert text={message(error)} /> : null}\n",
+            "        {items.map((item) => (\n",
+            "          <Item key={item.id} label={format(item)} />\n",
+            "        ))}\n",
+            "        {count(items) > 0 && <Footer total={sum(items)} />}\n",
+            "      </div>\n",
+            "    </>\n",
+            "  );\n",
+            "}\n",
+        );
+        let output = instrument_candidate(source, "src/panel.tsx").unwrap();
+        // The instrumented output must itself parse.
+        instrument_candidate(&output.code, "src/panel.tsx").expect("instrumented JSX must reparse");
+        // A spread attribute is not a container and is never rewritten.
+        assert!(output.code.contains("{...spread(user)}"), "{}", output.code);
+        let rendered = output
+            .points
+            .iter()
+            .filter(|point| point.label.as_deref() == Some("jsx-rendered-expression"))
+            .map(|point| point.source.as_str())
+            .collect::<Vec<_>>();
+        assert!(rendered.contains(&"`hi ${name(user)}`"), "{rendered:?}");
+        assert!(
+            rendered.contains(&"cx(\'a\', tone && \'b\')"),
+            "{rendered:?}"
+        );
+        assert!(rendered.contains(&"format(item)"), "{rendered:?}");
+        assert!(rendered.contains(&"message(error)"), "{rendered:?}");
+        // `user?.id` short-circuits but is still a member access reached with
+        // the statement, and a key that is a bare member chain is too.
+        assert!(!rendered.contains(&"user?.id"), "{rendered:?}");
+        assert!(!rendered.contains(&"item.id"), "{rendered:?}");
     }
 
     #[test]

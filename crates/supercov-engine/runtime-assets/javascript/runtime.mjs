@@ -1207,6 +1207,15 @@ function selectionEnd(frame, value) {
   }
   return value;
 }
+// A JSX expression container has nowhere to put a statement and cannot hold a
+// bare comma operator, so a rendered expression carries its probe as a call
+// that returns the value through. Like optionalSelect, it records after the
+// value evaluates: an expression that throws is reported unevaluated rather
+// than covered.
+function renderedValueV2(file, index, value) {
+  coverageHitV2(file, index);
+  return value;
+}
 function optionalSelect(shortId, continuedId, value) {
   coverageHit(value === null || value === void 0 ? shortId : continuedId);
   return value;
@@ -1356,6 +1365,7 @@ const directRuntimeApi = {
   optionalCallEnd,
   optionalCallReached,
   optionalSelect,
+  renderedValueV2,
   parenthesizedAssignmentValue,
   phaseBelongsToAttempt,
   registerProbeV2,
@@ -1406,6 +1416,7 @@ export {
   optionalCallEnd,
   optionalCallReached,
   optionalSelect,
+  renderedValueV2,
   parenthesizedAssignmentValue,
   phaseBelongsToAttempt,
   registerProbeV2,

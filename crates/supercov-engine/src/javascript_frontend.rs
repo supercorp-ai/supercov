@@ -49,6 +49,7 @@ const RUNTIME_FILES: &[&str] = &[
     "runtime.mjs",
     "transport.mjs",
     "vitest.mjs",
+    "vitestBrowser.mjs",
     "vitestReporter.mjs",
 ];
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
@@ -488,6 +489,9 @@ fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
         "runtime.mjs" => Some(include_bytes!("../runtime-assets/javascript/runtime.mjs")),
         "transport.mjs" => Some(include_bytes!("../runtime-assets/javascript/transport.mjs")),
         "vitest.mjs" => Some(include_bytes!("../runtime-assets/javascript/vitest.mjs")),
+        "vitestBrowser.mjs" => Some(include_bytes!(
+            "../runtime-assets/javascript/vitestBrowser.mjs"
+        )),
         "vitestReporter.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/vitestReporter.mjs"
         )),
@@ -972,17 +976,31 @@ fn write_vitest_config(
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
          import SupercovVitestReporter from './node_modules/vitestReporter.mjs';\n\
-         import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
+         import {{ supercovBrowserCommands, supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
          const discoveredConfig = {original};\n\
+         // Browser Mode runs the test file in the browser, so the node setup --\n\
+         // which reaches node:fs to write evidence -- cannot load there. Vite\n\
+         // externalises it and the suite fails before collecting a test.\n\
+         const supercovBrowserMode = (config) => Boolean(config?.test?.browser?.enabled);\n\
+         const supercovSetupFile = (config) =>\n\
+           supercovBrowserMode(config)\n\
+             ? '.supercov/node_modules/vitestBrowser.mjs'\n\
+             : '.supercov/node_modules/vitest.mjs';\n\
+         // Evidence leaves the browser over Vitest's own command channel, so\n\
+         // the command is registered only for the mode that uses it.\n\
+         const supercovBrowserTest = (config) =>\n\
+           supercovBrowserMode(config)\n\
+             ? {{ browser: {{ commands: supercovBrowserCommands(process.cwd()) }} }}\n\
+             : {{}};\n\
          export default async function supercovVitestConfig(env) {{\n\
            const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;\n\
            const loaded = originalPath ? await loadConfigFromFile(env, originalPath, process.cwd()) : undefined;\n\
            const config = mergeConfig(loaded?.config ?? {{}}, {{\n\
              cacheDir: resolve(process.cwd(), '.supercov/vitest-cache'),\n\
              plugins: [supercovViteInstrumentation(process.cwd())],\n\
-             test: {{ setupFiles: [resolve(process.cwd(), '.supercov/node_modules/vitest.mjs')], maxConcurrency: 1 }},\n\
+             test: {{ setupFiles: [resolve(process.cwd(), supercovSetupFile(loaded?.config))], maxConcurrency: 1, ...supercovBrowserTest(loaded?.config) }},\n\
            }});\n\
            const configuredReporters = loaded?.config?.test?.reporters;\n\
            config.test ??= {{}};\n\
@@ -1200,10 +1218,52 @@ fn write_vite_transforms(
     payload.push(b'\n');
     atomic_write(&generated.join("vite-transforms.json"), &payload)?;
     let adapter = "import { createHash } from 'node:crypto';\n\
-import { readFileSync } from 'node:fs';\n\
+import { mkdirSync, readFileSync } from 'node:fs';\n\
 import { relative, resolve, sep } from 'node:path';\n\
+import { atomicWriteFileSync } from './node_modules/atomic.mjs';\n\
+import { inferTestProvenance } from './node_modules/provenance.mjs';\n\
 const transforms = JSON.parse(readFileSync(new URL('./vite-transforms.json', import.meta.url), 'utf8'));\n\
 const sha256 = value => createHash('sha256').update(value).digest('hex');\n\
+// Browser Mode runs the test file in the browser, where none of this is\n\
+// reachable: no node:fs to write evidence, no project root to relativise a\n\
+// path against, no env to read. Vitest's own browser command channel carries\n\
+// what the browser observed to node, which completes the same payload the node\n\
+// setup writes -- so one contract keeps one implementation. The command is\n\
+// awaited as part of the test, and node learns the test file from Vitest\n\
+// rather than from the browser realm, which cannot be trusted to name it.\n\
+const supercovEvidenceSuffix = /^[A-Za-z0-9._-]+$/;\n\
+export function supercovBrowserCommands(root) {\n\
+  return {\n\
+    __supercovEvidence(context, payload, suffix) {\n\
+      const evidenceDirectory = process.env['SUPERCOV_EVIDENCE_DIR'];\n\
+      if (!evidenceDirectory) return;\n\
+      // A suffix names one directory under the evidence directory. Anything\n\
+      // else is refused rather than resolved, so a malformed one cannot send\n\
+      // the write outside the directory it is supposed to stay in.\n\
+      if (typeof suffix !== 'string' || !supercovEvidenceSuffix.test(suffix))\n\
+        throw new Error('Supercov refused an unusable evidence suffix: ' + suffix);\n\
+      const absolute = context.testPath;\n\
+      const testFile = absolute ? relative(root, absolute).split(sep).join('/') : undefined;\n\
+      const projectName = payload.projectName ?? context.project?.name;\n\
+      delete payload.projectName;\n\
+      // The browser has no environment to read, so the run identity is stamped\n\
+      // here rather than sent from a realm that cannot know it.\n\
+      const runId = process.env['SUPERCOV_RUN_ID'];\n\
+      if (runId && payload.scope) payload.scope.runId = runId;\n\
+      const complete = Object.assign({}, payload, testFile ? { testFile } : {}, {\n\
+        provenance: inferTestProvenance({\n\
+          runner: 'vitest',\n\
+          file: testFile,\n\
+          project: projectName,\n\
+          explicitKind: process.env['SUPERCOV_TEST_KIND'],\n\
+        }),\n\
+      });\n\
+      const directory = resolve(root, evidenceDirectory, suffix);\n\
+      mkdirSync(directory, { recursive: true });\n\
+      atomicWriteFileSync(resolve(directory, 'mcdc.json'), JSON.stringify(complete) + '\\n');\n\
+    },\n\
+  };\n\
+}\n\
 export function supercovViteInstrumentation(root) {\n\
   const runtimePath = resolve(root, '.supercov/node_modules/applicationRuntime.mjs');\n\
   return {\n\
@@ -1477,6 +1537,55 @@ mod tests {
         // policies on the system temporary directory cannot affect them.
         fs::create_dir_all(&path).unwrap();
         crate::workspace::canonicalize_simplified(path).unwrap()
+    }
+
+    #[test]
+    fn browser_mode_gets_a_browser_setup_and_the_command_that_carries_its_evidence() {
+        let generated = temporary("browser-mode-config");
+        write_vite_transforms(&generated, &BTreeMap::new()).unwrap();
+        let adapter = fs::read_to_string(generated.join("viteInstrumentation.mjs")).unwrap();
+        // Evidence leaves the browser over Vitest's own command channel. The
+        // dev-server endpoint this replaced was reachable by anything loaded in
+        // that realm and took the test file's identity on the browser's word.
+        assert!(adapter.contains("export function supercovBrowserCommands(root)"));
+        assert!(adapter.contains("__supercovEvidence(context, payload, suffix)"));
+        assert!(adapter.contains("const absolute = context.testPath;"));
+        assert!(!adapter.contains("configureServer"), "{adapter}");
+        assert!(!adapter.contains("__supercov/evidence"), "{adapter}");
+        // A suffix names one directory beneath the evidence directory; a
+        // traversing one has to be refused rather than resolved.
+        assert!(adapter.contains("supercovEvidenceSuffix = /^[A-Za-z0-9._-]+$/"));
+        assert!(adapter.contains("Supercov refused an unusable evidence suffix"));
+    }
+
+    #[test]
+    fn a_browser_mode_project_loads_the_setup_that_can_run_in_a_browser() {
+        // The node setup reaches node:fs through atomic.mjs; Vite externalises
+        // that for the client, and the suite fails before collecting a test.
+        let workspace = temporary("browser-mode-setup");
+        let generated = workspace.join(".supercov");
+        fs::create_dir_all(&generated).unwrap();
+        fs::write(workspace.join("package.json"), "{\"type\":\"module\"}\n").unwrap();
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(
+            workspace.join("src/example.mjs"),
+            "export const one = () => 1;\n",
+        )
+        .unwrap();
+        let project = discover_coverage_project(
+            &workspace,
+            &BTreeMap::new(),
+            &["npx".into(), "vitest".into(), "run".into()],
+        )
+        .unwrap();
+        let path = write_vitest_config(&workspace, &project, &generated).unwrap();
+        let config = fs::read_to_string(path).unwrap();
+        assert!(config.contains("config?.test?.browser?.enabled"));
+        assert!(config.contains("'.supercov/node_modules/vitestBrowser.mjs'"));
+        assert!(config.contains("'.supercov/node_modules/vitest.mjs'"));
+        // The command exists only for the mode that uses it.
+        assert!(config.contains("browser: { commands: supercovBrowserCommands(process.cwd()) }"));
+        assert!(config.contains("...supercovBrowserTest(loaded?.config)"));
     }
 
     #[test]

@@ -661,3 +661,24 @@ test("assertion callee binding preserves receivers, await order and synchronous 
   const phases = runtime.takeNodeAssertionPhases(scope);
   assert.deepEqual(phases.map(p => [p.source, p.status]), [['test.js:1:1', 'passed'], ['test.js:2:1', 'failed']], 'rejected arguments do not create an assertion occurrence');
 });
+
+test("a rendered JSX expression records its own evaluation and passes the value through", async () => {
+  const { registerProbeV2, renderedValueV2, resetCoverage, coverageSnapshot } = await import(
+    "../../runtime/javascript/runtime.mjs"
+  );
+  const file = registerProbeV2({
+    file: "src/button.tsx",
+    pointIds: ["attribute", "child"],
+    decisions: [],
+    points: [],
+  });
+  resetCoverage("rendered-value");
+  // The probe has to carry the value through unchanged: it sits inside JSX,
+  // where the expression's result is what gets rendered.
+  assert.equal(renderedValueV2(file, 0, "Copied!"), "Copied!");
+  const covered = new Set(coverageSnapshot().hits);
+  assert.ok(covered.has("attribute"), "the evaluated attribute is recorded");
+  // A rendered expression that never evaluates is not recorded, which is the
+  // whole point: the enclosing JSX statement alone used to imply both.
+  assert.ok(!covered.has("child"), "the unevaluated child is not recorded");
+});
