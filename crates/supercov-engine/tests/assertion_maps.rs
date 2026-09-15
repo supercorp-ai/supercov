@@ -1230,3 +1230,102 @@ fn editor_schema_accepts_explicit_null_basis_and_requires_the_field() {
         );
     }
 }
+
+/// "dependency file changed: src/a.js" names a file and leaves the author to
+/// work out what it has to do with this claim. A flow depends on a file for one
+/// of four reasons and they call for different judgements, so the reason says
+/// which, and where the flow's nodes sit in it.
+#[test]
+fn a_changed_dependency_says_why_it_is_one_and_where_the_flow_sits() {
+    let (inputs, mut map, state) = fixture();
+    map.assertions[0].flows[0].watch = vec!["test.js".into()];
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    let mut new = inputs.clone();
+    new.files
+        .get_mut("src/a.js")
+        .unwrap()
+        .push_str("// a note\n");
+    let (next, next_state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
+    let a = &next.assertions[0];
+    let why = reasons(a, &a.flows[0], &next, &next_state, &new);
+    let named = why
+        .iter()
+        .find(|r| r.starts_with("dependency file changed or removed: src/a.js"))
+        .unwrap_or_else(|| panic!("{why:?}"));
+    // The node's role and its line, so the author can look rather than reread.
+    assert!(named.contains("holds this flow's"), "{named}");
+    assert!(named.contains("return:1"), "{named}");
+    // And not a role it does not have: src/a.js is not watched here, test.js is.
+    assert!(!named.contains("watched"), "{named}");
+}
+
+/// A watched file is the author's own "tell me if this changes", and reads
+/// differently from a file that merely holds a node.
+#[test]
+fn a_watched_file_is_named_as_watched() {
+    let (inputs, mut map, state) = fixture();
+    map.assertions[0].flows[0].watch = vec!["src/helper.js".into()];
+    map.assertions[0].flows[0].nodes[0].at = anchor("src/a.js", "return 1;\n", "return 1;");
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    let mut new = inputs.clone();
+    new.files
+        .get_mut("src/helper.js")
+        .unwrap()
+        .push_str("more();\n");
+    let (next, next_state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
+    let a = &next.assertions[0];
+    let why = reasons(a, &a.flows[0], &next, &next_state, &new);
+    let named = why
+        .iter()
+        .find(|r| r.contains("src/helper.js"))
+        .unwrap_or_else(|| panic!("{why:?}"));
+    assert!(named.contains("is watched by this flow"), "{named}");
+    assert!(!named.contains("holds this flow's"), "{named}");
+}
+
+/// B19: a node that did not move, in a file that changed elsewhere, is
+/// reported as "changed or ambiguous" -- a false statement about that node.
+///
+/// `relocate` has one fast path, for a file that did not change at all. Once
+/// the file changes anywhere, every node in it is re-found by searching the
+/// whole file for its text, and that search insists the text be unique. A node
+/// whose statement appears twice in its file therefore fails to relocate even
+/// though it sits at the same line, byte for byte, untouched by the edit.
+#[test]
+fn a_node_that_did_not_move_is_not_ambiguous() {
+    let (mut inputs, mut map, mut state) = fixture();
+    // Two identical statements: the node's text is no longer unique.
+    let source = "return 1;\nreturn 1;\n";
+    inputs.files.insert("src/a.js".into(), source.into());
+    state.inputs_digest = inputs.identity();
+    // The flow's node is the first of them, and nothing watches the file, so
+    // the only thing that should speak is whether the node itself changed.
+    map.assertions[0].flows[0].nodes[0].at = anchor("src/a.js", source, "return 1;");
+    map.assertions[0].flows[0].watch = vec!["test.js".into()];
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    assert_eq!(current(&map, &state, &inputs), 2, "fresh to begin with");
+
+    // An edit at the end of the file. The node is above it and untouched.
+    let mut new = inputs.clone();
+    new.files
+        .get_mut("src/a.js")
+        .unwrap()
+        .push_str("// a comment, far below the node\n");
+    let (next, next_state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
+
+    let a = &next.assertions[0];
+    let f = &a.flows[0];
+    let why = reasons(a, f, &next, &next_state, &new);
+    assert!(
+        !why.iter().any(|r| r.contains("node")),
+        "no reason may name a node that did not move: {why:?}"
+    );
+    // The flow is still stale, for `dependency file changed or removed`.
+    // Fixing the false message does not save the review: the digest of any
+    // file holding a node governs, whatever the node itself did. That half is
+    // a deliberate design decision and is recorded as such in B19.
+    assert!(
+        why.iter().any(|r| r.contains("dependency file changed")),
+        "the file-level signal is what still costs the review: {why:?}"
+    );
+}

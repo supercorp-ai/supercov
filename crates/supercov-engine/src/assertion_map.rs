@@ -613,6 +613,43 @@ pub fn change_current(map: &AssertionMap, change: &Change, inputs: &InputManifes
         .collect::<Vec<_>>();
     matches!(responses.as_slice(), [r] if change_errors(map, change, r).is_empty() && r.basis.as_deref() == Some(expected_change_basis(change, r, inputs).as_str()))
 }
+/// Why a file is one of a flow's dependencies, and where the flow sits in it.
+///
+/// "dependency file changed" names a file and leaves the author to work out
+/// what it has to do with this claim. A flow depends on a file for one of four
+/// reasons, and they call for different judgements: a node there is the claim's
+/// subject, a watch is something the author asked to be told about, the test
+/// file is where the claim is exercised, and the assertion's own file is where
+/// it is written. Saying which -- and where the nodes are -- is the difference
+/// between rereading a claim and glancing at a line number.
+fn why_depended_on(a: &Assertion, f: &Flow, file: &str) -> String {
+    let mut roles: Vec<String> = Vec::new();
+    let lines = f
+        .nodes
+        .iter()
+        .filter(|n| n.at.file == file)
+        .map(|n| format!("{}:{}", n.id, n.at.line))
+        .collect::<Vec<_>>();
+    if !lines.is_empty() {
+        roles.push(format!("holds this flow's {}", lines.join(", ")));
+    }
+    if a.at.file == file {
+        roles.push(format!("holds the assertion, line {}", a.at.line));
+    }
+    if f.applies_to.iter().any(|t| t.file == file) {
+        roles.push("is the test this claim applies to".to_owned());
+    }
+    if f.watch.iter().any(|w| w == file) {
+        roles.push("is watched by this flow".to_owned());
+    }
+    if roles.is_empty() {
+        // Every path into dependencies() is covered above; say nothing rather
+        // than guess if that ever stops being true.
+        return String::new();
+    }
+    format!(" ({})", roles.join("; "))
+}
+
 fn generation(
     a: &Assertion,
     f: &Flow,
@@ -805,6 +842,20 @@ pub fn relocate(at: &Anchor, old: &FileManifest, new: &Files) -> Option<Anchor> 
     if FileFingerprint::of(after) == *before && candidate.offset(new).is_some() {
         return Some(candidate);
     }
+    // The file changed somewhere. That says nothing about this anchor: read the
+    // recorded position in the new file and see whether it still holds the same
+    // text. If it does, the anchor did not move and there is nothing to find.
+    //
+    // Without this, every anchor in a changed file is re-found by searching the
+    // whole file, and that search insists the text be unique -- so a statement
+    // that appears twice is reported "changed or ambiguous" while sitting
+    // untouched at the line it was recorded at. That is a false statement about
+    // a specific node, and it is most of the staleness in a real map.
+    if let Some(start) = candidate.offset(new)
+        && after.get(start..start + at.text.len()) == Some(at.text.as_str())
+    {
+        return Some(candidate);
+    }
     let position = unique_occurrence(after, &at.text)?;
     Some(Anchor::new(
         &target,
@@ -907,7 +958,10 @@ pub fn carry(
                 if old.files.get(file) != new_manifest.files.get(file)
                     || !old.files.contains_key(file)
                 {
-                    dirty.insert(format!("dependency file changed or removed: {file}"));
+                    dirty.insert(format!(
+                        "dependency file changed or removed: {file}{}",
+                        why_depended_on(a, prior, file)
+                    ));
                 }
             }
             if replacement.is_some() {
