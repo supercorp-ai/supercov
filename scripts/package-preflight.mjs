@@ -229,7 +229,13 @@ assert(
   // of what this guards. Raised from 200 when one release added the whole
   // coverage-workflow set; if a future section approaches this, the question
   // to ask is whether it is still bullets, not whether it can be trimmed.
-  notes.split(/\s+/).length <= 450,
+  //
+  // Raised again to 600 for 0.0.52, which carries nine fixes. That section was
+  // trimmed five times against the old cap, and each pass cost a full gate run
+  // and took information out of notes that are published verbatim. The answer
+  // to the question above was yes -- still bullets, one per fix -- so the cap
+  // moved rather than the content.
+  notes.split(/\s+/).length <= 600,
   `the ${manifest.version} changelog section is ${notes.split(/\s+/).length} words; release notes are bullets, not prose`,
 );
 for (const line of notes.split("\n")) {
