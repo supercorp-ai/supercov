@@ -751,8 +751,19 @@ function withNodeAssertionPhase(operation, source, callback) {
   const scope = context.scope;
   if (!scope)
     return callback();
-  const existing = context.phaseId && assertionPhaseState(scope).phaseIds.has(context.phaseId);
-  if (existing)
+  // A lexically instrumented occurrence is an authored assertion site in its
+  // own right, even when it runs inside another assertion's callback: the
+  // validator passed to assert.throws is the ordinary case, and its inner
+  // assertions are what claim *what* the error says. Skipping every nested
+  // phase left those with no passing occurrence, so they could never earn
+  // credit however carefully they were mapped.
+  //
+  // What must still be skipped is the same call seen twice -- the module proxy
+  // firing inside the lexical wrapper. That path has no lexical source and
+  // arrives as a lazy stack fallback, so the shape of `source` tells them
+  // apart without comparing coordinates the transform has moved.
+  const nested = context.phaseId && assertionPhaseState(scope).phaseIds.has(context.phaseId);
+  if (nested && typeof source !== "string")
     return callback();
   // A lexical occurrence already identifies its source. Stack fallback is lazy
   // and qualified so transformed coordinates cannot impersonate original ones.
@@ -1244,20 +1255,35 @@ function tryBegin(successId, catchId) {
   return { successId, catchId, caught: false };
 }
 function tryCatch(frame, value) {
-  frame.caught = true;
+  // Record the outcome the moment it is known, not when the construct is left.
+  // The commit used to sit in the generated `finally`, and `process.exit()` in
+  // a catch body skips `finally` -- so a catch that ran and whose statements
+  // were credited was still reported as never entered. Statement probes fire
+  // in place and survived, which is what made the report contradict itself.
+  if (!frame.caught) {
+    frame.caught = true;
+    coverageHit(frame.catchId);
+  }
   return value;
 }
 function tryEnd(frame) {
-  coverageHit(frame.caught ? frame.catchId : frame.successId);
+  // Completing without catching is only knowable here.
+  if (!frame.caught) coverageHit(frame.successId);
 }
 function loopBegin(zeroId, enteredId) {
   return { zeroId, enteredId, entered: false };
 }
 function loopEntered(frame) {
-  frame.entered = true;
+  // Same reason as tryCatch: a loop body that exits the process would
+  // otherwise report zero iterations. Guarded so a loop still counts once,
+  // however many times it iterates.
+  if (!frame.entered) {
+    frame.entered = true;
+    coverageHit(frame.enteredId);
+  }
 }
 function loopEnd(frame) {
-  coverageHit(frame.entered ? frame.enteredId : frame.zeroId);
+  if (!frame.entered) coverageHit(frame.zeroId);
 }
 function mcdcBegin(id, meta) {
   if (!state.decisions.has(id)) {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.53
+
+**Fixed**
+
+- An assertion inside a validator callback records its own passing occurrence. `assert.throws(fn, validator)` is the standard way to assert *what* an error says rather than only that one was thrown, so the inner assertions are the interesting ones -- and every nested assertion phase was skipped, leaving them with no passing occurrence and so unable to earn credit however carefully they were mapped. The same call seen twice, once through the module proxy, is still recorded once.
+- A branch outcome is recorded when it happens rather than when control leaves the construct, so a `catch` or loop body that calls `process.exit()` no longer reports its outcome as never taken. The commit sat in the generated `finally`, which `process.exit()` skips; statement probes fire in place and survived, so the report contradicted itself -- crediting every line inside a catch while reporting the catch as unentered. On a project holding 100% the only way to make it agree was to delete a correct error path.
+
 ## 0.0.52
 
 **Added**
