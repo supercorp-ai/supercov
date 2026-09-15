@@ -201,6 +201,66 @@ test("test provenance prefers explicit, project, path, then runner defaults", ()
   );
 });
 
+test("a filename token never overrides a runner that can only drive the whole system", () => {
+  // B14. `storefront-empire-integration.spec.ts` launched a real browser and
+  // asserted rendered UI, and was labelled `integration` because its name held
+  // that word. 102 lines were then reported as untouched by E2E while a browser
+  // had demonstrably rendered them, and renaming the file changed the number
+  // without changing the test.
+  const kind = (runner, file) => inferTestProvenance({ runner, file }).kind;
+
+  // A Playwright run is evidence; a word in a filename is a convention someone
+  // may not have followed.
+  assert.equal(
+    kind("playwright", "tests/offline/features/storefront-empire-integration.spec.ts"),
+    "e2e",
+  );
+  assert.equal(kind("playwright", "checkout-integration.spec.ts"), "e2e");
+
+  // A directory is a deliberate choice about where a suite lives, so it still
+  // outranks the runner.
+  assert.equal(kind("playwright", "tests/integration/api.spec.ts"), "integration");
+  assert.equal(kind("playwright", "tests/unit/a.ts"), "unit");
+
+  // A spec inside an e2e directory used to come out as `integration`, because
+  // the kind list is ordered `unit, component, integration, e2e` and the first
+  // match won. Precedence is specificity now, not array position.
+  assert.equal(kind("playwright", "tests/e2e/customer-integration.spec.ts"), "e2e");
+  assert.equal(kind("vitest", "checkout-integration-e2e.test.ts"), "e2e");
+  assert.equal(kind("vitest", "checkout-e2e-integration.test.ts"), "integration");
+
+  // The nearest enclosing suite wins, and Windows separators are paths too.
+  assert.equal(kind("playwright", "tests\\e2e\\win-integration.spec.ts"), "e2e");
+
+  // Runners that run everything have no strong signal, so their filenames are
+  // still read -- this is how camel-case conventions keep working.
+  assert.equal(kind("vitest", "responseIntegration.test.ts"), "integration");
+  assert.equal(kind("vitest", "gatewayE2e.test.ts"), "e2e");
+  assert.equal(kind("vitest", "plain.test.ts"), "unit");
+  assert.equal(
+    inferTestProvenance({ runner: "vitest", file: "plain.test.ts" }).source,
+    "runner-default",
+  );
+
+  // And what the author said still outranks all of it.
+  assert.equal(
+    inferTestProvenance({
+      runner: "playwright",
+      file: "tests/e2e/a.spec.ts",
+      explicitKind: "integration",
+    }).kind,
+    "integration",
+  );
+  assert.equal(
+    inferTestProvenance({
+      runner: "playwright",
+      file: "tests/e2e/a.spec.ts",
+      project: "integration-suite",
+    }).kind,
+    "integration",
+  );
+});
+
 test("remote launch mapping is provider-neutral and scopes reusable snapshots", () => {
   const mapping = discoverWorkspaceMapping(
     {
