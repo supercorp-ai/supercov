@@ -63,9 +63,10 @@ one run and preserves runner identity wherever the runner exposes it.
 
 Vitest Browser Mode runs the test file in a real browser. Supercov measures it
 per test like any other Vitest run: lines, branches, MC/DC and assertion
-coverage, with no extra configuration. Every provider is supported, because
-evidence travels over Vitest's own browser command channel rather than anything
-provider-specific.
+coverage. Combined Node/browser projects are configured after Vitest resolves
+inline definitions, config-file references, globs and project selection.
+Evidence travels over Vitest's own browser command channel; the compatibility
+suite exercises Chromium through the Playwright provider.
 
 Component code is instrumented the same way as any other source, with one
 addition that matters most here. A JSX tree is a single statement, so an
@@ -82,6 +83,26 @@ where it is created.
 
 `expect.element(...)`, `expect.soft(...)` and `expect.poll(...)` are recognised
 as assertions, so their passing occurrences are available to assertion maps.
+
+### React and React Native
+
+React components can use Testing Library with Vitest/jsdom, Vitest Browser Mode,
+or Babel/Jest. React Native and Expo component tests run through their existing
+Jest presets, including native mocks. This is JavaScript component-test coverage:
+it does not measure Hermes, native modules, simulator/device execution, Detox or
+Maestro. React SSR hydration is exercised in jsdom and Chromium; this does not
+establish Next.js Server Components, streaming SSR or server actions.
+
+An assertion map can explain which displayed value, accessible name, disabled
+state or error message a test checks. JSX expression coverage and a passing
+assertion are evidence for reviewing that explanation, not automatic semantic
+proof. A button being rendered does not establish that its disabled state was
+checked. Keep your existing runner and matchers.
+
+The [React verification example](https://github.com/supercorp-ai/supercov/tree/main/examples/react-verification)
+shows a fully executed checkout whose weak tests accept four UI regressions,
+then adds four precise assertions and independently checks the broken copies.
+The agent-authored maps credit only those four UI expressions.
 
 ### Builds and source formats
 

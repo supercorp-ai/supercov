@@ -683,6 +683,48 @@ fn scope_limitation(file: &str) -> SourceLimitation {
     }
 }
 
+// A declared Jest setup file is test infrastructure even when it lives under
+// a source root with an arbitrary name. Instrumenting its mock factories adds
+// out-of-scope bindings that Babel's jest-hoist correctly rejects.
+fn declared_test_setup(packages: &[PathBuf]) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for package in packages {
+        let manifest = read_json(&package.join("package.json")).unwrap_or(Value::Null);
+        let Some(jest) = manifest.get("jest") else {
+            continue;
+        };
+        let root = jest
+            .get("rootDir")
+            .and_then(Value::as_str)
+            .map(|value| {
+                resolve(
+                    package,
+                    value.replace("<rootDir>", &package.to_string_lossy()),
+                )
+            })
+            .unwrap_or_else(|| package.clone());
+        for field in [
+            "setupFiles",
+            "setupFilesAfterEnv",
+            "globalSetup",
+            "globalTeardown",
+        ] {
+            let values = match jest.get(field) {
+                Some(Value::Array(values)) => values.iter().collect::<Vec<_>>(),
+                Some(value) => vec![value],
+                None => Vec::new(),
+            };
+            for value in values.into_iter().filter_map(Value::as_str) {
+                let path = resolve(&root, value.replace("<rootDir>", &root.to_string_lossy()));
+                if path.is_file() {
+                    paths.insert(path);
+                }
+            }
+        }
+    }
+    paths
+}
+
 pub fn discover_source_scope(
     root: &Path,
     configured_roots: Option<&[String]>,
@@ -693,6 +735,7 @@ pub fn discover_source_scope(
         return Err(SourceDiscoveryError::InvalidRoot(root));
     }
     let packages = package_directories(&root)?;
+    let test_setup = declared_test_setup(&packages);
     let explicit = configured_roots.is_some_and(|roots| !roots.is_empty());
     let include_roots = if explicit {
         configured_roots
@@ -760,6 +803,8 @@ pub fn discover_source_scope(
         };
         if declaration_file(&file) {
             entries.push(entry(SourceScopeStatus::Excluded, "TypeScript declaration"));
+        } else if test_setup.contains(&path) {
+            entries.push(entry(SourceScopeStatus::Excluded, "declared test setup"));
         } else if test_or_fixture(&file) {
             entries.push(entry(SourceScopeStatus::Excluded, "test or fixture source"));
         } else if tool_script(&file) {
@@ -866,6 +911,31 @@ mod tests {
             .iter()
             .find(|entry| entry.file == file)
             .unwrap()
+    }
+
+    #[test]
+    fn excludes_declared_jest_setup_without_hiding_neighboring_application_code() {
+        let root = repository(
+            "jest-setup",
+            &[
+                (
+                    "package.json",
+                    r#"{"jest":{"setupFilesAfterEnv":["<rootDir>/src/bootstrap.js"]}}"#,
+                ),
+                (
+                    "src/bootstrap.js",
+                    "jest.mock('storage', () => ({read: () => null}));",
+                ),
+                ("src/index.js", "export const value = 1;"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert_eq!(discovered.source_files, ["src/index.js"]);
+        assert_eq!(
+            entry(&discovered, "src/bootstrap.js").reason,
+            "declared test setup"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

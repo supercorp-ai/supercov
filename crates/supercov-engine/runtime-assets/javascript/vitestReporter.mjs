@@ -25,6 +25,15 @@ function rawAttemptStatus(state, expectedFailure) {
 /** Records final runner outcomes, including tests that never execute hooks. */
 export default class SupercovVitestReporter {
     reportedAttempts = new Set();
+    constructor(configureProjects) {
+        this.configureProjects = configureProjects;
+    }
+    onInit(vitest) {
+        this.configureProjects?.(vitest.projects);
+    }
+    onBrowserInit(project) {
+        this.configureProjects?.([project]);
+    }
     onTestCaseResult(testCase) {
         const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
         if (!evidenceDirectory)

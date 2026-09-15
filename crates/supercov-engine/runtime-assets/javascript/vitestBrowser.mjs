@@ -17,6 +17,7 @@ const browserContext = await import("vitest/browser").catch(() =>
 const { commands } = browserContext;
 const attempts = new Map();
 const activeScopes = new Map();
+const emittedSetupFiles = new Set();
 enableRuntimeSnapshotEvidence();
 function attemptStatus(state) {
     if (state === "pass")
@@ -62,6 +63,27 @@ async function sendEvidence(payload, suffix) {
 }
 beforeEach(async (context) => {
     const task = context.task;
+    // Module imports and shared setup execute before the first test. Save
+    // them before resetCoverage clears the snapshot, with a setup identity
+    // rather than crediting that execution to the first test.
+    if (!emittedSetupFiles.has(task.file.id)) {
+        const setupSnapshot = coverageSnapshot();
+        if (setupSnapshot.hits.length || setupSnapshot.decisions.length) {
+            await sendEvidence({
+                testId: `vitest:${task.file.id}:setup`,
+                test: `${task.file.name} > module setup`,
+                projectName: task.file.projectName,
+                title: "module setup",
+                retry: 0,
+                status: "passed",
+                role: "setup",
+                runtime: [setupSnapshot],
+                browser: [],
+                server: [],
+            }, `vitest-${task.file.id}-setup`);
+        }
+        emittedSetupFiles.add(task.file.id);
+    }
     const testId = `vitest:${task.id}`;
     const retry = attempts.get(testId) ?? 0;
     attempts.set(testId, retry + 1);

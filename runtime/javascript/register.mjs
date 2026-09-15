@@ -190,22 +190,28 @@ if (isJestEntrypoint && process.env.SUPERCOV_EVIDENCE_DIR) {
     // Jest reads one configuration. Ours (jest.config.mjs) reads the user's
     // the way Jest would and adds the adapter and reporter; an explicit
     // --config on the command line reaches it through the environment.
+    const generatedJestConfig = fileURLToPath(new URL("./jest.config.mjs", import.meta.url));
     for (let index = 2; index < process.argv.length; index += 1) {
         const argument = process.argv[index];
         if (argument === "--config" || argument === "-c") {
             const value = process.argv[index + 1];
-            if (value)
+            // Expo's Jest executable forwards argv to the real Jest process.
+            // Preserve the original config across that second preload; reading
+            // our own config as the user's would recurse until the heap fills.
+            if (value && resolve(value) !== resolve(generatedJestConfig))
                 process.env.SUPERCOV_ORIGINAL_JEST_CONFIG = resolve(value);
             process.argv.splice(index, value ? 2 : 1);
             index -= 1;
         }
         else if (argument?.startsWith("--config=")) {
-            process.env.SUPERCOV_ORIGINAL_JEST_CONFIG = resolve(argument.slice("--config=".length));
+            const value = resolve(argument.slice("--config=".length));
+            if (value !== resolve(generatedJestConfig))
+                process.env.SUPERCOV_ORIGINAL_JEST_CONFIG = value;
             process.argv.splice(index, 1);
             index -= 1;
         }
     }
-    process.argv.push("--config", fileURLToPath(new URL("./jest.config.mjs", import.meta.url)));
+    process.argv.push("--config", generatedJestConfig);
 }
 if (generatedPlaywrightConfig &&
     isPlaywrightEntrypoint) {

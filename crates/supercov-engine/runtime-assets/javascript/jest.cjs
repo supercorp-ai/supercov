@@ -28,8 +28,32 @@ function localFile(path) {
     return relative(process.cwd(), path).split(sep).join("/");
 }
 // Must match jestReporter.mjs: the reporter has the same file and full name.
-function testIdentity(testFile, fullName) {
-    return `jest:${digest(`${testFile}\0${fullName}`)}`;
+function testIdentity(testFile, fullName, occurrence = 0) {
+    return `jest:${digest(`${testFile}\0${fullName}${occurrence ? `\0${occurrence}` : ""}`)}`;
+}
+// Circus keeps its declaration tree on the environment global. It distinguishes
+// identical titles and survives retries; expect.currentTestName alone cannot.
+function currentDeclaration() {
+    const symbol = Object.getOwnPropertySymbols(globalThis)
+        .find(key => key.description === "JEST_STATE_SYMBOL");
+    const state = symbol && globalThis[symbol];
+    if (!state?.currentlyRunningTest || !state.rootDescribeBlock) return undefined;
+    const names = new Map();
+    let found;
+    function visit(block, parents) {
+        for (const child of block.children ?? []) {
+            if (child.type === "describeBlock") visit(child, [...parents, child.name]);
+            else if (child.type === "test") {
+                const name = [...parents, child.name].join(" ");
+                const occurrence = names.get(name) ?? 0;
+                names.set(name, occurrence + 1);
+                if (child === state.currentlyRunningTest)
+                    found = {occurrence, retry: Math.max((child.invocations ?? 1) - 1, 0)};
+            }
+        }
+    }
+    visit(state.rootDescribeBlock, []);
+    return found;
 }
 // Mirrors provenance.mjs, which is ESM and out of reach here.
 const KINDS = [
@@ -56,7 +80,7 @@ function writeEvidence(suffix, payload) {
     renameSync(temporary, target);
 }
 
-if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof afterEach === "function") {
+if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof afterAll === "function") {
     // One in-memory snapshot per test; the server JSONL transport would be
     // redundant and unattributed, as under Vitest.
     runtime.enableRuntimeSnapshotEvidence();
@@ -64,6 +88,7 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
     const emittedSetupFiles = new Set();
     let active;
     beforeEach(() => {
+        flushActive();
         const state = expect.getState();
         const testFile = localFile(state.testPath ?? "unknown");
         if (!emittedSetupFiles.has(testFile)) {
@@ -87,8 +112,9 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
             }
         }
         const fullName = state.currentTestName ?? "test";
-        const testId = testIdentity(testFile, fullName);
-        const retry = attempts.get(testId) ?? 0;
+        const declaration = currentDeclaration();
+        const testId = testIdentity(testFile, fullName, declaration?.occurrence);
+        const retry = declaration?.retry ?? attempts.get(testId) ?? 0;
         attempts.set(testId, retry + 1);
         const testKey = digest(testId);
         const scope = {
@@ -104,7 +130,10 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
         runtime.activateCoverageScope(scope);
         runtime.resetCoverage(testId);
     });
-    afterEach(() => {
+    // Flush after all user afterEach hooks (including Testing Library cleanup).
+    // Our setup registers first, so an afterEach snapshot would run too early.
+    // The next beforeEach or this file's afterAll runs after test teardown.
+    function flushActive() {
         const current = active;
         active = undefined;
         if (!current)
@@ -130,5 +159,6 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
         // snapshot (Vitest isolates files; Jest does not).
         runtime.resetCoverage();
         runtime.activateCoverageScope();
-    });
+    }
+    afterAll(flushActive);
 }
