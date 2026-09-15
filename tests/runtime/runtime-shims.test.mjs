@@ -73,6 +73,53 @@ test("native assertion fallback tolerates opaque or throwing stack formatters", 
   assert.ok(phases.every(p => p.status === "passed" && p.source === undefined));
 });
 
+test("an assertion inside a validator callback records its own passing phase", () => {
+  // B22. assert.throws(fn, validator) is the standard way to assert *what* an
+  // error says rather than merely that one was thrown, so the inner assertions
+  // are the interesting ones. Every nested phase used to be skipped, leaving
+  // them with no passing occurrence -- and an assertion with no passing
+  // occurrence can never earn credit, however carefully it is mapped.
+  //
+  // What must still be skipped is the same call seen twice: the module proxy
+  // firing inside the lexical wrapper the instrumenter emits.
+  const adapter = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/nodeAssertAdapter.mjs")).href;
+  const runtime = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    import native from 'node:assert/strict';
+    import { createNodeAssertAdapter } from ${JSON.stringify(adapter)};
+    import { withCoverageCarrier, takeNodeAssertionPhases, withNodeAssertionPhase } from ${JSON.stringify(runtime)};
+    const assert = createNodeAssertAdapter(native, 'node:assert/strict');
+    const scope = { version: 1, runId: 'r', workerId: 'w', testId: 't', testKey: 'k', retry: 0, attemptId: 'a' };
+    await withCoverageCarrier({ version: 1, scope }, async () => {
+      // What the instrumenter emits: a lexical wrapper per authored site.
+      withNodeAssertionPhase('node:assert/strict.throws', 'tests/t.test.js:3:3', () =>
+        assert.throws(
+          () => { throw new Error('Invalid access count 0 for session-b'); },
+          (error) => {
+            withNodeAssertionPhase('node:assert/strict.match', 'tests/t.test.js:5:5', () =>
+              assert.match(error.message, /Invalid access count 0/));
+            withNodeAssertionPhase('node:assert/strict.match', 'tests/t.test.js:6:5', () =>
+              assert.match(error.message, /session-b/));
+            return true;
+          },
+        ));
+    });
+    process.stdout.write(JSON.stringify(takeNodeAssertionPhases(scope)));
+  `], { encoding: "utf8", timeout: 10000 });
+  assert.equal(child.status, 0, child.stderr);
+  const phases = JSON.parse(child.stdout);
+  const sources = phases.map(phase => phase.source);
+  assert.deepEqual(
+    sources,
+    ["tests/t.test.js:3:3", "tests/t.test.js:5:5", "tests/t.test.js:6:5"],
+    "each authored site records once, in the order the phases open",
+  );
+  assert.ok(phases.every(phase => phase.status === "passed"), JSON.stringify(phases));
+  // The module proxy fires for each of these calls too. If its nested phase
+  // were recorded, every site would appear twice.
+  assert.equal(phases.length, 3, "the same call must not be recorded twice");
+});
+
 test("a phase is only honoured for the attempt that minted it", async () => {
   // A browser context shared by a whole worker keeps the previous test's last
   // phase in storage and in its cookie; tagging the next test's evidence with

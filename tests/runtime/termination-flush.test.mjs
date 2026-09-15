@@ -89,3 +89,48 @@ test("every flusher shares one listener per signal", () => {
     "additional flushers must reuse the installed signal listener",
   );
 });
+
+// B21. A branch outcome used to be recorded only when control left the
+// construct: the generated `finally` called tryEnd/loopEnd. `process.exit()`
+// does not run `finally`, so a catch that ran -- and whose statements were
+// credited, because statement probes fire in place -- was reported as never
+// entered. The report contradicted itself, and on a project at 100% the only
+// way to make it agree was to delete a correct error path.
+test("a branch outcome is recorded when it happens, not when the construct is left", () => {
+  const hits = () => new Set(runtime.coverageSnapshot().hits);
+
+  runtime.resetCoverage("try-frame");
+  const caught = runtime.tryBegin("t:success", "t:catch");
+  runtime.tryCatch(caught, undefined);
+  assert.ok(
+    hits().has("t:catch"),
+    "entering a catch must record it before any finally runs",
+  );
+  assert.ok(!hits().has("t:success"), "the try did not complete without catching");
+  // Completing the construct must not then add the other outcome.
+  runtime.tryEnd(caught);
+  assert.ok(!hits().has("t:success"), "a caught try never completed normally");
+
+  // The success outcome is only knowable at the end, and still works.
+  runtime.resetCoverage("try-success");
+  const clean = runtime.tryBegin("s:success", "s:catch");
+  runtime.tryEnd(clean);
+  assert.deepEqual([...hits()], ["s:success"]);
+
+  runtime.resetCoverage("loop-frame");
+  const loop = runtime.loopBegin("l:zero", "l:entered");
+  runtime.loopEntered(loop);
+  assert.ok(
+    hits().has("l:entered"),
+    "entering a loop must record it before any finally runs",
+  );
+  // Iterating again must not record the entry twice; a loop counts once.
+  runtime.loopEntered(loop);
+  runtime.loopEnd(loop);
+  assert.deepEqual([...hits()], ["l:entered"]);
+
+  runtime.resetCoverage("loop-zero");
+  const empty = runtime.loopBegin("z:zero", "z:entered");
+  runtime.loopEnd(empty);
+  assert.deepEqual([...hits()], ["z:zero"]);
+});

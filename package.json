@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.52",
+  "version": "0.0.53",
   "description": "Coverage for coding agents and software factories \ud83c\udf19",
   "license": "MIT",
   "repository": {
@@ -97,14 +97,14 @@
     "test:launcher": "go vet ./cmd/... && go test ./cmd/..."
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "0.0.52",
-    "@supercov/cli-darwin-x64": "0.0.52",
-    "@supercov/cli-linux-arm64-gnu": "0.0.52",
-    "@supercov/cli-linux-arm64-musl": "0.0.52",
-    "@supercov/cli-linux-x64-gnu": "0.0.52",
-    "@supercov/cli-linux-x64-musl": "0.0.52",
-    "@supercov/cli-win32-arm64": "0.0.52",
-    "@supercov/cli-win32-x64": "0.0.52"
+    "@supercov/cli-darwin-arm64": "0.0.53",
+    "@supercov/cli-darwin-x64": "0.0.53",
+    "@supercov/cli-linux-arm64-gnu": "0.0.53",
+    "@supercov/cli-linux-arm64-musl": "0.0.53",
+    "@supercov/cli-linux-x64-gnu": "0.0.53",
+    "@supercov/cli-linux-x64-musl": "0.0.53",
+    "@supercov/cli-win32-arm64": "0.0.53",
+    "@supercov/cli-win32-x64": "0.0.53"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",
