@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.52
+
+**Fixed**
+
+- Removing a `watch` entry that Supercov itself reports as redundant no longer restates the claim. A manifest, lockfile or runner configuration named in `watch` is tracked for the whole run, so it never became one of the flow's dependencies -- but it was still part of what the acknowledgement was computed over, so deleting the entry the report advised deleting cost a full re-acknowledgement. Writing one and removing one are now both free. Flows that never named such a file keep their existing tokens; only a flow carrying a redundant entry is re-based, onto the token it would have had without it.
+
 ## 0.0.51
 
 **Added**

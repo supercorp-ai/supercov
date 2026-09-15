@@ -1470,3 +1470,64 @@ fn comments_and_blank_lines_anywhere_leave_an_acknowledgement_standing() {
     assert!(why.is_empty(), "{why:?}");
     assert!(next_state.changes.is_empty(), "{:?}", next_state.changes);
 }
+
+/// B16: Supercov reports a manifest watch as redundant, so taking it back out
+/// must not restate the claim. Writing one and removing one are both free; a
+/// watch on a file the run does not answer for is not.
+#[test]
+fn a_redundant_manifest_watch_is_free_to_write_and_free_to_remove() {
+    let (mut inputs, mut map, state) = fixture();
+    inputs
+        .files
+        .insert("package.json".into(), "{\"name\":\"x\"}\n".into());
+    let state = State {
+        inputs_digest: inputs.identity(),
+        ..state
+    };
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    assert_eq!(current(&map, &state, &inputs), 2);
+
+    // The author follows the documentation and watches the manifest.
+    for a in &mut map.assertions {
+        for f in &mut a.flows {
+            f.watch.push("package.json".into());
+        }
+    }
+    assert_eq!(
+        current(&map, &state, &inputs),
+        2,
+        "writing a redundant watch restated the claim"
+    );
+    let advice = advisories(&map);
+    assert_eq!(advice.len(), 2, "{advice:?}");
+    assert!(advice.iter().all(|a| a.contains("redundant")), "{advice:?}");
+    assert!(
+        !dependencies(&map.assertions[0], &map.assertions[0].flows[0]).contains("package.json"),
+        "a redundant watch became a dependency"
+    );
+
+    // Taking the tool's advice must not cost an acknowledgement.
+    for a in &mut map.assertions {
+        for f in &mut a.flows {
+            f.watch.retain(|w| w != "package.json");
+        }
+    }
+    assert_eq!(
+        current(&map, &state, &inputs),
+        2,
+        "removing an entry Supercov calls redundant restated the claim"
+    );
+
+    // A watch the run does not answer for is a real part of the claim, and
+    // dropping it is still a new claim.
+    for a in &mut map.assertions {
+        for f in &mut a.flows {
+            f.watch.retain(|w| w != "test.js");
+        }
+    }
+    assert_eq!(
+        current(&map, &state, &inputs),
+        0,
+        "dropping a real watch kept the acknowledgement"
+    );
+}

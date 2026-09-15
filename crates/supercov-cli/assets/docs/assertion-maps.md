@@ -70,7 +70,7 @@ examined and acknowledged.
 | `appliesTo` | Select tests by project-relative file and exact displayed test name. |
 | `nodes`, `edges` | Record source locations and relationships ending at `$assertion`. |
 | `countsAsAsserted` | List the node IDs you judge to be checked by the assertion. |
-| `watch` | List additional files the explanation depends on, such as helpers or configuration. Manifests, lockfiles and runner configuration are already tracked for the whole run; naming one here catches nothing, and the report says so. |
+| `watch` | List additional files the explanation depends on, such as helpers or configuration. Manifests, lockfiles and runner configuration are already tracked for the whole run; naming one here catches nothing, and the report says so. Such an entry is also free to take back out: it is not part of what the acknowledgement rests on, so removing one keeps the flow's credit. |
 | `questions` | Record unresolved investigation questions. Questions inside a flow block its credit. |
 
 Source anchors use project-relative paths with `/`, one-based lines and one-based

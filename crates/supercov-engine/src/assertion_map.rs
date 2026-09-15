@@ -589,27 +589,35 @@ pub fn validate_flow(flow: &Flow, files: &Files) -> Vec<String> {
     errors
 }
 
+/// The watch entries that are the flow's own.
+///
+/// A manifest, lockfile or runner configuration is tracked for the whole run,
+/// so naming one here catches nothing -- `advisories()` tells the author so.
+/// An entry that catches nothing must also cost nothing, in both directions:
+/// it is not a dependency, and taking it back out is not a new claim. Those
+/// are two different code paths -- `dependencies()` and `claim()` -- and when
+/// only the first filtered, Supercov advised authors to delete an entry it
+/// then charged a full re-acknowledgement for.
+///
+/// Only the watch list is filtered. An anchor or a node in one of those files
+/// is the flow's actual subject -- `setup.py` is a dependency manifest and
+/// measured source at once -- and editing it must still cost a review.
+fn watched(f: &Flow) -> impl Iterator<Item = &str> {
+    f.watch
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !crate::integrity::globally_tracked(path))
+}
 /// Whole-file input dependencies, not a mechanically inferred semantic slice.
 pub fn dependencies<'a>(a: &'a Assertion, f: &'a Flow) -> BTreeSet<&'a str> {
     std::iter::once(a.at.file.as_str())
         .chain(f.applies_to.iter().map(|t| t.file.as_str()))
         .chain(f.nodes.iter().map(|n| n.at.file.as_str()))
-        // A watch on a file Supercov already answers for run-wide contributes
-        // nothing here, and hashing its bytes would quietly undo the manifest
-        // rule: a version bump would still make every flow that names
+        // Hashing a manifest's bytes here would quietly undo the manifest
+        // rule: a version bump would make every flow that names
         // `package.json` stale, which is most of them in a real map. The
         // run-level signal still fires, as a change to assess.
-        //
-        // Only the watch list is filtered. An anchor or a node in one of those
-        // files is the flow's actual subject -- `setup.py` is a dependency
-        // manifest and measured source at once -- and editing it must still
-        // cost a review.
-        .chain(
-            f.watch
-                .iter()
-                .map(String::as_str)
-                .filter(|path| !crate::integrity::globally_tracked(path)),
-        )
+        .chain(watched(f))
         .collect()
 }
 fn token(value: &impl Serialize) -> String {
@@ -850,7 +858,9 @@ struct Claim<'a> {
     nodes: Vec<NodeClaim<'a>>,
     edges: &'a [Edge],
     counts_as_asserted: &'a [String],
-    watch: &'a [String],
+    /// The flow's own watches. A redundant manifest entry is left out so that
+    /// writing one and removing it are both free.
+    watch: Vec<&'a str>,
     questions: &'a [String],
 }
 fn claim<'a>(f: &'a Flow, inputs: &'a InputManifest) -> Claim<'a> {
@@ -870,7 +880,7 @@ fn claim<'a>(f: &'a Flow, inputs: &'a InputManifest) -> Claim<'a> {
             .collect(),
         edges: &f.edges,
         counts_as_asserted: &f.counts_as_asserted,
-        watch: &f.watch,
+        watch: watched(f).collect(),
         questions: &f.questions,
     }
 }
