@@ -1,6 +1,7 @@
 //! Agent-authored assertion maps. Edges are explanations, never inferred proofs.
 //! This module owns format validation, text relocation and input acknowledgement bookkeeping.
 
+use crate::source_units::{Code, Diff, named};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -90,13 +91,29 @@ pub struct Inputs {
 pub struct FileFingerprint {
     pub sha256: String,
     pub bytes: usize,
+    /// The parser's view of the file: what it declares, each declaration
+    /// digested with comments blanked. Absent for a file no parser reads and
+    /// in manifests written before this existed; such a file is compared by
+    /// its bytes, as every file once was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<Code>,
 }
 impl FileFingerprint {
     pub fn of(source: &str) -> Self {
         Self {
             sha256: format!("{:x}", Sha256::digest(source.as_bytes())),
             bytes: source.len(),
+            code: None,
         }
+    }
+    /// Bytes and, where Supercov has a parser for the file, its declarations.
+    pub fn read(path: &str, source: &str) -> Self {
+        let mut fingerprint = Self::of(source);
+        fingerprint.code = crate::source_units::code(path, source);
+        fingerprint
+    }
+    pub fn same_bytes(&self, other: &Self) -> bool {
+        self.sha256 == other.sha256
     }
 }
 pub type FileManifest = BTreeMap<String, FileFingerprint>;
@@ -121,7 +138,7 @@ impl Inputs {
             files: self
                 .files
                 .iter()
-                .map(|(p, s)| (p.clone(), FileFingerprint::of(s)))
+                .map(|(p, s)| (p.clone(), FileFingerprint::read(p, s)))
                 .collect(),
             assertions: self.assertions.clone(),
             limitations: self.limitations.clone(),
@@ -224,21 +241,31 @@ fn required_basis<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
     let value = Option::<String>::deserialize(d)?;
     if value.as_deref().is_some_and(|s| !valid_basis(s)) {
         return Err(serde::de::Error::custom(
-            "expected null or scov2:<64 lowercase hex digits>",
+            "expected null or scov3:<64 lowercase hex digits>",
         ));
     }
     Ok(value)
 }
 fn basis_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({"type":["string","null"],"pattern":"^scov2:[0-9a-f]{64}$"})
+    schemars::json_schema!({"type":["string","null"],"pattern":"^scov[23]:[0-9a-f]{64}$"})
 }
 fn valid_basis(s: &str) -> bool {
-    s.strip_prefix("scov2:").is_some_and(|h| {
-        h.len() == 64
-            && h.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
+    s.strip_prefix("scov3:")
+        .or_else(|| s.strip_prefix("scov2:"))
+        .is_some_and(|h| {
+            h.len() == 64
+                && h.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
 }
+/// A token from a release whose basis pinned files rather than the code a
+/// claim rests on. It still parses, so the map stays valid; it can no longer
+/// match, so the claim reads as needing acknowledgement, with this as its
+/// reason rather than a change that never happened.
+pub fn superseded_basis(s: &str) -> bool {
+    s.starts_with("scov2:")
+}
+pub const SUPERSEDED_BASIS: &str = "acknowledged under an earlier Supercov basis format; reread the claim and copy the current expectedBasis";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChangeAssessment {
@@ -318,6 +345,27 @@ pub fn parse(bytes: &[u8]) -> Result<AssertionMap, ParseError> {
 pub struct FlowState {
     pub generation: String,
     pub reasons: BTreeSet<String>,
+    /// Changes near this flow that could not have reached it: a file it
+    /// depends on changed only in code its test never ran. Told, not asked.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub notices: BTreeSet<String>,
+}
+/// What each test of a run executed, in the units of that run's manifest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Executions {
+    pub tests: Vec<Execution>,
+    /// Per file, the units that hold a probe of their own. A change confined
+    /// to these can reach a test only by being run.
+    pub probed: BTreeMap<String, Vec<usize>>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Execution {
+    pub test: TestSelector,
+    pub passed: bool,
+    /// Per file, the innermost unit of every probe this test fired.
+    pub files: BTreeMap<String, Vec<usize>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -327,7 +375,14 @@ pub struct Change {
     pub before: Option<String>,
     pub after: Option<String>,
     pub reason: String,
+    /// Flows this change has already made stale. An assessment has to name
+    /// them; it may name more.
     pub known_flows: BTreeSet<String>,
+    /// Flows whose selected tests ran the changed code, or have no execution
+    /// record to say. Not stale for it -- the claim they make does not pass
+    /// through that code -- but these are the ones the assessment is about.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub exposed: BTreeSet<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -339,6 +394,8 @@ pub struct State {
     pub changes: Vec<Change>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inheritance: Option<Inheritance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executions: Option<Executions>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -390,6 +447,7 @@ pub fn seed_manifest(inputs: &InputManifest, evidence_digest: &str) -> (Assertio
             flows: BTreeMap::new(),
             changes: vec![],
             inheritance: None,
+            executions: None,
         },
     )
 }
@@ -555,7 +613,7 @@ pub fn dependencies<'a>(a: &'a Assertion, f: &'a Flow) -> BTreeSet<&'a str> {
         .collect()
 }
 fn token(value: &impl Serialize) -> String {
-    format!("scov2:{}", digest(value))
+    format!("scov3:{}", digest(value))
 }
 pub fn change_errors(
     map: &AssertionMap,
@@ -622,7 +680,7 @@ pub fn change_current(map: &AssertionMap, change: &Change, inputs: &InputManifes
 /// file is where the claim is exercised, and the assertion's own file is where
 /// it is written. Saying which -- and where the nodes are -- is the difference
 /// between rereading a claim and glancing at a line number.
-fn why_depended_on(a: &Assertion, f: &Flow, file: &str) -> String {
+fn roles(a: &Assertion, f: &Flow, file: &str) -> Vec<String> {
     let mut roles: Vec<String> = Vec::new();
     let lines = f
         .nodes
@@ -642,12 +700,163 @@ fn why_depended_on(a: &Assertion, f: &Flow, file: &str) -> String {
     if f.watch.iter().any(|w| w == file) {
         roles.push("is watched by this flow".to_owned());
     }
+    roles
+}
+fn in_role(roles: &[String]) -> String {
     if roles.is_empty() {
         // Every path into dependencies() is covered above; say nothing rather
         // than guess if that ever stops being true.
-        return String::new();
+        String::new()
+    } else {
+        format!(" ({})", roles.join("; "))
     }
-    format!(" ({})", roles.join("; "))
+}
+/// A file the flow rests on as a whole: the test it applies to, a file it
+/// watches, the file its assertion is written in. Any change there is the
+/// author's to judge; only its comments are not.
+fn whole_file(a: &Assertion, f: &Flow, file: &str) -> bool {
+    a.at.file == file
+        || f.applies_to.iter().any(|t| t.file == file)
+        || f.watch.iter().any(|w| w == file)
+}
+/// A claim's identity is where it points and what it says, not the line it
+/// happens to be on: a file edited above a node moves the node without
+/// touching the claim. Where the file has a parser's view, a node is placed by
+/// the declaration holding it and how many lines of code lie between it and
+/// the nearest boundary in that declaration -- the declaration's start, or the
+/// end of the last nested declaration before it. Growth anywhere else, and
+/// comments or blank lines anywhere, leave it in place; pointing it at another
+/// statement of the same text on another line does not.
+#[derive(Serialize)]
+struct Site<'a> {
+    file: &'a str,
+    text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unit: Option<&'a str>,
+    line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    column: Option<usize>,
+}
+fn site<'a>(at: &'a Anchor, inputs: &'a InputManifest) -> Site<'a> {
+    let code = inputs.files.get(&at.file).and_then(|f| f.code.as_ref());
+    let Some(code) = code else {
+        return Site {
+            file: &at.file,
+            text: &at.text,
+            unit: None,
+            line: at.line,
+            column: Some(at.column),
+        };
+    };
+    let holder = code.unit_at(at.line, at.column);
+    let mut boundary = code.units[holder].line;
+    for child in code.units.iter().filter(|u| u.parent == Some(holder)) {
+        if (child.end_line, child.end_column) <= (at.line, at.column) && child.end_line > boundary {
+            boundary = child.end_line;
+        }
+    }
+    Site {
+        file: &at.file,
+        text: &at.text,
+        unit: Some(&code.units[holder].path),
+        line: code
+            .code_line(at.line)
+            .saturating_sub(code.code_line(boundary)),
+        column: None,
+    }
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeClaim<'a> {
+    id: &'a str,
+    at: Site<'a>,
+    role: &'a str,
+    meaning: &'a str,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Claim<'a> {
+    id: &'a str,
+    explanation: &'a str,
+    applies_to: &'a [TestSelector],
+    nodes: Vec<NodeClaim<'a>>,
+    edges: &'a [Edge],
+    counts_as_asserted: &'a [String],
+    watch: &'a [String],
+    questions: &'a [String],
+}
+fn claim<'a>(f: &'a Flow, inputs: &'a InputManifest) -> Claim<'a> {
+    Claim {
+        id: &f.id,
+        explanation: &f.explanation,
+        applies_to: &f.applies_to,
+        nodes: f
+            .nodes
+            .iter()
+            .map(|n| NodeClaim {
+                id: &n.id,
+                at: site(&n.at, inputs),
+                role: &n.role,
+                meaning: &n.meaning,
+            })
+            .collect(),
+        edges: &f.edges,
+        counts_as_asserted: &f.counts_as_asserted,
+        watch: &f.watch,
+        questions: &f.questions,
+    }
+}
+/// What an acknowledgement rests on in one dependency file.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+enum Footing<'a> {
+    /// Named by the flow but not among the run's inputs.
+    Absent,
+    /// No parser reads this file; its bytes are the claim's ground.
+    Bytes(&'a str),
+    /// Everything the file does, comments aside.
+    Semantic(&'a str),
+    /// The declarations holding this flow's nodes, and the file's set of
+    /// declarations. Code elsewhere in the file is answered for by what the
+    /// flow's test executed, which `carry` judges.
+    Units {
+        structure: &'a str,
+        units: BTreeMap<&'a str, &'a str>,
+    },
+}
+fn footing<'a>(
+    a: &'a Assertion,
+    f: &'a Flow,
+    inputs: &'a InputManifest,
+) -> BTreeMap<&'a str, Footing<'a>> {
+    dependencies(a, f)
+        .into_iter()
+        .map(|file| {
+            let Some(fingerprint) = inputs.files.get(file) else {
+                return (file, Footing::Absent);
+            };
+            let Some(code) = &fingerprint.code else {
+                return (file, Footing::Bytes(&fingerprint.sha256));
+            };
+            if whole_file(a, f, file) {
+                return (file, Footing::Semantic(&code.semantic));
+            }
+            let units = f
+                .nodes
+                .iter()
+                .filter(|n| n.at.file == file)
+                .flat_map(|n| code.ancestors(code.unit_at(n.at.line, n.at.column)))
+                .map(|i| (code.units[i].path.as_str(), code.units[i].digest.as_str()))
+                .collect();
+            (
+                file,
+                Footing::Units {
+                    structure: &code.structure,
+                    units,
+                },
+            )
+        })
+        .collect()
 }
 
 fn generation(
@@ -683,20 +892,14 @@ pub fn expected_basis(
     state: &State,
     inputs: &InputManifest,
 ) -> String {
-    let mut claim = f.clone();
-    claim.basis = None;
-    let hashes = dependencies(a, f)
-        .into_iter()
-        .map(|p| (p, inputs.files.get(p)))
-        .collect::<BTreeMap<_, _>>();
     token(&(
-        "supercov-flow-v2",
+        "supercov-flow-v3",
         &inputs.context_digest,
         &a.id,
-        &a.at,
+        site(&a.at, inputs),
         &a.observes,
-        claim,
-        hashes,
+        claim(f, inputs),
+        footing(a, f, inputs),
         generation(a, f, map, state, inputs),
     ))
 }
@@ -723,10 +926,10 @@ pub fn reasons_for_manifest(
     }
     if f.basis.as_deref() != Some(expected_basis(a, f, map, state, manifest).as_str()) {
         reasons.insert(
-            if f.basis.is_none() {
-                "draft: input acknowledgement not recorded"
-            } else {
-                "claim or inputs changed; needs rechecking"
+            match f.basis.as_deref() {
+                None => "draft: input acknowledgement not recorded",
+                Some(basis) if superseded_basis(basis) => SUPERSEDED_BASIS,
+                Some(_) => "claim or inputs changed; needs rechecking",
             }
             .into(),
         );
@@ -757,7 +960,7 @@ pub fn validation(map: &AssertionMap, state: &State, inputs: &Inputs) -> serde_j
         let response = map.change_assessments.iter().find(|r| r.id == c.id);
         let faults = response.map(|r| change_errors(map, c, r)).unwrap_or_default();
         errors.extend(faults.iter().map(|e| format!("{}: {e}", c.id)));
-        json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,"knownFlows":c.known_flows,
+        json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,"knownFlows":c.known_flows,"exposed":c.exposed,
             "current":change_current(map,c,&manifest),"assessment":response,"errors":faults,
             "expectedBasis":response.map(|r| expected_change_basis(c,r,&manifest))})
     }).collect::<Vec<_>>();
@@ -777,6 +980,7 @@ pub fn invalidate(state: &mut State, map: &AssertionMap, reason: &str) {
                 FlowState {
                     generation: digest(&(base, reason, &state.inputs_digest)),
                     reasons: BTreeSet::from([reason.into()]),
+                    notices: BTreeSet::new(),
                 },
             );
         }
@@ -789,6 +993,7 @@ pub fn add_change(
     after: Option<String>,
     reason: String,
     known_flows: BTreeSet<String>,
+    exposed: BTreeSet<String>,
 ) {
     // Include pending history so edit/revert/edit cannot alias a still-pending event.
     let id = format!(
@@ -809,6 +1014,7 @@ pub fn add_change(
         after,
         reason,
         known_flows,
+        exposed,
     });
 }
 
@@ -829,7 +1035,9 @@ fn target_file(file: &str, old: &FileManifest, new: &Files) -> Option<String> {
         return Some(file.into());
     }
     let hash = old.get(file)?;
-    let mut matches = new.iter().filter(|(_, s)| FileFingerprint::of(s) == *hash);
+    let mut matches = new
+        .iter()
+        .filter(|(_, s)| FileFingerprint::of(s).same_bytes(hash));
     let first = matches.next()?.0;
     matches.next().is_none().then(|| first.clone())
 }
@@ -839,7 +1047,7 @@ pub fn relocate(at: &Anchor, old: &FileManifest, new: &Files) -> Option<Anchor> 
     let after = &new[&target];
     let mut candidate = at.clone();
     candidate.file.clone_from(&target);
-    if FileFingerprint::of(after) == *before && candidate.offset(new).is_some() {
+    if FileFingerprint::of(after).same_bytes(before) && candidate.offset(new).is_some() {
         return Some(candidate);
     }
     // The file changed somewhere. That says nothing about this anchor: read the
@@ -865,8 +1073,121 @@ pub fn relocate(at: &Anchor, old: &FileManifest, new: &Files) -> Option<Anchor> 
     ))
 }
 
+/// How one captured file moved between two runs, judged once and read for
+/// every flow.
+pub enum FileChange<'a> {
+    Same,
+    /// Only comments changed: no program can tell.
+    CommentsOnly,
+    /// Not among the previous run's inputs.
+    Added,
+    Removed,
+    /// No parser reads the file on one side or the other; its bytes moved.
+    Bytes,
+    Code {
+        before: &'a Code,
+        after: &'a Code,
+        diff: Diff,
+        /// The change is confined to declaration bodies that only run: it
+        /// reaches a test only if the test ran one of them.
+        narrow: bool,
+    },
+}
+pub fn file_change<'a>(
+    before: Option<&'a FileFingerprint>,
+    after: Option<&'a FileFingerprint>,
+    probed: Option<&[usize]>,
+) -> Option<FileChange<'a>> {
+    let Some(before) = before else {
+        return after.map(|_| FileChange::Added);
+    };
+    let Some(after) = after else {
+        return Some(FileChange::Removed);
+    };
+    if before.same_bytes(after) {
+        return Some(FileChange::Same);
+    }
+    let (Some(old), Some(new)) = (&before.code, &after.code) else {
+        return Some(FileChange::Bytes);
+    };
+    if old.semantic == new.semantic {
+        return Some(FileChange::CommentsOnly);
+    }
+    let diff = old.diff(new);
+    let narrow = probed.is_some_and(|probed| diff.narrow(old, probed));
+    Some(FileChange::Code {
+        before: old,
+        after: new,
+        diff,
+        narrow,
+    })
+}
+/// Every unit that moved, by name: what changed, what arrived, what went.
+pub fn describe(before: &Code, after: &Code, diff: &Diff) -> String {
+    let mut parts = Vec::new();
+    if !diff.changed.is_empty() {
+        parts.push(named(diff.changed.iter().map(|i| &before.units[*i])));
+    }
+    if !diff.added.is_empty() {
+        parts.push(format!(
+            "added {}",
+            named(diff.added.iter().map(|i| &after.units[*i]))
+        ));
+    }
+    if !diff.removed.is_empty() {
+        parts.push(format!(
+            "removed {}",
+            named(diff.removed.iter().map(|i| &before.units[*i]))
+        ));
+    }
+    if parts.is_empty() {
+        "declarations".to_owned()
+    } else {
+        parts.join("; ")
+    }
+}
+/// The units a flow's tests executed, per file, each with what it sits
+/// inside; `None` when a selected test has no execution record in this state,
+/// in which case nothing about execution can be assumed.
+fn executed<'s>(
+    records: &BTreeMap<&TestSelector, &'s Execution>,
+    f: &Flow,
+    manifest: &InputManifest,
+) -> Option<BTreeMap<&'s str, BTreeSet<usize>>> {
+    let mut out: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
+    for selector in &f.applies_to {
+        let record = records.get(selector)?;
+        for (file, units) in &record.files {
+            let code = manifest.files.get(file).and_then(|fp| fp.code.as_ref());
+            let set = out.entry(file.as_str()).or_default();
+            for &unit in units {
+                match code {
+                    Some(code) if unit < code.units.len() => set.extend(code.ancestors(unit)),
+                    _ => {
+                        set.insert(unit);
+                    }
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
 /// Carries explanations, never execution events. Uncertain matches are retained
 /// as retired suggestions; no nearest-line heuristic assigns semantic meaning.
+///
+/// A flow goes stale for a change to what its claim rests on and for nothing
+/// else: the declarations holding its nodes and the top level of their files,
+/// the test it applies to, a file it watches, its assertion, the run's
+/// context. A change elsewhere in a node's file is a notice. A change to
+/// comments or blank lines is nothing.
+///
+/// What each flow's test executed does not make the flow stale -- a claim
+/// does not pass through every function its test happened to run, and an
+/// acknowledgement demanded for all of them at once stops being read. It goes
+/// on the change record instead: a changed file names the flows whose tests
+/// ran the changed code, so the one assessment the change asks for is asked
+/// of the right people, and a change nobody ran asks for none.
 pub fn carry(
     map: &AssertionMap,
     state: &State,
@@ -897,6 +1218,38 @@ pub fn carry(
         .filter(|r| next_state.changes.iter().any(|c| c.id == r.id))
         .cloned()
         .collect();
+    let records = state
+        .executions
+        .iter()
+        .flat_map(|e| e.tests.iter().map(|t| (&t.test, t)))
+        .collect::<BTreeMap<_, _>>();
+    let probed = |file: &str| {
+        state
+            .executions
+            .as_ref()
+            .and_then(|e| e.probed.get(file))
+            .map(Vec::as_slice)
+    };
+    let changes = old
+        .files
+        .keys()
+        .chain(new_manifest.files.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|file| {
+            file_change(
+                old.files.get(file),
+                new_manifest.files.get(file),
+                probed(file),
+            )
+            .map(|change| (file.as_str(), change))
+        })
+        .collect::<BTreeMap<_, _>>();
+    // Per changed file: the flows it made stale, and the flows whose tests ran
+    // the changed code or have no record to say -- what the change record
+    // names as known and as exposed.
+    let mut marked: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    let mut exposed: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut consumed = BTreeSet::new();
     let exact = map
         .assertions
@@ -945,23 +1298,119 @@ pub fn carry(
         let mut updated = a.clone();
         updated.at = at.clone();
         for (prior, f) in a.flows.iter().zip(&mut updated.flows) {
+            let key = flow_key(a, f);
             let base = generation(a, prior, map, state, old);
             let mut dirty = BTreeSet::new();
-            if prior
-                .basis
-                .as_deref()
-                .is_some_and(|basis| basis != expected_basis(a, prior, map, state, old))
-            {
-                dirty.insert("inherited claim still needs rechecking".into());
+            let mut notices = BTreeSet::new();
+            match prior.basis.as_deref() {
+                Some(basis) if superseded_basis(basis) => {
+                    dirty.insert(SUPERSEDED_BASIS.into());
+                }
+                Some(basis) if basis != expected_basis(a, prior, map, state, old) => {
+                    dirty.insert("inherited claim still needs rechecking".into());
+                }
+                _ => {}
             }
+            // What the flow's test ran, for the change record: a changed file
+            // is assessed by whoever ran the change, and a change nobody ran
+            // is not assessed at all.
+            match executed(&records, prior, old) {
+                Some(ran) => {
+                    for (file, units) in &ran {
+                        let reached = match changes.get(file) {
+                            None
+                            | Some(
+                                FileChange::Same | FileChange::CommentsOnly | FileChange::Added,
+                            ) => false,
+                            Some(FileChange::Removed | FileChange::Bytes) => true,
+                            Some(FileChange::Code { diff, narrow, .. }) => {
+                                !*narrow || diff.changed.iter().any(|i| units.contains(i))
+                            }
+                        };
+                        if reached {
+                            exposed.entry(file).or_default().insert(key.clone());
+                        }
+                    }
+                }
+                None => {
+                    for (file, change) in &changes {
+                        if !matches!(
+                            change,
+                            FileChange::Same | FileChange::CommentsOnly | FileChange::Added
+                        ) {
+                            exposed.entry(file).or_default().insert(key.clone());
+                        }
+                    }
+                }
+            }
+            // What the flow names: its test, its watch list and its assertion's
+            // file as a whole; the file of a node for the declarations that
+            // hold the node, its top level and its set of declarations.
             for file in dependencies(a, prior) {
-                if old.files.get(file) != new_manifest.files.get(file)
-                    || !old.files.contains_key(file)
-                {
-                    dirty.insert(format!(
-                        "dependency file changed or removed: {file}{}",
-                        why_depended_on(a, prior, file)
-                    ));
+                let roles = roles(a, prior, file);
+                let verdict = match changes.get(file) {
+                    None => Some(format!(
+                        "{file} is not among the run's inputs{}",
+                        in_role(&roles)
+                    )),
+                    Some(FileChange::Added) => Some(format!(
+                        "{file} is new since the previous run{}",
+                        in_role(&roles)
+                    )),
+                    Some(FileChange::Same | FileChange::CommentsOnly) => None,
+                    Some(FileChange::Removed) => Some(format!("{file} removed{}", in_role(&roles))),
+                    Some(FileChange::Bytes) => Some(format!("{file} changed{}", in_role(&roles))),
+                    Some(FileChange::Code {
+                        before,
+                        after,
+                        diff,
+                        ..
+                    }) => {
+                        if whole_file(a, prior, file) {
+                            Some(format!(
+                                "{file}: {} changed{}",
+                                describe(before, after, diff),
+                                in_role(&roles)
+                            ))
+                        } else {
+                            let holders = prior
+                                .nodes
+                                .iter()
+                                .filter(|n| n.at.file == file)
+                                .flat_map(|n| {
+                                    before.ancestors(before.unit_at(n.at.line, n.at.column))
+                                })
+                                .collect::<BTreeSet<_>>();
+                            let moved = holders
+                                .iter()
+                                .filter(|i| diff.changed.contains(i) || diff.removed.contains(i))
+                                .map(|i| &before.units[*i])
+                                .collect::<Vec<_>>();
+                            if !moved.is_empty() {
+                                Some(format!(
+                                    "{file}: {} changed{}",
+                                    named(moved),
+                                    in_role(&roles)
+                                ))
+                            } else if diff.structural {
+                                Some(format!(
+                                    "{file}: declarations changed, {}{}",
+                                    describe(before, after, diff),
+                                    in_role(&roles)
+                                ))
+                            } else {
+                                notices.insert(format!(
+                                    "{file} changed outside this flow's nodes: {}",
+                                    describe(before, after, diff)
+                                ));
+                                None
+                            }
+                        }
+                    }
+                };
+                if let Some(reason) = verdict {
+                    dirty.insert(reason);
+                    marked.entry(file).or_default().insert(key.clone());
                 }
             }
             if replacement.is_some() {
@@ -989,14 +1438,15 @@ pub fn carry(
                 dirty.insert("run configuration, dependencies or execution context changed".into());
             }
             next_state.flows.insert(
-                flow_key(a, f),
+                key,
                 FlowState {
                     generation: if dirty.is_empty() {
                         base
                     } else {
-                        digest(&("supercov-carry-v2", base, &new_manifest, &dirty))
+                        digest(&("supercov-carry-v3", base, &new_manifest, &dirty))
                     },
                     reasons: dirty,
+                    notices,
                 },
             );
         }
@@ -1034,26 +1484,25 @@ pub fn carry(
         if crate::integrity::tracked_manifest(file) {
             continue;
         }
-        if old.files.get(file) != new_manifest.files.get(file) {
-            let known = map
-                .assertions
-                .iter()
-                .flat_map(|a| {
-                    a.flows
-                        .iter()
-                        .filter(|f| dependencies(a, f).contains(file.as_str()))
-                        .map(move |f| flow_key(a, f))
-                })
-                .collect();
-            add_change(
-                &mut next_state,
-                Some(file.clone()),
-                old.files.get(file).map(|f| f.sha256.clone()),
-                new_manifest.files.get(file).map(|f| f.sha256.clone()),
-                "captured source file changed".into(),
-                known,
-            );
+        let exposed_to = exposed.get(file.as_str()).cloned().unwrap_or_default();
+        match changes.get(file.as_str()) {
+            // A comment is not a change to assess.
+            Some(FileChange::Same | FileChange::CommentsOnly) => continue,
+            // A change confined to code that only runs, which no selected test
+            // ran, cannot have reached any claim; the flow claiming that code
+            // is already stale for it. Nothing to ask.
+            Some(FileChange::Code { narrow: true, .. }) if exposed_to.is_empty() => continue,
+            _ => {}
         }
+        add_change(
+            &mut next_state,
+            Some(file.clone()),
+            old.files.get(file).map(|f| f.sha256.clone()),
+            new_manifest.files.get(file).map(|f| f.sha256.clone()),
+            "captured source file changed".into(),
+            marked.get(file.as_str()).cloned().unwrap_or_default(),
+            exposed_to,
+        );
     }
     next.assertions.sort_by(|a, b| a.at.cmp(&b.at));
     Ok((next, next_state))

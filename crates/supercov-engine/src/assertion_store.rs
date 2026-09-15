@@ -8,6 +8,7 @@ use crate::{
     evidence_archive::read_archive,
     lifecycle::atomic_write,
     run_store::{RunFingerprint, RunMetadata, StoredRun, discover_runs},
+    source_units::named,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -230,6 +231,7 @@ pub(crate) fn prepare_publication(
                         None,
                         reason.clone(),
                         BTreeSet::new(),
+                        BTreeSet::new(),
                     );
                     return Ok(Some((next, next_state)));
                 }
@@ -250,6 +252,7 @@ pub(crate) fn prepare_publication(
                         Some(a.dependencies.clone()),
                         Some(b.dependencies.clone()),
                         "installed dependencies changed".into(),
+                        BTreeSet::new(),
                         BTreeSet::new(),
                     );
                 }
@@ -280,14 +283,258 @@ pub(crate) fn prepare_publication(
             "newer assertion map could not be reused; inspect inherited claims",
         );
     }
+    // What each test ran, so the next carry can tell a change the test saw
+    // from one it could not have. Evidence that will not analyse leaves the
+    // record out; every flow is then judged by its files, as before.
+    state.executions = coverage(&run).ok().and_then(|report| {
+        executions(
+            &report,
+            &input.manifest,
+            current.as_ref().ok().map(|inputs| &inputs.files),
+        )
+    });
     if let Err(reason) = current {
         invalidate(&mut state, &map, &reason);
-        add_change(&mut state, None, None, None, reason, BTreeSet::new());
+        add_change(
+            &mut state,
+            None,
+            None,
+            None,
+            reason,
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
     }
     state.inheritance = Some(inheritance);
     write_json(root, &run, MAP_FILE, &map)?;
     write_json(root, &run, STATE_FILE, &state)?;
     Ok(())
+}
+/// Each test's execution, placed in the declarations of the run's own
+/// manifest: for every probe a test fired, the innermost unit holding it.
+/// Also which units hold a probe at all, per file, since only a change
+/// confined to such units can be said to have missed a test. Sources are
+/// needed to place JavaScript columns; without them there is no record.
+pub fn executions(
+    coverage: &CoverageReport,
+    manifest: &InputManifest,
+    sources: Option<&Files>,
+) -> Option<Executions> {
+    let mut located: std::collections::HashMap<&str, (&str, usize)> =
+        std::collections::HashMap::new();
+    let mut probed: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for point in &coverage.view.points {
+        let meta = &point.meta;
+        let Some(code) = manifest
+            .files
+            .get(&meta.file)
+            .and_then(|fingerprint| fingerprint.code.as_ref())
+        else {
+            continue;
+        };
+        let column = if manifest.language == "javascript" {
+            let source = sources?.get(&meta.file)?;
+            let Some(column) = byte_column(source, meta.line, meta.column, &manifest.language)
+            else {
+                continue;
+            };
+            column
+        } else {
+            meta.column + 1
+        };
+        let unit = code.unit_at(meta.line, column);
+        located.insert(meta.id.as_str(), (meta.file.as_str(), unit));
+        if code.units[unit].is_code() {
+            probed.entry(meta.file.clone()).or_default().insert(unit);
+        }
+    }
+    let mut tests: BTreeMap<TestSelector, Execution> = BTreeMap::new();
+    for test in &coverage.view.tests {
+        let Some(file) = &test.file else {
+            continue;
+        };
+        let selector = TestSelector {
+            file: file.clone(),
+            name: test.name.clone(),
+        };
+        let record = tests.entry(selector.clone()).or_insert_with(|| Execution {
+            test: selector,
+            passed: false,
+            files: BTreeMap::new(),
+        });
+        record.passed |= test.outcome == "passed";
+        for hit in &test.hits {
+            if let Some((file, unit)) = located.get(hit.as_str()) {
+                record
+                    .files
+                    .entry((*file).to_owned())
+                    .or_default()
+                    .push(*unit);
+            }
+        }
+    }
+    let mut tests = tests.into_values().collect::<Vec<_>>();
+    for record in &mut tests {
+        for units in record.files.values_mut() {
+            units.sort_unstable();
+            units.dedup();
+        }
+    }
+    Some(Executions {
+        tests,
+        probed: probed
+            .into_iter()
+            .map(|(file, units)| (file, units.into_iter().collect()))
+            .collect(),
+    })
+}
+/// Which of a run's tests the current checkout's changes could have reached,
+/// from what each test executed and what has changed since, declaration by
+/// declaration. A test is affected by a change in code it ran, in its test
+/// file, or in a file it ran code in whose declarations changed shape; not by
+/// a change confined to code it never ran; not by comments or blank lines. A
+/// test that did not pass is listed as affected regardless: it has a result to
+/// establish. What this cannot see is a file the run never captured -- a file
+/// added since -- and the run's dependencies and configuration, which the
+/// working-tree check answers for.
+pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
+    let stored = load_manifest(run)?;
+    let (_, state) = load(run, &stored)?;
+    let Some(executions) = &state.executions else {
+        return Err(
+            "This run has no per-test execution record; rerun tests with this version of Supercov"
+                .into(),
+        );
+    };
+    let root = crate::workspace::canonicalize_simplified(root).map_err(|e| e.to_string())?;
+    let manifest = &stored.manifest;
+    let now = manifest
+        .files
+        .keys()
+        .filter_map(|file| {
+            let path = root.join(file);
+            let canonical = crate::workspace::canonicalize_simplified(&path).ok()?;
+            if !canonical.starts_with(&root) || !canonical.is_file() {
+                return None;
+            }
+            let text = fs::read_to_string(canonical).ok()?;
+            Some((file.clone(), FileFingerprint::read(file, &text)))
+        })
+        .collect::<FileManifest>();
+    let changes = manifest
+        .files
+        .keys()
+        .filter_map(|file| {
+            model::file_change(
+                manifest.files.get(file),
+                now.get(file),
+                executions.probed.get(file).map(Vec::as_slice),
+            )
+            .map(|change| (file.as_str(), change))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let files = changes
+        .iter()
+        .filter_map(|(file, change)| {
+            let (kind, detail) = match change {
+                FileChange::Same | FileChange::Added => return None,
+                FileChange::CommentsOnly => ("formatting", None),
+                FileChange::Removed => ("removed", None),
+                FileChange::Bytes => ("changed", None),
+                FileChange::Code {
+                    before,
+                    after,
+                    diff,
+                    narrow,
+                } => (
+                    if *narrow { "bodies" } else { "declarations" },
+                    Some(model::describe(before, after, diff)),
+                ),
+            };
+            Some(json!({"file":file,"change":kind,"detail":detail}))
+        })
+        .collect::<Vec<_>>();
+    let mut affected = Vec::new();
+    let mut unaffected = Vec::new();
+    for record in &executions.tests {
+        let mut reasons = Vec::new();
+        if !record.passed {
+            reasons.push("did not pass in the run".to_owned());
+        }
+        match changes.get(record.test.file.as_str()) {
+            None | Some(FileChange::Same | FileChange::CommentsOnly | FileChange::Added) => {}
+            Some(FileChange::Removed) => reasons.push("test file removed".to_owned()),
+            Some(FileChange::Bytes) => reasons.push("test file changed".to_owned()),
+            Some(FileChange::Code {
+                before,
+                after,
+                diff,
+                ..
+            }) => reasons.push(format!(
+                "test file changed: {}",
+                model::describe(before, after, diff)
+            )),
+        }
+        for (file, units) in &record.files {
+            let code = manifest.files.get(file).and_then(|f| f.code.as_ref());
+            let ran = units
+                .iter()
+                .flat_map(|unit| match code {
+                    Some(code) if *unit < code.units.len() => {
+                        code.ancestors(*unit).collect::<Vec<_>>()
+                    }
+                    _ => vec![*unit],
+                })
+                .collect::<BTreeSet<_>>();
+            match changes.get(file.as_str()) {
+                None | Some(FileChange::Same | FileChange::CommentsOnly | FileChange::Added) => {}
+                Some(FileChange::Removed) => {
+                    reasons.push(format!("{file} removed (this test ran code in it)"));
+                }
+                Some(FileChange::Bytes) => {
+                    reasons.push(format!("{file} changed (this test ran code in it)"));
+                }
+                Some(FileChange::Code {
+                    before,
+                    after,
+                    diff,
+                    narrow,
+                }) => {
+                    if *narrow {
+                        let hit = diff
+                            .changed
+                            .iter()
+                            .filter(|i| ran.contains(i))
+                            .map(|i| &before.units[*i])
+                            .collect::<Vec<_>>();
+                        if !hit.is_empty() {
+                            reasons
+                                .push(format!("{file}: {} changed (this test ran it)", named(hit)));
+                        }
+                    } else {
+                        reasons.push(format!(
+                            "{file}: {} changed (this test ran code in this file)",
+                            model::describe(before, after, diff)
+                        ));
+                    }
+                }
+            }
+        }
+        let entry = json!({"file":record.test.file,"name":record.test.name,"reasons":reasons});
+        if reasons.is_empty() {
+            unaffected.push(entry);
+        } else {
+            affected.push(entry);
+        }
+    }
+    Ok(json!({
+        "run": run.id,
+        "affected": affected,
+        "unaffected": unaffected,
+        "changedFiles": files,
+        "summary": {"tests": executions.tests.len(), "affected": affected.len(), "unaffected": unaffected.len(), "changedFiles": files.len()},
+        "meaning": "Tests whose recorded execution a change since the run could have reached. A file the run never captured, a dependency or a configuration change is not seen here; see workingTree."
+    }))
 }
 /// How a difference between two runs reaches the flows inherited across it.
 struct ContextDelta {
@@ -819,7 +1066,18 @@ pub fn assess(
                     }
                 }
             }
-            flows.push(json!({"id":f.id,"freshness":freshness,"valid":valid,"current":dirty.is_empty(),"expectedBasis":model::expected_basis(a,f,map,state,&manifest),"selectors":selectors,"questions":f.questions,"reasons":dirty,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines,"nodeCredit":node_credit}));
+            let notices = state
+                .flows
+                .get(&flow_key(a, f))
+                .map(|s| s.notices.clone())
+                .unwrap_or_default();
+            let exposed_to = state
+                .changes
+                .iter()
+                .filter(|c| c.exposed.contains(&flow_key(a, f)))
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>();
+            flows.push(json!({"id":f.id,"freshness":freshness,"valid":valid,"current":dirty.is_empty(),"expectedBasis":model::expected_basis(a,f,map,state,&manifest),"selectors":selectors,"questions":f.questions,"reasons":dirty,"notices":notices,"exposedTo":exposed_to,"eligible":eligible,"blockers":blockers,"matchingTests":applicable,"creditedStatementLines":lines,"nodeCredit":node_credit}));
         }
         let observation = if !witnesses.is_empty() {
             "Passing assertion occurrence recorded."
@@ -1023,6 +1281,142 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
     use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
+
+    /// Publish one run over a two-function file whose test ran one of them,
+    /// then ask which tests each edit affects.
+    #[test]
+    fn publication_records_what_each_test_ran_and_affected_tests_reads_it() {
+        let root = std::env::temp_dir().join(format!("supercov-affected-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        // The fixture's one point sits at line 1, column 0, so `work` has to
+        // start the file: an `export` keyword there would belong to the top
+        // level, not to the function.
+        let app = "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n";
+        let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
+        fs::write(root.join("src/app.js"), app).unwrap();
+        fs::write(root.join("tests/app.test.js"), test).unwrap();
+        // The fixture run's one point sits at line 1, column 0 of src/app.js
+        // with a zero-based byte column, which is how every non-JavaScript
+        // frontend reports; the language is named for that.
+        let inputs = crate::assertion_inputs::capture(
+            &root,
+            "python",
+            ["src/app.js".into(), "tests/app.test.js".into()],
+        )
+        .unwrap();
+        let directory = crate::run_store::create_analyzable_test_run(&root, "first");
+        let path = directory.join("evidence.raw.gz");
+        let entries =
+            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let archive = write_archive(entries, &path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence.files = archive.files;
+        metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        prepare_publication(&root, &directory, &metadata).unwrap();
+        let run = discover_runs(&root).unwrap().runs.remove(0);
+        let stored = load_manifest(&run).unwrap();
+        let (_, state) = load(&run, &stored).unwrap();
+        let executions = state.executions.as_ref().expect("a record");
+        let code = stored.manifest.files["src/app.js"].code.as_ref().unwrap();
+        let work = code.units.iter().position(|u| u.path == "work").unwrap();
+        let idle = code.units.iter().position(|u| u.path == "idle").unwrap();
+        assert_eq!(executions.tests.len(), 1);
+        let record = &executions.tests[0];
+        assert_eq!(record.test.file, "tests/app.test.js");
+        assert_eq!(record.test.name, "test");
+        assert!(record.passed);
+        assert_eq!(record.files["src/app.js"], vec![work]);
+        assert_eq!(
+            executions.probed["src/app.js"],
+            vec![work],
+            "idle holds no probe in this run"
+        );
+        let _ = idle;
+
+        let names = |value: &Value, key: &str| {
+            value[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // Nothing changed.
+        let report = affected_tests(&root, &run).unwrap();
+        assert!(names(&report, "affected").is_empty(), "{report}");
+        assert_eq!(names(&report, "unaffected"), ["test"]);
+        assert_eq!(report["summary"]["changedFiles"], 0);
+        // A comment: still nothing.
+        fs::write(root.join("src/app.js"), format!("// about\n{app}")).unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert!(names(&report, "affected").is_empty(), "{report}");
+        assert_eq!(report["changedFiles"][0]["change"], "formatting");
+        // A body the test ran: affected, and it says which.
+        fs::write(
+            root.join("src/app.js"),
+            app.replace("return 1;", "return 1 + 0;"),
+        )
+        .unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(names(&report, "affected"), ["test"]);
+        assert_eq!(
+            report["affected"][0]["reasons"][0],
+            "src/app.js: work (line 1) changed (this test ran it)"
+        );
+        // A body the test did not run, once idle has a probe of its own: not
+        // affected. Here idle holds none, so the change is not one that can
+        // be said to have missed the test, and it counts.
+        fs::write(
+            root.join("src/app.js"),
+            app.replace("return 2;", "return 2 + 0;"),
+        )
+        .unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(names(&report, "affected"), ["test"], "{report}");
+        assert!(
+            report["affected"][0]["reasons"][0]
+                .as_str()
+                .unwrap()
+                .contains("this test ran code in this file"),
+            "{report}"
+        );
+        // A declaration added: affected, the file's shape changed.
+        fs::write(
+            root.join("src/app.js"),
+            format!("{app}function more() {{}}\n"),
+        )
+        .unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(names(&report, "affected"), ["test"]);
+        assert_eq!(report["changedFiles"][0]["change"], "declarations");
+        // The test file itself.
+        fs::write(root.join("src/app.js"), app).unwrap();
+        fs::write(root.join("tests/app.test.js"), test.replace("1)", "2)")).unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(names(&report, "affected"), ["test"]);
+        assert!(
+            report["affected"][0]["reasons"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("test file changed"),
+            "{report}"
+        );
+        // A source file removed.
+        fs::write(root.join("tests/app.test.js"), test).unwrap();
+        fs::remove_file(root.join("src/app.js")).unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(
+            report["affected"][0]["reasons"][0],
+            "src/app.js removed (this test ran code in it)"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn legacy_maps_import_without_the_old_checkout_and_require_review() {

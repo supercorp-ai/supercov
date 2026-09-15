@@ -214,12 +214,24 @@ fn unchanged_files_reuse_review_and_blank_line_moves_preserve_dirty_mappings() {
         site.at.line += 2;
     }
     let (carried, state) = carry(&map, &state, &old.manifest(), &new, "new", false).unwrap();
+    // src/a.js and src/b.js are not parsable JavaScript, so their bytes are
+    // what the flows rest on, and two blank lines are a change to them.
     assert_eq!(current(&carried, &state, &new), 0);
+    // src/helper.js is, and blank lines are not a change to anything it does:
+    // nothing to assess.
+    assert!(
+        !state
+            .changes
+            .iter()
+            .any(|c| c.file.as_deref() == Some("src/helper.js")),
+        "{:?}",
+        state.changes
+    );
     assert!(
         state
             .changes
             .iter()
-            .any(|c| c.file.as_deref() == Some("src/helper.js"))
+            .any(|c| c.file.as_deref() == Some("src/a.js"))
     );
     assert_eq!(map.assertions[0].id, carried.assertions[0].id);
     assert_eq!(carried.assertions[0].at.line, 4);
@@ -523,6 +535,7 @@ fn absence_claims_do_not_credit_unexecuted_code_and_scope_blocks_credit() {
         None,
         None,
         "unknown helper".into(),
+        BTreeSet::new(),
         BTreeSet::new(),
     );
     assert_eq!(
@@ -1068,7 +1081,7 @@ fn a_selected_test_file_is_an_implicit_dependency_and_questions_are_per_flow() {
     let (mut inputs, mut map, mut state) = fixture();
     inputs
         .files
-        .insert("tests/shared.js".into(), "// setup".into());
+        .insert("tests/shared.js".into(), "setup();\n".into());
     state.inputs_digest = inputs.identity();
     map.assertions[0].flows[0].applies_to.push(TestSelector {
         file: "tests/shared.js".into(),
@@ -1077,7 +1090,7 @@ fn a_selected_test_file_is_an_implicit_dependency_and_questions_are_per_flow() {
     acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
     let mut new = inputs.clone();
     new.files
-        .insert("tests/shared.js".into(), "// edited setup".into());
+        .insert("tests/shared.js".into(), "editedSetup();\n".into());
     let (mut next, state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
     assert_eq!(current(&next, &state, &new), 1);
     next.assertions[0]
@@ -1210,7 +1223,7 @@ fn validation_only_reads_and_basis_encoding_is_stable() {
     let f = &a.flows[0];
     assert_eq!(
         expected_basis(a, f, &map, &state, &inputs.manifest()),
-        "scov2:2469cd73a9d32689c8e28a4d24ef2c5a846f7c8407407013a3adbdeb88c6e68b"
+        "scov3:696d86be4b85a19b2e73dc5484fb2fe0b65ce5216c93ec27464740bb1a8e51e6"
     );
 }
 
@@ -1231,30 +1244,35 @@ fn editor_schema_accepts_explicit_null_basis_and_requires_the_field() {
     }
 }
 
-/// "dependency file changed: src/a.js" names a file and leaves the author to
-/// work out what it has to do with this claim. A flow depends on a file for one
-/// of four reasons and they call for different judgements, so the reason says
-/// which, and where the flow's nodes sit in it.
+/// "src/a.js changed" names a file and leaves the author to work out what it
+/// has to do with this claim. A flow depends on a file for one of four reasons
+/// and they call for different judgements, so the reason says which, what in
+/// the file changed, and where the flow's nodes sit in it.
 #[test]
 fn a_changed_dependency_says_why_it_is_one_and_where_the_flow_sits() {
-    let (inputs, mut map, state) = fixture();
+    let (mut inputs, mut map, mut state) = fixture();
+    let source =
+        "export function a() {\n  return 1;\n}\nexport function other() {\n  return 2;\n}\n";
+    inputs.files.insert("src/a.js".into(), source.into());
+    state.inputs_digest = inputs.identity();
+    map.assertions[0].flows[0].nodes[0].at = anchor("src/a.js", source, "return 1;");
     map.assertions[0].flows[0].watch = vec!["test.js".into()];
     acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
     let mut new = inputs.clone();
-    new.files
-        .get_mut("src/a.js")
-        .unwrap()
-        .push_str("// a note\n");
+    new.files.insert(
+        "src/a.js".into(),
+        source.replace("  return 1;", "  log();\n  return 1;"),
+    );
     let (next, next_state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
     let a = &next.assertions[0];
     let why = reasons(a, &a.flows[0], &next, &next_state, &new);
     let named = why
         .iter()
-        .find(|r| r.starts_with("dependency file changed or removed: src/a.js"))
+        .find(|r| r.starts_with("src/a.js: a (line 1) changed"))
         .unwrap_or_else(|| panic!("{why:?}"));
     // The node's role and its line, so the author can look rather than reread.
     assert!(named.contains("holds this flow's"), "{named}");
-    assert!(named.contains("return:1"), "{named}");
+    assert!(named.contains("return:2"), "{named}");
     // And not a role it does not have: src/a.js is not watched here, test.js is.
     assert!(!named.contains("watched"), "{named}");
 }
@@ -1283,19 +1301,19 @@ fn a_watched_file_is_named_as_watched() {
     assert!(!named.contains("holds this flow's"), "{named}");
 }
 
-/// B19: a node that did not move, in a file that changed elsewhere, is
+/// B19: a node that did not move, in a file that changed elsewhere, was
 /// reported as "changed or ambiguous" -- a false statement about that node.
 ///
-/// `relocate` has one fast path, for a file that did not change at all. Once
-/// the file changes anywhere, every node in it is re-found by searching the
+/// `relocate` had one fast path, for a file that did not change at all. Once
+/// the file changed anywhere, every node in it was re-found by searching the
 /// whole file for its text, and that search insists the text be unique. A node
-/// whose statement appears twice in its file therefore fails to relocate even
-/// though it sits at the same line, byte for byte, untouched by the edit.
+/// whose statement appears twice in its file therefore failed to relocate even
+/// though it sat at the same line, byte for byte, untouched by the edit.
 #[test]
 fn a_node_that_did_not_move_is_not_ambiguous() {
     let (mut inputs, mut map, mut state) = fixture();
     // Two identical statements: the node's text is no longer unique.
-    let source = "return 1;\nreturn 1;\n";
+    let source = "export function a() {\n  return 1;\n}\nexport function b() {\n  return 1;\n}\n";
     inputs.files.insert("src/a.js".into(), source.into());
     state.inputs_digest = inputs.identity();
     // The flow's node is the first of them, and nothing watches the file, so
@@ -1305,14 +1323,13 @@ fn a_node_that_did_not_move_is_not_ambiguous() {
     acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
     assert_eq!(current(&map, &state, &inputs), 2, "fresh to begin with");
 
-    // An edit at the end of the file. The node is above it and untouched.
+    // A comment at the end of the file. The node is above it and untouched.
     let mut new = inputs.clone();
     new.files
         .get_mut("src/a.js")
         .unwrap()
         .push_str("// a comment, far below the node\n");
     let (next, next_state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
-
     let a = &next.assertions[0];
     let f = &a.flows[0];
     let why = reasons(a, f, &next, &next_state, &new);
@@ -1320,12 +1337,136 @@ fn a_node_that_did_not_move_is_not_ambiguous() {
         !why.iter().any(|r| r.contains("node")),
         "no reason may name a node that did not move: {why:?}"
     );
-    // The flow is still stale, for `dependency file changed or removed`.
-    // Fixing the false message does not save the review: the digest of any
-    // file holding a node governs, whatever the node itself did. That half is
-    // a deliberate design decision and is recorded as such in B19.
+    // A comment cannot change what the file does, so the review is saved.
+    assert!(why.is_empty(), "a comment invalidates nothing: {why:?}");
     assert!(
-        why.iter().any(|r| r.contains("dependency file changed")),
-        "the file-level signal is what still costs the review: {why:?}"
+        next_state.flows[&flow_key(a, f)].notices.is_empty(),
+        "nor is there anything to notice"
     );
+
+    // An edit inside the other function: outside this flow's nodes, so a
+    // notice, not a review. With no record of what the test ran, the change
+    // is recorded for assessment with this flow among the exposed.
+    let mut new = inputs.clone();
+    new.files.insert(
+        "src/a.js".into(),
+        source.replace(
+            "export function b() {\n  return 1;",
+            "export function b() {\n  return 1 + 1;",
+        ),
+    );
+    let (next, next_state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
+    let a = &next.assertions[0];
+    let f = &a.flows[0];
+    let why = reasons(a, f, &next, &next_state, &new);
+    assert!(why.is_empty(), "b is not this flow's business: {why:?}");
+    let notices = &next_state.flows[&flow_key(a, f)].notices;
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices.iter().next().unwrap().contains("b (line 4)"),
+        "{notices:?}"
+    );
+    let change = next_state
+        .changes
+        .iter()
+        .find(|c| c.file.as_deref() == Some("src/a.js"))
+        .expect("a change to assess");
+    assert!(change.known_flows.is_empty(), "nothing was made stale");
+    assert!(change.exposed.contains(&flow_key(a, f)), "{change:?}");
+
+    // With the record -- the test ran `a` and nothing else here -- the same
+    // edit cannot have reached any selected test. Nothing to assess at all.
+    let mut recorded = state.clone();
+    recorded.executions = Some(executions_running(&inputs, "src/a.js", &["a"]));
+    let (next, next_state) =
+        carry(&map, &recorded, &inputs.manifest(), &new, "new", false).unwrap();
+    let a = &next.assertions[0];
+    let f = &a.flows[0];
+    assert!(reasons(a, f, &next, &next_state, &new).is_empty());
+    assert_eq!(next_state.flows[&flow_key(a, f)].notices.len(), 1);
+    assert!(next_state.changes.is_empty(), "{:?}", next_state.changes);
+
+    // And when the record says the test ran `b`, the flow is exposed to the
+    // change -- asked about, still not made stale.
+    let mut recorded = state.clone();
+    recorded.executions = Some(executions_running(&inputs, "src/a.js", &["a", "b"]));
+    let (next, next_state) =
+        carry(&map, &recorded, &inputs.manifest(), &new, "new", false).unwrap();
+    let a = &next.assertions[0];
+    let f = &a.flows[0];
+    assert!(reasons(a, f, &next, &next_state, &new).is_empty());
+    assert_eq!(next_state.changes.len(), 1);
+    assert!(next_state.changes[0].exposed.contains(&flow_key(a, f)));
+}
+
+/// An execution record saying the fixture's one test ran exactly the named
+/// declarations of one file, every code unit of which holds a probe.
+fn executions_running(inputs: &Inputs, file: &str, ran: &[&str]) -> Executions {
+    let manifest = inputs.manifest();
+    let code = manifest.files[file].code.as_ref().expect("parsable");
+    let index = |path: &str| {
+        code.units
+            .iter()
+            .position(|u| u.path == path)
+            .unwrap_or_else(|| panic!("no unit {path}"))
+    };
+    Executions {
+        tests: vec![Execution {
+            test: TestSelector {
+                file: "test.js".into(),
+                name: "test".into(),
+            },
+            passed: true,
+            files: [(file.to_owned(), ran.iter().map(|p| index(p)).collect())].into(),
+        }],
+        probed: [(
+            file.to_owned(),
+            code.units
+                .iter()
+                .enumerate()
+                .filter(|(_, u)| u.is_code())
+                .map(|(i, _)| i)
+                .collect(),
+        )]
+        .into(),
+    }
+}
+
+/// The edits that change nothing a program can observe leave an acknowledged
+/// claim acknowledged, wherever they land: above the node, inside its
+/// declaration, in the test file.
+#[test]
+fn comments_and_blank_lines_anywhere_leave_an_acknowledgement_standing() {
+    let (mut inputs, mut map, mut state) = fixture();
+    let source = "export function a() {\n  const x = 1;\n  return 1;\n}\n";
+    inputs.files.insert("src/a.js".into(), source.into());
+    state.inputs_digest = inputs.identity();
+    map.assertions[0].flows[0].nodes[0].at = anchor("src/a.js", source, "return 1;");
+    map.assertions[0].flows[0].watch = vec![];
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    let mut new = inputs.clone();
+    new.files.insert(
+        "src/a.js".into(),
+        format!(
+            "// a header comment\n\n{}",
+            source.replace(
+                "  const x = 1;",
+                "  // about x\n\n  const x = 1; // trailing"
+            )
+        ),
+    );
+    let test = new.files["test.js"].clone();
+    new.files
+        .insert("test.js".into(), format!("// about this test\n\n{test}"));
+    for site in &mut new.assertions {
+        site.at.line += 2;
+    }
+    let (next, next_state) = carry(&map, &state, &inputs.manifest(), &new, "new", false).unwrap();
+    let a = &next.assertions[0];
+    let f = &a.flows[0];
+    assert_eq!(f.nodes[0].at.line, 7, "the node followed its statement");
+    assert_eq!(a.at.line, 4, "so did the assertion");
+    let why = reasons(a, f, &next, &next_state, &new);
+    assert!(why.is_empty(), "{why:?}");
+    assert!(next_state.changes.is_empty(), "{:?}", next_state.changes);
 }

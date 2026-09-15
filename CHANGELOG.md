@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.51
+
+**Added**
+
+- `supercov runs <id> tests affected` names the tests of a run that the changes since it could have reached: a change in code the test ran, in its test file, or in the shape of a file it ran code in. A change confined to code the test never ran does not count, nor do comments, blank lines or trailing whitespace. `--names` and `--files` print one line per test for a runner's filter; a dependency, configuration or toolchain change affects every test and says so; a file added since the run is outside every record, and the working-tree check says that too.
+- Each run records what every test executed, declaration by declaration, in the run's own state. Assertion change records name the flows whose selected tests ran the changed code as `exposed`, alongside the `knownFlows` the change made stale, so the one assessment a change asks for is asked of the right people -- and a change no selected test ran is not asked about at all.
+
+**Changed**
+
+- An acknowledged assertion flow now goes stale for a change to what its claim rests on and for nothing else: the declaration holding each of its nodes and the top level of that file, the file's set of declarations, the test it applies to, a watched file, its assertion, the run's context. Editing another function in a node's file is a notice on the flow (`notices` in the report), not a review. Editing a comment, a blank line or trailing whitespace is nothing, in every language; a comment the language itself reads -- a Go `//go:` directive, a Ruby magic comment, a Rust doctest -- still counts. Each reason names what moved and where the flow sits: `src/server.js: Server.start (line 12) changed (holds this flow's return:31)`.
+- A node keeps its acknowledgement when code is added or removed above it, in another declaration or in comments; pointing it at another statement of the same text does not.
+- Acknowledgement tokens are now `scov3:` and pin the code a claim rests on rather than the bytes of whole files. Tokens from earlier releases still parse; each such flow reads as needing acknowledgement, with that as its reason, once. Copy the current `expectedBasis` after rereading the claim.
+
+**Fixed**
+
+- A node whose statement appears twice in its file was reported "changed or ambiguous" whenever the file changed anywhere, though it sat untouched at its recorded line.
+
 ## 0.0.50
 
 **Added**

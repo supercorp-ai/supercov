@@ -107,12 +107,35 @@ token stale.
 
 ### What makes a review token stale
 
-A flow needs a fresh review when its claim changes, when a file it watches or a
-test it selects changes, or when the configuration that decides what executes
-changes: a transpiler, a test runner, an interpreter pin.
+A flow needs a fresh review when its claim changes; when a declaration holding
+one of its nodes changes -- the function, method or class the node sits in, or
+the top level of that file, its imports and constants; when that file's set of
+declarations changes, one added, removed or renamed; when a file it watches, a
+test it selects or its assertion's file changes; or when the configuration
+that decides what executes changes: a transpiler, a test runner, an
+interpreter pin.
+
+Each reason names what moved -- `src/server.js: Server.start (line 12)
+changed (holds this flow's return:31)` -- so you can look rather than reread.
 
 Several things that sound like they should count do not, because an
 acknowledgement demanded for all of them at once stops being read.
+
+Comments do not, nor blank lines or trailing whitespace: no program can tell.
+A comment the language itself reads is the exception and does count -- a Go
+`//go:embed` directive, a Ruby magic comment, a Rust doctest.
+
+A change to another declaration in a node's file does not. The claim rests on
+the code it names; the rest of the file is the author's to name in `watch` if
+it matters. Such a change is a notice on the flow (`notices` in the report),
+not a review, and it is asked about once, as a change to assess.
+
+Code the flow's test ran elsewhere does not make the flow stale either. A claim
+does not pass through every function its test happened to execute. What each
+test ran is recorded, and a changed file names the flows whose tests ran the
+changed code as `exposed` on its change record, so the one assessment the
+change asks for is asked of the right people -- and a change no selected test
+ran is not asked about at all.
 
 Cutting a release does not. A manifest is fingerprinted by what it declares, so
 a version number moving in `package.json`, `Cargo.toml`, `pyproject.toml` or a
@@ -233,11 +256,13 @@ Run the same test command again, then edit the new run's map. Supercov carries
 forward compatible mappings and leaves the previous run unchanged. If a newer
 map cannot be reused, `inheritance.skipped` explains the fallback.
 
-Each flow depends on its assertion file, selected test files, node files and
-extra `watch` files. A change to any of those files requires another look at that
-flow, even if only a comment changed. Independent sibling flows can stay current.
-Changing the assertion or its observation affects all its flows. Dependency,
-configuration and instrumentation changes can affect many flows.
+Each flow depends on the declarations holding its nodes and the top level of
+their files, on its assertion file, its selected test files and its extra
+`watch` files. A change to any of those requires another look at that flow;
+a comment, a blank line or another declaration's body does not. Independent
+sibling flows stay current. Changing the assertion or its observation affects
+all its flows. Dependency, configuration and instrumentation changes can
+affect many flows.
 
 Start with `assertions report --view changes`. Investigate every listed change,
 including effects on flows that did not yet watch the changed file. Add a
@@ -255,9 +280,11 @@ response in the map's top-level `changeAssessments` array:
 ```
 
 This is an excerpt to add to your existing map. Include every entry in `knownFlows`
-that still exists and any additional affected flows. An empty list needs an
-explanation of why existing claims are unaffected; it does not mean the changed
-code is tested.
+that still exists and any additional affected flows. `knownFlows` are the flows
+the change has already made stale. `exposed` are the flows whose selected tests
+ran the changed code -- not stale for it, but the ones to think about; add the
+ones the change actually reaches. An empty list needs an explanation of why
+existing claims are unaffected; it does not mean the changed code is tested.
 
 Save the assessments and graph edits, validate, and copy the examined change
 tokens. Save again, then validate once more before copying final flow tokens.

@@ -110,7 +110,7 @@
             "string",
             "null"
           ],
-          "pattern": "^scov2:[0-9a-f]{64}$"
+          "pattern": "^scov[23]:[0-9a-f]{64}$"
         },
         "explanation": {
           "type": "string"
@@ -236,7 +236,7 @@
             "string",
             "null"
           ],
-          "pattern": "^scov2:[0-9a-f]{64}$"
+          "pattern": "^scov[23]:[0-9a-f]{64}$"
         },
         "affectedFlows": {
           "type": "array",
