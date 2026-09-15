@@ -76,6 +76,7 @@ function installRuntime(target) {
       };
     },
     coverageHitV2() {},
+    renderedValueV2(_file, _index, value) { return value; },
     mcdcEndV2(_file, _index, _encoded, value) {
       return value;
     },
@@ -157,6 +158,7 @@ const runtimeExports = [
   "registerProbeV2",
   "mcdcEndV2",
   "coverageHitV2",
+  "renderedValueV2",
   "selectionBegin",
   "selectionRight",
   "selectionEnd",
@@ -290,6 +292,7 @@ async function runBrowser(name) {
               mcdcEnd(_frame, value) { return value; },
               registerProbeV2(definition) { return { ...definition, clock: { epoch: 1, fast: true }, hitEpochs: new Uint32Array(definition.pointIds.length), decisionEpochs: definition.decisions.map((meta) => meta.conditions.length <= 6 ? new Uint32Array(2 * 3 ** meta.conditions.length) : new Map()), decisionVectorCounts: definition.decisions.map((_meta, definitionIndex) => definition.decisionVectorCounts?.[definitionIndex] ?? 0), decisionObservationEpochs: new Uint32Array(definition.decisions.length), decisionObservationCounts: new Uint16Array(definition.decisions.length), decisionCompleteEpochs: new Uint32Array(definition.decisions.length) }; },
               coverageHitV2() {},
+              renderedValueV2(_file, _index, value) { return value; },
               mcdcEndV2(_file, _decisionIndex, _encoded, value) { return value; },
               selectionBegin(shortId, rightId) { return { shortId, rightId, rightEvaluated: false }; },
               selectionRight(frame, value, inferredName) { frame.rightEvaluated = true; return applyInferredName(value, inferredName); },
