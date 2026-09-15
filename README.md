@@ -136,16 +136,22 @@ The denominator comes from source structure before the run, so adding or removin
 
 ## Install for your language
 
-The same binary ships through each language's own package manager, at the same version, from one release:
+Measuring a project should not start by installing another language. The same binary, at the same version, from one release:
 
 ```bash
-npx supercov -- npm test                          # npm
-uvx --from supercov-cli supercov -- pytest        # PyPI
-gem install supercov && supercov -- bundle exec rspec   # RubyGems
-cargo binstall supercov && supercov -- cargo test  # crates.io
+npx supercov -- npm test                                 # npm
+uvx --from supercov-cli supercov -- pytest               # PyPI
+gem install supercov && supercov -- bundle exec rspec    # RubyGems
+cargo binstall supercov && supercov -- cargo test        # crates.io
+go run github.com/supercorp-ai/supercov/cmd/supercov@latest -- go test ./...   # Go
+brew install supercorp-ai/tap/supercov && supercov -- ./gradlew test           # Homebrew
 ```
 
 `pip install supercov-cli` and `gem install supercov` install a wheel or gem that carries the binary for your platform; nothing is compiled. `cargo binstall` downloads that same binary from the GitHub release, while plain `cargo install supercov` builds it from source and needs Rust 1.95.
+
+A Go project needs Go and nothing else. Like any `go run` with a version suffix it resolves by module path and ignores the `go.mod` in your current directory, so it neither needs nor touches your module.
+
+Java and Kotlin have no registry of their own here, so a JVM project takes the binary directly -- Homebrew above, `npx` if Node is already present, or the platform archive from the [latest release](https://github.com/supercorp-ai/supercov/releases/latest). Maven and Gradle are driven as your test command, not as a plugin. Supercov adds the JUnit Platform launcher its measurement needs to the build file inside its own isolated workspace copy -- your `pom.xml` or `build.gradle` is never edited.
 
 ## Supported languages
 
@@ -156,7 +162,7 @@ cargo binstall supercov && supercov -- cargo test  # crates.io
 | Rust | Available | `npx supercov -- cargo test` |
 | Python | Available | `npx supercov -- pytest` |
 | Ruby | Available | `npx supercov -- rspec` |
-| Go | Available | `npx supercov -- go test ./...` |
+| Go | Available | `go run github.com/supercorp-ai/supercov/cmd/supercov@latest -- go test ./...` |
 | Java | Available | `npx supercov -- mvn test` |
 | Kotlin | Available | `npx supercov -- ./gradlew test` |
 | Zig | Coming soon | — |
