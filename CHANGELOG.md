@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- Vitest Browser Mode is measured per test, like any other Vitest run. A browser-mode project collected no tests at all: Supercov injected its node setup, which reaches `node:fs`, and Vite externalises that for the client, so the suite failed before a single test was collected. Browser mode now gets a setup that can run in a browser, and its evidence travels over Vitest's own browser command channel -- awaited as part of the test, with the test file taken from Vitest rather than from the browser realm, and working for every provider.
+- An expression rendered inside JSX is measured on its own. A JSX tree is a single statement, so `aria-label={label(state)}` and a child `{formatted(value)}` were counted as covered the moment the component rendered once, even when the expression never evaluated. It is also the seam a UI assertion attaches to: with one statement for the whole tree, `toHaveAccessibleName` naming the attribute and `toHaveTextContent` naming the child could not be told apart, and neither could be credited. Only expressions that can independently fail to evaluate become obligations -- `{value}` is reached exactly when the tree is, and `onClick={() => save()}` is measured where the handler is called rather than where it is created.
+- `expect.element(...)`, `expect.soft(...)` and `expect.poll(...)` are recognised as assertions. The chain root is a member call rather than a bare `expect`, which left every Vitest Browser Mode UI assertion without a passing occurrence and so unable to earn credit.
+
+**Upgrading**
+
+- A project with JSX gains obligations for the expressions rendered inside it, so its line and statement percentages move. Measured on three React codebases, the obligation count grew 2.3%, 5.5% and 9.5%; roughly four in five containers earn nothing. A project sitting at 100% may drop: the expressions it gains were being reported as covered without evidence that they ever evaluated.
+
 ## 0.0.53
 
 **Fixed**
