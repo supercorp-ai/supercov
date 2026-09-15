@@ -1042,11 +1042,20 @@ pub fn validation(map: &AssertionMap, state: &State, inputs: &Inputs) -> serde_j
             errors.push(format!("{}: unknown change assessment", r.id));
         }
     }
+    // Exposure is kept per flow but read per test: hundreds of flow keys say
+    // less than the dozen tests they apply to, and cost more to page.
+    let selectors = map
+        .assertions
+        .iter()
+        .flat_map(|a| a.flows.iter().map(move |f| (flow_key(a, f), &f.applies_to)))
+        .collect::<BTreeMap<_, _>>();
     let changes = state.changes.iter().map(|c| {
         let response = map.change_assessments.iter().find(|r| r.id == c.id);
         let faults = response.map(|r| ledger.change_errors(c, r)).unwrap_or_default();
         errors.extend(faults.iter().map(|e| format!("{}: {e}", c.id)));
-        json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,"knownFlows":c.known_flows,"exposed":c.exposed,
+        let tests = c.exposed.iter().filter_map(|k| selectors.get(k)).flat_map(|t| t.iter()).collect::<BTreeSet<_>>();
+        json!({"id":c.id,"file":c.file,"before":c.before,"after":c.after,"reason":c.reason,"knownFlows":c.known_flows,
+            "exposed":{"flows":c.exposed.len(),"tests":tests,"sample":c.exposed.iter().take(8).collect::<Vec<_>>()},
             "current":ledger.current(&c.id),"assessment":response,"errors":faults,
             "expectedBasis":response.map(|r| ledger.expected_change_basis(c,r))})
     }).collect::<Vec<_>>();

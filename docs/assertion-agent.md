@@ -99,9 +99,9 @@ back into the map.
 ## Assess changes before renewing flows
 
 When inheriting a map, read every entry in `--view changes`. Each names the
-flows it already made stale (`knownFlows`) and the flows whose selected tests
-ran the changed code (`exposed`); start with those, and investigate whether
-other flows are affected too. A flow's own `notices` list changes near its
+flows it already made stale (`knownFlows`) and, under `exposed`, the tests that
+ran the changed code and how many flows they carry; start with those, and
+investigate whether other flows are affected too. A flow's own `notices` list changes near its
 nodes that could not have reached it.
 
 Add a `changeAssessments` entry for each managed change ID. Include all listed

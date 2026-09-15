@@ -132,8 +132,8 @@ not a review, and it is asked about once, as a change to assess.
 
 Code the flow's test ran elsewhere does not make the flow stale either. A claim
 does not pass through every function its test happened to execute. What each
-test ran is recorded, and a changed file names the flows whose tests ran the
-changed code as `exposed` on its change record, so the one assessment the
+test ran is recorded, and a changed file's change record says which tests ran
+the changed code and how many flows that exposes, so the one assessment the
 change asks for is asked of the right people -- and a change no selected test
 ran is not asked about at all.
 
@@ -281,9 +281,9 @@ response in the map's top-level `changeAssessments` array:
 
 This is an excerpt to add to your existing map. Include every entry in `knownFlows`
 that still exists and any additional affected flows. `knownFlows` are the flows
-the change has already made stale. `exposed` are the flows whose selected tests
-ran the changed code -- not stale for it, but the ones to think about; add the
-ones the change actually reaches. An empty list needs an explanation of why
+the change has already made stale. `exposed` counts the flows whose selected
+tests ran the changed code and names those tests -- not stale for it, but the
+ones to think about; add the flows the change actually reaches. An empty list needs an explanation of why
 existing claims are unaffected; it does not mean the changed code is tested.
 
 Save the assessments and graph edits, validate, and copy the examined change
