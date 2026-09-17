@@ -290,6 +290,12 @@ assessment duration and token usage. `usage_this_run` counts successful fresh re
 cache hits; it cannot account for provider billing on failed attempts. Full
 source and API credentials are not written to the cache.
 
+A scan prepares every request first and then sends eight at a time, so its
+speed is set by the provider rather than by the file count: Supercov's own 141
+source files, about 5 MB, take 24 seconds and $0.085 cold, and 7 seconds and
+nothing when every answer is already cached. Wider scopes are judged after the
+files and in order, since each one reads the verdicts below it.
+
 Exit status is 0 for a completed report (including review flags and uncertain judgments), or 2 for
 invalid input or any file/API error. Partial results remain in the report. Low
 grades do not fail the command. HTTP 429 and 5xx responses receive at most two

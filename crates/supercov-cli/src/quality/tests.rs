@@ -1662,3 +1662,58 @@ fn a_declaration_small_enough_to_send_stays_one_split_point() {
         .collect();
     assert_eq!(named, vec!["Small", "Other"]);
 }
+
+#[test]
+fn every_request_gets_its_own_answer_back_when_they_are_sent_together() {
+    let temp = Temp::new();
+    // Twenty cached answers, so the whole batch resolves without a network or a
+    // key, and each one is distinguishable by its own source.
+    let mut pending = Vec::new();
+    for index in 0..20 {
+        let source = format!("export const value{index} = {index};");
+        let path = format!("src/file{index}.ts");
+        let request = request(&path, &source, None);
+        let bytes = serde_json::to_vec(&request).unwrap();
+        let hash = digest(&bytes);
+        let mut response = response(&request);
+        // Each answer carries a different overall level, so a mixed-up slot
+        // would show as the wrong grade rather than passing unnoticed.
+        at_level(&mut response, "overall", index % 5);
+        validate(&response, &request).unwrap();
+        save(
+            &store::responses(&temp.0).join(format!("{hash}.json")),
+            &CacheEntry {
+                request_hash: hash,
+                response,
+                elapsed_ms: 1,
+            },
+        )
+        .unwrap();
+        pending.push(((index, None), request, bytes));
+    }
+    let answered = answer_all(&temp.0, &client(), None, false, &pending, false);
+    assert_eq!(answered.len(), pending.len(), "one answer per request");
+    for (index, _) in pending.iter().enumerate().take(20) {
+        let (_, entry, hit, _) = answered[&(index, None)].as_ref().unwrap();
+        assert!(hit, "every answer came from the cache");
+        let Answer::Score { score, .. } = entry.response.answers["overall_score"] else {
+            unreachable!("a validated score")
+        };
+        assert_eq!(
+            score,
+            (index % 5) as f64,
+            "answer {index} landed in its own slot"
+        );
+    }
+    // A request with no cached answer and no key fails on its own, without
+    // taking its neighbours down.
+    let missing = request("src/absent.ts", "export const absent = 1;", None);
+    let bytes = serde_json::to_vec(&missing).unwrap();
+    pending.push(((99, None), missing, bytes));
+    let answered = answer_all(&temp.0, &client(), None, false, &pending, false);
+    assert!(answered[&(99, None)].is_err());
+    assert_eq!(
+        answered.values().filter(|answer| answer.is_ok()).count(),
+        20
+    );
+}

@@ -1132,6 +1132,68 @@ fn graded(
     value
 }
 
+/// How many requests are in flight at once. A scan spends nearly all its time
+/// waiting on the provider, which allows 1,200 requests a minute, so a handful
+/// in flight turns minutes into seconds while staying well inside that. Each
+/// answer is saved under its own request hash, so no two threads ever write the
+/// same file.
+const CONCURRENCY: usize = 8;
+
+/// A request answered: its hash, the answer, whether it came from the cache,
+/// and any trouble saving it.
+type Answered = Result<(String, CacheEntry, bool, Option<String>), String>;
+
+/// One file, ready to send, or the reason it cannot be.
+enum Planned {
+    Failed(Value),
+    Ready(String, Identity, Prepared),
+}
+
+/// Which request an answer belongs to: a file, and a window within it when the
+/// file was too large to send whole.
+type Slot = (usize, Option<usize>);
+
+/// Answer every prepared request, a few at a time.
+fn answer_all(
+    root: &Path,
+    agent: &ureq::Agent,
+    key: Option<&str>,
+    refresh: bool,
+    pending: &[(Slot, Value, Vec<u8>)],
+    progress: bool,
+) -> BTreeMap<Slot, Answered> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let finished = AtomicUsize::new(0);
+    let answers = std::sync::Mutex::new(BTreeMap::new());
+    std::thread::scope(|scope| {
+        for _ in 0..CONCURRENCY.min(pending.len()) {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((slot, request, bytes)) = pending.get(index) else {
+                        return;
+                    };
+                    let hash = digest(bytes);
+                    let answered = resolve(root, agent, key, refresh, request, &hash)
+                        .map(|(entry, hit, warning)| (hash, entry, hit, warning));
+                    if progress {
+                        let count = finished.fetch_add(1, Ordering::Relaxed) + 1;
+                        eprintln!("[supercov] quality: {count}/{}", pending.len());
+                    }
+                    answers
+                        .lock()
+                        .expect("answers are only locked to insert one")
+                        .insert(*slot, answered);
+                }
+            });
+        }
+    });
+    answers
+        .into_inner()
+        .expect("answers are only locked to insert one")
+}
+
 fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool), String> {
     let paths = discover(root, &options.paths)?;
     let context = options
@@ -1140,22 +1202,11 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
         .map(|p| read_text(&root.join(p)))
         .transpose()?;
     let agent = client();
-    let mut files = Vec::new();
-    let mut requests = Vec::new();
     let mut errors = false;
-    let mut input_tokens = 0;
-    let mut output_tokens = 0;
-    let mut answer = |request: &Value,
-                      bytes: &[u8]|
-     -> Result<(String, CacheEntry, bool, Option<String>), String> {
-        let hash = digest(bytes);
-        let (entry, hit, warning) = resolve(root, &agent, key, options.refresh, request, &hash)?;
-        if !hit {
-            input_tokens += entry.response.usage.input_tokens;
-            output_tokens += entry.response.usage.output_tokens;
-        }
-        Ok((hash, entry, hit, warning))
-    };
+
+    // Everything is prepared before anything is sent, so the requests can go
+    // out together rather than one file at a time.
+    let mut planned = Vec::new();
     for path in paths {
         let relative = path
             .strip_prefix(root)
@@ -1208,47 +1259,86 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
                 .collect::<Result<Vec<_>, String>>()?;
             Ok((identity, Prepared::Windows(windows)))
         });
-        let (identity, prepared) = match prepared {
-            Ok(value) => value,
+        planned.push(match prepared {
+            Ok((identity, prepared)) => Planned::Ready(relative, identity, prepared),
             Err(error) => {
                 errors = true;
-                files.push(json!({"path": relative, "status": "error", "error": error}));
-                continue;
+                Planned::Failed(json!({"path": relative, "status": "error", "error": error}))
             }
-        };
-        if options.dry_run {
-            match prepared {
-                Prepared::Whole(request, bytes) => requests.push(
-                    json!({"path": relative, "request_hash": digest(&bytes), "request": request}),
+        });
+    }
+
+    if options.dry_run {
+        let mut requests = Vec::new();
+        let mut failures = Vec::new();
+        for item in &planned {
+            match item {
+                Planned::Failed(entry) => failures.push(entry.clone()),
+                Planned::Ready(relative, _, Prepared::Whole(request, bytes)) => requests.push(
+                    json!({"path": relative, "request_hash": digest(bytes), "request": request}),
                 ),
-                Prepared::Windows(windows) => {
+                Planned::Ready(relative, _, Prepared::Windows(windows)) => {
                     for (window, built) in windows {
                         match built {
                             Ok((request, bytes)) => requests.push(json!({"path": relative,
-                                "window": window, "request_hash": digest(&bytes), "request": request})),
+                                "window": window, "request_hash": digest(bytes), "request": request})),
                             Err(error) => {
                                 errors = true;
-                                files.push(json!({"path": relative, "window": window,
+                                failures.push(json!({"path": relative, "window": window,
                                     "status": "error", "error": error}));
                             }
                         }
                     }
                 }
             }
+        }
+        return Ok((
+            json!({"schema_version": 3, "dry_run": true, "requests": requests, "errors": failures}),
+            errors,
+        ));
+    }
+
+    let mut pending: Vec<(Slot, Value, Vec<u8>)> = Vec::new();
+    for (index, item) in planned.iter().enumerate() {
+        let Planned::Ready(_, _, prepared) = item else {
             continue;
-        }
-        if !options.json {
-            eprintln!("[supercov] quality: {relative}");
-        }
-        let mut assess_one = |request: &Value, bytes: &[u8]| -> Result<Value, String> {
-            let (hash, entry, hit, warning) = answer(request, bytes)?;
-            Ok(graded(&entry, &hash, hit, options.review_below, warning))
         };
         match prepared {
-            Prepared::Whole(request, bytes) => match assess_one(&request, &bytes) {
+            Prepared::Whole(request, bytes) => {
+                pending.push(((index, None), request.clone(), bytes.clone()));
+            }
+            Prepared::Windows(windows) => {
+                for (position, (_, built)) in windows.iter().enumerate() {
+                    if let Ok((request, bytes)) = built {
+                        pending.push(((index, Some(position)), request.clone(), bytes.clone()));
+                    }
+                }
+            }
+        }
+    }
+    let mut answered = answer_all(root, &agent, key, options.refresh, &pending, !options.json);
+
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut take = |slot: &Slot| -> Result<Value, String> {
+        let (hash, entry, hit, warning) = answered
+            .remove(slot)
+            .unwrap_or_else(|| Err("no answer was produced for this request".to_owned()))?;
+        if !hit {
+            input_tokens += entry.response.usage.input_tokens;
+            output_tokens += entry.response.usage.output_tokens;
+        }
+        Ok(graded(&entry, &hash, hit, options.review_below, warning))
+    };
+
+    let mut files = Vec::new();
+    for (index, item) in planned.into_iter().enumerate() {
+        match item {
+            Planned::Failed(entry) => files.push(entry),
+            Planned::Ready(relative, identity, Prepared::Whole(..)) => match take(&(index, None)) {
                 Ok(graded) => {
                     let mut entry = json!({"path": relative, "source_hash": identity.source_hash,
-                        "bytes": identity.bytes, "declarations": identity.declarations});
+                            "bytes": identity.bytes, "declarations": identity.declarations});
                     merge(&mut entry, graded);
                     files.push(entry);
                 }
@@ -1257,11 +1347,11 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
                     files.push(json!({"path": relative, "status": "error", "error": error}));
                 }
             },
-            Prepared::Windows(windows) => {
+            Planned::Ready(relative, identity, Prepared::Windows(windows)) => {
                 let mut assessed = Vec::new();
-                for (window, built) in windows {
+                for (position, (window, built)) in windows.into_iter().enumerate() {
                     let mut entry = serde_json::to_value(&window).map_err(|e| e.to_string())?;
-                    match built.and_then(|(request, bytes)| assess_one(&request, &bytes)) {
+                    match built.and(take(&(index, Some(position)))) {
                         Ok(graded) => merge(&mut entry, graded),
                         Err(error) => {
                             errors = true;
@@ -1293,12 +1383,16 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
             }
         }
     }
-    if options.dry_run {
-        return Ok((
-            json!({"schema_version": 3, "dry_run": true, "requests": requests, "errors": files}),
-            errors,
-        ));
-    }
+    let mut answer = |request: &Value, bytes: &[u8]| -> Answered {
+        let hash = digest(bytes);
+        let (entry, hit, warning) = resolve(root, &agent, key, options.refresh, request, &hash)?;
+        if !hit {
+            input_tokens += entry.response.usage.input_tokens;
+            output_tokens += entry.response.usage.output_tokens;
+        }
+        Ok((hash, entry, hit, warning))
+    };
+
     // Every wider scope is judged only once every file below it has been, so
     // each of those requests carries verdicts rather than the source beneath them.
     let (aggregates, aggregate_warning) =
