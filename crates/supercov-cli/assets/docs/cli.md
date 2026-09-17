@@ -199,6 +199,42 @@ Declarations carry no review markers either, for the same reason wider scopes
 do not: the two cutoffs were selected on whole human-rated classes. The Python
 transfer that came closest to this scope was explicitly exploratory.
 
+### Compare two snapshots
+
+```sh
+supercov quality diff q_332dd8d1bfd149f1 q_c0e9a3aba4f77eb8
+```
+
+Only snapshots of the same rubric, policy version and model can be compared;
+anything else would compare two different questions and call the difference a
+change in the code. The comparison sorts files into four groups, because they
+mean different things:
+
+- **Changed source.** The file's bytes differ, so a movement may be the edit.
+- **Same source, different grade.** An identical request is answered from
+  cache, so this only happens after `--refresh`: it is one question asked
+  twice, not a change in the code, and it is labelled that way.
+- **Newly assessed declarations.** A deepened child snapshot, where no grade
+  changed and grades were added.
+- **Unchanged.** Counted, not listed.
+
+Every movement carries its own size, and one no larger than **0.7** is marked
+as within the repeat variation measured for this rubric. That number is the
+largest difference seen between two identical requests when this rubric family
+was measured on real files, across 28 source snapshots and 8 constructs, where
+the median difference was 0.075. It is an observed maximum rather than a
+statistical threshold, and it is attached to a movement rather than hiding it.
+
+A real example: renaming a function's locals to single letters and deleting its
+error log moved readability by -2.67 and failure handling by -1.67, while five
+other constructs moved less than the repeat variation and were marked as such.
+The repository grade above that file moved -0.03, which is what one file out of
+twenty-two should do.
+
+Declarations are compared by name, so a declaration added or removed is
+reported, and one that was renamed reads as one of each. Nothing here detects a
+rename, because a snapshot stores the hash of its source rather than the source.
+
 Validated raw responses are cached in `.supercov/quality/requests/`, keyed by
 the exact request hash, including source, comments, context, model and question
 wording. Responses cached by an earlier version in `.supercov/quality/` itself
@@ -219,8 +255,8 @@ Exit status is 0 for a completed report (including review flags and uncertain ju
 invalid input or any file/API error. Partial results remain in the report. Low
 grades do not fail the command. HTTP 429 and 5xx responses receive at most two
 retries with bounded backoff; long retry delays are returned to the caller.
-Line locations within a declaration, changed-file selection, snapshot
-comparison and failing CI grade gates are not implemented yet.
+Line locations within a declaration, changed-file selection and failing CI
+grade gates are not implemented yet.
 
 ## Measure a test command
 

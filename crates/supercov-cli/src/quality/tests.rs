@@ -1444,3 +1444,132 @@ fn a_declaration_request_names_every_declaration_it_asks_about() {
         );
     }
 }
+
+#[test]
+fn a_diff_shows_what_changed_and_marks_movements_repeat_variation_explains() {
+    let temp = Temp::new();
+    let before = "export function alpha() {\n  return 1;\n}\n";
+    temp.write("src/a.ts", before);
+    seed(&temp, "src/a.ts", before, |response| {
+        at_level(response, "maintainability", 1);
+        at_level(response, "readability", 1);
+    });
+    let options = Options {
+        paths: vec!["src".into()],
+        json: true,
+        ..Default::default()
+    };
+    // One file has no wider scope, so this scan completes from the cache alone.
+    let (first, errors) = run(&temp.0, &options, None).unwrap();
+    assert!(!errors);
+    let from = first["id"].as_str().unwrap().to_owned();
+
+    let after =
+        "export function alpha() {\n  return 1;\n}\n\nexport function gamma() {\n  return 3;\n}\n";
+    temp.write("src/a.ts", after);
+    seed(&temp, "src/a.ts", after, |response| {
+        at_level(response, "maintainability", 2);
+        at_level(response, "readability", 1);
+    });
+    let (second, errors) = run(&temp.0, &options, None).unwrap();
+    assert!(!errors);
+    let to = second["id"].as_str().unwrap().to_owned();
+
+    let view = query::diff(&temp.0, &from, &to, 0).unwrap();
+    assert_eq!(view["files"]["in_both"], 1);
+    assert_eq!(view["files"]["changed_source"], 1);
+    assert_eq!(view["files"]["unchanged"], 0);
+    assert!(view["files"]["regraded"].as_array().unwrap().is_empty());
+    let changed = &view["files"]["changed"][0];
+    assert_eq!(changed["path"], "src/a.ts");
+    // Maintainability moved a level; readability stayed and is left out.
+    let moved: Vec<&str> = changed["constructs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|construct| construct["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(moved, vec!["maintainability"]);
+    let maintainability = &changed["constructs"][0];
+    assert!((maintainability["from"].as_f64().unwrap() - 10.0 / 3.0).abs() < 1e-9);
+    assert!((maintainability["to"].as_f64().unwrap() - 20.0 / 3.0).abs() < 1e-9);
+    assert_eq!(maintainability["within_repeat_variation"], false);
+    assert_eq!(changed["declarations"]["added"], json!(["gamma"]));
+    assert!(
+        changed["declarations"]["removed"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let text = query::render(&view);
+    assert!(text.contains("1 files in both"));
+    assert!(text.contains("maintainability 3.33 → 6.67 (+3.33)"));
+    assert!(text.contains("declarations added: gamma"));
+    assert!(!text.contains("within measured repeat variation"));
+
+    // Comparing a snapshot with itself is a mistake worth naming.
+    assert!(
+        query::diff(&temp.0, &from, &from, 0)
+            .unwrap_err()
+            .contains("the same snapshot twice")
+    );
+}
+
+#[test]
+fn a_repeat_of_one_question_is_reported_apart_from_a_change_in_the_code() {
+    let temp = Temp::new();
+    let file = |score: f64| {
+        json!({
+            "path": "src/a.ts", "status": "completed", "source_hash": "the-same-bytes",
+            "declarations": [], "dimensions": {
+                "maintainability": {"score": score, "confidence": 0.5},
+            },
+        })
+    };
+    let manifest = |created: &str| {
+        json!({
+            "created_at": created, "rubric_version": RUBRIC_VERSION,
+            "policy_version": POLICY_VERSION, "model": MODEL,
+        })
+    };
+    let (from, _) = store::identity().unwrap();
+    store::write(
+        &temp.0,
+        &from,
+        &manifest("2026-09-17T00-00-00-000000Z"),
+        &json!({"files": [file(6.0)]}),
+    )
+    .unwrap();
+    let (to, _) = store::identity().unwrap();
+    store::write(
+        &temp.0,
+        &to,
+        &manifest("2026-09-17T01-00-00-000000Z"),
+        &json!({"files": [file(6.5)], "aggregates": []}),
+    )
+    .unwrap();
+
+    let view = query::diff(&temp.0, &from, &to, 0).unwrap();
+    // The source did not change, so this is the same question asked twice.
+    assert_eq!(view["files"]["changed_source"], 0);
+    let regraded = view["files"]["regraded"].as_array().unwrap();
+    assert_eq!(regraded.len(), 1);
+    let moved = &regraded[0]["constructs"][0];
+    assert_eq!(moved["delta"], 0.5);
+    assert_eq!(
+        moved["within_repeat_variation"], true,
+        "half a point is inside the variation two identical requests have shown"
+    );
+    let text = query::render(&view);
+    assert!(text.contains("not changes in the code"));
+    assert!(text.contains("within measured repeat variation"));
+
+    // A different rubric asks different questions, so the grades do not compare.
+    let (other, _) = store::identity().unwrap();
+    let mut different = manifest("2026-09-17T02-00-00-000000Z");
+    different["rubric_version"] = json!("quality-v2-experimental");
+    store::write(&temp.0, &other, &different, &json!({"files": []})).unwrap();
+    let refusal = query::diff(&temp.0, &from, &other, 0).unwrap_err();
+    assert!(refusal.contains("only snapshots of the same rubric and model can be compared"));
+}

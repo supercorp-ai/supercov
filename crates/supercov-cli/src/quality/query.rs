@@ -517,6 +517,188 @@ pub fn function(
     Ok(view)
 }
 
+/// One construct's movement between two snapshots. `within_repeat_variation`
+/// says the movement is no larger than two identical requests have been seen to
+/// differ by, which is a fact about the measurement rather than a verdict.
+fn movement(id: &str, from: Option<f64>, to: Option<f64>) -> Option<Value> {
+    let (from, to) = (from?, to?);
+    let delta = to - from;
+    Some(json!({
+        "id": id, "from": from, "to": to, "delta": delta,
+        "within_repeat_variation": delta.abs() <= REPEAT_VARIATION,
+    }))
+}
+
+/// Every construct that moved, in rubric order. An unmoved construct is left
+/// out: a comparison should show what changed.
+fn movements(from: &Value, to: &Value, constructs: &[String]) -> Vec<Value> {
+    constructs
+        .iter()
+        .filter_map(|id| {
+            movement(
+                id,
+                from["dimensions"][id]["score"].as_f64(),
+                to["dimensions"][id]["score"].as_f64(),
+            )
+        })
+        .filter(|moved| moved["delta"].as_f64() != Some(0.0))
+        .collect()
+}
+
+/// A file's movements, using the weakest window for a file graded in windows.
+fn file_movements(from: &Value, to: &Value) -> Vec<Value> {
+    rubric()
+        .into_iter()
+        .filter_map(|construct| {
+            movement(
+                &construct.id,
+                scope_score(from, &construct.id).map(|(score, _)| score),
+                scope_score(to, &construct.id).map(|(score, _)| score),
+            )
+        })
+        .filter(|moved| moved["delta"].as_f64() != Some(0.0))
+        .collect()
+}
+
+fn declaration_changes(from: &Value, to: &Value) -> Value {
+    let named = |file: &Value, key: &str| -> BTreeMap<String, Value> {
+        file[key]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter_map(|entry| Some((entry["name"].as_str()?.to_owned(), entry.clone())))
+            .collect()
+    };
+    let (before, after) = (named(from, "declarations"), named(to, "declarations"));
+    let (graded_before, graded_after) = (
+        named(from, "assessed_declarations"),
+        named(to, "assessed_declarations"),
+    );
+    let constructs = declarations::order();
+    let moved: Vec<Value> = graded_after
+        .iter()
+        .filter_map(|(name, after)| {
+            let before = graded_before.get(name)?;
+            let moved = movements(before, after, &constructs);
+            (!moved.is_empty()).then(|| json!({"name": name, "constructs": moved}))
+        })
+        .collect();
+    json!({
+        "added": after.keys().filter(|name| !before.contains_key(*name)).collect::<Vec<_>>(),
+        "removed": before.keys().filter(|name| !after.contains_key(*name)).collect::<Vec<_>>(),
+        "moved": moved,
+        "assessed_in_both": graded_before
+            .keys()
+            .filter(|name| graded_after.contains_key(*name))
+            .count(),
+        "newly_assessed": graded_after
+            .keys()
+            .filter(|name| !graded_before.contains_key(*name))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// What changed between two snapshots of the same rubric and model.
+pub fn diff(root: &Path, from: &str, to: &str, limit: usize) -> Result<Value, String> {
+    let (before, after) = (open(root, Some(from))?, open(root, Some(to))?);
+    if before.id == after.id {
+        return Err(format!("{} is the same snapshot twice", before.id));
+    }
+    // Comparing grades across rubrics or models would compare two different
+    // questions and call the difference a change in the code.
+    for field in ["rubric_version", "policy_version", "model"] {
+        if before.manifest[field] != after.manifest[field] {
+            return Err(format!(
+                "snapshot {} has {field} {} and {} has {}; only snapshots of the same rubric and model can be compared",
+                before.id, before.manifest[field], after.id, after.manifest[field]
+            ));
+        }
+    }
+    let entries = |snapshot: &Snapshot| -> BTreeMap<String, Value> {
+        snapshot
+            .files
+            .iter()
+            .filter(|file| file["status"] == "completed")
+            .filter_map(|file| Some((file["path"].as_str()?.to_owned(), file.clone())))
+            .collect()
+    };
+    let (old, new) = (entries(&before), entries(&after));
+
+    let mut changed = Vec::new();
+    let mut regraded = Vec::new();
+    let mut deepened = Vec::new();
+    let mut unchanged = 0;
+    for (path, after) in &new {
+        let Some(before) = old.get(path) else {
+            continue;
+        };
+        let moved = file_movements(before, after);
+        let declarations = declaration_changes(before, after);
+        let listed = |key: &str| !declarations[key].as_array().is_none_or(Vec::is_empty);
+        let entry = json!({
+            "path": path, "constructs": moved.clone(), "declarations": declarations.clone(),
+            "partial": after["partial"] == true,
+        });
+        if before["source_hash"] != after["source_hash"] {
+            changed.push(entry);
+        } else if !moved.is_empty() || listed("moved") {
+            // An identical request is answered from cache, so a grade that
+            // moved while the source did not is one question asked twice.
+            regraded.push(entry);
+        } else if listed("newly_assessed") {
+            deepened.push(entry);
+        } else {
+            unchanged += 1;
+        }
+    }
+    let weakest = |file: &Value| scope_score(file, RANKING[0]).map(|(score, _)| score);
+    let (total, changed) = limited(changed, limit);
+    let aggregates = |snapshot: &Snapshot| -> BTreeMap<String, Value> {
+        snapshot
+            .aggregates
+            .iter()
+            .filter_map(|entry| Some((entry["path"].as_str()?.to_owned(), entry.clone())))
+            .collect()
+    };
+    let (old_scopes, new_scopes) = (aggregates(&before), aggregates(&after));
+    let scope_constructs: Vec<String> = ["maintainability", "readability", "overall"]
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect();
+    let scopes: Vec<Value> = new_scopes
+        .iter()
+        .filter_map(|(path, after)| {
+            let before = old_scopes.get(path)?;
+            let moved = movements(before, after, &scope_constructs);
+            (!moved.is_empty()).then(|| {
+                json!({
+                    "scope": after["scope"], "path": path, "constructs": moved,
+                    "basis_sufficient": after["basis_sufficient"] == true
+                        && before["basis_sufficient"] == true,
+                })
+            })
+        })
+        .collect();
+    Ok(json!({
+        "view": "diff",
+        "from": {"id": before.id, "created_at": before.manifest["created_at"]},
+        "to": {"id": after.id, "created_at": after.manifest["created_at"]},
+        "rubric_version": after.manifest["rubric_version"], "model": after.manifest["model"],
+        "repeat_variation": REPEAT_VARIATION,
+        "scopes": scopes,
+        "files": {
+            "in_both": old.keys().filter(|path| new.contains_key(*path)).count(),
+            "unchanged": unchanged,
+            "changed_source": total, "shown": changed.len(), "changed": changed,
+            "regraded": regraded, "deepened": deepened,
+            "added": new.iter().filter(|(path, _)| !old.contains_key(*path))
+                .map(|(path, file)| json!({"path": path, "maintainability": weakest(file)}))
+                .collect::<Vec<_>>(),
+            "removed": old.keys().filter(|path| !new.contains_key(*path)).collect::<Vec<_>>(),
+        },
+    }))
+}
+
 fn marker(construct: &Value) -> String {
     match construct["review_below"].as_f64() {
         Some(cutoff) if construct["review_recommended"] == true => {
@@ -541,6 +723,7 @@ pub fn render(view: &Value) -> String {
         "file" => render_file(view),
         "functions" => render_functions(view),
         "function" => render_function(view),
+        "diff" => render_diff(view),
         other => format!("unknown quality view: {other}\n"),
     }
 }
@@ -651,6 +834,152 @@ fn render_function(view: &Value) -> String {
         text.push_str("\nThe source this grade describes:\n");
         text.push_str(source);
         text.push('\n');
+    }
+    text
+}
+
+fn moved_line(construct: &Value) -> String {
+    let delta = construct["delta"].as_f64().unwrap_or_default();
+    format!(
+        "{} {} → {} ({}{:.2}{})",
+        construct["id"].as_str().unwrap_or("?"),
+        number(&construct["from"]).trim_start(),
+        number(&construct["to"]).trim_start(),
+        if delta > 0.0 { "+" } else { "" },
+        delta,
+        if construct["within_repeat_variation"] == true {
+            ", within measured repeat variation"
+        } else {
+            ""
+        },
+    )
+}
+
+fn render_diff(view: &Value) -> String {
+    let files = &view["files"];
+    let mut text = format!(
+        "Comparing {} ({}) with {} ({}).\nRubric {}, model {} in both. Movements no larger than {} are within the\nrepeat variation measured for this rubric, so they are marked rather than read as change.\n",
+        view["from"]["id"].as_str().unwrap_or("?"),
+        view["from"]["created_at"].as_str().unwrap_or("?"),
+        view["to"]["id"].as_str().unwrap_or("?"),
+        view["to"]["created_at"].as_str().unwrap_or("?"),
+        view["rubric_version"].as_str().unwrap_or("?"),
+        view["model"].as_str().unwrap_or("?"),
+        view["repeat_variation"],
+    );
+    let scopes = view["scopes"].as_array().map_or(&[][..], Vec::as_slice);
+    if !scopes.is_empty() {
+        text.push_str("\nWider scopes:\n");
+        for scope in scopes {
+            text.push_str(&format!(
+                "  {} {}{}\n",
+                scope["scope"].as_str().unwrap_or("?"),
+                scope["path"].as_str().unwrap_or("?"),
+                if scope["basis_sufficient"] == true {
+                    ""
+                } else {
+                    "  (one side had too little basis to judge)"
+                },
+            ));
+            for construct in scope["constructs"]
+                .as_array()
+                .map_or(&[][..], Vec::as_slice)
+            {
+                text.push_str(&format!("     {}\n", moved_line(construct)));
+            }
+        }
+    }
+    text.push_str(&format!(
+        "\n{} files in both, {} unchanged. {} with changed source, {} added, {} removed.\n",
+        files["in_both"],
+        files["unchanged"],
+        files["changed_source"],
+        files["added"].as_array().map_or(0, Vec::len),
+        files["removed"].as_array().map_or(0, Vec::len),
+    ));
+    let changed = files["changed"].as_array().map_or(&[][..], Vec::as_slice);
+    if !changed.is_empty() {
+        text.push_str(&format!(
+            "\nChanged source ({} of {}):\n",
+            files["shown"], files["changed_source"]
+        ));
+        for file in changed {
+            text.push_str(&format!("\n  {}\n", file["path"].as_str().unwrap_or("?")));
+            for construct in file["constructs"].as_array().map_or(&[][..], Vec::as_slice) {
+                text.push_str(&format!("     {}\n", moved_line(construct)));
+            }
+            let declarations = &file["declarations"];
+            for moved in declarations["moved"]
+                .as_array()
+                .map_or(&[][..], Vec::as_slice)
+            {
+                text.push_str(&format!(
+                    "     {}: {}\n",
+                    moved["name"].as_str().unwrap_or("?"),
+                    moved["constructs"]
+                        .as_array()
+                        .map_or(String::new(), |constructs| constructs
+                            .iter()
+                            .map(moved_line)
+                            .collect::<Vec<_>>()
+                            .join("; ")),
+                ));
+            }
+            for (label, key) in [("added", "added"), ("removed", "removed")] {
+                let names = declarations[key].as_array().map_or(&[][..], Vec::as_slice);
+                if !names.is_empty() {
+                    text.push_str(&format!(
+                        "     declarations {label}: {}\n",
+                        names
+                            .iter()
+                            .filter_map(|name| name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+        }
+    }
+    let deepened = files["deepened"].as_array().map_or(&[][..], Vec::as_slice);
+    if !deepened.is_empty() {
+        text.push_str("\nNewly assessed declarations, with no grade changed:\n");
+        for file in deepened {
+            text.push_str(&format!(
+                "  {}: {}\n",
+                file["path"].as_str().unwrap_or("?"),
+                file["declarations"]["newly_assessed"]
+                    .as_array()
+                    .map_or(String::new(), |names| names
+                        .iter()
+                        .filter_map(|name| name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")),
+            ));
+        }
+    }
+    let regraded = files["regraded"].as_array().map_or(&[][..], Vec::as_slice);
+    if !regraded.is_empty() {
+        text.push_str(
+            "\nSame source, different grade — these are repeats of one question, not changes in the code:\n",
+        );
+        for file in regraded {
+            text.push_str(&format!("  {}\n", file["path"].as_str().unwrap_or("?")));
+            for construct in file["constructs"].as_array().map_or(&[][..], Vec::as_slice) {
+                text.push_str(&format!("     {}\n", moved_line(construct)));
+            }
+        }
+    }
+    for (label, key) in [("Added", "added"), ("Removed", "removed")] {
+        let rows = files[key].as_array().map_or(&[][..], Vec::as_slice);
+        if !rows.is_empty() {
+            text.push_str(&format!("\n{label}:\n"));
+            for row in rows {
+                text.push_str(&format!(
+                    "  {}\n",
+                    row["path"].as_str().or_else(|| row.as_str()).unwrap_or("?")
+                ));
+            }
+        }
     }
     text
 }
