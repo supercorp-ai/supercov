@@ -97,48 +97,25 @@ fn limited<T>(rows: Vec<T>, limit: usize) -> (usize, Vec<T>) {
     }
 }
 
-/// The saved provider answer behind one graded scope, when the response cache
-/// still holds it. A snapshot stays readable without it; the level wording and
-/// distributions simply go missing.
-fn response(root: &Path, hash: &str) -> Option<ApiResponse> {
-    let name = format!("{hash}.json");
-    [
-        store::responses(root).join(&name),
-        store::legacy_response(root, hash),
-    ]
-    .iter()
-    .find_map(|path| {
-        let entry: CacheEntry = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-        (entry.request_hash == hash).then_some(entry.response)
-    })
+struct Snapshot {
+    id: String,
+    manifest: Value,
+    files: Vec<Value>,
+    aggregates: Vec<Value>,
 }
 
-/// The level Jev put most of its probability on, with the exact wording that
-/// level was asked as. This is the model's own description of the code, which
-/// a score alone does not carry.
-fn modal_level(response: &ApiResponse, id: &str) -> Option<(String, String)> {
-    let Answer::Score {
-        legend,
-        probabilities,
-        ..
-    } = response.answers.get(&format!("{id}_score"))?
-    else {
-        return None;
-    };
-    let (index, _) = probabilities
-        .iter()
-        .max_by(|a, b| a.1.total_cmp(b.1).then_with(|| b.0.cmp(a.0)))?;
-    Some((index.clone(), legend.get(index)?.clone()))
-}
-
-fn open(root: &Path, snapshot: Option<&str>) -> Result<(String, Value, Vec<Value>), String> {
+fn open(root: &Path, snapshot: Option<&str>) -> Result<Snapshot, String> {
     let id = store::resolve(root, snapshot)?;
-    let (manifest, files) = store::read(root, &id)?;
-    let files = files["files"]
-        .as_array()
-        .ok_or("invalid snapshot file record")?
-        .clone();
-    Ok((id, manifest, files))
+    let (manifest, record) = store::read(root, &id)?;
+    Ok(Snapshot {
+        id,
+        manifest,
+        files: record["files"]
+            .as_array()
+            .ok_or("invalid snapshot file record")?
+            .clone(),
+        aggregates: record["aggregates"].as_array().cloned().unwrap_or_default(),
+    })
 }
 
 pub fn snapshots(root: &Path, limit: usize) -> Result<Value, String> {
@@ -160,7 +137,12 @@ pub fn snapshots(root: &Path, limit: usize) -> Result<Value, String> {
 }
 
 pub fn show(root: &Path, snapshot: Option<&str>, limit: usize) -> Result<Value, String> {
-    let (id, manifest, files) = open(root, snapshot)?;
+    let Snapshot {
+        id,
+        manifest,
+        files,
+        aggregates,
+    } = open(root, snapshot)?;
     let completed = assessed(&files);
     let constructs: Vec<Value> = rubric()
         .into_iter()
@@ -192,6 +174,10 @@ pub fn show(root: &Path, snapshot: Option<&str>, limit: usize) -> Result<Value, 
     let (total, weakest_first) = limited(rows, limit);
     Ok(json!({
         "view": "show", "snapshot_id": id, "manifest": manifest,
+        "repository": aggregates.iter().find(|entry| entry["scope"] == "repository"),
+        "directories": aggregates.iter()
+            .filter(|entry| entry["scope"] == "directory")
+            .collect::<Vec<_>>(),
         "constructs": constructs, "total_files": total,
         "shown": weakest_first.len(), "weakest_first": weakest_first,
         "errors": files.iter().filter(|file| file["status"] == "error")
@@ -219,7 +205,12 @@ pub fn dimension(
                     .join(", ")
             )
         })?;
-    let (id, manifest, files) = open(root, snapshot)?;
+    let Snapshot {
+        id,
+        manifest,
+        files,
+        ..
+    } = open(root, snapshot)?;
     let completed = assessed(&files);
     let rows: Vec<Value> = ranked(&completed, &dimension.id)
         .into_iter()
@@ -245,7 +236,12 @@ pub fn dimension(
 }
 
 pub fn file(root: &Path, path: &str, snapshot: Option<&str>) -> Result<Value, String> {
-    let (id, manifest, files) = open(root, snapshot)?;
+    let Snapshot {
+        id,
+        manifest,
+        files,
+        ..
+    } = open(root, snapshot)?;
     let wanted = path.replace('\\', "/");
     let matched = files
         .iter()
@@ -410,6 +406,28 @@ fn render_show(view: &Value) -> String {
         counts["errors"],
         manifest["usage_this_run"]["input_tokens"],
     );
+    text.push_str(&render_repository(&view["repository"]));
+    let directories = view["directories"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    if !directories.is_empty() {
+        text.push_str("\nDirectories, each judged by Jev from the assessments inside it:\n");
+        for directory in directories {
+            let grades = &directory["dimensions"];
+            text.push_str(&format!(
+                "  {:<40} maint {} read {} overall {}{}\n",
+                directory["path"].as_str().unwrap_or("?"),
+                number(&grades["maintainability"]["score"]),
+                number(&grades["readability"]["score"]),
+                number(&grades["overall"]["score"]),
+                if directory["basis_sufficient"] == true {
+                    ""
+                } else {
+                    "  (basis too weak to show)"
+                },
+            ));
+        }
+    }
     text.push_str("\nConstructs — every grade is Jev's own answer; markers are advisory:\n");
     for construct in view["constructs"].as_array().map_or(&[][..], Vec::as_slice) {
         let cutoff = match construct["review_below"].as_f64() {
@@ -463,6 +481,45 @@ fn render_show(view: &Value) -> String {
     }
     text.push_str(&format!(
         "\nGo deeper:\n  supercov quality dimension maintainability {id}\n  supercov quality file <path> {id}\n",
+    ));
+    text
+}
+
+/// Jev's judgment of the repository, shown only when Jev itself said the
+/// evidence supports judging the whole. The grades are kept either way; what
+/// the basis answer gates is whether they are presented as a verdict.
+fn render_repository(repository: &Value) -> String {
+    let Some(grades) = repository["dimensions"].as_object() else {
+        return String::new();
+    };
+    let basis = repository["basis"].as_f64().unwrap_or_default();
+    if repository["basis_sufficient"] != true {
+        return format!(
+            "\nRepository — no judgment shown. Asked whether the supplied evidence supports judging\nthe whole, Jev answered {basis:.2} of 1. Its grades are kept in the JSON view.\n"
+        );
+    }
+    let mut text = String::from(
+        "\nRepository — Jev's own judgment, from the assessment of every file below it:\n",
+    );
+    for id in ["maintainability", "readability", "overall"] {
+        if let Some(grade) = grades.get(id) {
+            text.push_str(&format!(
+                "  {:<16} {}/10  confidence {}\n",
+                id,
+                number(&grade["score"]),
+                number(&grade["confidence"]).trim_start(),
+            ));
+        }
+    }
+    if let Some(risk) = repository["risk_concentration"].as_object() {
+        text.push_str(&format!(
+            "  behavioral risk sits in: {} (confidence {})\n",
+            risk["choice"].as_str().unwrap_or("?"),
+            number(&risk["confidence"]).trim_start(),
+        ));
+    }
+    text.push_str(&format!(
+        "  basis {basis:.2}/1 — Jev's own answer that this evidence supports judging the whole\n"
     ));
     text
 }

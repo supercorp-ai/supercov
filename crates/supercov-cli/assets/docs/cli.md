@@ -94,6 +94,40 @@ language Supercov cannot parse, is reported as an error, as is a single
 declaration too large to send alone; its neighbouring windows are still
 assessed. Empty files are errors. Nothing larger than 4 MiB is read.
 
+### The repository judgment
+
+Once every file has been graded, Jev judges each directory and then the
+repository. It makes those judgments the same way it makes a file's: as answers
+to a rubric. What it reads is an inventory of what the scope holds and, for each
+part of it, **the rubric level Jev itself chose for that part, quoted word for
+word**. It never receives a score, a cutoff or an average. A repository grade is
+therefore Jev's own judgment, not our arithmetic over file grades, and the
+report says so in those terms.
+
+Scopes are judged deepest first, so a directory is one verdict by the time the
+scope above reads it. That is what lets a large repository be judged at all: a
+parent reads one verdict per child, not every file beneath it. A directory
+holding more children than fit in one request is judged in parts first, the way
+an oversized file is judged in windows. A directory that holds only one thing is
+not judged separately, since its verdict would simply be that thing's.
+
+Jev is also asked whether the supplied evidence is enough to judge the scope as
+a whole. **A grade is shown only when that answer is at least 0.5.** Below it,
+the report says the judgment was withheld and gives the number, and the grades
+stay in the JSON view rather than being deleted or quietly displayed. This gate
+exists because a bare inventory still produces a confident-looking number: asked
+to judge a repository from file names alone, Jev graded it 6.65 out of 10 while
+answering 0.13 to whether it had the basis to judge at all.
+
+Wider scopes carry **no review markers**. The two file cutoffs were selected on
+human-rated Java classes; nothing at directory or repository scope is calibrated
+against anything, so nothing there is marked. Jev is additionally asked where
+behavioral risk sits, but only when a scope has between two and twelve children:
+a Choice ranks one option first however weak the evidence, and over 22 options
+that answer was measured at 0.25 confidence with "no clear one" tied for first.
+
+A single assessed file has no wider scope and produces no repository judgment.
+
 ### Browse a saved assessment
 
 ```sh
@@ -109,7 +143,8 @@ A snapshot argument is optional and defaults to the most recent scan made in
 this directory; a scan never revises an earlier snapshot, so an id keeps
 showing what it showed.
 
-`show` gives the scan's header, each construct with how many files its cutoff
+`show` gives the scan's header, the repository judgment or the reason it was
+withheld, each judged directory, each construct with how many files its cutoff
 marked and which file is weakest on it, and the files ranked weakest
 maintainability first. `dimension <construct>` ranks every file on one
 construct. `file <path>` opens one file: each construct's grade and confidence,
@@ -146,9 +181,8 @@ Exit status is 0 for a completed report (including review flags and uncertain ju
 invalid input or any file/API error. Partial results remain in the report. Low
 grades do not fail the command. HTTP 429 and 5xx responses receive at most two
 retries with bounded backoff; long retry delays are returned to the caller.
-Function-level grading, repository aggregates, line locations, changed-file
-selection, snapshot comparison and failing CI grade gates are not implemented
-yet.
+Function-level grading, line locations, changed-file selection, snapshot
+comparison and failing CI grade gates are not implemented yet.
 
 ## Measure a test command
 

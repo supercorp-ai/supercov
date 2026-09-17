@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+mod aggregate;
 mod query;
 mod store;
 
@@ -69,7 +70,10 @@ with a subcommand is still assessable as: supercov quality scan show
 Set TYPESAFE_API_KEY for uncached assessments. Source and optional context are
 sent to api.typesafe.ai, once per file with 9 Jev scores and 1 context question.
 No tests are run. A file too large for one request is assessed as windows of
-whole declarations, which carry no whole-file grade. Paths must be inside the
+whole declarations, which carry no whole-file grade. Once every file is graded,
+Jev judges each directory and then the repository, reading the levels it chose
+for the parts below rather than their source. A wider judgment is shown only
+when Jev itself answers that the evidence supports judging that whole. Paths must be inside the
 current directory. Directory scans respect
 ignore files and skip hidden, generated, dependency and build directories.
 Explicit files may be ignored by Git; symbolic links are not followed.
@@ -639,6 +643,11 @@ enum Answer {
     Noul {
         noul: f64,
     },
+    Choice {
+        choice: String,
+        probabilities: BTreeMap<String, f64>,
+        confidence: f64,
+    },
     Score {
         score: f64,
         legend: BTreeMap<String, String>,
@@ -677,6 +686,21 @@ fn validate(response: &ApiResponse, request: &Value) -> Result<(), String> {
     for (id, question) in questions {
         let valid = match &response.answers[id] {
             Answer::Noul { noul } => question["type"] == "noul" && probability(*noul),
+            Answer::Choice {
+                choice,
+                probabilities,
+                confidence,
+            } => {
+                let options = question["criteria"]
+                    .as_object()
+                    .filter(|_| question["type"] == "choice");
+                options.is_some_and(|options| {
+                    let keys: BTreeSet<String> = options.keys().cloned().collect();
+                    keys.contains(choice)
+                        && probability(*confidence)
+                        && distribution(probabilities, keys)
+                })
+            }
             Answer::Score {
                 score,
                 legend,
@@ -752,6 +776,40 @@ fn assess(response: &ApiResponse, override_below: Option<f64>) -> BTreeMap<Strin
             )
         })
         .collect()
+}
+
+/// The saved provider answer behind one graded scope, when the response cache
+/// still holds it. A snapshot stays readable without it; the level wording and
+/// the distributions simply go missing.
+fn response(root: &Path, hash: &str) -> Option<ApiResponse> {
+    let name = format!("{hash}.json");
+    [
+        store::responses(root).join(&name),
+        store::legacy_response(root, hash),
+    ]
+    .iter()
+    .find_map(|path| {
+        let entry: CacheEntry = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+        (entry.request_hash == hash).then_some(entry.response)
+    })
+}
+
+/// The level Jev put most of its probability on, with the exact wording that
+/// level was asked as. This is the model's own description of the code, which
+/// a score alone does not carry, and it is what a wider scope reads as evidence.
+fn modal_level(response: &ApiResponse, id: &str) -> Option<(String, String)> {
+    let Answer::Score {
+        legend,
+        probabilities,
+        ..
+    } = response.answers.get(&format!("{id}_score"))?
+    else {
+        return None;
+    };
+    let (index, _) = probabilities
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(b.1).then_with(|| b.0.cmp(a.0)))?;
+    Some((index.clone(), legend.get(index)?.clone()))
 }
 
 /// A validated Noul answer, or `None` when this question set did not ask it.
@@ -864,6 +922,13 @@ enum Prepared {
 /// A request and its serialized bytes, or why it cannot be sent.
 type Sendable = Result<(Value, Vec<u8>), String>;
 
+/// Sends one prepared request and reports its hash, the answer, whether the
+/// answer came from the cache, and any trouble saving it. A scan passes this to
+/// the wider scopes so they send their requests the way files do, counting
+/// against the same usage total.
+type Answering<'a> =
+    dyn FnMut(&Value, &[u8]) -> Result<(String, CacheEntry, bool, Option<String>), String> + 'a;
+
 /// A few names, and how many more there are.
 fn few(names: &[String]) -> String {
     match names.len() {
@@ -945,6 +1010,17 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
     let mut errors = false;
     let mut input_tokens = 0;
     let mut output_tokens = 0;
+    let mut answer = |request: &Value,
+                      bytes: &[u8]|
+     -> Result<(String, CacheEntry, bool, Option<String>), String> {
+        let hash = digest(bytes);
+        let (entry, hit, warning) = resolve(root, &agent, key, options.refresh, request, &hash)?;
+        if !hit {
+            input_tokens += entry.response.usage.input_tokens;
+            output_tokens += entry.response.usage.output_tokens;
+        }
+        Ok((hash, entry, hit, warning))
+    };
     for path in paths {
         let relative = path
             .strip_prefix(root)
@@ -1030,18 +1106,12 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
         if !options.json {
             eprintln!("[supercov] quality: {relative}");
         }
-        let mut answer = |request: &Value, bytes: &[u8]| -> Result<Value, String> {
-            let hash = digest(bytes);
-            let (entry, hit, warning) =
-                resolve(root, &agent, key, options.refresh, request, &hash)?;
-            if !hit {
-                input_tokens += entry.response.usage.input_tokens;
-                output_tokens += entry.response.usage.output_tokens;
-            }
+        let mut assess_one = |request: &Value, bytes: &[u8]| -> Result<Value, String> {
+            let (hash, entry, hit, warning) = answer(request, bytes)?;
             Ok(graded(&entry, &hash, hit, options.review_below, warning))
         };
         match prepared {
-            Prepared::Whole(request, bytes) => match answer(&request, &bytes) {
+            Prepared::Whole(request, bytes) => match assess_one(&request, &bytes) {
                 Ok(graded) => {
                     let mut entry = json!({"path": relative, "source_hash": identity.source_hash,
                         "bytes": identity.bytes, "declarations": identity.declarations});
@@ -1057,7 +1127,7 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
                 let mut assessed = Vec::new();
                 for (window, built) in windows {
                     let mut entry = serde_json::to_value(&window).map_err(|e| e.to_string())?;
-                    match built.and_then(|(request, bytes)| answer(&request, &bytes)) {
+                    match built.and_then(|(request, bytes)| assess_one(&request, &bytes)) {
                         Ok(graded) => merge(&mut entry, graded),
                         Err(error) => {
                             errors = true;
@@ -1095,6 +1165,25 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
             errors,
         ));
     }
+    // Every wider scope is judged only once every file below it has been, so
+    // each of those requests carries verdicts rather than the source beneath them.
+    let (aggregates, aggregate_warning) =
+        match aggregate::judge(root, &files, context.as_deref(), &mut answer) {
+            Ok(judged) => (judged, None),
+            Err(error) => {
+                errors = true;
+                (
+                    Vec::new(),
+                    Some(format!(
+                        "the files were assessed but no wider scope was: {error}"
+                    )),
+                )
+            }
+        };
+    let repository = aggregates
+        .iter()
+        .find(|entry| entry["scope"] == "repository")
+        .cloned();
     let completed = files.iter().filter(|file| file["status"] == "completed");
     let counts = json!({
         "assessed": completed.clone().count(),
@@ -1103,6 +1192,7 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
             .flat_map(|file| file["windows"].as_array().map_or(&[][..], Vec::as_slice))
             .count(),
         "errors": files.iter().filter(|file| file["status"] == "error").count(),
+        "aggregates": aggregates.len(),
     });
     let (id, created_at) = store::identity()?;
     let mut manifest = json!({
@@ -1118,20 +1208,30 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
             "note": "estimated tokens, not a provider measurement; files over budget are windowed"},
         "policy": {"review_below_override": options.review_below,
             "cutoffs": rubric().into_iter().map(|d| (d.id, json!({"review_below": d.review_below, "basis": d.cutoff_basis}))).collect::<Map<_, _>>(),
-            "review_rule": "score strictly below the construct cutoff", "grades": "direct Jev judgments", "fail_on_review": false},
+            "review_rule": "score strictly below the construct cutoff", "grades": "direct Jev judgments", "fail_on_review": false,
+            "aggregate_basis_sufficient": aggregate::BASIS_SUFFICIENT,
+            "aggregate_cutoffs": "none; no cutoff at a wider scope is calibrated, so nothing there is marked"},
         "usage_this_run": {"input_tokens": input_tokens, "output_tokens": output_tokens},
     });
     // Raw provider answers stay in the response cache the snapshot points into,
     // rather than being copied into every snapshot that mentions them.
-    let recorded = Value::Array(files.iter().map(without_raw).collect());
-    let saved = store::write(root, &id, &manifest, &json!({"files": recorded}));
+    let recorded = json!({
+        "files": Value::Array(files.iter().map(without_raw).collect()),
+        "aggregates": Value::Array(aggregates.iter().map(without_raw).collect()),
+    });
+    let saved = store::write(root, &id, &manifest, &recorded);
     let mut report = manifest.take();
     if let Err(error) = &saved {
         report["snapshot_warning"] = json!(format!(
             "the assessment completed but no snapshot was saved: {error}"
         ));
     }
+    if let Some(warning) = aggregate_warning {
+        report["aggregate_warning"] = json!(warning);
+    }
     report["saved"] = json!(saved.is_ok());
+    report["repository"] = json!(repository);
+    report["aggregates"] = Value::Array(aggregates);
     report["files"] = Value::Array(files);
     Ok((report, errors))
 }

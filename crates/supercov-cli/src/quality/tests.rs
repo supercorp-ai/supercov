@@ -38,6 +38,18 @@ fn response(request: &Value) -> ApiResponse {
         .map(|(id, question)| {
             let answer = match question["type"].as_str().unwrap() {
                 "noul" => Answer::Noul { noul: 0.99 },
+                "choice" => {
+                    let options = question["criteria"].as_object().unwrap();
+                    let chosen = options.keys().next().unwrap().clone();
+                    Answer::Choice {
+                        confidence: 1.0,
+                        probabilities: options
+                            .keys()
+                            .map(|option| (option.clone(), f64::from(*option == chosen)))
+                            .collect(),
+                        choice: chosen,
+                    }
+                }
                 "score" => {
                     let levels = question["criteria"].as_array().unwrap();
                     Answer::Score {
@@ -866,6 +878,19 @@ fn a_scan_saves_a_snapshot_that_reads_back_with_no_key_and_no_network() {
         json: true,
         ..Default::default()
     };
+    // Two files make a scope wider than a file, which cannot be answered from
+    // an empty cache. The files are still assessed and reported.
+    let (first, errors) = run(&temp.0, &options, None).unwrap();
+    assert!(errors);
+    assert!(
+        first["aggregate_warning"]
+            .as_str()
+            .unwrap()
+            .contains("the files were assessed but no wider scope was")
+    );
+    assert_eq!(first["files"].as_array().unwrap().len(), 2);
+    aggregate::seed(&temp.0, first["files"].as_array().unwrap(), None, response).unwrap();
+
     let (report, errors) = run(&temp.0, &options, None).unwrap();
     assert!(!errors);
     assert_eq!(report["saved"], true);
@@ -1058,4 +1083,131 @@ fn a_windowed_file_is_navigated_by_its_weakest_window() {
     assert!(text.contains("no whole-file grade"));
     assert!(text.contains("Top-level declarations, none assessed on its own"));
     assert!(text.contains("step0 (function)"));
+}
+
+#[test]
+fn a_wider_scope_reads_verdicts_and_never_a_score_or_a_line_of_source() {
+    let temp = Temp::new();
+    let sources = [
+        (
+            "src/lib/alpha.ts",
+            "export function alpha() {\n  return \"distinctiveSourceMarker\";\n}\n",
+        ),
+        (
+            "src/lib/beta.ts",
+            "export function beta() {\n  return 2;\n}\n",
+        ),
+        (
+            "src/gamma.ts",
+            "export function gamma() {\n  return 3;\n}\n",
+        ),
+    ];
+    for (path, source) in sources {
+        temp.write(path, source);
+        seed(&temp, path, source, |_| {});
+    }
+    let options = Options {
+        paths: vec!["src".into()],
+        json: true,
+        ..Default::default()
+    };
+    let (first, _) = run(&temp.0, &options, None).unwrap();
+    let sent = std::cell::RefCell::new(Vec::new());
+    aggregate::seed(
+        &temp.0,
+        first["files"].as_array().unwrap(),
+        None,
+        |request| {
+            sent.borrow_mut().push(request.clone());
+            response(request)
+        },
+    )
+    .unwrap();
+
+    let sent = sent.into_inner();
+    assert!(!sent.is_empty(), "a wider scope was judged");
+    for request in &sent {
+        let state = request["state"].to_string();
+        // What Jev reads is the level it chose for each part, word for word.
+        assert!(state.contains("Strongly agree"), "verdicts are quoted");
+        assert!(state.contains("assessment_basis"));
+        // What it must never read: the source, a score, or a review policy.
+        assert!(!state.contains("distinctiveSourceMarker"), "no source");
+        assert!(!state.contains("\"score\""), "no score");
+        assert!(!state.contains("review_below"), "no cutoff");
+        assert!(!state.contains("/10"), "no scale");
+        // Every construct asked here is a Score or a Noul with its own wording.
+        assert!(request["questions"]["basis"]["type"] == "noul");
+        assert!(request["questions"]["overall_score"]["criteria"].is_array());
+    }
+
+    let (report, errors) = run(&temp.0, &options, None).unwrap();
+    assert!(!errors);
+    // src/lib holds two files, so it is judged, and the repository reads its
+    // verdict rather than the files beneath it.
+    let scopes: Vec<(&str, &str)> = report["aggregates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["scope"].as_str().unwrap(),
+                entry["path"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        scopes,
+        vec![("directory", "src/lib"), ("repository", "src")],
+        "deepest scope first, the repository last"
+    );
+    let repository = &report["repository"];
+    assert_eq!(repository["path"], "src");
+    assert!(repository["dimensions"]["maintainability"]["score"].is_number());
+    // Nothing at this scope is calibrated, so nothing here is marked.
+    assert!(repository["dimensions"]["maintainability"]["review_below"].is_null());
+    assert!(repository["dimensions"]["maintainability"]["review_recommended"].is_null());
+
+    let view = query::show(&temp.0, None, 0).unwrap();
+    assert_eq!(view["repository"]["path"], "src");
+    assert_eq!(view["directories"].as_array().unwrap().len(), 1);
+    let text = query::render(&view);
+    assert!(text.contains("Repository — Jev's own judgment"));
+    assert!(text.contains("Directories, each judged by Jev"));
+    assert!(text.contains("src/lib"));
+}
+
+#[test]
+fn a_repository_judgment_is_withheld_when_jev_says_the_evidence_is_too_thin() {
+    let mut repository = json!({
+        "scope": "repository", "path": ".", "basis": 0.18, "basis_sufficient": false,
+        "dimensions": {
+            "maintainability": {"score": 6.0, "confidence": 0.8},
+            "readability": {"score": 6.0, "confidence": 0.8},
+            "overall": {"score": 6.0, "confidence": 0.8},
+        },
+    });
+    let view = json!({
+        "view": "show", "snapshot_id": "q_0123456789abcdef",
+        "manifest": {"counts": {}, "usage_this_run": {}},
+        "repository": repository, "directories": [], "constructs": [],
+        "total_files": 0, "shown": 0, "weakest_first": [], "errors": [],
+    });
+    let text = query::render(&view);
+    assert!(text.contains("no judgment shown"));
+    assert!(text.contains("Jev answered 0.18 of 1"));
+    assert!(
+        !text.contains("6.00/10"),
+        "a withheld grade is not shown anyway"
+    );
+
+    // The same grades are presented once Jev says the evidence carries them.
+    repository["basis"] = json!(0.74);
+    repository["basis_sufficient"] = json!(true);
+    let mut view = view;
+    view["repository"] = repository;
+    let text = query::render(&view);
+    assert!(text.contains("Repository — Jev's own judgment"));
+    assert!(text.contains("6.00/10"));
+    assert!(text.contains("basis 0.74/1"));
 }
