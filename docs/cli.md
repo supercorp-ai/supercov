@@ -62,10 +62,13 @@ Files are listed weakest maintainability first, then weakest readability, then
 Jev's overall answer. **Maintainability is the only construct with a review
 cutoff**, at 6.9, selected on 20 human-rated Java development classes. It has
 since held up on 40 further classes and on 31 that no rubric had graded, where
-it caught every negative class. Every other construct is ranked and never
+it caught every negative class, and on 200 Python functions from 128
+repositories that humans rated adequate or better it flagged 35, a false-alarm
+rate of 17.5% against the 20% this project set as its bar. Every other construct is ranked and never
 marked. The readability cutoff of 7.775 was withdrawn on 2026-09-18: on those
-31 unused classes it flagged 87% of a sample that was 45% negative, and its
-agreement fell across all three samples that tested it. `--review-below <n>`
+31 unused classes it flagged 87% of a sample that was 45% negative, its
+agreement fell across all three samples that tested it, and on the 200 Python
+functions it would have flagged 26.5% where nothing was rated badly. `--review-below <n>`
 replaces every construct's cutoff with `n` (range 0–10). Cutoffs decide markers
 only: they never change a score, no marker fails the command, and none of them
 is a validated defect boundary.

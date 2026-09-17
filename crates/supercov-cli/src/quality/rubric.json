@@ -11,7 +11,7 @@
       "Strongly agree: the visible code is readily maintainable; understanding and ordinary changes should require little avoidable effort."
     ],
     "review_below": 6.9,
-    "cutoff_basis": "selected on the 20 Java development classes of the 2026-09-17 human-rubric experiment, balanced accuracy 0.955; held at 0.903 on 40 exposed classes and 0.813 on 31 unused ones, where it caught every negative; advisory only, and not yet tested on a representative sample"
+    "cutoff_basis": "selected on 20 human-rated Java development classes, balanced accuracy 0.955; caught every negative on 40 exposed and 31 unused classes; flagged 17.5% of 200 Python functions humans rated adequate or better, inside the 20% false-alarm bar; advisory only"
   },
   {
     "id": "readability",
