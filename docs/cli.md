@@ -59,6 +59,15 @@ but it does not lead. There is no local average, weight, or score penalty.
 Maintainability and readability are agreement judgments on four levels, worded
 against the human rating instruments they were compared with; the other seven
 constructs use five levels with concrete conditions for weak and strong grades.
+Against professional maintainability ratings of Java classes, **given two files
+the raters clearly separate, the ranking picks the harder one 85 to 96 times in
+100, where file size alone manages 74 to 88**. On 200 Python functions rated by
+three people each it agrees at 0.50 where source length manages 0.32. The nine
+constructs are not nine independent judgments: maintainability, readability and
+changeability correlate at 0.89 to 0.97 with each other in both languages, and
+no construct adds agreement with the human reference once maintainability is
+known.
+
 **This ranks code by how hard it is to work with. It does not predict where
 bugs are or were**, and that boundary has been measured twice. Across twelve
 real upstream fixes, the declaration a maintainer changed ranked weakest 5
@@ -66,7 +75,11 @@ times out of 12 against 3.77 by chance. Across four years of one TypeScript
 project's history, 1,029 author-declared fix commits over 186 files, the
 correlation between a file's grade and the fixes it received disappears once
 file size is held constant, falling from −0.41 to +0.02. What people call hard
-to maintain and where bugs get fixed are different things.
+to maintain and where bugs get fixed are different things. Refactors in that
+same history behave differently: holding size constant, poorly graded files
+attract more refactoring and optimisation and fewer features, which is what a
+maintainability signal should look like and not what a size proxy would
+produce.
 
 These judgments are not measured coverage, probabilities of correctness, or a
 security audit. The overall answer is independent; a high overall score can
