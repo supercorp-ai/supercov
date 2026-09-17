@@ -1,5 +1,6 @@
 use super::*;
 use std::{
+    io::Write,
     net::TcpListener,
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -593,19 +594,19 @@ fn authentication_error_is_not_retried_or_echoed() {
 }
 
 #[test]
-fn cli_rejects_unknown_or_missing_options() {
+fn scan_rejects_unknown_or_missing_options() {
     for value in ["NaN", "inf", "-1", "10.1", "abc"] {
-        assert!(parse(vec!["a.ts".into(), "--review-below".into(), value.into()]).is_err());
+        assert!(parse_scan(vec!["a.ts".into(), "--review-below".into(), value.into()]).is_err());
     }
-    assert!(parse(vec!["a.ts".into(), "--review-below".into()]).is_err());
+    assert!(parse_scan(vec!["a.ts".into(), "--review-below".into()]).is_err());
     assert_eq!(
-        parse(vec!["a.ts".into(), "--review-below".into(), "7.5".into()])
+        parse_scan(vec!["a.ts".into(), "--review-below".into(), "7.5".into()])
             .unwrap()
             .review_below,
         Some(7.5)
     );
     assert!(
-        parse(vec![
+        parse_scan(vec![
             "a.ts".into(),
             "--review-below".into(),
             "5".into(),
@@ -615,11 +616,11 @@ fn cli_rejects_unknown_or_missing_options() {
         .is_err()
     );
 
-    assert!(parse(vec![]).is_err());
-    assert!(parse(vec!["a.ts".into(), "--context".into()]).is_err());
-    assert!(parse(vec!["a.ts".into(), "--scope".into(), "function".into()]).is_err());
+    assert!(parse_scan(vec![]).is_err());
+    assert!(parse_scan(vec!["a.ts".into(), "--context".into()]).is_err());
+    assert!(parse_scan(vec!["a.ts".into(), "--scope".into(), "function".into()]).is_err());
     assert!(
-        parse(vec!["a.ts".into(), "--json".into(), "--dry-run".into()])
+        parse_scan(vec!["a.ts".into(), "--json".into(), "--dry-run".into()])
             .unwrap()
             .dry_run
     );
@@ -721,4 +722,340 @@ fn files_are_ranked_weakest_maintainability_first() {
     assert!(weak < strong, "weakest maintainability comes first");
     assert!(strong < error, "errors follow the ranked files");
     assert!(text.contains("1 of 2 assessed files carry a review marker"));
+}
+
+#[test]
+fn a_subcommand_is_only_a_reserved_word_and_a_path_can_still_be_scanned() {
+    let scanned =
+        |arguments: Vec<&str>| match parse(arguments.iter().map(|a| a.to_string()).collect()) {
+            Ok(Command::Scan(options)) => options.paths,
+            _ => panic!("expected a scan"),
+        };
+    assert_eq!(scanned(vec!["src"]), vec![PathBuf::from("src")]);
+    // A directory named after a subcommand is still assessable through `scan`.
+    assert_eq!(scanned(vec!["scan", "show"]), vec![PathBuf::from("show")]);
+    assert_eq!(
+        scanned(vec!["scan", "src", "--refresh"]),
+        vec![PathBuf::from("src")]
+    );
+    assert!(matches!(
+        parse(vec!["show".into()]),
+        Ok(Command::Show { snapshot: None, .. })
+    ));
+    assert!(matches!(
+        parse(vec!["snapshots".into()]),
+        Ok(Command::Snapshots { .. })
+    ));
+}
+
+#[test]
+fn reading_a_snapshot_takes_a_selector_and_its_own_options() {
+    let id = "q_0123456789abcdef";
+    match parse(vec![
+        "show".into(),
+        id.into(),
+        "--json".into(),
+        "--limit".into(),
+        "0".into(),
+    ]) {
+        Ok(Command::Show {
+            snapshot,
+            json,
+            limit,
+        }) => {
+            assert_eq!(snapshot.as_deref(), Some(id));
+            assert!(json);
+            assert_eq!(limit, 0);
+        }
+        other => panic!("expected a show view, got {:?}", other.is_ok()),
+    }
+    match parse(vec![
+        "dimension".into(),
+        "maintainability".into(),
+        id.into(),
+    ]) {
+        Ok(Command::Dimension {
+            name,
+            snapshot,
+            limit,
+            ..
+        }) => {
+            assert_eq!(name, "maintainability");
+            assert_eq!(snapshot.as_deref(), Some(id));
+            assert_eq!(limit, query::DEFAULT_LIMIT);
+        }
+        _ => panic!("expected a dimension view"),
+    }
+    match parse(vec!["file".into(), "src/a.ts".into()]) {
+        Ok(Command::File { path, snapshot, .. }) => {
+            assert_eq!(path, "src/a.ts");
+            assert_eq!(snapshot, None);
+        }
+        _ => panic!("expected a file view"),
+    }
+    assert!(parse(vec!["dimension".into()]).is_err());
+    assert!(parse(vec!["file".into()]).is_err());
+    assert!(
+        parse(vec![
+            "file".into(),
+            "a.ts".into(),
+            "--limit".into(),
+            "5".into()
+        ])
+        .is_err()
+    );
+    assert!(parse(vec!["show".into(), "--limit".into(), "many".into()]).is_err());
+    assert!(parse(vec!["show".into(), "--refresh".into()]).is_err());
+}
+
+/// A cached answer for one whole-file request, with `adjust` free to weaken
+/// individual constructs before it is saved.
+fn seed(temp: &Temp, path: &str, source: &str, adjust: impl Fn(&mut ApiResponse)) -> String {
+    let request = request(path, source, None);
+    let hash = digest(&serde_json::to_vec(&request).unwrap());
+    let mut response = response(&request);
+    adjust(&mut response);
+    validate(&response, &request).unwrap();
+    save(
+        &store::responses(&temp.0).join(format!("{hash}.json")),
+        &CacheEntry {
+            request_hash: hash.clone(),
+            response,
+            elapsed_ms: 12,
+        },
+    )
+    .unwrap();
+    hash
+}
+
+/// Put one construct on a chosen level, keeping the distribution consistent.
+fn at_level(response: &mut ApiResponse, construct: &str, level: usize) {
+    if let Answer::Score {
+        score,
+        probabilities,
+        ..
+    } = response
+        .answers
+        .get_mut(&format!("{construct}_score"))
+        .unwrap()
+    {
+        *score = level as f64;
+        for (index, p) in probabilities {
+            *p = if *index == level.to_string() {
+                1.0
+            } else {
+                0.0
+            };
+        }
+    }
+}
+
+#[test]
+fn a_scan_saves_a_snapshot_that_reads_back_with_no_key_and_no_network() {
+    let temp = Temp::new();
+    let (weak, strong) = ("export const weak = 1;", "export const strong = 2;");
+    temp.write("src/weak.ts", weak);
+    temp.write("src/strong.ts", strong);
+    seed(&temp, "src/weak.ts", weak, |response| {
+        at_level(response, "maintainability", 1);
+        at_level(response, "overall", 1);
+    });
+    seed(&temp, "src/strong.ts", strong, |_| {});
+    let options = Options {
+        paths: vec!["src".into()],
+        json: true,
+        ..Default::default()
+    };
+    let (report, errors) = run(&temp.0, &options, None).unwrap();
+    assert!(!errors);
+    assert_eq!(report["saved"], true);
+    let id = report["id"].as_str().unwrap().to_owned();
+    assert!(store::is_snapshot_id(&id));
+
+    // The snapshot records the grades and points at the answers; it does not
+    // copy them, and the scan report still carries them.
+    let (manifest, files) = store::read(&temp.0, &id).unwrap();
+    assert_eq!(manifest["counts"]["assessed"], 2);
+    assert_eq!(manifest["rubric_version"], RUBRIC_VERSION);
+    assert_eq!(manifest["paths"][0], "src");
+    let recorded = &files["files"][0];
+    assert!(recorded.get("raw_response").is_none());
+    assert!(recorded["request_hash"].is_string());
+    assert!(recorded["declarations"].is_array());
+    assert!(report["files"][0]["raw_response"].is_object());
+
+    // Every read view works from the saved snapshot alone.
+    let view = query::show(&temp.0, None, 0).unwrap();
+    assert_eq!(view["snapshot_id"], id.as_str());
+    assert_eq!(view["weakest_first"][0]["path"], "src/weak.ts");
+    assert_eq!(view["total_files"], 2);
+    let maintainability = view["constructs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|construct| construct["id"] == "maintainability")
+        .unwrap();
+    assert_eq!(maintainability["marked"], 1);
+    assert_eq!(maintainability["weakest"]["path"], "src/weak.ts");
+
+    let ranked = query::dimension(&temp.0, "maintainability", Some(&id), 0).unwrap();
+    assert_eq!(ranked["construct"]["review_below"], 6.9);
+    assert_eq!(ranked["files"][0]["path"], "src/weak.ts");
+    assert_eq!(ranked["files"][0]["review_recommended"], true);
+    assert_eq!(ranked["files"][1]["path"], "src/strong.ts");
+    assert!(query::dimension(&temp.0, "invented", Some(&id), 0).is_err());
+
+    // The file view explains a grade with the wording Jev actually chose,
+    // which only the cached answer carries.
+    let file = query::file(&temp.0, "src/weak.ts", Some(&id)).unwrap();
+    assert_eq!(file["scopes"][0]["scope"], "file");
+    assert_eq!(file["scopes"][0]["response_available"], true);
+    let construct = file["scopes"][0]["constructs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|construct| construct["id"] == "maintainability")
+        .unwrap();
+    assert_eq!(construct["level_index"], "1");
+    assert!(
+        construct["level"]
+            .as_str()
+            .unwrap()
+            .starts_with("Disagree:")
+    );
+    assert!(query::render(&file).contains("Jev chose: Disagree:"));
+    assert!(query::file(&temp.0, "src/missing.ts", Some(&id)).is_err());
+
+    // Without the cached answer the snapshot still reads; only the wording goes.
+    fs::remove_dir_all(store::responses(&temp.0)).unwrap();
+    let file = query::file(&temp.0, "src/weak.ts", Some(&id)).unwrap();
+    assert_eq!(file["scopes"][0]["response_available"], false);
+    assert!(file["scopes"][0]["constructs"][0]["level"].is_null());
+    assert_eq!(file["scopes"][0]["constructs"][0]["id"], "maintainability");
+    assert!(
+        (file["scopes"][0]["constructs"][0]["score"]
+            .as_f64()
+            .unwrap()
+            - 10.0 / 3.0)
+            .abs()
+            < 1e-9,
+        "the grade survives without the answer behind it"
+    );
+    assert!(query::render(&file).contains("no longer cached"));
+}
+
+#[test]
+fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
+    let temp = Temp::new();
+    let files = json!({"files": []});
+    let (first, _) = store::identity().unwrap();
+    store::write(
+        &temp.0,
+        &first,
+        &json!({"created_at": "2026-09-17T00-00-00-000000Z"}),
+        &files,
+    )
+    .unwrap();
+    // An id is never reused, and an existing one is refused rather than revised.
+    assert!(
+        store::write(&temp.0, &first, &json!({"created_at": "later"}), &files)
+            .unwrap_err()
+            .contains("already exists")
+    );
+    let (second, _) = store::identity().unwrap();
+    assert_ne!(first, second);
+    store::write(
+        &temp.0,
+        &second,
+        &json!({"created_at": "2026-09-17T01-00-00-000000Z"}),
+        &files,
+    )
+    .unwrap();
+
+    assert_eq!(store::resolve(&temp.0, None).unwrap(), second);
+    assert_eq!(store::resolve(&temp.0, Some("latest")).unwrap(), second);
+    assert_eq!(store::resolve(&temp.0, Some(&first)).unwrap(), first);
+    let listed = store::list(&temp.0).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].0, second, "most recent first");
+
+    // A selector is checked before any path is built from it.
+    for selector in [
+        "..",
+        "../../etc/passwd",
+        "q_0123",
+        "run_0123456789abcdef",
+        "",
+    ] {
+        assert!(store::resolve(&temp.0, Some(selector)).is_err());
+        assert!(store::read(&temp.0, selector).is_err());
+    }
+    // A pointer at a snapshot that is gone falls back to the newest kept one.
+    fs::remove_dir_all(store::root(&temp.0).join("snapshots").join(&second)).unwrap();
+    assert_eq!(store::resolve(&temp.0, None).unwrap(), first);
+    // And with nothing left, browsing says so instead of inventing a snapshot.
+    fs::remove_dir_all(store::root(&temp.0).join("snapshots")).unwrap();
+    assert!(
+        store::resolve(&temp.0, None)
+            .unwrap_err()
+            .contains("no quality snapshot here yet")
+    );
+}
+
+#[test]
+fn a_windowed_file_is_navigated_by_its_weakest_window() {
+    let temp = Temp::new();
+    let source = oversized_typescript();
+    temp.write("big.ts", &source);
+    let starts = line_starts(&source);
+    let (outline, planned) = plan("big.ts", &source, None).unwrap();
+    // The second window is the weak one, so navigation must lead there.
+    for (position, (window, _)) in planned.iter().enumerate() {
+        let text = window_source(&source, &starts, window);
+        let request = windowed_request("big.ts", text, window, &outline, None);
+        let hash = digest(&serde_json::to_vec(&request).unwrap());
+        let mut answers = response(&request);
+        if position == 1 {
+            at_level(&mut answers, "maintainability", 0);
+        }
+        validate(&answers, &request).unwrap();
+        save(
+            &store::responses(&temp.0).join(format!("{hash}.json")),
+            &CacheEntry {
+                request_hash: hash,
+                response: answers,
+                elapsed_ms: 3,
+            },
+        )
+        .unwrap();
+    }
+    let options = Options {
+        paths: vec!["big.ts".into()],
+        json: true,
+        ..Default::default()
+    };
+    let (report, errors) = run(&temp.0, &options, None).unwrap();
+    assert!(!errors);
+    let id = report["id"].as_str().unwrap().to_owned();
+    assert_eq!(store::read(&temp.0, &id).unwrap().0["counts"]["partial"], 1);
+
+    let weak = &planned[1].0;
+    let ranked = query::dimension(&temp.0, "maintainability", Some(&id), 0).unwrap();
+    assert_eq!(ranked["files"][0]["path"], "big.ts");
+    assert_eq!(ranked["files"][0]["score"], 0.0);
+    assert_eq!(
+        ranked["files"][0]["scope"],
+        format!("window 2/2, lines {}-{}", weak.start_line, weak.end_line)
+    );
+    assert!(query::render(&ranked).contains("window 2/2"));
+
+    let file = query::file(&temp.0, "big.ts", Some(&id)).unwrap();
+    assert_eq!(file["partial"], true);
+    assert_eq!(file["scopes"].as_array().unwrap().len(), 2);
+    assert_eq!(file["scopes"][1]["scope"], "window 2/2");
+    assert_eq!(file["scopes"][1]["start_line"], weak.start_line);
+    let text = query::render(&file);
+    assert!(text.contains("no whole-file grade"));
+    assert!(text.contains("Top-level declarations, none assessed on its own"));
+    assert!(text.contains("step0 (function)"));
 }

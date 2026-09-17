@@ -2,7 +2,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
     process::ExitCode,
     time::{Duration, Instant},
@@ -11,6 +11,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+
+mod query;
+mod store;
 
 const MODEL: &str = "jev-1.13.0";
 const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
@@ -38,14 +41,30 @@ const RANKING: [&str; 3] = ["maintainability", "readability", "overall"];
 
 const HELP: &str = "Assess source quality with TypeSafe AI (experimental, advisory).
 
-Usage: supercov quality <file-or-directory> [...] [options]
+Usage:
+  supercov quality [scan] <file-or-directory> [...]   assess source, saving a snapshot
+  supercov quality snapshots                          list saved snapshots
+  supercov quality show [snapshot]                    read a saved snapshot
+  supercov quality dimension <construct> [snapshot]   rank files by one construct
+  supercov quality file <path> [snapshot]             one file, every construct
 
+Scan options:
   --json              Print the report as JSON
   --dry-run           Print exact request bodies as JSON; no API call or cache writes
   --context <file>    Include a UTF-8 contract/context document in every request
   --review-below <n>  Override every construct cutoff with n/10
   --refresh           Bypass cached responses
+
+Reading options:
+  --json              Print the view as JSON
+  --limit <n>         Rows to show, 0 for all of them (default 20; file takes none)
+
   --help              Show this help
+
+Reading a snapshot never contacts the API and needs no key. A snapshot argument
+defaults to the most recent scan made here. Snapshots are immutable: a scan
+writes a new one rather than revising the last. A directory whose name collides
+with a subcommand is still assessable as: supercov quality scan show
 
 Set TYPESAFE_API_KEY for uncached assessments. Source and optional context are
 sent to api.typesafe.ai, once per file with 9 Jev scores and 1 context question.
@@ -63,7 +82,8 @@ Files are listed weakest maintainability first.
 Context sufficiency and confidence stay visible without suppressing scores.
 Source is never truncated. A file over the request budget is split into windows
 at declaration boundaries; a file with no declarations to split on is an error.
-Cache: .supercov/quality/ (exact request hash; --refresh to reassess).
+Cache: .supercov/quality/requests/ (exact request hash; --refresh to reassess).
+Snapshots: .supercov/quality/snapshots/.
 ";
 
 #[derive(Default, Debug)]
@@ -76,7 +96,101 @@ struct Options {
     review_below: Option<f64>,
 }
 
-fn parse(args: Vec<String>) -> Result<Options, String> {
+/// What the user asked for: a new assessment, or a reading of a saved one.
+/// Reading never contacts the provider.
+enum Command {
+    Scan(Options),
+    Snapshots {
+        json: bool,
+        limit: usize,
+    },
+    Show {
+        snapshot: Option<String>,
+        json: bool,
+        limit: usize,
+    },
+    Dimension {
+        name: String,
+        snapshot: Option<String>,
+        json: bool,
+        limit: usize,
+    },
+    File {
+        path: String,
+        snapshot: Option<String>,
+        json: bool,
+    },
+}
+
+/// The first argument is a subcommand only when it is one of the reserved
+/// words. A directory that happens to be called `show` is still assessable as
+/// `supercov quality scan show`.
+fn parse(arguments: Vec<String>) -> Result<Command, String> {
+    let subcommand = arguments.first().map_or("", String::as_str);
+    let rest = || arguments[1..].to_vec();
+    match subcommand {
+        "scan" => Ok(Command::Scan(parse_scan(rest())?)),
+        "snapshots" | "show" | "dimension" | "file" => parse_view(subcommand, rest()),
+        _ => Ok(Command::Scan(parse_scan(arguments)?)),
+    }
+}
+
+fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
+    let mut json = false;
+    let mut limit = None;
+    let mut positional = Vec::new();
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--json" => json = true,
+            "--limit" => {
+                let value = arguments
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .ok_or("--limit requires a row count, or 0 for every row")?;
+                if limit.replace(value).is_some() {
+                    return Err("--limit may only be specified once".into());
+                }
+            }
+            "--" => positional.extend(arguments.by_ref()),
+            value if value.starts_with('-') => {
+                return Err(format!("unknown quality {kind} option: {value}"));
+            }
+            _ => positional.push(argument),
+        }
+    }
+    if kind == "file" && limit.is_some() {
+        return Err("quality file shows one file and takes no --limit".into());
+    }
+    let limit = limit.unwrap_or(query::DEFAULT_LIMIT);
+    let mut positional = positional.into_iter();
+    let mut required = |what: &str| {
+        positional
+            .next()
+            .ok_or_else(|| format!("quality {kind} requires {what}"))
+    };
+    Ok(match kind {
+        "snapshots" => Command::Snapshots { json, limit },
+        "show" => Command::Show {
+            snapshot: positional.next(),
+            json,
+            limit,
+        },
+        "dimension" => Command::Dimension {
+            name: required("a construct name")?,
+            snapshot: positional.next(),
+            json,
+            limit,
+        },
+        _ => Command::File {
+            path: required("a file path")?,
+            snapshot: positional.next(),
+            json,
+        },
+    })
+}
+
+fn parse_scan(args: Vec<String>) -> Result<Options, String> {
     let mut options = Options::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -267,19 +381,16 @@ fn window_source<'s>(source: &'s str, starts: &[usize], window: &Window) -> &'s 
     &source[from..to]
 }
 
-/// Every line of the file assigned to one candidate window, split only at the
-/// first line of a top-level declaration. Code before the first declaration
-/// joins it rather than becoming a window of its own.
-fn candidates(path: &str, source: &str, starts: &[usize]) -> Option<(Value, Vec<Window>)> {
+/// Every top-level declaration a file has: the outline a request carries, and
+/// each declaration's name with the line it starts on. `None` when Supercov has
+/// no parser for the language or the file does not parse.
+fn top_level(path: &str, source: &str) -> Option<(Value, Vec<(String, usize)>)> {
     let code = supercov_engine::source_units::code(path, source)?;
     let top: Vec<_> = code
         .units
         .iter()
         .filter(|unit| unit.parent == Some(0))
         .collect();
-    if top.is_empty() {
-        return None;
-    }
     let outline = Value::Array(
         top.iter()
             .map(|unit| {
@@ -287,7 +398,23 @@ fn candidates(path: &str, source: &str, starts: &[usize]) -> Option<(Value, Vec<
             })
             .collect(),
     );
-    let mut boundaries: Vec<usize> = top.iter().map(|unit| unit.line).collect();
+    Some((
+        outline,
+        top.iter()
+            .map(|unit| (unit.path.clone(), unit.line))
+            .collect(),
+    ))
+}
+
+/// Every line of the file assigned to one candidate window, split only at the
+/// first line of a top-level declaration. Code before the first declaration
+/// joins it rather than becoming a window of its own.
+fn candidates(path: &str, source: &str, lines: &[usize]) -> Option<(Value, Vec<Window>)> {
+    let (outline, top) = top_level(path, source)?;
+    if top.is_empty() {
+        return None;
+    }
+    let mut boundaries: Vec<usize> = top.iter().map(|(_, line)| *line).collect();
     boundaries.dedup();
     let windows = boundaries
         .iter()
@@ -296,7 +423,7 @@ fn candidates(path: &str, source: &str, starts: &[usize]) -> Option<(Value, Vec<
             let start_line = if index == 0 { 1 } else { *boundary };
             let end_line = boundaries
                 .get(index + 1)
-                .map_or(starts.len(), |next| next - 1);
+                .map_or(lines.len(), |next| next - 1);
             Window {
                 index: index + 1,
                 of: boundaries.len(),
@@ -304,8 +431,8 @@ fn candidates(path: &str, source: &str, starts: &[usize]) -> Option<(Value, Vec<
                 end_line,
                 declarations: top
                     .iter()
-                    .filter(|unit| unit.line >= start_line && unit.line <= end_line)
-                    .map(|unit| unit.path.clone())
+                    .filter(|(_, line)| *line >= start_line && *line <= end_line)
+                    .map(|(name, _)| name.clone())
                     .collect(),
             }
         })
@@ -723,24 +850,7 @@ fn cached(path: &Path, hash: &str, request: &Value) -> Result<Option<CacheEntry>
 }
 
 fn save(path: &Path, entry: &CacheEntry) -> Result<(), String> {
-    let directory = path.parent().ok_or("invalid cache path")?;
-    fs::create_dir_all(directory).map_err(|e| e.to_string())?;
-    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-    let result = (|| -> Result<(), String> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(entry).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(&temp, path).map_err(|e| e.to_string())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result
+    store::write_atomic(path, &serde_json::to_vec(entry).map_err(|e| e.to_string())?)
 }
 
 /// What a file needs sent for it: one request, or one per window when the whole
@@ -766,16 +876,22 @@ fn few(names: &[String]) -> String {
 /// One request answered: from the cache when this exact request was answered
 /// before, otherwise from the provider.
 fn resolve(
-    cache_root: &Path,
+    project_root: &Path,
     agent: &ureq::Agent,
     key: Option<&str>,
     refresh: bool,
     request: &Value,
     hash: &str,
 ) -> Result<(CacheEntry, bool, Option<String>), String> {
-    let cache_path = cache_root.join(format!("{hash}.json"));
-    if !refresh && let Some(entry) = cached(&cache_path, hash, request)? {
-        return Ok((entry, true, None));
+    let cache_path = store::responses(project_root).join(format!("{hash}.json"));
+    if !refresh {
+        // The flat directory is where responses were cached before snapshots
+        // existed. An answer saved there still answers this exact request.
+        for path in [&cache_path, &store::legacy_response(project_root, hash)] {
+            if let Some(entry) = cached(path, hash, request)? {
+                return Ok((entry, true, None));
+            }
+        }
     }
     let key = key
         .filter(|s| !s.trim().is_empty())
@@ -824,7 +940,6 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
         .map(|p| read_text(&root.join(p)))
         .transpose()?;
     let agent = client();
-    let cache_root = root.join(".supercov/quality");
     let mut files = Vec::new();
     let mut requests = Vec::new();
     let mut errors = false;
@@ -841,9 +956,17 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
             if source.trim().is_empty() {
                 return Err("empty source file cannot be assessed".into());
             }
+            // Recorded for every file, assessed whole or not: a drilldown names
+            // the declarations it did not grade, and later scopes need them.
+            let identity = Identity {
+                source_hash: digest(source.as_bytes()),
+                bytes: source.len(),
+                declarations: top_level(&relative, &source)
+                    .map_or(Value::Null, |(outline, _)| outline),
+            };
             let whole = request(&relative, &source, context.as_deref());
             if let Some(bytes) = within_budget(&whole)? {
-                return Ok((digest(source.as_bytes()), Prepared::Whole(whole, bytes)));
+                return Ok((identity, Prepared::Whole(whole, bytes)));
             }
             let (outline, planned) = plan(&relative, &source, context.as_deref())?;
             let starts = line_starts(&source);
@@ -873,9 +996,9 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
                     Ok((window, built))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            Ok((digest(source.as_bytes()), Prepared::Windows(windows)))
+            Ok((identity, Prepared::Windows(windows)))
         });
-        let (source_hash, prepared) = match prepared {
+        let (identity, prepared) = match prepared {
             Ok(value) => value,
             Err(error) => {
                 errors = true;
@@ -910,7 +1033,7 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
         let mut answer = |request: &Value, bytes: &[u8]| -> Result<Value, String> {
             let hash = digest(bytes);
             let (entry, hit, warning) =
-                resolve(&cache_root, &agent, key, options.refresh, request, &hash)?;
+                resolve(root, &agent, key, options.refresh, request, &hash)?;
             if !hit {
                 input_tokens += entry.response.usage.input_tokens;
                 output_tokens += entry.response.usage.output_tokens;
@@ -920,7 +1043,8 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
         match prepared {
             Prepared::Whole(request, bytes) => match answer(&request, &bytes) {
                 Ok(graded) => {
-                    let mut entry = json!({"path": relative, "source_hash": source_hash});
+                    let mut entry = json!({"path": relative, "source_hash": identity.source_hash,
+                        "bytes": identity.bytes, "declarations": identity.declarations});
                     merge(&mut entry, graded);
                     files.push(entry);
                 }
@@ -958,7 +1082,8 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
                     })
                     .collect::<Map<_, _>>();
                 files.push(json!({"path": relative, "status": "completed", "partial": true,
-                    "source_hash": source_hash, "scope_note":
+                    "source_hash": identity.source_hash, "bytes": identity.bytes,
+                    "declarations": identity.declarations, "scope_note":
                     "assessed as windows of whole declarations; Jev graded each window, and this file has no whole-file grade",
                     "windows_weakest": weakest, "windows": assessed}));
             }
@@ -970,17 +1095,71 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
             errors,
         ));
     }
-    Ok((
-        json!({"schema_version": 3, "rubric_version": RUBRIC_VERSION, "policy_version": POLICY_VERSION, "experimental": true,
-        "model": MODEL, "scope": "file", "context_hash": context.as_ref().map(|s| digest(s.as_bytes())),
+    let completed = files.iter().filter(|file| file["status"] == "completed");
+    let counts = json!({
+        "assessed": completed.clone().count(),
+        "partial": completed.clone().filter(|file| file["partial"] == true).count(),
+        "windows": completed
+            .flat_map(|file| file["windows"].as_array().map_or(&[][..], Vec::as_slice))
+            .count(),
+        "errors": files.iter().filter(|file| file["status"] == "error").count(),
+    });
+    let (id, created_at) = store::identity()?;
+    let mut manifest = json!({
+        "schema_version": 3, "id": id, "created_at": created_at, "parent": Value::Null,
+        "supercov_version": env!("CARGO_PKG_VERSION"),
+        "rubric_version": RUBRIC_VERSION, "policy_version": POLICY_VERSION, "experimental": true,
+        "model": MODEL, "scope": "file", "counts": counts,
+        "paths": options.paths.iter()
+            .map(|path| path.display().to_string().replace('\\', "/"))
+            .collect::<Vec<_>>(),
+        "context_hash": context.as_ref().map(|s| digest(s.as_bytes())),
         "budget": {"max_request_tokens": MAX_REQUEST_TOKENS, "bytes_per_token": BYTES_PER_TOKEN,
             "note": "estimated tokens, not a provider measurement; files over budget are windowed"},
         "policy": {"review_below_override": options.review_below,
             "cutoffs": rubric().into_iter().map(|d| (d.id, json!({"review_below": d.review_below, "basis": d.cutoff_basis}))).collect::<Map<_, _>>(),
             "review_rule": "score strictly below the construct cutoff", "grades": "direct Jev judgments", "fail_on_review": false},
-        "usage_this_run": {"input_tokens": input_tokens, "output_tokens": output_tokens}, "files": files}),
-        errors,
-    ))
+        "usage_this_run": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+    });
+    // Raw provider answers stay in the response cache the snapshot points into,
+    // rather than being copied into every snapshot that mentions them.
+    let recorded = Value::Array(files.iter().map(without_raw).collect());
+    let saved = store::write(root, &id, &manifest, &json!({"files": recorded}));
+    let mut report = manifest.take();
+    if let Err(error) = &saved {
+        report["snapshot_warning"] = json!(format!(
+            "the assessment completed but no snapshot was saved: {error}"
+        ));
+    }
+    report["saved"] = json!(saved.is_ok());
+    report["files"] = Value::Array(files);
+    Ok((report, errors))
+}
+
+/// What a report records about a file whichever way it was assessed.
+struct Identity {
+    source_hash: String,
+    bytes: usize,
+    declarations: Value,
+}
+
+/// A report entry without the provider answers embedded in it.
+fn without_raw(file: &Value) -> Value {
+    let mut file = file.clone();
+    let Some(object) = file.as_object_mut() else {
+        return file;
+    };
+    object.remove("raw_response");
+    for window in object
+        .get_mut("windows")
+        .and_then(Value::as_array_mut)
+        .map_or(&mut [][..], Vec::as_mut_slice)
+    {
+        if let Some(window) = window.as_object_mut() {
+            window.remove("raw_response");
+        }
+    }
+    file
 }
 
 /// Move every field of `from` onto `into`, which keeps a report entry's own
@@ -1142,7 +1321,29 @@ fn human(report: &Value) -> String {
         "\n{}; rubric {}. Fresh input tokens: {}.\n",
         MODEL, RUBRIC_VERSION, report["usage_this_run"]["input_tokens"]
     ));
+    if let Some(id) = report["id"].as_str().filter(|_| report["saved"] == true) {
+        text.push_str(&format!(
+            "Snapshot {id} — browse it offline with: supercov quality show {id}\n"
+        ));
+    }
+    if let Some(warning) = report["snapshot_warning"].as_str() {
+        text.push_str(&format!("Warning: {warning}\n"));
+    }
     text
+}
+
+/// A saved view: JSON for a program, text for a person. Reading never fails
+/// the command on the strength of what it found.
+fn present(view: Value, json: bool) -> Result<bool, String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&view).map_err(|e| e.to_string())?
+        );
+    } else {
+        print!("{}", query::render(&view));
+    }
+    Ok(false)
 }
 
 pub fn command(arguments: Vec<String>) -> ExitCode {
@@ -1151,21 +1352,44 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let result = (|| -> Result<bool, String> {
-        let options = parse(arguments)?;
         let root = std::env::current_dir()
             .and_then(|p| p.canonicalize())
             .map_err(|e| e.to_string())?;
-        let key = std::env::var("TYPESAFE_API_KEY").ok();
-        let (report, errors) = run(&root, &options, key.as_deref())?;
-        if options.json || options.dry_run {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
-            );
-        } else {
-            print!("{}", human(&report));
+        match parse(arguments)? {
+            Command::Scan(options) => {
+                let key = std::env::var("TYPESAFE_API_KEY").ok();
+                let (report, errors) = run(&root, &options, key.as_deref())?;
+                if options.json || options.dry_run {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                    );
+                } else {
+                    print!("{}", human(&report));
+                }
+                Ok(errors)
+            }
+            Command::Snapshots { json, limit } => present(query::snapshots(&root, limit)?, json),
+            Command::Show {
+                snapshot,
+                json,
+                limit,
+            } => present(query::show(&root, snapshot.as_deref(), limit)?, json),
+            Command::Dimension {
+                name,
+                snapshot,
+                json,
+                limit,
+            } => present(
+                query::dimension(&root, &name, snapshot.as_deref(), limit)?,
+                json,
+            ),
+            Command::File {
+                path,
+                snapshot,
+                json,
+            } => present(query::file(&root, &path, snapshot.as_deref())?, json),
         }
-        Ok(errors)
     })();
     match result {
         Ok(false) => ExitCode::SUCCESS,

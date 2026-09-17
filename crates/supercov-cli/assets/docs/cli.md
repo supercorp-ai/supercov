@@ -94,14 +94,51 @@ language Supercov cannot parse, is reported as an error, as is a single
 declaration too large to send alone; its neighbouring windows are still
 assessed. Empty files are errors. Nothing larger than 4 MiB is read.
 
-Validated raw responses are cached in `.supercov/quality/`, keyed by the exact
-request hash, including source, comments, context, model and question wording.
+### Browse a saved assessment
+
+```sh
+supercov quality snapshots
+supercov quality show
+supercov quality dimension maintainability
+supercov quality file src/server.ts q_1a2b3c4d5e6f7890
+```
+
+Every scan saves an immutable snapshot and prints its id. The read commands
+above work entirely from what is on disk: no API call, no key, no new grade.
+A snapshot argument is optional and defaults to the most recent scan made in
+this directory; a scan never revises an earlier snapshot, so an id keeps
+showing what it showed.
+
+`show` gives the scan's header, each construct with how many files its cutoff
+marked and which file is weakest on it, and the files ranked weakest
+maintainability first. `dimension <construct>` ranks every file on one
+construct. `file <path>` opens one file: each construct's grade and confidence,
+**the rubric level Jev actually chose, in its own words**, the behavioral
+context and window judgments, and the file's top-level declarations, which are
+listed precisely because none of them was graded on its own yet.
+
+A windowed file has no whole-file grade, so a listing represents it by its
+weakest window and names that window. That is how the row is ordered and
+labelled, not a grade for the file.
+
+`--limit <n>` sets how many rows a listing shows, defaulting to 20, with `0`
+for all of them. `--json` prints the same view as JSON. The first argument is
+read as a subcommand only when it is one of the reserved words, so a directory
+called `show` is still assessable as `supercov quality scan show`.
+
+Validated raw responses are cached in `.supercov/quality/requests/`, keyed by
+the exact request hash, including source, comments, context, model and question
+wording. Responses cached by an earlier version in `.supercov/quality/` itself
+are still read. Snapshots live in `.supercov/quality/snapshots/` and hold grades
+and identities, not copies of the provider's answers: they point into the
+response cache by request hash. A file view degrades gracefully when a cached
+answer has been deleted, losing the level wording but keeping the grades.
 Cache hits work without an API key. `--refresh` requests a new assessment.
 JSON reports contain source/request/context hashes, model and rubric versions,
-the token budget, review policy with each construct's cutoff and its basis, raw
-answer distributions, per-axis scores and confidence, context sufficiency,
-review flags, window spans and declarations, the original assessment duration
-and token usage. `usage_this_run` counts successful fresh responses, excluding
+the snapshot id, the token budget, review policy with each construct's cutoff
+and its basis, raw answer distributions, per-axis scores and confidence,
+context sufficiency, review flags, window spans and declarations, the original
+assessment duration and token usage. `usage_this_run` counts successful fresh responses, excluding
 cache hits; it cannot account for provider billing on failed attempts. Full
 source and API credentials are not written to the cache.
 
@@ -110,7 +147,7 @@ invalid input or any file/API error. Partial results remain in the report. Low
 grades do not fail the command. HTTP 429 and 5xx responses receive at most two
 retries with bounded backoff; long retry delays are returned to the caller.
 Function-level grading, repository aggregates, line locations, changed-file
-selection, baseline comparisons and failing CI grade gates are not implemented
+selection, snapshot comparison and failing CI grade gates are not implemented
 yet.
 
 ## Measure a test command
