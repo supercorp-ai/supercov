@@ -9,6 +9,13 @@ use super::*;
 
 /// How many rows a listing shows unless the caller says otherwise.
 pub const DEFAULT_LIMIT: usize = 20;
+/// Below this, a difference between two grades is not something the rubric has
+/// been shown to resolve. A reader who could not see the grades agreed with 10
+/// of 10 pairs separated by more than three points and 7 of 10 separated by
+/// less than one, and two identical requests have differed by up to 0.45.
+const RESOLUTION: f64 = 1.0;
+const RESOLUTION_NOTE: &str =
+    "Differences under 1 point are not ones this rubric has been shown to resolve.";
 
 /// The grade a construct has for a file, and the scope it came from. A file
 /// assessed whole has one; a windowed file is represented by its weakest
@@ -1089,7 +1096,7 @@ fn render_show(view: &Value) -> String {
         ));
     }
     text.push_str(&format!(
-        "\nWeakest maintainability first ({} of {} files):\n",
+        "\nWeakest maintainability first ({} of {} files). {RESOLUTION_NOTE}\n",
         view["shown"], view["total_files"]
     ));
     for (position, row) in view["weakest_first"]
@@ -1182,13 +1189,20 @@ fn render_dimension(view: &Value) -> String {
         text.push_str(&format!("Jev judged agreement with: {statement}\n"));
     }
     text.push_str(&format!(
-        "{} of {} files, weakest first.\n\n",
+        "{} of {} files, weakest first. {RESOLUTION_NOTE}\n\n",
         view["shown"], view["total"]
     ));
+    // A gap the rubric cannot resolve should not read as an ordering, so the
+    // rows that sit within one point of the weakest are marked as a group.
+    let weakest = view["files"][0]["score"].as_f64();
     for row in view["files"].as_array().map_or(&[][..], Vec::as_slice) {
         let scope = row["scope"].as_str().unwrap_or("file");
+        let close = match (weakest, row["score"].as_f64()) {
+            (Some(weakest), Some(score)) if score - weakest < RESOLUTION => "  *",
+            _ => "   ",
+        };
         text.push_str(&format!(
-            "  {}/10  confidence {}  {}{}{}\n",
+            "{close} {}/10  confidence {}  {}{}{}\n",
             number(&row["score"]),
             number(&row["confidence"]).trim_start(),
             row["path"].as_str().unwrap_or("?"),
@@ -1203,6 +1217,9 @@ fn render_dimension(view: &Value) -> String {
                 ""
             },
         ));
+    }
+    if view["files"].as_array().is_some_and(|rows| rows.len() > 1) {
+        text.push_str("\n  * within one point of the weakest, so their order among themselves is not meaningful.\n");
     }
     text
 }

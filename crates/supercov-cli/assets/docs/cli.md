@@ -68,7 +68,12 @@ security audit. The overall answer is independent; a high overall score can
 coexist with a weak individual axis.
 
 Files are listed weakest maintainability first, then weakest readability, then
-Jev's overall answer. **Maintainability is the only construct with a review
+Jev's overall answer. **A difference under 1 point is not one this rubric has
+been shown to resolve**, and the listings say so: a reader who could not see
+the grades agreed with 10 of 10 blinded pairs separated by more than three
+points, and 7 of 10 separated by less than one, where chance is 5. In the
+`dimension` view, files within one point of the weakest are marked, because
+their order among themselves carries nothing. **Maintainability is the only construct with a review
 cutoff**, at 6.9, selected on 20 human-rated Java development classes. It has
 since held up on 40 further classes and on 31 that no rubric had graded, where
 it caught every negative class, and on 200 Python functions from 128
