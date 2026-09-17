@@ -50,7 +50,12 @@ behavioral context sufficiency. The pinned model is `jev-1.13.0`; the rubric is
 `quality-v3`.
 
 Every displayed score, including overall, is Jev's own judgment, scaled from its
-rubric levels to 0–10. There is no local average, weight, or score penalty.
+rubric levels to 0–10. **A file's headline is its maintainability**, not the
+broad `overall` answer, which is the weakest construct in the rubric: against
+50 human-rated Java classes it reached 0.46 where maintainability reached 0.74
+and file size alone reached 0.60, and on 200 Python functions it reached 0.30
+against readability's 0.50. It is still reported, and still Jev's own answer,
+but it does not lead. There is no local average, weight, or score penalty.
 Maintainability and readability are agreement judgments on four levels, worded
 against the human rating instruments they were compared with; the other seven
 constructs use five levels with concrete conditions for weak and strong grades.
@@ -87,8 +92,16 @@ replaces every construct's cutoff with `n` (range 0–10). Cutoffs decide marker
 only: they never change a score, no marker fails the command, and none of them
 is a validated defect boundary.
 Scores remain visible at low confidence or when context is missing. Every score
-shows its provider confidence, and the report separately shows Jev's 0–1
-judgment of behavioral context sufficiency. High scores with insufficient
+shows its provider confidence. **Confidence says how concentrated an answer
+was, which predicts how much it would move if asked again, not whether it is
+right.** It correlates with repeat movement at −0.72, and a grade below 0.7
+confidence moves about four times as much between identical requests as one
+above. It does not separate good code from bad: on 31 Java classes the median
+confidence of the human-negative ones was 0.71 against 0.72 for the positives,
+and requiring confidence alongside the review cutoff lost ten of twenty-three
+real findings while removing no false alarms. Nothing in this command acts on
+confidence, deliberately. The report separately shows Jev's 0–1 judgment of
+behavioral context sufficiency. High scores with insufficient
 context do not establish the behavior of missing dependencies.
 
 Paths must be inside the current working directory. Directory scans respect

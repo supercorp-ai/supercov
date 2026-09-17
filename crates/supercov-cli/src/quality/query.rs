@@ -1268,8 +1268,8 @@ fn render_file(view: &Value) -> String {
             ));
         }
         text.push_str(&format!(
-            " — Jev overall {}/10\n",
-            number(&scope["overall_score"]).trim_start()
+            " — maintainability {}/10\n",
+            number(&scope["constructs"][0]["score"]).trim_start()
         ));
         for construct in scope["constructs"]
             .as_array()

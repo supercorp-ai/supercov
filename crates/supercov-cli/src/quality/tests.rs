@@ -449,11 +449,11 @@ fn a_windowed_report_has_no_whole_file_grade_and_ranks_by_its_weakest_window() {
     let text = human(&report);
     assert!(text.find("big.ts").unwrap() < text.find("small.ts").unwrap());
     assert!(text.contains("2 windows of whole declarations, no whole-file grade"));
-    assert!(text.contains("window 1/2 lines 1-120 (alpha) — Jev overall 7.00/10"));
+    assert!(text.contains("window 1/2 lines 1-120 (alpha) — maintainability 7.00/10"));
     assert!(text.contains("window sufficiency 0.40/1"));
     assert!(text.contains("window 2/2 lines 121-240 (beta): ERROR"));
     // The windowed file shows no overall grade line of its own.
-    assert!(!text.contains("big.ts — Jev overall"));
+    assert!(!text.contains("big.ts — maintainability"));
 }
 
 #[test]
@@ -483,7 +483,7 @@ fn cache_reuse_and_comment_invalidation_without_network() {
     assert_eq!(report["files"][0]["cached"], true);
     assert_eq!(report["files"][0]["overall_score"], 10.0);
     assert_eq!(report["usage_this_run"]["input_tokens"], 0);
-    assert!(human(&report).contains("10.00/10 (cached)"));
+    assert!(human(&report).contains("maintainability 10.00/10 (cached)"));
     assert!(report["files"][0].get("maintainability_index").is_none());
     let mut revised = entry;
     for (id, level) in [("overall_score", "1"), ("maintainability_score", "1")] {

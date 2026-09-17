@@ -1588,10 +1588,15 @@ fn human(report: &Value) -> String {
         };
         match file["windows"].as_array() {
             None => {
+                // Maintainability leads, not the broad overall answer: against
+                // human ratings overall reaches 0.46 where maintainability
+                // reaches 0.74, and file size alone reaches 0.60.
                 text.push_str(&format!(
-                    "\n{}. {path} — Jev overall {:.2}/10{cached}\n",
+                    "\n{}. {path} — maintainability {:.2}/10{cached}\n",
                     position + 1,
-                    file["overall_score"].as_f64().unwrap_or(0.0),
+                    file["dimensions"]["maintainability"]["score"]
+                        .as_f64()
+                        .unwrap_or(0.0),
                 ));
                 text.push_str(&grades(file, "   "));
             }
@@ -1623,10 +1628,12 @@ fn human(report: &Value) -> String {
                         continue;
                     }
                     text.push_str(&format!(
-                        "   window {}/{} {span} — Jev overall {:.2}/10{}\n",
+                        "   window {}/{} {span} — maintainability {:.2}/10{}\n",
                         window["index"],
                         window["of"],
-                        window["overall_score"].as_f64().unwrap_or(0.0),
+                        window["dimensions"]["maintainability"]["score"]
+                            .as_f64()
+                            .unwrap_or(0.0),
                         if window["cached"] == true {
                             " (cached)"
                         } else {
