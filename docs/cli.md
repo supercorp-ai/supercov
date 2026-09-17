@@ -125,9 +125,21 @@ exists because a bare inventory still produces a confident-looking number: asked
 to judge a repository from file names alone, Jev graded it 6.65 out of 10 while
 answering 0.13 to whether it had the basis to judge at all.
 
-Wider scopes carry **no review markers**. The two file cutoffs were selected on
+Wider scopes carry **no review markers**. The file cutoff was selected on
 human-rated Java classes; nothing at directory or repository scope is calibrated
-against anything, so nothing there is marked. Jev is additionally asked where
+against anything, so nothing there is marked.
+
+The repository judgment has been tested once, against five Java projects whose
+classes carry professional ratings. It ordered the best-rated and worst-rated
+projects correctly on both constructs, and a repository seeded with the dataset's
+worst classes fell on all three, so it reads its evidence. Two limits came out of
+the same test. Its range is compressed: across projects the raters placed far
+apart, its grades spanned about 1.6 points on maintainability and 0.9 on
+readability. And an offline average of the same file grades ordered all five
+projects correctly where the judgment misplaced one. Averaging is not what this
+command does, by design, because an average over file grades is arithmetic rather
+than a judgment; but the extra request has not been shown to order repositories
+better than one, and on five projects it could not be. Jev is additionally asked where
 behavioral risk sits, but only when a scope has between two and twelve children:
 a Choice ranks one option first however weak the evidence, and over 22 options
 that answer was measured at 0.25 confidence with "no clear one" tied for first.
