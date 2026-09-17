@@ -1211,3 +1211,236 @@ fn a_repository_judgment_is_withheld_when_jev_says_the_evidence_is_too_thin() {
     assert!(text.contains("6.00/10"));
     assert!(text.contains("basis 0.74/1"));
 }
+
+const NESTED: &str = "export function alpha(input: string): string {\n  const helper = () => input.trim();\n  return helper();\n}\n\nexport class Beta {\n  run(): number {\n    return 1;\n  }\n}\n";
+
+/// Answer and cache every declaration request for one file, so a deepen can
+/// then run offline. This drives the real request builder.
+fn seed_declarations(temp: &Temp, path: &str, source: &str, adjust: impl Fn(&mut ApiResponse)) {
+    let mut answer = |request: &Value,
+                      bytes: &[u8]|
+     -> Result<(String, CacheEntry, bool, Option<String>), String> {
+        let hash = digest(bytes);
+        let mut response = response(request);
+        adjust(&mut response);
+        validate(&response, request).unwrap();
+        let entry = CacheEntry {
+            request_hash: hash.clone(),
+            response,
+            elapsed_ms: 4,
+        };
+        save(
+            &store::responses(&temp.0).join(format!("{hash}.json")),
+            &entry,
+        )
+        .unwrap();
+        Ok((hash, entry, false, None))
+    };
+    declarations::assess(path, source, None, &mut answer).unwrap();
+}
+
+#[test]
+fn gradable_declarations_are_functions_and_methods_but_never_nested_closures() {
+    let found = declarations::gradable("src/a.ts", NESTED).unwrap();
+    let named: Vec<(&str, &str)> = found
+        .iter()
+        .map(|declaration| (declaration.name.as_str(), declaration.kind.as_str()))
+        .collect();
+    assert_eq!(named, vec![("alpha", "function"), ("Beta.run", "method")]);
+    // A callback installed at the top level is the code that installs it.
+    let handlers = declarations::gradable(
+        "src/b.js",
+        "process.on(\"exit\", () => {\n  cleanup();\n});\nfunction cleanup() {}\n",
+    )
+    .unwrap();
+    assert!(handlers.iter().any(|found| found.name == "cleanup"));
+    // A language Supercov cannot parse has no declarations to offer, which is
+    // not the same as a parsed file that declares none.
+    assert!(declarations::gradable("a.cs", "class A { void B() {} }").is_none());
+}
+
+#[test]
+fn deepening_grades_declarations_and_leaves_its_parent_snapshot_untouched() {
+    let temp = Temp::new();
+    temp.write("src/a.ts", NESTED);
+    seed(&temp, "src/a.ts", NESTED, |_| {});
+    let options = Options {
+        paths: vec!["src".into()],
+        json: true,
+        ..Default::default()
+    };
+    let (report, errors) = run(&temp.0, &options, None).unwrap();
+    assert!(!errors);
+    let parent = report["id"].as_str().unwrap().to_owned();
+    let declared: Vec<&str> = report["files"][0]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|declaration| declaration["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(declared, vec!["alpha", "Beta.run"]);
+
+    // Before deepening, a declaration says it has no grade and how to get one.
+    let listed = query::functions(&temp.0, "src/a.ts", None, 0).unwrap();
+    assert_eq!(listed["total"], 2);
+    assert_eq!(listed["assessed"], 0);
+    assert_eq!(listed["declarations"][0]["assessed"], false);
+    let text = query::render(&listed);
+    assert!(text.contains("not assessed"));
+    assert!(text.contains("supercov quality functions src/a.ts --deepen"));
+    let one = query::function(&temp.0, "src/a.ts", "alpha", None, false).unwrap();
+    assert_eq!(one["assessed"], false);
+    assert!(query::render(&one).contains("Not assessed on its own"));
+
+    // Deepening asks about every declaration, and the weaker one leads.
+    seed_declarations(&temp, "src/a.ts", NESTED, |response| {
+        at_level(response, "d0_maintainability", 0);
+    });
+    let deepened = deepen(&temp.0, "src/a.ts", None, None, false, None).unwrap();
+    let child = deepened["id"].as_str().unwrap().to_owned();
+    assert_ne!(child, parent);
+    assert_eq!(deepened["parent"], parent.as_str());
+    assert_eq!(deepened["deepened"][0], "src/a.ts");
+    assert_eq!(deepened["counts"]["declarations"], 2);
+    assert_eq!(deepened["declarations"].as_array().unwrap().len(), 2);
+
+    // The parent still holds exactly what it held.
+    let (parent_manifest, parent_files) = store::read(&temp.0, &parent).unwrap();
+    assert!(parent_manifest["parent"].is_null());
+    assert!(parent_files["files"][0]["assessed_declarations"].is_null());
+
+    let listed = query::functions(&temp.0, "src/a.ts", Some(&child), 0).unwrap();
+    assert_eq!(listed["assessed"], 2);
+    assert_eq!(listed["parent"], parent.as_str());
+    assert_eq!(listed["declarations"][0]["name"], "alpha", "weakest first");
+    assert_eq!(
+        listed["declarations"][0]["dimensions"]["maintainability"]["score"],
+        0.0
+    );
+    assert!(query::render(&listed).contains("Deepened from snapshot"));
+
+    let one = query::function(&temp.0, "src/a.ts", "Beta.run", Some(&child), false).unwrap();
+    assert_eq!(one["assessed"], true);
+    assert_eq!(one["graded_within"], "the whole file");
+    assert_eq!(one["substance"], 0.99);
+    let readability = one["constructs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|construct| construct["id"] == "readability")
+        .unwrap();
+    assert!(
+        readability["level"]
+            .as_str()
+            .unwrap()
+            .starts_with("Strongly agree:"),
+        "the wording Jev chose, read back from the cached answer"
+    );
+    assert!(query::render(&one).contains("Jev chose: Strongly agree:"));
+
+    // The graded source can be shown because the file still holds those bytes.
+    let with_source = query::function(&temp.0, "src/a.ts", "alpha", Some(&child), true).unwrap();
+    let source = with_source["source"].as_str().unwrap();
+    assert!(source.contains("export function alpha"));
+    assert!(!source.contains("class Beta"), "only its own lines");
+}
+
+#[test]
+fn deepening_refuses_source_that_is_no_longer_what_was_graded() {
+    let temp = Temp::new();
+    temp.write("src/a.ts", NESTED);
+    seed(&temp, "src/a.ts", NESTED, |_| {});
+    let options = Options {
+        paths: vec!["src".into()],
+        json: true,
+        ..Default::default()
+    };
+    let (report, _) = run(&temp.0, &options, None).unwrap();
+    let snapshot = report["id"].as_str().unwrap().to_owned();
+    seed_declarations(&temp, "src/a.ts", NESTED, |_| {});
+    let child = deepen(&temp.0, "src/a.ts", None, None, false, None).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // A context document the snapshot was not assessed with is refused, while
+    // the source is still the graded source.
+    temp.write("contract.md", "a contract");
+    assert!(
+        deepen(
+            &temp.0,
+            "src/a.ts",
+            Some(&snapshot),
+            Some(Path::new("contract.md")),
+            false,
+            None
+        )
+        .unwrap_err()
+        .contains("different --context document")
+    );
+
+    temp.write(
+        "src/a.ts",
+        &NESTED.replace("input.trim()", "input.trimEnd()"),
+    );
+    let refusal = deepen(&temp.0, "src/a.ts", Some(&snapshot), None, false, None).unwrap_err();
+    assert!(refusal.contains("has changed since snapshot"));
+    // The grades stay readable; only the source view is withheld.
+    assert_eq!(
+        query::function(&temp.0, "src/a.ts", "alpha", Some(&child), false).unwrap()["assessed"],
+        true
+    );
+    let refusal = query::function(&temp.0, "src/a.ts", "alpha", Some(&child), true).unwrap_err();
+    assert!(refusal.contains("its graded source is gone"));
+
+    assert!(
+        deepen(&temp.0, "src/missing.ts", None, None, false, None)
+            .unwrap_err()
+            .contains("is not in snapshot")
+    );
+}
+
+#[test]
+fn a_declaration_request_names_every_declaration_it_asks_about() {
+    let declarations = declarations::gradable("src/a.ts", NESTED).unwrap();
+    let mut sent = Vec::new();
+    let mut answer = |request: &Value,
+                      bytes: &[u8]|
+     -> Result<(String, CacheEntry, bool, Option<String>), String> {
+        sent.push(request.clone());
+        Ok((
+            digest(bytes),
+            CacheEntry {
+                request_hash: digest(bytes),
+                response: response(request),
+                elapsed_ms: 1,
+            },
+            false,
+            None,
+        ))
+    };
+    declarations::assess("src/a.ts", NESTED, None, &mut answer).unwrap();
+    assert_eq!(sent.len(), 1, "two declarations fit one request");
+    let request = &sent[0];
+    // The file is supplied once, whole, as shared context.
+    assert_eq!(request["state"]["file"]["source"], NESTED);
+    assert_eq!(request["state"]["file"]["supplied"], "the whole file");
+    // Question ids are routing keys, so each question names its own subject.
+    for (index, declaration) in declarations.iter().enumerate() {
+        for construct in declarations::order() {
+            let instructions =
+                &request["questions"][format!("d{index}_{construct}_score")]["instructions"];
+            assert_eq!(instructions["declaration"], declaration.name);
+            assert_eq!(instructions["kind"], declaration.kind);
+            assert_eq!(
+                instructions["lines"],
+                format!("{}-{}", declaration.start_line, declaration.end_line)
+            );
+            assert_eq!(instructions["axis"], construct);
+        }
+        assert_eq!(
+            request["questions"][format!("d{index}_substance")]["type"],
+            "noul"
+        );
+    }
+}

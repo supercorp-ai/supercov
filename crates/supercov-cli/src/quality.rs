@@ -13,6 +13,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 mod aggregate;
+mod declarations;
 mod query;
 mod store;
 
@@ -48,6 +49,9 @@ Usage:
   supercov quality show [snapshot]                    read a saved snapshot
   supercov quality dimension <construct> [snapshot]   rank files by one construct
   supercov quality file <path> [snapshot]             one file, every construct
+  supercov quality functions <path> [snapshot]        what a file declares
+  supercov quality functions <path> --deepen          grade those declarations
+  supercov quality function <file>::<name> [snapshot] one declaration
 
 Scan options:
   --json              Print the report as JSON
@@ -58,7 +62,12 @@ Scan options:
 
 Reading options:
   --json              Print the view as JSON
-  --limit <n>         Rows to show, 0 for all of them (default 20; file takes none)
+  --limit <n>         Rows to show, 0 for all of them (default 20)
+  --source            Show the graded source of one declaration (quality function)
+
+Deepening options (quality functions --deepen):
+  --context <file>    The same context document the snapshot was assessed with
+  --refresh           Bypass cached responses
 
   --help              Show this help
 
@@ -86,6 +95,10 @@ Files are listed weakest maintainability first.
 Context sufficiency and confidence stay visible without suppressing scores.
 Source is never truncated. A file over the request budget is split into windows
 at declaration boundaries; a file with no declarations to split on is an error.
+Deepening grades a file's functions and methods, sending the file once as
+shared context, and saves a child of the snapshot it deepened. The parent keeps
+every grade it had. The file must still hold the bytes that were graded.
+
 Cache: .supercov/quality/requests/ (exact request hash; --refresh to reassess).
 Snapshots: .supercov/quality/snapshots/.
 ";
@@ -124,6 +137,22 @@ enum Command {
         snapshot: Option<String>,
         json: bool,
     },
+    Functions {
+        path: String,
+        snapshot: Option<String>,
+        deepen: bool,
+        refresh: bool,
+        context: Option<PathBuf>,
+        json: bool,
+        limit: usize,
+    },
+    Function {
+        path: String,
+        name: String,
+        snapshot: Option<String>,
+        source: bool,
+        json: bool,
+    },
 }
 
 /// The first argument is a subcommand only when it is one of the reserved
@@ -134,7 +163,9 @@ fn parse(arguments: Vec<String>) -> Result<Command, String> {
     let rest = || arguments[1..].to_vec();
     match subcommand {
         "scan" => Ok(Command::Scan(parse_scan(rest())?)),
-        "snapshots" | "show" | "dimension" | "file" => parse_view(subcommand, rest()),
+        "snapshots" | "show" | "dimension" | "file" | "functions" | "function" => {
+            parse_view(subcommand, rest())
+        }
         _ => Ok(Command::Scan(parse_scan(arguments)?)),
     }
 }
@@ -142,11 +173,27 @@ fn parse(arguments: Vec<String>) -> Result<Command, String> {
 fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
     let mut json = false;
     let mut limit = None;
+    let mut deepen = false;
+    let mut refresh = false;
+    let mut source = false;
+    let mut context = None;
     let mut positional = Vec::new();
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--json" => json = true,
+            "--deepen" if kind == "functions" => deepen = true,
+            "--refresh" if kind == "functions" => refresh = true,
+            "--context" if kind == "functions" => {
+                let path = arguments
+                    .next()
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or("--context requires a file")?;
+                if context.replace(PathBuf::from(path)).is_some() {
+                    return Err("--context may only be specified once".into());
+                }
+            }
+            "--source" if kind == "function" => source = true,
             "--limit" => {
                 let value = arguments
                     .next()
@@ -163,8 +210,13 @@ fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
             _ => positional.push(argument),
         }
     }
-    if kind == "file" && limit.is_some() {
-        return Err("quality file shows one file and takes no --limit".into());
+    if matches!(kind, "file" | "function") && limit.is_some() {
+        return Err(format!(
+            "quality {kind} shows one thing and takes no --limit"
+        ));
+    }
+    if !deepen && (refresh || context.is_some()) {
+        return Err("--refresh and --context only apply with --deepen".into());
     }
     let limit = limit.unwrap_or(query::DEFAULT_LIMIT);
     let mut positional = positional.into_iter();
@@ -186,11 +238,33 @@ fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
             json,
             limit,
         },
-        _ => Command::File {
+        "file" => Command::File {
             path: required("a file path")?,
             snapshot: positional.next(),
             json,
         },
+        "functions" => Command::Functions {
+            path: required("a file path")?,
+            snapshot: positional.next(),
+            deepen,
+            refresh,
+            context,
+            json,
+            limit,
+        },
+        _ => {
+            let selector = required("a declaration as <file>::<name>")?;
+            let (path, name) = selector.split_once("::").ok_or(
+                "name the declaration as <file>::<name>, such as src/server.ts::createServer",
+            )?;
+            Command::Function {
+                path: path.to_owned(),
+                name: name.to_owned(),
+                snapshot: positional.next(),
+                source,
+                json,
+            }
+        }
     })
 }
 
@@ -1037,8 +1111,7 @@ fn run(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool
             let identity = Identity {
                 source_hash: digest(source.as_bytes()),
                 bytes: source.len(),
-                declarations: top_level(&relative, &source)
-                    .map_or(Value::Null, |(outline, _)| outline),
+                declarations: declarations::inventory(&relative, &source),
             };
             let whole = request(&relative, &source, context.as_deref());
             if let Some(bytes) = within_budget(&whole)? {
@@ -1432,6 +1505,98 @@ fn human(report: &Value) -> String {
     text
 }
 
+/// Grade the declarations of one already assessed file, and save the result as
+/// a child of the snapshot it deepens. The parent keeps every grade it had.
+fn deepen(
+    root: &Path,
+    path: &str,
+    snapshot: Option<&str>,
+    context: Option<&Path>,
+    refresh: bool,
+    key: Option<&str>,
+) -> Result<Value, String> {
+    let parent = store::resolve(root, snapshot)?;
+    let (manifest, mut record) = store::read(root, &parent)?;
+    let wanted = path.replace('\\', "/");
+    let files = record["files"]
+        .as_array_mut()
+        .ok_or("invalid snapshot file record")?;
+    let index = files
+        .iter()
+        .position(|file| file["path"].as_str() == Some(wanted.as_str()))
+        .ok_or_else(|| format!("{path} is not in snapshot {parent}"))?;
+    if files[index]["status"] != "completed" {
+        return Err(format!(
+            "{path} was not assessed in snapshot {parent}, so there is nothing to deepen"
+        ));
+    }
+    // A declaration grade has to describe the bytes the file grade described,
+    // so the working tree must still hold exactly those.
+    let source = read_text(&root.join(&wanted))?;
+    if files[index]["source_hash"] != json!(digest(source.as_bytes())) {
+        return Err(format!(
+            "{path} has changed since snapshot {parent} graded it; assess it again before deepening"
+        ));
+    }
+    // Only the context document's hash is stored, so deepening with the same
+    // context has to be asked for and checked rather than assumed.
+    let context = context
+        .map(|path| read_text(&root.join(path)))
+        .transpose()?;
+    if manifest["context_hash"] != json!(context.as_ref().map(|text| digest(text.as_bytes()))) {
+        return Err(format!(
+            "snapshot {parent} was assessed with a different --context document; supply the same one to deepen it"
+        ));
+    }
+
+    let agent = client();
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut answer = |request: &Value,
+                      bytes: &[u8]|
+     -> Result<(String, CacheEntry, bool, Option<String>), String> {
+        let hash = digest(bytes);
+        let (entry, hit, warning) = resolve(root, &agent, key, refresh, request, &hash)?;
+        if !hit {
+            input_tokens += entry.response.usage.input_tokens;
+            output_tokens += entry.response.usage.output_tokens;
+        }
+        Ok((hash, entry, hit, warning))
+    };
+    let assessed = declarations::assess(&wanted, &source, context.as_deref(), &mut answer)?;
+    files[index]["assessed_declarations"] = Value::Array(assessed.clone());
+
+    let (id, created_at) = store::identity()?;
+    let mut child = manifest;
+    let mut deepened: Vec<Value> = child["deepened"].as_array().cloned().unwrap_or_default();
+    if !deepened.iter().any(|done| done == &json!(wanted)) {
+        deepened.push(json!(wanted));
+    }
+    let counted: usize = record["files"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(|file| file["assessed_declarations"].as_array().map_or(0, Vec::len))
+        .sum();
+    child["id"] = json!(id);
+    child["created_at"] = json!(created_at);
+    child["parent"] = json!(parent);
+    child["deepened"] = Value::Array(deepened);
+    child["counts"]["declarations"] = json!(counted);
+    child["usage_this_run"] = json!({"input_tokens": input_tokens, "output_tokens": output_tokens});
+    let saved = store::write(root, &id, &child, &record);
+    let mut report = child;
+    if let Err(error) = &saved {
+        report["snapshot_warning"] = json!(format!(
+            "the declarations were assessed but no snapshot was saved: {error}"
+        ));
+    }
+    report["saved"] = json!(saved.is_ok());
+    report["path"] = json!(wanted);
+    report["declarations"] = Value::Array(assessed);
+    Ok(report)
+}
+
 /// A saved view: JSON for a program, text for a person. Reading never fails
 /// the command on the strength of what it found.
 fn present(view: Value, json: bool) -> Result<bool, String> {
@@ -1489,6 +1654,62 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
                 snapshot,
                 json,
             } => present(query::file(&root, &path, snapshot.as_deref())?, json),
+            Command::Functions {
+                path,
+                snapshot,
+                deepen: false,
+                json,
+                limit,
+                ..
+            } => present(
+                query::functions(&root, &path, snapshot.as_deref(), limit)?,
+                json,
+            ),
+            Command::Functions {
+                path,
+                snapshot,
+                context,
+                refresh,
+                json,
+                limit,
+                ..
+            } => {
+                let key = std::env::var("TYPESAFE_API_KEY").ok();
+                let report = deepen(
+                    &root,
+                    &path,
+                    snapshot.as_deref(),
+                    context.as_deref(),
+                    refresh,
+                    key.as_deref(),
+                )?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                    );
+                    return Ok(false);
+                }
+                let id = report["id"].as_str().map(str::to_owned);
+                print!(
+                    "{}",
+                    query::render(&query::functions(&root, &path, id.as_deref(), limit)?)
+                );
+                if let Some(warning) = report["snapshot_warning"].as_str() {
+                    println!("Warning: {warning}");
+                }
+                Ok(false)
+            }
+            Command::Function {
+                path,
+                name,
+                snapshot,
+                source,
+                json,
+            } => present(
+                query::function(&root, &path, &name, snapshot.as_deref(), source)?,
+                json,
+            ),
         }
     })();
     match result {

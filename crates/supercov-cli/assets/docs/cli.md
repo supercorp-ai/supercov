@@ -161,6 +161,44 @@ for all of them. `--json` prints the same view as JSON. The first argument is
 read as a subcommand only when it is one of the reserved words, so a directory
 called `show` is still assessable as `supercov quality scan show`.
 
+### Drill into one file's functions
+
+```sh
+supercov quality functions src/server.ts
+supercov quality functions src/server.ts --deepen
+supercov quality function src/server.ts::createServer --source
+```
+
+A file's grade says the file deserves attention; it does not say where in the
+file to look. Deepening asks Jev about each function and method on its own,
+with the whole file supplied once as shared context, so a declaration is read
+where it actually lives rather than as a snippet. Every scan already records
+what a file declares, so `functions <path>` lists them with no API call: each
+one either carries its grades or says it has none and gives the command that
+would grade it. **A file's grade is never copied down onto its parts.**
+
+What counts as a declaration is every function and method the file declares,
+excluding closures nested inside them: a callback is part of the code that
+installs it, and grading it separately reports noise rather than a place to
+look. Four constructs are graded here, readability, maintainability,
+correctness and failure handling, and Jev is separately asked whether the
+declaration is substantial enough for a separate judgment to say anything,
+which is what keeps a one-line accessor scoring well from reading as news.
+Cohesion, changeability, state integrity and input validation stay file-scope
+questions.
+
+`--deepen` saves a **child snapshot**, with the parent untouched and named in
+the child's manifest. Deepening a second file starts from the child, so the
+grades accumulate. It refuses to run when the file no longer holds the bytes
+that were graded, and `--source` refuses to print a changed file under a grade
+that describes different source. If the snapshot was assessed with a
+`--context` document, supply the same one to deepen it; only its hash is
+stored, so it cannot be assumed.
+
+Declarations carry no review markers either, for the same reason wider scopes
+do not: the two cutoffs were selected on whole human-rated classes. The Python
+transfer that came closest to this scope was explicitly exploratory.
+
 Validated raw responses are cached in `.supercov/quality/requests/`, keyed by
 the exact request hash, including source, comments, context, model and question
 wording. Responses cached by an earlier version in `.supercov/quality/` itself
@@ -181,7 +219,7 @@ Exit status is 0 for a completed report (including review flags and uncertain ju
 invalid input or any file/API error. Partial results remain in the report. Low
 grades do not fail the command. HTTP 429 and 5xx responses receive at most two
 retries with bounded backoff; long retry delays are returned to the caller.
-Function-level grading, line locations, changed-file selection, snapshot
+Line locations within a declaration, changed-file selection, snapshot
 comparison and failing CI grade gates are not implemented yet.
 
 ## Measure a test command

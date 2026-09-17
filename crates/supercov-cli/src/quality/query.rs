@@ -129,6 +129,8 @@ pub fn snapshots(root: &Path, limit: usize) -> Result<Value, String> {
                 "model": manifest["model"],
                 "rubric_version": manifest["rubric_version"],
                 "counts": manifest["counts"],
+                "parent": manifest["parent"],
+                "deepened": manifest["deepened"],
             })
         })
         .collect();
@@ -330,6 +332,191 @@ pub fn file(root: &Path, path: &str, snapshot: Option<&str>) -> Result<Value, St
     }))
 }
 
+/// The file entry a path names, matched exactly or by an unambiguous suffix.
+fn locate<'f>(files: &'f [Value], id: &str, path: &str) -> Result<&'f Value, String> {
+    let wanted = path.replace('\\', "/");
+    files
+        .iter()
+        .find(|file| file["path"].as_str() == Some(wanted.as_str()))
+        .or_else(|| {
+            let mut suffixed = files.iter().filter(|file| {
+                file["path"]
+                    .as_str()
+                    .is_some_and(|stored| stored.ends_with(&format!("/{wanted}")))
+            });
+            suffixed.next().filter(|_| suffixed.next().is_none())
+        })
+        .ok_or_else(|| {
+            format!("{path} is not in snapshot {id}; list its files with: supercov quality show {id} --limit 0")
+        })
+}
+
+/// What a file declares, with the grades of whichever declarations have been
+/// deepened. A declaration with no grade says so and gives the command that
+/// would grade it; a file grade is never copied down onto its parts.
+pub fn functions(
+    root: &Path,
+    path: &str,
+    snapshot: Option<&str>,
+    limit: usize,
+) -> Result<Value, String> {
+    let Snapshot {
+        id,
+        manifest,
+        files,
+        ..
+    } = open(root, snapshot)?;
+    let file = locate(&files, &id, path)?;
+    let assessed = file["assessed_declarations"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let declared = file["declarations"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let mut rows: Vec<Value> = declared
+        .iter()
+        .map(|declaration| {
+            let graded = assessed.iter().find(|graded| {
+                graded["name"] == declaration["name"]
+                    && graded["start_line"] == declaration["start_line"]
+            });
+            let mut row = json!({
+                "name": declaration["name"], "kind": declaration["kind"],
+                "start_line": declaration["start_line"], "end_line": declaration["end_line"],
+                "assessed": graded.is_some(),
+            });
+            if let Some(graded) = graded {
+                for carried in [
+                    "status",
+                    "error",
+                    "dimensions",
+                    "substance",
+                    "graded_within",
+                    "request_hash",
+                ] {
+                    if !graded[carried].is_null() {
+                        row[carried] = graded[carried].clone();
+                    }
+                }
+            }
+            row
+        })
+        .collect();
+    // Weakest maintainability first once there are grades to order by; source
+    // order until then, which is how someone reads an unassessed file.
+    if !assessed.is_empty() {
+        rows.sort_by(|a, b| {
+            match (
+                a["dimensions"]["maintainability"]["score"].as_f64(),
+                b["dimensions"]["maintainability"]["score"].as_f64(),
+            ) {
+                (Some(a), Some(b)) => a.total_cmp(&b),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
+    }
+    let (total, shown) = limited(rows, limit);
+    Ok(json!({
+        "view": "functions", "snapshot_id": id, "parent": manifest["parent"],
+        "path": file["path"], "partial": file["partial"] == true,
+        "total": total, "assessed": assessed.len(), "shown": shown.len(),
+        "declarations": shown,
+    }))
+}
+
+/// One declaration: its grades, the wording Jev chose, and on request the
+/// source it was graded from.
+pub fn function(
+    root: &Path,
+    path: &str,
+    name: &str,
+    snapshot: Option<&str>,
+    source: bool,
+) -> Result<Value, String> {
+    let Snapshot { id, files, .. } = open(root, snapshot)?;
+    let file = locate(&files, &id, path)?;
+    let stored = file["path"].as_str().unwrap_or_default().to_owned();
+    let declared = file["declarations"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let declaration = declared
+        .iter()
+        .find(|declaration| declaration["name"].as_str() == Some(name))
+        .ok_or_else(|| {
+            format!(
+                "{stored} declares no {name}; list what it declares with: supercov quality functions {stored} {id}"
+            )
+        })?;
+    let graded = file["assessed_declarations"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .find(|graded| {
+            graded["name"] == declaration["name"]
+                && graded["start_line"] == declaration["start_line"]
+        });
+    let mut view = json!({
+        "view": "function", "snapshot_id": id, "path": stored,
+        "name": declaration["name"], "kind": declaration["kind"],
+        "start_line": declaration["start_line"], "end_line": declaration["end_line"],
+        "assessed": graded.is_some(),
+    });
+    if let Some(graded) = graded {
+        let answers = graded["request_hash"]
+            .as_str()
+            .and_then(|hash| response(root, hash));
+        let index = graded["question_index"].as_u64().unwrap_or_default();
+        view["graded_within"] = graded["graded_within"].clone();
+        view["substance"] = graded["substance"].clone();
+        view["response_available"] = json!(answers.is_some());
+        view["constructs"] = Value::Array(
+            declarations::order()
+                .into_iter()
+                .map(|construct| {
+                    let grade = &graded["dimensions"][&construct];
+                    let level = answers
+                        .as_ref()
+                        .and_then(|answers| modal_level(answers, &format!("d{index}_{construct}")));
+                    json!({
+                        "id": construct,
+                        "score": grade["score"], "confidence": grade["confidence"],
+                        "level_index": level.as_ref().map(|(index, _)| index.clone()),
+                        "level": level.map(|(_, text)| text),
+                    })
+                })
+                .collect(),
+        );
+        if graded["status"] == "error" {
+            view["error"] = graded["error"].clone();
+        }
+    }
+    if source {
+        // The graded bytes or nothing: showing the current file under a grade
+        // that describes different bytes would misattribute both.
+        let text = fs::read_to_string(root.join(&stored))
+            .map_err(|e| format!("cannot read {stored}: {e}"))?;
+        if file["source_hash"] != json!(digest(text.as_bytes())) {
+            return Err(format!(
+                "{stored} has changed since snapshot {id} graded it, so its graded source is gone; assess it again"
+            ));
+        }
+        let start = declaration["start_line"].as_u64().unwrap_or(1) as usize;
+        let end = declaration["end_line"].as_u64().unwrap_or_default() as usize;
+        let end = end.max(start);
+        view["source"] = json!(
+            text.lines()
+                .enumerate()
+                .filter(|(number, _)| (start..=end).contains(&(number + 1)))
+                .map(|(number, line)| format!("{:>5}  {line}", number + 1))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    Ok(view)
+}
+
 fn marker(construct: &Value) -> String {
     match construct["review_below"].as_f64() {
         Some(cutoff) if construct["review_recommended"] == true => {
@@ -352,8 +539,120 @@ pub fn render(view: &Value) -> String {
         "show" => render_show(view),
         "dimension" => render_dimension(view),
         "file" => render_file(view),
+        "functions" => render_functions(view),
+        "function" => render_function(view),
         other => format!("unknown quality view: {other}\n"),
     }
+}
+
+fn render_functions(view: &Value) -> String {
+    let path = view["path"].as_str().unwrap_or("?");
+    let id = view["snapshot_id"].as_str().unwrap_or("?");
+    let mut text = format!(
+        "{path} in snapshot {id} — {} declarations, {} assessed on their own\n",
+        view["total"], view["assessed"]
+    );
+    if let Some(parent) = view["parent"].as_str() {
+        text.push_str(&format!("Deepened from snapshot {parent}.\n"));
+    }
+    if view["total"] == 0 {
+        text.push_str(
+            "Supercov has no declaration parser for this file, or it declares no function.\n",
+        );
+        return text;
+    }
+    text.push('\n');
+    for declaration in view["declarations"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+    {
+        let named = format!(
+            "{} ({}) lines {}-{}",
+            declaration["name"].as_str().unwrap_or("?"),
+            declaration["kind"].as_str().unwrap_or("?"),
+            declaration["start_line"],
+            declaration["end_line"],
+        );
+        if declaration["status"] == "error" {
+            text.push_str(&format!(
+                "  {named}: ERROR — {}\n",
+                declaration["error"].as_str().unwrap_or("unknown error")
+            ));
+        } else if declaration["assessed"] == true {
+            let grades = &declaration["dimensions"];
+            text.push_str(&format!(
+                "  maint {} read {} correct {} failures {}  {named}\n",
+                number(&grades["maintainability"]["score"]),
+                number(&grades["readability"]["score"]),
+                number(&grades["correctness"]["score"]),
+                number(&grades["failure_handling"]["score"]),
+            ));
+        } else {
+            text.push_str(&format!(
+                "  not assessed                                  {named}\n"
+            ));
+        }
+    }
+    if view["assessed"] == 0 {
+        text.push_str(&format!(
+            "\nAssess them: supercov quality functions {path} --deepen\n"
+        ));
+    } else {
+        text.push_str(&format!(
+            "\nOne declaration: supercov quality function {path}::<name> {id} --source\nNo cutoff applies at this scope, so nothing here is marked for review.\n"
+        ));
+    }
+    text
+}
+
+fn render_function(view: &Value) -> String {
+    let mut text = format!(
+        "{} ({}) lines {}-{} in {}, snapshot {}\n",
+        view["name"].as_str().unwrap_or("?"),
+        view["kind"].as_str().unwrap_or("?"),
+        view["start_line"],
+        view["end_line"],
+        view["path"].as_str().unwrap_or("?"),
+        view["snapshot_id"].as_str().unwrap_or("?"),
+    );
+    if view["assessed"] != true {
+        text.push_str(&format!(
+            "\nNot assessed on its own. Assess it: supercov quality functions {} --deepen\n",
+            view["path"].as_str().unwrap_or("?")
+        ));
+    } else {
+        text.push_str(&format!(
+            "Graded within {}.\n\n",
+            view["graded_within"].as_str().unwrap_or("the whole file")
+        ));
+        for construct in view["constructs"].as_array().map_or(&[][..], Vec::as_slice) {
+            text.push_str(&format!(
+                "  {:<16} {}/10  confidence {}\n",
+                construct["id"].as_str().unwrap_or("?"),
+                number(&construct["score"]),
+                number(&construct["confidence"]).trim_start(),
+            ));
+            if let Some(level) = construct["level"].as_str() {
+                text.push_str(&format!("      Jev chose: {level}\n"));
+            }
+        }
+        if let Some(substance) = view["substance"].as_f64() {
+            text.push_str(&format!(
+                "  substance {substance:.2}/1 — Jev's own answer that judging this apart says something\n"
+            ));
+        }
+        if view["response_available"] == false {
+            text.push_str(
+                "  The saved provider answer is no longer cached, so level wording is missing.\n",
+            );
+        }
+    }
+    if let Some(source) = view["source"].as_str() {
+        text.push_str("\nThe source this grade describes:\n");
+        text.push_str(source);
+        text.push('\n');
+    }
+    text
 }
 
 fn render_snapshots(view: &Value) -> String {
@@ -381,6 +680,19 @@ fn render_snapshots(view: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(" ")),
         ));
+        if let Some(parent) = row["parent"].as_str() {
+            text.push_str(&format!(
+                "   {} declarations assessed, deepened from {parent}: {}\n",
+                counts["declarations"],
+                row["deepened"]
+                    .as_array()
+                    .map_or(String::new(), |paths| paths
+                        .iter()
+                        .filter_map(|path| path.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")),
+            ));
+        }
     }
     text
 }
