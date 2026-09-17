@@ -9,9 +9,20 @@
 //! working tree still holds the exact bytes that were graded. A grade that
 //! described other source would be worse than no grade.
 //!
-//! Nothing here is calibrated. The file cutoffs were selected on whole
-//! human-rated classes, so no cutoff and no review marker is applied at this
-//! scope; the grades order declarations and explain themselves, nothing more.
+//! Only readability and maintainability are graded here, and neither carries a
+//! cutoff: the file cutoff was selected on whole human-rated classes, so nothing
+//! at this scope is calibrated, and these grades order declarations and explain
+//! themselves, nothing more.
+//!
+//! Correctness and failure handling were graded here until 2026-09-18 and were
+//! withdrawn. Tested on twelve real upstream fixes, reformatting a file without
+//! changing its behaviour moved those two constructs by a median of 0.16 and
+//! 0.15 per declaration, while the fixes themselves moved the declaration they
+//! repaired by a median of 0.13. A grade that answers more to whitespace than
+//! to the defect is not evidence about the defect. The same reformatting moved
+//! readability and maintainability by a median of 0.03, which is why they
+//! stayed. Both remain file-scope questions, where they were measured to rise
+//! for three of three independently reproduced fixes.
 
 use super::*;
 

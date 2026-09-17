@@ -198,12 +198,28 @@ would grade it. **A file's grade is never copied down onto its parts.**
 What counts as a declaration is every function and method the file declares,
 excluding closures nested inside them: a callback is part of the code that
 installs it, and grading it separately reports noise rather than a place to
-look. Four constructs are graded here, readability, maintainability,
-correctness and failure handling, and Jev is separately asked whether the
-declaration is substantial enough for a separate judgment to say anything,
-which is what keeps a one-line accessor scoring well from reading as news.
-Cohesion, changeability, state integrity and input validation stay file-scope
-questions.
+look. **Two constructs are graded here, readability and maintainability**, and
+Jev is separately asked whether the declaration is substantial enough for a
+separate judgment to say anything, which is what keeps a one-line accessor
+scoring well from reading as news. Every other construct stays a file-scope
+question.
+
+**This view ranks the declarations of a file by how hard they are to read and
+change. It does not say where a bug is.** Tested on twelve real upstream fixes
+from four npm packages, the declaration a maintainer changed ranked weakest on
+the relevant construct 5 times out of 12, against 3.77 expected by chance. A
+subtle defect in an otherwise careful function does not make that function read
+worse than a gnarlier neighbour.
+
+Correctness and failure handling were graded here until 2026-09-18 and were
+withdrawn by the same test. Reformatting a file without changing its parsed
+syntax tree moved those two by a median of 0.16 and 0.15 per declaration, while
+the real fixes moved the declaration they repaired by a median of 0.13: a grade
+that answers more to whitespace than to the defect is not evidence about the
+defect. The same reformatting moved readability and maintainability by a median
+of 0.03. Both withdrawn constructs remain file-scope questions, where the
+relevant one was measured rising for three of three independently reproduced
+fixes.
 
 `--deepen` saves a **child snapshot**, with the parent untouched and named in
 the child's manifest. Deepening a second file starts from the child, so the
@@ -214,8 +230,10 @@ that describes different source. If the snapshot was assessed with a
 stored, so it cannot be assumed.
 
 Declarations carry no review markers either, for the same reason wider scopes
-do not: the two cutoffs were selected on whole human-rated classes. The Python
-transfer that came closest to this scope was explicitly exploratory.
+do not: the cutoff was selected on whole human-rated classes. The Python
+transfer that came closest to this scope was explicitly exploratory, and the
+two constructs graded here have passed a stability test rather than an accuracy
+one.
 
 ### Compare two snapshots
 

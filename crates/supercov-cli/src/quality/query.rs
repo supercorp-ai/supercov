@@ -763,13 +763,12 @@ fn render_functions(view: &Value) -> String {
             ));
         } else if declaration["assessed"] == true {
             let grades = &declaration["dimensions"];
-            text.push_str(&format!(
-                "  maint {} read {} correct {} failures {}  {named}\n",
-                number(&grades["maintainability"]["score"]),
-                number(&grades["readability"]["score"]),
-                number(&grades["correctness"]["score"]),
-                number(&grades["failure_handling"]["score"]),
-            ));
+            let columns = declarations::order()
+                .into_iter()
+                .map(|construct| format!("{construct} {}", number(&grades[&construct]["score"])))
+                .collect::<Vec<_>>()
+                .join(" ");
+            text.push_str(&format!("  {columns}  {named}\n"));
         } else {
             text.push_str(&format!(
                 "  not assessed                                  {named}\n"
