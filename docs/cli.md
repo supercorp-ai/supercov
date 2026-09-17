@@ -24,7 +24,94 @@ npx supercov --help
 | Find the tests a change affects | `npx supercov runs latest tests affected` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
+| Assess source quality with TypeSafe AI | `npx supercov quality src/` |
 | Read bundled guides | `npx supercov docs` |
+
+## Assess source quality (experimental)
+
+```sh
+supercov quality src/server.ts --dry-run
+supercov quality src/ --json
+supercov quality src/server.ts --context contracts.md
+supercov quality src/server.ts --refresh
+supercov quality src/ --review-below 5
+```
+
+Set `TYPESAFE_API_KEY` in your environment for uncached assessments. This command
+sends the selected source files and optional context to TypeSafe AI. It does not
+run tests, instrument code, or require a coverage run. `--dry-run` prints the exact
+request bodies as JSON without making API calls or writing cache files.
+
+Whole files receive nine independent Jev scores: maintainability, readability,
+correctness, input validation, failure handling, state integrity, cohesion,
+changeability, and overall. Each file is sent once as plain source text inside a
+named state object, with those nine Score questions and one Noul question about
+behavioral context sufficiency. The pinned model is `jev-1.13.0`; the rubric is
+`quality-v3`.
+
+Every displayed score, including overall, is Jev's own judgment, scaled from its
+rubric levels to 0–10. There is no local average, weight, or score penalty.
+Maintainability and readability are agreement judgments on four levels, worded
+against the human rating instruments they were compared with; the other seven
+constructs use five levels with concrete conditions for weak and strong grades.
+These judgments are not measured coverage, probabilities of correctness, or a
+security audit. The overall answer is independent; a high overall score can
+coexist with a weak individual axis.
+
+Files are listed weakest maintainability first, then weakest readability, then
+Jev's overall answer. Maintainability and readability carry review cutoffs
+selected on 20 human-rated Java development classes, at 6.9 and 7.775
+respectively. The other constructs have no calibrated cutoff and are reported
+without a marker. `--review-below <n>` replaces every construct's cutoff with
+`n` (range 0–10). Cutoffs decide markers only: they never change a score, no
+marker fails the command, and none of them is a validated defect boundary.
+Scores remain visible at low confidence or when context is missing. Every score
+shows its provider confidence, and the report separately shows Jev's 0–1
+judgment of behavioral context sufficiency. High scores with insufficient
+context do not establish the behavior of missing dependencies.
+
+Paths must be inside the current working directory. Directory scans respect
+`.gitignore` and `.ignore` files and omit hidden files and common build,
+dependency and generated directories. Explicit source files may be Git-ignored.
+Supported extensions include JS/TS, Rust, Python, Ruby, Go, Java/Kotlin, C/C++, C#,
+Swift and PHP. Symlink targets are rejected. Tests are included when selected;
+there is no automatic test or dependency retrieval. `--context` supplies a UTF-8
+contract document to every selected file, so keep it relevant to that selection.
+
+Source is never truncated. A request must stay within an estimated 30,000 tokens,
+counted as one token per three serialized bytes. That estimate is deliberately
+low: Rust source measured about 3.8 bytes per token, so most files well over
+80 KB still fit. A file over the budget is assessed as **windows** of whole
+declarations instead. Windows partition the file at declaration boundaries, so
+every line belongs to exactly one window and no byte is sent twice; each window
+is graded on its own and states which lines it covers, and the file outline is
+supplied for orientation. A windowed file has **no whole-file grade**, because
+a file-wide construct such as cohesion cannot be judged from one window; it is
+ordered in the report by its weakest window, which is ordering rather than a
+grade. Window grades are not covered by the cutoff calibration above. A file
+over the budget with no declarations to split on, including any file in a
+language Supercov cannot parse, is reported as an error, as is a single
+declaration too large to send alone; its neighbouring windows are still
+assessed. Empty files are errors. Nothing larger than 4 MiB is read.
+
+Validated raw responses are cached in `.supercov/quality/`, keyed by the exact
+request hash, including source, comments, context, model and question wording.
+Cache hits work without an API key. `--refresh` requests a new assessment.
+JSON reports contain source/request/context hashes, model and rubric versions,
+the token budget, review policy with each construct's cutoff and its basis, raw
+answer distributions, per-axis scores and confidence, context sufficiency,
+review flags, window spans and declarations, the original assessment duration
+and token usage. `usage_this_run` counts successful fresh responses, excluding
+cache hits; it cannot account for provider billing on failed attempts. Full
+source and API credentials are not written to the cache.
+
+Exit status is 0 for a completed report (including review flags and uncertain judgments), or 2 for
+invalid input or any file/API error. Partial results remain in the report. Low
+grades do not fail the command. HTTP 429 and 5xx responses receive at most two
+retries with bounded backoff; long retry delays are returned to the caller.
+Function-level grading, repository aggregates, line locations, changed-file
+selection, baseline comparisons and failing CI grade gates are not implemented
+yet.
 
 ## Measure a test command
 

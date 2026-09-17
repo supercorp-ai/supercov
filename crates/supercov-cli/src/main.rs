@@ -48,6 +48,7 @@ mod assertions_human;
 mod assertions_query;
 mod human_query;
 mod public_query;
+mod quality;
 mod tests_query;
 
 use human_query::render_human;
@@ -74,6 +75,7 @@ Inspect a run with small, paginated answers:
   supercov runs <run-id> [resource]    query one immutable run
 
 Compare, combine, and maintain:
+  supercov quality <path>              assess source quality with TypeSafe AI
   supercov diff <older> <newer>        compare two runs
   supercov merge <id> <id> [...]       combine compatible runs
   supercov clean [--keep N]            remove stored runs (all by default)
@@ -303,6 +305,7 @@ fn main() -> ExitCode {
         Some("__build-rust-compiler") => build_rust_compiler(),
         Some("__run-rust-compiler") => run_rust_compiler(),
         Some("clean") => cleanup_command(arguments.collect()),
+        Some("quality") => quality::command(arguments.collect()),
         Some("docs") => docs_command(arguments.collect()),
         Some("assertions") => assertions_query::global_command(&arguments.collect::<Vec<_>>()),
         Some("runs") => public_query_command("runs", arguments.collect()),
