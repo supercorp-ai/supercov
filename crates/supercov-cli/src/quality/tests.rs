@@ -669,10 +669,17 @@ fn cutoffs_are_per_construct_and_an_override_reaches_every_construct() {
             dimension.review_below.is_some()
         );
     }
-    // The frozen development-set cutoffs, and no invented boundary elsewhere.
+    // Maintainability is the only construct with a cutoff that survived being
+    // tested on classes no rubric had graded; every other construct, readability
+    // included, is ranked but never marked.
     assert_eq!(assessments["maintainability"].review_below, Some(6.9));
-    assert_eq!(assessments["readability"].review_below, Some(7.775));
-    for id in ["correctness", "cohesion", "changeability", "overall"] {
+    for id in [
+        "readability",
+        "correctness",
+        "cohesion",
+        "changeability",
+        "overall",
+    ] {
         assert_eq!(assessments[id].review_below, None);
         assert!(!assessments[id].review_recommended);
     }
@@ -1572,4 +1579,86 @@ fn a_repeat_of_one_question_is_reported_apart_from_a_change_in_the_code() {
     store::write(&temp.0, &other, &different, &json!({"files": []})).unwrap();
     let refusal = query::diff(&temp.0, &from, &other, 0).unwrap_err();
     assert!(refusal.contains("only snapshots of the same rubric and model can be compared"));
+}
+
+/// One class holding everything, the shape most Java files have, and far past
+/// the budget.
+fn oversized_java_class() -> String {
+    let mut source = String::from("package example;\n\npublic class Huge {\n");
+    for index in 0..60 {
+        source.push_str(&format!(
+            "  public int step{index}(int input) {{\n{}    return input + {index};\n  }}\n\n",
+            "    // a line of body that exists only to take up room in this method\n".repeat(30),
+        ));
+    }
+    source.push_str("}\n");
+    source
+}
+
+#[test]
+fn a_file_that_is_one_large_class_is_split_at_that_class_s_methods() {
+    let source = oversized_java_class();
+    assert!(
+        within_budget(&request("Huge.java", &source, None))
+            .unwrap()
+            .is_none(),
+        "the fixture has to be over budget for this to mean anything"
+    );
+    let starts = line_starts(&source);
+    let (outline, planned) = plan("Huge.java", &source, None).unwrap();
+    // The class is the only top-level declaration, so splitting at top-level
+    // boundaries alone would leave one window and no way to send the file.
+    assert!(planned.len() >= 2, "a single class still splits");
+    assert!(planned.iter().all(|(_, oversized)| !oversized));
+
+    let named: Vec<&str> = outline
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|unit| unit["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        named.len() >= 60,
+        "split points are the methods: {}",
+        named.len()
+    );
+    assert!(
+        named.iter().all(|name| name.starts_with("Huge.")),
+        "every split point is inside the class: {named:?}"
+    );
+
+    // Still a partition: every line in exactly one window, nothing duplicated.
+    let mut rebuilt = String::new();
+    for (window, _) in &planned {
+        rebuilt.push_str(window_source(&source, &starts, window));
+        assert!(
+            within_budget(&windowed_request("Huge.java", "x", window, &outline, None))
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert_eq!(rebuilt, source);
+    assert_eq!(
+        planned[0].0.start_line, 1,
+        "the class header joins the first window"
+    );
+    assert_eq!(planned.last().unwrap().0.end_line, starts.len());
+}
+
+#[test]
+fn a_declaration_small_enough_to_send_stays_one_split_point() {
+    // Descending is for declarations too large to send, not for every class:
+    // a small class keeps its own boundary rather than exposing its methods.
+    let source = format!(
+        "package example;\n\npublic class Small {{\n  public int a() {{ return 1; }}\n  public int b() {{ return 2; }}\n}}\n\npublic class Other {{\n{}  public int c() {{ return 3; }}\n}}\n",
+        "  // filler\n".repeat(4),
+    );
+    let (outline, _) = split_units("Small.java", &source).unwrap();
+    let named: Vec<&str> = outline
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|unit| unit["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(named, vec!["Small", "Other"]);
 }

@@ -59,12 +59,16 @@ security audit. The overall answer is independent; a high overall score can
 coexist with a weak individual axis.
 
 Files are listed weakest maintainability first, then weakest readability, then
-Jev's overall answer. Maintainability and readability carry review cutoffs
-selected on 20 human-rated Java development classes, at 6.9 and 7.775
-respectively. The other constructs have no calibrated cutoff and are reported
-without a marker. `--review-below <n>` replaces every construct's cutoff with
-`n` (range 0–10). Cutoffs decide markers only: they never change a score, no
-marker fails the command, and none of them is a validated defect boundary.
+Jev's overall answer. **Maintainability is the only construct with a review
+cutoff**, at 6.9, selected on 20 human-rated Java development classes. It has
+since held up on 40 further classes and on 31 that no rubric had graded, where
+it caught every negative class. Every other construct is ranked and never
+marked. The readability cutoff of 7.775 was withdrawn on 2026-09-18: on those
+31 unused classes it flagged 87% of a sample that was 45% negative, and its
+agreement fell across all three samples that tested it. `--review-below <n>`
+replaces every construct's cutoff with `n` (range 0–10). Cutoffs decide markers
+only: they never change a score, no marker fails the command, and none of them
+is a validated defect boundary.
 Scores remain visible at low confidence or when context is missing. Every score
 shows its provider confidence, and the report separately shows Jev's 0–1
 judgment of behavioral context sufficiency. High scores with insufficient
@@ -82,8 +86,10 @@ Source is never truncated. A request must stay within an estimated 30,000 tokens
 counted as one token per three serialized bytes. That estimate is deliberately
 low: Rust source measured about 3.8 bytes per token, so most files well over
 80 KB still fit. A file over the budget is assessed as **windows** of whole
-declarations instead. Windows partition the file at declaration boundaries, so
-every line belongs to exactly one window and no byte is sent twice; each window
+declarations instead. Windows partition the file at declaration boundaries,
+descending into any declaration too large to send on its own, so a file holding
+a single large class splits at that class's methods rather than not at all.
+Every line belongs to exactly one window and no byte is sent twice; each window
 is graded on its own and states which lines it covers, and the file outline is
 supplied for orientation. A windowed file has **no whole-file grade**, because
 a file-wide construct such as cohesion cannot be judged from one window; it is
