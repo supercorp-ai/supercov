@@ -54,6 +54,15 @@ rubric levels to 0–10. There is no local average, weight, or score penalty.
 Maintainability and readability are agreement judgments on four levels, worded
 against the human rating instruments they were compared with; the other seven
 constructs use five levels with concrete conditions for weak and strong grades.
+**This ranks code by how hard it is to work with. It does not predict where
+bugs are or were**, and that boundary has been measured twice. Across twelve
+real upstream fixes, the declaration a maintainer changed ranked weakest 5
+times out of 12 against 3.77 by chance. Across four years of one TypeScript
+project's history, 1,029 author-declared fix commits over 186 files, the
+correlation between a file's grade and the fixes it received disappears once
+file size is held constant, falling from −0.41 to +0.02. What people call hard
+to maintain and where bugs get fixed are different things.
+
 These judgments are not measured coverage, probabilities of correctness, or a
 security audit. The overall answer is independent; a high overall score can
 coexist with a weak individual axis.
