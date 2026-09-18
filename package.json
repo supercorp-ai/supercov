@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Code quality and coverage for coding agents",
   "license": "MIT",
   "repository": {
@@ -99,14 +99,14 @@
     "test:launcher": "go vet ./cmd/... && go test ./cmd/..."
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "1.0.0",
-    "@supercov/cli-darwin-x64": "1.0.0",
-    "@supercov/cli-linux-arm64-gnu": "1.0.0",
-    "@supercov/cli-linux-arm64-musl": "1.0.0",
-    "@supercov/cli-linux-x64-gnu": "1.0.0",
-    "@supercov/cli-linux-x64-musl": "1.0.0",
-    "@supercov/cli-win32-arm64": "1.0.0",
-    "@supercov/cli-win32-x64": "1.0.0"
+    "@supercov/cli-darwin-arm64": "1.0.1",
+    "@supercov/cli-darwin-x64": "1.0.1",
+    "@supercov/cli-linux-arm64-gnu": "1.0.1",
+    "@supercov/cli-linux-arm64-musl": "1.0.1",
+    "@supercov/cli-linux-x64-gnu": "1.0.1",
+    "@supercov/cli-linux-x64-musl": "1.0.1",
+    "@supercov/cli-win32-arm64": "1.0.1",
+    "@supercov/cli-win32-x64": "1.0.1"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",

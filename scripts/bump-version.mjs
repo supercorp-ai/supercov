@@ -1,58 +1,114 @@
 #!/usr/bin/env node
 // Move Supercov's own version across the four files that carry it.
 //
-// The match is anchored on the closing quote, never a bare substring. A
-// dependency pin can share the release's prefix -- `ra_ap_syntax` is pinned at
-// 0.0.349, which starts with 0.0.34 -- and a substring bump rewrites it to a
-// version that does not exist. That fails nowhere locally and everywhere on the
-// release runners, after the tag is already pushed. Every file has a known
-// number of Supercov references; any other count means the world changed and
-// the bump stops rather than guessing.
+// Nothing here bumps by substring. A dependency pin can share the release's
+// prefix -- `ra_ap_syntax` is pinned at 0.0.349, which starts with 0.0.34 -- and
+// a substring bump rewrites it to a version that does not exist. That fails
+// nowhere locally and everywhere on the release runners, after the tag is
+// already pushed.
+//
+// Nor does it bump by quoted occurrence any more. That worked while Supercov's
+// version was one no dependency shared, and stopped at 1.0.0: the lockfile
+// carries 31 third-party ranges like "^1.0.0" and two crates sit at 1.0.0
+// exactly, so a quoted replacement across those files would rewrite other
+// people's versions. Each file is edited where Supercov's version actually
+// lives -- our own manifests wholesale, the two lockfiles only inside the
+// entries we own -- and every file has a known number of references. Any other
+// count means the world changed and the bump stops rather than guessing.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-
-const repository = resolve(import.meta.dirname, "..");
 
 // One native package per platform the release publishes.
 const NATIVE_PACKAGES = 8;
 
-// Every quoted occurrence in these files is Supercov's own version.
-const EXPECTED = {
-  "package.json": 9,
-  "package-lock.json": 18,
-  "Cargo.toml": 3,
-  "Cargo.lock": 3,
-};
+// Our own crates, as Cargo.lock names them.
+const CRATES = ["supercov", "supercov-contracts", "supercov-engine"];
 
-export function bump(from, to, root = repository) {
+/** Every quoted occurrence in these files is Supercov's own version. */
+function replaceEveryQuoted(text, from, to) {
   const quoted = (version) => `${version}"`;
+  const count = text.split(quoted(from)).length - 1;
+  return { text: text.replaceAll(quoted(from), quoted(to)), count };
+}
+
+/**
+ * package-lock.json, where only some entries are ours: the root version, the
+ * root package, its optional dependencies, and the `@supercov/*` packages. The
+ * enclosing key decides, so this walks lines and tracks it, which also keeps
+ * npm's exact formatting rather than reserialising the file.
+ */
+function replaceLockfile(text, from, to) {
+  let key = null;
+  let count = 0;
+  const ours = () => key === "" || key?.startsWith("node_modules/@supercov/");
+  const lines = text.split("\n").map((line, index) => {
+    const entry = /^ {4}"(.*)": \{$/.exec(line);
+    if (entry) key = entry[1];
+    // The top-level version, before `packages` opens.
+    const top = index < 5 && new RegExp(`^ {2}"version": "${from}",$`).test(line);
+    const version = ours() && new RegExp(`^ {6}"version": "${from}",?$`).test(line);
+    // A pin on one of our native packages is ours wherever it appears.
+    const pin = new RegExp(`^ +"@supercov/[a-z0-9-]+": "${from}",?$`).test(line);
+    if (!top && !version && !pin) return line;
+    count += 1;
+    return line.replace(`"${from}"`, `"${to}"`);
+  });
+  return { text: lines.join("\n"), count };
+}
+
+/** Cargo.lock, where our crates sit in `[[package]]` blocks beside everyone else's. */
+function replaceCargoLock(text, from, to) {
+  let count = 0;
+  let mine = false;
+  const lines = text.split("\n").map((line) => {
+    const name = /^name = "(.*)"$/.exec(line);
+    if (name) mine = CRATES.includes(name[1]);
+    if (!mine || line !== `version = "${from}"`) return line;
+    count += 1;
+    return `version = "${to}"`;
+  });
+  return { text: lines.join("\n"), count };
+}
+
+const FILES = [
+  { name: "package.json", expected: 9, replace: replaceEveryQuoted },
+  { name: "package-lock.json", expected: 18, replace: replaceLockfile },
+  { name: "Cargo.toml", expected: 3, replace: replaceEveryQuoted },
+  { name: "Cargo.lock", expected: 3, replace: replaceCargoLock },
+];
+
+export function bump(from, to, root = resolve(import.meta.dirname, "..")) {
   const planned = [];
-  for (const [name, expected] of Object.entries(EXPECTED)) {
+  for (const { name, expected, replace } of FILES) {
     const path = resolve(root, name);
     const before = readFileSync(path, "utf8");
-    const count = before.split(quoted(from)).length - 1;
+    const { text: after, count } = replace(before, from, to);
     if (count !== expected) {
       throw new Error(
         `${name}: ${count} reference(s) to ${from}, expected ${expected}; refusing to bump into a file that does not look as expected`,
       );
     }
-    const after = before.replaceAll(quoted(from), quoted(to));
-    // A third-party pin that shared the prefix must read exactly as it did.
-    //
-    // Compared position by position, never as two sets with the release's own
-    // version filtered out. A dependency already sitting on the version being
-    // released is indistinguishable from a bumped entry once both are filtered,
-    // so that comparison refused every bump whose target collided with a
-    // dependency: six packages in the lockfile are at 1.0.0, which blocked the
-    // 1.0.0 release outright. Position keeps them apart, and still catches the
-    // thing this guards against, a pin that shares the release's prefix being
-    // rewritten to a version that does not exist.
-    const pins = (text) => text.match(/(?<=")[0-9]+\.[0-9]+\.[0-9]+(?=")/g) ?? [];
+    // Position by position, every quoted three-part version in the file. The
+    // ones that moved must be exactly the ones we meant to move, and each must
+    // have gone from this release's version to the next. This is what catches a
+    // third-party pin sharing the release's prefix, and now also catches a
+    // third-party version that happens to equal the release's own.
+    // `"=1.0.0"` is how Cargo pins an exact version, and `ra_ap_syntax` is
+    // pinned that way, so the optional `=` has to be part of the anchor.
+    const pins = (value) => value.match(/(?<="=?)[0-9]+\.[0-9]+\.[0-9]+(?=")/g) ?? [];
     const pinsBefore = pins(before);
     const pinsAfter = pins(after);
-    const intended = pinsBefore.map((pin) => (pin === from ? to : pin));
-    if (pinsAfter.length !== intended.length
-      || pinsAfter.some((pin, index) => pin !== intended[index])) {
+    const moved = pinsBefore.filter(
+      (pin, index) => pin !== pinsAfter[index],
+    ).length;
+    if (
+      pinsAfter.length !== pinsBefore.length ||
+      moved !== expected ||
+      pinsBefore.some(
+        (pin, index) =>
+          pin !== pinsAfter[index] && !(pin === from && pinsAfter[index] === to),
+      )
+    ) {
       throw new Error(`${name}: a version other than Supercov's own would change; refusing`);
     }
     planned.push({ path, after, name, expected });
