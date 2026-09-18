@@ -2,9 +2,6 @@
 
 ## 1.0.0
 
-Quality joins coverage: Supercov now tells your coding agent what to fix as well
-as what to test.
-
 **Added**
 
 - `supercov quality` scores your code with [Jev](https://typesafe.ai). Twelve named properties are asked of each file as yes/no questions and Supercov does the arithmetic, so every part of a score is a claim you can check against the file. With no argument it assesses the repository you are in.
