@@ -231,6 +231,18 @@ fn variable_manifest(directory: &Path) -> Option<bool> {
 
 /// Whether a directory declares a package, and whether that declaration counts
 /// at any depth.
+/// Whether a path names a file that declares a package, for the manifest list a
+/// scope question carries as context.
+pub fn declares_a_package(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let lower = name.to_ascii_lowercase();
+    MANIFESTS.contains(&name)
+        || lower.ends_with(".gradle")
+        || lower.ends_with(".gradle.kts")
+        || lower.ends_with(".csproj")
+        || lower.ends_with(".sln")
+}
+
 fn manifest_in(directory: &Path) -> Option<bool> {
     if MANIFESTS.iter().any(|name| directory.join(name).is_file()) {
         return Some(false);

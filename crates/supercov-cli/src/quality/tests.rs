@@ -1804,3 +1804,86 @@ fn a_finding_in_uncovered_code_is_marked_and_counted() {
         "the reader must be told the finding sits in untested code:\n{text}"
     );
 }
+
+#[test]
+fn a_scope_question_carries_the_whole_tree_and_asks_only_what_is_unsettled() {
+    // A convention is per-path and cannot see the tree. The model seeing all of
+    // it at once is the entire difference: `runtime/python/runtime.py` is
+    // unclassifiable alone and obvious beside `runtime/javascript/` and a
+    // manifest that ships one of them.
+    let asking = vec![
+        "runtime/python/runtime.py".to_string(),
+        "spikes/toy/main.rs".to_string(),
+    ];
+    let request = smells::scope_request(
+        "supercov",
+        "src/a.ts\nruntime/python/runtime.py\nspikes/toy/main.rs",
+        "package.json\nCargo.toml",
+        &asking,
+    );
+    let state = request["state"].as_object().unwrap();
+    assert_eq!(state["repository"], "supercov");
+    assert!(
+        state["tree"]
+            .as_str()
+            .unwrap()
+            .contains("runtime/python/runtime.py")
+    );
+    assert!(state["manifests"].as_str().unwrap().contains("Cargo.toml"));
+    let questions = request["questions"].as_object().unwrap();
+    assert_eq!(
+        questions.len(),
+        2,
+        "only the unsettled files are asked about"
+    );
+    let task = questions["f0"]["instructions"]["task"].as_str().unwrap();
+    assert!(task.contains("runtime/python/runtime.py"));
+    assert!(task.contains("in the context of the whole tree"));
+    // Paths only. Sending contents would cost a hundred times as much and is
+    // not what this was measured on.
+    assert!(!state.contains_key("source"));
+}
+
+#[test]
+fn a_manifest_is_recognised_from_its_path_for_the_scope_question() {
+    for path in [
+        "package.json",
+        "crates/engine/Cargo.toml",
+        "pyproject.toml",
+        "Package.swift",
+        "junit-jupiter-api/junit-jupiter-api.gradle.kts",
+        "src/Shop/Shop.csproj",
+        "Reactive.sln",
+    ] {
+        assert!(scope::declares_a_package(path), "{path} declares a package");
+    }
+    for path in ["src/app.ts", "README.md", "src/packaged.rs"] {
+        assert!(!scope::declares_a_package(path), "{path} does not");
+    }
+}
+
+#[test]
+fn declared_roots_are_an_answer_and_the_model_does_not_override_them() {
+    // Asking the model to second-guess a declaration would make
+    // SUPERCOV_SOURCE_ROOTS advisory, which is the opposite of its purpose.
+    let temp = Temp::new();
+    temp.write("package.json", "{}\n");
+    temp.write("scratch/prototype.ts", "export const b = 2;\n");
+    let found = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let roots = vec!["scratch".to_string()];
+    let mut explicit = scope::classify(&temp.0, &found, Some(&roots));
+    assert_eq!(explicit.mode, "explicit");
+    assert!(
+        resolve_ambiguity(&temp.0, &mut explicit, &found, Some("key"), false).is_none(),
+        "an explicit scope is never re-decided"
+    );
+    // And with nothing ambiguous there is nothing to ask, so no request is made.
+    let mut automatic = scope::classify(&temp.0, &found, None);
+    if automatic.ambiguous() == 0 {
+        assert!(resolve_ambiguity(&temp.0, &mut automatic, &found, Some("key"), false).is_none());
+    }
+    // Without a credential it stays silent rather than failing an assessment.
+    let mut again = scope::classify(&temp.0, &found, None);
+    assert!(resolve_ambiguity(&temp.0, &mut again, &found, None, false).is_none());
+    assert!(resolve_ambiguity(&temp.0, &mut again, &found, Some("  "), false).is_none());
+}

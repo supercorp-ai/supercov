@@ -226,6 +226,40 @@ npx supercov diff <previous-run-id> latest
 
 Collections accept `--limit` and `--offset` and print a copyable next-page command. Machine-readable output is available with `--json` when an integration needs it.
 
+## Assess source quality (experimental)
+
+Coverage answers whether your tests exercised the code. Quality answers what is
+in it, as twelve named properties you can check against the file yourself.
+
+```bash
+# The whole repository, no arguments and no configuration
+npx supercov quality
+
+# Narrow, then read one file with every check and what is known about it
+npx supercov quality gaps
+npx supercov quality file src/server.ts
+
+# Which files are assessed, and why
+npx supercov quality scope
+
+# What a change introduced, against the merge base
+npx supercov quality patch --base origin/main
+npx supercov quality patch --base origin/main --annotate github
+
+# What declined between two assessments
+npx supercov quality diff <older-snapshot> latest
+```
+
+The score is arithmetic this CLI does over twelve yes/no answers, not a grade a
+model handed over, so every part of it is a claim you can verify. It needs
+`TYPESAFE_API_KEY`; a whole repository costs about two cents. **Nothing it
+reports fails a command.**
+
+Read [Understanding quality](docs/quality.md) before relying on it: it says
+plainly what the number is worth, where it is mostly measuring file size, and
+why the change review is a structural regression check rather than a substitute
+for a reviewer.
+
 ## Local, private, and zero-edit
 
 Everything Supercov writes lives under one hidden `.supercov/` directory: run evidence in `.supercov/runs/<run-id>/` and the isolated build cache in `.supercov/workspaces/`. It ignores itself in Git, so there is nothing to add to your `.gitignore`.
@@ -245,6 +279,7 @@ npx supercov clean             # remove all runs and the build cache
 - [Getting started](https://supercov.com/docs/getting-started)
 - [Agent workflow](https://supercov.com/docs/agent-loop)
 - [Understanding assertions](docs/assertions.md)
+- [Understanding quality](docs/quality.md)
 - [Troubleshooting](https://supercov.com/docs/troubleshooting)
 - [CLI reference](https://supercov.com/docs/cli)
 - [Supported languages and test suites](https://supercov.com/docs/supported-suites)

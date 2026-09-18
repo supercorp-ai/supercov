@@ -9,6 +9,7 @@ const mappings = [
   ["docs/getting-started.md", "crates/supercov-cli/assets/docs/getting-started.md"],
   ["docs/agent-loop.md", "crates/supercov-cli/assets/docs/agent-loop.md"],
   ["docs/assertions.md", "crates/supercov-cli/assets/docs/assertions.md"],
+  ["docs/quality.md", "crates/supercov-cli/assets/docs/quality.md"],
   ["docs/assertion-evidence.md", "crates/supercov-cli/assets/docs/assertion-evidence.md"],
   ["docs/assertion-maps.md", "crates/supercov-cli/assets/docs/assertion-maps.md"],
   ["docs/assertion-agent.md", "crates/supercov-cli/assets/docs/assertion-agent.md"],

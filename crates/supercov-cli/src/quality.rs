@@ -1299,10 +1299,83 @@ fn scored(answers: &Answers) -> Value {
 }
 
 /// Health for every file, every directory that holds one, and the tree.
+/// Ask the model about the files no convention could settle.
+///
+/// One request, paths only, with the whole tree as context. Silent when there is
+/// nothing ambiguous, when there is no credential, and when the user declared
+/// roots, because an explicit declaration is an answer and this would override
+/// it.
+fn resolve_ambiguity(
+    root: &Path,
+    scope: &mut scope::Scope,
+    found: &[PathBuf],
+    key: Option<&str>,
+    refresh: bool,
+) -> Option<Value> {
+    let key = key.filter(|k| !k.trim().is_empty())?;
+    if scope.mode != "automatic" || scope.ambiguous() == 0 {
+        return None;
+    }
+    let relative = |path: &Path| {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let mut tree: Vec<String> = found.iter().map(|p| relative(p)).collect();
+    tree.sort();
+    let manifests = tree
+        .iter()
+        .filter(|p| scope::declares_a_package(p))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let asking: Vec<String> = scope
+        .entries
+        .iter()
+        .filter(|e| e.status == scope::Status::Ambiguous)
+        .map(|e| e.path.clone())
+        .collect();
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let request = smells::scope_request(&name, &tree.join("\n"), &manifests, &asking);
+    let bytes = within_budget(&request).ok()??;
+    let agent = client();
+    let hash = digest(&bytes);
+    let (entry, _, _) = resolve(root, &agent, Some(key), refresh, &request, &hash).ok()?;
+    let mut ships = 0usize;
+    for (index, path) in asking.iter().enumerate() {
+        let Some(value) = noul(&entry.response, &format!("f{index}")) else {
+            continue;
+        };
+        if value >= smells::PRESENT_AT {
+            ships += 1;
+            if let Some(found) = scope.entries.iter_mut().find(|e| &e.path == path) {
+                found.status = scope::Status::Included;
+                found.reason = "the model reads it as part of the product".into();
+            }
+        } else if let Some(found) = scope.entries.iter_mut().find(|e| &e.path == path) {
+            found.status = scope::Status::Excluded;
+            found.reason = "the model reads it as not part of the product".into();
+        }
+    }
+    Some(json!({
+        "asked": asking.len(), "ships": ships, "does_not": asking.len() - ships,
+        "basis": "paths and the whole tree, no file contents",
+    }))
+}
+
 fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool), String> {
     let found = discover(root, &options.paths)?;
     let configured = scope::configured_roots();
-    let scope = scope::classify(root, &found, configured.as_deref());
+    let mut scope = scope::classify(root, &found, configured.as_deref());
+    let resolved = if options.dry_run {
+        None
+    } else {
+        resolve_ambiguity(root, &mut scope, &found, key, options.refresh)
+    };
     // A file the user names directly is an unambiguous request for it, whatever
     // the scope would have decided.
     let named: BTreeSet<PathBuf> = options
@@ -1465,6 +1538,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         "counts": {"files": files.len(), "scored": weighted.len(), "errors": errors,
             "directories": directories.len(), "skipped": skipped_files.len()},
         "scope": scope.summary(),
+        "scope_resolved": resolved,
         "limitation": scope.limitation(),
         "skipped": skipped_files,
         "catalog": smells::described(),
@@ -1684,6 +1758,15 @@ fn human_quality(report: &Value) -> String {
         count(5.0, 8.0),
         count(f64::NEG_INFINITY, 5.0)
     ));
+    if let Some(resolved) = report["scope_resolved"].as_object() {
+        out.push_str(&format!(
+            "  {} files under no source root were read by the model from the tree: \
+             {} ship, {} do not.\n",
+            resolved["asked"].as_u64().unwrap_or(0),
+            resolved["ships"].as_u64().unwrap_or(0),
+            resolved["does_not"].as_u64().unwrap_or(0)
+        ));
+    }
     if let Some(limitation) = report["limitation"].as_str() {
         out.push_str(&format!("\n{limitation}\n"));
     }
