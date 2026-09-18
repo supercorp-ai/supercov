@@ -26,7 +26,7 @@ npx supercov --help
 | Remove local data | `npx supercov clean` |
 | Assess source quality with TypeSafe AI | `npx supercov quality` |
 | See only files with findings | `npx supercov quality gaps` |
-| Review what a change introduced | `npx supercov quality patch --base origin/main` |
+| Review what a change introduced | `npx supercov quality patch` |
 | Read bundled guides | `npx supercov docs` |
 
 ## Assess source quality (experimental)
@@ -36,279 +36,57 @@ supercov quality                 # this repository
 supercov quality src/            # one directory
 supercov quality gaps            # only files something fired on
 supercov quality file src/a.ts   # one file, every check
+supercov quality scope           # which files are assessed, and why
 supercov quality snapshots       # saved assessments
+supercov quality diff <older> <newer>
 ```
 
-With no argument the subject is the repository you are standing in, the way
-`supercov runs` needs no argument. Every assessment saves a snapshot, so the
-reading commands work afterwards with no key and no network.
+With no argument the subject is the repository you are standing in. Every
+assessment saves a snapshot, so the reading commands work afterwards with no key
+and no network.
 
-Twelve yes/no questions about specific named properties, drawn from Fowler and
-Beck's refactoring smells and the class-scope smells CodeScene's Code Health is
-built from: god class, long method, deep nesting, complex conditional, long
-parameter list, duplicated logic, primitive obsession, dead code, feature envy,
-temporary field, message chains and magic values. **The arithmetic that turns
-twelve answers into one number is done by this command, not by the model**, so
-every part of the score is a claim you can check against the file in seconds.
-`quality file <path>` shows all twelve with what is known about each.
+Twelve yes/no questions about named code properties go to [Jev](https://typesafe.ai);
+the score is arithmetic this command does over the answers. Text reports a band,
+`good`, `fair` or `weak`; `--json` carries the number and every check with what
+is known about it. `--all` includes test files, generated output and anything
+outside a source root, all of which are left out by default. `--dry-run` prints
+the exact requests and contacts nothing.
 
-Text output reports a **band**, not a decimal, because the measured resolution
-of these judgments is about one point and `4.4/10` would claim precision nobody
-observed. `good` is 8 and above, `fair` is 5 to 8, `weak` is below 5. The number
-is in `--json`, where something has to sort.
+`quality diff` reports what declined between two assessments: which files lost
+health, which properties appeared, and which files entered or left the scope.
 
-Directory and repository health weight files by size, because a plain average
-would let a directory of one-line re-exports outvote the file everything depends
-on. A file too large to send whole is split into windows at declaration
-boundaries and the strongest answer to each question wins, since every question
-is existential: "does this file contain a method that…" is true if any window
-has one. A windowed file says so, because a property of the whole file, such as
-logic duplicated across two windows, is weaker there.
+Needs `TYPESAFE_API_KEY`. A repository of 200 files costs about two cents, and
+the command prints its estimate before spending anything. Nothing it reports
+fails this command.
 
-### Which files are assessed
-
-```sh supercov-example
-supercov quality scope
-SUPERCOV_SOURCE_ROOTS=src,app supercov quality
-```
-
-The same shape as the coverage side's source scope, and the same vocabulary, so
-a reviewer reading `runs patch` and `quality patch` together is looking at one
-set of files. Every file is **included**, **excluded** or **ambiguous**.
-
-**Included** means under a source root. Roots are found by looking for package
-manifests, `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, `Gemfile`,
-`pom.xml`, `Package.swift` and the rest, at the repository root or under a
-conventional package parent (`packages`, `apps`, `crates`, `services`, `workspaces`), plus whatever a
-root manifest declares in `workspaces` or `[workspace].members`. Inside each
-package it takes the conventional source directories, matched without regard to
-case: `src`, `app`, `lib`, `server`, `client`, `api`, `functions`, Go's `cmd`,
-`internal` and `pkg`, C and C++'s `include`, and SwiftPM's `Sources`. A Python
-package is any directory holding an `__init__.py`, which is the flat layout PyPA
-documents beside the `src` one. A Go module root is a source root **for Go files
-only**, because Go compiles every package beneath it wherever it sits, and
-scoping that by extension keeps a `go.mod` at the top of a polyglot repository
-from claiming the rest of the tree. A declared package with no conventional
-layout is measured whole.
-
-Two manifests do not have fixed names. Gradle lets a module call its build file
-after itself, as JUnit's `junit-jupiter-api.gradle.kts` does, so any `.gradle`
-or `.gradle.kts` file counts. And a .NET project file names itself after the
-project, so any `.csproj`, `.fsproj` or `.vbproj` marks a package **at any
-depth**, with its own directory as a root, because .NET nests projects and keeps
-sources beside the project file.
-
-**It also reads what the manifest itself declares**, which is how a project says
-where its code is without anyone guessing: `main`, `module`, `browser`, `bin`
-and `exports` in a `package.json`, `path` entries and a `build.rs` in a
-`Cargo.toml`. Supercov's own package declares `bin/supercov.js` and
-`./runtime/javascript/*.mjs`; neither is a conventional source directory and
-both ship. A declared file in a directory of its own brings that directory, so
-the files it loads travel with it, while a declared file at the package root,
-such as Cargo's `build.rs`, is only itself rather than swallowing the package.
-
-Five conventional locations hold real code that is not the product, and are
-named rather than left unclassified because there is nothing to declare: a
-`scripts` directory is a `tool script`, matching the coverage scope's own rule,
-`examples` is an `example`, `benches` is a `benchmark`, `docs` is
-`documentation`, and anything spelled
-`<tool>.config.<ext>` or `.<tool>rc.<ext>` is `build or tool configuration`. A
-manifest entry pointing into build output, such as `"bin": "dist/index.js"`, is
-ignored for the same reason: it names the artifact, not the code you would
-change.
-
-A test directory is recognised by suffix as well as by name, so Hono's
-`runtime-tests` and .NET's `Shop.Tests` count. A separator is required before
-the suffix, which keeps `contest` and `latest` as source.
-
-**Excluded** means test code or generated output, each carrying its reason.
-This is not a claim that test code does not matter: it costs a request each, and
-several checks encode assumptions that are wrong for it, since duplication
-between two test cases is often deliberate and a literal in a fixture is the
-fixture. Recognition is by directory, by separator convention
-(`login.test.ts`, `auth_test.go`, `test_login.py`, `user_spec.rb`), and by the
-CamelCase suffix Java, Kotlin, C#, Swift and PHP use instead (`OrderTest.java`,
-`OrderSpec.kt`, `OrderIT.java`). Generated output is recognised by name
-(`.d.ts`, `.min.js`, `.pb.go`, `_pb2.py`, `.designer.cs`) and by the marker a
-generator leaves in the file, which is the one signal needing no convention.
-
-**Ambiguous** is the state that matters. First-party source under no recognised
-root is never silently dropped: it is counted, reported as a limitation next to
-the score, and listed by `quality scope`. Declare your roots to resolve
-it:
-
-```sh supercov-example
-SUPERCOV_SOURCE_ROOTS=crates,runtime,bin supercov quality
-```
-
-That switches to **explicit** mode, where anything outside the named roots is
-excluded as a decision rather than left as a question, and nothing is ambiguous.
-
-Two details. **Matching is on whole separator-delimited parts, never on
-substrings**, so `latest.ts`, `contest.rs`, `manifest.rs`, `attestation.go` and
-`AUDIT.java` are source. And a file you name directly is always assessed,
-whatever the scope decided, since `supercov quality tests/auth_test.ts` is an
-unambiguous request for it.
-
-`--all` assesses everything discovered, whatever its status. `quality patch`
-applies the same scope for the same reasons.
-
-### What is known about this number
-
-On 272 Java classes carrying professional maintainability ratings, the composite
-orders size-matched pairs 78% the way the raters did, against CodeScene Code
-Health's 67%, a statement count's 58% and the Microsoft Maintainability Index's
-52%. Asked twice, a single check moves by a median of 0.01 and the composite by
-0.5% of its range.
-
-Three limits belong next to it and are not hidden:
-
-- The composite **correlates 0.92 with a statement count.** It is largely a size
-  measure whose residual is right, which is a weaker claim than the table above
-  sounds.
-- Its margin over Code Health is **somewhere between 7 and 11 points** and moves
-  by several points depending on which fifth of the corpus is dropped. The
-  margins over a statement count and the Maintainability Index are large and
-  stable.
-- **Six checks score as well as twelve.** These are not twelve measurements but
-  one measurement taken twelve times, so rewording checks does not improve the
-  number. Four were reworded after a blind reader found them failing, and the
-  composite moved by 0.4 points with an interval that includes zero.
-
-Three checks fire on more than half of a real repository, so a full list of what
-fired buries the finding that is news under the ones that are true of
-everything. Text output shows the three strongest per file and `quality file`
-shows the rest.
-
-A property is reported as present at **0.60**, chosen against three references
-rather than taken as a midpoint: it agrees with a blind reader slightly more
-often than 0.50, reports 2.2 properties per file across 272 classes rather than
-2.8, and still catches every deliberately introduced smell while co-firing on
-unrelated checks falls from 12% to 7%. **Health does not use it.** The score is
-the mean of the raw answers, so this decides what is shown and never what is
-scored. No assessment fails a build.
-
-### Compare two assessments
-
-```sh supercov-example
-supercov quality snapshots
-supercov quality diff q_332dd8d1bfd149f1 q_c0e9a3aba4f77eb8
-```
-
-This is the decline gate. It reports which files lost health, which gained,
-which properties appeared that were not there before, and which files entered or
-left the scope. Only snapshots of the same catalog version and model can be
-compared, because the questions would otherwise differ and the difference would
-be read as a change in the code.
-
-**A file whose bytes are identical in both snapshots is marked as such.** The
-same question was asked twice, so any movement is the model's own variation
-rather than an edit, and a reader should not go looking for a change that never
-happened.
+See [Understanding quality](https://supercov.com/docs/quality) for what the
+number is worth and which files get assessed.
 
 ## Review what a change introduced (experimental)
 
 ```sh supercov-example
-supercov quality patch                          # unstaged, the default
-supercov quality patch --staged                 # what a commit would contain
-supercov quality patch --base origin/main       # a branch, tag or commit
-supercov quality patch --base origin/main src/  # only changes under src/
-supercov quality patch --base origin/main --annotate github
+supercov quality patch
+supercov quality patch --base origin/main
+supercov quality patch --base origin/main --annotate github --run latest
 ```
 
-The twelve checks, asked about a change rather than a file, plus **seven risk
-checks that exist only in this form** because each is about what a change did:
-a credential written into source, untrusted input interpolated into a query,
-a change to who may do what, a test that now checks less, a change callers
-outside the file would have to follow, a schema or data migration, and
-debugging left behind.
+The same twelve properties asked of a change, plus six risk checks that only
+apply to one: a credential in source, untrusted input in a query, a change to
+who may do what, a test that now checks less, a schema migration, and debugging
+left behind.
 
-The two sets come from different evidence and are worth reading differently. It mirrors
-`supercov runs patch`, which asks whether the lines a change touched are tested,
-and takes the same `--base` and `--annotate` options for the same reasons.
+With no range it reviews uncommitted work when the tree is dirty and everything
+since this branch left its default branch when it is clean. `--unstaged`,
+`--staged` and `--base <ref>` say so explicitly; `--base` uses the merge base,
+like `runs patch`, so commits other people landed after you branched are not
+your change.
 
-`--base` compares against the **merge base**, the point this branch left that
-ref, not the ref's current tip. Commits other people landed after you branched
-are not your change. A shallow checkout has no merge base; fetch with full
-history (`actions/checkout` takes `fetch-depth: 0`).
+`--annotate github` prints workflow annotations on stdout, needing no token and
+posting no comment. `--run <id>` reads a saved coverage run and marks any file
+where a property appeared and the run left lines uncovered.
 
-`--unstaged` and `--staged` have no equivalent on the coverage side, because
-coverage of uncommitted work means nothing without a run. Here they are the
-pre-commit and pre-push moments. Untracked files are reviewed as additions under
-`--unstaged` and `--base`, since you wrote them; under `--staged` they are not,
-because an untracked file is by definition not in the index.
-
-Both whole versions go into one request. A hunk alone cannot separate a property
-the change introduced from one the file already had, which is the entire
-question, so the extra tokens are the point.
-
-Output lists only the files where something appeared, and only the checks that
-fired, strongest first. A change that introduces nothing prints one line saying
-so. `--annotate github` prints workflow annotations on stdout, needing no token
-and posting no comment. A named property is a fact about a file rather than
-about one line, so each annotation is anchored at the first line the change adds
-rather than guessing which line caused it.
-
-### What is known about this
-
-Eight real files were each given one deliberately introduced smell. All eight
-were detected, seven of eight ranked the introduced property first, and there
-was **one false alarm across 312 control questions**: reformatting, playing the
-change backwards, and comparing a file with itself produced nothing at or above
-0.5, and nothing above 0.25. Cost is about **$0.0005 per changed file** for all
-twelve checks, since they share one copy of the two versions.
-
-This matters more than it sounds. Asked about a file, several of these checks
-fire on two thirds of everything and are useless as flags. Asked about a change,
-they stay quiet unless something changed.
-
-**But a benchmark of 173 comments real reviewers wrote found the complexity
-catalog has a word for 8% of them and fired on 1%.** Fifty-four percent of what
-reviewers write about is bugs, and nothing here asks about correctness. Treat
-the complexity half as a structural regression check, which is what CodeScene's
-decline gate is, and not as a review.
-
-The seven risk checks were built for that gap and are cleaner. On constructed
-positives with matched safe changes they separate by 0.91 or more, and across
-the same 50 real pull requests they fire once per pull request. On the seven
-pull requests where a reviewer raised a security concern, one of them fired on
-four, against nine of the forty-three without one. `breaks_api` is the loose
-one: twenty of fifty with a median of 0.45, which needs its own ground truth
-before it is worth relying on.
-
-What is untested is a real pull request where a property arrived incidentally
-among unrelated edits. The eight edits above were constructed, and a deliberate
-four-level nest is a cleaner signal than nesting that grew over three years.
-
-Nothing here fails a build. No threshold in this project has survived
-calibration, so the command reports and exits successfully.
-
-### Crossing a change with coverage
-
-```sh supercov-example
-supercov quality patch --base origin/main --run latest
-```
-
-Reads a run that already happened and marks any changed file where a property
-appeared **and** the run left measured lines uncovered.
-
-Neither half justifies stopping anyone on its own. A structural property is a
-judgment, and an uncovered line is normal in code nobody has tested yet. Both at
-once describes a change that made code harder to follow in a place no test
-exercises, which is the one claim this tool can make that a coverage tool and a
-quality tool cannot make separately.
-
-This never starts a run, and **nothing about quality appears in a run's own
-output**. An assessment costs money and needs a credential, so it stays
-something you ask for.
-
-### When both versions do not fit
-
-A file whose two versions exceed the request budget cannot be split into windows
-the way one file can, so the unified diff is sent instead and the report says
-`unified diff only` for that file. On one real change the diff alone scored 0.83
-where both versions scored 0.82, so it is a usable second choice, but it is one
-measurement and it is labelled rather than silently substituted.
+Output lists only files where something appeared. A change that introduces
+nothing prints one line saying so. About $0.0005 per changed file.
 
 ## Measure a test command
 

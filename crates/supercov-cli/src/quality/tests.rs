@@ -175,7 +175,7 @@ fn values(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
 
 #[test]
 fn catalog_parses_and_holds_only_checks_the_evidence_kept() {
-    let catalog = smells::catalog();
+    let catalog = catalog::properties();
     assert_eq!(catalog.len(), 12);
     let ids: Vec<&str> = catalog.iter().map(|c| c.id.as_str()).collect();
     // Cut for firing on everything rather than for being wrong, and for never
@@ -192,36 +192,36 @@ fn catalog_parses_and_holds_only_checks_the_evidence_kept() {
 #[test]
 fn health_is_ten_when_nothing_fires_and_zero_when_everything_does() {
     assert_eq!(
-        smells::health(&values(&[("a", 0.0), ("b", 0.0)])),
+        catalog::health(&values(&[("a", 0.0), ("b", 0.0)])),
         Some(10.0)
     );
     assert_eq!(
-        smells::health(&values(&[("a", 1.0), ("b", 1.0)])),
+        catalog::health(&values(&[("a", 1.0), ("b", 1.0)])),
         Some(0.0)
     );
     assert_eq!(
-        smells::health(&values(&[("a", 0.0), ("b", 1.0)])),
+        catalog::health(&values(&[("a", 0.0), ("b", 1.0)])),
         Some(5.0)
     );
-    assert_eq!(smells::health(&BTreeMap::new()), None);
+    assert_eq!(catalog::health(&BTreeMap::new()), None);
 }
 
 #[test]
 fn health_uses_the_mean_so_the_scale_survives_a_catalog_change() {
     // Two checks at 0.5 and four checks at 0.5 are the same health. A sum would
     // make the number mean something different after a check is added.
-    let two = smells::health(&values(&[("a", 0.5), ("b", 0.5)]));
-    let four = smells::health(&values(&[("a", 0.5), ("b", 0.5), ("c", 0.5), ("d", 0.5)]));
+    let two = catalog::health(&values(&[("a", 0.5), ("b", 0.5)]));
+    let four = catalog::health(&values(&[("a", 0.5), ("b", 0.5), ("c", 0.5), ("d", 0.5)]));
     assert_eq!(two, four);
 }
 
 #[test]
 fn present_reports_only_what_fired_strongest_first() {
-    let fired = smells::present(&values(&[
+    let fired = catalog::present(&values(&[
         ("low", 0.49),
         ("high", 0.91),
-        ("edge", smells::PRESENT_AT),
-        ("under", smells::PRESENT_AT - 0.01),
+        ("edge", catalog::PRESENT_AT),
+        ("under", catalog::PRESENT_AT - 0.01),
         ("mid", 0.7),
     ]));
     let names: Vec<&str> = fired.iter().map(|(id, _)| id.as_str()).collect();
@@ -235,13 +235,13 @@ fn the_presence_threshold_was_chosen_against_evidence_not_taken_as_the_midpoint(
     // 272 classes rather than 2.8, and still catches all eight deliberately
     // introduced smells while co-firing on unrelated checks falls from 12% to
     // 7%. Changing it back is a decision, not a tidy-up.
-    assert_eq!(smells::PRESENT_AT, 0.6);
+    assert_eq!(catalog::PRESENT_AT, 0.6);
     // The composite must not depend on it: health is the mean of raw answers.
     let all_just_under = values(&[("a", 0.59), ("b", 0.59)]);
     let all_just_over = values(&[("a", 0.61), ("b", 0.61)]);
-    assert!(smells::health(&all_just_under) > smells::health(&all_just_over));
-    assert!(smells::present(&all_just_under).is_empty());
-    assert_eq!(smells::present(&all_just_over).len(), 2);
+    assert!(catalog::health(&all_just_under) > catalog::health(&all_just_over));
+    assert!(catalog::present(&all_just_under).is_empty());
+    assert_eq!(catalog::present(&all_just_over).len(), 2);
 }
 
 #[test]
@@ -250,16 +250,16 @@ fn aggregate_weights_by_size_so_small_files_cannot_outvote_the_code() {
     // this healthy, which is the failure weighting exists to prevent.
     let mut files = vec![(10u64, 10.0f64); 9];
     files.push((10_000, 0.0));
-    let weighted = smells::aggregate(&files).unwrap();
+    let weighted = catalog::aggregate(&files).unwrap();
     assert!(weighted < 0.1, "byte-weighted health was {weighted}");
-    assert_eq!(smells::aggregate(&[]), None);
+    assert_eq!(catalog::aggregate(&[]), None);
 }
 
 #[test]
 fn a_change_request_sends_exactly_the_two_versions() {
     // The wrapped shape measurably weakened detection. If this test fails the
     // request is no longer the one the evidence was gathered on.
-    let request = smells::change_request("old", "new");
+    let request = catalog::change_request("old", "new");
     let state = request["state"].as_object().unwrap();
     assert_eq!(state.len(), 2);
     assert_eq!(state["before"], "old");
@@ -268,13 +268,13 @@ fn a_change_request_sends_exactly_the_two_versions() {
     // the change form because every one of them is about what a change did.
     assert_eq!(
         request["questions"].as_object().unwrap().len(),
-        smells::catalog().len() + smells::risks().len()
+        catalog::properties().len() + catalog::risks().len()
     );
 }
 
 #[test]
 fn risk_checks_are_asked_of_a_change_and_never_of_a_file() {
-    let risks: BTreeSet<&str> = smells::risks().iter().map(|r| r.id.as_str()).collect();
+    let risks: BTreeSet<&str> = catalog::risks().iter().map(|r| r.id.as_str()).collect();
     assert_eq!(risks.len(), 6);
     assert!(risks.contains("hardcoded_secret") && risks.contains("injection_risk"));
     // Removed 2026-09-18: it fired on 20 of 50 real pull requests with a median
@@ -284,14 +284,14 @@ fn risk_checks_are_asked_of_a_change_and_never_of_a_file() {
         "breaks_api was removed for firing too often"
     );
     // A file has no before, so "did this change add a credential" has no answer.
-    let file = smells::file_questions();
+    let file = catalog::file_questions();
     for risk in &risks {
         assert!(
             !file.contains_key(*risk),
             "{risk} must not be asked of a file"
         );
     }
-    let change = smells::change_questions();
+    let change = catalog::change_questions();
     for risk in &risks {
         assert!(
             change.contains_key(*risk),
@@ -304,7 +304,7 @@ fn risk_checks_are_asked_of_a_change_and_never_of_a_file() {
     assert!(!task(&change["hardcoded_secret"]).contains("where `before` did not"));
     assert!(task(&change["deep_nesting"]).contains("where `before` did not"));
     // Everything a report carries about a check covers both catalogs.
-    let described = smells::described();
+    let described = catalog::described();
     let named: BTreeSet<&str> = described
         .as_array()
         .unwrap()
@@ -321,8 +321,8 @@ fn risk_checks_are_asked_of_a_change_and_never_of_a_file() {
 
 #[test]
 fn change_questions_ask_what_appeared_and_file_questions_do_not() {
-    let change = smells::change_questions();
-    let file = smells::file_questions();
+    let change = catalog::change_questions();
+    let file = catalog::file_questions();
     let task = |q: &Value| q["instructions"]["task"].as_str().unwrap().to_owned();
     assert!(task(&change["deep_nesting"]).contains("does `after` show the following"));
     assert!(!task(&file["deep_nesting"]).contains("`after`"));
@@ -332,7 +332,7 @@ fn change_questions_ask_what_appeared_and_file_questions_do_not() {
 
 #[test]
 fn a_file_request_names_the_path_but_a_change_request_does_not() {
-    let file = smells::file_request("src/a.rs", "fn a() {}");
+    let file = catalog::file_request("src/a.rs", "fn a() {}");
     assert_eq!(file["state"]["file"]["path"], "src/a.rs");
     assert_eq!(file["state"]["file"]["source"], "fn a() {}");
 }
@@ -340,7 +340,7 @@ fn a_file_request_names_the_path_but_a_change_request_does_not() {
 // ---- change ranges ----------------------------------------------------------
 
 #[test]
-fn patch_defaults_to_unstaged_and_accepts_each_range() {
+fn patch_accepts_each_range_and_works_out_the_rest_from_the_repository() {
     let parse_range = |args: &[&str]| match parse(
         std::iter::once("patch")
             .chain(args.iter().copied())
@@ -351,12 +351,19 @@ fn patch_defaults_to_unstaged_and_accepts_each_range() {
         Ok(_) => panic!("patch did not parse as a patch"),
         Err(e) => Err(e),
     };
-    assert_eq!(parse_range(&[]).unwrap(), changes::Range::Unstaged);
-    assert_eq!(parse_range(&["--staged"]).unwrap(), changes::Range::Staged);
-    assert_eq!(parse_range(&["--cached"]).unwrap(), changes::Range::Staged);
+    // No flag is not a default range: it means work it out from the tree.
+    assert_eq!(parse_range(&[]).unwrap(), None);
+    assert_eq!(
+        parse_range(&["--staged"]).unwrap(),
+        Some(changes::Range::Staged)
+    );
+    assert_eq!(
+        parse_range(&["--cached"]).unwrap(),
+        Some(changes::Range::Staged)
+    );
     assert_eq!(
         parse_range(&["--base", "main"]).unwrap(),
-        changes::Range::Base("main".into())
+        Some(changes::Range::Base("main".into()))
     );
     assert!(parse_range(&["--base"]).is_err());
     assert!(parse_range(&["--staged", "--base", "main"]).is_err());
@@ -647,7 +654,7 @@ fn an_oversized_file_is_windowed_and_every_window_fits() {
         ));
     }
     assert!(
-        within_budget(&smells::file_request("big.ts", &source))
+        within_budget(&catalog::file_request("big.ts", &source))
             .unwrap()
             .is_none(),
         "the fixture must exceed the budget or this proves nothing"
@@ -656,7 +663,7 @@ fn an_oversized_file_is_windowed_and_every_window_fits() {
     assert!(windows.len() > 1, "an oversized file is split");
     for (window, text) in &windows {
         assert!(
-            within_budget(&smells::file_request("big.ts", text))
+            within_budget(&catalog::file_request("big.ts", text))
                 .unwrap()
                 .is_some(),
             "window {} of {} is still over budget",
@@ -1342,7 +1349,7 @@ fn layout_php_composer_and_laravel() {
 fn catalog_snapshot(root: &Path, id: &str, health: f64, files: Vec<Value>) {
     let manifest = json!({
         "schema_version": 3, "id": id, "created_at": "2026-09-18T00:00:00.000Z",
-        "instrument": "catalog", "catalog_version": smells::CATALOG_VERSION,
+        "instrument": "catalog", "catalog_version": catalog::CATALOG_VERSION,
         "model": MODEL, "scope": "file", "health": health,
     });
     store::write(root, id, &manifest, &json!({ "files": files })).unwrap();
@@ -1747,7 +1754,7 @@ fn patch_takes_a_run_to_cross_findings_with() {
     ) {
         Ok(Command::Patch { run, range, .. }) => {
             assert_eq!(run.as_deref(), Some("latest"));
-            assert_eq!(range, changes::Range::Base("main".into()));
+            assert_eq!(range, Some(changes::Range::Base("main".into())));
         }
         _ => panic!("expected a patch"),
     }
@@ -1805,7 +1812,7 @@ fn a_scope_question_carries_the_whole_tree_and_asks_only_what_is_unsettled() {
         "runtime/python/runtime.py".to_string(),
         "spikes/toy/main.rs".to_string(),
     ];
-    let request = smells::scope_request(
+    let request = catalog::scope_request(
         "supercov",
         "src/a.ts\nruntime/python/runtime.py\nspikes/toy/main.rs",
         "package.json\nCargo.toml",
@@ -1926,7 +1933,7 @@ fn a_run_says_what_it_will_cost_before_it_spends_it() {
     // Output tokens are free, so the bill is the input, and the input is known
     // exactly from the bytes about to be sent. On a monorepo this is the
     // difference between a surprise and a decision.
-    let request = smells::file_request("a.ts", &"x".repeat(300_000));
+    let request = catalog::file_request("a.ts", &"x".repeat(300_000));
     let bytes = serde_json::to_vec(&request).unwrap();
     let pending = vec![((0usize, None), request, bytes)];
     let (tokens, usd) = estimated_cost(&pending);
@@ -1942,13 +1949,13 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
     // rebasing or checking out an old commit therefore re-uses every answer for
     // a file whose content is unchanged, and pays only for the ones that moved.
     let temp = Temp::new();
-    let request = smells::file_request("src/a.ts", "export const a = 1;\n");
+    let request = catalog::file_request("src/a.ts", "export const a = 1;\n");
     let hash = digest(&serde_json::to_vec(&request).unwrap());
     let entry = CacheEntry {
         request_hash: hash.clone(),
         response: ApiResponse {
             model: MODEL.to_owned(),
-            answers: smells::catalog()
+            answers: catalog::properties()
                 .iter()
                 .map(|c| (c.id.clone(), Answer::Noul { noul: 0.2 }))
                 .collect(),
@@ -1964,7 +1971,7 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
     save(&path, &entry).unwrap();
 
     // The same content in a different place is the same request.
-    let moved = smells::file_request("src/a.ts", "export const a = 1;\n");
+    let moved = catalog::file_request("src/a.ts", "export const a = 1;\n");
     let moved_hash = digest(&serde_json::to_vec(&moved).unwrap());
     assert_eq!(moved_hash, hash);
     assert!(
@@ -1974,7 +1981,7 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
 
     // An edit is a different request, so it is paid for and nothing stale is
     // served in its place.
-    let edited = smells::file_request("src/a.ts", "export const a = 2;\n");
+    let edited = catalog::file_request("src/a.ts", "export const a = 2;\n");
     let edited_hash = digest(&serde_json::to_vec(&edited).unwrap());
     assert_ne!(edited_hash, hash);
     assert!(
@@ -1985,5 +1992,85 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
         )
         .unwrap()
         .is_none()
+    );
+}
+
+#[test]
+fn with_no_range_a_dirty_tree_means_the_uncommitted_work() {
+    // Someone running this in a tree with uncommitted edits means those edits.
+    // Asking them to type --unstaged to get what they are looking at is the
+    // kind of default that makes a command feel like paperwork.
+    let temp = repository();
+    temp.write("src/a.ts", "export const a = 1;\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+
+    temp.write("src/a.ts", "export const a = 2;\n");
+    assert_eq!(changes::automatic(&temp.0), changes::Range::Unstaged);
+
+    // An untracked file is uncommitted work too.
+    git_in(&temp.0, &["checkout", "--quiet", "--", "src/a.ts"]);
+    temp.write("src/new.ts", "export const b = 2;\n");
+    assert_eq!(changes::automatic(&temp.0), changes::Range::Unstaged);
+
+    // Staged and nothing else means what a commit would contain.
+    fs::remove_file(temp.0.join("src/new.ts")).unwrap();
+    temp.write("src/a.ts", "export const a = 3;\n");
+    git_in(&temp.0, &["add", "src/a.ts"]);
+    assert_eq!(changes::automatic(&temp.0), changes::Range::Staged);
+}
+
+#[test]
+fn with_no_range_a_clean_tree_means_everything_since_the_default_branch() {
+    let temp = repository();
+    temp.write("src/a.ts", "export const a = 1;\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    git_in(&temp.0, &["branch", "-M", "main"]);
+    git_in(&temp.0, &["checkout", "--quiet", "-b", "work"]);
+    temp.write("src/b.ts", "export const b = 2;\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "mine"]);
+
+    // Nothing uncommitted, so the subject is the branch.
+    assert_eq!(
+        changes::automatic(&temp.0),
+        changes::Range::Base("main".into())
+    );
+    let found = changes::collect(&temp.0, &changes::automatic(&temp.0), &[]).unwrap();
+    assert_eq!(
+        found.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(),
+        vec!["src/b.ts"]
+    );
+}
+
+#[test]
+fn the_default_branch_comes_from_the_remote_before_any_guess() {
+    let temp = repository();
+    temp.write("src/a.ts", "export const a = 1;\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    git_in(&temp.0, &["branch", "-M", "main"]);
+    // No remote at all: fall back to a conventional name that exists.
+    assert_eq!(changes::default_branch(&temp.0).as_deref(), Some("main"));
+
+    // What the remote calls its default wins over the convention, because a
+    // repository whose trunk is `develop` should not be compared with `main`.
+    git_in(&temp.0, &["checkout", "--quiet", "-b", "develop"]);
+    git_in(
+        &temp.0,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    git_in(
+        &temp.0,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/develop",
+        ],
+    );
+    assert_eq!(
+        changes::default_branch(&temp.0).as_deref(),
+        Some("origin/develop")
     );
 }

@@ -110,6 +110,61 @@ fn blob(root: &Path, revision: &str, path: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| format!("{spec} is not UTF-8"))
 }
 
+/// The branch this repository is compared against when nobody says.
+///
+/// `origin/HEAD` is what the remote itself calls its default branch, so it is
+/// asked first and needs no guessing. A clone made with `--single-branch`, or
+/// one whose `origin/HEAD` was never fetched, does not have it, and the two
+/// conventional names are tried instead.
+pub fn default_branch(root: &Path) -> Option<String> {
+    if let Ok(name) = text(
+        root,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    ) && let Some(branch) = name.trim().strip_prefix("refs/remotes/")
+    {
+        return Some(branch.to_owned());
+    }
+    ["origin/main", "origin/master", "main", "master"]
+        .into_iter()
+        .find(|candidate| {
+            git(
+                root,
+                &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")],
+            )
+            .is_ok()
+        })
+        .map(str::to_owned)
+}
+
+/// What to review when the caller did not say.
+///
+/// Work in progress first, because someone running this in a working tree with
+/// uncommitted edits means those edits. With a clean tree it means the branch:
+/// everything since this branch left the default one. Neither is a guess a user
+/// has to correct, and the report names which it chose.
+pub fn automatic(root: &Path) -> Range {
+    // A hidden directory belongs to a tool, including this one: Supercov's own
+    // response cache is untracked, so counting it would make every tree look
+    // dirty and this choice would never reach the branch.
+    let dirty = |arguments: &[&str]| {
+        text(root, arguments).is_ok_and(|out| {
+            out.lines().any(|path| {
+                !path.trim().is_empty() && !path.split('/').any(|segment| segment.starts_with('.'))
+            })
+        })
+    };
+    if dirty(&["diff", "--name-only"]) || dirty(&["ls-files", "--others", "--exclude-standard"]) {
+        return Range::Unstaged;
+    }
+    if dirty(&["diff", "--cached", "--name-only"]) {
+        return Range::Staged;
+    }
+    match default_branch(root) {
+        Some(branch) => Range::Base(branch),
+        None => Range::Unstaged,
+    }
+}
+
 pub fn is_repository(root: &Path) -> bool {
     git(root, &["rev-parse", "--git-dir"]).is_ok()
 }

@@ -1,6 +1,6 @@
 //! Advisory, source-only quality assessment. No coverage run or test execution.
 //!
-//! One instrument: the named-property catalog in `smells.json`. The nine-construct
+//! One instrument: the code-property catalog in `properties.json`. The nine-construct
 //! rubric this module used to carry was removed on 2026-09-18, because it ordered
 //! human-rated classes 90.2% correctly where counting the statements in a file
 //! got 90.3%, and a paid call cannot justify itself by matching `wc`. Declaration
@@ -20,10 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+mod catalog;
 mod changes;
 mod query;
 mod scope;
-mod smells;
 mod store;
 
 const MODEL: &str = "jev-1.13.0";
@@ -68,8 +68,10 @@ Usage:
   supercov quality diff <snapshot> <snapshot>  what declined between two
   supercov quality patch [file-or-directory]   what a change introduced
 
-Change range (quality patch), pick one:
-  --unstaged          Working tree against the index (default)
+Change range (quality patch). With none of these, it reviews uncommitted work
+when the tree is dirty and everything since this branch left its default branch
+when it is clean:
+  --unstaged          Working tree against the index
   --staged            Index against HEAD: what a commit would contain
   --base <ref>        Working tree against the merge base with a branch or tag
 
@@ -157,7 +159,8 @@ enum Command {
     Patch {
         /// A saved coverage run to cross the findings with.
         run: Option<String>,
-        range: changes::Range,
+        /// None means: work out what to review from the repository.
+        range: Option<changes::Range>,
         paths: Vec<PathBuf>,
         json: bool,
         refresh: bool,
@@ -228,7 +231,9 @@ fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
         }
     }
     Ok(Command::Patch {
-        range: range.unwrap_or(changes::Range::Unstaged),
+        // Resolved against the repository when the command runs, because which
+        // range makes sense depends on whether the tree is dirty.
+        range,
         paths,
         json,
         refresh,
@@ -1157,7 +1162,7 @@ fn catalog_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, St
     )?;
     let fits = |window: &Window| -> Result<bool, String> {
         let text = window_source(source, &starts, window);
-        Ok(within_budget(&smells::file_request(path, text))?.is_some())
+        Ok(within_budget(&catalog::file_request(path, text))?.is_some())
     };
     let mut planned: Vec<Window> = Vec::new();
     for candidate in candidates {
@@ -1293,9 +1298,9 @@ fn ask_smells(
                 // complexity questions, so nothing extra appears there and
                 // health stays the mean of the same twelve.
                 out[index].values = Some(
-                    smells::catalog()
+                    catalog::properties()
                         .iter()
-                        .chain(smells::risks())
+                        .chain(catalog::risks())
                         .filter_map(|c| Some((c.id.clone(), noul(&entry.response, &c.id)?)))
                         .collect(),
                 );
@@ -1355,8 +1360,8 @@ fn scored(answers: &Answers) -> Value {
             "bytes": answers.bytes,
             "status": "completed",
             "cached": answers.cached,
-            "health": smells::health(values),
-            "present": smells::present(values)
+            "health": catalog::health(values),
+            "present": catalog::present(values)
                 .into_iter()
                 .map(|(id, value)| json!({ "check": id, "value": value }))
                 .collect::<Vec<_>>(),
@@ -1416,7 +1421,7 @@ fn resolve_ambiguity(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let request = smells::scope_request(&name, &tree.join("\n"), &manifests, &asking);
+    let request = catalog::scope_request(&name, &tree.join("\n"), &manifests, &asking);
     let bytes = within_budget(&request).ok()??;
     let agent = client();
     let hash = digest(&bytes);
@@ -1426,7 +1431,7 @@ fn resolve_ambiguity(
         let Some(value) = noul(&entry.response, &format!("f{index}")) else {
             continue;
         };
-        if value >= smells::PRESENT_AT {
+        if value >= catalog::PRESENT_AT {
             ships += 1;
             if let Some(found) = scope.entries.iter_mut().find(|e| &e.path == path) {
                 found.status = scope::Status::Included;
@@ -1505,7 +1510,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
                 skipped_files.push(json!({ "path": relative, "reason": "generated" }));
             }
             Ok(source) => {
-                let whole = smells::file_request(&relative, &source);
+                let whole = catalog::file_request(&relative, &source);
                 match within_budget(&whole) {
                     Ok(Some(_)) => subjects.push(Subject {
                         bytes: source.len() as u64,
@@ -1519,7 +1524,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
                             for (window, text) in windows {
                                 subjects.push(Subject {
                                     bytes: text.len() as u64,
-                                    request: smells::file_request(&relative, &text),
+                                    request: catalog::file_request(&relative, &text),
                                     path: relative.clone(),
                                     note: Some(format!(
                                         "assessed in {count} windows at declaration boundaries; \
@@ -1548,7 +1553,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
     if options.dry_run {
         return Ok((
             json!({
-                "catalog_version": smells::CATALOG_VERSION, "model": MODEL,
+                "catalog_version": catalog::CATALOG_VERSION, "model": MODEL,
                 "requests": subjects.iter().map(|s| &s.request).collect::<Vec<_>>(),
             }),
             false,
@@ -1563,7 +1568,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
     let mut files: Vec<Value> = Vec::new();
     for answer in &answers {
         if let Some(values) = &answer.values
-            && let Some(health) = smells::health(values)
+            && let Some(health) = catalog::health(values)
         {
             weighted.push((answer.bytes, health));
             // Every ancestor directory, so a tree can be read at any depth.
@@ -1593,7 +1598,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
             Some(json!({
                 "path": name, "files": members.len(),
                 "bytes": members.iter().map(|(b, _)| b).sum::<u64>(),
-                "health": smells::aggregate(members)?,
+                "health": catalog::aggregate(members)?,
             }))
         })
         .collect();
@@ -1606,7 +1611,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         // snapshot for a rubric one: they answer different questions and their
         // numbers are not comparable.
         "instrument": "catalog",
-        "catalog_version": smells::CATALOG_VERSION,
+        "catalog_version": catalog::CATALOG_VERSION,
         "model": MODEL, "scope": "file", "experimental": true,
         "paths": options.paths.iter()
             .map(|path| path.display().to_string().replace('\\', "/"))
@@ -1617,10 +1622,10 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         "scope_resolved": resolved,
         "limitation": scope.limitation(),
         "skipped": skipped_files,
-        "catalog": smells::described(),
-        "health": smells::aggregate(&weighted),
+        "catalog": catalog::described(),
+        "health": catalog::aggregate(&weighted),
         "bytes": weighted.iter().map(|(b, _)| b).sum::<u64>(),
-        "policy": {"present_at": smells::PRESENT_AT,
+        "policy": {"present_at": catalog::PRESENT_AT,
             "composition": "health is the mean of the catalog answers, computed by this CLI",
             "aggregation": "directory and repository health weight files by size",
             "cutoffs": "none; no threshold in this project has survived calibration",
@@ -1698,11 +1703,11 @@ fn run_patch(
         }
         // Both whole versions are the validated question. When they do not fit,
         // the patch alone is asked instead and the report says so.
-        let whole = smells::change_request(&change.before, &change.after);
+        let whole = catalog::change_request(&change.before, &change.after);
         let (request, note) = match within_budget(&whole) {
             Ok(Some(_)) => (whole, None),
             _ if !change.patch.is_empty() => (
-                smells::patch_request(&change.patch),
+                catalog::patch_request(&change.patch),
                 Some("unified diff only: both versions exceed the request budget".to_owned()),
             ),
             _ => (whole, None),
@@ -1727,7 +1732,7 @@ fn run_patch(
             let mut value = scored(answer);
             value["line"] = json!(anchors.get(&answer.path));
             if let Some(values) = &answer.values {
-                let fired = smells::present(values);
+                let fired = catalog::present(values);
                 introduced += fired.len();
                 // Health is a property of a file, not of a change; what a review
                 // reports is which properties appeared.
@@ -1748,9 +1753,9 @@ fn run_patch(
     let failed = ordered.iter().any(|f| f["status"] == "failed");
     Ok((
         json!({
-            "catalog_version": smells::CATALOG_VERSION,
+            "catalog_version": catalog::CATALOG_VERSION,
             "model": MODEL,
-            "catalog": smells::described(),
+            "catalog": catalog::described(),
             "scope": scope.summary(),
             "range": range.id(),
             "range_description": range.describe(),
@@ -2155,6 +2160,10 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
                 run,
             } => {
                 let key = std::env::var("TYPESAFE_API_KEY").ok();
+                if !changes::is_repository(&root) {
+                    return Err("quality patch needs a Git repository; run it inside one".into());
+                }
+                let range = range.unwrap_or_else(|| changes::automatic(&root));
                 let (mut report, failed) =
                     run_patch(&root, &range, &paths, refresh, all, key.as_deref())?;
                 if let Some(selector) = run.as_deref() {

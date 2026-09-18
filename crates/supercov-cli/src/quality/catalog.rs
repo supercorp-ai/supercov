@@ -1,4 +1,4 @@
-//! Named code properties, asked as yes/no questions and composed in code.
+//! The two catalogs: code properties, and risks a change can introduce.
 //!
 //! This is a different instrument from the rubric in `rubric.json`. The rubric
 //! asks the model to place a file on a scale, which ties with counting
@@ -27,9 +27,9 @@ use std::sync::OnceLock;
 
 /// Bumped whenever a check's wording changes, so a saved answer is never read
 /// as an answer to a question that was not asked.
-pub const CATALOG_VERSION: &str = "smells-v2";
+pub const CATALOG_VERSION: &str = "properties-v1";
 
-const CATALOG: &str = include_str!("smells.json");
+const PROPERTIES: &str = include_str!("properties.json");
 
 /// Risks a change can introduce, which the complexity catalog cannot express.
 ///
@@ -74,10 +74,10 @@ pub struct Check {
     pub evidence: String,
 }
 
-pub fn catalog() -> &'static [Check] {
+pub fn properties() -> &'static [Check] {
     static PARSED: OnceLock<Vec<Check>> = OnceLock::new();
     PARSED.get_or_init(|| {
-        serde_json::from_str(CATALOG).expect("smells.json ships with the binary and parses")
+        serde_json::from_str(PROPERTIES).expect("properties.json ships with the binary and parses")
     })
 }
 
@@ -98,7 +98,7 @@ fn noul(task: String, present: &str, absent: &str) -> Value {
 
 /// Every check, asked about one file as it stands.
 pub fn file_questions() -> Map<String, Value> {
-    catalog()
+    properties()
         .iter()
         .map(|c| (c.id.clone(), noul(c.task.clone(), &c.present, &c.absent)))
         .collect()
@@ -107,7 +107,7 @@ pub fn file_questions() -> Map<String, Value> {
 /// Every check, asked about what a change introduced: the complexity catalog in
 /// its differential form, and the risk checks, which only exist in this form.
 pub fn change_questions() -> Map<String, Value> {
-    let mut questions: Map<String, Value> = catalog()
+    let mut questions: Map<String, Value> = properties()
         .iter()
         .map(|c| {
             (
@@ -137,7 +137,7 @@ pub fn change_questions() -> Map<String, Value> {
 /// about how well it answers. A finding is only checkable if the question and
 /// its evidence travel with it.
 pub fn described() -> Value {
-    catalog()
+    properties()
         .iter()
         .chain(risks())
         .map(|c| json!({ "check": c.id, "asks": c.present, "evidence": c.evidence }))
