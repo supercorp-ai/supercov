@@ -132,7 +132,7 @@ fn file_catalog(snapshot: &Snapshot, path: &str) -> Result<Value, String> {
                     let entry = known.get(id.as_str());
                     json!({
                         "check": id, "value": value,
-                        "present": value.as_f64().unwrap_or(0.0) >= 0.5,
+                        "present": value.as_f64().unwrap_or(0.0) >= super::smells::PRESENT_AT,
                         "asks": entry.map(|e| e["asks"].clone()),
                         "evidence": entry.map(|e| e["evidence"].clone()),
                     })

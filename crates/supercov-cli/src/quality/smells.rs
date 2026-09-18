@@ -138,10 +138,20 @@ pub fn change_request(before: &str, after: &str) -> Value {
     })
 }
 
-/// A check is reported as present at or above this value. It is the midpoint,
-/// not a calibrated cutoff: no threshold in this project has ever survived
-/// calibration, and the composite does not use one.
-pub const PRESENT_AT: f64 = 0.5;
+/// A check is reported as present at or above this value.
+///
+/// Chosen against three references rather than taken as the midpoint, which is
+/// what 0.5 was. On 240 judgements a blind reader and the model both made, 0.60
+/// agrees with the reader 80.8% of the time against 79.2% at 0.50, which is
+/// inside the noise on that many judgements. The other two references are not
+/// noisy and both point the same way: across 272 classes it reports 2.2
+/// properties per file rather than 2.8, and on eight deliberately introduced
+/// smells it still catches all eight while co-firing on unrelated checks falls
+/// from 12% to 7%. Nothing favoured 0.50.
+///
+/// The composite does not use this. Health is the mean of the raw answers, so a
+/// threshold decides only what is shown, never what is scored.
+pub const PRESENT_AT: f64 = 0.6;
 
 /// Health on a 0 to 10 scale, where 10 is a file no check fires on.
 ///

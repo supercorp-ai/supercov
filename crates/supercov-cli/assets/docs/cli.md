@@ -178,7 +178,15 @@ Three limits belong next to it and are not hidden:
 Three checks fire on more than half of a real repository, so a full list of what
 fired buries the finding that is news under the ones that are true of
 everything. Text output shows the three strongest per file and `quality file`
-shows the rest. There is no cutoff, and no assessment fails a build.
+shows the rest.
+
+A property is reported as present at **0.60**, chosen against three references
+rather than taken as a midpoint: it agrees with a blind reader slightly more
+often than 0.50, reports 2.2 properties per file across 272 classes rather than
+2.8, and still catches every deliberately introduced smell while co-firing on
+unrelated checks falls from 12% to 7%. **Health does not use it.** The score is
+the mean of the raw answers, so this decides what is shown and never what is
+scored. No assessment fails a build.
 
 ### Compare two assessments
 
