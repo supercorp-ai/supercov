@@ -55,16 +55,18 @@ use human_query::render_human;
 use public_query::{PublicQueryInvocation, help_for, parse_public_query};
 use supercov_engine::progress::ProgressLine;
 
-const HELP: &str = r#"Supercov coverage engine.
+const HELP: &str = r#"Code quality and coverage for coding agents.
 
-Assertion map schema and syntax: supercov assertions --help
+Score the source with Jev:
+  supercov quality                     score this repository
+  supercov quality gaps                only files something fired on
+  supercov quality file <path>         one file, every check
+  supercov quality patch               what a change introduced
+  supercov quality --help              every quality query
 
-Measure your FULL test command, not one suite. Supercov copies the project
-into an isolated instrumented workspace, so sandboxed and VM-gated suites run
-unchanged and every detected runner lands in one run.
-
+Measure your full test command:
   npx supercov -- npm test
-  supercov -- <test command>            measure the complete command
+  supercov -- <test command>           measure the complete command
 
 Inspect a run with small, paginated answers:
   supercov runs latest                 newest run summary
@@ -74,8 +76,12 @@ Inspect a run with small, paginated answers:
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
+Check what the tests assert:
+  supercov runs latest assertions      assertions and their status
+  supercov runs latest assertion <id>  one assertion and its flows
+  supercov assertions --help           assertion map schema and syntax
+
 Compare, combine, and maintain:
-  supercov quality [path]              code quality powered by Jev
   supercov diff <older> <newer>        compare two runs
   supercov merge <id> <id> [...]       combine compatible runs
   supercov clean [--keep N]            remove stored runs (all by default)
@@ -4261,10 +4267,23 @@ mod tests {
 
     #[test]
     fn shell_reports_the_public_engine() {
-        assert!(HELP.contains("Supercov coverage engine"));
-        assert!(HELP.contains("FULL test command"));
+        assert!(HELP.contains("Code quality and coverage for coding agents"));
+        assert!(HELP.contains("full test command"));
         assert!(HELP.contains("npx supercov -- npm test"));
         assert!(HELP.contains("supercov docs"));
+        // Quality, coverage, then assertions, each in its own section.
+        let order = [
+            "Score the source with Jev:",
+            "Measure your full test command:",
+            "Inspect a run with small, paginated answers:",
+            "Check what the tests assert:",
+        ];
+        let mut at = 0;
+        for needle in order {
+            let found = HELP[at..].find(needle).expect(needle);
+            at += found + needle.len();
+        }
+        assert!(!HELP.contains("Assertion map schema and syntax: supercov assertions"));
     }
 
     #[test]

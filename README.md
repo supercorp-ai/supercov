@@ -7,7 +7,7 @@
 Paste this to your coding agent to start:
 
 ```text supercov-prompt
-Score this codebase with npx supercov quality and show me the weakest files.
+Measure code quality with npx supercov and show me the weakest files.
 ```
 
 Scoring needs a [TypeSafe AI](https://typesafe.ai) API key, and your coding agent will usually ask you for it. It costs about a cent per megabyte of source. Coverage needs no account, config file, import, custom reporter, or hosted service. Supercov is local, free, open source, and MIT licensed.

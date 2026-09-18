@@ -15,9 +15,8 @@ tests; you don't need to do those steps yourself.
 To score the code itself rather than its tests, set a [Jev](https://typesafe.ai)
 key and ask:
 
-```sh supercov-example
-export TYPESAFE_API_KEY=...
-npx supercov quality
+```text supercov-prompt
+Measure code quality with npx supercov and show me the weakest files.
 ```
 
 See [Understanding quality](https://supercov.com/docs/quality).
