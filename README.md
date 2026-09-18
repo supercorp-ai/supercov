@@ -297,9 +297,9 @@ The Supercov CLI does not contact a Supercov service during a coverage run. Pack
 Supercov does not rewrite your source files, tests, imports, reporter list, runner configuration, dependency tree, or normal build output. An existing user-created `supercov/` directory is never adopted.
 
 ```bash
-npx supercov clean --dry-run   # preview cleanup
-npx supercov clean --keep 20   # keep the 20 newest runs
-npx supercov clean             # remove all runs and the build cache
+npx supercov runs clean --dry-run   # preview cleanup
+npx supercov runs clean --keep 20   # keep the 20 newest runs
+npx supercov runs clean             # remove all runs and the build cache
 ```
 
 ## Documentation

@@ -23,10 +23,11 @@ npx supercov --help
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Find the tests a change affects | `npx supercov runs latest tests affected` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
-| Remove local data | `npx supercov clean` |
+| Remove stored runs | `npx supercov runs clean` |
 | Assess code quality with Jev | `npx supercov quality` |
 | See only files with findings | `npx supercov quality gaps` |
 | Review what a change introduced | `npx supercov quality patch` |
+| Remove saved assessments | `npx supercov quality clean` |
 | Read bundled guides | `npx supercov docs` |
 
 ## Assess source quality
@@ -386,14 +387,25 @@ incompatible merge rather than publishing a misleading aggregate.
 ## Clean local data
 
 ```sh supercov
-npx supercov clean --dry-run
-npx supercov clean --keep 20
-npx supercov clean
+npx supercov runs clean --dry-run
+npx supercov runs clean --keep 20
+npx supercov runs clean
 ```
 
-By default, `clean` removes all stored runs and the isolated build cache.
-`--keep N` keeps the newest N runs. Cleanup removes only marker-owned Supercov
+By default, `runs clean` removes all stored runs and the isolated build cache.
+`--keep N` keeps the newest N runs, by when they started rather than by their
+identifiers, which carry no order. Cleanup removes only marker-owned Supercov
 storage.
+
+Saved quality assessments live in their own lane and are never removed here: an
+assessment costs money and cannot be reproduced from the repository. Remove
+those deliberately, with the same options:
+
+```sh supercov
+npx supercov quality clean --dry-run
+npx supercov quality clean --keep 5
+npx supercov quality clean
+```
 
 ## Read bundled documentation
 

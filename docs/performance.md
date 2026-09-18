@@ -74,9 +74,9 @@ The isolated workspace may be larger because it can contain an instrumented
 build cache. Supercov does not delete history in the background.
 
 ```sh supercov
-npx supercov clean --dry-run
-npx supercov clean --keep 20
-npx supercov clean
+npx supercov runs clean --dry-run
+npx supercov runs clean --keep 20
+npx supercov runs clean
 ```
 
 Use `--dry-run` to preview cleanup. Keep enough run history for active reviews

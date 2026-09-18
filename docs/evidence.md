@@ -101,9 +101,9 @@ instrumented build cache may use more space than the compressed run itself.
 Nothing is pruned in the background.
 
 ```sh supercov
-npx supercov clean --dry-run
-npx supercov clean --keep 20
-npx supercov clean
+npx supercov runs clean --dry-run
+npx supercov runs clean --keep 20
+npx supercov runs clean
 ```
 
 Preview cleanup first. The final command removes all runs and the isolated build

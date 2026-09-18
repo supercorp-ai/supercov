@@ -40,7 +40,7 @@ pub fn legacy_response(project_root: &Path, hash: &str) -> PathBuf {
     root(project_root).join(format!("{hash}.json"))
 }
 
-fn snapshots(project_root: &Path) -> PathBuf {
+pub fn snapshots(project_root: &Path) -> PathBuf {
     root(project_root).join("snapshots")
 }
 

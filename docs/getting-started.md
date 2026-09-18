@@ -152,9 +152,9 @@ Supercov does not rewrite your source, tests, imports, runner configuration,
 dependencies, or ordinary build output.
 
 ```sh supercov
-npx supercov clean --dry-run   # preview what would be removed
-npx supercov clean --keep 20   # keep the 20 newest runs
-npx supercov clean             # remove all runs and the build cache
+npx supercov runs clean --dry-run   # preview what would be removed
+npx supercov runs clean --keep 20   # keep the 20 newest runs
+npx supercov runs clean             # remove all runs and the build cache
 ```
 
 If the first run does not look right, go to [Troubleshooting](troubleshooting.md)
