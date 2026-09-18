@@ -2095,3 +2095,13 @@ fn assessing_without_a_key_stops_before_it_does_anything() {
     assert!(parse_scan(vec!["--key".into(), "apikey_x".into()]).is_err());
     assert!(parse_scan(vec!["--api-key".into(), "apikey_x".into()]).is_err());
 }
+
+#[test]
+fn a_band_matches_the_number_printed_beside_it() {
+    // 4.95 prints as 5.0, and a reader seeing `weak (5.0/10)` beside a legend
+    // that says fair starts at 5 would be right to distrust both.
+    assert_eq!(band(Some(4.95)), "fair");
+    assert_eq!(band(Some(4.94)), "weak");
+    assert_eq!(band(Some(7.95)), "good");
+    assert_eq!(band(Some(7.94)), "fair");
+}

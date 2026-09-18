@@ -311,7 +311,9 @@ pub fn file(root: &Path, path: &str, snapshot: Option<&str>) -> Result<Value, St
 /// judgments is about a point and two decimals would claim precision nobody
 /// observed. The number stays in `--json`, where something has to sort.
 fn band(health: Option<f64>) -> &'static str {
-    match health {
+    // Banded on the number a reader sees, not the one behind it, so 4.95 can
+    // never print as `weak (5.0/10)`.
+    match health.map(|h| (h * 10.0).round() / 10.0) {
         Some(h) if h >= 8.0 => "good",
         Some(h) if h >= 5.0 => "fair",
         Some(_) => "weak",
@@ -392,11 +394,10 @@ fn render_file_catalog(view: &Value) -> String {
     let empty = Vec::new();
     let mut out = String::new();
     out.push_str(&format!(
-        "{}  quality {} ({:.1}/10), {} bytes\n\n",
+        "{}  quality {} ({:.1}/10)\n\n",
         view["path"].as_str().unwrap_or("?"),
         band(view["health"].as_f64()),
-        view["health"].as_f64().unwrap_or(0.0),
-        view["bytes"].as_u64().unwrap_or(0)
+        view["health"].as_f64().unwrap_or(0.0)
     ));
     for check in view["checks"].as_array().unwrap_or(&empty) {
         let present = check["present"].as_bool().unwrap_or(false);

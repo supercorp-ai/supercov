@@ -1805,7 +1805,9 @@ arithmetic over those checks, done here and not by the model.\n";
 /// one point, so `4.4/10` would claim precision nobody observed. The number
 /// stays in `--json`, where something has to sort.
 fn band(health: Option<f64>) -> &'static str {
-    match health {
+    // Banded on the number a reader sees, not the one behind it, so 4.95 can
+    // never print as `weak (5.0/10)`.
+    match health.map(|h| (h * 10.0).round() / 10.0) {
         Some(h) if h >= 8.0 => "good",
         Some(h) if h >= 5.0 => "fair",
         Some(_) => "weak",
@@ -1853,11 +1855,10 @@ fn human_quality(report: &Value) -> String {
             .count()
     };
     out.push_str(&format!(
-        "Quality {} ({:.1}/10, weighted by size) over {} files, {} bytes.\n",
+        "Quality {} ({:.1}/10) over {} files.\n",
         band(health),
         health.unwrap_or(0.0),
-        scored.len(),
-        report["bytes"].as_u64().unwrap_or(0)
+        scored.len()
     ));
     out.push_str(&format!(
         "  {} good, {} fair, {} weak.\n",

@@ -2,7 +2,7 @@
 
 **Code quality and coverage for coding agents**
 
-**Supercov tells your coding agent what to fix and what to test.** It scores your code by twelve named properties, runs the test command you already use, and turns uncovered paths into small, actionable queries. Your agent picks a target, writes a focused test or a focused refactor, proves what improved, and keeps going.
+**Supercov tells your coding agent what to fix and what to test.** It scores your code quality with [Jev](https://typesafe.ai), runs the test command you already use, and turns uncovered paths into small, actionable queries. Your agent picks a target, writes a focused test or a focused refactor, proves what improved, and keeps going.
 
 Coverage needs no account, config file, import, custom reporter, or hosted service. Supercov is local, free, open source, and MIT licensed. Quality uses [Jev](https://typesafe.ai) and needs a key.
 
@@ -20,14 +20,13 @@ export TYPESAFE_API_KEY=...   # get one at https://typesafe.ai
 npx supercov quality
 ```
 
-No arguments and no configuration. It finds your source, asks [Jev](https://typesafe.ai)
-twelve yes/no questions about each file, and does the arithmetic itself, so
-every part of a score is a claim you can check against the file.
+No arguments and no configuration. It finds your source, asks Jev a set of
+yes/no questions about each file, and does the arithmetic itself, so every part
+of a score is a claim you can check against the file.
 
 ```
-Quality weak (3.8/10, weighted by size) over 163 files, 5166192 bytes.
+Quality weak (3.8/10) over 163 files.
   11 good, 52 fair, 100 weak.
-Catalog properties-v1, model jev-1.13.0, snapshot q_9f488de685364027.
 
 Weakest:
   weak  runtime/python/supercov_runtime.py
@@ -45,9 +44,9 @@ npx supercov quality patch                    # your uncommitted work, or your b
 npx supercov quality patch --annotate github  # workflow annotations, no token
 ```
 
-A repository of 200 files costs about two cents, and answers are cached by
-content so a second run pays only for what changed. See [Understanding
-quality](docs/quality.md).
+Jev charges for what it reads and nothing for what it writes, so a megabyte of
+source costs a little over a cent. Answers are cached by content, so a second
+run pays only for what changed. See [Understanding quality](docs/quality.md).
 
 ## Start with the suite you already have
 

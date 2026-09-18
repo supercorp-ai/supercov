@@ -44,7 +44,7 @@ each file, and saves a snapshot you can read afterwards without a key or a
 network.
 
 ```
-Quality fair (5.0/10, weighted by size) over 163 files, 5147399 bytes.
+Quality fair (5.0/10) over 163 files.
   11 good, 53 fair, 99 weak.
 
 Weakest:
@@ -78,8 +78,9 @@ npx supercov quality gaps        # only files something fired on
 ## Reading the score
 
 Health is the mean of the twelve answers, done by this command rather than by
-the model. Directory and repository health weight files by size, so a folder of
-one-line re-exports cannot outvote the file everything depends on.
+the model. A directory or a whole repository counts its larger files for more,
+so a folder of one-line re-exports cannot outvote the file everything depends
+on.
 
 Use it to find the code that is hardest to change, and `quality gaps` to jump
 straight to the files something fired on.
@@ -151,15 +152,17 @@ so a small movement does not send you looking for an edit that was never made.
 
 ## What it costs
 
-Jev charges for what it reads and nothing for what it writes, so the bill is the
-size of your source. At $0.042 per million input tokens:
+Jev charges for what it reads and nothing for what it writes, at $42 per billion
+input tokens. What that means in practice, measured rather than estimated:
 
-| | files | cost |
+| | source | cost |
 | --- | ---: | ---: |
-| a small library | 25 | $0.003 |
-| a typical service | 200 | $0.02 |
-| a large monorepo | 2,000 | $0.20 |
-| one changed file in a review | 1 | $0.0005 |
+| Supercov's CLI crate | 0.5 MB | $0.007 |
+| a TypeScript gateway, 197 files | 0.9 MB | $0.02 |
+| one changed file in a review | — | $0.0005 |
+
+About a cent per megabyte of source, a little more when the files are small,
+because each one carries its own questions.
 
 The command prints its estimate before sending anything, so a number that looks
 wrong can be stopped rather than discovered on an invoice:
