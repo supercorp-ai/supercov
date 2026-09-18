@@ -582,7 +582,7 @@ const TEST_DIRECTORIES: &[&str] = &[
 ///
 /// The suffix form covers `runtime-tests` in Hono and `Shop.Tests` in .NET, and
 /// requires a separator before it so `contest` and `latest` stay source.
-fn is_test_directory(segment: &str) -> bool {
+pub(super) fn is_test_directory(segment: &str) -> bool {
     if TEST_DIRECTORIES.contains(&segment) {
         return true;
     }

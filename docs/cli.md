@@ -78,8 +78,8 @@ set of files. Every file is **included**, **excluded** or **ambiguous**.
 
 **Included** means under a source root. Roots are found by looking for package
 manifests, `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, `Gemfile`,
-`pom.xml` and the rest, at the repository root or under a conventional package
-parent (`packages`, `apps`, `crates`, `services`, `workspaces`), plus whatever a
+`pom.xml`, `Package.swift` and the rest, at the repository root or under a
+conventional package parent (`packages`, `apps`, `crates`, `services`, `workspaces`), plus whatever a
 root manifest declares in `workspaces` or `[workspace].members`. Inside each
 package it takes the conventional source directories, matched without regard to
 case: `src`, `app`, `lib`, `server`, `client`, `api`, `functions`, Go's `cmd`,
@@ -91,6 +91,13 @@ scoping that by extension keeps a `go.mod` at the top of a polyglot repository
 from claiming the rest of the tree. A declared package with no conventional
 layout is measured whole.
 
+Two manifests do not have fixed names. Gradle lets a module call its build file
+after itself, as JUnit's `junit-jupiter-api.gradle.kts` does, so any `.gradle`
+or `.gradle.kts` file counts. And a .NET project file names itself after the
+project, so any `.csproj`, `.fsproj` or `.vbproj` marks a package **at any
+depth**, with its own directory as a root, because .NET nests projects and keeps
+sources beside the project file.
+
 **It also reads what the manifest itself declares**, which is how a project says
 where its code is without anyone guessing: `main`, `module`, `browser`, `bin`
 and `exports` in a `package.json`, `path` entries and a `build.rs` in a
@@ -100,10 +107,11 @@ both ship. A declared file in a directory of its own brings that directory, so
 the files it loads travel with it, while a declared file at the package root,
 such as Cargo's `build.rs`, is only itself rather than swallowing the package.
 
-Four conventional locations hold real code that is not the product, and are
+Five conventional locations hold real code that is not the product, and are
 named rather than left unclassified because there is nothing to declare: a
 `scripts` directory is a `tool script`, matching the coverage scope's own rule,
-`examples` is an `example`, `benches` is a `benchmark`, and anything spelled
+`examples` is an `example`, `benches` is a `benchmark`, `docs` is
+`documentation`, and anything spelled
 `<tool>.config.<ext>` or `.<tool>rc.<ext>` is `build or tool configuration`. A
 manifest entry pointing into build output, such as `"bin": "dist/index.js"`, is
 ignored for the same reason: it names the artifact, not the code you would

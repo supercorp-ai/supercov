@@ -210,8 +210,32 @@ fn declared_entry_points(directory: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn manifest_in(directory: &Path) -> bool {
-    MANIFESTS.iter().any(|name| directory.join(name).is_file())
+/// Manifests whose name varies, so the fixed list cannot hold them: Gradle lets
+/// a module call its build file after itself, as JUnit's
+/// `junit-jupiter-api.gradle.kts` does, and .NET names a project file after the
+/// project. A project file also makes its directory a package at any depth,
+/// because one project per directory is the convention and nesting is normal.
+fn variable_manifest(directory: &Path) -> Option<bool> {
+    let mut project_file = false;
+    for entry in std::fs::read_dir(directory).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if name.ends_with(".gradle") || name.ends_with(".gradle.kts") {
+            return Some(false);
+        }
+        if name.ends_with(".csproj") || name.ends_with(".fsproj") || name.ends_with(".vbproj") {
+            project_file = true;
+        }
+    }
+    project_file.then_some(true)
+}
+
+/// Whether a directory declares a package, and whether that declaration counts
+/// at any depth.
+fn manifest_in(directory: &Path) -> Option<bool> {
+    if MANIFESTS.iter().any(|name| directory.join(name).is_file()) {
+        return Some(false);
+    }
+    variable_manifest(directory)
 }
 
 /// Package directories a root manifest declares, so a member that lives
@@ -305,8 +329,14 @@ fn package_roots(root: &Path) -> BTreeSet<PathBuf> {
             let under_parent = relative
                 .components()
                 .any(|c| PACKAGE_PARENTS.contains(&c.as_os_str().to_string_lossy().as_ref()));
-            if manifest_in(&path) && (depth == 0 || under_parent) {
-                found.insert(path.clone());
+            match manifest_in(&path) {
+                Some(true) => {
+                    found.insert(path.clone());
+                }
+                Some(false) if depth == 0 || under_parent => {
+                    found.insert(path.clone());
+                }
+                _ => {}
             }
             visit(root, &path, depth + 1, found);
         }
@@ -334,6 +364,8 @@ fn beside_the_product(file: &str) -> Option<&'static str> {
             "scripts" => return Some("tool script"),
             "examples" | "example" => return Some("example"),
             "benches" | "benchmarks" => return Some("benchmark"),
+            // Code inside documentation is there to be read, not shipped.
+            "docs" | "doc" | "documentation" => return Some("documentation"),
             _ => {}
         }
     }
@@ -374,6 +406,11 @@ fn conventional_directories(package: &Path) -> Vec<PathBuf> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        // A Python test package has an `__init__.py` too. Without this guard
+        // `requests` reported `tests` as a source root beside `src`.
+        if super::is_test_directory(&name) {
+            continue;
+        }
         if SOURCE_DIRECTORIES.contains(&name.as_str()) || path.join("__init__.py").is_file() {
             found.push(path);
         }
@@ -418,6 +455,15 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
         let packages = package_roots(root);
         let mut roots = BTreeSet::new();
         for package in &packages {
+            // A .NET project keeps its sources in the project directory itself,
+            // so the directory is a root whatever it also contains. Without
+            // this, `System.Reactive.Async/Internal` became the only root
+            // because `Internal` collides with Go's `internal`, and every file
+            // beside the project file was left unclassified.
+            if package != root && variable_manifest(package) == Some(true) {
+                roots.insert(package.clone());
+                continue;
+            }
             let mut candidates: Vec<PathBuf> = conventional_directories(package);
             candidates.extend(declared_entry_points(package));
             if candidates.is_empty() && package != root {

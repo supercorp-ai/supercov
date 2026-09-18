@@ -1534,3 +1534,130 @@ fn tool_configuration_is_not_the_product_being_built() {
         "build or tool configuration"
     );
 }
+
+// ---- what eight real projects taught the scope --------------------------------
+
+#[test]
+fn a_gradle_module_names_its_build_file_after_itself() {
+    // JUnit 5 calls it `junit-jupiter-api.gradle.kts`, not `build.gradle.kts`.
+    // Looking only for the fixed name found 9 of its 1,064 source files.
+    let temp = Temp::new();
+    temp.write("settings.gradle.kts", "rootProject.name = \"junit\"\n");
+    temp.write(
+        "junit-jupiter-api/junit-jupiter-api.gradle.kts",
+        "plugins {}\n",
+    );
+    temp.write(
+        "junit-jupiter-api/src/main/java/org/junit/Api.java",
+        "class Api {}\n",
+    );
+    temp.write(
+        "junit-jupiter-api/src/test/java/org/junit/ApiTest.java",
+        "class ApiTest {}\n",
+    );
+
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let status = |p: &str| view.entries.iter().find(|e| e.path == p).unwrap().status;
+    assert_eq!(
+        status("junit-jupiter-api/src/main/java/org/junit/Api.java"),
+        scope::Status::Included
+    );
+    assert_eq!(
+        status("junit-jupiter-api/src/test/java/org/junit/ApiTest.java"),
+        scope::Status::Excluded
+    );
+}
+
+#[test]
+fn a_dotnet_project_keeps_its_sources_beside_the_project_file() {
+    // Rx.NET nests projects several levels deep and puts sources directly in the
+    // project directory, with a namespace folder called `Internal`. That folder
+    // collides with Go's `internal`, so it became the only root and every file
+    // beside the project file was unclassified: 0 of 1,473 included.
+    let temp = Temp::new();
+    temp.write("Reactive.sln", "\n");
+    temp.write(
+        "Rx.NET/Source/src/System.Reactive/System.Reactive.csproj",
+        "<Project/>\n",
+    );
+    temp.write(
+        "Rx.NET/Source/src/System.Reactive/AnonymousObservable.cs",
+        "class A {}\n",
+    );
+    temp.write(
+        "Rx.NET/Source/src/System.Reactive/Internal/Sink.cs",
+        "class S {}\n",
+    );
+    temp.write(
+        "Rx.NET/Source/tests/Tests.System.Reactive/ObservableTest.cs",
+        "class T {}\n",
+    );
+
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let status = |p: &str| view.entries.iter().find(|e| e.path == p).unwrap().status;
+    assert_eq!(
+        status("Rx.NET/Source/src/System.Reactive/AnonymousObservable.cs"),
+        scope::Status::Included,
+        "a source file beside its project file is source"
+    );
+    assert_eq!(
+        status("Rx.NET/Source/src/System.Reactive/Internal/Sink.cs"),
+        scope::Status::Included
+    );
+    assert_eq!(
+        status("Rx.NET/Source/tests/Tests.System.Reactive/ObservableTest.cs"),
+        scope::Status::Excluded
+    );
+    assert_eq!(view.ambiguous(), 0);
+}
+
+#[test]
+fn a_python_test_package_is_not_a_source_root() {
+    // `requests` keeps an `__init__.py` in `tests/`, which made it a source root
+    // beside `src`. A Python package that is a test package is still a test.
+    let temp = Temp::new();
+    temp.write("pyproject.toml", "[project]\nname = \"requests\"\n");
+    temp.write("src/requests/__init__.py", "\n");
+    temp.write("src/requests/api.py", "def get(): pass\n");
+    temp.write("tests/__init__.py", "\n");
+    temp.write("tests/test_api.py", "def test_get(): pass\n");
+
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    assert!(
+        !view.roots.iter().any(|root| root == "tests"),
+        "a test package became a source root: {:?}",
+        view.roots
+    );
+    assert_eq!(
+        view.entries
+            .iter()
+            .find(|e| e.path == "tests/test_api.py")
+            .unwrap()
+            .status,
+        scope::Status::Excluded
+    );
+}
+
+#[test]
+fn code_inside_documentation_is_there_to_be_read() {
+    let temp = Temp::new();
+    temp.write("package.json", "{}\n");
+    temp.write("src/app.ts", "export const a = 1;\n");
+    temp.write(
+        "docs/mkdocs/examples/readme.cpp",
+        "int main() { return 0; }\n",
+    );
+    temp.write("documentation/src/demo.java", "class Demo {}\n");
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let entry = |p: &str| view.entries.iter().find(|e| e.path == p).unwrap().clone();
+    assert_eq!(
+        entry("docs/mkdocs/examples/readme.cpp").reason,
+        "documentation"
+    );
+    assert_eq!(entry("documentation/src/demo.java").reason, "documentation");
+    assert_eq!(entry("src/app.ts").status, scope::Status::Included);
+}
