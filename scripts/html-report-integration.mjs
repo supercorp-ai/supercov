@@ -2,11 +2,11 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -58,15 +58,13 @@ try {
     { cwd: project, encoding: "utf8", stdio: "pipe" },
   );
 
-  // A saved assessment, written by hand so this stays offline and free. Only the
-  // source fingerprint decides whether it pairs with the run, so it is copied
-  // from the run itself; a made-up one must stay unpaired.
-  const runDirectory = resolve(project, ".supercov/runs");
-  const runId = readdirSync(runDirectory)[0];
-  const runRecord = JSON.parse(
-    readFileSync(resolve(runDirectory, runId, "run.json"), "utf8"),
-  );
-  const sourceFingerprint = runRecord.integrity.fingerprint.source;
+  // A saved assessment, written by hand so this stays offline and free. What
+  // decides pairing is the per-file digest, so it is taken from the file on
+  // disk; a made-up one must stay unpaired.
+  const sourcePath = resolve(project, "src/access.js");
+  const sourceDigest = createHash("sha256")
+    .update(readFileSync(sourcePath))
+    .digest("hex");
   const snapshot = resolve(project, ".supercov/quality/snapshots/q_00000000000000aa");
   mkdirSync(snapshot, { recursive: true });
   writeFileSync(
@@ -78,7 +76,7 @@ try {
       instrument: "catalog",
       catalog_version: "properties-v1",
       model: "jev-1.13.0",
-      source_fingerprint: sourceFingerprint,
+      source_fingerprint: "c".repeat(64),
       source_files: 1,
       health: 4.84,
       counts: { files: 1, scored: 1 },
@@ -92,7 +90,7 @@ try {
         {
           path: "src/access.js",
           bytes: 120,
-          sha256: "a".repeat(64),
+          sha256: sourceDigest,
           status: "completed",
           health: 3.5,
           present: [{ check: "long_method", value: 0.95 }],
@@ -120,11 +118,12 @@ try {
   assert.equal(paired.timeline[0].qualityId, "q_00000000000000aa");
   assert.equal(paired.qualities[0].files[0].path, "src/access.js");
 
-  // A snapshot taken against different source must not be folded into the run.
+  // A snapshot of different bytes must not be folded into the run, however
+  // close in time it was taken.
   writeFileSync(
-    resolve(snapshot, "manifest.json"),
-    readFileSync(resolve(snapshot, "manifest.json"), "utf8").replace(
-      sourceFingerprint,
+    resolve(snapshot, "files.json"),
+    readFileSync(resolve(snapshot, "files.json"), "utf8").replace(
+      sourceDigest,
       "b".repeat(64),
     ),
   );

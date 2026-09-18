@@ -160,6 +160,10 @@ struct ReportQuality {
     scope: serde_json::Value,
     limitation: serde_json::Value,
     files: serde_json::Value,
+    /// Carried only when no run in this report already carries the same source,
+    /// so an assessment can be read beside its code with no run at all.
+    sources: BTreeMap<String, ReportSource>,
+    omitted_sources: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -535,6 +539,60 @@ fn build_assertions(root: &Path, run: &StoredRun) -> Option<serde_json::Value> {
     })
 }
 
+/// Source for assessed files, included only when it is still what was assessed.
+///
+/// The snapshot recorded a digest per file, so this can prove the match file by
+/// file instead of trusting one fingerprint for the set: a file that changed
+/// since the assessment is left out and named, and the rest are still readable.
+fn collect_quality_sources(
+    root: &Path,
+    files: &serde_json::Value,
+) -> (BTreeMap<String, ReportSource>, Vec<String>) {
+    let mut sources = BTreeMap::new();
+    let mut omitted = Vec::new();
+    let mut total = 0_usize;
+    for file in files.as_array().unwrap_or(&Vec::new()) {
+        let (Some(relative), Some(recorded)) = (
+            file.get("path").and_then(|value| value.as_str()),
+            file.get("sha256").and_then(|value| value.as_str()),
+        ) else {
+            continue;
+        };
+        let omit = |omitted: &mut Vec<String>| omitted.push(relative.to_owned());
+        let Some(path) = safe_relative_source(root, relative) else {
+            omit(&mut omitted);
+            continue;
+        };
+        let Ok(metadata) = fs::metadata(&path) else {
+            omit(&mut omitted);
+            continue;
+        };
+        let Ok(length) = usize::try_from(metadata.len()) else {
+            omit(&mut omitted);
+            continue;
+        };
+        if !metadata.is_file()
+            || length > MAX_SOURCE_BYTES
+            || total.saturating_add(length) > MAX_TOTAL_SOURCE_BYTES
+        {
+            omit(&mut omitted);
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            omit(&mut omitted);
+            continue;
+        };
+        let sha256 = format!("{:x}", Sha256::digest(contents.as_bytes()));
+        if sha256 != recorded {
+            omit(&mut omitted);
+            continue;
+        }
+        total += contents.len();
+        sources.insert(relative.to_owned(), ReportSource { sha256, contents });
+    }
+    (sources, omitted)
+}
+
 /// Read saved assessments into the shape a report carries.
 fn build_qualities(root: &Path, limit: usize) -> Vec<ReportQuality> {
     crate::quality::report_snapshots(root, limit)
@@ -577,6 +635,8 @@ fn build_qualities(root: &Path, limit: usize) -> Vec<ReportQuality> {
                     .get("limitation")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null),
+                sources: BTreeMap::new(),
+                omitted_sources: Vec::new(),
                 files: files
                     .get("files")
                     .cloned()
@@ -587,23 +647,71 @@ fn build_qualities(root: &Path, limit: usize) -> Vec<ReportQuality> {
         .collect()
 }
 
+/// Give an assessment its own copy of the source when no run here has it.
+///
+/// A paired assessment needs none: the run beside it already carries the same
+/// files, and a report attached to a pull request should not pay for them twice.
+fn attach_quality_sources(root: &Path, qualities: &mut [ReportQuality], timeline: &[TimelineItem]) {
+    let paired: BTreeSet<&str> = timeline
+        .iter()
+        .filter(|item| item.kind == "paired")
+        .filter_map(|item| item.quality_id.as_deref())
+        .collect();
+    for quality in qualities.iter_mut() {
+        if paired.contains(quality.id.as_str()) {
+            continue;
+        }
+        let (sources, omitted) = collect_quality_sources(root, &quality.files);
+        quality.sources = sources;
+        quality.omitted_sources = omitted;
+    }
+}
+
 /// Put runs and assessments on one axis.
 ///
 /// The only thing that pairs them is an identical source fingerprint. A run
 /// from before fingerprints were recorded has none, so it pairs with nothing
 /// and says so, which is the honest answer rather than a guess from two
 /// timestamps.
+/// Whether a run and an assessment read identical bytes for their shared files.
+///
+/// A run's own source fingerprint cannot answer this. It digests the union of
+/// the discovered source files and the ungenerated scope entries, so it covers
+/// more than an assessment ever looks at, and on a real project the two never
+/// agree. What does answer it is the digest each side records per file.
+///
+/// Sharing no file at all is not agreement, so it does not pair: two judgments
+/// about disjoint code are two moments.
+fn reads_the_same_source(run: &ReportRun, quality: &ReportQuality) -> bool {
+    let empty = Vec::new();
+    let mut shared = 0_usize;
+    for file in quality.files.as_array().unwrap_or(&empty) {
+        let (Some(path), Some(assessed)) = (
+            file.get("path").and_then(|value| value.as_str()),
+            file.get("sha256").and_then(|value| value.as_str()),
+        ) else {
+            continue;
+        };
+        let Some(measured) = run.sources.get(path) else {
+            continue;
+        };
+        if measured.sha256 != assessed {
+            return false;
+        }
+        shared += 1;
+    }
+    shared > 0
+}
+
 fn build_timeline(runs: &[ReportRun], qualities: &[ReportQuality]) -> Vec<TimelineItem> {
     let mut paired_quality: BTreeSet<&str> = BTreeSet::new();
     let mut items: Vec<TimelineItem> = runs
         .iter()
         .map(|run| {
             let fingerprint = run.source_fingerprint.clone();
-            let partner = fingerprint.as_deref().and_then(|fingerprint| {
-                qualities
-                    .iter()
-                    .find(|quality| quality.source_fingerprint.as_deref() == Some(fingerprint))
-            });
+            let partner = qualities
+                .iter()
+                .find(|quality| reads_the_same_source(run, quality));
             if let Some(quality) = partner {
                 paired_quality.insert(quality.id.as_str());
             }
@@ -777,8 +885,9 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
         }
         eprint!("\r{}\r", " ".repeat(96));
         let _ = std::io::stderr().flush();
-        let qualities = build_qualities(&root, DEFAULT_SNAPSHOTS);
+        let mut qualities = build_qualities(&root, DEFAULT_SNAPSHOTS);
         let timeline = build_timeline(&runs, &qualities);
+        attach_quality_sources(&root, &mut qualities, &timeline);
         if timeline.is_empty() {
             return Err("no local coverage runs and no saved quality assessments to report".into());
         }

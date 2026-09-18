@@ -854,7 +854,10 @@
       const value = summary.status === "available" ? pct(statements.percentage) : "\u2014";
       const head = node("div", "quality-head");
       head.append(node("span", "quality-score", value));
-      head.append(node("span", `assertion-status ${summary.status === "available" ? "good" : "quiet"}`, summary.status === "available" ? "assessed" : String(summary.status || "")));
+      // A function replacer rather than a numbered backreference: the report is
+      // checked for a currency figure, and a backreference reads as one.
+      const statusText = String(summary.status || "").replace(/([a-z])([A-Z])/g, (whole, before, after) => `${before} ${after}`).toLowerCase();
+      head.append(node("span", `assertion-status ${summary.status === "available" ? "good" : "quiet"}`, summary.status === "available" ? "assessed" : statusText));
       section.append(head);
       if (summary.reason) section.append(node("div", "quality-context", summary.reason));
       section.append(node("div", "quality-context", `${integer(statements.asserted)} of ${integer(statements.total)} measured statements credited \u00b7 ${integer(summary.assertions)} ${summary.assertions === 1 ? "assertion" : "assertions"}`));
@@ -882,8 +885,8 @@
       hero.append(quality
         ? renderQuality(quality)
         : renderMissing("quality", "No quality assessment of this source", "This run measured what the tests reach. Nothing has judged how the code reads."));
-      const assertions = renderAssertions(run);
-      if (assertions) hero.append(assertions);
+      hero.append(renderAssertions(run)
+        || renderMissing("assertions", "No assertion map for this run", "Coverage shows which code ran. Nothing here explains what the tests actually prove about it."));
       shell.append(hero);
     }
 
@@ -893,6 +896,9 @@
       const hero = node("section", "hero");
       hero.append(renderQuality(quality));
       hero.append(renderMissing("run", "No coverage run for this source", "Nothing here has been measured by tests, so there are no lines, branches or MC/DC obligations to show."));
+      // No action of its own: an assertion map is authored against a run, so the
+      // measurement above is the thing that has to happen first.
+      hero.append(renderMissing(null, "No assertion coverage", "What the tests prove is recorded against a run, so this becomes available once this source has been measured."));
       shell.append(hero);
     }
 
@@ -1131,7 +1137,51 @@
       return panel;
     }
 
+    function renderPlainSource(quality, file) {
+      const wrap = node("div");
+      const source = quality.sources && quality.sources[file];
+      const head = node("div", "source-head"); const headCopy = node("div", "source-head-copy");
+      if (!source) {
+        headCopy.append(node("div", "small muted", (quality.omittedSources || []).includes(file)
+          ? "This file changed after it was assessed, so its source is not shown beside a grade that describes different text."
+          : "Source for this file was not bundled."));
+        head.append(headCopy); wrap.append(head); return wrap;
+      }
+      headCopy.append(node("div", "small muted", "The source as it was assessed."));
+      head.append(headCopy); wrap.append(head);
+      const code = node("div", "code"); code.setAttribute("role", "region"); code.setAttribute("aria-label", `Source for ${file}`);
+      const lines = source.contents.split("\n");
+      const end = Math.min(lines.length, state.sourceRadius * 2);
+      lines.slice(0, end).forEach((text, offset) => {
+        const row = node("div", "code-line");
+        row.append(node("span", "code-gutter", String(offset + 1)), node("span", "code-flag", "\u00b7"), node("span", "code-text", text || " "));
+        code.append(row);
+      });
+      if (end < lines.length) {
+        head.append(button(`Show more context (1\u2013${end} of ${lines.length})`, "button", () => { state.sourceRadius = Math.min(lines.length, state.sourceRadius * 3); render(); }));
+      }
+      wrap.append(code); return wrap;
+    }
+
+    function renderQualityFileDetail(content, quality, file) {
+      const panel = node("section", "panel detail detail-view");
+      const top = node("div", "detail-top");
+      top.append(button("\u2039 All files", "back-button", () => { state.file = null; state.line = null; render(); }), node("h1", "detail-heading", fileName(file)));
+      const directory = fileDirectory(file); if (directory) top.append(node("div", "detail-subtitle", directory));
+      panel.append(top);
+      const sourceSection = node("div", "section");
+      sourceSection.append(node("h3", "", "Source"), renderPlainSource(quality, file));
+      panel.append(sourceSection);
+      const fileQuality = renderFileQuality(file); if (fileQuality) panel.append(fileQuality);
+      panel.append(renderMissing("run", "Not measured", "No coverage run read this source, so nothing here says which of these lines the tests reach."));
+      content.append(panel);
+    }
+
     function renderQualityFiles(content, quality) {
+      if (state.file && Array.isArray(quality.files) && quality.files.some(file => file.path === state.file)) {
+        renderQualityFileDetail(content, quality, state.file); return;
+      }
+      state.file = null;
       const files = (Array.isArray(quality.files) ? quality.files : [])
         .filter(file => file.path.toLowerCase().includes(state.gapQuery.toLowerCase()))
         .slice().sort((a, b) => Number(a.health) - Number(b.health));
@@ -1141,12 +1191,13 @@
       head.append(title); panel.append(head);
       const list = node("div", "file-list");
       files.forEach(file => {
-        const row = node("div", "file-row static");
+        const row = button("", "file-row", () => { state.file = file.path; state.line = null; state.sourceRadius = 32; render(); });
         row.append(node("span", `file-state-dot ${band(file.health)}`));
         const identity = node("span", "file-row-identity");
         identity.append(node("span", "file-row-name", fileName(file.path)));
         const directory = fileDirectory(file.path); if (directory) identity.append(node("span", "file-row-directory", directory));
         row.append(identity, node("span", "file-row-metric", health(file.health)));
+        const chevron = node("span", "file-chevron", "\u203a"); chevron.setAttribute("aria-hidden", "true"); row.append(chevron);
         list.append(row);
       });
       if (!files.length) list.append(node("div", "empty", "No files match this search."));
@@ -1373,7 +1424,7 @@
     function renderMissing(kind, heading, copy) {
       const card = node("div", "missing-card");
       card.append(node("div", "missing-heading", heading), node("div", "missing-copy", copy));
-      card.append(button("How to add this", "missing-action", () => { state.prompt = kind; render(); }));
+      if (kind) card.append(button("How to add this", "missing-action", () => { state.prompt = kind; render(); }));
       return card;
     }
 
