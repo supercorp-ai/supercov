@@ -126,6 +126,79 @@ impl Scope {
     }
 }
 
+/// Locations a package's own manifest declares, resolved to files or
+/// directories. Reading the manifest is how a project says where its code is
+/// without anyone guessing: this repository's `package.json` names
+/// `bin/supercov.js` and `./runtime/javascript/*.mjs`, neither of which is a
+/// conventional source directory and both of which are shipped.
+fn declared_entry_points(directory: &Path) -> Vec<PathBuf> {
+    let mut targets: Vec<String> = Vec::new();
+    fn strings(value: &Value, depth: usize, out: &mut Vec<String>) {
+        if depth > 4 {
+            return;
+        }
+        match value {
+            Value::String(text) => out.push(text.clone()),
+            Value::Array(items) => items.iter().for_each(|v| strings(v, depth + 1, out)),
+            Value::Object(fields) => fields.values().for_each(|v| strings(v, depth + 1, out)),
+            _ => {}
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(directory.join("package.json"))
+        && let Ok(manifest) = serde_json::from_str::<Value>(&text)
+    {
+        for key in ["main", "module", "browser", "bin", "exports"] {
+            if let Some(value) = manifest.get(key) {
+                strings(value, 0, &mut targets);
+            }
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(directory.join("Cargo.toml")) {
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("path")
+                && let Some(value) = rest.split('"').nth(1)
+            {
+                targets.push(value.to_owned());
+            }
+        }
+        // Cargo compiles a `build.rs` beside the manifest without being told.
+        if directory.join("build.rs").is_file() {
+            targets.push("build.rs".to_owned());
+        }
+    }
+    targets
+        .into_iter()
+        .filter(|target| !target.contains("node_modules"))
+        .filter_map(|target| {
+            // A subpath pattern such as `./dist/*.js` names the directory.
+            let prefix = target.split('*').next()?.trim_end_matches('/');
+            let prefix = prefix.strip_prefix("./").unwrap_or(prefix);
+            if prefix.is_empty() || prefix.starts_with('/') || prefix.starts_with("..") {
+                return None;
+            }
+            let path = directory.join(prefix);
+            if path.is_dir() {
+                return Some(path);
+            }
+            if !path.is_file() {
+                return None;
+            }
+            // A declared file in a directory of its own, such as `bin`, makes
+            // that directory a root so the files it loads travel with it. A
+            // declared file sitting at the package root, such as Cargo's
+            // `build.rs`, is only itself: taking its parent would swallow the
+            // whole package.
+            let parent = path.parent()?;
+            Some(if parent == directory {
+                path
+            } else {
+                parent.to_owned()
+            })
+        })
+        .collect()
+}
+
 fn manifest_in(directory: &Path) -> bool {
     MANIFESTS.iter().any(|name| directory.join(name).is_file())
 }
@@ -233,6 +306,26 @@ fn package_roots(root: &Path) -> BTreeSet<PathBuf> {
     found
 }
 
+/// Code that is conventionally kept beside a package without being part of it.
+///
+/// A tool script is the coverage scope's own rule, in its words. Examples and
+/// benchmarks are Cargo, Go and npm conventions for code that ships to nobody:
+/// naming the reason is more useful than calling them unclassified, because
+/// there is nothing for a project to declare.
+fn beside_the_product(file: &str) -> Option<&'static str> {
+    let lower = file.to_ascii_lowercase();
+    let directories = lower.rsplit_once('/').map(|(head, _)| head).unwrap_or("");
+    for segment in directories.split('/') {
+        match segment {
+            "scripts" => return Some("tool script"),
+            "examples" | "example" => return Some("example"),
+            "benches" | "benchmarks" => return Some("benchmark"),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -258,11 +351,12 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
         let packages = package_roots(root);
         let mut roots = BTreeSet::new();
         for package in &packages {
-            let candidates: Vec<PathBuf> = SOURCE_DIRECTORIES
+            let mut candidates: Vec<PathBuf> = SOURCE_DIRECTORIES
                 .iter()
                 .map(|name| package.join(name))
                 .filter(|path| path.is_dir())
                 .collect();
+            candidates.extend(declared_entry_points(package));
             if candidates.is_empty() && package != root {
                 // A declared package that keeps its code somewhere
                 // unconventional is still first-party source, so the package
@@ -299,6 +393,8 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
         };
         if let Some(skipped) = super::skipped_path(&file) {
             entries.push(entry(Status::Excluded, skipped.reason()));
+        } else if let Some(reason) = beside_the_product(&file) {
+            entries.push(entry(Status::Excluded, reason));
         } else if roots.iter().any(|dir| path.starts_with(dir)) {
             entries.push(entry(
                 Status::Included,

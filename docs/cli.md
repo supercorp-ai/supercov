@@ -384,6 +384,20 @@ package it takes the conventional source directories: `src`, `app`, `lib`,
 `server`, `client`, `api`, `functions`, and Go's `cmd`, `internal` and `pkg`. A
 declared package with no conventional layout is measured whole.
 
+**It also reads what the manifest itself declares**, which is how a project says
+where its code is without anyone guessing: `main`, `module`, `browser`, `bin`
+and `exports` in a `package.json`, `path` entries and a `build.rs` in a
+`Cargo.toml`. Supercov's own package declares `bin/supercov.js` and
+`./runtime/javascript/*.mjs`; neither is a conventional source directory and
+both ship. A declared file in a directory of its own brings that directory, so
+the files it loads travel with it, while a declared file at the package root,
+such as Cargo's `build.rs`, is only itself rather than swallowing the package.
+
+Three conventional locations hold real code that ships to nobody, and are named
+rather than left unclassified because there is nothing to declare: a `scripts`
+directory is a `tool script`, matching the coverage scope's own rule,
+`examples` is an `example`, and `benches` is a `benchmark`.
+
 **Excluded** means test code or generated output, each carrying its reason.
 This is not a claim that test code does not matter: it costs a request each, and
 several checks encode assumptions that are wrong for it, since duplication

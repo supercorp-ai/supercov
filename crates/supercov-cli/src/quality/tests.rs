@@ -2423,3 +2423,81 @@ fn declared_roots_are_read_from_the_environment_as_a_comma_list() {
     assert_eq!(parsed(" src , app "), vec!["src", "app"]);
     assert!(parsed(" , ").is_empty());
 }
+
+#[test]
+fn a_manifest_says_where_code_lives_when_the_layout_is_not_conventional() {
+    // This repository's own package.json names `bin/supercov.js` and
+    // `./runtime/javascript/*.mjs`. Neither is a conventional source directory
+    // and both ship, so reading the manifest is what stops them being guesses.
+    let temp = Temp::new();
+    temp.write(
+        "package.json",
+        r#"{"bin":{"tool":"bin/tool.js"},"exports":{"./x":"./runtime/javascript/x.mjs"}}"#,
+    );
+    temp.write("bin/tool.js", "export const a = 1;\n");
+    temp.write("bin/helper.js", "export const b = 2;\n");
+    temp.write("runtime/javascript/x.mjs", "export const c = 3;\n");
+    temp.write("runtime/python/y.py", "c = 3\n");
+
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let status = |path: &str| view.entries.iter().find(|e| e.path == path).unwrap().status;
+    assert_eq!(status("bin/tool.js"), scope::Status::Included);
+    // A declared file in a directory of its own brings the directory, so the
+    // files it loads travel with it.
+    assert_eq!(status("bin/helper.js"), scope::Status::Included);
+    assert_eq!(status("runtime/javascript/x.mjs"), scope::Status::Included);
+    // Nothing declares the Python runtime, so it stays a question.
+    assert_eq!(status("runtime/python/y.py"), scope::Status::Ambiguous);
+}
+
+#[test]
+fn a_build_script_is_itself_and_does_not_drag_in_its_whole_crate() {
+    let temp = Temp::new();
+    temp.write("Cargo.toml", "[workspace]\nmembers = [\"crates/engine\"]\n");
+    temp.write("crates/engine/Cargo.toml", "[package]\nname = \"engine\"\n");
+    temp.write("crates/engine/build.rs", "fn main() {}\n");
+    temp.write("crates/engine/src/lib.rs", "pub fn a() {}\n");
+    temp.write("crates/engine/assets/blob.rs", "pub fn b() {}\n");
+
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let status = |path: &str| view.entries.iter().find(|e| e.path == path).unwrap().status;
+    // Cargo compiles build.rs without being told, so it is real code.
+    assert_eq!(status("crates/engine/build.rs"), scope::Status::Included);
+    assert_eq!(status("crates/engine/src/lib.rs"), scope::Status::Included);
+    // Taking the build script's parent would have swallowed the whole crate.
+    assert_eq!(
+        status("crates/engine/assets/blob.rs"),
+        scope::Status::Ambiguous
+    );
+}
+
+#[test]
+fn code_kept_beside_a_package_is_named_rather_than_left_unclassified() {
+    // A tool script is the coverage scope's own rule, in its words. Examples
+    // and benchmarks ship to nobody and there is nothing to declare, so saying
+    // why is more useful than calling them unclassified.
+    let temp = Temp::new();
+    temp.write("package.json", "{}\n");
+    temp.write("src/app.ts", "export const a = 1;\n");
+    temp.write("scripts/release.mjs", "export const b = 2;\n");
+    temp.write("examples/demo/app.ts", "export const c = 3;\n");
+    temp.write("benches/throughput.rs", "fn main() {}\n");
+
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let entry = |path: &str| {
+        view.entries
+            .iter()
+            .find(|e| e.path == path)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(entry("scripts/release.mjs").status, scope::Status::Excluded);
+    assert_eq!(entry("scripts/release.mjs").reason, "tool script");
+    assert_eq!(entry("examples/demo/app.ts").reason, "example");
+    assert_eq!(entry("benches/throughput.rs").reason, "benchmark");
+    assert_eq!(entry("src/app.ts").status, scope::Status::Included);
+    assert_eq!(view.ambiguous(), 0);
+}
