@@ -1822,40 +1822,43 @@ fn a_file_request_names_the_path_but_a_change_request_does_not() {
 // ---- change ranges ----------------------------------------------------------
 
 #[test]
-fn review_defaults_to_unstaged_and_accepts_each_range() {
+fn patch_defaults_to_unstaged_and_accepts_each_range() {
     let parse_range = |args: &[&str]| match parse(
-        std::iter::once("review")
+        std::iter::once("patch")
             .chain(args.iter().copied())
             .map(str::to_owned)
             .collect(),
     ) {
-        Ok(Command::Review { range, .. }) => Ok(range),
-        Ok(_) => panic!("review did not parse as a review"),
+        Ok(Command::Patch { range, .. }) => Ok(range),
+        Ok(_) => panic!("patch did not parse as a patch"),
         Err(e) => Err(e),
     };
     assert_eq!(parse_range(&[]).unwrap(), changes::Range::Unstaged);
     assert_eq!(parse_range(&["--staged"]).unwrap(), changes::Range::Staged);
     assert_eq!(parse_range(&["--cached"]).unwrap(), changes::Range::Staged);
     assert_eq!(
-        parse_range(&["--since", "main"]).unwrap(),
-        changes::Range::Since("main".into())
+        parse_range(&["--base", "main"]).unwrap(),
+        changes::Range::Base("main".into())
     );
-    assert!(parse_range(&["--since"]).is_err());
-    assert!(parse_range(&["--staged", "--since", "main"]).is_err());
+    assert!(parse_range(&["--base"]).is_err());
+    assert!(parse_range(&["--staged", "--base", "main"]).is_err());
+    // The old spelling is gone rather than quietly aliased, because it meant
+    // the ref's tip where --base means the merge base.
+    assert!(parse_range(&["--since", "main"]).is_err());
     // Naming the same range twice is not a conflict.
     assert!(parse_range(&["--staged", "--cached"]).is_ok());
     assert!(parse_range(&["--nonsense"]).is_err());
 }
 
 #[test]
-fn review_takes_paths_and_a_limit() {
+fn patch_takes_paths_and_a_limit() {
     match parse(
-        ["review", "--limit", "3", "src", "docs/a.md"]
+        ["patch", "--limit", "3", "src", "docs/a.md"]
             .iter()
             .map(|s| (*s).to_owned())
             .collect(),
     ) {
-        Ok(Command::Review { paths, limit, .. }) => {
+        Ok(Command::Patch { paths, limit, .. }) => {
             assert_eq!(limit, 3);
             assert_eq!(
                 paths,
@@ -1870,8 +1873,8 @@ fn review_takes_paths_and_a_limit() {
 fn range_names_itself_the_same_way_every_run() {
     assert_eq!(changes::Range::Unstaged.id(), "unstaged");
     assert_eq!(changes::Range::Staged.id(), "staged");
-    assert_eq!(changes::Range::Since("v1".into()).id(), "since:v1");
-    assert!(changes::Range::Since("v1".into()).describe().contains("v1"));
+    assert_eq!(changes::Range::Base("v1".into()).id(), "base:v1");
+    assert!(changes::Range::Base("v1".into()).describe().contains("v1"));
 }
 
 fn git_in(root: &Path, arguments: &[&str]) {
@@ -1934,7 +1937,7 @@ fn staged_compares_the_index_with_head() {
 }
 
 #[test]
-fn since_compares_the_working_tree_with_a_named_commit() {
+fn base_compares_the_working_tree_with_the_merge_base_not_the_tip() {
     let temp = repository();
     temp.write("a.rs", "fn a() {}\n");
     git_in(&temp.0, &["add", "a.rs"]);
@@ -1945,11 +1948,76 @@ fn since_compares_the_working_tree_with_a_named_commit() {
     git_in(&temp.0, &["commit", "--quiet", "-m", "second"]);
     temp.write("a.rs", "fn a() { three(); }\n");
 
-    let found = changes::collect(&temp.0, &changes::Range::Since("base".into()), &[]).unwrap();
+    let found = changes::collect(&temp.0, &changes::Range::Base("base".into()), &[]).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].before, "fn a() {}\n");
     assert_eq!(found[0].after, "fn a() { three(); }\n");
-    assert!(changes::collect(&temp.0, &changes::Range::Since("nope".into()), &[]).is_err());
+    assert!(changes::collect(&temp.0, &changes::Range::Base("nope".into()), &[]).is_err());
+}
+
+#[test]
+fn a_base_that_moved_on_is_not_this_branch_s_obligation() {
+    // The whole reason for the merge base. main gains a commit after the branch
+    // leaves it; comparing against main's tip would report that commit's file as
+    // part of this change.
+    let temp = repository();
+    temp.write("shared.rs", "fn shared() {}\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    git_in(&temp.0, &["checkout", "--quiet", "-b", "work"]);
+    temp.write("mine.rs", "fn mine() {}\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "mine"]);
+
+    let main = String::from_utf8(
+        std::process::Command::new("git")
+            .current_dir(&temp.0)
+            .args(["rev-parse", "HEAD~1"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    git_in(&temp.0, &["checkout", "--quiet", main.trim()]);
+    git_in(&temp.0, &["checkout", "--quiet", "-B", "main"]);
+    temp.write("theirs.rs", "fn theirs() {}\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "theirs"]);
+    git_in(&temp.0, &["checkout", "--quiet", "work"]);
+
+    let found = changes::collect(&temp.0, &changes::Range::Base("main".into()), &[]).unwrap();
+    let paths: Vec<&str> = found.iter().map(|c| c.path.as_str()).collect();
+    assert!(paths.contains(&"mine.rs"), "{paths:?}");
+    assert!(
+        !paths.contains(&"theirs.rs"),
+        "a commit landed on main after this branch left it is not this change: {paths:?}"
+    );
+}
+
+#[test]
+fn an_untracked_file_is_reviewed_as_an_addition() {
+    let temp = repository();
+    temp.write("tracked.rs", "fn tracked() {}\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    temp.write("brand-new.rs", "fn fresh() {}\n");
+
+    // git diff never mentions an untracked file, but the author wrote it.
+    let found = changes::collect(&temp.0, &changes::Range::Unstaged, &[]).unwrap();
+    let new = found.iter().find(|c| c.path == "brand-new.rs").unwrap();
+    assert_eq!(new.kind, changes::Kind::Added);
+    assert_eq!(new.after, "fn fresh() {}\n");
+    assert!(new.before.is_empty());
+    // Staged work is the exception: an untracked file is not in the index.
+    let staged = changes::collect(&temp.0, &changes::Range::Staged, &[]).unwrap();
+    assert!(staged.iter().all(|c| c.path != "brand-new.rs"));
+}
+
+#[test]
+fn an_annotation_anchors_at_the_first_line_the_change_adds() {
+    let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -10,3 +12,7 @@ fn a() {\n+    added\n";
+    assert_eq!(changes::first_added_line(patch), Some(12));
+    assert_eq!(changes::first_added_line("no hunks here"), None);
 }
 
 #[test]

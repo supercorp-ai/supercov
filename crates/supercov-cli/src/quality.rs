@@ -68,12 +68,15 @@ Usage:
   supercov quality function <file>::<name> [snapshot] one declaration
   supercov quality diff <snapshot> <snapshot>         what changed between two
   supercov quality health [file-or-directory ...]     score code by named properties
-  supercov quality review [file-or-directory ...]     what a change introduced
+  supercov quality patch [file-or-directory ...]      what a change introduced
 
-Change range (quality review), pick one:
+Change range (quality patch), pick one:
   --unstaged          Working tree against the index (default)
   --staged            Index against HEAD: what a commit would contain
-  --since <ref>       Working tree against a commit, branch or tag
+  --base <ref>        Working tree against the merge base with a branch or tag
+
+Patch options:
+  --annotate github   Print GitHub workflow annotations; posts nothing
 
 Scan options:
   --json              Print the report as JSON
@@ -184,20 +187,22 @@ enum Command {
     /// Score files by the named-property catalog rather than the rubric.
     Health(Options),
     /// Ask the same catalog what a change introduced.
-    Review {
+    Patch {
         range: changes::Range,
         paths: Vec<PathBuf>,
         json: bool,
         refresh: bool,
         limit: usize,
+        annotate: bool,
     },
 }
 
 /// The change range, shared by any command that works on a change rather than
 /// on a tree. Kept separate from scan's options so a later command can take the
 /// same three flags without inheriting the rest.
-fn parse_review(arguments: Vec<String>) -> Result<Command, String> {
+fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
     let (mut range, mut json, mut refresh, mut limit) = (None, false, false, None);
+    let mut annotate = false;
     let mut paths = Vec::new();
     let mut arguments = arguments.into_iter();
     let set = |chosen: changes::Range, slot: &mut Option<changes::Range>| match slot {
@@ -215,11 +220,21 @@ fn parse_review(arguments: Vec<String>) -> Result<Command, String> {
             "--refresh" => refresh = true,
             "--unstaged" => set(changes::Range::Unstaged, &mut range)?,
             "--staged" | "--cached" => set(changes::Range::Staged, &mut range)?,
-            "--since" => {
+            "--base" => {
                 let reference = arguments
                     .next()
-                    .ok_or("--since needs a commit, branch or tag")?;
-                set(changes::Range::Since(reference), &mut range)?;
+                    .ok_or("--base needs a commit, branch or tag")?;
+                set(changes::Range::Base(reference), &mut range)?;
+            }
+            "--annotate" => {
+                // Only GitHub's form exists, and naming it keeps room for others.
+                match arguments.next().as_deref() {
+                    Some("github") => annotate = true,
+                    Some(other) => {
+                        return Err(format!("--annotate does not know {other}; use github"));
+                    }
+                    None => return Err("--annotate needs a format; use github".into()),
+                }
             }
             "--limit" => {
                 limit = Some(
@@ -231,17 +246,18 @@ fn parse_review(arguments: Vec<String>) -> Result<Command, String> {
                 );
             }
             other if other.starts_with("--") => {
-                return Err(format!("unknown option {other} for quality review"));
+                return Err(format!("unknown option {other} for quality patch"));
             }
             other => paths.push(PathBuf::from(other)),
         }
     }
-    Ok(Command::Review {
+    Ok(Command::Patch {
         range: range.unwrap_or(changes::Range::Unstaged),
         paths,
         json,
         refresh,
         limit: limit.unwrap_or(20),
+        annotate,
     })
 }
 
@@ -257,7 +273,7 @@ fn parse(arguments: Vec<String>) -> Result<Command, String> {
             parse_view(subcommand, rest())
         }
         "health" => Ok(Command::Health(parse_scan(rest())?)),
-        "review" => parse_review(rest()),
+        "patch" => parse_patch(rest()),
         _ => Ok(Command::Scan(parse_scan(arguments)?)),
     }
 }
@@ -2030,7 +2046,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
 }
 
 /// What a change introduced, file by file.
-fn run_review(
+fn run_patch(
     root: &Path,
     range: &changes::Range,
     paths: &[PathBuf],
@@ -2070,6 +2086,10 @@ fn run_review(
             note,
         });
     }
+    let anchors: BTreeMap<String, u32> = collected
+        .iter()
+        .filter_map(|c| changes::first_added_line(&c.patch).map(|l| (c.path.clone(), l)))
+        .collect();
     let count = subjects.len();
     let (answers, usage) = ask_smells(root, key, refresh, subjects, count > 4);
     let mut introduced = 0usize;
@@ -2077,6 +2097,7 @@ fn run_review(
         .iter()
         .map(|answer| {
             let mut value = scored(answer);
+            value["line"] = json!(anchors.get(&answer.path));
             if let Some(values) = &answer.values {
                 let fired = smells::present(values);
                 introduced += fired.len();
@@ -2178,7 +2199,7 @@ fn human_health(report: &Value) -> String {
     out
 }
 
-fn human_review(report: &Value, limit: usize) -> String {
+fn human_patch(report: &Value, limit: usize) -> String {
     let empty = Vec::new();
     let mut out = String::new();
     out.push_str(SMELL_CAVEAT);
@@ -2235,6 +2256,42 @@ fn human_review(report: &Value, limit: usize) -> String {
     let skipped = report["skipped"].as_array().unwrap_or(&empty).len();
     if skipped > 0 {
         out.push_str(&format!("{skipped} changed files not reviewed.\n"));
+    }
+    out
+}
+
+/// GitHub workflow annotations for what a change introduced.
+///
+/// Printed on stdout, needing no token and posting no comment, the way the
+/// coverage patch already does it. A named property is a fact about a file
+/// rather than about one line, so each annotation is anchored at the start of
+/// the change and says which check fired, never guessing at a line.
+fn annotations(report: &Value) -> String {
+    let empty = Vec::new();
+    let escape = |text: &str| {
+        text.replace('%', "%25")
+            .replace('\r', "%0D")
+            .replace('\n', "%0A")
+    };
+    let mut out = String::new();
+    for file in report["files"].as_array().unwrap_or(&empty) {
+        let Some(path) = file["path"].as_str() else {
+            continue;
+        };
+        let line = file["line"].as_u64().unwrap_or(1).max(1);
+        for finding in file["present"].as_array().unwrap_or(&empty) {
+            let Some(check) = finding["check"].as_str() else {
+                continue;
+            };
+            let value = finding["value"].as_f64().unwrap_or(0.0);
+            out.push_str(&format!(
+                "::warning file={path},line={line},title=quality: {check}::{}\n",
+                escape(&format!(
+                    "This change appears to introduce {check} ({value:.2}). \
+                     Advisory: a model judgment you can check against the file."
+                ))
+            ));
+        }
     }
     out
 }
@@ -2369,22 +2426,26 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
                 }
                 Ok(failed)
             }
-            Command::Review {
+            Command::Patch {
                 range,
                 paths,
                 json,
                 refresh,
                 limit,
+                annotate,
             } => {
                 let key = std::env::var("TYPESAFE_API_KEY").ok();
-                let (report, failed) = run_review(&root, &range, &paths, refresh, key.as_deref())?;
+                let (report, failed) = run_patch(&root, &range, &paths, refresh, key.as_deref())?;
                 if json {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
                     );
                 } else {
-                    print!("{}", human_review(&report, limit));
+                    print!("{}", human_patch(&report, limit));
+                }
+                if annotate {
+                    print!("{}", annotations(&report));
                 }
                 Ok(failed)
             }

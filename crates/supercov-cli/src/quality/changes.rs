@@ -19,8 +19,10 @@ pub enum Range {
     Unstaged,
     /// Index against HEAD: what a commit would contain.
     Staged,
-    /// Working tree against a named commit, branch or tag.
-    Since(String),
+    /// Working tree against the **merge base** with this ref, which is where
+    /// the branch left it, not its current tip. Comparing against a tip that
+    /// has moved on would report other people's code as this change.
+    Base(String),
 }
 
 impl Range {
@@ -28,7 +30,7 @@ impl Range {
         match self {
             Range::Unstaged => "unstaged changes".into(),
             Range::Staged => "staged changes".into(),
-            Range::Since(reference) => format!("changes since {reference}"),
+            Range::Base(reference) => format!("changes since this branch left {reference}"),
         }
     }
 
@@ -37,7 +39,7 @@ impl Range {
         match self {
             Range::Unstaged => "unstaged".into(),
             Range::Staged => "staged".into(),
-            Range::Since(reference) => format!("since:{reference}"),
+            Range::Base(reference) => format!("base:{reference}"),
         }
     }
 }
@@ -119,25 +121,58 @@ pub fn head(root: &Path) -> Option<String> {
         .map(|s| s.trim().to_owned())
 }
 
+/// Where the branch left the named ref.
+///
+/// `runs patch` resolves a base the same way and for the same reason. The error
+/// names the usual cause, because a shallow CI checkout has no merge base at
+/// all and the git message alone does not say so.
+fn merge_base(root: &Path, reference: &str) -> Result<String, String> {
+    text(root, &["merge-base", reference, "HEAD"])
+        .map(|s| s.trim().to_owned())
+        .map_err(|error| format!(
+            "{error}\nCould not find where this branch left {reference}. A shallow checkout has \
+             no merge base: fetch with enough history (actions/checkout uses fetch-depth: 0), and \
+             make sure {reference} exists locally."
+        ))
+}
+
 /// The arguments that select this range, shared by every git call that needs it.
-fn selector(range: &Range) -> Vec<&str> {
+/// The base is already resolved to a commit by the caller.
+fn selector<'a>(range: &'a Range, resolved: &'a str) -> Vec<&'a str> {
     match range {
         Range::Unstaged => vec![],
         Range::Staged => vec!["--cached"],
-        Range::Since(reference) => vec![reference.as_str()],
+        Range::Base(_) => vec![resolved],
     }
 }
 
-fn patch(root: &Path, range: &Range, path: &str) -> String {
+/// Where the command is running, relative to the repository root.
+///
+/// Git speaks in repository-relative paths. A user who runs this in a
+/// subdirectory means the paths they can see, so paths are translated rather
+/// than matched by basename, which would attribute one `index.ts` to another.
+fn prefix(root: &Path) -> Option<String> {
+    let top = text(root, &["rev-parse", "--show-toplevel"]).ok()?;
+    let top = std::fs::canonicalize(top.trim()).ok()?;
+    let here = std::fs::canonicalize(root).ok()?;
+    let rest = here
+        .strip_prefix(&top)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    (!rest.is_empty()).then(|| format!("{rest}/"))
+}
+
+fn patch(root: &Path, range: &Range, resolved: &str, path: &str) -> String {
     let mut arguments = vec!["diff", "-U3"];
-    arguments.extend(selector(range));
+    arguments.extend(selector(range, resolved));
     arguments.extend(["--", path]);
     text(root, &arguments).unwrap_or_default()
 }
 
-fn name_status(root: &Path, range: &Range) -> Result<Vec<(Kind, String)>, String> {
+fn name_status(root: &Path, range: &Range, resolved: &str) -> Result<Vec<(Kind, String)>, String> {
     let mut arguments = vec!["diff", "--name-status", "--no-renames", "-z"];
-    arguments.extend(selector(range));
+    arguments.extend(selector(range, resolved));
     let raw = text(root, &arguments)?;
     // -z separates every field with NUL, so a path containing a newline or a
     // quote survives. Fields alternate status, path, status, path.
@@ -160,15 +195,21 @@ fn name_status(root: &Path, range: &Range) -> Result<Vec<(Kind, String)>, String
 /// naming a directory reviews the changes inside it.
 pub fn collect(root: &Path, range: &Range, only: &[PathBuf]) -> Result<Vec<Change>, String> {
     if !is_repository(root) {
-        return Err("quality review needs a Git repository; run it inside one".into());
+        return Err("quality patch needs a Git repository; run it inside one".into());
     }
-    if let Range::Since(reference) = range {
-        git(
-            root,
-            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-        )
-        .map_err(|_| format!("no commit named {reference}"))?;
-    }
+    let resolved = match range {
+        Range::Base(reference) => merge_base(root, reference)?,
+        _ => String::new(),
+    };
+    let prefix = prefix(root);
+    // A path Git reports is repository-relative; keep only what is under this
+    // directory and name it the way the user would.
+    let relocate = |path: String| -> Option<String> {
+        match prefix.as_ref() {
+            Some(prefix) => path.strip_prefix(prefix).map(str::to_owned),
+            None => Some(path),
+        }
+    };
     let wanted = |path: &str| {
         only.is_empty()
             || only.iter().any(|p| {
@@ -176,8 +217,23 @@ pub fn collect(root: &Path, range: &Range, only: &[PathBuf]) -> Result<Vec<Chang
                 path == p || path.starts_with(&format!("{p}/"))
             })
     };
+
+    let mut listed = name_status(root, range, &resolved)?;
+    // A file Git does not track yet is entirely new and is a change the author
+    // made, so it is reviewed. `git diff` never mentions it. Staged work is the
+    // exception: an untracked file is by definition not in the index.
+    if *range != Range::Staged {
+        for path in text(root, &["ls-files", "--others", "--exclude-standard", "-z"])?
+            .split('\0')
+            .filter(|s| !s.is_empty())
+        {
+            listed.push((Kind::Added, path.to_owned()));
+        }
+    }
+
     let mut out = Vec::new();
-    for (kind, path) in name_status(root, range)? {
+    for (kind, path) in listed {
+        let Some(path) = relocate(path) else { continue };
         if !wanted(&path) {
             continue;
         }
@@ -185,19 +241,23 @@ pub fn collect(root: &Path, range: &Range, only: &[PathBuf]) -> Result<Vec<Chang
         let (before_rev, after_rev) = match range {
             Range::Unstaged => ("", None),
             Range::Staged => ("HEAD", Some("")),
-            Range::Since(reference) => (reference.as_str(), None),
+            Range::Base(_) => (resolved.as_str(), None),
+        };
+        let repository_path = match prefix.as_ref() {
+            Some(prefix) => format!("{prefix}{path}"),
+            None => path.clone(),
         };
         let before = if kind == Kind::Added {
             String::new()
         } else {
-            blob(root, before_rev, &path)?
+            blob(root, before_rev, &repository_path)?
         };
         let after = match (kind, after_rev) {
             (Kind::Deleted, _) => String::new(),
-            (_, Some(revision)) => blob(root, revision, &path)?,
+            (_, Some(revision)) => blob(root, revision, &repository_path)?,
             (_, None) => std::fs::read_to_string(root.join(&path)).unwrap_or_default(),
         };
-        let patch = patch(root, range, &path);
+        let patch = patch(root, range, &resolved, &repository_path);
         out.push(Change {
             path,
             kind,
@@ -207,5 +267,23 @@ pub fn collect(root: &Path, range: &Range, only: &[PathBuf]) -> Result<Vec<Chang
         });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
+    out.dedup_by(|a, b| a.path == b.path);
     Ok(out)
+}
+
+/// The first line the change adds, so a CI annotation can point somewhere.
+///
+/// A named property is a fact about a file rather than about one line, so this
+/// anchors a finding at the start of the change instead of pretending to know
+/// which line caused it.
+pub fn first_added_line(patch: &str) -> Option<u32> {
+    for line in patch.lines() {
+        let Some(rest) = line.strip_prefix("@@ ") else {
+            continue;
+        };
+        let after = rest.split(" +").nth(1)?;
+        let number = after.split([',', ' ', '@']).next()?.parse::<u32>().ok()?;
+        return Some(number.max(1));
+    }
+    None
 }

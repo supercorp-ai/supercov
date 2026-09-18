@@ -26,7 +26,7 @@ npx supercov --help
 | Remove local data | `npx supercov clean` |
 | Assess source quality with TypeSafe AI | `npx supercov quality src/` |
 | Score code by named properties | `npx supercov quality health src/` |
-| Review what a change introduced | `npx supercov quality review --since main` |
+| Review what a change introduced | `npx supercov quality patch --base origin/main` |
 | Read bundled guides | `npx supercov docs` |
 
 ## Assess source quality (experimental)
@@ -404,23 +404,40 @@ this command does not fail a build.
 
 ## Review what a change introduced (experimental)
 
-```sh
-npx supercov quality review                    # unstaged, the default
-npx supercov quality review --staged           # what a commit would contain
-npx supercov quality review --since main       # a branch, tag or commit
-npx supercov quality review --since main src/  # only changes under src/
+```sh supercov-example
+supercov quality patch                          # unstaged, the default
+supercov quality patch --staged                 # what a commit would contain
+supercov quality patch --base origin/main       # a branch, tag or commit
+supercov quality patch --base origin/main src/  # only changes under src/
+supercov quality patch --base origin/main --annotate github
 ```
 
 The same twelve checks, asked about a change rather than a file: does the new
-version show this property where the old one did not. Both whole versions go
-into one request. A hunk alone cannot separate a property the change introduced
-from one the file already had, which is the entire question, so the extra tokens
-are the point.
+version show this property where the old one did not. It mirrors
+`supercov runs patch`, which asks whether the lines a change touched are tested,
+and takes the same `--base` and `--annotate` options for the same reasons.
+
+`--base` compares against the **merge base**, the point this branch left that
+ref, not the ref's current tip. Commits other people landed after you branched
+are not your change. A shallow checkout has no merge base; fetch with full
+history (`actions/checkout` takes `fetch-depth: 0`).
+
+`--unstaged` and `--staged` have no equivalent on the coverage side, because
+coverage of uncommitted work means nothing without a run. Here they are the
+pre-commit and pre-push moments. Untracked files are reviewed as additions under
+`--unstaged` and `--base`, since you wrote them; under `--staged` they are not,
+because an untracked file is by definition not in the index.
+
+Both whole versions go into one request. A hunk alone cannot separate a property
+the change introduced from one the file already had, which is the entire
+question, so the extra tokens are the point.
 
 Output lists only the files where something appeared, and only the checks that
 fired, strongest first. A change that introduces nothing prints one line saying
-so. The three ranges exist because they are three different moments: before a
-commit, before a push, and on a pull request.
+so. `--annotate github` prints workflow annotations on stdout, needing no token
+and posting no comment. A named property is a fact about a file rather than
+about one line, so each annotation is anchored at the first line the change adds
+rather than guessing which line caused it.
 
 ### What is known about this
 
@@ -438,6 +455,9 @@ they stay quiet unless something changed.
 What is untested is a real pull request where a property arrived incidentally
 among unrelated edits. The eight edits above were constructed, and a deliberate
 four-level nest is a cleaner signal than nesting that grew over three years.
+
+Nothing here fails a build. No threshold in this project has survived
+calibration, so the command reports and exits successfully.
 
 ### When both versions do not fit
 
