@@ -38,11 +38,21 @@ export function bump(from, to, root = repository) {
     }
     const after = before.replaceAll(quoted(from), quoted(to));
     // A third-party pin that shared the prefix must read exactly as it did.
-    const pinsBefore = before.match(/(?<=")[0-9]+\.[0-9]+\.[0-9]+(?=")/g) ?? [];
-    const pinsAfter = after.match(/(?<=")[0-9]+\.[0-9]+\.[0-9]+(?=")/g) ?? [];
-    const untouched = pinsBefore.filter((pin) => pin !== from);
-    const survived = pinsAfter.filter((pin) => pin !== to);
-    if (untouched.join("\n") !== survived.join("\n")) {
+    //
+    // Compared position by position, never as two sets with the release's own
+    // version filtered out. A dependency already sitting on the version being
+    // released is indistinguishable from a bumped entry once both are filtered,
+    // so that comparison refused every bump whose target collided with a
+    // dependency: six packages in the lockfile are at 1.0.0, which blocked the
+    // 1.0.0 release outright. Position keeps them apart, and still catches the
+    // thing this guards against, a pin that shares the release's prefix being
+    // rewritten to a version that does not exist.
+    const pins = (text) => text.match(/(?<=")[0-9]+\.[0-9]+\.[0-9]+(?=")/g) ?? [];
+    const pinsBefore = pins(before);
+    const pinsAfter = pins(after);
+    const intended = pinsBefore.map((pin) => (pin === from ? to : pin));
+    if (pinsAfter.length !== intended.length
+      || pinsAfter.some((pin, index) => pin !== intended[index])) {
       throw new Error(`${name}: a version other than Supercov's own would change; refusing`);
     }
     planned.push({ path, after, name, expected });

@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.0.56
+## 1.0.0
+
+Quality joins coverage: Supercov now tells your coding agent what to fix as well
+as what to test.
 
 **Added**
 
