@@ -673,6 +673,21 @@ pub(crate) fn publish_run_with_fault(
     Ok(destination)
 }
 
+/// Read a published run's start timestamp for retention ordering. Runs whose
+/// metadata is missing or unreadable sort as oldest, matching the run inventory,
+/// which leaves such directories out of its listing altogether.
+fn published_started_at(root: &Path, id: &str) -> String {
+    let directory = root.join(".supercov/runs").join(id);
+    fs::read(directory.join("run.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .as_ref()
+        .and_then(|value| value.get("startedAt"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 fn published_run(root: &Path, id: &str) -> bool {
     let directory = root.join(".supercov/runs").join(id);
     let metadata = fs::read(directory.join("run.json"))
@@ -821,12 +836,16 @@ pub fn cleanup_storage_locked(
             active.insert(id.clone());
         }
     }
-    let retained = published
+    let mut retention_order = published
         .iter()
-        .rev()
         .filter(|id| !active.contains(*id))
+        .map(|id| (published_started_at(root, id), id.clone()))
+        .collect::<Vec<_>>();
+    retention_order.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    let retained = retention_order
+        .into_iter()
         .take(options.keep)
-        .cloned()
+        .map(|(_, id)| id)
         .collect::<BTreeSet<_>>();
     let mut result = CleanupResult {
         removed_runs: Vec::new(),
@@ -1195,6 +1214,43 @@ mod tests {
         assert_eq!(result, preview);
         assert!(root.join(".supercov/work").join(active).exists());
         assert!(root.join(".supercov/runs").join(ids[2]).exists());
+        sweep_trash(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retention_keeps_the_newest_runs_when_run_ids_disagree_with_recency() {
+        let root = project();
+        let (evidence, bytes) = evidence(&root);
+        // Run IDs are random hex, so ordering them as strings says nothing about
+        // time. The newest run here carries the smallest ID and must survive.
+        for (id, started_at) in [
+            ("run_ffffffffffffffff", "2026-01-01T00:00:00Z"),
+            ("run_7777777777777777", "2026-05-01T00:00:00Z"),
+            ("run_0000000000000001", "2026-09-01T00:00:00Z"),
+        ] {
+            let mut run = metadata(id, bytes);
+            run.started_at = started_at.into();
+            publish_run(&root, &run, &evidence).unwrap();
+        }
+        let result = cleanup_storage_locked(
+            &root,
+            CleanupOptions {
+                keep: 1,
+                dry_run: false,
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            result.removed_runs,
+            ["run_ffffffffffffffff", "run_7777777777777777"]
+        );
+        assert!(
+            root.join(".supercov/runs")
+                .join("run_0000000000000001")
+                .exists()
+        );
         sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
