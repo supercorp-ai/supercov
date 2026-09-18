@@ -1661,3 +1661,25 @@ fn code_inside_documentation_is_there_to_be_read() {
     assert_eq!(entry("documentation/src/demo.java").reason, "documentation");
     assert_eq!(entry("src/app.ts").status, scope::Status::Included);
 }
+
+#[test]
+fn a_tools_own_untracked_state_is_not_a_change_somebody_made() {
+    // Reviewing a real merged commit in a repository that had been assessed
+    // reported 393 changed files, 391 of them this tool's own response cache.
+    // Git lists them because nothing ignores them; nobody changed them.
+    let temp = repository();
+    temp.write("src/a.ts", "export const a = 1;\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    temp.write("src/b.ts", "export const b = 2;\n");
+    temp.write(".supercov/quality/requests/abc.json", "{}\n");
+    temp.write(".cache/tool/state.ts", "export const c = 3;\n");
+
+    let found = changes::collect(&temp.0, &changes::Range::Unstaged, &[]).unwrap();
+    let paths: Vec<&str> = found.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["src/b.ts"],
+        "only the real new file is a change"
+    );
+}

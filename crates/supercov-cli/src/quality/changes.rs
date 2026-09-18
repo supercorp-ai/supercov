@@ -227,6 +227,14 @@ pub fn collect(root: &Path, range: &Range, only: &[PathBuf]) -> Result<Vec<Chang
             .split('\0')
             .filter(|s| !s.is_empty())
         {
+            // Everything under a hidden directory belongs to a tool, including
+            // this one: reviewing a real commit in a repository that had been
+            // assessed reported 393 changed files, 391 of them Supercov's own
+            // response cache. Git lists them because nothing ignores them;
+            // nobody changed them.
+            if path.split('/').any(|segment| segment.starts_with('.')) {
+                continue;
+            }
             listed.push((Kind::Added, path.to_owned()));
         }
     }
