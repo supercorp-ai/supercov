@@ -55,7 +55,7 @@ the exact requests and contacts nothing.
 `quality diff` reports what declined between two assessments: which files lost
 health, which properties appeared, and which files entered or left the scope.
 
-Assessing needs a TypeSafe API key in `TYPESAFE_API_KEY`; reading a saved
+Assessing needs a TypeSafe AI API key in `TYPESAFE_API_KEY`; reading a saved
 assessment does not. The command prints a cost estimate before sending anything
 and caches answers by content, so a second run pays only for what changed.
 

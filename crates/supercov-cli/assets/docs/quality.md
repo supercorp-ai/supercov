@@ -9,8 +9,10 @@ arithmetic, so every part of a score is a claim you can check against the file.
 
 ## Set your key
 
-Assessing needs a TypeSafe API key, read from `TYPESAFE_API_KEY`. Get one at
-[typesafe.ai](https://typesafe.ai).
+Assessing needs a TypeSafe AI API key, and your coding agent will usually ask
+you for it. Get one at [typesafe.ai](https://typesafe.ai).
+
+Supercov looks for it in `TYPESAFE_API_KEY`:
 
 ```bash
 export TYPESAFE_API_KEY=...        # for this shell

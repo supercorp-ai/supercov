@@ -10,7 +10,7 @@ Paste this to your coding agent to start:
 Score this codebase with npx supercov quality and show me the weakest files.
 ```
 
-Scoring reads a [Jev](https://typesafe.ai) key from `TYPESAFE_API_KEY`, and costs about a cent per megabyte of source. Coverage needs no account, config file, import, custom reporter, or hosted service. Supercov is local, free, open source, and MIT licensed.
+Scoring needs a [TypeSafe AI](https://typesafe.ai) API key, and your coding agent will usually ask you for it. It costs about a cent per megabyte of source. Coverage needs no account, config file, import, custom reporter, or hosted service. Supercov is local, free, open source, and MIT licensed.
 
 [Website](https://supercov.com) · [Documentation](https://supercov.com/docs) · [npm](https://www.npmjs.com/package/supercov) · [GitHub](https://github.com/supercorp-ai/supercov)
 

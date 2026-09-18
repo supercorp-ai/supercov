@@ -1230,7 +1230,7 @@ fn require_key(key: Option<&str>) -> Result<(), String> {
         return Ok(());
     }
     Err(
-        "quality needs a TypeSafe API key in TYPESAFE_API_KEY.\n\n  \
+        "quality needs a TypeSafe AI API key in TYPESAFE_API_KEY.\n\n  \
          export TYPESAFE_API_KEY=...        # this shell\n  \
          TYPESAFE_API_KEY=... supercov ...  # one command\n\n\
          Get one at https://typesafe.ai. Reading a saved assessment needs no key, \
