@@ -16,7 +16,7 @@ To score the code itself rather than its tests, set a [Jev](https://typesafe.ai)
 key and ask:
 
 ```text supercov-prompt
-Measure code quality with npx supercov and show me the weakest files.
+Measure code quality with npx supercov.
 ```
 
 See [Understanding quality](https://supercov.com/docs/quality).
