@@ -373,6 +373,19 @@ fn digest_files(
     digest_paths(root, paths, false)
 }
 
+/// The same source digest a run records, for callers outside a run.
+///
+/// A quality snapshot stores this so a reader can say whether an assessment and
+/// a run read the same source, instead of inferring it from two timestamps.
+/// Exported rather than reimplemented: two copies of a hash construction agree
+/// until one of them is changed.
+pub fn digest_source_files(
+    root: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<String, IntegrityError> {
+    digest_files(root, paths)
+}
+
 /// Dependency manifests, hashed by what they say rather than by their bytes.
 ///
 /// A manifest carries two unrelated things: what the project depends on, and

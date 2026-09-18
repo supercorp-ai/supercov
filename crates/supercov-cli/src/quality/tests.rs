@@ -602,6 +602,9 @@ fn windowed(path: &str, checks: &[(&str, f64)]) -> Answers {
     Answers {
         path: path.to_owned(),
         bytes: 100,
+        // Every window of one file carries that file's digest, which is what
+        // lets the folded row say which source it describes.
+        sha256: "0".repeat(64),
         windows: 1,
         note: Some("windowed".into()),
         values: Some(checks.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()),

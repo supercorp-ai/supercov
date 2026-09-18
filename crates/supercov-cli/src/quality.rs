@@ -64,6 +64,7 @@ Usage:
   supercov quality file <path> [snapshot]      one file, every check
   supercov quality scope                       which files are assessed, and why
   supercov quality snapshots                   list saved assessments
+  supercov quality clean [--keep N]            remove saved assessments
   supercov quality show [snapshot]             read a saved assessment
   supercov quality diff <snapshot> <snapshot>  what declined between two
   supercov quality patch [file-or-directory]   what a change introduced
@@ -150,6 +151,12 @@ enum Command {
         to: String,
         json: bool,
         limit: usize,
+    },
+    /// Remove saved assessments, newest kept first.
+    Clean {
+        keep: usize,
+        dry_run: bool,
+        json: bool,
     },
     /// The catalog: twelve named properties, composed here. The default.
     Health(Options),
@@ -251,9 +258,72 @@ fn parse(arguments: Vec<String>) -> Result<Command, String> {
     match subcommand {
         "scan" => Ok(Command::Health(defaulted(parse_scan(rest())?))),
         "snapshots" | "show" | "gaps" | "scope" | "file" | "diff" => parse_view(subcommand, rest()),
+        "clean" => parse_clean(rest()),
         "patch" => parse_patch(rest()),
         _ => Ok(Command::Health(defaulted(parse_scan(arguments)?))),
     }
+}
+
+fn parse_clean(arguments: Vec<String>) -> Result<Command, String> {
+    let mut keep = None;
+    let mut dry_run = false;
+    let mut json = false;
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--dry-run" => dry_run = true,
+            "--json" => json = true,
+            "--keep" => {
+                let value = arguments
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .ok_or("--keep requires a count of assessments to retain")?;
+                if keep.replace(value).is_some() {
+                    return Err("--keep may only be specified once".into());
+                }
+            }
+            value => return Err(format!("unknown quality clean option: {value}")),
+        }
+    }
+    Ok(Command::Clean {
+        keep: keep.unwrap_or(0),
+        dry_run,
+        json,
+    })
+}
+
+/// Remove saved assessments, keeping the newest.
+///
+/// An assessment costs money and cannot be reproduced from the repository, so
+/// this is never part of cleaning up after a run: it only happens when somebody
+/// asks for it by name. Snapshots are ordered by when they were taken, never by
+/// their identifiers, which carry no order.
+fn clean(root: &Path, keep: usize, dry_run: bool) -> Result<Value, String> {
+    let saved = store::list(root)?;
+    let removed: Vec<String> = saved.iter().skip(keep).map(|(id, _)| id.clone()).collect();
+    if !dry_run {
+        for id in &removed {
+            let directory = store::snapshots(root).join(id);
+            if !store::is_snapshot_id(id) {
+                continue;
+            }
+            fs::remove_dir_all(&directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+        }
+        // The pointer may name something just removed. Dropping it is enough:
+        // resolving a snapshot already falls back to the newest that survives.
+        let pointer = store::snapshots(root).join("latest");
+        if let Ok(named) = fs::read_to_string(&pointer)
+            && removed.iter().any(|id| id == named.trim())
+        {
+            let _ = fs::remove_file(&pointer);
+        }
+    }
+    Ok(json!({
+        "view": "quality.clean",
+        "dry_run": dry_run,
+        "kept": saved.len().saturating_sub(removed.len()),
+        "removed": removed,
+    }))
 }
 
 fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
@@ -1197,6 +1267,9 @@ fn catalog_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, St
 struct Subject {
     path: String,
     bytes: u64,
+    /// SHA-256 of the whole file, even when it is assessed in windows, so a
+    /// reader can tell whether a grade describes the source in front of them.
+    sha256: String,
     request: Value,
     /// Set when this subject is not being asked the preferred question, so the
     /// report can say the answer is weaker rather than look the same.
@@ -1207,6 +1280,7 @@ struct Subject {
 struct Answers {
     path: String,
     bytes: u64,
+    sha256: String,
     /// How many requests this row came from. More than one means the file was
     /// windowed, which the report says.
     windows: usize,
@@ -1281,6 +1355,7 @@ fn ask_smells(
         out.push(Answers {
             path: subject.path.clone(),
             bytes: subject.bytes,
+            sha256: subject.sha256.clone(),
             windows: 1,
             note: subject.note.clone(),
             values: None,
@@ -1379,6 +1454,7 @@ fn scored(answers: &Answers) -> Value {
         Some(values) => json!({
             "path": answers.path,
             "bytes": answers.bytes,
+            "sha256": answers.sha256,
             "status": "completed",
             "cached": answers.cached,
             "health": catalog::health(values),
@@ -1394,6 +1470,7 @@ fn scored(answers: &Answers) -> Value {
         None => json!({
             "path": answers.path,
             "bytes": answers.bytes,
+            "sha256": answers.sha256,
             "status": "failed",
             "error": answers.error,
         }),
@@ -1534,12 +1611,14 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
                 skipped_files.push(json!({ "path": relative, "reason": "generated" }));
             }
             Ok(source) => {
+                let sha256 = digest(source.as_bytes());
                 let whole = catalog::file_request(&relative, &source);
                 match within_budget(&whole) {
                     Ok(Some(_)) => subjects.push(Subject {
                         bytes: source.len() as u64,
                         request: whole,
                         path: relative,
+                        sha256,
                         note: None,
                     }),
                     Ok(None) => match catalog_windows(&relative, &source) {
@@ -1550,6 +1629,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
                                     bytes: text.len() as u64,
                                     request: catalog::file_request(&relative, &text),
                                     path: relative.clone(),
+                                    sha256: sha256.clone(),
                                     note: Some(format!(
                                         "assessed in {count} windows at declaration boundaries; \
                                          a property of the whole file, such as a god class or \
@@ -1627,9 +1707,25 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         })
         .collect();
 
+    // The same digest a run records over the same files, so a reader can say an
+    // assessment and a run read identical source instead of comparing two
+    // timestamps. Only the files this assessment actually read are included, so
+    // it answers for the snapshot rather than for whatever else is in the tree.
+    let assessed: Vec<PathBuf> = answers
+        .iter()
+        .filter(|answer| answer.values.is_some())
+        .map(|answer| root.join(&answer.path))
+        .collect();
+    let assessed_files = assessed.len();
+    let source_fingerprint = supercov_engine::integrity::digest_source_files(root, assessed).ok();
+
     let (id, created_at) = store::identity()?;
     let mut manifest = json!({
-        "schema_version": 3, "id": id, "created_at": created_at, "parent": Value::Null,
+        "schema_version": 4, "id": id, "created_at": created_at, "parent": Value::Null,
+        // Null when a file moved or became unreadable between the assessment and
+        // this line: absent is honest, a digest over a different set is not.
+        "source_fingerprint": source_fingerprint,
+        "source_files": assessed_files,
         "supercov_version": env!("CARGO_PKG_VERSION"),
         // Which instrument produced this. A reader must never mistake a catalog
         // snapshot for a rubric one: they answer different questions and their
@@ -1741,6 +1837,7 @@ fn run_patch(
             bytes: change.after.len() as u64,
             request,
             path: change.path.clone(),
+            sha256: digest(change.after.as_bytes()),
             note,
         });
     }
@@ -2118,6 +2215,11 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
             .map_err(|e| e.to_string())?;
         match parse(arguments)? {
             Command::Snapshots { json, limit } => present(query::snapshots(&root, limit)?, json),
+            Command::Clean {
+                keep,
+                dry_run,
+                json,
+            } => present(clean(&root, keep, dry_run)?, json),
             Command::Gaps {
                 snapshot,
                 json,
