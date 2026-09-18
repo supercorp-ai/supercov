@@ -4,7 +4,13 @@
 
 **Supercov tells your coding agent what to fix and what to test.** It scores your code quality with [Jev](https://typesafe.ai), runs the test command you already use, and turns uncovered paths into small, actionable queries. Your agent picks a target, writes a focused test or a focused refactor, proves what improved, and keeps going.
 
-Coverage needs no account, config file, import, custom reporter, or hosted service. Supercov is local, free, open source, and MIT licensed. Quality uses [Jev](https://typesafe.ai) and needs a key.
+Paste this to your coding agent to start:
+
+```text supercov-prompt
+Score this codebase with npx supercov quality and show me the weakest files.
+```
+
+Scoring reads a [Jev](https://typesafe.ai) key from `TYPESAFE_API_KEY`, and costs about a cent per megabyte of source. Coverage needs no account, config file, import, custom reporter, or hosted service. Supercov is local, free, open source, and MIT licensed.
 
 [Website](https://supercov.com) · [Documentation](https://supercov.com/docs) · [npm](https://www.npmjs.com/package/supercov) · [GitHub](https://github.com/supercorp-ai/supercov)
 
