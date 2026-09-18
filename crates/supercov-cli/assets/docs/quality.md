@@ -4,6 +4,11 @@ Coverage answers whether your tests exercised the code. Quality answers a
 different question: what is in the code, named property by named property, so
 you can check each answer against the file yourself.
 
+Judgments come from [Jev](https://typesafe.ai), which answers typed questions —
+yes or no, a position on a scale, a choice among options — rather than generating
+prose. Supercov asks twelve yes/no questions per file and does the arithmetic
+itself.
+
 It is **experimental and advisory**. Nothing it reports fails a command.
 
 ## It asks twelve definite questions, and does the arithmetic itself
@@ -77,30 +82,34 @@ supercov quality patch --base origin/main
 The same twelve checks asked differentially — does the new version show this
 where the old one did not — plus **seven risk checks that exist only in this
 form**: a credential written into source, untrusted input interpolated into a
-query, a change to who may do what, a test that now checks less, a change
-callers would have to follow, a schema or data migration, and debugging left
-behind.
+query, a change to who may do what, a test that now checks less, a schema or
+data migration, and debugging left behind.
 
 Both whole versions go into one request. A hunk cannot separate a property a
 change introduced from one the file already had, which is the entire question.
 
-### Read this before trusting it as a review
+### What it covers, and what it does not
 
-A benchmark of **173 comments real reviewers wrote** on 50 pull requests from
-cal.com, Discourse, Grafana, Keycloak and Sentry found the complexity catalog
-has a word for 8% of them and fired on 1%. Fifty-four percent of what reviewers
-write about is bugs, and nothing here asks about correctness.
+This reports **structure**, and structure is a corner of what a reader of a
+change cares about. Measured against 173 comments real reviewers wrote on 50
+pull requests from cal.com, Discourse, Grafana, Keycloak and Sentry, the twelve
+complexity properties have a word for 8% of them. Fifty-four percent of those
+comments are about bugs, and **nothing here asks about correctness**.
 
-**Treat the complexity half as a structural regression check**, which is what
-CodeScene's decline gate is, and not as a review. It does not compete with the
-person who found the race condition.
+So it is a structural regression check, in the same family as CodeScene's
+decline gate: it tells you a change made code harder to follow. It is not
+looking for the race condition, and it does not replace the person who is.
 
 The seven risk checks were built for that gap and are cleaner: on constructed
 positives with matched safe changes they separate by 0.91 or more, and across
-the same 50 real pull requests they fire once per pull request. On the seven
-where a reviewer raised a security concern, one fired on four, against nine of
-the forty-three without one. `breaks_api` is the loose one — twenty of fifty,
-median 0.45 — and needs its own ground truth.
+the same 50 real pull requests they fire about once per pull request. On the
+seven where a reviewer raised a security concern, one fired on four, against
+nine of the forty-three without one.
+
+A seventh, `breaks_api`, was removed: it caught its constructed positive cleanly
+but fired on 20 of 50 real pull requests with a median of 0.45. Changing an
+exported signature is ordinary in library work, so it was announcing a common
+event rather than catching a rare one.
 
 ## Which files are assessed
 
@@ -156,7 +165,8 @@ needs a credential.
 
 ## Cost and privacy
 
-An assessment sends source to TypeSafe AI and needs `TYPESAFE_API_KEY`. A whole
+An assessment sends source to [TypeSafe](https://typesafe.ai) and needs
+`TYPESAFE_API_KEY`. A whole
 repository of 197 files costs about **$0.02** and takes under half a minute at
 eight concurrent requests; a changed file costs about $0.0005. Responses are
 cached under `.supercov/quality/requests/` by exact request hash, so a re-run

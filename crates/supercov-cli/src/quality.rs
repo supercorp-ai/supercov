@@ -56,7 +56,7 @@ const MAX_RESPONSE_BYTES: u64 = 1_048_576;
 // Weakest maintainability first, then readability, then Jev's own overall answer.
 // These are the two constructs with calibrated cutoffs and human references.
 
-const HELP: &str = "Assess source quality with TypeSafe AI (experimental, advisory).
+const HELP: &str = "Code quality powered by Jev (experimental, advisory).
 
 Usage:
   supercov quality [file-or-directory ...]     assess code, saving a snapshot
@@ -115,7 +115,6 @@ struct Options {
     dry_run: bool,
     refresh: bool,
     context: Option<PathBuf>,
-    review_below: Option<f64>,
 }
 
 /// What the user asked for: a new assessment, or a reading of a saved one.
@@ -341,20 +340,6 @@ fn parse_scan(args: Vec<String>) -> Result<Options, String> {
             "--dry-run" => options.dry_run = true,
             "--refresh" => options.refresh = true,
             "--all" => options.all = true,
-            "--review-below" => {
-                let value = args
-                    .next()
-                    .ok_or("--review-below requires a number from 0 to 10")?;
-                let value: f64 = value
-                    .parse()
-                    .map_err(|_| "--review-below requires a number from 0 to 10")?;
-                if !value.is_finite() || !(0.0..=10.0).contains(&value) {
-                    return Err("--review-below requires a number from 0 to 10".into());
-                }
-                if options.review_below.replace(value).is_some() {
-                    return Err("--review-below may only be specified once".into());
-                }
-            }
             "--context" => {
                 let path = args
                     .next()
@@ -913,6 +898,53 @@ fn noul(response: &ApiResponse, id: &str) -> Option<f64> {
     }
 }
 
+/// When the provider last asked everyone to wait, and for how long.
+///
+/// Eight requests run at once. Without somewhere shared to put a rate limit,
+/// each worker discovers it alone, sleeps alone and wakes at the same moment as
+/// the other seven, which is how a limit becomes a stampede. A worker checks
+/// this before sending and waits out whatever is left.
+static PAUSED_UNTIL: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+fn pause_for(delay: Duration) {
+    let until = Instant::now() + delay;
+    let mut slot = PAUSED_UNTIL
+        .lock()
+        .expect("the pause is only read and replaced");
+    if slot.is_none_or(|current| current < until) {
+        *slot = Some(until);
+    }
+}
+
+fn wait_out_any_pause() {
+    loop {
+        let remaining = {
+            let slot = PAUSED_UNTIL
+                .lock()
+                .expect("the pause is only read and replaced");
+            match *slot {
+                Some(until) => until.checked_duration_since(Instant::now()),
+                None => None,
+            }
+        };
+        match remaining {
+            // A little jitter, so the workers do not all resume on the same
+            // millisecond and reproduce the burst that caused the limit.
+            Some(left) => std::thread::sleep(left + jitter()),
+            None => return,
+        }
+    }
+}
+
+/// Up to 250ms, derived from the clock rather than a dependency.
+fn jitter() -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    Duration::from_millis((nanos % 250) as u64)
+}
+
 fn client() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(45)))
@@ -928,7 +960,8 @@ fn evaluate(
     key: &str,
     request: &Value,
 ) -> Result<ApiResponse, String> {
-    for attempt in 0..3 {
+    for attempt in 0..4 {
+        wait_out_any_pause();
         let mut response = agent
             .post(endpoint)
             .header("Authorization", format!("Bearer {key}"))
@@ -938,19 +971,24 @@ fn evaluate(
                     .to_string()
             })?;
         let status = response.status().as_u16();
-        if (status == 429 || (500..600).contains(&status)) && attempt < 2 {
-            let delay = response
+        if (status == 429 || (500..600).contains(&status)) && attempt < 3 {
+            let asked = response
                 .headers()
                 .get("retry-after")
                 .and_then(|s| s.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1 << attempt);
-            if delay > 10 {
+                .and_then(|s| s.parse::<u64>().ok());
+            // A server naming a delay is telling us something; doubling from a
+            // second is the guess to make when it does not. Either way the wait
+            // is shared, so the other seven workers pause too.
+            let delay = asked.unwrap_or(1 << attempt).min(MAX_BACKOFF_SECONDS);
+            if asked.is_some_and(|seconds| seconds > MAX_BACKOFF_SECONDS) {
                 return Err(format!(
-                    "TypeSafe HTTP {status}; retry after {delay} seconds"
+                    "TypeSafe HTTP {status} and asked for {} seconds, longer than this command \
+                     will wait; try again later or with fewer paths",
+                    asked.unwrap_or_default()
                 ));
             }
-            std::thread::sleep(Duration::from_secs(delay));
+            pause_for(Duration::from_secs(delay) + jitter());
             continue;
         }
         if !(200..300).contains(&status) {
@@ -1046,6 +1084,14 @@ fn resolve(
 /// answer is saved under its own request hash, so no two threads ever write the
 /// same file.
 const CONCURRENCY: usize = 8;
+
+/// The longest this command waits out a rate limit before giving the caller
+/// their terminal back. A provider asking for longer is telling you to come
+/// back later, not to sleep through it.
+const MAX_BACKOFF_SECONDS: u64 = 30;
+
+/// What Jev charges for input. Output is free, so this is the whole bill.
+const USD_PER_MILLION_INPUT_TOKENS: f64 = 0.042;
 
 /// A request answered: its hash, the answer, whether it came from the cache,
 /// and any trouble saving it.
@@ -1167,14 +1213,29 @@ struct Answers {
     error: Option<String>,
 }
 
+/// What a set of requests will cost, before any of it is spent.
+///
+/// Output tokens are free, so the whole bill is the input, and the input is
+/// known exactly from the bytes about to be sent. On a large monorepo this is
+/// the difference between a surprise and a decision.
+fn estimated_cost(pending: &[(Slot, Value, Vec<u8>)]) -> (usize, f64) {
+    let tokens: usize = pending
+        .iter()
+        .map(|(_, _, bytes)| estimated_tokens(bytes.len()))
+        .sum();
+    (tokens, tokens as f64 / 1e6 * USD_PER_MILLION_INPUT_TOKENS)
+}
+
 /// Send every subject, a few at a time, reusing the scan cache and retry path.
+type Asked = (Vec<Answers>, Usage, Usage);
+
 fn ask_smells(
     root: &Path,
     key: Option<&str>,
     refresh: bool,
     subjects: Vec<Subject>,
     progress: bool,
-) -> (Vec<Answers>, Usage) {
+) -> Asked {
     let agent = client();
     let mut pending = Vec::new();
     let mut out: Vec<Answers> = Vec::new();
@@ -1201,16 +1262,31 @@ fn ask_smells(
             error,
         });
     }
+    if progress && key.is_some() {
+        let (tokens, usd) = estimated_cost(&pending);
+        eprintln!(
+            "[supercov] quality: {} requests, about {tokens} input tokens \
+             (${usd:.4}) if none is cached",
+            pending.len()
+        );
+    }
     let answered = answer_all(root, &agent, key, refresh, &pending, progress);
+    // Counted apart, because a cached answer costs nothing and reporting it as
+    // spend would tell a reader their bill was 34 requests when it was none.
     let mut usage = Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+    };
+    let mut reused = Usage {
         input_tokens: 0,
         output_tokens: 0,
     };
     for ((index, _), result) in answered {
         match result {
             Ok((_, entry, hit, warning)) => {
-                usage.input_tokens += entry.response.usage.input_tokens;
-                usage.output_tokens += entry.response.usage.output_tokens;
+                let counted = if hit { &mut reused } else { &mut usage };
+                counted.input_tokens += entry.response.usage.input_tokens;
+                counted.output_tokens += entry.response.usage.output_tokens;
                 // Both catalogs, because a change is asked the risk questions
                 // too and collecting only the complexity ones silently threw
                 // every risk answer away. A file is only ever asked the
@@ -1229,7 +1305,7 @@ fn ask_smells(
             Err(e) => out[index].error = Some(e),
         }
     }
-    (out, usage)
+    (out, usage, reused)
 }
 
 /// Fold a windowed file's answers back into one.
@@ -1479,7 +1555,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         ));
     }
     let count = subjects.len();
-    let (answered, usage) = ask_smells(root, key, options.refresh, subjects, count > 4);
+    let (answered, usage, reused) = ask_smells(root, key, options.refresh, subjects, count > 4);
     let answers = combine_windows(answered);
 
     let mut weighted: Vec<(u64, f64)> = Vec::new();
@@ -1550,6 +1626,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
             "cutoffs": "none; no threshold in this project has survived calibration",
             "fail_on_finding": false},
         "usage_this_run": usage,
+        "usage_from_cache": reused,
     });
     let recorded = json!({ "files": files, "directories": directories });
     let saved = store::write(root, &id, &manifest, &recorded);
@@ -1642,7 +1719,7 @@ fn run_patch(
         .filter_map(|c| changes::first_added_line(&c.patch).map(|l| (c.path.clone(), l)))
         .collect();
     let count = subjects.len();
-    let (answers, usage) = ask_smells(root, key, refresh, subjects, count > 4);
+    let (answers, usage, reused) = ask_smells(root, key, refresh, subjects, count > 4);
     let mut introduced = 0usize;
     let files: Vec<Value> = answers
         .iter()
@@ -1683,6 +1760,7 @@ fn run_patch(
             "introduced": introduced,
             "skipped": skipped,
             "usage": usage,
+            "usage_from_cache": reused,
             "files": ordered,
         }),
         failed,

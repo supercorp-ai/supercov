@@ -42,6 +42,12 @@ const CATALOG: &str = include_str!("smells.json");
 ///
 /// They are not a bug finder. 94 of those 173 comments are bugs and none of
 /// these asks about correctness.
+///
+/// An eighth, `breaks_api`, was removed on 2026-09-18. It caught its constructed
+/// positive cleanly but fired on 20 of 50 real pull requests with a median of
+/// 0.45, which is a common event being announced rather than a rare one being
+/// caught. Changing an exported signature is ordinary in library work, so it may
+/// have been correct and useless at once; either way it had no ground truth.
 const RISKS: &str = include_str!("risks.json");
 
 /// How a change question is framed. Both versions go in one request, because

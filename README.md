@@ -226,10 +226,14 @@ npx supercov diff <previous-run-id> latest
 
 Collections accept `--limit` and `--offset` and print a copyable next-page command. Machine-readable output is available with `--json` when an integration needs it.
 
-## Assess source quality (experimental)
+## Code quality, powered by Jev (experimental)
 
 Coverage answers whether your tests exercised the code. Quality answers what is
 in it, as twelve named properties you can check against the file yourself.
+
+Judgments come from [Jev](https://typesafe.ai), which answers typed questions
+rather than generating prose. Supercov asks twelve of them per file and does the
+arithmetic itself, so the score is not a grade handed over by a model.
 
 ```bash
 # The whole repository, no arguments and no configuration
@@ -250,15 +254,12 @@ npx supercov quality patch --base origin/main --annotate github
 npx supercov quality diff <older-snapshot> latest
 ```
 
-The score is arithmetic this CLI does over twelve yes/no answers, not a grade a
-model handed over, so every part of it is a claim you can verify. It needs
-`TYPESAFE_API_KEY`; a whole repository costs about two cents. **Nothing it
-reports fails a command.**
+Every part of the score is a claim you can verify against the file. It needs a
+[TypeSafe](https://typesafe.ai) key in `TYPESAFE_API_KEY`; a whole repository
+costs about two cents. **Nothing it reports fails a command.**
 
-Read [Understanding quality](docs/quality.md) before relying on it: it says
-plainly what the number is worth, where it is mostly measuring file size, and
-why the change review is a structural regression check rather than a substitute
-for a reviewer.
+[Understanding quality](docs/quality.md) says what the number is worth, where it
+is mostly measuring file size, and what the change mode does and does not cover.
 
 ## Local, private, and zero-edit
 

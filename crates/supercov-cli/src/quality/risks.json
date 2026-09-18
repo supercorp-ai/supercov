@@ -28,13 +28,6 @@
     "evidence": "caught at 0.98, 0.02 on the matched safe change; fired on 4 of 50 real pull requests"
   },
   {
-    "id": "breaks_api",
-    "task": "Does this change alter something callers outside this file depend on: removing an exported name, changing a parameter list, or changing what a public function returns?",
-    "present": "A caller outside this code would have to change.",
-    "absent": "The surface callers depend on is unchanged.",
-    "evidence": "caught at 0.97, 0.05 on the matched safe change, but fired on 20 of 50 real pull requests with a median of 0.45; needs its own ground truth"
-  },
-  {
     "id": "data_migration",
     "task": "Does this change alter a database schema or migrate stored data?",
     "present": "It changes a schema or rewrites stored data.",

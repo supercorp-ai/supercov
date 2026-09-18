@@ -56,26 +56,10 @@ fn discovery_honors_ignores_deduplicates_and_checks_scope() {
 
 #[test]
 fn scan_rejects_unknown_or_missing_options() {
-    for value in ["NaN", "inf", "-1", "10.1", "abc"] {
-        assert!(parse_scan(vec!["a.ts".into(), "--review-below".into(), value.into()]).is_err());
-    }
-    assert!(parse_scan(vec!["a.ts".into(), "--review-below".into()]).is_err());
-    assert_eq!(
-        parse_scan(vec!["a.ts".into(), "--review-below".into(), "7.5".into()])
-            .unwrap()
-            .review_below,
-        Some(7.5)
-    );
-    assert!(
-        parse_scan(vec![
-            "a.ts".into(),
-            "--review-below".into(),
-            "5".into(),
-            "--review-below".into(),
-            "6".into()
-        ])
-        .is_err()
-    );
+    // --review-below overrode a rubric cutoff. The rubric is gone and no
+    // threshold here is calibrated, so the option is refused rather than
+    // accepted and ignored.
+    assert!(parse_scan(vec!["a.ts".into(), "--review-below".into(), "7.5".into()]).is_err());
 
     // No path is no longer an error; the caller fills in this directory.
     assert!(parse_scan(vec![]).unwrap().paths.is_empty());
@@ -291,8 +275,14 @@ fn a_change_request_sends_exactly_the_two_versions() {
 #[test]
 fn risk_checks_are_asked_of_a_change_and_never_of_a_file() {
     let risks: BTreeSet<&str> = smells::risks().iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(risks.len(), 7);
+    assert_eq!(risks.len(), 6);
     assert!(risks.contains("hardcoded_secret") && risks.contains("injection_risk"));
+    // Removed 2026-09-18: it fired on 20 of 50 real pull requests with a median
+    // of 0.45, and had no ground truth to justify that rate.
+    assert!(
+        !risks.contains("breaks_api"),
+        "breaks_api was removed for firing too often"
+    );
     // A file has no before, so "did this change add a credential" has no answer.
     let file = smells::file_questions();
     for risk in &risks {
@@ -1886,4 +1876,114 @@ fn declared_roots_are_an_answer_and_the_model_does_not_override_them() {
     let mut again = scope::classify(&temp.0, &found, None);
     assert!(resolve_ambiguity(&temp.0, &mut again, &found, None, false).is_none());
     assert!(resolve_ambiguity(&temp.0, &mut again, &found, Some("  "), false).is_none());
+}
+
+// ---- running it for real ------------------------------------------------------
+
+#[test]
+fn a_rate_limit_is_waited_out_once_by_everyone() {
+    // Eight requests run at once. Without somewhere shared to put a limit, each
+    // worker discovers it alone and they all wake together, which is how a
+    // limit becomes a stampede.
+    let started = Instant::now();
+    pause_for(Duration::from_millis(120));
+    let workers: Vec<_> = (0..4)
+        .map(|_| std::thread::spawn(wait_out_any_pause))
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(120),
+        "every worker waited: {waited:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(3),
+        "and none of them waited forever: {waited:?}"
+    );
+    // Once it has passed, nobody waits again.
+    let after = Instant::now();
+    wait_out_any_pause();
+    assert!(after.elapsed() < Duration::from_millis(400));
+}
+
+#[test]
+fn a_longer_pause_replaces_a_shorter_one_and_never_the_other_way() {
+    pause_for(Duration::from_millis(10));
+    pause_for(Duration::from_millis(400));
+    pause_for(Duration::from_millis(10));
+    let started = Instant::now();
+    wait_out_any_pause();
+    assert!(
+        started.elapsed() >= Duration::from_millis(350),
+        "the longest wait wins, so a later short 429 cannot shorten an earlier long one"
+    );
+}
+
+#[test]
+fn a_run_says_what_it_will_cost_before_it_spends_it() {
+    // Output tokens are free, so the bill is the input, and the input is known
+    // exactly from the bytes about to be sent. On a monorepo this is the
+    // difference between a surprise and a decision.
+    let request = smells::file_request("a.ts", &"x".repeat(300_000));
+    let bytes = serde_json::to_vec(&request).unwrap();
+    let pending = vec![((0usize, None), request, bytes)];
+    let (tokens, usd) = estimated_cost(&pending);
+    assert!(tokens > 90_000, "{tokens}");
+    assert!((usd - tokens as f64 / 1e6 * 0.042).abs() < 1e-9);
+    assert_eq!(estimated_cost(&[]), (0, 0.0));
+}
+
+#[test]
+fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
+    // A response is keyed by the hash of the exact request, which contains the
+    // file's bytes and nothing about where it came from. Switching branches,
+    // rebasing or checking out an old commit therefore re-uses every answer for
+    // a file whose content is unchanged, and pays only for the ones that moved.
+    let temp = Temp::new();
+    let request = smells::file_request("src/a.ts", "export const a = 1;\n");
+    let hash = digest(&serde_json::to_vec(&request).unwrap());
+    let entry = CacheEntry {
+        request_hash: hash.clone(),
+        response: ApiResponse {
+            model: MODEL.to_owned(),
+            answers: smells::catalog()
+                .iter()
+                .map(|c| (c.id.clone(), Answer::Noul { noul: 0.2 }))
+                .collect(),
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 0,
+            },
+        },
+        elapsed_ms: 1,
+    };
+    let path = store::responses(&temp.0).join(format!("{hash}.json"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    save(&path, &entry).unwrap();
+
+    // The same content in a different place is the same request.
+    let moved = smells::file_request("src/a.ts", "export const a = 1;\n");
+    let moved_hash = digest(&serde_json::to_vec(&moved).unwrap());
+    assert_eq!(moved_hash, hash);
+    assert!(
+        cached(&path, &hash, &moved).unwrap().is_some(),
+        "answered from cache"
+    );
+
+    // An edit is a different request, so it is paid for and nothing stale is
+    // served in its place.
+    let edited = smells::file_request("src/a.ts", "export const a = 2;\n");
+    let edited_hash = digest(&serde_json::to_vec(&edited).unwrap());
+    assert_ne!(edited_hash, hash);
+    assert!(
+        cached(
+            &store::responses(&temp.0).join(format!("{edited_hash}.json")),
+            &edited_hash,
+            &edited
+        )
+        .unwrap()
+        .is_none()
+    );
 }
