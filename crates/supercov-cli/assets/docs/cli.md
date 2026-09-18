@@ -364,6 +364,32 @@ With no argument the subject is the repository you are standing in, the way
 `supercov runs` needs no argument. Every assessment saves a snapshot, so the
 reading commands work afterwards with no key and no network.
 
+### What is skipped, and why
+
+Test files and generated output are left out by default. The report says how
+many and `--all` puts them back. This is not a claim that test code does not
+matter: it costs a request each, and **several checks encode assumptions that
+are wrong for it.** Duplication between two test cases is often deliberate and
+good, and a literal in a fixture is the fixture.
+
+Recognition is by directory (`tests`, `spec`, `__tests__`, `e2e`, `testdata`,
+`fixtures`, `mocks`, `features` and the rest), by separator convention
+(`login.test.ts`, `auth_test.go`, `test_login.py`, `user_spec.rb`), and by the
+CamelCase suffix that Java, Kotlin, C#, Swift and PHP use instead
+(`OrderTest.java`, `OrderSpec.kt`, `OrderIT.java`). Generated output is
+recognised by name (`.d.ts`, `.min.js`, `.pb.go`, `_pb2.py`, `.designer.cs`) and
+by the marker a generator leaves in the file itself, which is the one signal
+that needs no naming convention at all.
+
+**Matching is on whole separator-delimited parts, never on substrings**, so
+`latest.ts`, `contest.rs`, `manifest.rs`, `attestation.go` and `AUDIT.java` are
+source. A file you name directly is always assessed, since asking for
+`tests/auth_test.ts` by name is an unambiguous request for it; only files found
+by walking a directory are filtered.
+
+`quality patch` applies the same filter for the same reasons, and `--all` works
+there too.
+
 Twelve yes/no questions about specific named properties, drawn from Fowler and
 Beck's refactoring smells and the class-scope smells CodeScene's Code Health is
 built from: god class, long method, deep nesting, complex conditional, long

@@ -78,8 +78,10 @@ Change range (quality patch), pick one:
 
 Patch options:
   --annotate github   Print GitHub workflow annotations; posts nothing
+  --all               Include test files and generated output, which are skipped
 
 Scan options:
+  --all               Include test files and generated output, which are skipped
   --json              Print the report as JSON
   --dry-run           Print exact request bodies as JSON; no API call or cache writes
   --context <file>    Include a UTF-8 contract/context document in every request
@@ -132,6 +134,8 @@ Snapshots: .supercov/quality/snapshots/.
 #[derive(Default, Debug)]
 struct Options {
     paths: Vec<PathBuf>,
+    /// Assess test files and generated output too, which discovery leaves out.
+    all: bool,
     json: bool,
     dry_run: bool,
     refresh: bool,
@@ -204,6 +208,7 @@ enum Command {
         refresh: bool,
         limit: usize,
         annotate: bool,
+        all: bool,
     },
 }
 
@@ -213,6 +218,7 @@ enum Command {
 fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
     let (mut range, mut json, mut refresh, mut limit) = (None, false, false, None);
     let mut annotate = false;
+    let mut all = false;
     let mut paths = Vec::new();
     let mut arguments = arguments.into_iter();
     let set = |chosen: changes::Range, slot: &mut Option<changes::Range>| match slot {
@@ -228,6 +234,7 @@ fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
         match argument.as_str() {
             "--json" => json = true,
             "--refresh" => refresh = true,
+            "--all" => all = true,
             "--unstaged" => set(changes::Range::Unstaged, &mut range)?,
             "--staged" | "--cached" => set(changes::Range::Staged, &mut range)?,
             "--base" => {
@@ -268,6 +275,7 @@ fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
         refresh,
         limit: limit.unwrap_or(20),
         annotate,
+        all,
     })
 }
 
@@ -418,6 +426,7 @@ fn parse_scan(args: Vec<String>) -> Result<Options, String> {
             "--json" => options.json = true,
             "--dry-run" => options.dry_run = true,
             "--refresh" => options.refresh = true,
+            "--all" => options.all = true,
             "--review-below" => {
                 let value = args
                     .next()
@@ -780,6 +789,137 @@ fn is_source(path: &Path) -> bool {
     )
 }
 
+/// Why a file is left out of an assessment by default.
+///
+/// Not a judgment that the code does not matter. A score is about the code you
+/// ship, these files cost a request each, and several checks encode assumptions
+/// that are wrong for them: duplication between two test cases is often
+/// deliberate and good, and a literal in a fixture is the fixture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Skipped {
+    Test,
+    Generated,
+}
+
+impl Skipped {
+    fn reason(self) -> &'static str {
+        match self {
+            Skipped::Test => "test",
+            Skipped::Generated => "generated",
+        }
+    }
+}
+
+/// Directory names that mean test code in every language this assesses.
+const TEST_DIRECTORIES: &[&str] = &[
+    "__mocks__",
+    "__snapshots__",
+    "__tests__",
+    "cypress",
+    "e2e",
+    "features",
+    "fixture",
+    "fixtures",
+    "mock",
+    "mocks",
+    "spec",
+    "specs",
+    "test",
+    "testdata",
+    "tests",
+];
+
+/// A CamelCase suffix that names a test class, for the languages that spell it
+/// that way rather than with a separator: Java, Kotlin, C#, Swift, PHP.
+fn camel_test_suffix(stem: &str) -> bool {
+    for suffix in ["Test", "Tests", "TestCase", "TestCases", "Spec", "Specs"] {
+        if stem.len() > suffix.len() && stem.ends_with(suffix) {
+            return true;
+        }
+    }
+    // `OrderIT` is an integration test; `AUDIT` is not. Requiring a lowercase
+    // letter before the suffix separates them.
+    stem.len() > 2
+        && stem.ends_with("IT")
+        && stem
+            .chars()
+            .nth(stem.len() - 3)
+            .is_some_and(|c| c.is_ascii_lowercase())
+}
+
+/// Whether a path is test code or generated output, and which.
+///
+/// Matching is on whole separator-delimited parts, never on substrings, so
+/// `latest.ts`, `contest.rs`, `manifest.java` and `attestation.go` are source.
+fn skipped_path(relative: &str) -> Option<Skipped> {
+    let lower = relative.to_ascii_lowercase();
+    let (directories, file) = match lower.rsplit_once('/') {
+        Some((directories, file)) => (directories, file),
+        None => ("", lower.as_str()),
+    };
+    if directories
+        .split('/')
+        .any(|segment| TEST_DIRECTORIES.contains(&segment))
+    {
+        return Some(Skipped::Test);
+    }
+    let parts: Vec<&str> = file.split(['.', '_', '-']).collect();
+    if parts.iter().any(|part| matches!(*part, "test" | "spec")) {
+        return Some(Skipped::Test);
+    }
+    if matches!(
+        file,
+        "conftest.py" | "spec_helper.rb" | "test_helper.rb" | "rails_helper.rb"
+    ) {
+        return Some(Skipped::Test);
+    }
+    let stem = relative.rsplit('/').next().unwrap_or(relative);
+    let stem = stem.split('.').next().unwrap_or(stem);
+    if camel_test_suffix(stem) {
+        return Some(Skipped::Test);
+    }
+    // Type declarations carry no logic, and the rest are the file names that
+    // code generators produce across these ecosystems.
+    if lower.ends_with(".d.ts") || lower.ends_with(".d.mts") || lower.ends_with(".d.cts") {
+        return Some(Skipped::Generated);
+    }
+    if lower.ends_with(".min.js")
+        || lower.ends_with(".pb.go")
+        || lower.ends_with(".pb.cc")
+        || lower.ends_with(".pb.h")
+        || lower.ends_with("_pb2.py")
+        || lower.ends_with("_pb2_grpc.py")
+        || lower.ends_with(".designer.cs")
+        || lower.ends_with(".g.cs")
+        || parts.contains(&"generated")
+    {
+        return Some(Skipped::Generated);
+    }
+    None
+}
+
+/// The marker a generator leaves in the file itself, which is the one signal
+/// that does not depend on a naming convention. Go's is a standard; the others
+/// are conventions wide enough to be worth reading.
+fn generated_header(source: &str) -> bool {
+    source
+        .char_indices()
+        .take_while(|(index, _)| *index < 2048)
+        .last()
+        .map(|(index, c)| &source[..index + c.len_utf8()])
+        .unwrap_or(source)
+        .lines()
+        .take(20)
+        .any(|line| {
+            line.contains("Code generated by")
+                || line.contains("@generated")
+                || line.contains("DO NOT EDIT")
+                || line.contains("do not edit")
+                || line.contains("auto-generated")
+                || line.contains("autogenerated")
+        })
+}
+
 fn ignored_directory(name: &str) -> bool {
     matches!(
         name,
@@ -794,6 +934,40 @@ fn ignored_directory(name: &str) -> bool {
             | "venv"
             | "out"
     )
+}
+
+/// Source files to assess, and the ones discovery left out with the reason.
+type Discovered = (Vec<PathBuf>, Vec<(PathBuf, Skipped)>);
+
+/// Every source file under the given paths, and the ones left out with why.
+///
+/// A file named directly is always assessed: asking for `tests/auth_test.ts` by
+/// name is an unambiguous request for it. Only files found by walking a
+/// directory are filtered, and only when `all` is false.
+fn discover_with_skipped(root: &Path, paths: &[PathBuf], all: bool) -> Result<Discovered, String> {
+    let found = discover(root, paths)?;
+    if all {
+        return Ok((found, Vec::new()));
+    }
+    let named: BTreeSet<PathBuf> = paths
+        .iter()
+        .filter_map(|path| root.join(path).canonicalize().ok())
+        .filter(|path| path.is_file())
+        .collect();
+    let mut kept = Vec::new();
+    let mut left = Vec::new();
+    for path in found {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        match skipped_path(&relative) {
+            Some(reason) if !named.contains(&path) => left.push((path, reason)),
+            _ => kept.push(path),
+        }
+    }
+    Ok((kept, left))
 }
 
 fn discover(root: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
@@ -2073,7 +2247,17 @@ fn scored(answers: &Answers) -> Value {
 
 /// Health for every file, every directory that holds one, and the tree.
 fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool), String> {
-    let paths = discover(root, &options.paths)?;
+    let (paths, left_out) = discover_with_skipped(root, &options.paths, options.all)?;
+    let mut skipped_files: Vec<Value> = left_out
+        .iter()
+        .map(|(path, reason)| {
+            json!({
+                "path": path.strip_prefix(root).unwrap_or(path)
+                    .to_string_lossy().replace('\\', "/"),
+                "reason": reason.reason(),
+            })
+        })
+        .collect();
     let mut subjects = Vec::new();
     let mut unreadable = Vec::new();
     for path in &paths {
@@ -2083,6 +2267,9 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
             .to_string_lossy()
             .replace('\\', "/");
         match read_text(path) {
+            Ok(source) if !options.all && generated_header(&source) => {
+                skipped_files.push(json!({ "path": relative, "reason": "generated" }));
+            }
             Ok(source) => {
                 let whole = smells::file_request(&relative, &source);
                 match within_budget(&whole) {
@@ -2191,7 +2378,8 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
             .map(|path| path.display().to_string().replace('\\', "/"))
             .collect::<Vec<_>>(),
         "counts": {"files": files.len(), "scored": weighted.len(), "errors": errors,
-            "directories": directories.len()},
+            "directories": directories.len(), "skipped": skipped_files.len()},
+        "skipped": skipped_files,
         "catalog": smells::described(),
         "health": smells::aggregate(&weighted),
         "bytes": weighted.iter().map(|(b, _)| b).sum::<u64>(),
@@ -2222,6 +2410,7 @@ fn run_patch(
     range: &changes::Range,
     paths: &[PathBuf],
     refresh: bool,
+    all: bool,
     key: Option<&str>,
 ) -> Result<(Value, bool), String> {
     let collected = changes::collect(root, range, paths)?;
@@ -2237,6 +2426,16 @@ fn run_patch(
         }
         if !is_source(Path::new(&change.path)) {
             skipped.push(json!({ "path": change.path, "reason": "not a source file" }));
+            continue;
+        }
+        // The same filter as an assessment, for the same reasons. A reviewer
+        // asking what a change introduced means the code being shipped.
+        if !all && let Some(reason) = skipped_path(&change.path) {
+            skipped.push(json!({ "path": change.path, "reason": reason.reason() }));
+            continue;
+        }
+        if !all && generated_header(&change.after) {
+            skipped.push(json!({ "path": change.path, "reason": "generated" }));
             continue;
         }
         // Both whole versions are the validated question. When they do not fit,
@@ -2377,6 +2576,20 @@ fn human_quality(report: &Value) -> String {
         count(5.0, 8.0),
         count(f64::NEG_INFINITY, 5.0)
     ));
+    let skipped = report["counts"]["skipped"].as_u64().unwrap_or(0);
+    if skipped > 0 {
+        let by = |reason: &str| {
+            report["skipped"]
+                .as_array()
+                .map(|all| all.iter().filter(|s| s["reason"] == reason).count())
+                .unwrap_or(0)
+        };
+        out.push_str(&format!(
+            "  {skipped} skipped: {} test, {} generated. Add --all to include them.\n",
+            by("test"),
+            by("generated")
+        ));
+    }
     out.push_str(&format!(
         "Catalog {}, model {}, snapshot {}.\n{SMELL_CAVEAT}\n",
         report["catalog_version"].as_str().unwrap_or("?"),
@@ -2658,9 +2871,11 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
                 refresh,
                 limit,
                 annotate,
+                all,
             } => {
                 let key = std::env::var("TYPESAFE_API_KEY").ok();
-                let (report, failed) = run_patch(&root, &range, &paths, refresh, key.as_deref())?;
+                let (report, failed) =
+                    run_patch(&root, &range, &paths, refresh, all, key.as_deref())?;
                 if json {
                     println!(
                         "{}",
