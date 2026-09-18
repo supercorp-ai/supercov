@@ -16,6 +16,7 @@ mod aggregate;
 mod changes;
 mod declarations;
 mod query;
+mod scope;
 mod smells;
 mod store;
 
@@ -60,6 +61,7 @@ const HELP: &str = "Assess source quality with TypeSafe AI (experimental, adviso
 Usage:
   supercov quality [file-or-directory ...]            assess code, saving a snapshot
   supercov quality gaps                               only files something fired on
+  supercov quality scope                              which files are assessed, and why
   supercov quality rubric [file-or-directory ...]     the older nine-construct grade
   supercov quality snapshots                          list saved snapshots
   supercov quality show [snapshot]                    read a saved snapshot
@@ -151,6 +153,11 @@ enum Command {
     /// beats Code Health and the Maintainability Index on size-matched pairs.
     Rubric(Options),
     Snapshots {
+        json: bool,
+        limit: usize,
+    },
+    /// Which files an assessment is about, and why, mirroring `runs scope`.
+    Scope {
         json: bool,
         limit: usize,
     },
@@ -287,8 +294,8 @@ fn parse(arguments: Vec<String>) -> Result<Command, String> {
     let rest = || arguments[1..].to_vec();
     match subcommand {
         "scan" => Ok(Command::Health(defaulted(parse_scan(rest())?))),
-        "snapshots" | "show" | "gaps" | "dimension" | "file" | "functions" | "function"
-        | "diff" => parse_view(subcommand, rest()),
+        "snapshots" | "show" | "gaps" | "scope" | "dimension" | "file" | "functions"
+        | "function" | "diff" => parse_view(subcommand, rest()),
         "rubric" => Ok(Command::Rubric(defaulted(parse_scan(rest())?))),
         "patch" => parse_patch(rest()),
         _ => Ok(Command::Health(defaulted(parse_scan(arguments)?))),
@@ -352,6 +359,7 @@ fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
     };
     Ok(match kind {
         "snapshots" => Command::Snapshots { json, limit },
+        "scope" => Command::Scope { json, limit },
         "gaps" => Command::Gaps {
             snapshot: positional.next(),
             json,
@@ -934,40 +942,6 @@ fn ignored_directory(name: &str) -> bool {
             | "venv"
             | "out"
     )
-}
-
-/// Source files to assess, and the ones discovery left out with the reason.
-type Discovered = (Vec<PathBuf>, Vec<(PathBuf, Skipped)>);
-
-/// Every source file under the given paths, and the ones left out with why.
-///
-/// A file named directly is always assessed: asking for `tests/auth_test.ts` by
-/// name is an unambiguous request for it. Only files found by walking a
-/// directory are filtered, and only when `all` is false.
-fn discover_with_skipped(root: &Path, paths: &[PathBuf], all: bool) -> Result<Discovered, String> {
-    let found = discover(root, paths)?;
-    if all {
-        return Ok((found, Vec::new()));
-    }
-    let named: BTreeSet<PathBuf> = paths
-        .iter()
-        .filter_map(|path| root.join(path).canonicalize().ok())
-        .filter(|path| path.is_file())
-        .collect();
-    let mut kept = Vec::new();
-    let mut left = Vec::new();
-    for path in found {
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        match skipped_path(&relative) {
-            Some(reason) if !named.contains(&path) => left.push((path, reason)),
-            _ => kept.push(path),
-        }
-    }
-    Ok((kept, left))
 }
 
 fn discover(root: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
@@ -2247,16 +2221,48 @@ fn scored(answers: &Answers) -> Value {
 
 /// Health for every file, every directory that holds one, and the tree.
 fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool), String> {
-    let (paths, left_out) = discover_with_skipped(root, &options.paths, options.all)?;
-    let mut skipped_files: Vec<Value> = left_out
+    let found = discover(root, &options.paths)?;
+    let configured = scope::configured_roots();
+    let scope = scope::classify(root, &found, configured.as_deref());
+    // A file the user names directly is an unambiguous request for it, whatever
+    // the scope would have decided.
+    let named: BTreeSet<PathBuf> = options
+        .paths
         .iter()
-        .map(|(path, reason)| {
-            json!({
-                "path": path.strip_prefix(root).unwrap_or(path)
-                    .to_string_lossy().replace('\\', "/"),
-                "reason": reason.reason(),
-            })
+        .filter_map(|path| root.join(path).canonicalize().ok())
+        .filter(|path| path.is_file())
+        .collect();
+    let wanted: BTreeSet<String> = named
+        .iter()
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/")
         })
+        .collect();
+    let paths: Vec<PathBuf> = found
+        .iter()
+        .filter(|path| {
+            let file = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            options.all
+                || wanted.contains(&file)
+                || scope
+                    .entries
+                    .iter()
+                    .any(|e| e.path == file && e.status == scope::Status::Included)
+        })
+        .cloned()
+        .collect();
+    let mut skipped_files: Vec<Value> = scope
+        .entries
+        .iter()
+        .filter(|e| e.status != scope::Status::Included && !wanted.contains(&e.path))
+        .map(|e| json!({ "path": e.path, "reason": e.reason, "status": e.status }))
         .collect();
     let mut subjects = Vec::new();
     let mut unreadable = Vec::new();
@@ -2379,6 +2385,8 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
             .collect::<Vec<_>>(),
         "counts": {"files": files.len(), "scored": weighted.len(), "errors": errors,
             "directories": directories.len(), "skipped": skipped_files.len()},
+        "scope": scope.summary(),
+        "limitation": scope.limitation(),
         "skipped": skipped_files,
         "catalog": smells::described(),
         "health": smells::aggregate(&weighted),
@@ -2414,6 +2422,19 @@ fn run_patch(
     key: Option<&str>,
 ) -> Result<(Value, bool), String> {
     let collected = changes::collect(root, range, paths)?;
+    let configured = scope::configured_roots();
+    let changed: Vec<PathBuf> = collected.iter().map(|c| root.join(&c.path)).collect();
+    let scope = scope::classify(root, &changed, configured.as_deref());
+    let in_scope: BTreeMap<String, scope::Status> = scope
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), e.status))
+        .collect();
+    let scope_reasons: BTreeMap<String, String> = scope
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), e.reason.clone()))
+        .collect();
     let mut subjects = Vec::new();
     let mut skipped = Vec::new();
     for change in &collected {
@@ -2428,10 +2449,17 @@ fn run_patch(
             skipped.push(json!({ "path": change.path, "reason": "not a source file" }));
             continue;
         }
-        // The same filter as an assessment, for the same reasons. A reviewer
-        // asking what a change introduced means the code being shipped.
-        if !all && let Some(reason) = skipped_path(&change.path) {
-            skipped.push(json!({ "path": change.path, "reason": reason.reason() }));
+        // The same scope as an assessment, so a reviewer reading `runs patch`
+        // and `quality patch` together sees one set of files. A change outside
+        // it is reported rather than dropped.
+        if !all
+            && let Some(entry) = in_scope.get(&change.path)
+            && *entry != scope::Status::Included
+        {
+            skipped.push(json!({
+                "path": change.path,
+                "reason": scope_reasons.get(&change.path).cloned().unwrap_or_default(),
+            }));
             continue;
         }
         if !all && generated_header(&change.after) {
@@ -2493,6 +2521,7 @@ fn run_patch(
             "catalog_version": smells::CATALOG_VERSION,
             "model": MODEL,
             "catalog": smells::described(),
+            "scope": scope.summary(),
             "range": range.id(),
             "range_description": range.describe(),
             "head": changes::head(root),
@@ -2576,6 +2605,9 @@ fn human_quality(report: &Value) -> String {
         count(5.0, 8.0),
         count(f64::NEG_INFINITY, 5.0)
     ));
+    if let Some(limitation) = report["limitation"].as_str() {
+        out.push_str(&format!("\n{limitation}\n"));
+    }
     let skipped = report["counts"]["skipped"].as_u64().unwrap_or(0);
     if skipped > 0 {
         let by = |reason: &str| {
@@ -2584,10 +2616,12 @@ fn human_quality(report: &Value) -> String {
                 .map(|all| all.iter().filter(|s| s["reason"] == reason).count())
                 .unwrap_or(0)
         };
+        let scope = &report["scope"];
         out.push_str(&format!(
-            "  {skipped} skipped: {} test, {} generated. Add --all to include them.\n",
-            by("test"),
-            by("generated")
+            "  {} of {skipped} not assessed are test or generated; \
+             {} sit under no source root. Add --all to include everything.\n",
+            by("test") + by("generated"),
+            scope["ambiguous"].as_u64().unwrap_or(0)
         ));
     }
     out.push_str(&format!(
@@ -2770,6 +2804,28 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
                 json,
                 limit,
             } => present(query::gaps(&root, snapshot.as_deref(), limit)?, json),
+            Command::Scope { json, limit } => {
+                let found = discover(&root, &here())?;
+                let configured = scope::configured_roots();
+                let view = scope::classify(&root, &found, configured.as_deref());
+                let shown: Vec<&scope::Entry> = view
+                    .entries
+                    .iter()
+                    .filter(|e| e.status != scope::Status::Included)
+                    .take(if limit == 0 { usize::MAX } else { limit })
+                    .collect();
+                present(
+                    json!({
+                        "view": "scope",
+                        "summary": view.summary(),
+                        "limitation": view.limitation(),
+                        "not_included": shown,
+                        "total_not_included": view.entries.iter()
+                            .filter(|e| e.status != scope::Status::Included).count(),
+                    }),
+                    json,
+                )
+            }
             Command::Show {
                 snapshot,
                 json,

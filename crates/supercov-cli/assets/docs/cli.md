@@ -364,53 +364,57 @@ With no argument the subject is the repository you are standing in, the way
 `supercov runs` needs no argument. Every assessment saves a snapshot, so the
 reading commands work afterwards with no key and no network.
 
-### What is skipped, and why
+### Which files are assessed
 
-Test files and generated output are left out by default. The report says how
-many and `--all` puts them back. This is not a claim that test code does not
-matter: it costs a request each, and **several checks encode assumptions that
-are wrong for it.** Duplication between two test cases is often deliberate and
-good, and a literal in a fixture is the fixture.
+```sh supercov-example
+supercov quality scope
+SUPERCOV_SOURCE_ROOTS=src,app supercov quality
+```
 
-Recognition is by directory (`tests`, `spec`, `__tests__`, `e2e`, `testdata`,
-`fixtures`, `mocks`, `features` and the rest), by separator convention
+The same shape as the coverage side's source scope, and the same vocabulary, so
+a reviewer reading `runs patch` and `quality patch` together is looking at one
+set of files. Every file is **included**, **excluded** or **ambiguous**.
+
+**Included** means under a source root. Roots are found by looking for package
+manifests, `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, `Gemfile`,
+`pom.xml` and the rest, at the repository root or under a conventional package
+parent (`packages`, `apps`, `crates`, `services`, `workspaces`), plus whatever a
+root manifest declares in `workspaces` or `[workspace].members`. Inside each
+package it takes the conventional source directories: `src`, `app`, `lib`,
+`server`, `client`, `api`, `functions`, and Go's `cmd`, `internal` and `pkg`. A
+declared package with no conventional layout is measured whole.
+
+**Excluded** means test code or generated output, each carrying its reason.
+This is not a claim that test code does not matter: it costs a request each, and
+several checks encode assumptions that are wrong for it, since duplication
+between two test cases is often deliberate and a literal in a fixture is the
+fixture. Recognition is by directory, by separator convention
 (`login.test.ts`, `auth_test.go`, `test_login.py`, `user_spec.rb`), and by the
-CamelCase suffix that Java, Kotlin, C#, Swift and PHP use instead
-(`OrderTest.java`, `OrderSpec.kt`, `OrderIT.java`). Generated output is
-recognised by name (`.d.ts`, `.min.js`, `.pb.go`, `_pb2.py`, `.designer.cs`) and
-by the marker a generator leaves in the file itself, which is the one signal
-that needs no naming convention at all.
+CamelCase suffix Java, Kotlin, C#, Swift and PHP use instead (`OrderTest.java`,
+`OrderSpec.kt`, `OrderIT.java`). Generated output is recognised by name
+(`.d.ts`, `.min.js`, `.pb.go`, `_pb2.py`, `.designer.cs`) and by the marker a
+generator leaves in the file, which is the one signal needing no convention.
 
-**Matching is on whole separator-delimited parts, never on substrings**, so
-`latest.ts`, `contest.rs`, `manifest.rs`, `attestation.go` and `AUDIT.java` are
-source. A file you name directly is always assessed, since asking for
-`tests/auth_test.ts` by name is an unambiguous request for it; only files found
-by walking a directory are filtered.
+**Ambiguous** is the state that matters. First-party source under no recognised
+root is never silently dropped: it is counted, reported as a limitation next to
+the score, and listed by `quality scope`. Declare your roots to resolve
+it:
 
-`quality patch` applies the same filter for the same reasons, and `--all` works
-there too.
+```sh supercov-example
+SUPERCOV_SOURCE_ROOTS=crates,runtime,bin supercov quality
+```
 
-Twelve yes/no questions about specific named properties, drawn from Fowler and
-Beck's refactoring smells and the class-scope smells CodeScene's Code Health is
-built from: god class, long method, deep nesting, complex conditional, long
-parameter list, duplicated logic, primitive obsession, dead code, feature envy,
-temporary field, message chains and magic values. **The arithmetic that turns
-twelve answers into one number is done by this command, not by the model**, so
-every part of the score is a claim you can check against the file in seconds.
-`quality file <path>` shows all twelve with what is known about each.
+That switches to **explicit** mode, where anything outside the named roots is
+excluded as a decision rather than left as a question, and nothing is ambiguous.
 
-Text output reports a **band**, not a decimal, because the measured resolution
-of these judgments is about one point and `4.4/10` would claim precision nobody
-observed. `good` is 8 and above, `fair` is 5 to 8, `weak` is below 5. The number
-is in `--json`, where something has to sort.
+Two details. **Matching is on whole separator-delimited parts, never on
+substrings**, so `latest.ts`, `contest.rs`, `manifest.rs`, `attestation.go` and
+`AUDIT.java` are source. And a file you name directly is always assessed,
+whatever the scope decided, since `supercov quality tests/auth_test.ts` is an
+unambiguous request for it.
 
-Directory and repository health weight files by size, because a plain average
-would let a directory of one-line re-exports outvote the file everything depends
-on. A file too large to send whole is split into windows at declaration
-boundaries and the strongest answer to each question wins, since every question
-is existential: "does this file contain a method that…" is true if any window
-has one. A windowed file says so, because a property of the whole file, such as
-logic duplicated across two windows, is weaker there.
+`--all` assesses everything discovered, whatever its status. `quality patch`
+applies the same scope for the same reasons.
 
 ### What is known about this number
 

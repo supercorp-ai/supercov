@@ -2271,46 +2271,155 @@ fn generated_output_is_recognised_by_name_and_by_its_own_marker() {
 }
 
 #[test]
-fn discovery_skips_tests_but_never_a_file_named_directly() {
+fn a_source_root_puts_files_in_and_everything_else_stays_out() {
+    // An allowlist, like the coverage scope: nothing counts until a root puts
+    // it in, which is what stops a prototype tree being read as the product.
     let temp = Temp::new();
+    temp.write("package.json", "{}\n");
     temp.write("src/app.ts", "export const a = 1;\n");
     temp.write("src/app.test.ts", "it('works', () => {});\n");
-    temp.write("tests/e2e.ts", "it('works', () => {});\n");
     temp.write("src/types.d.ts", "export declare const a: number;\n");
+    temp.write("scratch/prototype.ts", "export const b = 2;\n");
 
-    let relative = |paths: Vec<PathBuf>| -> Vec<String> {
-        let mut out: Vec<String> = paths
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let status = |path: &str| {
+        view.entries
             .iter()
-            .map(|p| {
-                p.strip_prefix(&temp.0)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
-            .collect();
-        out.sort();
-        out
+            .find(|e| e.path == path)
+            .unwrap_or_else(|| panic!("{path} missing from the scope"))
     };
+    assert_eq!(status("src/app.ts").status, scope::Status::Included);
+    assert_eq!(status("src/app.test.ts").status, scope::Status::Excluded);
+    assert_eq!(status("src/app.test.ts").reason, "test");
+    assert_eq!(status("src/types.d.ts").status, scope::Status::Excluded);
+    // Under no root, and not obviously test or generated: say so rather than
+    // guessing either way.
+    assert_eq!(
+        status("scratch/prototype.ts").status,
+        scope::Status::Ambiguous
+    );
+    assert_eq!(view.ambiguous(), 1);
+    assert!(view.limitation().unwrap().contains("SUPERCOV_SOURCE_ROOTS"));
+    assert_eq!(view.mode, "automatic");
+}
 
-    let (kept, left) = discover_with_skipped(&temp.0, &[PathBuf::from(".")], false).unwrap();
-    assert_eq!(relative(kept), vec!["src/app.ts"]);
-    let mut reasons: Vec<&str> = left.iter().map(|(_, r)| r.reason()).collect();
-    reasons.sort();
-    assert_eq!(reasons, vec!["generated", "test", "test"]);
+#[test]
+fn declared_roots_replace_discovery_and_leave_nothing_ambiguous() {
+    let temp = Temp::new();
+    temp.write("package.json", "{}\n");
+    temp.write("src/app.ts", "export const a = 1;\n");
+    temp.write("scratch/prototype.ts", "export const b = 2;\n");
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
 
-    // --all puts them back.
-    let (all, left) = discover_with_skipped(&temp.0, &[PathBuf::from(".")], true).unwrap();
-    assert_eq!(all.len(), 4);
-    assert!(left.is_empty());
+    let roots = vec!["scratch".to_string()];
+    let view = scope::classify(&temp.0, &files, Some(&roots));
+    let status = |path: &str| {
+        view.entries
+            .iter()
+            .find(|e| e.path == path)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(view.mode, "explicit");
+    assert_eq!(
+        status("scratch/prototype.ts").status,
+        scope::Status::Included
+    );
+    // In explicit mode a file outside the roots is a decision, not a question.
+    assert_eq!(status("src/app.ts").status, scope::Status::Excluded);
+    assert_eq!(status("src/app.ts").reason, "outside explicit source roots");
+    assert_eq!(view.ambiguous(), 0);
+    assert!(view.limitation().is_none());
+}
 
-    // Naming a test file is an unambiguous request for it.
-    let (named, left) =
-        discover_with_skipped(&temp.0, &[PathBuf::from("src/app.test.ts")], false).unwrap();
-    assert_eq!(relative(named), vec!["src/app.test.ts"]);
-    assert!(left.is_empty(), "a file named directly is never skipped");
+#[test]
+fn a_package_is_a_root_only_where_a_manifest_is_conventional_or_declared() {
+    let temp = Temp::new();
+    temp.write("package.json", "{\"workspaces\": [\"odd/*\"]}\n");
+    temp.write("src/root.ts", "export const a = 1;\n");
+    // Under a conventional package parent: a package.
+    temp.write("packages/web/package.json", "{}\n");
+    temp.write("packages/web/src/page.ts", "export const b = 2;\n");
+    // Declared by the root manifest, though `odd` is not conventional.
+    temp.write("odd/thing/package.json", "{}\n");
+    temp.write("odd/thing/src/thing.ts", "export const c = 3;\n");
+    // A manifest nowhere conventional and declared by nobody: a prototype.
+    temp.write("spikes/toy/package.json", "{}\n");
+    temp.write("spikes/toy/src/toy.ts", "export const d = 4;\n");
+    // A manifest inside a test tree is a fixture, never a source root.
+    temp.write("tests/fixtures/packages/app/package.json", "{}\n");
+    temp.write(
+        "tests/fixtures/packages/app/src/f.ts",
+        "export const e = 5;\n",
+    );
 
-    // Naming a directory still filters inside it.
-    let (walked, left) = discover_with_skipped(&temp.0, &[PathBuf::from("tests")], false).unwrap();
-    assert!(walked.is_empty());
-    assert_eq!(left.len(), 1);
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let status = |path: &str| view.entries.iter().find(|e| e.path == path).unwrap().status;
+    assert_eq!(status("src/root.ts"), scope::Status::Included);
+    assert_eq!(status("packages/web/src/page.ts"), scope::Status::Included);
+    assert_eq!(status("odd/thing/src/thing.ts"), scope::Status::Included);
+    assert_eq!(status("spikes/toy/src/toy.ts"), scope::Status::Ambiguous);
+    assert_eq!(
+        status("tests/fixtures/packages/app/src/f.ts"),
+        scope::Status::Excluded
+    );
+    assert!(
+        !view.roots.iter().any(|root| root.starts_with("tests/")),
+        "a fixture must never become a source root: {:?}",
+        view.roots
+    );
+}
+
+#[test]
+fn cargo_workspace_members_are_roots_and_a_crate_outside_one_is_not() {
+    let temp = Temp::new();
+    temp.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\n  \"crates/engine\",\n]\nresolver = \"3\"\n",
+    );
+    temp.write("crates/engine/Cargo.toml", "[package]\nname = \"engine\"\n");
+    temp.write("crates/engine/src/lib.rs", "pub fn a() {}\n");
+    temp.write("spikes/toy/Cargo.toml", "[package]\nname = \"toy\"\n");
+    temp.write("spikes/toy/src/main.rs", "fn main() {}\n");
+
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let status = |path: &str| view.entries.iter().find(|e| e.path == path).unwrap().status;
+    assert_eq!(status("crates/engine/src/lib.rs"), scope::Status::Included);
+    assert_eq!(status("spikes/toy/src/main.rs"), scope::Status::Ambiguous);
+}
+
+#[test]
+fn a_declared_package_with_no_conventional_layout_is_measured_whole() {
+    let temp = Temp::new();
+    temp.write("package.json", "{\"workspaces\": [\"extension\"]}\n");
+    temp.write("extension/package.json", "{}\n");
+    temp.write("extension/blocks/widget.ts", "export const a = 1;\n");
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    assert_eq!(
+        view.entries
+            .iter()
+            .find(|e| e.path == "extension/blocks/widget.ts")
+            .unwrap()
+            .status,
+        scope::Status::Included
+    );
+}
+
+#[test]
+fn declared_roots_are_read_from_the_environment_as_a_comma_list() {
+    // Parsing only; the variable itself is process-wide and not set in tests.
+    let parsed = |value: &str| -> Vec<String> {
+        value
+            .split(',')
+            .map(|part| part.trim().to_owned())
+            .filter(|part| !part.is_empty())
+            .collect()
+    };
+    assert_eq!(parsed("src,app"), vec!["src", "app"]);
+    assert_eq!(parsed(" src , app "), vec!["src", "app"]);
+    assert!(parsed(" , ").is_empty());
 }

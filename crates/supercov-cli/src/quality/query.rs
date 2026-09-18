@@ -952,8 +952,62 @@ fn render_file_catalog(view: &Value) -> String {
     out
 }
 
+fn render_scope(view: &Value) -> String {
+    let empty = Vec::new();
+    let summary = &view["summary"];
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Source scope, {} mode: {} included, {} ambiguous, {} excluded.\n",
+        summary["mode"].as_str().unwrap_or("?"),
+        summary["included"].as_u64().unwrap_or(0),
+        summary["ambiguous"].as_u64().unwrap_or(0),
+        summary["excluded"].as_u64().unwrap_or(0)
+    ));
+    let roots: Vec<&str> = summary["roots"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter_map(|r| r.as_str())
+        .collect();
+    out.push_str(&format!(
+        "Roots: {}\n",
+        if roots.is_empty() {
+            "(none found)".to_owned()
+        } else {
+            roots.join(", ")
+        }
+    ));
+    if let Some(reasons) = summary["reasons"].as_object() {
+        out.push('\n');
+        for (reason, count) in reasons {
+            out.push_str(&format!("  {:>5}  {reason}\n", count.as_u64().unwrap_or(0)));
+        }
+    }
+    let shown = view["not_included"].as_array().unwrap_or(&empty);
+    if !shown.is_empty() {
+        out.push_str("\nNot assessed:\n");
+    }
+    for entry in shown {
+        out.push_str(&format!(
+            "  {:<10} {}  ({})\n",
+            entry["status"].as_str().unwrap_or("?"),
+            entry["path"].as_str().unwrap_or("?"),
+            entry["reason"].as_str().unwrap_or("?")
+        ));
+    }
+    let total = view["total_not_included"].as_u64().unwrap_or(0) as usize;
+    if total > shown.len() {
+        out.push_str(&format!("  ... and {} more\n", total - shown.len()));
+    }
+    if let Some(limitation) = view["limitation"].as_str() {
+        out.push_str(&format!("\n{limitation}\n"));
+    }
+    out
+}
+
 pub fn render(view: &Value) -> String {
     match view["view"].as_str().unwrap_or_default() {
+        "scope" => render_scope(view),
         "quality" => render_quality(view),
         "gaps" => render_gaps(view),
         "file" if view["instrument"] == "catalog" => render_file_catalog(view),
