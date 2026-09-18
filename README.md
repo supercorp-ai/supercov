@@ -258,10 +258,9 @@ Every part of the score is a claim you can verify against the file. Set a
 [TypeSafe](https://typesafe.ai) key in `TYPESAFE_API_KEY` to assess; reading a
 saved assessment needs no key.
 
-It finds your source the same way coverage does, leaves out tests and generated
-output, and reports a band rather than a decimal because that is the resolution
-the answers support. Read [Understanding quality](docs/quality.md) for how to
-read a score and what the change review covers.
+It finds your source automatically, leaves out tests and generated output, and
+caches by content so a second run pays only for what changed. Read
+[Understanding quality](docs/quality.md) to get started.
 
 ## Local, private, and zero-edit
 

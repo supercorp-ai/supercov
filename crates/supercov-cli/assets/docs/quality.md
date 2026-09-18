@@ -52,7 +52,6 @@ Weakest:
         long_method 0.93, duplicated_logic 0.88, complex_conditional 0.87, +7 more
 ```
 
-The band is the headline because the underlying resolution is about a point:
 `good` is 8 and above, `fair` is 5 to 8, `weak` is below 5. `--json` carries the
 number when something needs to sort.
 
@@ -82,14 +81,8 @@ Health is the mean of the twelve answers, done by this command rather than by
 the model. Directory and repository health weight files by size, so a folder of
 one-line re-exports cannot outvote the file everything depends on.
 
-Two things are worth knowing before you act on it.
-
-**It moves with size.** Bigger files score worse, and that is mostly right, but
-it means the score rarely surprises you on a file you already knew was large.
-The interesting cases are the small files that score badly.
-
-**It measures structure, not correctness.** Nothing here asks whether the code
-works. Use it to find code that is hard to change, not code that is wrong.
+Use it to find the code that is hardest to change, and `quality gaps` to jump
+straight to the files something fired on.
 
 ## What a change introduced
 
@@ -123,10 +116,6 @@ npx supercov quality patch --base origin/main --annotate github
 
 `--annotate github` prints workflow annotations on stdout. It needs no token and
 posts no comment.
-
-This is a structural check on your change. It will tell you a function got
-harder to follow. It will not find the race condition, and it does not replace
-the person who would.
 
 ## Which files get looked at
 

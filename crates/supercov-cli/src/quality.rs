@@ -1798,7 +1798,7 @@ fn run_patch(
 }
 
 /// The caveat that belongs next to any number this catalog produces.
-const SMELL_CAVEAT: &str = "Each check is a judgment you can verify against the file. Health is \
+const HOW_IT_IS_SCORED: &str = "Each check is a judgment you can verify against the file. Health is \
 arithmetic over those checks, done here and not by the model.\n";
 
 /// A band, not a decimal. The measured resolution of these judgments is about
@@ -1894,7 +1894,7 @@ fn human_quality(report: &Value) -> String {
         ));
     }
     out.push_str(&format!(
-        "Catalog {}, model {}, snapshot {}.\n{SMELL_CAVEAT}\n",
+        "Catalog {}, model {}, snapshot {}.\n{HOW_IT_IS_SCORED}\n",
         report["catalog_version"].as_str().unwrap_or("?"),
         report["model"].as_str().unwrap_or("?"),
         report["id"].as_str().unwrap_or("?")
@@ -1938,7 +1938,7 @@ fn human_quality(report: &Value) -> String {
 fn human_patch(report: &Value, limit: usize) -> String {
     let empty = Vec::new();
     let mut out = String::new();
-    out.push_str(SMELL_CAVEAT);
+    out.push_str(HOW_IT_IS_SCORED);
     out.push_str(&format!(
         "Reviewing {}.\n\n",
         report["range_description"].as_str().unwrap_or("a change")
