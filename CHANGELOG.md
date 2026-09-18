@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.56
+
+**Added**
+
+- `supercov quality` scores your code with [Jev](https://typesafe.ai). Twelve named properties are asked of each file as yes/no questions and Supercov does the arithmetic, so every part of a score is a claim you can check against the file. With no argument it assesses the repository you are in.
+- `supercov quality patch` reports what a change introduced: the same properties asked differentially, plus six risk checks for a credential in source, untrusted input in a query, a change to who may do what, a test that now checks less, a schema migration, and debugging left behind. With no range it reviews uncommitted work, or your whole branch when the tree is clean. `--annotate github` prints workflow annotations and `--run <id>` marks findings in code no test exercises.
+- `quality gaps`, `file`, `scope`, `snapshots`, `show` and `diff` read a saved assessment with no key and no network. `diff` reports what declined between two.
+- Source files are found the way coverage finds them, across every supported language. `SUPERCOV_SOURCE_ROOTS` declares them explicitly.
+
 ## 0.0.55
 
 **Fixed**
