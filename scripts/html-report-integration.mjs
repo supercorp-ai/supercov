@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -57,6 +58,94 @@ try {
     { cwd: project, encoding: "utf8", stdio: "pipe" },
   );
 
+  // A saved assessment, written by hand so this stays offline and free. Only the
+  // source fingerprint decides whether it pairs with the run, so it is copied
+  // from the run itself; a made-up one must stay unpaired.
+  const runDirectory = resolve(project, ".supercov/runs");
+  const runId = readdirSync(runDirectory)[0];
+  const runRecord = JSON.parse(
+    readFileSync(resolve(runDirectory, runId, "run.json"), "utf8"),
+  );
+  const sourceFingerprint = runRecord.integrity.fingerprint.source;
+  const snapshot = resolve(project, ".supercov/quality/snapshots/q_00000000000000aa");
+  mkdirSync(snapshot, { recursive: true });
+  writeFileSync(
+    resolve(snapshot, "manifest.json"),
+    JSON.stringify({
+      schema_version: 4,
+      id: "q_00000000000000aa",
+      created_at: "2026-09-18T00:00:00.000Z",
+      instrument: "catalog",
+      catalog_version: "properties-v1",
+      model: "jev-1.13.0",
+      source_fingerprint: sourceFingerprint,
+      source_files: 1,
+      health: 4.84,
+      counts: { files: 1, scored: 1 },
+      policy: { cutoffs: "none", fail_on_finding: false },
+    }),
+  );
+  writeFileSync(
+    resolve(snapshot, "files.json"),
+    JSON.stringify({
+      files: [
+        {
+          path: "src/access.js",
+          bytes: 120,
+          sha256: "a".repeat(64),
+          status: "completed",
+          health: 3.5,
+          present: [{ check: "long_method", value: 0.95 }],
+          checks: { long_method: 0.95 },
+        },
+      ],
+      directories: [],
+    }),
+  );
+  execFileSync(
+    binary,
+    ["report", "--runs", "1", "--no-open", "--output", "paired.html"],
+    { cwd: project, encoding: "utf8", stdio: "pipe" },
+  );
+  const pairedHtml = readFileSync(resolve(project, "paired.html"), "utf8");
+  const pairedScripts = [
+    ...pairedHtml.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g),
+  ];
+  const paired = JSON.parse(
+    gunzipSync(Buffer.from(pairedScripts[0][1].trim(), "base64")).toString("utf8"),
+  );
+  assert.equal(paired.qualities.length, 1);
+  assert.equal(paired.timeline.length, 1);
+  assert.equal(paired.timeline[0].kind, "paired");
+  assert.equal(paired.timeline[0].qualityId, "q_00000000000000aa");
+  assert.equal(paired.qualities[0].files[0].path, "src/access.js");
+
+  // A snapshot taken against different source must not be folded into the run.
+  writeFileSync(
+    resolve(snapshot, "manifest.json"),
+    readFileSync(resolve(snapshot, "manifest.json"), "utf8").replace(
+      sourceFingerprint,
+      "b".repeat(64),
+    ),
+  );
+  execFileSync(
+    binary,
+    ["report", "--runs", "1", "--no-open", "--output", "unpaired.html"],
+    { cwd: project, encoding: "utf8", stdio: "pipe" },
+  );
+  const unpairedHtml = readFileSync(resolve(project, "unpaired.html"), "utf8");
+  const unpairedScripts = [
+    ...unpairedHtml.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g),
+  ];
+  const unpaired = JSON.parse(
+    gunzipSync(Buffer.from(unpairedScripts[0][1].trim(), "base64")).toString("utf8"),
+  );
+  assert.equal(unpaired.timeline.length, 2);
+  assert.deepEqual(
+    unpaired.timeline.map((item) => item.kind).sort(),
+    ["quality", "run"],
+  );
+
   const reportPath = resolve(project, "report.html");
   const html = readFileSync(reportPath, "utf8");
   assert(statSync(reportPath).size < 24 * 1024 * 1024);
@@ -87,6 +176,22 @@ try {
   assert.match(html, /Covered executable line/);
   assert.doesNotMatch(html, /Affected code/);
   assert.doesNotMatch(html, /Previous run/);
+
+  // The judgments a report can carry, and the way it offers the ones it lacks.
+  assert.match(html, /function renderQuality/);
+  assert.match(html, /function renderAssertions/);
+  assert.match(html, /function renderMissing/);
+  assert.match(html, /function renderQualityOnly/);
+  assert.match(html, /function promptFor/);
+  // A file:// report has no clipboard API, so the selection path must survive.
+  assert.match(html, /execCommand\("copy"\)/);
+  assert.match(html, /function copyBySelection/);
+  // Banding must match the command line, including rounding before comparing.
+  assert.match(html, /rounded >= 8 \? "good" : rounded >= 5 \? "fair" : "weak"/);
+  // Quality is a ranking, not a target, and the report has to say so.
+  assert.match(html, /not a target/);
+  // No price is quoted; a report outlives the rates.
+  assert.doesNotMatch(html, /\$\d/);
 
   const scripts = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)];
   assert.equal(scripts.length, 2);

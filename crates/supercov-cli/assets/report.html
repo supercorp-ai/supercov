@@ -530,6 +530,46 @@
     @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
       .run-sidebar, .tabs { background: color-mix(in srgb, var(--panel-solid), transparent 4%); }
     }
+    .run-item .run-context { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .quality-panel, .assertion-panel { margin-top: 28px; padding: 20px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); display: grid; gap: 12px; }
+    .quality-head { display: flex; align-items: center; gap: 12px; }
+    .quality-band { text-transform: capitalize; font-weight: 650; font-size: 13px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); }
+    .quality-band.good, .assertion-status.good { color: var(--good); }
+    .quality-band.fair { color: var(--warn); }
+    .quality-band.weak { color: var(--bad); }
+    .file-row-quality.good { color: var(--good); }
+    .file-row-quality.fair { color: var(--warn); }
+    .file-row-quality.weak { color: var(--bad); }
+    .file-state-dot.good { background: var(--good-fill); }
+    .file-state-dot.fair { background: var(--warn-fill); }
+    .file-state-dot.weak { background: var(--bad-fill); }
+    .quality-score { font-size: 24px; font-weight: 680; letter-spacing: -.02em; }
+    .assertion-status { font-size: 12px; text-transform: capitalize; opacity: .75; }
+    .quality-context { font-size: 13px; color: var(--muted); }
+    .quality-list { display: grid; gap: 2px; }
+    .quality-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: 0; padding: 8px 6px; border-radius: 10px; color: inherit; cursor: pointer; font: inherit; }
+    .quality-row:hover { background: var(--panel-2); }
+    .quality-file { display: grid; gap: 10px; padding: 16px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); }
+    .quality-checks { display: grid; gap: 4px; }
+    .quality-check { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+    .quality-check-name { text-transform: capitalize; }
+    .quality-check-value { font-variant-numeric: tabular-nums; color: var(--muted); }
+    .file-row-quality { font-size: 12px; text-transform: capitalize; margin-left: 10px; }
+    .file-row.static { cursor: default; }
+    .missing-card { margin-top: 28px; padding: 20px; border-radius: 16px; border: 1px dashed var(--line); display: grid; gap: 8px; justify-items: start; }
+    .missing-heading { font-weight: 650; }
+    .missing-copy { font-size: 13px; color: var(--muted); }
+    .missing-action { margin-top: 4px; font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: inherit; cursor: pointer; }
+    .missing-action:hover { background: var(--panel-2); }
+    .prompt-layer { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: grid; place-items: center; padding: 24px; z-index: 40; }
+    .prompt-modal { width: min(560px, 100%); background: var(--bg); border: 1px solid var(--line); border-radius: 18px; padding: 24px; display: grid; gap: 12px; max-height: 85vh; overflow: auto; }
+    .prompt-title { margin: 0; font-size: 19px; }
+    .prompt-copy { margin: 0; font-size: 14px; color: var(--muted); }
+    .prompt-command { margin: 0; padding: 14px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .prompt-actions { display: flex; gap: 10px; }
+    .prompt-copy-button, .prompt-close { font: inherit; font-size: 13px; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: inherit; cursor: pointer; }
+    .prompt-copy-button:hover, .prompt-close:hover { background: var(--panel-2); }
+    .prompt-status { margin: 0; font-size: 12px; color: var(--muted); min-height: 16px; }
   </style>
 </head>
 <body>
@@ -540,7 +580,7 @@
     "use strict";
     const app = document.getElementById("app");
     const payload = document.getElementById("report-data").textContent.trim();
-    const state = { bundle: null, runId: null, compareId: null, tab: "review", file: null, line: null, gapQuery: "", gapFilter: "all", testQuery: "", testSuite: null, testId: null, testFileFilter: null, testKind: "all", sourceRadius: 32, testFileLimit: 12 };
+    const state = { bundle: null, itemId: null, runId: null, compareId: null, tab: "review", file: null, line: null, gapQuery: "", gapFilter: "all", testQuery: "", testSuite: null, testId: null, testFileFilter: null, testKind: "all", sourceRadius: 32, testFileLimit: 12, prompt: null };
     const tabs = ["review", "explore", "tests"];
     const tabLabels = { review: "Overview", explore: "Files", tests: "Tests" };
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -579,7 +619,18 @@
     function pct(value) { return Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)}%` : "—"; }
     function integer(value) { return new Intl.NumberFormat().format(Number(value) || 0); }
     function shortDate(value) { try { return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value)); } catch { return value; } }
-    function currentRun() { return state.bundle.runs.find(run => run.id === state.runId) || state.bundle.runs[0]; }
+    function currentItem() { return state.bundle.timeline.find(item => item.id === state.itemId) || state.bundle.timeline[0]; }
+    function currentRun() { const item = currentItem(); return (item && item.runId && state.bundle.runs.find(run => run.id === item.runId)) || null; }
+    function currentQuality() { const item = currentItem(); return (item && item.qualityId && state.bundle.qualities.find(value => value.id === item.qualityId)) || null; }
+    function qualityRow(quality, path) { return quality && Array.isArray(quality.files) ? quality.files.find(file => file.path === path) || null : null; }
+    // Banded on the number a reader sees, exactly as the command line bands it,
+    // so the same assessment never reads as one grade here and another there.
+    function band(health) {
+      if (!Number.isFinite(Number(health))) return "\u2014";
+      const rounded = Math.round(Number(health) * 10) / 10;
+      return rounded >= 8 ? "good" : rounded >= 5 ? "fair" : "weak";
+    }
+    function health(value) { return Number.isFinite(Number(value)) ? `${(Math.round(Number(value) * 10) / 10).toFixed(1)}/10` : "\u2014"; }
     function compareRun() { return state.bundle.runs.find(run => run.id === state.compareId) || null; }
     function missing(file) { return (file.uncoveredLines || 0) + (file.uncoveredStatements || 0) + (file.uncoveredFunctions || 0) + (file.missingBranches || 0) + (file.missingMcdcConditions || 0); }
     function gapFiles(run) { return run.files.filter(file => missing(file) > 0 || file.measurementLimitations > 0); }
@@ -594,7 +645,7 @@
     function summaryMetric(run, key) { return run.summary.coverage[key] || { covered: 0, total: 0, percentage: 0 }; }
     function mcdc(run) { return { covered: run.summary.coverage.coveredConditions || 0, total: run.summary.coverage.conditions || 0, percentage: run.summary.coverage.conditionCoveragePct || 0 }; }
     function setHash() {
-      const parts = [state.tab, state.runId];
+      const parts = [state.tab, state.itemId];
       if (state.file) parts.push(encodeURIComponent(state.file));
       if (state.line) parts.push(String(state.line));
       history.replaceState(null, "", `#${parts.join("/")}`);
@@ -602,7 +653,7 @@
     function readHash() {
       const parts = location.hash.slice(1).split("/");
       if (tabs.includes(parts[0])) state.tab = parts[0];
-      if (state.bundle.runs.some(run => run.id === parts[1])) state.runId = parts[1];
+      if (state.bundle.timeline.some(item => item.id === parts[1])) state.itemId = parts[1];
       if (parts[2]) { try { state.file = decodeURIComponent(parts[2]); } catch {} }
       if (parts[3] && /^\d+$/.test(parts[3])) state.line = Number(parts[3]);
     }
@@ -611,9 +662,11 @@
       const index = state.bundle.runs.findIndex(run => run.id === runId);
       return index >= 0 ? state.bundle.runs[index + 1]?.id || null : null;
     }
-    function chooseRun(runId) {
-      state.runId = runId;
-      state.compareId = previousRunId(runId);
+    function chooseItem(itemId) {
+      state.itemId = itemId;
+      const item = state.bundle.timeline.find(value => value.id === itemId);
+      state.runId = (item && item.runId) || null;
+      state.compareId = state.runId ? previousRunId(state.runId) : null;
       state.file = null; state.line = null; state.testSuite = null; state.testId = null; state.testFileFilter = null; state.testKind = "all"; state.sourceRadius = 32; state.testFileLimit = 12;
       render();
     }
@@ -654,19 +707,32 @@
       return "good";
     }
 
-    function renderSidebar(layout, run) {
+    function renderSidebar(layout) {
       const aside = node("aside", "run-sidebar");
       const brand = node("div", "sidebar-brand"); brand.append(brandMark(), node("span", "", "Supercov"), themeToggle()); aside.append(brand);
       const project = node("div", "sidebar-project", state.bundle.project); project.title = state.bundle.project; aside.append(project);
       const history = node("div", "run-history"); const list = node("div", "run-list");
-      state.bundle.runs.forEach(item => {
-        const tone = runTone(item); const current = item.id === run.id;
-        const value = button("", "run-item", () => chooseRun(item.id)); value.setAttribute("aria-current", String(current));
-        value.append(node("span", `run-dot ${tone}`));
-        const openGaps = allGapKeys(item).size;
-        const context = openGaps ? `${integer(openGaps)} open ${openGaps === 1 ? "gap" : "gaps"}` : "Fully covered";
-        const copy = node("span", "run-copy"); copy.append(node("span", "run-date", shortDate(item.startedAt)), node("span", "run-context", context)); value.append(copy);
-        const score = node("span", "run-score", pct(mcdc(item).percentage)); score.title = "MC/DC coverage"; value.append(score); list.append(value);
+      const selected = currentItem();
+      state.bundle.timeline.forEach(item => {
+        const itemRun = item.runId ? state.bundle.runs.find(value => value.id === item.runId) : null;
+        const itemQuality = item.qualityId ? state.bundle.qualities.find(value => value.id === item.qualityId) : null;
+        const current = selected && item.id === selected.id;
+        const value = button("", "run-item", () => chooseItem(item.id)); value.setAttribute("aria-current", String(current));
+        value.append(node("span", `run-dot ${itemRun ? runTone(itemRun) : "quiet"}`));
+        // Each line says what was judged at this moment, so an item holding only
+        // one of the two never looks like the other is a zero.
+        let context;
+        if (itemRun) {
+          const openGaps = allGapKeys(itemRun).size;
+          context = openGaps ? `${integer(openGaps)} open ${openGaps === 1 ? "gap" : "gaps"}` : "Fully covered";
+          context += itemQuality ? ` \u00b7 quality ${band(itemQuality.health)}` : " \u00b7 not assessed";
+        } else {
+          context = `Quality ${band(itemQuality && itemQuality.health)} \u00b7 no run`;
+        }
+        const copy = node("span", "run-copy"); copy.append(node("span", "run-date", shortDate(item.at)), node("span", "run-context", context)); value.append(copy);
+        const score = node("span", "run-score", itemRun ? pct(mcdc(itemRun).percentage) : health(itemQuality && itemQuality.health));
+        score.title = itemRun ? "MC/DC coverage" : "Quality health";
+        value.append(score); list.append(value);
       });
       history.append(list); aside.append(history);
       layout.append(aside);
@@ -738,6 +804,64 @@
       visual.append(map, legend); return visual;
     }
 
+    // Quality reads as a band and a ranking, never as progress toward a target:
+    // the assessment records that it has no cutoffs and fails on no finding, so
+    // a bar beside 100% coverage would invent a goal that does not exist.
+    function renderQuality(quality) {
+      const section = node("section", "quality-panel");
+      const head = node("div", "quality-head");
+      head.append(node("span", `quality-band ${band(quality.health)}`, band(quality.health)));
+      head.append(node("span", "quality-score", health(quality.health)));
+      section.append(head);
+      const files = Array.isArray(quality.files) ? quality.files.filter(file => Number.isFinite(Number(file.health))) : [];
+      const counts = { good: 0, fair: 0, weak: 0 };
+      files.forEach(file => { counts[band(file.health)] += 1; });
+      section.append(node("div", "quality-context", `${integer(counts.good)} good \u00b7 ${integer(counts.fair)} fair \u00b7 ${integer(counts.weak)} weak of ${integer(files.length)} assessed`));
+      const weakest = files.slice().sort((a, b) => Number(a.health) - Number(b.health)).slice(0, 5);
+      if (weakest.length) {
+        const list = node("div", "quality-list");
+        weakest.forEach(file => {
+          const row = button("", "quality-row", () => { state.tab = "explore"; state.file = file.path; state.line = null; state.sourceRadius = 32; render(); });
+          row.append(node("span", `file-state-dot ${band(file.health)}`));
+          const identity = node("span", "file-row-identity");
+          identity.append(node("span", "file-row-name", fileName(file.path)));
+          const fired = (file.present || []).slice(0, 3).map(check => check.check.replace(/_/g, " ")).join(", ");
+          if (fired) identity.append(node("span", "file-row-directory", fired));
+          row.append(identity, node("span", "file-row-metric", health(file.health)));
+          const chevron = node("span", "file-chevron", "\u203a"); chevron.setAttribute("aria-hidden", "true");
+          row.append(chevron); list.append(row);
+        });
+        section.append(list);
+      }
+      section.append(node("div", "small muted", `${quality.model} \u00b7 ${quality.catalogVersion}. Judged by a model; no threshold in this project has survived calibration, so this is a ranking, not a target.`));
+      return section;
+    }
+
+    // Only "available" carries a percentage. The other states describe why there
+    // is no number, and printing one anyway would be the lie the command line
+    // already refuses to tell.
+    function renderAssertions(run) {
+      const data = run.assertions;
+      if (!data) return null;
+      const section = node("section", "assertion-panel");
+      section.append(node("div", "panel-title", "Assertion coverage"));
+      if (!data.available) {
+        section.append(node("div", "missing-copy", data.error || "Not available for this run."));
+        return section;
+      }
+      const summary = data.summary || {};
+      const statements = summary.statements || {};
+      const value = summary.status === "available" ? pct(statements.percentage) : "\u2014";
+      const head = node("div", "quality-head");
+      head.append(node("span", "quality-score", value));
+      head.append(node("span", `assertion-status ${summary.status === "available" ? "good" : "quiet"}`, summary.status === "available" ? "assessed" : String(summary.status || "")));
+      section.append(head);
+      if (summary.reason) section.append(node("div", "quality-context", summary.reason));
+      section.append(node("div", "quality-context", `${integer(statements.asserted)} of ${integer(statements.total)} measured statements credited \u00b7 ${integer(summary.assertions)} ${summary.assertions === 1 ? "assertion" : "assertions"}`));
+      if (data.basis) section.append(node("div", "small muted", data.basis));
+      return section;
+    }
+
     function renderHero(shell, run) {
       const hero = node("section", "hero");
       const openGaps = allGapKeys(run).size;
@@ -754,6 +878,21 @@
         status.append(node("span", "run-alert-dot"), node("span", "", !run.summary.valid ? "Tests failed in this run" : `${integer(run.summary.measurement.blocking)} measurement ${run.summary.measurement.blocking === 1 ? "limit" : "limits"}`));
         hero.append(status);
       }
+      const quality = currentQuality();
+      hero.append(quality
+        ? renderQuality(quality)
+        : renderMissing("quality", "No quality assessment of this source", "This run measured what the tests reach. Nothing has judged how the code reads."));
+      const assertions = renderAssertions(run);
+      if (assertions) hero.append(assertions);
+      shell.append(hero);
+    }
+
+    // An assessment with no run against the same source: worth reading on its
+    // own, and explicit about the half that is absent.
+    function renderQualityOnly(shell, quality) {
+      const hero = node("section", "hero");
+      hero.append(renderQuality(quality));
+      hero.append(renderMissing("run", "No coverage run for this source", "Nothing here has been measured by tests, so there are no lines, branches or MC/DC obligations to show."));
       shell.append(hero);
     }
 
@@ -982,12 +1121,67 @@
         const decisions = renderDecisions(run, file, state.line);
         if (decisions) { const disclosure = node("details", "disclosure"); disclosure.append(node("summary", "", "Show decision evidence"), decisions); panel.append(disclosure); }
       }
+      const fileQuality = renderFileQuality(file);
+      if (fileQuality) panel.append(fileQuality);
       const coveringTests = testsCoveringFile(run, file);
       if (coveringTests.length) {
         const jump = button("", "relationship-jump", () => { state.tab = "tests"; state.testFileFilter = file; state.testKind = "all"; state.testSuite = null; state.testId = null; state.testQuery = ""; state.file = null; state.line = null; render(); });
         const copy = node("span", ""); copy.append(node("span", "relationship-jump-label", "Covered by"), node("strong", "relationship-jump-value", `${integer(coveringTests.length)} ${coveringTests.length === 1 ? "test" : "tests"}`)); const chevron = node("span", "file-chevron", "›"); chevron.setAttribute("aria-hidden", "true"); jump.append(copy, node("span", "relation-count", "View tests"), chevron); panel.append(jump);
       }
       return panel;
+    }
+
+    function renderQualityFiles(content, quality) {
+      const files = (Array.isArray(quality.files) ? quality.files : [])
+        .filter(file => file.path.toLowerCase().includes(state.gapQuery.toLowerCase()))
+        .slice().sort((a, b) => Number(a.health) - Number(b.health));
+      const panel = node("section", "panel file-list-panel collection-view");
+      const head = node("div", "file-list-head"); const title = node("div");
+      title.append(node("div", "panel-title", "Files"), node("div", "small muted", `${integer(files.length)} assessed \u00b7 no coverage run for this source`));
+      head.append(title); panel.append(head);
+      const list = node("div", "file-list");
+      files.forEach(file => {
+        const row = node("div", "file-row static");
+        row.append(node("span", `file-state-dot ${band(file.health)}`));
+        const identity = node("span", "file-row-identity");
+        identity.append(node("span", "file-row-name", fileName(file.path)));
+        const directory = fileDirectory(file.path); if (directory) identity.append(node("span", "file-row-directory", directory));
+        row.append(identity, node("span", "file-row-metric", health(file.health)));
+        list.append(row);
+      });
+      if (!files.length) list.append(node("div", "empty", "No files match this search."));
+      panel.append(list); content.append(panel);
+    }
+
+    // What the assessment says about one file, beside the source rather than on
+    // it. Every property is a claim about the whole file, and the command line
+    // is careful never to guess a line for one, so neither is this.
+    function renderFileQuality(file) {
+      const quality = currentQuality();
+      if (!quality) return renderMissing("quality", "Not assessed", "Nothing has judged how this file reads.");
+      const row = qualityRow(quality, file);
+      if (!row) return null;
+      const section = node("div", "section");
+      const heading = node("h3", "", "Quality");
+      section.append(heading);
+      const card = node("div", "quality-file");
+      const head = node("div", "quality-head");
+      head.append(node("span", `quality-band ${band(row.health)}`, band(row.health)), node("span", "quality-score", health(row.health)));
+      card.append(head);
+      const fired = row.present || [];
+      if (fired.length) {
+        const list = node("div", "quality-checks");
+        fired.forEach(check => {
+          const item = node("div", "quality-check");
+          item.append(node("span", "quality-check-name", check.check.replace(/_/g, " ")), node("span", "quality-check-value", Number(check.value).toFixed(2)));
+          list.append(item);
+        });
+        card.append(list);
+      } else card.append(node("div", "quality-context", "No property fired on this file."));
+      card.append(node("div", "small muted", "A property describes the whole file, not a line."));
+      if (row.warning) card.append(node("div", "small muted", row.warning));
+      section.append(card);
+      return section;
     }
 
     function renderExplore(content, run) {
@@ -1005,6 +1199,8 @@
         const identity = node("span", "file-row-identity"); identity.append(node("span", "file-row-name", fileName(file.file))); const directory = fileDirectory(file.file); if (directory) identity.append(node("span", "file-row-directory", directory)); row.append(identity);
         const openCount = missing(file) + file.measurementLimitations;
         row.append(node("span", "file-row-metric", limited ? "Limited" : openCount ? `${integer(openCount)} open` : ""));
+        const assessed = qualityRow(currentQuality(), file.file);
+        if (assessed) { const mark = node("span", `file-row-quality ${band(assessed.health)}`, band(assessed.health)); mark.title = `Quality ${health(assessed.health)}`; row.append(mark); }
         const chevron = node("span", "file-chevron", "›"); chevron.setAttribute("aria-hidden", "true"); row.append(chevron); list.append(row);
       });
       if (!values.length) list.append(node("div", "empty", "No files match this search.")); panel.append(list); content.append(panel);
@@ -1090,12 +1286,116 @@
       if (!visibleFiles.length) list.append(node("div", "empty", "No test files match this search.")); listPanel.append(list); content.append(listPanel);
     }
 
+    // Copy without a clipboard API.
+    //
+    // A report is opened from a file:// URL, which is not a secure context, so
+    // navigator.clipboard is usually absent exactly where this button matters.
+    // The textarea path is the one that runs most of the time, not the fallback.
+    function copyBySelection(value) {
+      return new Promise((resolve, reject) => {
+        const field = document.createElement("textarea");
+        field.value = value; field.setAttribute("readonly", "");
+        field.style.position = "fixed"; field.style.opacity = "0";
+        document.body.append(field); field.select();
+        let copied = false;
+        try { copied = document.execCommand("copy"); } catch { copied = false; }
+        field.remove();
+        copied ? resolve() : reject(new Error("Copy failed"));
+      });
+    }
+    function copyText(value) {
+      // The clipboard API also rejects in a secure context when the document
+      // does not hold focus or permission was refused, and the selection path
+      // often still works there, so it is tried on any failure rather than only
+      // when the API is missing.
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(value).catch(() => copyBySelection(value));
+      }
+      return copyBySelection(value);
+    }
+
+    // What to run to obtain the judgment this item is missing, as a prompt the
+    // reader can paste. No price is quoted: a report outlives the rates.
+    function promptFor(kind) {
+      if (kind === "quality") {
+        return {
+          title: "Assess this code's quality",
+          body: "Supercov has coverage for this run but no quality assessment of the same source. Quality is judged by a model, so it needs an API credential and it costs money to produce.",
+          command: "export TYPESAFE_API_KEY=<your key>\nnpx supercov quality\nnpx supercov report",
+          note: "Run this in the project the report was made from. Assessing the same source as this run pairs the two on one timeline entry."
+        };
+      }
+      if (kind === "run") {
+        return {
+          title: "Measure this code with tests",
+          body: "This assessment has no coverage run against the same source. Measuring is free and runs locally; it needs the project's own test command.",
+          command: "npx supercov -- <your test command>\nnpx supercov report",
+          note: "Use the complete test command the repository already trusts, so the measurement covers the whole suite."
+        };
+      }
+      return {
+        title: "Explain what the tests assert",
+        body: "This run recorded assertions but nothing explains what they prove. Assertion coverage needs an authored map, which Supercov never writes for you.",
+        command: "npx supercov runs latest assertions\nnpx supercov docs assertion-agent",
+        note: "The map lives in the run's own directory. The agent guide describes how to author and validate it."
+      };
+    }
+
+    function renderPrompt() {
+      if (!state.prompt) return null;
+      const detail = promptFor(state.prompt);
+      const layer = node("div", "prompt-layer");
+      const close = () => { state.prompt = null; render(); };
+      layer.addEventListener("click", event => { if (event.target === layer) close(); });
+      const dialog = node("div", "prompt-modal");
+      dialog.setAttribute("role", "dialog"); dialog.setAttribute("aria-modal", "true"); dialog.setAttribute("aria-label", detail.title);
+      dialog.append(node("h2", "prompt-title", detail.title), node("p", "prompt-copy", detail.body));
+      const command = node("pre", "prompt-command", detail.command); dialog.append(command);
+      dialog.append(node("p", "small muted", detail.note));
+      const status = node("p", "prompt-status", "");
+      const actions = node("div", "prompt-actions");
+      const copy = button("Copy prompt", "prompt-copy-button", () => {
+        copyText(detail.command).then(
+          () => { copy.textContent = "Copied"; status.textContent = "Copied to clipboard."; },
+          () => { status.textContent = "Copy failed. Select the command above and copy it manually."; }
+        );
+      });
+      actions.append(copy, button("Close", "prompt-close", close));
+      dialog.append(actions, status);
+      layer.append(dialog);
+      document.addEventListener("keydown", function escape(event) {
+        if (event.key === "Escape") { document.removeEventListener("keydown", escape); close(); }
+      });
+      return layer;
+    }
+
+    // A judgment this item does not carry, said plainly, with the way to get it.
+    function renderMissing(kind, heading, copy) {
+      const card = node("div", "missing-card");
+      card.append(node("div", "missing-heading", heading), node("div", "missing-copy", copy));
+      card.append(button("How to add this", "missing-action", () => { state.prompt = kind; render(); }));
+      return card;
+    }
+
     function render() {
-      const run = currentRun(); if (!run) return;
-      setHash(); app.replaceChildren(); const layout = node("div", "report-layout"); renderSidebar(layout, run); const shell = node("main", "report-main"); renderTabs(shell);
-      if (state.tab === "review") renderHero(shell, run);
+      const run = currentRun();
+      const quality = currentQuality();
+      setHash(); app.replaceChildren();
+      const layout = node("div", "report-layout"); renderSidebar(layout);
+      const shell = node("main", "report-main"); renderTabs(shell);
+      if (!run) {
+        if (state.tab === "review") renderQualityOnly(shell, quality);
+        else {
+          const content = node("div", "report-content standalone"); content.setAttribute("role", "tabpanel");
+          if (state.tab === "explore" && quality) renderQualityFiles(content, quality);
+          else content.append(node("div", "empty", "This entry has no coverage run, so there are no tests to show."));
+          shell.append(content);
+        }
+      } else if (state.tab === "review") renderHero(shell, run);
       else { const content = node("div", "report-content standalone"); content.setAttribute("role", "tabpanel"); if (state.tab === "explore") renderExplore(content, run); else renderTests(content, run); shell.append(content); }
-      layout.append(shell); app.append(layout); syncThemeUi();
+      layout.append(shell); app.append(layout);
+      const prompt = renderPrompt(); if (prompt) app.append(prompt);
+      syncThemeUi();
     }
 
     async function load() {
@@ -1106,9 +1406,19 @@
         const binary = atob(payload); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
         const bundle = await new Response(stream).json();
-        if (bundle.schemaVersion !== 1 || !Array.isArray(bundle.runs) || !bundle.runs.length) throw new Error("The embedded report data is incompatible or empty.");
-        state.bundle = bundle; state.runId = bundle.selectedRunId; state.compareId = bundle.comparisonRunId || null; readHash();
-        if (state.runId !== bundle.selectedRunId || state.compareId === state.runId) state.compareId = previousRunId(state.runId);
+        // A report may carry assessments and no runs, so the timeline is what
+        // must not be empty.
+        if (bundle.schemaVersion !== 2 || !Array.isArray(bundle.timeline) || !bundle.timeline.length) throw new Error("The embedded report data is incompatible or empty.");
+        state.bundle = bundle;
+        state.itemId = bundle.selectedId;
+        state.runId = bundle.selectedRunId || null;
+        state.compareId = bundle.comparisonRunId || null;
+        readHash();
+        const item = currentItem();
+        state.itemId = item.id;
+        state.runId = item.runId || null;
+        if (state.runId && (state.runId !== bundle.selectedRunId || state.compareId === state.runId)) state.compareId = previousRunId(state.runId);
+        if (!state.runId) state.compareId = null;
         render();
       } catch (error) {
         app.replaceChildren(); const fatal = node("div", "fatal"); fatal.append(node("h1", "", "Could not open this report"), node("p", "muted", error instanceof Error ? error.message : String(error)), node("p", "small muted", "The file stays private and no network request was attempted.")); app.append(fatal);
