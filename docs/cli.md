@@ -59,9 +59,14 @@ but it does not lead. There is no local average, weight, or score penalty.
 Maintainability and readability are agreement judgments on four levels, worded
 against the human rating instruments they were compared with; the other seven
 constructs use five levels with concrete conditions for weak and strong grades.
-Against professional maintainability ratings of Java classes, **given two files
+Against professional maintainability ratings of Java classes, given two files
 the raters clearly separate, the ranking picks the harder one 85 to 96 times in
-100, where file size alone manages 74 to 88**. On 200 Python functions rated by
+100, where file size alone manages 74 to 88. **It does not beat the static
+metrics that are already free**: on 80 classes joined to the ICSME 2024
+benchmark it orders clear pairs correctly 90.2% of the time and a count of
+statements in the file gets 90.3%, with cyclomatic complexity at 86.5%,
+CodeScene Code Health at 84.4% and SonarQube's debt ratio at 57.3%. Treat this
+ranking as orientation, not as a reason to prefer it over a parser. On 200 Python functions rated by
 three people each it agrees at 0.50 where source length manages 0.32. The nine
 constructs are not nine independent judgments: maintainability, readability and
 changeability correlate at 0.89 to 0.97 with each other in both languages, and
