@@ -100,6 +100,18 @@ npx supercov -- npm test
 npx supercov diff <previous-run-id> latest
 ```
 
+Want to hand the evidence to a person? Generate one private, interactive file:
+
+```bash
+npx supercov report
+```
+
+The report opens in your browser with up to ten recent runs in a visual history.
+Selecting a run compares it with the previous snapshot automatically. It has no
+server, external assets, account, or file picker. You can attach
+`supercov-report.html` directly to a pull request; a reviewer downloads that one
+file and double-clicks it.
+
 Use whichever complete test command the repository already trusts:
 
 ```bash
@@ -284,6 +296,9 @@ npx supercov runs latest line app/checkout/session.ts:64
 
 # What changed between two runs
 npx supercov diff <previous-run-id> latest
+
+# A portable interactive report for a person
+npx supercov report
 ```
 
 Collections accept `--limit` and `--offset` and print a copyable next-page command. Machine-readable output is available with `--json` when an integration needs it.
@@ -313,6 +328,7 @@ npx supercov clean             # remove all runs and the build cache
 - [Supported languages and test suites](https://supercov.com/docs/supported-suites)
 - [Understanding coverage](https://supercov.com/docs/coverage-model)
 - [Runs and evidence](https://supercov.com/docs/evidence)
+- [Portable HTML reports](https://supercov.com/docs/reports)
 - [Files, privacy, and cleanup](https://supercov.com/docs/workspace-isolation)
 - [Trusting a result](https://supercov.com/docs/verification)
 - [Speed and storage](https://supercov.com/docs/performance)

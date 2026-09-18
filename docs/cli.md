@@ -21,6 +21,7 @@ npx supercov --help
 | Inspect one assertion and its flows | `npx supercov runs latest assertion <id>` |
 | Read matching current source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
+| Open an interactive report | `npx supercov report` |
 | Find the tests a change affects | `npx supercov runs latest tests affected` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
@@ -339,6 +340,30 @@ The same filters can focus a comparison:
 ```sh supercov
 npx supercov diff <older-run> <newer-run> --kind e2e
 ```
+
+## Generate a portable HTML report
+
+```sh
+npx supercov report
+npx supercov report <run-id>
+npx supercov report latest --compare <older-run-id>
+```
+
+`report` turns stored local evidence into one self-contained interactive HTML
+file and opens it in the default browser. It does not rerun tests, start a
+server, load external assets, or upload anything. The default report includes
+up to ten recent runs. Selecting a run compares it with the previous saved run
+automatically.
+
+```sh
+npx supercov report --runs 5
+npx supercov report --output artifacts/supercov-report.html --no-open
+```
+
+Use `--runs N` to include up to 20 stored runs. Reports are capped at 24 MB so
+they remain suitable for a normal pull-request attachment; use `--runs 1` if a
+large project exceeds that target. See [Portable HTML reports](reports.md) for
+the privacy and source-integrity rules.
 
 ## Find a smaller test set
 
