@@ -88,7 +88,16 @@ npx supercov runs latest line app/checkout/session.ts:64
 outcomes and MC/DC witnesses. `line` shows the obligations and tests associated
 with one source line.
 
-### 4. Add a test and prove the gain
+#For a human review, create one interactive file from the same stored evidence:
+
+```sh
+npx supercov report
+```
+
+It opens locally with run comparison, prioritized gaps, source context, test
+attribution, and scope. No test rerun or server is required.
+
+## 4. Add a test and prove the gain
 
 The agent writes one focused test with a meaningful assertion. It then reruns
 the same complete command and compares the two runs:

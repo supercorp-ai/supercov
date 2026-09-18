@@ -46,6 +46,7 @@ use time::{OffsetDateTime, macros::format_description};
 
 mod assertions_human;
 mod assertions_query;
+mod html_report;
 mod human_query;
 mod public_query;
 mod quality;
@@ -83,6 +84,7 @@ Check what the tests assert:
 
 Compare, combine, and maintain:
   supercov diff <older> <newer>        compare two runs
+  supercov report [run-id]             open a portable interactive HTML report
   supercov merge <id> <id> [...]       combine compatible runs
   supercov runs clean [--keep N]       remove stored runs (all by default)
   supercov quality clean [--keep N]    remove saved assessments
@@ -107,6 +109,7 @@ const DOC_TOPICS: &[&str] = &[
     "supported-suites",
     "verification",
     "performance",
+    "reports",
     "workspace-isolation",
 ];
 
@@ -323,6 +326,7 @@ fn main() -> ExitCode {
             }
         }
         Some("diff") => public_query_command("diff", arguments.collect()),
+        Some("report") => html_report::report_command(arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
