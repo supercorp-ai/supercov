@@ -13,8 +13,10 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 mod aggregate;
+mod changes;
 mod declarations;
 mod query;
+mod smells;
 mod store;
 
 const MODEL: &str = "jev-1.13.0";
@@ -65,6 +67,13 @@ Usage:
   supercov quality functions <path> --deepen          grade those declarations
   supercov quality function <file>::<name> [snapshot] one declaration
   supercov quality diff <snapshot> <snapshot>         what changed between two
+  supercov quality health [file-or-directory ...]     score code by named properties
+  supercov quality review [file-or-directory ...]     what a change introduced
+
+Change range (quality review), pick one:
+  --unstaged          Working tree against the index (default)
+  --staged            Index against HEAD: what a commit would contain
+  --since <ref>       Working tree against a commit, branch or tag
 
 Scan options:
   --json              Print the report as JSON
@@ -172,6 +181,68 @@ enum Command {
         json: bool,
         limit: usize,
     },
+    /// Score files by the named-property catalog rather than the rubric.
+    Health(Options),
+    /// Ask the same catalog what a change introduced.
+    Review {
+        range: changes::Range,
+        paths: Vec<PathBuf>,
+        json: bool,
+        refresh: bool,
+        limit: usize,
+    },
+}
+
+/// The change range, shared by any command that works on a change rather than
+/// on a tree. Kept separate from scan's options so a later command can take the
+/// same three flags without inheriting the rest.
+fn parse_review(arguments: Vec<String>) -> Result<Command, String> {
+    let (mut range, mut json, mut refresh, mut limit) = (None, false, false, None);
+    let mut paths = Vec::new();
+    let mut arguments = arguments.into_iter();
+    let set = |chosen: changes::Range, slot: &mut Option<changes::Range>| match slot {
+        Some(existing) if *existing != chosen => {
+            Err("pick one change range: --unstaged, --staged or --since <ref>".to_string())
+        }
+        slot => {
+            *slot = Some(chosen);
+            Ok(())
+        }
+    };
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--json" => json = true,
+            "--refresh" => refresh = true,
+            "--unstaged" => set(changes::Range::Unstaged, &mut range)?,
+            "--staged" | "--cached" => set(changes::Range::Staged, &mut range)?,
+            "--since" => {
+                let reference = arguments
+                    .next()
+                    .ok_or("--since needs a commit, branch or tag")?;
+                set(changes::Range::Since(reference), &mut range)?;
+            }
+            "--limit" => {
+                limit = Some(
+                    arguments
+                        .next()
+                        .ok_or("--limit needs a number")?
+                        .parse::<usize>()
+                        .map_err(|_| "--limit needs a number")?,
+                );
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown option {other} for quality review"));
+            }
+            other => paths.push(PathBuf::from(other)),
+        }
+    }
+    Ok(Command::Review {
+        range: range.unwrap_or(changes::Range::Unstaged),
+        paths,
+        json,
+        refresh,
+        limit: limit.unwrap_or(20),
+    })
 }
 
 /// The first argument is a subcommand only when it is one of the reserved
@@ -185,6 +256,8 @@ fn parse(arguments: Vec<String>) -> Result<Command, String> {
         "snapshots" | "show" | "dimension" | "file" | "functions" | "function" | "diff" => {
             parse_view(subcommand, rest())
         }
+        "health" => Ok(Command::Health(parse_scan(rest())?)),
+        "review" => parse_review(rest()),
         _ => Ok(Command::Scan(parse_scan(arguments)?)),
     }
 }
@@ -1761,6 +1834,411 @@ fn deepen(
 
 /// A saved view: JSON for a program, text for a person. Reading never fails
 /// the command on the strength of what it found.
+/// One subject to ask the smell catalog about: a file as it stands, or a file
+/// before and after a change. Both produce the same twelve answers, so both
+/// travel through one sender.
+struct Subject {
+    path: String,
+    bytes: u64,
+    request: Value,
+    /// Set when this subject is not being asked the preferred question, so the
+    /// report can say the answer is weaker rather than look the same.
+    note: Option<String>,
+}
+
+/// Every answer for one subject, or why it has none.
+struct Answers {
+    path: String,
+    bytes: u64,
+    note: Option<String>,
+    values: Option<BTreeMap<String, f64>>,
+    cached: bool,
+    error: Option<String>,
+}
+
+/// Send every subject, a few at a time, reusing the scan cache and retry path.
+fn ask_smells(
+    root: &Path,
+    key: Option<&str>,
+    refresh: bool,
+    subjects: Vec<Subject>,
+    progress: bool,
+) -> (Vec<Answers>, Usage) {
+    let agent = client();
+    let mut pending = Vec::new();
+    let mut out: Vec<Answers> = Vec::new();
+    for (index, subject) in subjects.iter().enumerate() {
+        let sendable = within_budget(&subject.request);
+        let error = match &sendable {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(format!(
+                "over the {MAX_REQUEST_TOKENS} token request budget; a pair of versions \
+                 cannot be split into windows the way one file can"
+            )),
+            Err(e) => Some(e.clone()),
+        };
+        if let Ok(Some(bytes)) = sendable {
+            pending.push(((index, None), subject.request.clone(), bytes));
+        }
+        out.push(Answers {
+            path: subject.path.clone(),
+            bytes: subject.bytes,
+            note: subject.note.clone(),
+            values: None,
+            cached: false,
+            error,
+        });
+    }
+    let answered = answer_all(root, &agent, key, refresh, &pending, progress);
+    let mut usage = Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+    };
+    for ((index, _), result) in answered {
+        match result {
+            Ok((_, entry, hit, warning)) => {
+                usage.input_tokens += entry.response.usage.input_tokens;
+                usage.output_tokens += entry.response.usage.output_tokens;
+                out[index].values = Some(
+                    smells::catalog()
+                        .iter()
+                        .filter_map(|c| Some((c.id.clone(), noul(&entry.response, &c.id)?)))
+                        .collect(),
+                );
+                out[index].cached = hit;
+                out[index].error = warning;
+            }
+            Err(e) => out[index].error = Some(e),
+        }
+    }
+    (out, usage)
+}
+
+fn scored(answers: &Answers) -> Value {
+    match &answers.values {
+        Some(values) => json!({
+            "path": answers.path,
+            "bytes": answers.bytes,
+            "status": "completed",
+            "cached": answers.cached,
+            "health": smells::health(values),
+            "present": smells::present(values)
+                .into_iter()
+                .map(|(id, value)| json!({ "check": id, "value": value }))
+                .collect::<Vec<_>>(),
+            "checks": values,
+            "basis": answers.note.clone().unwrap_or_else(|| "both versions".into()),
+            "warning": answers.error,
+        }),
+        None => json!({
+            "path": answers.path,
+            "bytes": answers.bytes,
+            "status": "failed",
+            "error": answers.error,
+        }),
+    }
+}
+
+/// Health for every file, every directory that holds one, and the tree.
+fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool), String> {
+    let paths = discover(root, &options.paths)?;
+    let mut subjects = Vec::new();
+    let mut unreadable = Vec::new();
+    for path in &paths {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        match read_text(path) {
+            Ok(source) => subjects.push(Subject {
+                bytes: source.len() as u64,
+                request: smells::file_request(&relative, &source),
+                path: relative,
+                note: None,
+            }),
+            Err(e) => unreadable.push(json!({
+                "path": relative, "status": "failed", "error": e
+            })),
+        }
+    }
+    if options.dry_run {
+        return Ok((
+            json!({
+                "catalog_version": smells::CATALOG_VERSION, "model": MODEL,
+                "requests": subjects.iter().map(|s| &s.request).collect::<Vec<_>>(),
+            }),
+            false,
+        ));
+    }
+    let count = subjects.len();
+    let (answers, usage) = ask_smells(root, key, options.refresh, subjects, count > 4);
+
+    let mut weighted: Vec<(u64, f64)> = Vec::new();
+    let mut by_directory: BTreeMap<String, Vec<(u64, f64)>> = BTreeMap::new();
+    let mut files: Vec<Value> = Vec::new();
+    for answer in &answers {
+        if let Some(values) = &answer.values
+            && let Some(health) = smells::health(values)
+        {
+            weighted.push((answer.bytes, health));
+            // Every ancestor directory, so a tree can be read at any depth.
+            let mut directory = Path::new(&answer.path).parent();
+            while let Some(current) = directory {
+                by_directory
+                    .entry(current.to_string_lossy().replace('\\', "/"))
+                    .or_default()
+                    .push((answer.bytes, health));
+                directory = current.parent();
+            }
+        }
+        files.push(scored(answer));
+    }
+    files.sort_by(|a, b| {
+        let key = |v: &Value| v["health"].as_f64().unwrap_or(f64::MAX);
+        key(a).total_cmp(&key(b))
+    });
+    files.extend(unreadable);
+    let failed = files.iter().any(|f| f["status"] == "failed");
+
+    let directories: Vec<Value> = by_directory
+        .iter()
+        .filter(|(name, _)| !name.is_empty())
+        .filter_map(|(name, members)| {
+            Some(json!({
+                "path": name, "files": members.len(),
+                "bytes": members.iter().map(|(b, _)| b).sum::<u64>(),
+                "health": smells::aggregate(members)?,
+            }))
+        })
+        .collect();
+
+    Ok((
+        json!({
+            "catalog_version": smells::CATALOG_VERSION,
+            "model": MODEL,
+            "catalog": smells::described(),
+            "health": smells::aggregate(&weighted),
+            "files_scored": weighted.len(),
+            "bytes": weighted.iter().map(|(b, _)| b).sum::<u64>(),
+            "usage": usage,
+            "directories": directories,
+            "files": files,
+        }),
+        failed,
+    ))
+}
+
+/// What a change introduced, file by file.
+fn run_review(
+    root: &Path,
+    range: &changes::Range,
+    paths: &[PathBuf],
+    refresh: bool,
+    key: Option<&str>,
+) -> Result<(Value, bool), String> {
+    let collected = changes::collect(root, range, paths)?;
+    let mut subjects = Vec::new();
+    let mut skipped = Vec::new();
+    for change in &collected {
+        if !change.reviewable() {
+            skipped.push(json!({
+                "path": change.path,
+                "reason": "a deletion cannot introduce anything",
+            }));
+            continue;
+        }
+        if !is_source(Path::new(&change.path)) {
+            skipped.push(json!({ "path": change.path, "reason": "not a source file" }));
+            continue;
+        }
+        // Both whole versions are the validated question. When they do not fit,
+        // the patch alone is asked instead and the report says so.
+        let whole = smells::change_request(&change.before, &change.after);
+        let (request, note) = match within_budget(&whole) {
+            Ok(Some(_)) => (whole, None),
+            _ if !change.patch.is_empty() => (
+                smells::patch_request(&change.patch),
+                Some("unified diff only: both versions exceed the request budget".to_owned()),
+            ),
+            _ => (whole, None),
+        };
+        subjects.push(Subject {
+            bytes: change.after.len() as u64,
+            request,
+            path: change.path.clone(),
+            note,
+        });
+    }
+    let count = subjects.len();
+    let (answers, usage) = ask_smells(root, key, refresh, subjects, count > 4);
+    let mut introduced = 0usize;
+    let files: Vec<Value> = answers
+        .iter()
+        .map(|answer| {
+            let mut value = scored(answer);
+            if let Some(values) = &answer.values {
+                let fired = smells::present(values);
+                introduced += fired.len();
+                // Health is a property of a file, not of a change; what a review
+                // reports is which properties appeared.
+                value["health"] = Value::Null;
+                value["introduced"] = json!(fired.len());
+            }
+            value
+        })
+        .collect();
+    let mut ordered = files;
+    ordered.sort_by(|a, b| {
+        b["introduced"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&a["introduced"].as_u64().unwrap_or(0))
+            .then_with(|| a["path"].as_str().cmp(&b["path"].as_str()))
+    });
+    let failed = ordered.iter().any(|f| f["status"] == "failed");
+    Ok((
+        json!({
+            "catalog_version": smells::CATALOG_VERSION,
+            "model": MODEL,
+            "catalog": smells::described(),
+            "range": range.id(),
+            "range_description": range.describe(),
+            "head": changes::head(root),
+            "changed_files": collected.len(),
+            "reviewed_files": count,
+            "introduced": introduced,
+            "skipped": skipped,
+            "usage": usage,
+            "files": ordered,
+        }),
+        failed,
+    ))
+}
+
+/// The caveat that belongs next to any number this catalog produces.
+const SMELL_CAVEAT: &str = "Named-property assessment, experimental and advisory. Each check is a \
+model judgment you can verify against the file.\nHealth is arithmetic over those checks, done here \
+and not by the model. It correlates strongly with file size.\n";
+
+fn health_line(value: &Value) -> String {
+    match value.as_f64() {
+        Some(health) => format!("{health:.1}/10"),
+        None => "—".into(),
+    }
+}
+
+fn human_health(report: &Value) -> String {
+    let mut out = String::new();
+    out.push_str(SMELL_CAVEAT);
+    out.push_str(&format!(
+        "Catalog {}, model {}.\n\n",
+        report["catalog_version"].as_str().unwrap_or("?"),
+        report["model"].as_str().unwrap_or("?")
+    ));
+    out.push_str(&format!(
+        "Health {} over {} files, {} bytes.\n\n",
+        health_line(&report["health"]),
+        report["files_scored"].as_u64().unwrap_or(0),
+        report["bytes"].as_u64().unwrap_or(0)
+    ));
+    let empty = Vec::new();
+    let files = report["files"].as_array().unwrap_or(&empty);
+    if !files.is_empty() {
+        out.push_str("Weakest first:\n");
+    }
+    for file in files.iter().take(20) {
+        if file["status"] == "failed" {
+            out.push_str(&format!(
+                "  {:>7}  {}  ({})\n",
+                "failed",
+                file["path"].as_str().unwrap_or("?"),
+                file["error"].as_str().unwrap_or("unknown error")
+            ));
+            continue;
+        }
+        let fired: Vec<&str> = file["present"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .filter_map(|p| p["check"].as_str())
+            .collect();
+        out.push_str(&format!(
+            "  {:>7}  {}\n",
+            health_line(&file["health"]),
+            file["path"].as_str().unwrap_or("?")
+        ));
+        if !fired.is_empty() {
+            out.push_str(&format!("           {}\n", fired.join(", ")));
+        }
+    }
+    if files.len() > 20 {
+        out.push_str(&format!("  ... and {} more\n", files.len() - 20));
+    }
+    out
+}
+
+fn human_review(report: &Value, limit: usize) -> String {
+    let empty = Vec::new();
+    let mut out = String::new();
+    out.push_str(SMELL_CAVEAT);
+    out.push_str(&format!(
+        "Reviewing {}.\n\n",
+        report["range_description"].as_str().unwrap_or("a change")
+    ));
+    let reviewed = report["reviewed_files"].as_u64().unwrap_or(0);
+    let introduced = report["introduced"].as_u64().unwrap_or(0);
+    if reviewed == 0 {
+        out.push_str("No changed source files to review.\n");
+        return out;
+    }
+    if introduced == 0 {
+        out.push_str(&format!(
+            "Nothing introduced across {reviewed} changed files.\n"
+        ));
+    }
+    let files = report["files"].as_array().unwrap_or(&empty);
+    let shown = if limit == 0 { files.len() } else { limit };
+    for file in files.iter().take(shown) {
+        if file["status"] == "failed" {
+            out.push_str(&format!(
+                "  failed  {}  ({})\n",
+                file["path"].as_str().unwrap_or("?"),
+                file["error"].as_str().unwrap_or("unknown error")
+            ));
+            continue;
+        }
+        let fired = file["present"].as_array().unwrap_or(&empty);
+        if fired.is_empty() {
+            continue;
+        }
+        let basis = file["basis"].as_str().unwrap_or("both versions");
+        out.push_str(&format!("{}\n", file["path"].as_str().unwrap_or("?")));
+        if basis != "both versions" {
+            out.push_str(&format!("  ({basis})\n"));
+        }
+        for finding in fired {
+            out.push_str(&format!(
+                "  {:.2}  {}\n",
+                finding["value"].as_f64().unwrap_or(0.0),
+                finding["check"].as_str().unwrap_or("?")
+            ));
+        }
+        out.push('\n');
+    }
+    if files.len() > shown {
+        out.push_str(&format!(
+            "... and {} more changed files\n",
+            files.len() - shown
+        ));
+    }
+    let skipped = report["skipped"].as_array().unwrap_or(&empty).len();
+    if skipped > 0 {
+        out.push_str(&format!("{skipped} changed files not reviewed.\n"));
+    }
+    out
+}
+
 fn present(view: Value, json: bool) -> Result<bool, String> {
     if json {
         println!(
@@ -1878,6 +2356,38 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
                 json,
                 limit,
             } => present(query::diff(&root, &from, &to, limit)?, json),
+            Command::Health(options) => {
+                let key = std::env::var("TYPESAFE_API_KEY").ok();
+                let (report, failed) = run_health(&root, &options, key.as_deref())?;
+                if options.json || options.dry_run {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                    );
+                } else {
+                    print!("{}", human_health(&report));
+                }
+                Ok(failed)
+            }
+            Command::Review {
+                range,
+                paths,
+                json,
+                refresh,
+                limit,
+            } => {
+                let key = std::env::var("TYPESAFE_API_KEY").ok();
+                let (report, failed) = run_review(&root, &range, &paths, refresh, key.as_deref())?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                    );
+                } else {
+                    print!("{}", human_review(&report, limit));
+                }
+                Ok(failed)
+            }
         }
     })();
     match result {

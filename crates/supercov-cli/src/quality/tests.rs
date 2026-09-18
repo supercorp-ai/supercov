@@ -1717,3 +1717,280 @@ fn every_request_gets_its_own_answer_back_when_they_are_sent_together() {
         20
     );
 }
+
+// ---- named-property catalog -------------------------------------------------
+
+fn values(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
+    pairs.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()
+}
+
+#[test]
+fn catalog_parses_and_holds_only_checks_the_evidence_kept() {
+    let catalog = smells::catalog();
+    assert_eq!(catalog.len(), 12);
+    let ids: Vec<&str> = catalog.iter().map(|c| c.id.as_str()).collect();
+    // Cut for firing on everything rather than for being wrong, and for never
+    // firing at all. Re-adding one silently would undo a measured decision.
+    for gone in ["mixed_abstraction", "comment_deodorant", "data_class"] {
+        assert!(!ids.contains(&gone), "{gone} was cut from the catalog");
+    }
+    for check in catalog {
+        assert!(!check.task.is_empty() && !check.present.is_empty());
+        assert!(!check.absent.is_empty() && !check.evidence.is_empty());
+    }
+}
+
+#[test]
+fn health_is_ten_when_nothing_fires_and_zero_when_everything_does() {
+    assert_eq!(
+        smells::health(&values(&[("a", 0.0), ("b", 0.0)])),
+        Some(10.0)
+    );
+    assert_eq!(
+        smells::health(&values(&[("a", 1.0), ("b", 1.0)])),
+        Some(0.0)
+    );
+    assert_eq!(
+        smells::health(&values(&[("a", 0.0), ("b", 1.0)])),
+        Some(5.0)
+    );
+    assert_eq!(smells::health(&BTreeMap::new()), None);
+}
+
+#[test]
+fn health_uses_the_mean_so_the_scale_survives_a_catalog_change() {
+    // Two checks at 0.5 and four checks at 0.5 are the same health. A sum would
+    // make the number mean something different after a check is added.
+    let two = smells::health(&values(&[("a", 0.5), ("b", 0.5)]));
+    let four = smells::health(&values(&[("a", 0.5), ("b", 0.5), ("c", 0.5), ("d", 0.5)]));
+    assert_eq!(two, four);
+}
+
+#[test]
+fn present_reports_only_what_fired_strongest_first() {
+    let fired = smells::present(&values(&[
+        ("low", 0.49),
+        ("high", 0.91),
+        ("edge", 0.5),
+        ("mid", 0.7),
+    ]));
+    let names: Vec<&str> = fired.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(names, ["high", "mid", "edge"]);
+}
+
+#[test]
+fn aggregate_weights_by_size_so_small_files_cannot_outvote_the_code() {
+    // Nine tiny perfect files and one large bad one: a plain average would call
+    // this healthy, which is the failure weighting exists to prevent.
+    let mut files = vec![(10u64, 10.0f64); 9];
+    files.push((10_000, 0.0));
+    let weighted = smells::aggregate(&files).unwrap();
+    assert!(weighted < 0.1, "byte-weighted health was {weighted}");
+    assert_eq!(smells::aggregate(&[]), None);
+}
+
+#[test]
+fn a_change_request_sends_exactly_the_two_versions() {
+    // The wrapped shape measurably weakened detection. If this test fails the
+    // request is no longer the one the evidence was gathered on.
+    let request = smells::change_request("old", "new");
+    let state = request["state"].as_object().unwrap();
+    assert_eq!(state.len(), 2);
+    assert_eq!(state["before"], "old");
+    assert_eq!(state["after"], "new");
+    assert_eq!(request["questions"].as_object().unwrap().len(), 12);
+}
+
+#[test]
+fn change_questions_ask_what_appeared_and_file_questions_do_not() {
+    let change = smells::change_questions();
+    let file = smells::file_questions();
+    let task = |q: &Value| q["instructions"]["task"].as_str().unwrap().to_owned();
+    assert!(task(&change["deep_nesting"]).contains("does `after` show the following"));
+    assert!(!task(&file["deep_nesting"]).contains("`after`"));
+    // The underlying question is the same one in both forms.
+    assert!(task(&change["deep_nesting"]).ends_with(&task(&file["deep_nesting"])));
+}
+
+#[test]
+fn a_file_request_names_the_path_but_a_change_request_does_not() {
+    let file = smells::file_request("src/a.rs", "fn a() {}");
+    assert_eq!(file["state"]["file"]["path"], "src/a.rs");
+    assert_eq!(file["state"]["file"]["source"], "fn a() {}");
+}
+
+// ---- change ranges ----------------------------------------------------------
+
+#[test]
+fn review_defaults_to_unstaged_and_accepts_each_range() {
+    let parse_range = |args: &[&str]| match parse(
+        std::iter::once("review")
+            .chain(args.iter().copied())
+            .map(str::to_owned)
+            .collect(),
+    ) {
+        Ok(Command::Review { range, .. }) => Ok(range),
+        Ok(_) => panic!("review did not parse as a review"),
+        Err(e) => Err(e),
+    };
+    assert_eq!(parse_range(&[]).unwrap(), changes::Range::Unstaged);
+    assert_eq!(parse_range(&["--staged"]).unwrap(), changes::Range::Staged);
+    assert_eq!(parse_range(&["--cached"]).unwrap(), changes::Range::Staged);
+    assert_eq!(
+        parse_range(&["--since", "main"]).unwrap(),
+        changes::Range::Since("main".into())
+    );
+    assert!(parse_range(&["--since"]).is_err());
+    assert!(parse_range(&["--staged", "--since", "main"]).is_err());
+    // Naming the same range twice is not a conflict.
+    assert!(parse_range(&["--staged", "--cached"]).is_ok());
+    assert!(parse_range(&["--nonsense"]).is_err());
+}
+
+#[test]
+fn review_takes_paths_and_a_limit() {
+    match parse(
+        ["review", "--limit", "3", "src", "docs/a.md"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    ) {
+        Ok(Command::Review { paths, limit, .. }) => {
+            assert_eq!(limit, 3);
+            assert_eq!(
+                paths,
+                vec![PathBuf::from("src"), PathBuf::from("docs/a.md")]
+            );
+        }
+        other => panic!("unexpected parse: {}", other.is_err()),
+    }
+}
+
+#[test]
+fn range_names_itself_the_same_way_every_run() {
+    assert_eq!(changes::Range::Unstaged.id(), "unstaged");
+    assert_eq!(changes::Range::Staged.id(), "staged");
+    assert_eq!(changes::Range::Since("v1".into()).id(), "since:v1");
+    assert!(changes::Range::Since("v1".into()).describe().contains("v1"));
+}
+
+fn git_in(root: &Path, arguments: &[&str]) {
+    let status = std::process::Command::new("git")
+        .current_dir(root)
+        .args(arguments)
+        .output()
+        .expect("git runs in tests");
+    assert!(
+        status.status.success(),
+        "git {:?}: {}",
+        arguments,
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn repository() -> Temp {
+    let temp = Temp::new();
+    git_in(&temp.0, &["init", "--quiet"]);
+    git_in(&temp.0, &["config", "user.email", "t@example.invalid"]);
+    git_in(&temp.0, &["config", "user.name", "Test"]);
+    git_in(&temp.0, &["config", "commit.gpgsign", "false"]);
+    temp
+}
+
+#[test]
+fn unstaged_compares_the_working_tree_with_the_index() {
+    let temp = repository();
+    temp.write("a.rs", "fn a() {}\n");
+    git_in(&temp.0, &["add", "a.rs"]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    temp.write("a.rs", "fn a() { let x = 1; }\n");
+
+    let found = changes::collect(&temp.0, &changes::Range::Unstaged, &[]).unwrap();
+    assert_eq!(found.len(), 1);
+    // before comes from the index, which is the committed text here. An earlier
+    // version built the revision spec as `::a.rs`, git failed, and the error was
+    // swallowed into an empty before: every property looked introduced.
+    assert_eq!(found[0].before, "fn a() {}\n");
+    assert_eq!(found[0].after, "fn a() { let x = 1; }\n");
+    assert!(found[0].reviewable());
+    assert!(found[0].patch.contains("let x = 1"));
+}
+
+#[test]
+fn staged_compares_the_index_with_head() {
+    let temp = repository();
+    temp.write("a.rs", "fn a() {}\n");
+    git_in(&temp.0, &["add", "a.rs"]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    temp.write("a.rs", "fn a() { staged(); }\n");
+    git_in(&temp.0, &["add", "a.rs"]);
+    // Working tree moves on again; --staged must not see this.
+    temp.write("a.rs", "fn a() { later(); }\n");
+
+    let found = changes::collect(&temp.0, &changes::Range::Staged, &[]).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].before, "fn a() {}\n");
+    assert_eq!(found[0].after, "fn a() { staged(); }\n");
+}
+
+#[test]
+fn since_compares_the_working_tree_with_a_named_commit() {
+    let temp = repository();
+    temp.write("a.rs", "fn a() {}\n");
+    git_in(&temp.0, &["add", "a.rs"]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    git_in(&temp.0, &["tag", "base"]);
+    temp.write("a.rs", "fn a() { two(); }\n");
+    git_in(&temp.0, &["add", "a.rs"]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "second"]);
+    temp.write("a.rs", "fn a() { three(); }\n");
+
+    let found = changes::collect(&temp.0, &changes::Range::Since("base".into()), &[]).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].before, "fn a() {}\n");
+    assert_eq!(found[0].after, "fn a() { three(); }\n");
+    assert!(changes::collect(&temp.0, &changes::Range::Since("nope".into()), &[]).is_err());
+}
+
+#[test]
+fn an_addition_has_no_previous_version_and_a_deletion_is_not_reviewed() {
+    let temp = repository();
+    temp.write("keep.rs", "fn keep() {}\n");
+    temp.write("gone.rs", "fn gone() {}\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    temp.write("new.rs", "fn added() {}\n");
+    fs::remove_file(temp.0.join("gone.rs")).unwrap();
+    git_in(&temp.0, &["add", "-A"]);
+
+    let found = changes::collect(&temp.0, &changes::Range::Staged, &[]).unwrap();
+    let by = |name: &str| found.iter().find(|c| c.path == name).unwrap();
+    assert_eq!(by("new.rs").kind, changes::Kind::Added);
+    assert!(by("new.rs").before.is_empty());
+    assert!(by("new.rs").reviewable());
+    assert_eq!(by("gone.rs").kind, changes::Kind::Deleted);
+    assert!(!by("gone.rs").reviewable(), "a deletion introduces nothing");
+}
+
+#[test]
+fn naming_a_directory_reviews_only_the_changes_inside_it() {
+    let temp = repository();
+    temp.write("src/a.rs", "fn a() {}\n");
+    temp.write("other/b.rs", "fn b() {}\n");
+    git_in(&temp.0, &["add", "."]);
+    git_in(&temp.0, &["commit", "--quiet", "-m", "first"]);
+    temp.write("src/a.rs", "fn a() { one(); }\n");
+    temp.write("other/b.rs", "fn b() { two(); }\n");
+
+    let only = [PathBuf::from("src")];
+    let found = changes::collect(&temp.0, &changes::Range::Unstaged, &only).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].path, "src/a.rs");
+}
+
+#[test]
+fn review_outside_a_repository_says_so() {
+    let temp = Temp::new();
+    let error = changes::collect(&temp.0, &changes::Range::Unstaged, &[]).unwrap_err();
+    assert!(error.contains("Git repository"), "{error}");
+}

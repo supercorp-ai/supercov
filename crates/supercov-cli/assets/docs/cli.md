@@ -25,6 +25,8 @@ npx supercov --help
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
 | Assess source quality with TypeSafe AI | `npx supercov quality src/` |
+| Score code by named properties | `npx supercov quality health src/` |
+| Review what a change introduced | `npx supercov quality review --since main` |
 | Read bundled guides | `npx supercov docs` |
 
 ## Assess source quality (experimental)
@@ -347,6 +349,103 @@ grades do not fail the command. HTTP 429 and 5xx responses receive at most two
 retries with bounded backoff; long retry delays are returned to the caller.
 Line locations within a declaration, changed-file selection and failing CI
 grade gates are not implemented yet.
+
+## Score code by named properties (experimental)
+
+```sh
+npx supercov quality health src/
+npx supercov quality health --json src/
+```
+
+A different instrument from the rubric above. Rather than asking the model to
+place a file on a scale, this asks twelve yes/no questions about specific named
+properties, and the arithmetic that turns twelve answers into one number is done
+here rather than by the model. Every part of the score is therefore a claim you
+can check against the file in seconds.
+
+The checks are drawn from Fowler and Beck's refactoring smells and the
+class-scope smells CodeScene's Code Health is built from: god class, long
+method, deep nesting, complex conditional, long parameter list, duplicated
+logic, primitive obsession, dead code, feature envy, temporary field, message
+chains and magic values. `--json` carries the full catalog, including what is
+known about each check's accuracy.
+
+Health is `10` when nothing fires and `0` when everything does. It is the mean
+of the twelve answers, so the scale means the same thing if the catalog changes.
+Directory and repository health weight files by size, because a plain average
+would let a directory of one-line re-exports outvote the file everything depends
+on. **That weighting is arithmetic done by this command, not a judgment the
+model was asked for.** The per-file numbers it combines are model judgments.
+
+### What is known about this number
+
+On 272 Java classes carrying professional maintainability ratings, the composite
+orders size-matched pairs 78% the way the raters did, against CodeScene Code
+Health's 67%, a statement count's 58% and the Microsoft Maintainability Index's
+52%. Asked twice, a single check moves by a median of 0.01 and the composite by
+0.5% of its range.
+
+Three limits belong next to it and are not hidden:
+
+- The composite **correlates 0.92 with a statement count.** It is largely a size
+  measure whose residual is right, which is a weaker claim than the table above
+  sounds.
+- Its margin over Code Health is **somewhere between 7 and 11 points** and moves
+  by several points depending on which fifth of the corpus is dropped. The
+  margins over a statement count and the Maintainability Index are large and
+  stable.
+- **Six checks score as well as twelve.** These are not twelve measurements but
+  one measurement taken twelve times, so rewording checks does not improve the
+  number. Four were reworded after a blind reader found them failing, and the
+  composite moved by 0.4 points with an interval that includes zero.
+
+There is no cutoff. No threshold in this project has survived calibration, and
+this command does not fail a build.
+
+## Review what a change introduced (experimental)
+
+```sh
+npx supercov quality review                    # unstaged, the default
+npx supercov quality review --staged           # what a commit would contain
+npx supercov quality review --since main       # a branch, tag or commit
+npx supercov quality review --since main src/  # only changes under src/
+```
+
+The same twelve checks, asked about a change rather than a file: does the new
+version show this property where the old one did not. Both whole versions go
+into one request. A hunk alone cannot separate a property the change introduced
+from one the file already had, which is the entire question, so the extra tokens
+are the point.
+
+Output lists only the files where something appeared, and only the checks that
+fired, strongest first. A change that introduces nothing prints one line saying
+so. The three ranges exist because they are three different moments: before a
+commit, before a push, and on a pull request.
+
+### What is known about this
+
+Eight real files were each given one deliberately introduced smell. All eight
+were detected, seven of eight ranked the introduced property first, and there
+was **one false alarm across 312 control questions**: reformatting, playing the
+change backwards, and comparing a file with itself produced nothing at or above
+0.5, and nothing above 0.25. Cost is about **$0.0005 per changed file** for all
+twelve checks, since they share one copy of the two versions.
+
+This matters more than it sounds. Asked about a file, several of these checks
+fire on two thirds of everything and are useless as flags. Asked about a change,
+they stay quiet unless something changed.
+
+What is untested is a real pull request where a property arrived incidentally
+among unrelated edits. The eight edits above were constructed, and a deliberate
+four-level nest is a cleaner signal than nesting that grew over three years.
+
+### When both versions do not fit
+
+A file whose two versions exceed the request budget cannot be split into windows
+the way one file can, so the unified diff is sent instead and the report says
+`unified diff only` for that file. On one real change the diff alone scored 0.83
+where both versions scored 0.82, so it is a usable second choice, but it is one
+measurement and it is labelled rather than silently substituted.
 
 ## Measure a test command
 
