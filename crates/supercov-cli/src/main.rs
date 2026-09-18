@@ -75,7 +75,7 @@ Inspect a run with small, paginated answers:
   supercov runs <run-id> [resource]    query one immutable run
 
 Compare, combine, and maintain:
-  supercov quality <path>              assess source quality with TypeSafe AI
+  supercov quality [path]              code quality powered by Jev
   supercov diff <older> <newer>        compare two runs
   supercov merge <id> <id> [...]       combine compatible runs
   supercov clean [--keep N]            remove stored runs (all by default)

@@ -12,6 +12,16 @@ added and the before-and-after coverage.
 Your agent can install Supercov if needed. It runs the commands and edits the
 tests; you don't need to do those steps yourself.
 
+To score the code itself rather than its tests, set a [Jev](https://typesafe.ai)
+key and ask:
+
+```sh supercov-example
+export TYPESAFE_API_KEY=...
+npx supercov quality
+```
+
+See [Understanding quality](https://supercov.com/docs/quality).
+
 When it finishes, review the test change and coverage comparison in your
 conversation. Ask separately if you want a commit or pull request.
 

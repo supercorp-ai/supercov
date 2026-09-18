@@ -1,7 +1,7 @@
 {
   "name": "supercov",
   "version": "0.0.55",
-  "description": "Coverage for coding agents and software factories \ud83c\udf19",
+  "description": "Code quality and coverage for coding agents",
   "license": "MIT",
   "repository": {
     "type": "git",

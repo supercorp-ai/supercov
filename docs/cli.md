@@ -24,7 +24,7 @@ npx supercov --help
 | Find the tests a change affects | `npx supercov runs latest tests affected` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
-| Assess source quality with TypeSafe AI | `npx supercov quality` |
+| Assess code quality with Jev | `npx supercov quality` |
 | See only files with findings | `npx supercov quality gaps` |
 | Review what a change introduced | `npx supercov quality patch` |
 | Read bundled guides | `npx supercov docs` |
