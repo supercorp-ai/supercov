@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1
+
+**Changed**
+
+- `supercov` with no arguments names the product and leads with quality. Quality, coverage and assertions each get a section in the same shape, in that order, replacing the two paragraphs about passing a test command and the lone pointer to the assertion map schema.
+- Getting started opens on a score, with a prompt to paste rather than a shell export, and the starter prompt everywhere is now `Measure code quality with npx supercov and show me the weakest files.`
+
 ## 1.0.0
 
 **Added**
