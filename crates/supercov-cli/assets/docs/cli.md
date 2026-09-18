@@ -31,327 +31,6 @@ npx supercov --help
 
 ## Assess source quality (experimental)
 
-```sh
-supercov quality src/server.ts --dry-run
-supercov quality src/ --json
-supercov quality src/server.ts --context contracts.md
-supercov quality src/server.ts --refresh
-supercov quality src/ --review-below 5
-```
-
-Set `TYPESAFE_API_KEY` in your environment for uncached assessments. This command
-sends the selected source files and optional context to TypeSafe AI. It does not
-run tests, instrument code, or require a coverage run. `--dry-run` prints the exact
-request bodies as JSON without making API calls or writing cache files.
-
-Whole files receive nine independent Jev scores: maintainability, readability,
-correctness, input validation, failure handling, state integrity, cohesion,
-changeability, and overall. Each file is sent once as plain source text inside a
-named state object, with those nine Score questions and one Noul question about
-behavioral context sufficiency. The pinned model is `jev-1.13.0`; the rubric is
-`quality-v3`.
-
-Every displayed score, including overall, is Jev's own judgment, scaled from its
-rubric levels to 0–10. **A file's headline is its maintainability**, not the
-broad `overall` answer, which is the weakest construct in the rubric: against
-50 human-rated Java classes it reached 0.46 where maintainability reached 0.74
-and file size alone reached 0.60, and on 200 Python functions it reached 0.30
-against readability's 0.50. It is still reported, and still Jev's own answer,
-but it does not lead. There is no local average, weight, or score penalty.
-Maintainability and readability are agreement judgments on four levels, worded
-against the human rating instruments they were compared with; the other seven
-constructs use five levels with concrete conditions for weak and strong grades.
-Against professional maintainability ratings of Java classes, given two files
-the raters clearly separate, the ranking picks the harder one 85 to 96 times in
-100, where file size alone manages 74 to 88. **It does not beat the static
-metrics that are already free**: on 80 classes joined to the ICSME 2024
-benchmark it orders clear pairs correctly 90.2% of the time and a count of
-statements in the file gets 90.3%, with cyclomatic complexity at 86.5%,
-CodeScene Code Health at 84.4% and SonarQube's debt ratio at 57.3%. Treat this
-ranking as orientation, not as a reason to prefer it over a parser. On 200 Python functions rated by
-three people each it agrees at 0.50 where source length manages 0.32. The nine
-constructs are not nine independent judgments: maintainability, readability and
-changeability correlate at 0.89 to 0.97 with each other in both languages, and
-no construct adds agreement with the human reference once maintainability is
-known.
-
-**This ranks code by how hard it is to work with. It does not predict where
-bugs are or were**, and that boundary has been measured twice. Across twelve
-real upstream fixes, the declaration a maintainer changed ranked weakest 5
-times out of 12 against 3.77 by chance. Across four years of one TypeScript
-project's history, 1,029 author-declared fix commits over 186 files, the
-correlation between a file's grade and the fixes it received disappears once
-file size is held constant, falling from −0.41 to +0.02. What people call hard
-to maintain and where bugs get fixed are different things. Refactors in that
-same history behave differently: holding size constant, poorly graded files
-attract more refactoring and optimisation and fewer features, which is what a
-maintainability signal should look like and not what a size proxy would
-produce.
-
-These judgments are not measured coverage, probabilities of correctness, or a
-security audit. The overall answer is independent; a high overall score can
-coexist with a weak individual axis.
-
-Files are listed weakest maintainability first, then weakest readability, then
-Jev's overall answer. **A difference under 1 point is not one this rubric has
-been shown to resolve**, and the listings say so: a reader who could not see
-the grades agreed with 10 of 10 blinded pairs separated by more than three
-points, and 7 of 10 separated by less than one, where chance is 5. In the
-`dimension` view, files within one point of the weakest are marked, because
-their order among themselves carries nothing. **Maintainability is the only construct with a review
-cutoff**, at 6.9, selected on 20 human-rated Java development classes. It has
-since held up on 40 further classes and on 31 that no rubric had graded, where
-it caught every negative class, and on 200 Python functions from 128
-repositories that humans rated adequate or better it flagged 35, a false-alarm
-rate of 17.5% against the 20% this project set as its bar. Every other construct is ranked and never
-marked. The readability cutoff of 7.775 was withdrawn on 2026-09-18: on those
-31 unused classes it flagged 87% of a sample that was 45% negative, its
-agreement fell across all three samples that tested it, and on the 200 Python
-functions it would have flagged 26.5% where nothing was rated badly. `--review-below <n>`
-replaces every construct's cutoff with `n` (range 0–10). Cutoffs decide markers
-only: they never change a score, no marker fails the command, and none of them
-is a validated defect boundary.
-Scores remain visible at low confidence or when context is missing. Every score
-shows its provider confidence. **Confidence says how concentrated an answer
-was, which predicts how much it would move if asked again, not whether it is
-right.** It correlates with repeat movement at −0.72, and a grade below 0.7
-confidence moves about four times as much between identical requests as one
-above. It does not separate good code from bad: on 31 Java classes the median
-confidence of the human-negative ones was 0.71 against 0.72 for the positives,
-and requiring confidence alongside the review cutoff lost ten of twenty-three
-real findings while removing no false alarms. Nothing in this command acts on
-confidence, deliberately. The report separately shows Jev's 0–1 judgment of
-behavioral context sufficiency. High scores with insufficient
-context do not establish the behavior of missing dependencies.
-
-Paths must be inside the current working directory. Directory scans respect
-`.gitignore` and `.ignore` files and omit hidden files and common build,
-dependency and generated directories. Explicit source files may be Git-ignored.
-Supported extensions include JS/TS, Rust, Python, Ruby, Go, Java/Kotlin, C/C++, C#,
-Swift and PHP. Symlink targets are rejected. Tests are included when selected;
-there is no automatic test or dependency retrieval. `--context` supplies a UTF-8
-contract document to every selected file, so keep it relevant to that selection.
-
-Source is never truncated. A request must stay within an estimated 30,000 tokens,
-counted as one token per three serialized bytes. That estimate is deliberately
-low: Rust source measured about 3.8 bytes per token, so most files well over
-80 KB still fit. A file over the budget is assessed as **windows** of whole
-declarations instead. Windows partition the file at declaration boundaries,
-descending into any declaration too large to send on its own, so a file holding
-a single large class splits at that class's methods rather than not at all.
-Every line belongs to exactly one window and no byte is sent twice; each window
-is graded on its own and states which lines it covers, and the file outline is
-supplied for orientation. A windowed file has **no whole-file grade**, because
-a file-wide construct such as cohesion cannot be judged from one window; it is
-ordered in the report by its weakest window, which is ordering rather than a
-grade. Window grades are not covered by the cutoff calibration above. A file
-over the budget with no declarations to split on, including any file in a
-language Supercov cannot parse, is reported as an error, as is a single
-declaration too large to send alone; its neighbouring windows are still
-assessed. Empty files are errors. Nothing larger than 4 MiB is read.
-
-### The repository judgment
-
-Once every file has been graded, Jev judges each directory and then the
-repository. It makes those judgments the same way it makes a file's: as answers
-to a rubric. What it reads is an inventory of what the scope holds and, for each
-part of it, **the rubric level Jev itself chose for that part, quoted word for
-word**. It never receives a score, a cutoff or an average. A repository grade is
-therefore Jev's own judgment, not our arithmetic over file grades, and the
-report says so in those terms.
-
-Scopes are judged deepest first, so a directory is one verdict by the time the
-scope above reads it. That is what lets a large repository be judged at all: a
-parent reads one verdict per child, not every file beneath it. A directory
-holding more children than fit in one request is judged in parts first, the way
-an oversized file is judged in windows. A directory that holds only one thing is
-not judged separately, since its verdict would simply be that thing's.
-
-Jev is also asked whether the supplied evidence is enough to judge the scope as
-a whole. **A grade is shown only when that answer is at least 0.5.** Below it,
-the report says the judgment was withheld and gives the number, and the grades
-stay in the JSON view rather than being deleted or quietly displayed. This gate
-exists because a bare inventory still produces a confident-looking number: asked
-to judge a repository from file names alone, Jev graded it 6.65 out of 10 while
-answering 0.13 to whether it had the basis to judge at all.
-
-Wider scopes carry **no review markers**. The file cutoff was selected on
-human-rated Java classes; nothing at directory or repository scope is calibrated
-against anything, so nothing there is marked.
-
-The repository judgment has been tested once, against five Java projects whose
-classes carry professional ratings. It ordered the best-rated and worst-rated
-projects correctly on both constructs, and a repository seeded with the dataset's
-worst classes fell on all three, so it reads its evidence. Two limits came out of
-the same test. Its range is compressed: across projects the raters placed far
-apart, its grades spanned about 1.6 points on maintainability and 0.9 on
-readability. And an offline average of the same file grades ordered all five
-projects correctly where the judgment misplaced one. Averaging is not what this
-command does, by design, because an average over file grades is arithmetic rather
-than a judgment; but the extra request has not been shown to order repositories
-better than one, and on five projects it could not be. Jev is additionally asked where
-behavioral risk sits, but only when a scope has between two and twelve children:
-a Choice ranks one option first however weak the evidence, and over 22 options
-that answer was measured at 0.25 confidence with "no clear one" tied for first.
-
-A single assessed file has no wider scope and produces no repository judgment.
-
-### Browse a saved assessment
-
-```sh
-supercov quality snapshots
-supercov quality show
-supercov quality dimension maintainability
-supercov quality file src/server.ts q_1a2b3c4d5e6f7890
-```
-
-Every scan saves an immutable snapshot and prints its id. The read commands
-above work entirely from what is on disk: no API call, no key, no new grade.
-A snapshot argument is optional and defaults to the most recent scan made in
-this directory; a scan never revises an earlier snapshot, so an id keeps
-showing what it showed.
-
-`show` gives the scan's header, the repository judgment or the reason it was
-withheld, each judged directory, each construct with how many files its cutoff
-marked and which file is weakest on it, and the files ranked weakest
-maintainability first. `dimension <construct>` ranks every file on one
-construct. `file <path>` opens one file: each construct's grade and confidence,
-**the rubric level Jev actually chose, in its own words**, the behavioral
-context and window judgments, and the file's top-level declarations, which are
-listed precisely because none of them was graded on its own yet.
-
-A windowed file has no whole-file grade, so a listing represents it by its
-weakest window and names that window. That is how the row is ordered and
-labelled, not a grade for the file.
-
-`--limit <n>` sets how many rows a listing shows, defaulting to 20, with `0`
-for all of them. `--json` prints the same view as JSON. The first argument is
-read as a subcommand only when it is one of the reserved words, so a directory
-called `show` is still assessable as `supercov quality scan show`.
-
-### Drill into one file's functions
-
-```sh
-supercov quality functions src/server.ts
-supercov quality functions src/server.ts --deepen
-supercov quality function src/server.ts::createServer --source
-```
-
-A file's grade says the file deserves attention; it does not say where in the
-file to look. Deepening asks Jev about each function and method on its own,
-with the whole file supplied once as shared context, so a declaration is read
-where it actually lives rather than as a snippet. Every scan already records
-what a file declares, so `functions <path>` lists them with no API call: each
-one either carries its grades or says it has none and gives the command that
-would grade it. **A file's grade is never copied down onto its parts.**
-
-What counts as a declaration is every function and method the file declares,
-excluding closures nested inside them: a callback is part of the code that
-installs it, and grading it separately reports noise rather than a place to
-look. **Two constructs are graded here, readability and maintainability**, and
-Jev is separately asked whether the declaration is substantial enough for a
-separate judgment to say anything, which is what keeps a one-line accessor
-scoring well from reading as news. Every other construct stays a file-scope
-question.
-
-**This view ranks the declarations of a file by how hard they are to read and
-change. It does not say where a bug is.** Tested on twelve real upstream fixes
-from four npm packages, the declaration a maintainer changed ranked weakest on
-the relevant construct 5 times out of 12, against 3.77 expected by chance. A
-subtle defect in an otherwise careful function does not make that function read
-worse than a gnarlier neighbour.
-
-Correctness and failure handling were graded here until 2026-09-18 and were
-withdrawn by the same test. Reformatting a file without changing its parsed
-syntax tree moved those two by a median of 0.16 and 0.15 per declaration, while
-the real fixes moved the declaration they repaired by a median of 0.13: a grade
-that answers more to whitespace than to the defect is not evidence about the
-defect. The same reformatting moved readability and maintainability by a median
-of 0.03. Both withdrawn constructs remain file-scope questions, where the
-relevant one was measured rising for three of three independently reproduced
-fixes.
-
-`--deepen` saves a **child snapshot**, with the parent untouched and named in
-the child's manifest. Deepening a second file starts from the child, so the
-grades accumulate. It refuses to run when the file no longer holds the bytes
-that were graded, and `--source` refuses to print a changed file under a grade
-that describes different source. If the snapshot was assessed with a
-`--context` document, supply the same one to deepen it; only its hash is
-stored, so it cannot be assumed.
-
-Declarations carry no review markers either, for the same reason wider scopes
-do not: the cutoff was selected on whole human-rated classes. The Python
-transfer that came closest to this scope was explicitly exploratory, and the
-two constructs graded here have passed a stability test rather than an accuracy
-one.
-
-### Compare two snapshots
-
-```sh
-supercov quality diff q_332dd8d1bfd149f1 q_c0e9a3aba4f77eb8
-```
-
-Only snapshots of the same rubric, policy version and model can be compared;
-anything else would compare two different questions and call the difference a
-change in the code. The comparison sorts files into four groups, because they
-mean different things:
-
-- **Changed source.** The file's bytes differ, so a movement may be the edit.
-- **Same source, different grade.** An identical request is answered from
-  cache, so this only happens after `--refresh`: it is one question asked
-  twice, not a change in the code, and it is labelled that way.
-- **Newly assessed declarations.** A deepened child snapshot, where no grade
-  changed and grades were added.
-- **Unchanged.** Counted, not listed.
-
-Every movement carries its own size, and one no larger than **0.7** is marked
-as within the repeat variation measured for this rubric. That number is the
-largest difference seen between two identical requests when this rubric family
-was measured on real files, across 28 source snapshots and 8 constructs, where
-the median difference was 0.075. It is an observed maximum rather than a
-statistical threshold, and it is attached to a movement rather than hiding it.
-
-A real example: renaming a function's locals to single letters and deleting its
-error log moved readability by -2.67 and failure handling by -1.67, while five
-other constructs moved less than the repeat variation and were marked as such.
-The repository grade above that file moved -0.03, which is what one file out of
-twenty-two should do.
-
-Declarations are compared by name, so a declaration added or removed is
-reported, and one that was renamed reads as one of each. Nothing here detects a
-rename, because a snapshot stores the hash of its source rather than the source.
-
-Validated raw responses are cached in `.supercov/quality/requests/`, keyed by
-the exact request hash, including source, comments, context, model and question
-wording. Responses cached by an earlier version in `.supercov/quality/` itself
-are still read. Snapshots live in `.supercov/quality/snapshots/` and hold grades
-and identities, not copies of the provider's answers: they point into the
-response cache by request hash. A file view degrades gracefully when a cached
-answer has been deleted, losing the level wording but keeping the grades.
-Cache hits work without an API key. `--refresh` requests a new assessment.
-JSON reports contain source/request/context hashes, model and rubric versions,
-the snapshot id, the token budget, review policy with each construct's cutoff
-and its basis, raw answer distributions, per-axis scores and confidence,
-context sufficiency, review flags, window spans and declarations, the original
-assessment duration and token usage. `usage_this_run` counts successful fresh responses, excluding
-cache hits; it cannot account for provider billing on failed attempts. Full
-source and API credentials are not written to the cache.
-
-A scan prepares every request first and then sends eight at a time, so its
-speed is set by the provider rather than by the file count: Supercov's own 141
-source files, about 5 MB, take 24 seconds and $0.085 cold, and 7 seconds and
-nothing when every answer is already cached. Wider scopes are judged after the
-files and in order, since each one reads the verdicts below it.
-
-Exit status is 0 for a completed report (including review flags and uncertain judgments), or 2 for
-invalid input or any file/API error. Partial results remain in the report. Low
-grades do not fail the command. HTTP 429 and 5xx responses receive at most two
-retries with bounded backoff; long retry delays are returned to the caller.
-Line locations within a declaration, changed-file selection and failing CI
-grade gates are not implemented yet.
-
-## Assess code quality (experimental)
-
 ```sh supercov-example
 supercov quality                 # this repository
 supercov quality src/            # one directory
@@ -363,6 +42,28 @@ supercov quality snapshots       # saved assessments
 With no argument the subject is the repository you are standing in, the way
 `supercov runs` needs no argument. Every assessment saves a snapshot, so the
 reading commands work afterwards with no key and no network.
+
+Twelve yes/no questions about specific named properties, drawn from Fowler and
+Beck's refactoring smells and the class-scope smells CodeScene's Code Health is
+built from: god class, long method, deep nesting, complex conditional, long
+parameter list, duplicated logic, primitive obsession, dead code, feature envy,
+temporary field, message chains and magic values. **The arithmetic that turns
+twelve answers into one number is done by this command, not by the model**, so
+every part of the score is a claim you can check against the file in seconds.
+`quality file <path>` shows all twelve with what is known about each.
+
+Text output reports a **band**, not a decimal, because the measured resolution
+of these judgments is about one point and `4.4/10` would claim precision nobody
+observed. `good` is 8 and above, `fair` is 5 to 8, `weak` is below 5. The number
+is in `--json`, where something has to sort.
+
+Directory and repository health weight files by size, because a plain average
+would let a directory of one-line re-exports outvote the file everything depends
+on. A file too large to send whole is split into windows at declaration
+boundaries and the strongest answer to each question wins, since every question
+is existential: "does this file contain a method that…" is true if any window
+has one. A windowed file says so, because a property of the whole file, such as
+logic duplicated across two windows, is weaker there.
 
 ### Which files are assessed
 
@@ -463,16 +164,23 @@ fired buries the finding that is news under the ones that are true of
 everything. Text output shows the three strongest per file and `quality file`
 shows the rest. There is no cutoff, and no assessment fails a build.
 
-### The older rubric
+### Compare two assessments
 
 ```sh supercov-example
-supercov quality rubric src/
+supercov quality snapshots
+supercov quality diff q_332dd8d1bfd149f1 q_c0e9a3aba4f77eb8
 ```
 
-Nine constructs placed on a scale by the model, which is what `quality` did
-before. It is kept behind its own verb because it orders human-rated classes
-90.2% correctly where **counting the statements in the file gets 90.3%**. The
-catalog above is the instrument this command now uses.
+This is the decline gate. It reports which files lost health, which gained,
+which properties appeared that were not there before, and which files entered or
+left the scope. Only snapshots of the same catalog version and model can be
+compared, because the questions would otherwise differ and the difference would
+be read as a change in the code.
+
+**A file whose bytes are identical in both snapshots is marked as such.** The
+same question was asked twice, so any movement is the model's own variation
+rather than an edit, and a reader should not go looking for a change that never
+happened.
 
 ## Review what a change introduced (experimental)
 
