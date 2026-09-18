@@ -133,7 +133,6 @@ struct TimelineItem {
     at: String,
     /// "paired", "run" or "quality".
     kind: &'static str,
-    source_fingerprint: Option<String>,
     run_id: Option<String>,
     quality_id: Option<String>,
 }
@@ -150,7 +149,9 @@ struct ReportQuality {
     instrument: String,
     catalog_version: String,
     model: String,
-    source_fingerprint: Option<String>,
+    /// The identity of what this assessment read. Not comparable with a run's
+    /// source fingerprint, which keys a build cache and covers a wider set.
+    assessed_files_fingerprint: Option<String>,
     health: Option<f64>,
     counts: serde_json::Value,
     /// Carries "no cutoffs" and "no failure on a finding", which is why this is
@@ -176,8 +177,10 @@ struct ReportRun {
     test_exit_code: Option<i32>,
     stale: bool,
     stale_reasons: Vec<String>,
-    /// The digest of the source this run measured. An assessment recording the
-    /// same value read the same source.
+    /// The run's own source fingerprint, recorded as evidence of what state the
+    /// project was in. It keys the instrumented build cache, so it covers every
+    /// file the frontend may rewrite rather than only what was measured, and it
+    /// is not comparable with an assessment's.
     source_fingerprint: Option<String>,
     source_mode: &'static str,
     omitted_sources: Vec<String>,
@@ -610,8 +613,8 @@ fn build_qualities(root: &Path, limit: usize) -> Vec<ReportQuality> {
                 instrument: text("instrument"),
                 catalog_version: text("catalog_version"),
                 model: text("model"),
-                source_fingerprint: manifest
-                    .get("source_fingerprint")
+                assessed_files_fingerprint: manifest
+                    .get("assessed_files_fingerprint")
                     .and_then(|value| value.as_str())
                     .map(str::to_owned),
                 health: manifest.get("health").and_then(serde_json::Value::as_f64),
@@ -708,7 +711,6 @@ fn build_timeline(runs: &[ReportRun], qualities: &[ReportQuality]) -> Vec<Timeli
     let mut items: Vec<TimelineItem> = runs
         .iter()
         .map(|run| {
-            let fingerprint = run.source_fingerprint.clone();
             let partner = qualities
                 .iter()
                 .find(|quality| reads_the_same_source(run, quality));
@@ -719,7 +721,6 @@ fn build_timeline(runs: &[ReportRun], qualities: &[ReportQuality]) -> Vec<Timeli
                 id: run.id.clone(),
                 at: run.started_at.clone(),
                 kind: if partner.is_some() { "paired" } else { "run" },
-                source_fingerprint: fingerprint,
                 run_id: Some(run.id.clone()),
                 quality_id: partner.map(|quality| quality.id.clone()),
             }
@@ -733,7 +734,6 @@ fn build_timeline(runs: &[ReportRun], qualities: &[ReportQuality]) -> Vec<Timeli
                 id: quality.id.clone(),
                 at: quality.created_at.clone(),
                 kind: "quality",
-                source_fingerprint: quality.source_fingerprint.clone(),
                 run_id: None,
                 quality_id: Some(quality.id.clone()),
             }),

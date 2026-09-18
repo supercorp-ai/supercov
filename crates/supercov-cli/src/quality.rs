@@ -1707,25 +1707,29 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         })
         .collect();
 
-    // The same digest a run records over the same files, so a reader can say an
-    // assessment and a run read identical source instead of comparing two
-    // timestamps. Only the files this assessment actually read are included, so
-    // it answers for the snapshot rather than for whatever else is in the tree.
+    // The identity of what this assessment read: a digest over exactly the files
+    // it answered for, and nothing else in the tree.
+    //
+    // It is not a run's source fingerprint and must never be compared with one.
+    // That fingerprint keys the instrumented build cache and so covers every
+    // file the frontend may rewrite, which is a wider set; the two disagree on
+    // any real project. Whether an assessment and a run read the same code is
+    // answered per file, by the digests each records.
     let assessed: Vec<PathBuf> = answers
         .iter()
         .filter(|answer| answer.values.is_some())
         .map(|answer| root.join(&answer.path))
         .collect();
     let assessed_files = assessed.len();
-    let source_fingerprint = supercov_engine::integrity::digest_source_files(root, assessed).ok();
+    let assessed_fingerprint = supercov_engine::integrity::digest_source_files(root, assessed).ok();
 
     let (id, created_at) = store::identity()?;
     let mut manifest = json!({
         "schema_version": 4, "id": id, "created_at": created_at, "parent": Value::Null,
         // Null when a file moved or became unreadable between the assessment and
         // this line: absent is honest, a digest over a different set is not.
-        "source_fingerprint": source_fingerprint,
-        "source_files": assessed_files,
+        "assessed_files_fingerprint": assessed_fingerprint,
+        "assessed_files": assessed_files,
         "supercov_version": env!("CARGO_PKG_VERSION"),
         // Which instrument produced this. A reader must never mistake a catalog
         // snapshot for a rubric one: they answer different questions and their

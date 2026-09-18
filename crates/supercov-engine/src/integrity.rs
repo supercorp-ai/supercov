@@ -373,12 +373,15 @@ fn digest_files(
     digest_paths(root, paths, false)
 }
 
-/// The same source digest a run records, for callers outside a run.
+/// Digest a set of files the way this module digests any set of files.
 ///
-/// A quality snapshot stores this so a reader can say whether an assessment and
-/// a run read the same source, instead of inferring it from two timestamps.
-/// Exported rather than reimplemented: two copies of a hash construction agree
-/// until one of them is changed.
+/// This is not a run's source fingerprint and cannot be compared with one. That
+/// fingerprint keys the instrumented build cache, so it deliberately covers
+/// every file the frontend may rewrite and reuse, which is wider than any
+/// caller here is describing.
+///
+/// Exported so a caller outside a run gets the same construction rather than a
+/// second one: two copies of a hash agree until one of them is changed.
 pub fn digest_source_files(
     root: &Path,
     paths: impl IntoIterator<Item = PathBuf>,

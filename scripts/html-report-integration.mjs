@@ -76,8 +76,8 @@ try {
       instrument: "catalog",
       catalog_version: "properties-v1",
       model: "jev-1.13.0",
-      source_fingerprint: "c".repeat(64),
-      source_files: 1,
+      assessed_files_fingerprint: "c".repeat(64),
+      assessed_files: 1,
       health: 4.84,
       counts: { files: 1, scored: 1 },
       policy: { cutoffs: "none", fail_on_finding: false },
@@ -209,9 +209,10 @@ try {
   assert.equal(bundle.timeline[0].runId, bundle.runs[0].id);
   assert.equal(bundle.timeline[0].qualityId, null);
   assert.equal(bundle.selectedId, bundle.runs[0].id);
-  // A run records what source it measured, which is the only thing that pairs
-  // it with an assessment.
+  // A run carries its own fingerprint as evidence, but it keys a build cache and
+  // never pairs anything: that is decided per file.
   assert.match(bundle.runs[0].sourceFingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(bundle.timeline[0].sourceFingerprint, undefined);
   // Every run writes a map, so the section is carried. Nothing explains a flow
   // yet, so it reports that status and no percentage rather than a zero.
   const asserted = bundle.runs[0].assertions;
