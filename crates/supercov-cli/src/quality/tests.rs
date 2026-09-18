@@ -280,7 +280,53 @@ fn a_change_request_sends_exactly_the_two_versions() {
     assert_eq!(state.len(), 2);
     assert_eq!(state["before"], "old");
     assert_eq!(state["after"], "new");
-    assert_eq!(request["questions"].as_object().unwrap().len(), 12);
+    // Twelve complexity properties plus the seven risks, which exist only in
+    // the change form because every one of them is about what a change did.
+    assert_eq!(
+        request["questions"].as_object().unwrap().len(),
+        smells::catalog().len() + smells::risks().len()
+    );
+}
+
+#[test]
+fn risk_checks_are_asked_of_a_change_and_never_of_a_file() {
+    let risks: BTreeSet<&str> = smells::risks().iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(risks.len(), 7);
+    assert!(risks.contains("hardcoded_secret") && risks.contains("injection_risk"));
+    // A file has no before, so "did this change add a credential" has no answer.
+    let file = smells::file_questions();
+    for risk in &risks {
+        assert!(
+            !file.contains_key(*risk),
+            "{risk} must not be asked of a file"
+        );
+    }
+    let change = smells::change_questions();
+    for risk in &risks {
+        assert!(
+            change.contains_key(*risk),
+            "{risk} must be asked of a change"
+        );
+    }
+    // A risk question already asks about the change, so it does not carry the
+    // complexity form's "where `before` did not" clause.
+    let task = |q: &Value| q["instructions"]["task"].as_str().unwrap().to_owned();
+    assert!(!task(&change["hardcoded_secret"]).contains("where `before` did not"));
+    assert!(task(&change["deep_nesting"]).contains("where `before` did not"));
+    // Everything a report carries about a check covers both catalogs.
+    let described = smells::described();
+    let named: BTreeSet<&str> = described
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["check"].as_str())
+        .collect();
+    for risk in &risks {
+        assert!(
+            named.contains(*risk),
+            "{risk} must travel with its evidence"
+        );
+    }
 }
 
 #[test]

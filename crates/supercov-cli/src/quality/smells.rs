@@ -31,11 +31,28 @@ pub const CATALOG_VERSION: &str = "smells-v2";
 
 const CATALOG: &str = include_str!("smells.json");
 
+/// Risks a change can introduce, which the complexity catalog cannot express.
+///
+/// A [benchmark of 173 comments real reviewers wrote] found the complexity
+/// catalog has a word for 8% of them: the rest are bugs, concurrency, security
+/// and api. These seven are aimed at that gap and, on constructed positives with
+/// matched safe changes, they separate by 0.91 or more where the complexity
+/// checks separate by far less and co-fire constantly. They are asked only of a
+/// change, never of a file, because every one of them is about what a change did.
+///
+/// They are not a bug finder. 94 of those 173 comments are bugs and none of
+/// these asks about correctness.
+const RISKS: &str = include_str!("risks.json");
+
 /// How a change question is framed. Both versions go in one request, because
 /// scoring each alone and subtracting hits a ceiling: a file the model already
 /// half-believes is guilty has no room left to rise.
 const CHANGE_PREFIX: &str = "Two versions of one file are given, `before` and `after`. \
 Answer only about what changed: does `after` show the following where `before` did not? ";
+/// A risk check already asks about the change, so it needs the framing without
+/// the "where `before` did not" clause the complexity questions require.
+const CHANGE_PREFIX_PLAIN: &str = "Two versions of one file are given, `before` and `after`. \
+Answer only about what changed: ";
 const CHANGE_PRESENT: &str = "`after` shows it and `before` did not.";
 const CHANGE_ABSENT: &str =
     "`before` already showed it, or neither version does, or `after` no longer does.";
@@ -58,6 +75,13 @@ pub fn catalog() -> &'static [Check] {
     })
 }
 
+pub fn risks() -> &'static [Check] {
+    static PARSED: OnceLock<Vec<Check>> = OnceLock::new();
+    PARSED.get_or_init(|| {
+        serde_json::from_str(RISKS).expect("risks.json ships with the binary and parses")
+    })
+}
+
 fn noul(task: String, present: &str, absent: &str) -> Value {
     json!({
         "type": "noul",
@@ -74,9 +98,10 @@ pub fn file_questions() -> Map<String, Value> {
         .collect()
 }
 
-/// Every check, asked about what a change introduced.
+/// Every check, asked about what a change introduced: the complexity catalog in
+/// its differential form, and the risk checks, which only exist in this form.
 pub fn change_questions() -> Map<String, Value> {
-    catalog()
+    let mut questions: Map<String, Value> = catalog()
         .iter()
         .map(|c| {
             (
@@ -88,7 +113,18 @@ pub fn change_questions() -> Map<String, Value> {
                 ),
             )
         })
-        .collect()
+        .collect();
+    for risk in risks() {
+        questions.insert(
+            risk.id.clone(),
+            noul(
+                format!("{CHANGE_PREFIX_PLAIN}{}", risk.task),
+                &risk.present,
+                &risk.absent,
+            ),
+        );
+    }
+    questions
 }
 
 /// The catalog as a report carries it: what each check asks, and what is known
@@ -97,6 +133,7 @@ pub fn change_questions() -> Map<String, Value> {
 pub fn described() -> Value {
     catalog()
         .iter()
+        .chain(risks())
         .map(|c| json!({ "check": c.id, "asks": c.present, "evidence": c.evidence }))
         .collect()
 }

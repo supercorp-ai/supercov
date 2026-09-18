@@ -1,0 +1,51 @@
+[
+  {
+    "id": "hardcoded_secret",
+    "task": "Does this change add a credential, token, key or password as a literal value in source, rather than reading it from configuration or the environment?",
+    "present": "A credential is written into the source.",
+    "absent": "Credentials come from configuration or the environment, or none are involved.",
+    "evidence": "caught at 0.99 on a constructed positive, 0.03 on the matched safe change; fired on 0 of 50 real pull requests"
+  },
+  {
+    "id": "injection_risk",
+    "task": "Does this change build a query, command or markup by concatenating or interpolating a value that came from outside the program, rather than passing it as a parameter or escaping it?",
+    "present": "Untrusted input is interpolated into a query, command or markup.",
+    "absent": "Values are parameterised or escaped, or none come from outside.",
+    "evidence": "caught at 0.98, 0.03 on the matched safe change; fired on 4 of 50 real pull requests"
+  },
+  {
+    "id": "touches_auth",
+    "task": "Does this change alter how the system decides who a caller is or what they may do?",
+    "present": "It changes authentication or authorisation.",
+    "absent": "It leaves identity and permission decisions alone.",
+    "evidence": "caught at 0.97, 0.05 on the matched safe change; fired on 10 of 50 real pull requests"
+  },
+  {
+    "id": "weakens_tests",
+    "task": "Does this change make an existing test check less than it did, by removing an assertion, skipping a case, or loosening what a value must equal?",
+    "present": "An existing test now checks less.",
+    "absent": "Tests check the same or more.",
+    "evidence": "caught at 0.98, 0.02 on the matched safe change; fired on 4 of 50 real pull requests"
+  },
+  {
+    "id": "breaks_api",
+    "task": "Does this change alter something callers outside this file depend on: removing an exported name, changing a parameter list, or changing what a public function returns?",
+    "present": "A caller outside this code would have to change.",
+    "absent": "The surface callers depend on is unchanged.",
+    "evidence": "caught at 0.97, 0.05 on the matched safe change, but fired on 20 of 50 real pull requests with a median of 0.45; needs its own ground truth"
+  },
+  {
+    "id": "data_migration",
+    "task": "Does this change alter a database schema or migrate stored data?",
+    "present": "It changes a schema or rewrites stored data.",
+    "absent": "It leaves stored data and its shape alone.",
+    "evidence": "caught at 0.99, 0.06 on the matched safe change; fired on 7 of 50 real pull requests"
+  },
+  {
+    "id": "debug_leftovers",
+    "task": "Does this change leave behind debugging that was not meant to ship: a console print, a commented-out block, or a temporary flag?",
+    "present": "Debugging left in the change.",
+    "absent": "No debugging remains.",
+    "evidence": "caught at 0.98, 0.06 on the matched safe change; fired on 4 of 50 real pull requests"
+  }
+]

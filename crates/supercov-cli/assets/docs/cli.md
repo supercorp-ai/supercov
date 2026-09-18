@@ -216,8 +216,14 @@ supercov quality patch --base origin/main src/  # only changes under src/
 supercov quality patch --base origin/main --annotate github
 ```
 
-The same twelve checks, asked about a change rather than a file: does the new
-version show this property where the old one did not. It mirrors
+The twelve checks, asked about a change rather than a file, plus **seven risk
+checks that exist only in this form** because each is about what a change did:
+a credential written into source, untrusted input interpolated into a query,
+a change to who may do what, a test that now checks less, a change callers
+outside the file would have to follow, a schema or data migration, and
+debugging left behind.
+
+The two sets come from different evidence and are worth reading differently. It mirrors
 `supercov runs patch`, which asks whether the lines a change touched are tested,
 and takes the same `--base` and `--annotate` options for the same reasons.
 
@@ -255,6 +261,20 @@ twelve checks, since they share one copy of the two versions.
 This matters more than it sounds. Asked about a file, several of these checks
 fire on two thirds of everything and are useless as flags. Asked about a change,
 they stay quiet unless something changed.
+
+**But a benchmark of 173 comments real reviewers wrote found the complexity
+catalog has a word for 8% of them and fired on 1%.** Fifty-four percent of what
+reviewers write about is bugs, and nothing here asks about correctness. Treat
+the complexity half as a structural regression check, which is what CodeScene's
+decline gate is, and not as a review.
+
+The seven risk checks were built for that gap and are cleaner. On constructed
+positives with matched safe changes they separate by 0.91 or more, and across
+the same 50 real pull requests they fire once per pull request. On the seven
+pull requests where a reviewer raised a security concern, one of them fired on
+four, against nine of the forty-three without one. `breaks_api` is the loose
+one: twenty of fifty with a median of 0.45, which needs its own ground truth
+before it is worth relying on.
 
 What is untested is a real pull request where a property arrived incidentally
 among unrelated edits. The eight edits above were constructed, and a deliberate

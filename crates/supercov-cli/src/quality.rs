@@ -1202,9 +1202,15 @@ fn ask_smells(
             Ok((_, entry, hit, warning)) => {
                 usage.input_tokens += entry.response.usage.input_tokens;
                 usage.output_tokens += entry.response.usage.output_tokens;
+                // Both catalogs, because a change is asked the risk questions
+                // too and collecting only the complexity ones silently threw
+                // every risk answer away. A file is only ever asked the
+                // complexity questions, so nothing extra appears there and
+                // health stays the mean of the same twelve.
                 out[index].values = Some(
                     smells::catalog()
                         .iter()
+                        .chain(smells::risks())
                         .filter_map(|c| Some((c.id.clone(), noul(&entry.response, &c.id)?)))
                         .collect(),
                 );
