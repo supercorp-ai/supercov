@@ -2204,6 +2204,24 @@ fn present(view: Value, json: bool) -> Result<bool, String> {
     Ok(false)
 }
 
+/// Saved assessments, newest first, for a reader outside this module.
+///
+/// Returns the manifest and the per-file rows together, because a report needs
+/// both: the manifest says which instrument answered and over what source, and
+/// only the rows can be placed beside a file. Snapshots that cannot be read are
+/// left out rather than failing the caller, matching how they are listed.
+pub fn report_snapshots(root: &Path, limit: usize) -> Vec<(String, Value, Value)> {
+    store::list(root)
+        .unwrap_or_default()
+        .into_iter()
+        .take(limit)
+        .filter_map(|(id, manifest)| {
+            let (_, files) = store::read(root, &id).ok()?;
+            Some((id, manifest, files))
+        })
+        .collect()
+}
+
 pub fn command(arguments: Vec<String>) -> ExitCode {
     if arguments.iter().any(|arg| arg == "--help" || arg == "-h") {
         print!("{HELP}");

@@ -94,9 +94,31 @@ try {
   const bundle = JSON.parse(
     gunzipSync(Buffer.from(scripts[0][1].trim(), "base64")).toString("utf8"),
   );
-  assert.equal(bundle.schemaVersion, 1);
+  assert.equal(bundle.schemaVersion, 2);
   assert.equal(bundle.project, "portable-report-fixture");
   assert.equal(bundle.runs.length, 1);
+  // Nothing has been assessed here, so the run stands alone on the timeline
+  // and the report says quality is missing rather than implying a zero.
+  assert.equal(bundle.qualities.length, 0);
+  assert.equal(bundle.timeline.length, 1);
+  assert.equal(bundle.timeline[0].kind, "run");
+  assert.equal(bundle.timeline[0].runId, bundle.runs[0].id);
+  assert.equal(bundle.timeline[0].qualityId, null);
+  assert.equal(bundle.selectedId, bundle.runs[0].id);
+  // A run records what source it measured, which is the only thing that pairs
+  // it with an assessment.
+  assert.match(bundle.runs[0].sourceFingerprint, /^[0-9a-f]{64}$/);
+  // Every run writes a map, so the section is carried. Nothing explains a flow
+  // yet, so it reports that status and no percentage rather than a zero.
+  const asserted = bundle.runs[0].assertions;
+  assert.equal(asserted.available, true);
+  assert.equal(asserted.summary.status, "notAssessed");
+  assert.equal(asserted.summary.statements.percentage, null);
+  assert.match(asserted.basis, /agent-assessed/);
+  // The query path carries the map's absolute path; a shareable report must not.
+  assert.equal(asserted.map, undefined);
+  // A report is attached to pull requests; it must not carry a home directory.
+  assert.doesNotMatch(JSON.stringify(bundle), /\/(Users|home)\/[a-z]/i);
   assert.equal(bundle.runs[0].sourceMode, "exact");
   assert.match(bundle.runs[0].sources["src/access.js"].contents, /hostile/);
   assert(bundle.runs[0].fileDetails["src/access.js"].gapLines.length > 0);

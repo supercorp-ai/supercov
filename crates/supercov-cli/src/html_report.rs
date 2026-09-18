@@ -21,7 +21,8 @@ use supercov_engine::{
 
 use crate::{current_integrity_for_run, full_suite_hints, public_run_inventory};
 
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
+const DEFAULT_SNAPSHOTS: usize = 20;
 const DEFAULT_RUNS: usize = 10;
 const MAX_RUNS: usize = 20;
 const MAX_REPORT_BYTES: usize = 24 * 1024 * 1024;
@@ -104,9 +105,61 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
 struct ReportBundle {
     schema_version: u32,
     project: String,
-    selected_run_id: String,
+    /// The timeline item the report opens on, which may be an assessment that
+    /// no run pairs with.
+    selected_id: String,
+    selected_run_id: Option<String>,
     comparison_run_id: Option<String>,
     runs: Vec<ReportRun>,
+    /// Saved assessments, newest first. Kept beside the runs rather than inside
+    /// them: an assessment belongs to source, not to a test command, and one
+    /// may pair with no run at all.
+    qualities: Vec<ReportQuality>,
+    /// Runs and assessments on one axis, newest first.
+    timeline: Vec<TimelineItem>,
+}
+
+/// One moment in the project's history, holding whichever of the two judgments
+/// was made about that source.
+///
+/// A run and an assessment share an item only when both recorded the same
+/// source fingerprint. Anything else stays on its own item: two judgments about
+/// different source are two moments, and merging them on a guess about
+/// timestamps would be the one thing this report must not do.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineItem {
+    id: String,
+    at: String,
+    /// "paired", "run" or "quality".
+    kind: &'static str,
+    source_fingerprint: Option<String>,
+    run_id: Option<String>,
+    quality_id: Option<String>,
+}
+
+/// A saved quality assessment, as a report reads it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportQuality {
+    id: String,
+    created_at: String,
+    /// Which instrument answered. Two snapshots are only comparable when these
+    /// three agree; the report must break a series rather than join across a
+    /// change of any of them.
+    instrument: String,
+    catalog_version: String,
+    model: String,
+    source_fingerprint: Option<String>,
+    health: Option<f64>,
+    counts: serde_json::Value,
+    /// Carries "no cutoffs" and "no failure on a finding", which is why this is
+    /// never drawn as progress toward a target.
+    policy: serde_json::Value,
+    catalog: serde_json::Value,
+    scope: serde_json::Value,
+    limitation: serde_json::Value,
+    files: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -119,12 +172,16 @@ struct ReportRun {
     test_exit_code: Option<i32>,
     stale: bool,
     stale_reasons: Vec<String>,
+    /// The digest of the source this run measured. An assessment recording the
+    /// same value read the same source.
+    source_fingerprint: Option<String>,
     source_mode: &'static str,
     omitted_sources: Vec<String>,
     summary: serde_json::Value,
     files: Vec<IndexedFileGap>,
     file_details: BTreeMap<String, serde_json::Value>,
     decisions: serde_json::Value,
+    assertions: Option<serde_json::Value>,
     tests: Vec<ReportTest>,
     lines: Vec<ReportLine>,
     scope: Option<serde_json::Value>,
@@ -422,17 +479,159 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
         test_exit_code: run.metadata.test_exit_code,
         stale,
         stale_reasons,
+        source_fingerprint: Some(run.metadata.integrity.fingerprint.source.clone()),
         source_mode: if source_exact { "exact" } else { "snippets" },
         omitted_sources,
         summary: serde_json::to_value(summary).map_err(|error| error.to_string())?,
         files,
         file_details,
         decisions: serde_json::to_value(decisions).map_err(|error| error.to_string())?,
+        assertions: build_assertions(root, run),
         tests,
         lines,
         scope,
         sources,
     })
+}
+
+/// What the assertion map claims this run proved, when there is a map to read.
+///
+/// The query path decides this the same way, and this is deliberately a copy of
+/// that decision rather than a looser one: without a map there is nothing to
+/// report, and against a changed checkout the map's claims are about source
+/// that is no longer there, so the reason is reported instead of the numbers.
+///
+/// The absolute path to the map is dropped. The query path prints it to a
+/// terminal on the machine that holds it; a report is meant to be attached to a
+/// pull request, and the path names somebody's home directory.
+fn build_assertions(root: &Path, run: &StoredRun) -> Option<serde_json::Value> {
+    if !run
+        .directory
+        .join(supercov_engine::assertion_store::MAP_FILE)
+        .exists()
+    {
+        return None;
+    }
+    let current = current_integrity_for_run(root, run);
+    let usable = current.as_ref().is_some_and(|current| {
+        !compare_run_integrity(Some(&run.metadata.integrity), current).stale
+    });
+    let report = if usable {
+        supercov_engine::assertion_store::report(root, run)
+    } else {
+        Err("Current checkout differs from the run or cannot be verified; rerun tests to inherit the assertion map".into())
+    };
+    Some(match report {
+        Ok(report) => serde_json::json!({
+            "available": true,
+            "summary": report["summary"],
+            "basis": report["basis"],
+            "revision": report["revision"],
+            "inheritance": report["inheritance"],
+            "validationErrors": report["validationErrors"],
+            "scope": "whole run with matching current source; independent of structural query filters",
+        }),
+        Err(error) => serde_json::json!({"available": false, "error": error}),
+    })
+}
+
+/// Read saved assessments into the shape a report carries.
+fn build_qualities(root: &Path, limit: usize) -> Vec<ReportQuality> {
+    crate::quality::report_snapshots(root, limit)
+        .into_iter()
+        .map(|(id, manifest, files)| {
+            let text = |key: &str| {
+                manifest
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            ReportQuality {
+                created_at: text("created_at"),
+                instrument: text("instrument"),
+                catalog_version: text("catalog_version"),
+                model: text("model"),
+                source_fingerprint: manifest
+                    .get("source_fingerprint")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
+                health: manifest.get("health").and_then(serde_json::Value::as_f64),
+                counts: manifest
+                    .get("counts")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                policy: manifest
+                    .get("policy")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                catalog: manifest
+                    .get("catalog")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                scope: manifest
+                    .get("scope")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                limitation: manifest
+                    .get("limitation")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                files: files
+                    .get("files")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                id,
+            }
+        })
+        .collect()
+}
+
+/// Put runs and assessments on one axis.
+///
+/// The only thing that pairs them is an identical source fingerprint. A run
+/// from before fingerprints were recorded has none, so it pairs with nothing
+/// and says so, which is the honest answer rather than a guess from two
+/// timestamps.
+fn build_timeline(runs: &[ReportRun], qualities: &[ReportQuality]) -> Vec<TimelineItem> {
+    let mut paired_quality: BTreeSet<&str> = BTreeSet::new();
+    let mut items: Vec<TimelineItem> = runs
+        .iter()
+        .map(|run| {
+            let fingerprint = run.source_fingerprint.clone();
+            let partner = fingerprint.as_deref().and_then(|fingerprint| {
+                qualities
+                    .iter()
+                    .find(|quality| quality.source_fingerprint.as_deref() == Some(fingerprint))
+            });
+            if let Some(quality) = partner {
+                paired_quality.insert(quality.id.as_str());
+            }
+            TimelineItem {
+                id: run.id.clone(),
+                at: run.started_at.clone(),
+                kind: if partner.is_some() { "paired" } else { "run" },
+                source_fingerprint: fingerprint,
+                run_id: Some(run.id.clone()),
+                quality_id: partner.map(|quality| quality.id.clone()),
+            }
+        })
+        .collect();
+    items.extend(
+        qualities
+            .iter()
+            .filter(|quality| !paired_quality.contains(quality.id.as_str()))
+            .map(|quality| TimelineItem {
+                id: quality.id.clone(),
+                at: quality.created_at.clone(),
+                kind: "quality",
+                source_fingerprint: quality.source_fingerprint.clone(),
+                run_id: None,
+                quality_id: Some(quality.id.clone()),
+            }),
+    );
+    items.sort_by(|left, right| right.at.cmp(&left.at).then_with(|| right.id.cmp(&left.id)));
+    items
 }
 
 fn render_html(bundle: &ReportBundle) -> Result<Vec<u8>, String> {
@@ -550,8 +749,14 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
     };
     let result = (|| -> Result<(PathBuf, usize), String> {
         let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
-        let selected = selected_runs(&inventory, &options)?;
-        let selected_run_id = selected[0].id.clone();
+        // An assessment is worth reading on its own, so no run is only fatal
+        // when there is nothing else to show either.
+        let selected = if inventory.runs.is_empty() {
+            Vec::new()
+        } else {
+            selected_runs(&inventory, &options)?
+        };
+        let selected_run_id = selected.first().map(|run| run.id.clone());
         let comparison_run_id = options
             .comparison
             .as_deref()
@@ -572,12 +777,25 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
         }
         eprint!("\r{}\r", " ".repeat(96));
         let _ = std::io::stderr().flush();
+        let qualities = build_qualities(&root, DEFAULT_SNAPSHOTS);
+        let timeline = build_timeline(&runs, &qualities);
+        if timeline.is_empty() {
+            return Err("no local coverage runs and no saved quality assessments to report".into());
+        }
+        // The chosen run when there is one, so an explicit selector still
+        // decides; otherwise the newest thing there is.
+        let selected_id = selected_run_id
+            .clone()
+            .unwrap_or_else(|| timeline[0].id.clone());
         let bundle = ReportBundle {
             schema_version: REPORT_SCHEMA_VERSION,
             project: project_name(&root),
+            selected_id,
             selected_run_id,
             comparison_run_id,
             runs,
+            qualities,
+            timeline,
         };
         let html = render_html(&bundle)?;
         if html.len() > MAX_REPORT_BYTES {
