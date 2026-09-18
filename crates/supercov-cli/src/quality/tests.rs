@@ -2074,3 +2074,24 @@ fn the_default_branch_comes_from_the_remote_before_any_guess() {
         Some("origin/develop")
     );
 }
+
+#[test]
+fn assessing_without_a_key_stops_before_it_does_anything() {
+    // It used to discover this once per file, deep inside the sender, and every
+    // file failed separately: the result was an empty report claiming a score
+    // over zero files and an exit code of success.
+    let error = require_key(None).unwrap_err();
+    assert!(error.contains("TYPESAFE_API_KEY"), "{error}");
+    assert!(
+        error.contains("typesafe.ai"),
+        "the message says where to get one"
+    );
+    assert!(error.contains("--dry-run"), "and what works without one");
+    assert!(require_key(Some("   ")).is_err(), "a blank key is no key");
+    assert!(require_key(Some("apikey_x")).is_ok());
+
+    // A key is never an option, because one on the command line lands in shell
+    // history and in the process list.
+    assert!(parse_scan(vec!["--key".into(), "apikey_x".into()]).is_err());
+    assert!(parse_scan(vec!["--api-key".into(), "apikey_x".into()]).is_err());
+}

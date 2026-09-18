@@ -226,7 +226,7 @@ npx supercov diff <previous-run-id> latest
 
 Collections accept `--limit` and `--offset` and print a copyable next-page command. Machine-readable output is available with `--json` when an integration needs it.
 
-## Code quality, powered by Jev (experimental)
+## Code quality, powered by Jev
 
 Coverage answers whether your tests exercised the code. Quality answers what is
 in it, as twelve named properties you can check against the file yourself.
@@ -246,20 +246,22 @@ npx supercov quality file src/server.ts
 # Which files are assessed, and why
 npx supercov quality scope
 
-# What a change introduced, against the merge base
-npx supercov quality patch --base origin/main
+# What a change introduced: your uncommitted work, or your whole branch
+npx supercov quality patch
 npx supercov quality patch --base origin/main --annotate github
 
 # What declined between two assessments
 npx supercov quality diff <older-snapshot> latest
 ```
 
-Every part of the score is a claim you can verify against the file. It needs a
-[TypeSafe](https://typesafe.ai) key in `TYPESAFE_API_KEY`; a whole repository
-costs about two cents. **Nothing it reports fails a command.**
+Every part of the score is a claim you can verify against the file. Set a
+[TypeSafe](https://typesafe.ai) key in `TYPESAFE_API_KEY` to assess; reading a
+saved assessment needs no key.
 
-[Understanding quality](docs/quality.md) says what the number is worth, where it
-is mostly measuring file size, and what the change mode does and does not cover.
+It finds your source the same way coverage does, leaves out tests and generated
+output, and reports a band rather than a decimal because that is the resolution
+the answers support. Read [Understanding quality](docs/quality.md) for how to
+read a score and what the change review covers.
 
 ## Local, private, and zero-edit
 

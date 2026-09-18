@@ -29,7 +29,7 @@ npx supercov --help
 | Review what a change introduced | `npx supercov quality patch` |
 | Read bundled guides | `npx supercov docs` |
 
-## Assess source quality (experimental)
+## Assess source quality
 
 ```sh supercov-example
 supercov quality                 # this repository
@@ -55,14 +55,14 @@ the exact requests and contacts nothing.
 `quality diff` reports what declined between two assessments: which files lost
 health, which properties appeared, and which files entered or left the scope.
 
-Needs `TYPESAFE_API_KEY`. A repository of 200 files costs about two cents, and
-the command prints its estimate before spending anything. Nothing it reports
-fails this command.
+Assessing needs a TypeSafe API key in `TYPESAFE_API_KEY`; reading a saved
+assessment does not. The command prints a cost estimate before sending anything
+and caches answers by content, so a second run pays only for what changed.
 
 See [Understanding quality](https://supercov.com/docs/quality) for what the
 number is worth and which files get assessed.
 
-## Review what a change introduced (experimental)
+## Review what a change introduced
 
 ```sh supercov-example
 supercov quality patch

@@ -56,7 +56,7 @@ const MAX_RESPONSE_BYTES: u64 = 1_048_576;
 // Weakest maintainability first, then readability, then Jev's own overall answer.
 // These are the two constructs with calibrated cutoffs and human references.
 
-const HELP: &str = "Code quality powered by Jev (experimental, advisory).
+const HELP: &str = "Code quality powered by Jev.
 
 Usage:
   supercov quality [file-or-directory ...]     assess code, saving a snapshot
@@ -101,8 +101,6 @@ With no path the subject is this repository. Which files that means is decided
 the way coverage decides it: source roots found from package manifests, with
 test code and generated output left out, and anything under no recognised root
 reported rather than guessed at. SUPERCOV_SOURCE_ROOTS=src,app declares them.
-
-Assessments are advisory. No finding fails this command.
 
 Cache: .supercov/quality/requests/ (exact request hash; --refresh to reassess).
 Snapshots: .supercov/quality/snapshots/.
@@ -1218,6 +1216,29 @@ struct Answers {
     error: Option<String>,
 }
 
+/// Refuse before doing any work when there is no credential.
+///
+/// Without this the command discovered the problem once per file, deep inside
+/// the sender, and every file failed separately: the result was an empty report
+/// claiming a score over zero files, and an exit code of success.
+///
+/// The variable is the only way in on purpose. A key on the command line lands
+/// in shell history and in the process list, where anyone on the machine can
+/// read it.
+fn require_key(key: Option<&str>) -> Result<(), String> {
+    if key.is_some_and(|value| !value.trim().is_empty()) {
+        return Ok(());
+    }
+    Err(
+        "quality needs a TypeSafe API key in TYPESAFE_API_KEY.\n\n  \
+         export TYPESAFE_API_KEY=...        # this shell\n  \
+         TYPESAFE_API_KEY=... supercov ...  # one command\n\n\
+         Get one at https://typesafe.ai. Reading a saved assessment needs no key, \
+         and --dry-run prints the exact requests without sending them."
+            .into(),
+    )
+}
+
 /// What a set of requests will cost, before any of it is spent.
 ///
 /// Output tokens are free, so the whole bill is the input, and the input is
@@ -1449,6 +1470,9 @@ fn resolve_ambiguity(
 }
 
 fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool), String> {
+    if !options.dry_run {
+        require_key(key)?;
+    }
     let found = discover(root, &options.paths)?;
     let configured = scope::configured_roots();
     let mut scope = scope::classify(root, &found, configured.as_deref());
@@ -1612,7 +1636,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         // numbers are not comparable.
         "instrument": "catalog",
         "catalog_version": catalog::CATALOG_VERSION,
-        "model": MODEL, "scope": "file", "experimental": true,
+        "model": MODEL, "scope": "file",
         "paths": options.paths.iter()
             .map(|path| path.display().to_string().replace('\\', "/"))
             .collect::<Vec<_>>(),
@@ -1656,6 +1680,7 @@ fn run_patch(
     all: bool,
     key: Option<&str>,
 ) -> Result<(Value, bool), String> {
+    require_key(key)?;
     let collected = changes::collect(root, range, paths)?;
     let configured = scope::configured_roots();
     let changed: Vec<PathBuf> = collected.iter().map(|c| root.join(&c.path)).collect();
@@ -1773,9 +1798,8 @@ fn run_patch(
 }
 
 /// The caveat that belongs next to any number this catalog produces.
-const SMELL_CAVEAT: &str = "Named-property assessment, experimental and advisory. Each check is a \
-model judgment you can verify against the file.\nHealth is arithmetic over those checks, done here \
-and not by the model. It correlates strongly with file size.\n";
+const SMELL_CAVEAT: &str = "Each check is a judgment you can verify against the file. Health is \
+arithmetic over those checks, done here and not by the model.\n";
 
 /// A band, not a decimal. The measured resolution of these judgments is about
 /// one point, so `4.4/10` would claim precision nobody observed. The number

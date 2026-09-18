@@ -1,189 +1,214 @@
 # Understanding quality
 
-Coverage answers whether your tests exercised the code. Quality answers a
-different question: what is in the code, named property by named property, so
-you can check each answer against the file yourself.
+`supercov quality` tells you what is in your code: twelve named properties,
+checked file by file, so a score is never a number you have to take on faith.
 
-Judgments come from [Jev](https://typesafe.ai), which answers typed questions —
-yes or no, a position on a scale, a choice among options — rather than generating
-prose. Supercov asks twelve yes/no questions per file and does the arithmetic
-itself.
+Judgments come from [Jev](https://typesafe.ai), which answers typed questions
+rather than generating prose. Supercov asks the questions and does the
+arithmetic, so every part of a score is a claim you can check against the file.
 
-It is **experimental and advisory**. Nothing it reports fails a command.
+## Set your key
 
-## It asks twelve definite questions, and does the arithmetic itself
+Assessing needs a TypeSafe API key, read from `TYPESAFE_API_KEY`. Get one at
+[typesafe.ai](https://typesafe.ai).
 
-A quality score usually comes from asking a model to place a file on a scale.
-That approach was tried here and abandoned: on 272 Java classes rated by
-professionals it ordered pairs correctly 90.2% of the time, and **counting the
-statements in the file got 90.3%**. A paid call cannot justify itself by
-matching `wc`.
+```bash
+export TYPESAFE_API_KEY=...        # for this shell
+TYPESAFE_API_KEY=... npx supercov quality   # for one command
+```
 
-So instead, twelve yes/no questions about specific named properties, drawn from
-Fowler and Beck's refactoring smells and the class-scope smells CodeScene's Code
-Health is built from:
+The environment variable is the only way to pass it. A key given on the command
+line ends up in your shell history and in the process list, where anyone on the
+machine can read it.
+
+Set it the way your environment already sets secrets:
+
+| Where | How |
+| --- | --- |
+| GitHub Actions | `env: { TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }} }` |
+| GitLab CI | a masked CI/CD variable named `TYPESAFE_API_KEY` |
+| Docker | `docker run -e TYPESAFE_API_KEY ...` |
+| Local development | a `.env` loaded by `direnv`, `dotenv` or your shell profile |
+
+Reading a saved assessment never needs a key, and `--dry-run` prints the exact
+requests without sending them.
+
+## Start with the repository
+
+```bash
+npx supercov quality
+```
+
+No arguments, no configuration. It finds your source, asks twelve questions of
+each file, and saves a snapshot you can read afterwards without a key or a
+network.
+
+```
+Quality fair (5.0/10, weighted by size) over 163 files, 5147399 bytes.
+  11 good, 53 fair, 99 weak.
+
+Weakest:
+  weak  src/lib/modernHttp.ts
+        long_method 0.93, duplicated_logic 0.88, complex_conditional 0.87, +7 more
+```
+
+The band is the headline because the underlying resolution is about a point:
+`good` is 8 and above, `fair` is 5 to 8, `weak` is below 5. `--json` carries the
+number when something needs to sort.
+
+## The twelve properties
 
 god class, long method, deep nesting, complex conditional, long parameter list,
 duplicated logic, primitive obsession, dead code, feature envy, temporary field,
 message chains, magic values.
 
-**The number is arithmetic this CLI does over those twelve answers, not
-something the model was asked for.** That is the point. A single opaque grade
-gives a reader nothing to argue with. Twelve named claims can each be checked
-against the file in seconds, and `quality file <path>` prints all of them with
-what is known about each.
+They come from Fowler and Beck's refactoring smells and the class-scope smells
+CodeScene's Code Health is built from. Each is a yes/no question with a
+definition and a stated exception, so two careful readers would agree on the
+answer.
 
-## What the number is worth
+Three of them fire on more than half the files in a typical repository, so the
+summary shows the three strongest per file. To see all twelve with what is known
+about each:
 
-On the same 272 classes, restricted to pairs whose statement counts are close so
-size cannot decide the answer:
+```bash
+npx supercov quality file src/lib/modernHttp.ts
+npx supercov quality gaps        # only files something fired on
+```
 
-| Predictor | orders size-matched pairs correctly |
-| --- | ---: |
-| this composite | **78%** |
-| CodeScene Code Health | 67% |
-| statement count | 58% |
-| Microsoft Maintainability Index | 52% |
-| cyclomatic complexity | 44% |
+## Reading the score
 
-Asked twice, a single check moves by a median of 0.01 and the composite by 0.5%
-of its range.
+Health is the mean of the twelve answers, done by this command rather than by
+the model. Directory and repository health weight files by size, so a folder of
+one-line re-exports cannot outvote the file everything depends on.
 
-Three limits belong beside those numbers.
+Two things are worth knowing before you act on it.
 
-- The composite **correlates 0.92 with a statement count**. It is largely a size
-  measure whose residual is right, which is a weaker claim than the table sounds.
-- Its margin over Code Health is **somewhere between 7 and 11 points**, moving by
-  several points depending on which fifth of the corpus is dropped. The margins
-  over a statement count and the Maintainability Index are large and stable.
-- **Six checks score as well as twelve.** These are not twelve measurements but
-  one measurement taken twelve times, so rewording checks does not move the
-  number. Four were reworded after a blind reader found them failing, and the
-  composite moved by 0.4 with an interval that includes zero.
+**It moves with size.** Bigger files score worse, and that is mostly right, but
+it means the score rarely surprises you on a file you already knew was large.
+The interesting cases are the small files that score badly.
 
-## Bands, not decimals
-
-Text output reports `good`, `fair` or `weak` rather than a number, because the
-measured resolution of these judgments is about one point and `4.4/10` would
-claim precision nobody observed. The number is in `--json`, where something has
-to sort.
-
-A property counts as present at 0.60, chosen against three references rather
-than taken as a midpoint. **Health does not use that threshold**: the score is
-the mean of the raw answers, so it decides what is shown and never what is
-scored.
+**It measures structure, not correctness.** Nothing here asks whether the code
+works. Use it to find code that is hard to change, not code that is wrong.
 
 ## What a change introduced
 
 ```bash
-supercov quality patch --base origin/main
+npx supercov quality patch
 ```
 
-The same twelve checks asked differentially — does the new version show this
-where the old one did not — plus **seven risk checks that exist only in this
-form**: a credential written into source, untrusted input interpolated into a
-query, a change to who may do what, a test that now checks less, a schema or
-data migration, and debugging left behind.
+With no range it reviews your uncommitted work when the tree is dirty, and
+everything since your branch left its default branch when it is clean. Say so
+explicitly with `--unstaged`, `--staged`, or `--base origin/main`, which uses
+the merge base so commits other people landed after you branched are not
+counted as yours.
 
-Both whole versions go into one request. A hunk cannot separate a property a
-change introduced from one the file already had, which is the entire question.
+It asks the twelve properties differentially, whether the new version shows
+something the old one did not, and adds six checks that only make sense for a
+change:
 
-### What it covers, and what it does not
+- a credential written into source
+- untrusted input interpolated into a query
+- a change to how the system decides who may do what
+- a test that now checks less than it did
+- a database schema or data migration
+- debugging left behind
 
-This reports **structure**, and structure is a corner of what a reader of a
-change cares about. Measured against 173 comments real reviewers wrote on 50
-pull requests from cal.com, Discourse, Grafana, Keycloak and Sentry, the twelve
-complexity properties have a word for 8% of them. Fifty-four percent of those
-comments are about bugs, and **nothing here asks about correctness**.
-
-So it is a structural regression check, in the same family as CodeScene's
-decline gate: it tells you a change made code harder to follow. It is not
-looking for the race condition, and it does not replace the person who is.
-
-The seven risk checks were built for that gap and are cleaner: on constructed
-positives with matched safe changes they separate by 0.91 or more, and across
-the same 50 real pull requests they fire about once per pull request. On the
-seven where a reviewer raised a security concern, one fired on four, against
-nine of the forty-three without one.
-
-A seventh, `breaks_api`, was removed: it caught its constructed positive cleanly
-but fired on 20 of 50 real pull requests with a median of 0.45. Changing an
-exported signature is ordinary in library work, so it was announcing a common
-event rather than catching a rare one.
-
-## Which files are assessed
-
-The same shape as the coverage source scope, and the same vocabulary, so
-`runs patch` and `quality patch` describe one set of files. Every file is
-**included**, **excluded** or **ambiguous**.
-
-Roots come from package manifests and from what a manifest declares: `main`,
-`bin` and `exports` in a `package.json`, `path` entries and `build.rs` in a
-`Cargo.toml`. Inside each package, the conventional source directories. Test
-code, generated output, tool scripts, examples, benchmarks and documentation are
-excluded, each with its reason.
-
-Anything first-party under no recognised root is **ambiguous**, never silently
-dropped. When a credential is available, one extra request asks the model about
-exactly those files, with the whole tree as context and no file contents. On six
-repositories in six languages that agreed with the conventions on 99.1% of the
-1,503 files they decide, and settled the 115 they cannot: it separated a shipped
-runtime tree from prototype crates exactly.
-
-`SUPERCOV_SOURCE_ROOTS=src,app` declares them yourself, and a declaration is
-never re-decided.
+Output lists only files where something appeared. A change that introduces
+nothing says so in one line.
 
 ```bash
-supercov quality scope
+npx supercov quality patch --base origin/main --annotate github
 ```
 
-## Comparing two assessments
+`--annotate github` prints workflow annotations on stdout. It needs no token and
+posts no comment.
+
+This is a structural check on your change. It will tell you a function got
+harder to follow. It will not find the race condition, and it does not replace
+the person who would.
+
+## Which files get looked at
 
 ```bash
-supercov quality diff <older> <newer>
+npx supercov quality scope
+```
+
+Source roots come from your package manifests and from what they declare, so a
+`bin` or `exports` entry counts even when it is not in a conventional directory.
+Test files, generated output, tool scripts, examples, benchmarks and
+documentation are left out, each with its reason. `--all` includes everything.
+
+If some of your code sits somewhere none of that recognises, Supercov asks Jev
+about those paths with your whole tree as context, and says how many it decided
+that way. To decide yourself:
+
+```bash
+SUPERCOV_SOURCE_ROOTS=src,packages npx supercov quality
+```
+
+A declaration is never second-guessed.
+
+## Tracking it over time
+
+```bash
+npx supercov quality snapshots
+npx supercov quality diff <older> <newer>
 ```
 
 Which files lost health, which gained, which properties appeared, and which
-entered or left the scope. Only snapshots of the same catalog version and model
-can be compared. A file whose bytes are identical in both is marked, because the
-same question was asked twice and any movement is the model's own variation
-rather than an edit worth hunting for.
+files entered or left the scope. A file whose contents did not change is marked,
+so a small movement does not send you looking for an edit that was never made.
 
-## Crossing a change with coverage
+## What it costs
 
-```bash
-supercov quality patch --base origin/main --run latest
+Jev charges for what it reads and nothing for what it writes, so the bill is the
+size of your source. At $0.042 per million input tokens:
+
+| | files | cost |
+| --- | ---: | ---: |
+| a small library | 25 | $0.003 |
+| a typical service | 200 | $0.02 |
+| a large monorepo | 2,000 | $0.20 |
+| one changed file in a review | 1 | $0.0005 |
+
+The command prints its estimate before sending anything, so a number that looks
+wrong can be stopped rather than discovered on an invoice:
+
+```
+[supercov] quality: 35 requests, about 111840 input tokens ($0.0047) if none is cached
 ```
 
-Marks any changed file where a property appeared **and** the run left measured
-lines uncovered. Neither half justifies stopping anyone alone. Both at once
-describes a change that made code harder to follow where no test runs.
+**Most runs cost far less than that estimate.** Answers are cached by content
+under `.supercov/quality/requests/`, so a second run pays only for files that
+actually changed. The cache follows content rather than paths, which means
+switching branches, rebasing or checking out an old commit reuses everything
+unchanged: assessing the same directory 400 commits back in a real repository
+answered every file from cache and sent nothing.
 
-Quality reads coverage. **Coverage never reads quality**, and nothing about
-quality appears in a run's own output, because an assessment costs money and
-needs a credential.
+Three ways to spend less:
 
-## Cost and privacy
+- **Assess a directory, not the tree**, while you are iterating:
+  `npx supercov quality src/api`.
+- **Review the change, not the repository**, in CI: `npx supercov quality patch`
+  costs about $0.0005 per changed file, so a typical pull request is a fraction
+  of a cent.
+- **Keep `.supercov/` between CI runs** if your runner supports a cache. An
+  unchanged file then costs nothing on every run after the first.
 
-An assessment sends source to [TypeSafe](https://typesafe.ai) and needs
-`TYPESAFE_API_KEY`. A whole
-repository of 197 files costs about **$0.02** and takes under half a minute at
-eight concurrent requests; a changed file costs about $0.0005. Responses are
-cached under `.supercov/quality/requests/` by exact request hash, so a re-run
-with no edits sends nothing.
-
-`--dry-run` prints the exact request bodies and contacts nothing.
+`--refresh` asks again and bypasses the cache. `--dry-run` prints the exact
+requests, sends nothing and costs nothing.
 
 ## Reference
 
-Full option lists are in the [CLI reference](https://supercov.com/docs/cli).
-
 ```bash
-supercov quality                             # this repository
-supercov quality gaps                        # only files something fired on
-supercov quality file src/server.ts          # one file, every check
-supercov quality scope                       # which files, and why
-supercov quality snapshots                   # saved assessments
-supercov quality diff <older> <newer>        # what declined
-supercov quality patch --base origin/main    # what a change introduced
+npx supercov quality                             # this repository
+npx supercov quality gaps                        # only files something fired on
+npx supercov quality file src/server.ts          # one file, every check
+npx supercov quality scope                       # which files, and why
+npx supercov quality snapshots                   # saved assessments
+npx supercov quality diff <older> <newer>        # what declined
+npx supercov quality patch                       # what a change introduced
 ```
+
+Full options are in the [CLI reference](https://supercov.com/docs/cli).
