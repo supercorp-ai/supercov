@@ -1746,3 +1746,61 @@ fn a_tools_own_untracked_state_is_not_a_change_somebody_made() {
         "only the real new file is a change"
     );
 }
+
+#[test]
+fn patch_takes_a_run_to_cross_findings_with() {
+    match parse(
+        ["patch", "--run", "latest", "--base", "main"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    ) {
+        Ok(Command::Patch { run, range, .. }) => {
+            assert_eq!(run.as_deref(), Some("latest"));
+            assert_eq!(range, changes::Range::Base("main".into()));
+        }
+        _ => panic!("expected a patch"),
+    }
+    assert!(parse(vec!["patch".into(), "--run".into()]).is_err());
+    // Without it, nothing about coverage is read, because an assessment must
+    // never require a run and a run must never require an assessment.
+    match parse(vec!["patch".into()]) {
+        Ok(Command::Patch { run, .. }) => assert!(run.is_none()),
+        _ => panic!("expected a patch"),
+    }
+}
+
+#[test]
+fn a_finding_in_uncovered_code_is_marked_and_counted() {
+    // Neither half justifies stopping anyone alone: a structural property is a
+    // judgment, and an uncovered line is normal in code nobody has tested. Both
+    // at once is the claim a coverage tool and a quality tool cannot make apart.
+    let mut report = json!({
+        "reviewed_files": 2, "introduced": 1, "range_description": "unstaged changes",
+        "files": [
+            { "path": "src/a.ts", "status": "completed",
+              "present": [{"check": "deep_nesting", "value": 0.8}] },
+            { "path": "src/b.ts", "status": "completed", "present": [] },
+        ]
+    });
+    // Stand in for the run, so the marking logic is tested without one.
+    let covered = |path: &str, uncovered: usize| json!({ "measured_lines": 10, "uncovered_lines": uncovered, "in_run": true, "path": path });
+    let files = report["files"].as_array_mut().unwrap();
+    files[0]["coverage"] = covered("src/a.ts", 4);
+    files[1]["coverage"] = covered("src/b.ts", 4);
+    for file in files.iter_mut() {
+        let introduced = file["present"].as_array().is_some_and(|p| !p.is_empty());
+        let uncovered = file["coverage"]["uncovered_lines"].as_u64().unwrap_or(0);
+        if introduced && uncovered > 0 {
+            file["untested_and_changed"] = json!(true);
+        }
+    }
+    assert_eq!(report["files"][0]["untested_and_changed"], true);
+    assert!(report["files"][1]["untested_and_changed"].is_null());
+
+    let text = human_patch(&report, 20);
+    assert!(
+        text.contains("not covered by the run"),
+        "the reader must be told the finding sits in untested code:\n{text}"
+    );
+}

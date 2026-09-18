@@ -75,6 +75,8 @@ Change range (quality patch), pick one:
 
 Patch options:
   --annotate github   Print GitHub workflow annotations; posts nothing
+  --run <id|latest>   Cross the findings with a saved coverage run, to see what
+                      a change introduced in code no test exercises
 
 Assessment options:
   --all               Include test files, generated output and anything outside
@@ -154,6 +156,8 @@ enum Command {
     Health(Options),
     /// Ask the same catalog what a change introduced.
     Patch {
+        /// A saved coverage run to cross the findings with.
+        run: Option<String>,
         range: changes::Range,
         paths: Vec<PathBuf>,
         json: bool,
@@ -171,6 +175,7 @@ fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
     let (mut range, mut json, mut refresh, mut limit) = (None, false, false, None);
     let mut annotate = false;
     let mut all = false;
+    let mut run = None;
     let mut paths = Vec::new();
     let mut arguments = arguments.into_iter();
     let set = |chosen: changes::Range, slot: &mut Option<changes::Range>| match slot {
@@ -194,6 +199,9 @@ fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
                     .next()
                     .ok_or("--base needs a commit, branch or tag")?;
                 set(changes::Range::Base(reference), &mut range)?;
+            }
+            "--run" => {
+                run = Some(arguments.next().ok_or("--run needs a run id, or latest")?);
             }
             "--annotate" => {
                 // Only GitHub's form exists, and naming it keeps room for others.
@@ -228,6 +236,7 @@ fn parse_patch(arguments: Vec<String>) -> Result<Command, String> {
         limit: limit.unwrap_or(20),
         annotate,
         all,
+        run,
     })
 }
 
@@ -1772,6 +1781,12 @@ fn human_patch(report: &Value, limit: usize) -> String {
         }
         let basis = file["basis"].as_str().unwrap_or("both versions");
         out.push_str(&format!("{}\n", file["path"].as_str().unwrap_or("?")));
+        if file["untested_and_changed"] == true {
+            out.push_str(&format!(
+                "  and {} of its measured lines are not covered by the run\n",
+                file["coverage"]["uncovered_lines"].as_u64().unwrap_or(0)
+            ));
+        }
         if basis != "both versions" {
             out.push_str(&format!("  ({basis})\n"));
         }
@@ -1795,6 +1810,62 @@ fn human_patch(report: &Value, limit: usize) -> String {
         out.push_str(&format!("{skipped} changed files not reviewed.\n"));
     }
     out
+}
+
+/// Cross what a change introduced with what a saved run covered.
+///
+/// Neither half justifies stopping anyone on its own. A structural property is
+/// a judgment, and an uncovered line is normal in code nobody has tested yet.
+/// Both at once describes something else: a change that made code harder to
+/// follow in a place no test exercises, which is the one claim this product can
+/// make that a coverage tool and a quality tool cannot make separately.
+///
+/// Coverage is read from a run that already happened. This never starts one,
+/// and nothing about quality is added to a run's own output, because an
+/// assessment costs money and needs a credential.
+fn cross_with_coverage(report: &mut Value, selector: &str) -> Result<(), String> {
+    let selector = (selector != "latest").then_some(selector);
+    let view = crate::load_run_view(selector)?;
+    let mut both = 0usize;
+    let empty = Vec::new();
+    let files = report["files"].as_array().cloned().unwrap_or(empty);
+    let crossed: Vec<Value> = files
+        .into_iter()
+        .map(|mut file| {
+            let Some(path) = file["path"].as_str().map(str::to_owned) else {
+                return file;
+            };
+            let introduced = file["present"]
+                .as_array()
+                .is_some_and(|present| !present.is_empty());
+            match view.file(&path) {
+                Some(measured) => {
+                    let uncovered = measured.uncovered_lines.len();
+                    file["coverage"] = json!({
+                        "measured_lines": measured.measured_lines.len(),
+                        "uncovered_lines": uncovered,
+                        "in_run": true,
+                    });
+                    if introduced && uncovered > 0 {
+                        both += 1;
+                        file["untested_and_changed"] = json!(true);
+                    }
+                }
+                None => {
+                    file["coverage"] = json!({
+                        "in_run": false,
+                        "note": "the run did not measure this file",
+                    });
+                }
+            }
+            file
+        })
+        .collect();
+    report["run"] = json!(view.run);
+    report["run_stale"] = json!(view.stale);
+    report["files"] = json!(crossed);
+    report["introduced_in_untested_code"] = json!(both);
+    Ok(())
 }
 
 /// GitHub workflow annotations for what a change introduced.
@@ -1920,10 +1991,14 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
                 limit,
                 annotate,
                 all,
+                run,
             } => {
                 let key = std::env::var("TYPESAFE_API_KEY").ok();
-                let (report, failed) =
+                let (mut report, failed) =
                     run_patch(&root, &range, &paths, refresh, all, key.as_deref())?;
+                if let Some(selector) = run.as_deref() {
+                    cross_with_coverage(&mut report, selector)?;
+                }
                 if json {
                     println!(
                         "{}",

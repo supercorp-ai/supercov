@@ -1867,7 +1867,9 @@ fn render_patch(
 }
 
 /// Resolve a run and build the shared view every workflow command reads.
-fn load_run_view(selector: Option<&str>) -> Result<supercov_engine::run_view::RunView, String> {
+pub(crate) fn load_run_view(
+    selector: Option<&str>,
+) -> Result<supercov_engine::run_view::RunView, String> {
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;

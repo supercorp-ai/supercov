@@ -283,6 +283,25 @@ four-level nest is a cleaner signal than nesting that grew over three years.
 Nothing here fails a build. No threshold in this project has survived
 calibration, so the command reports and exits successfully.
 
+### Crossing a change with coverage
+
+```sh supercov-example
+supercov quality patch --base origin/main --run latest
+```
+
+Reads a run that already happened and marks any changed file where a property
+appeared **and** the run left measured lines uncovered.
+
+Neither half justifies stopping anyone on its own. A structural property is a
+judgment, and an uncovered line is normal in code nobody has tested yet. Both at
+once describes a change that made code harder to follow in a place no test
+exercises, which is the one claim this tool can make that a coverage tool and a
+quality tool cannot make separately.
+
+This never starts a run, and **nothing about quality appears in a run's own
+output**. An assessment costs money and needs a credential, so it stays
+something you ask for.
+
 ### When both versions do not fit
 
 A file whose two versions exceed the request budget cannot be split into windows
