@@ -910,6 +910,7 @@ struct ScopeProjection<'a> {
 
 fn scope_projection<'a>(
     scope: Option<&'a serde_json::Value>,
+    coverage_language: &'a str,
     coverage_model: &'a str,
 ) -> Result<Option<ScopeProjection<'a>>, CoverageIndexError> {
     let Some(scope) = scope else {
@@ -939,7 +940,7 @@ fn scope_projection<'a>(
             .ok_or(CoverageIndexError::InvalidRecord("source-scope entries"))?;
         return Ok(Some(ScopeProjection {
             kind: ScopeKind::SourceDiscovery,
-            language: "javascript",
+            language: coverage_language,
             model: coverage_model,
             mode: Some(mode),
             roots,
@@ -1002,7 +1003,7 @@ fn projection_record(
     );
     put_u32(&mut record, 12, strings.intern(&view.generated_at)?);
 
-    let scope = scope_projection(view.scope.as_ref(), &view.model.name)?;
+    let scope = scope_projection(view.scope.as_ref(), &view.model.language, &view.model.name)?;
     record[2] = u8::from(scope.is_some());
     record[3] = scope.as_ref().map_or(0, |scope| scope.kind as u8);
     put_u32(
@@ -4008,6 +4009,49 @@ mod tests {
         let projection = index.projection(CoverageViewId::All, None, None).unwrap();
         assert_eq!(projection.tests, 1);
         assert_eq!(projection.test_outcomes.unstarted, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_discovery_scope_preserves_python_language() {
+        let mut report = report();
+        let scope = serde_json::json!({
+            "version": 1,
+            "mode": "automatic",
+            "roots": ["."],
+            "entries": [{
+                "file": "src/a.py",
+                "status": "included",
+                "reason": "python source",
+                "packageRoot": "."
+            }]
+        });
+        for view in [
+            &mut report.view,
+            &mut report.filters.passed,
+            &mut report.filters.failed,
+        ] {
+            view.scope = Some(scope.clone());
+            view.model.language = "python".into();
+            view.model.name = "python-monitoring-v1".into();
+        }
+        let root = root();
+        let path = root.join("query-index.python.bin");
+        write_query_index(
+            &coverage_index_sections(&report).unwrap(),
+            &identity(),
+            &path,
+        )
+        .unwrap();
+        let container = QueryIndex::open(&path, &identity()).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        let projection = index.projection(CoverageViewId::All, None, None).unwrap();
+        let source_scope = projection.source_scope.unwrap();
+        assert_eq!(source_scope.language, "python");
+        assert_eq!(source_scope.model, "python-monitoring-v1");
+        assert_eq!(source_scope.kind, "source-discovery");
+        assert_eq!(source_scope.included, 1);
+        assert_eq!(index.scope_entries(CoverageViewId::All).unwrap().len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 
