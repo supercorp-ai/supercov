@@ -578,6 +578,24 @@ const TEST_DIRECTORIES: &[&str] = &[
     "tests",
 ];
 
+/// A directory that holds tests, by name or by suffix.
+///
+/// The suffix form covers `runtime-tests` in Hono and `Shop.Tests` in .NET, and
+/// requires a separator before it so `contest` and `latest` stay source.
+fn is_test_directory(segment: &str) -> bool {
+    if TEST_DIRECTORIES.contains(&segment) {
+        return true;
+    }
+    ["test", "tests", "spec", "specs"].iter().any(|word| {
+        segment.len() > word.len() + 1
+            && segment.ends_with(word)
+            && matches!(
+                segment.as_bytes()[segment.len() - word.len() - 1],
+                b'-' | b'_' | b'.'
+            )
+    })
+}
+
 /// A CamelCase suffix that names a test class, for the languages that spell it
 /// that way rather than with a separator: Java, Kotlin, C#, Swift, PHP.
 fn camel_test_suffix(stem: &str) -> bool {
@@ -606,10 +624,7 @@ fn skipped_path(relative: &str) -> Option<Skipped> {
         Some((directories, file)) => (directories, file),
         None => ("", lower.as_str()),
     };
-    if directories
-        .split('/')
-        .any(|segment| TEST_DIRECTORIES.contains(&segment))
-    {
+    if directories.split('/').any(is_test_directory) {
         return Some(Skipped::Test);
     }
     let parts: Vec<&str> = file.split(['.', '_', '-']).collect();

@@ -100,10 +100,18 @@ both ship. A declared file in a directory of its own brings that directory, so
 the files it loads travel with it, while a declared file at the package root,
 such as Cargo's `build.rs`, is only itself rather than swallowing the package.
 
-Three conventional locations hold real code that ships to nobody, and are named
-rather than left unclassified because there is nothing to declare: a `scripts`
-directory is a `tool script`, matching the coverage scope's own rule,
-`examples` is an `example`, and `benches` is a `benchmark`.
+Four conventional locations hold real code that is not the product, and are
+named rather than left unclassified because there is nothing to declare: a
+`scripts` directory is a `tool script`, matching the coverage scope's own rule,
+`examples` is an `example`, `benches` is a `benchmark`, and anything spelled
+`<tool>.config.<ext>` or `.<tool>rc.<ext>` is `build or tool configuration`. A
+manifest entry pointing into build output, such as `"bin": "dist/index.js"`, is
+ignored for the same reason: it names the artifact, not the code you would
+change.
+
+A test directory is recognised by suffix as well as by name, so Hono's
+`runtime-tests` and .NET's `Shop.Tests` count. A separator is required before
+the suffix, which keeps `contest` and `latest` as source.
 
 **Excluded** means test code or generated output, each carrying its reason.
 This is not a claim that test code does not matter: it costs a request each, and

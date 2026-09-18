@@ -173,7 +173,14 @@ fn declared_entry_points(directory: &Path) -> Vec<PathBuf> {
     }
     targets
         .into_iter()
-        .filter(|target| !target.contains("node_modules"))
+        // A manifest names what it ships, which for a compiled package is the
+        // build output. `"bin": "dist/index.js"` is a real declaration and a
+        // useless source root: the code a reader would change is the input.
+        .filter(|target| {
+            !target
+                .split('/')
+                .any(|segment| super::ignored_directory(segment.trim_start_matches("./")))
+        })
         .filter_map(|target| {
             // A subpath pattern such as `./dist/*.js` names the directory.
             let prefix = target.split('*').next()?.trim_end_matches('/');
@@ -318,7 +325,10 @@ fn package_roots(root: &Path) -> BTreeSet<PathBuf> {
 /// there is nothing for a project to declare.
 fn beside_the_product(file: &str) -> Option<&'static str> {
     let lower = file.to_ascii_lowercase();
-    let directories = lower.rsplit_once('/').map(|(head, _)| head).unwrap_or("");
+    let (directories, name) = match lower.rsplit_once('/') {
+        Some((head, name)) => (head, name),
+        None => ("", lower.as_str()),
+    };
     for segment in directories.split('/') {
         match segment {
             "scripts" => return Some("tool script"),
@@ -326,6 +336,23 @@ fn beside_the_product(file: &str) -> Option<&'static str> {
             "benches" | "benchmarks" => return Some("benchmark"),
             _ => {}
         }
+    }
+    // How a build tool is configured is not the product being built. `config`
+    // as a whole dot-separated part covers `vite.config.ts`, `eslint.config.mjs`
+    // and `tsup.config.ts` without touching a file merely named `configure.ts`.
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.len() > 2 && parts.contains(&"config") {
+        return Some("build or tool configuration");
+    }
+    // The older dotfile spelling, `.eslintrc.js` and its kind. Splitting a name
+    // that begins with a dot leaves an empty first part, so the tool's name is
+    // the second one.
+    if name.starts_with('.')
+        && parts
+            .get(1)
+            .is_some_and(|tool| tool.len() > 3 && tool.ends_with("rc"))
+    {
+        return Some("build or tool configuration");
     }
     None
 }

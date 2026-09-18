@@ -1430,3 +1430,107 @@ fn a_diff_will_not_read_a_snapshot_the_catalog_did_not_write() {
     let error = query::diff(&temp.0, "q_000000000000001e", "q_00000000000000ca", 20).unwrap_err();
     assert!(error.contains("not written by the catalog"), "{error}");
 }
+
+#[test]
+fn build_output_a_manifest_ships_is_not_a_source_root() {
+    // A compiled package declares what it ships, which is the build output.
+    // `"bin": "dist/index.js"` is a real declaration and a useless source root:
+    // the code a reader would change is the input, not the artifact. Found by
+    // running the scope over real repositories, where three of nine reported
+    // `dist` as source.
+    let temp = Temp::new();
+    temp.write(
+        "package.json",
+        r#"{"bin":{"tool":"dist/index.js"},"main":"build/main.js"}"#,
+    );
+    temp.write("src/index.ts", "export const a = 1;\n");
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    assert_eq!(view.roots, vec!["src".to_string()]);
+    assert!(
+        !view
+            .roots
+            .iter()
+            .any(|root| root == "dist" || root == "build"),
+        "build output became a source root: {:?}",
+        view.roots
+    );
+}
+
+#[test]
+fn a_test_directory_is_recognised_by_suffix_as_well_as_by_name() {
+    // Found on real repositories: Hono keeps `runtime-tests/`, and .NET names a
+    // test project `Shop.Tests`. Neither is in the fixed list, both are tests.
+    for path in [
+        "runtime-tests/workerd/index.ts",
+        "runtime-tests/lambda/mock.ts",
+        "Shop.Tests/OrderFixture.cs",
+        "integration_tests/api.py",
+        "api-spec/contract.ts",
+    ] {
+        assert_eq!(
+            skipped_path(path).map(Skipped::reason),
+            Some("test"),
+            "{path} should be recognised as test code"
+        );
+    }
+    // A separator is required before the suffix, so these stay source.
+    for path in [
+        "src/contest/rules.ts",
+        "src/latest/index.ts",
+        "protest/main.go",
+    ] {
+        assert_eq!(skipped_path(path), None, "{path} is source, not a test");
+    }
+}
+
+#[test]
+fn tool_configuration_is_not_the_product_being_built() {
+    // Found on real repositories: config files were nearly all of what remained
+    // unclassified across seven of them.
+    let temp = Temp::new();
+    temp.write("package.json", "{}\n");
+    temp.write("src/app.ts", "export const a = 1;\n");
+    for config in [
+        "vite.config.ts",
+        "vitest.config.mts",
+        "eslint.config.mjs",
+        "tsup.config.ts",
+        "postcss.config.js",
+        "packages/web/next.config.js",
+    ] {
+        temp.write(config, "export default {};\n");
+    }
+    // A file merely named for configuring something is still source.
+    temp.write("src/configure.ts", "export const c = 1;\n");
+
+    let files = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &files, None);
+    let entry = |path: &str| {
+        view.entries
+            .iter()
+            .find(|e| e.path == path)
+            .unwrap()
+            .clone()
+    };
+    for config in [
+        "vite.config.ts",
+        "eslint.config.mjs",
+        "packages/web/next.config.js",
+    ] {
+        assert_eq!(entry(config).status, scope::Status::Excluded, "{config}");
+        assert_eq!(
+            entry(config).reason,
+            "build or tool configuration",
+            "{config}"
+        );
+    }
+    assert_eq!(entry("src/configure.ts").status, scope::Status::Included);
+    assert_eq!(view.ambiguous(), 0);
+    // The dotfile spelling never reaches classification, because discovery
+    // skips hidden files, but the rule covers it for a path named directly.
+    assert_eq!(
+        scope::classify(&temp.0, &[temp.0.join(".eslintrc.js")], None).entries[0].reason,
+        "build or tool configuration"
+    );
+}
