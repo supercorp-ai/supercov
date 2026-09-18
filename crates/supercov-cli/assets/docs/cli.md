@@ -24,8 +24,8 @@ npx supercov --help
 | Find the tests a change affects | `npx supercov runs latest tests affected` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
-| Assess source quality with TypeSafe AI | `npx supercov quality src/` |
-| Score code by named properties | `npx supercov quality health src/` |
+| Assess source quality with TypeSafe AI | `npx supercov quality` |
+| See only files with findings | `npx supercov quality gaps` |
 | Review what a change introduced | `npx supercov quality patch --base origin/main` |
 | Read bundled guides | `npx supercov docs` |
 
@@ -350,32 +350,41 @@ retries with bounded backoff; long retry delays are returned to the caller.
 Line locations within a declaration, changed-file selection and failing CI
 grade gates are not implemented yet.
 
-## Score code by named properties (experimental)
+## Assess code quality (experimental)
 
-```sh
-npx supercov quality health src/
-npx supercov quality health --json src/
+```sh supercov-example
+supercov quality                 # this repository
+supercov quality src/            # one directory
+supercov quality gaps            # only files something fired on
+supercov quality file src/a.ts   # one file, every check
+supercov quality snapshots       # saved assessments
 ```
 
-A different instrument from the rubric above. Rather than asking the model to
-place a file on a scale, this asks twelve yes/no questions about specific named
-properties, and the arithmetic that turns twelve answers into one number is done
-here rather than by the model. Every part of the score is therefore a claim you
-can check against the file in seconds.
+With no argument the subject is the repository you are standing in, the way
+`supercov runs` needs no argument. Every assessment saves a snapshot, so the
+reading commands work afterwards with no key and no network.
 
-The checks are drawn from Fowler and Beck's refactoring smells and the
-class-scope smells CodeScene's Code Health is built from: god class, long
-method, deep nesting, complex conditional, long parameter list, duplicated
-logic, primitive obsession, dead code, feature envy, temporary field, message
-chains and magic values. `--json` carries the full catalog, including what is
-known about each check's accuracy.
+Twelve yes/no questions about specific named properties, drawn from Fowler and
+Beck's refactoring smells and the class-scope smells CodeScene's Code Health is
+built from: god class, long method, deep nesting, complex conditional, long
+parameter list, duplicated logic, primitive obsession, dead code, feature envy,
+temporary field, message chains and magic values. **The arithmetic that turns
+twelve answers into one number is done by this command, not by the model**, so
+every part of the score is a claim you can check against the file in seconds.
+`quality file <path>` shows all twelve with what is known about each.
 
-Health is `10` when nothing fires and `0` when everything does. It is the mean
-of the twelve answers, so the scale means the same thing if the catalog changes.
+Text output reports a **band**, not a decimal, because the measured resolution
+of these judgments is about one point and `4.4/10` would claim precision nobody
+observed. `good` is 8 and above, `fair` is 5 to 8, `weak` is below 5. The number
+is in `--json`, where something has to sort.
+
 Directory and repository health weight files by size, because a plain average
 would let a directory of one-line re-exports outvote the file everything depends
-on. **That weighting is arithmetic done by this command, not a judgment the
-model was asked for.** The per-file numbers it combines are model judgments.
+on. A file too large to send whole is split into windows at declaration
+boundaries and the strongest answer to each question wins, since every question
+is existential: "does this file contain a method that…" is true if any window
+has one. A windowed file says so, because a property of the whole file, such as
+logic duplicated across two windows, is weaker there.
 
 ### What is known about this number
 
@@ -399,8 +408,21 @@ Three limits belong next to it and are not hidden:
   number. Four were reworded after a blind reader found them failing, and the
   composite moved by 0.4 points with an interval that includes zero.
 
-There is no cutoff. No threshold in this project has survived calibration, and
-this command does not fail a build.
+Three checks fire on more than half of a real repository, so a full list of what
+fired buries the finding that is news under the ones that are true of
+everything. Text output shows the three strongest per file and `quality file`
+shows the rest. There is no cutoff, and no assessment fails a build.
+
+### The older rubric
+
+```sh supercov-example
+supercov quality rubric src/
+```
+
+Nine constructs placed on a scale by the model, which is what `quality` did
+before. It is kept behind its own verb because it orders human-rated classes
+90.2% correctly where **counting the statements in the file gets 90.3%**. The
+catalog above is the instrument this command now uses.
 
 ## Review what a change introduced (experimental)
 

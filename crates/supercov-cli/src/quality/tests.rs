@@ -628,7 +628,14 @@ fn scan_rejects_unknown_or_missing_options() {
         .is_err()
     );
 
-    assert!(parse_scan(vec![]).is_err());
+    // No path is no longer an error; the caller fills in this directory.
+    assert!(parse_scan(vec![]).unwrap().paths.is_empty());
+    assert_eq!(defaulted(parse_scan(vec![]).unwrap()).paths, here());
+    // A path given explicitly is never replaced by the default.
+    assert_eq!(
+        defaulted(parse_scan(vec!["a.ts".into()]).unwrap()).paths,
+        vec![PathBuf::from("a.ts")]
+    );
     assert!(parse_scan(vec!["a.ts".into(), "--context".into()]).is_err());
     assert!(parse_scan(vec!["a.ts".into(), "--scope".into(), "function".into()]).is_err());
     assert!(
@@ -747,10 +754,21 @@ fn files_are_ranked_weakest_maintainability_first() {
 fn a_subcommand_is_only_a_reserved_word_and_a_path_can_still_be_scanned() {
     let scanned =
         |arguments: Vec<&str>| match parse(arguments.iter().map(|a| a.to_string()).collect()) {
-            Ok(Command::Scan(options)) => options.paths,
-            _ => panic!("expected a scan"),
+            Ok(Command::Health(options)) => options.paths,
+            _ => panic!("expected an assessment"),
         };
     assert_eq!(scanned(vec!["src"]), vec![PathBuf::from("src")]);
+    // No path at all is the repository. `supercov quality` should say something
+    // about the code you are standing in without being told where to look.
+    assert_eq!(scanned(vec![]), vec![PathBuf::from(".")]);
+    assert!(matches!(
+        parse(vec!["rubric".into()]),
+        Ok(Command::Rubric(_))
+    ));
+    assert!(matches!(
+        parse(vec!["gaps".into()]),
+        Ok(Command::Gaps { snapshot: None, .. })
+    ));
     // A directory named after a subcommand is still assessable through `scan`.
     assert_eq!(scanned(vec!["scan", "show"]), vec![PathBuf::from("show")]);
     assert_eq!(
@@ -2061,4 +2079,103 @@ fn review_outside_a_repository_says_so() {
     let temp = Temp::new();
     let error = changes::collect(&temp.0, &changes::Range::Unstaged, &[]).unwrap_err();
     assert!(error.contains("Git repository"), "{error}");
+}
+
+#[test]
+fn a_band_says_only_what_the_resolution_supports() {
+    assert_eq!(band(Some(9.1)), "good");
+    assert_eq!(band(Some(8.0)), "good");
+    assert_eq!(band(Some(7.9)), "fair");
+    assert_eq!(band(Some(5.0)), "fair");
+    assert_eq!(band(Some(4.9)), "weak");
+    assert_eq!(band(None), "\u{2014}");
+}
+
+fn windowed(path: &str, checks: &[(&str, f64)]) -> Answers {
+    Answers {
+        path: path.to_owned(),
+        bytes: 100,
+        windows: 1,
+        note: Some("windowed".into()),
+        values: Some(checks.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()),
+        cached: true,
+        error: None,
+    }
+}
+
+#[test]
+fn windows_of_one_file_fold_back_by_taking_the_strongest_answer() {
+    // Every question is existential: "does this file contain a method that..."
+    // is true if any window has one, so the highest value wins.
+    let folded = combine_windows(vec![
+        windowed("a.rs", &[("long_method", 0.1), ("dead_code", 0.9)]),
+        windowed("a.rs", &[("long_method", 0.8), ("dead_code", 0.2)]),
+        windowed("b.rs", &[("long_method", 0.3), ("dead_code", 0.3)]),
+    ]);
+    assert_eq!(folded.len(), 2);
+    let a = &folded[0];
+    assert_eq!(a.path, "a.rs");
+    assert_eq!(a.windows, 2);
+    assert_eq!(a.bytes, 200, "a windowed file reports its whole size");
+    let values = a.values.as_ref().unwrap();
+    assert_eq!(values["long_method"], 0.8);
+    assert_eq!(values["dead_code"], 0.9);
+    // Order of first appearance is kept, so the report is stable.
+    assert_eq!(folded[1].path, "b.rs");
+    assert_eq!(folded[1].windows, 1);
+}
+
+#[test]
+fn folding_keeps_the_first_error_and_only_claims_cached_when_every_window_was() {
+    let mut miss = windowed("a.rs", &[("long_method", 0.1)]);
+    miss.cached = false;
+    let folded = combine_windows(vec![windowed("a.rs", &[("long_method", 0.2)]), miss]);
+    assert!(
+        !folded[0].cached,
+        "one live window means the file was not cached"
+    );
+}
+
+#[test]
+fn an_oversized_file_is_windowed_and_every_window_fits() {
+    // A single file can be split where a pair of versions cannot: there is one
+    // text, so each window is still real code to ask about.
+    let mut source = String::from("// oversized\n");
+    for index in 0..3000 {
+        source.push_str(&format!(
+            "export function unit{index}(a: number) {{\n  return a + {index};\n}}\n"
+        ));
+    }
+    assert!(
+        within_budget(&smells::file_request("big.ts", &source))
+            .unwrap()
+            .is_none(),
+        "the fixture must exceed the budget or this proves nothing"
+    );
+    let windows = catalog_windows("big.ts", &source).unwrap();
+    assert!(windows.len() > 1, "an oversized file is split");
+    for (window, text) in &windows {
+        assert!(
+            within_budget(&smells::file_request("big.ts", text))
+                .unwrap()
+                .is_some(),
+            "window {} of {} is still over budget",
+            window.index,
+            window.of
+        );
+    }
+    // The windows partition the file: every byte is asked about exactly once.
+    let covered: usize = windows.iter().map(|(_, text)| text.len()).sum();
+    assert_eq!(covered, source.len());
+    assert_eq!(windows.last().unwrap().0.of, windows.len());
+}
+
+#[test]
+fn a_file_with_nothing_to_window_on_says_so_rather_than_failing_silently() {
+    let source = format!("const blob = \"{}\";\n", "x".repeat(200_000));
+    let error = catalog_windows("blob.ts", &source).unwrap_err();
+    assert!(
+        error.contains("no parsed top-level declarations"),
+        "{error}"
+    );
 }

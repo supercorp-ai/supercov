@@ -125,6 +125,119 @@ fn open(root: &Path, snapshot: Option<&str>) -> Result<Snapshot, String> {
     })
 }
 
+/// Which instrument wrote a snapshot. Snapshots written before the catalog
+/// existed carry no marker and are rubric snapshots.
+fn instrument(manifest: &Value) -> &str {
+    manifest["instrument"].as_str().unwrap_or("rubric")
+}
+
+fn is_catalog(snapshot: &Snapshot) -> bool {
+    instrument(&snapshot.manifest) == "catalog"
+}
+
+/// A catalog snapshot read back: the tree, then the weakest files.
+fn show_catalog(snapshot: &Snapshot, limit: usize) -> Value {
+    let rows: Vec<Value> = snapshot
+        .files
+        .iter()
+        .map(|file| {
+            json!({
+                "path": file["path"], "health": file["health"], "status": file["status"],
+                "present": file["present"], "bytes": file["bytes"],
+            })
+        })
+        .collect();
+    let (total, shown) = limited(rows, limit);
+    json!({
+        "view": "quality", "instrument": "catalog", "snapshot": snapshot.id,
+        "created_at": snapshot.manifest["created_at"],
+        "catalog_version": snapshot.manifest["catalog_version"],
+        "model": snapshot.manifest["model"],
+        "health": snapshot.manifest["health"],
+        "counts": snapshot.manifest["counts"],
+        "bytes": snapshot.manifest["bytes"],
+        "directories": snapshot.manifest["directories"],
+        "total": total, "shown": shown.len(), "files": shown,
+    })
+}
+
+/// Only the files something fired on, the way `runs gaps` shows only files with
+/// uncovered behaviour. The whole point of a default command is that the next
+/// question narrows it.
+pub fn gaps(root: &Path, snapshot: Option<&str>, limit: usize) -> Result<Value, String> {
+    let snapshot = open(root, snapshot)?;
+    if !is_catalog(&snapshot) {
+        return Err(format!(
+            "snapshot {} was written by the rubric, which has no findings to narrow to; \
+             run `supercov quality` to assess with the catalog",
+            snapshot.id
+        ));
+    }
+    let rows: Vec<Value> = snapshot
+        .files
+        .iter()
+        .filter(|file| {
+            file["present"]
+                .as_array()
+                .is_some_and(|present| !present.is_empty())
+                || file["status"] == "failed"
+        })
+        .cloned()
+        .collect();
+    let quiet = snapshot.files.len() - rows.len();
+    let (total, shown) = limited(rows, limit);
+    Ok(json!({
+        "view": "gaps", "instrument": "catalog", "snapshot": snapshot.id,
+        "catalog_version": snapshot.manifest["catalog_version"],
+        "clean": quiet, "total": total, "shown": shown.len(), "files": shown,
+    }))
+}
+
+/// One file with every check, and what is known about each one, so a reader can
+/// weigh a finding without leaving the output.
+fn file_catalog(snapshot: &Snapshot, path: &str) -> Result<Value, String> {
+    let file = snapshot
+        .files
+        .iter()
+        .find(|file| file["path"] == path)
+        .ok_or_else(|| format!("{path} is not in snapshot {}", snapshot.id))?;
+    let empty = Vec::new();
+    let known: std::collections::BTreeMap<&str, &Value> = snapshot.manifest["catalog"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter_map(|entry| Some((entry["check"].as_str()?, entry)))
+        .collect();
+    let mut checks: Vec<Value> = file["checks"]
+        .as_object()
+        .map(|values| {
+            values
+                .iter()
+                .map(|(id, value)| {
+                    let entry = known.get(id.as_str());
+                    json!({
+                        "check": id, "value": value,
+                        "present": value.as_f64().unwrap_or(0.0) >= 0.5,
+                        "asks": entry.map(|e| e["asks"].clone()),
+                        "evidence": entry.map(|e| e["evidence"].clone()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    checks.sort_by(|a, b| {
+        b["value"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .total_cmp(&a["value"].as_f64().unwrap_or(0.0))
+    });
+    Ok(json!({
+        "view": "file", "instrument": "catalog", "snapshot": snapshot.id,
+        "path": path, "health": file["health"], "bytes": file["bytes"],
+        "status": file["status"], "checks": checks,
+    }))
+}
+
 pub fn snapshots(root: &Path, limit: usize) -> Result<Value, String> {
     let rows: Vec<Value> = store::list(root)?
         .into_iter()
@@ -134,7 +247,9 @@ pub fn snapshots(root: &Path, limit: usize) -> Result<Value, String> {
                 "created_at": manifest["created_at"],
                 "paths": manifest["paths"],
                 "model": manifest["model"],
+                "instrument": instrument(&manifest),
                 "rubric_version": manifest["rubric_version"],
+                "catalog_version": manifest["catalog_version"],
                 "counts": manifest["counts"],
                 "parent": manifest["parent"],
                 "deepened": manifest["deepened"],
@@ -146,6 +261,10 @@ pub fn snapshots(root: &Path, limit: usize) -> Result<Value, String> {
 }
 
 pub fn show(root: &Path, snapshot: Option<&str>, limit: usize) -> Result<Value, String> {
+    let opened = open(root, snapshot)?;
+    if is_catalog(&opened) {
+        return Ok(show_catalog(&opened, limit));
+    }
     let Snapshot {
         id,
         manifest,
@@ -245,6 +364,10 @@ pub fn dimension(
 }
 
 pub fn file(root: &Path, path: &str, snapshot: Option<&str>) -> Result<Value, String> {
+    let opened = open(root, snapshot)?;
+    if is_catalog(&opened) {
+        return file_catalog(&opened, path);
+    }
     let Snapshot {
         id,
         manifest,
@@ -722,8 +845,118 @@ fn number(value: &Value) -> String {
 }
 
 /// One text rendering for every view, chosen by the tag the view carries.
+/// One band rather than a decimal, because the measured resolution of these
+/// judgments is about a point and two decimals would claim precision nobody
+/// observed. The number stays in `--json`, where something has to sort.
+fn band(health: Option<f64>) -> &'static str {
+    match health {
+        Some(h) if h >= 8.0 => "good",
+        Some(h) if h >= 5.0 => "fair",
+        Some(_) => "weak",
+        None => "—",
+    }
+}
+
+fn render_quality(view: &Value) -> String {
+    let empty = Vec::new();
+    let mut out = String::new();
+    let health = view["health"].as_f64();
+    out.push_str(&format!(
+        "Quality {} ({:.1}/10) over {} files.\n",
+        band(health),
+        health.unwrap_or(0.0),
+        view["counts"]["scored"].as_u64().unwrap_or(0)
+    ));
+    out.push_str(&format!(
+        "Catalog {}, model {}, snapshot {}.\n\n",
+        view["catalog_version"].as_str().unwrap_or("?"),
+        view["model"].as_str().unwrap_or("?"),
+        view["snapshot"].as_str().unwrap_or("?")
+    ));
+    let files = view["files"].as_array().unwrap_or(&empty);
+    if !files.is_empty() {
+        out.push_str("Weakest first:\n");
+    }
+    for file in files {
+        let fired: Vec<&str> = file["present"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .filter_map(|p| p["check"].as_str())
+            .collect();
+        out.push_str(&format!(
+            "  {:>5}  {}\n",
+            band(file["health"].as_f64()),
+            file["path"].as_str().unwrap_or("?")
+        ));
+        if !fired.is_empty() {
+            out.push_str(&format!("         {}\n", fired.join(", ")));
+        }
+    }
+    let total = view["total"].as_u64().unwrap_or(0) as usize;
+    if total > files.len() {
+        out.push_str(&format!("  ... and {} more\n", total - files.len()));
+    }
+    out.push_str("\nNarrow with `quality gaps`, or read one with `quality file <path>`.\n");
+    out
+}
+
+fn render_gaps(view: &Value) -> String {
+    let empty = Vec::new();
+    let files = view["files"].as_array().unwrap_or(&empty);
+    let mut out = String::new();
+    if files.is_empty() {
+        return "Nothing fired on any assessed file.\n".into();
+    }
+    out.push_str(&format!(
+        "{} files with findings, {} clean.\n\n",
+        view["total"].as_u64().unwrap_or(0),
+        view["clean"].as_u64().unwrap_or(0)
+    ));
+    for file in files {
+        out.push_str(&format!("{}\n", file["path"].as_str().unwrap_or("?")));
+        for finding in file["present"].as_array().unwrap_or(&empty) {
+            out.push_str(&format!(
+                "  {:.2}  {}\n",
+                finding["value"].as_f64().unwrap_or(0.0),
+                finding["check"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+    out
+}
+
+fn render_file_catalog(view: &Value) -> String {
+    let empty = Vec::new();
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{}  quality {} ({:.1}/10), {} bytes\n\n",
+        view["path"].as_str().unwrap_or("?"),
+        band(view["health"].as_f64()),
+        view["health"].as_f64().unwrap_or(0.0),
+        view["bytes"].as_u64().unwrap_or(0)
+    ));
+    for check in view["checks"].as_array().unwrap_or(&empty) {
+        let present = check["present"].as_bool().unwrap_or(false);
+        out.push_str(&format!(
+            "  {}  {:.2}  {}\n",
+            if present { "yes" } else { " no" },
+            check["value"].as_f64().unwrap_or(0.0),
+            check["check"].as_str().unwrap_or("?")
+        ));
+        if present && let Some(asks) = check["asks"].as_str() {
+            out.push_str(&format!("            {asks}\n"));
+        }
+    }
+    out.push_str("\nEach line is a model judgment you can check against the file.\n");
+    out
+}
+
 pub fn render(view: &Value) -> String {
     match view["view"].as_str().unwrap_or_default() {
+        "quality" => render_quality(view),
+        "gaps" => render_gaps(view),
+        "file" if view["instrument"] == "catalog" => render_file_catalog(view),
         "snapshots" => render_snapshots(view),
         "show" => render_show(view),
         "dimension" => render_dimension(view),
