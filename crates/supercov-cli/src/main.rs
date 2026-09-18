@@ -48,6 +48,7 @@ mod assertions_human;
 mod assertions_query;
 mod human_query;
 mod public_query;
+mod quality;
 mod tests_query;
 
 use human_query::render_human;
@@ -74,6 +75,7 @@ Inspect a run with small, paginated answers:
   supercov runs <run-id> [resource]    query one immutable run
 
 Compare, combine, and maintain:
+  supercov quality [path]              code quality powered by Jev
   supercov diff <older> <newer>        compare two runs
   supercov merge <id> <id> [...]       combine compatible runs
   supercov clean [--keep N]            remove stored runs (all by default)
@@ -93,6 +95,7 @@ const DOC_TOPICS: &[&str] = &[
     "troubleshooting",
     "cli",
     "coverage-model",
+    "quality",
     "evidence",
     "supported-suites",
     "verification",
@@ -303,6 +306,7 @@ fn main() -> ExitCode {
         Some("__build-rust-compiler") => build_rust_compiler(),
         Some("__run-rust-compiler") => run_rust_compiler(),
         Some("clean") => cleanup_command(arguments.collect()),
+        Some("quality") => quality::command(arguments.collect()),
         Some("docs") => docs_command(arguments.collect()),
         Some("assertions") => assertions_query::global_command(&arguments.collect::<Vec<_>>()),
         Some("runs") => public_query_command("runs", arguments.collect()),
@@ -411,6 +415,7 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         "troubleshooting" => Some(include_str!("../assets/docs/troubleshooting.md")),
         "cli" => Some(include_str!("../assets/docs/cli.md")),
         "coverage-model" => Some(include_str!("../assets/docs/coverage-model.md")),
+        "quality" => Some(include_str!("../assets/docs/quality.md")),
         "evidence" => Some(include_str!("../assets/docs/evidence.md")),
         "supported-suites" => Some(include_str!("../assets/docs/supported-suites.md")),
         "verification" => Some(include_str!("../assets/docs/verification.md")),
@@ -1864,7 +1869,9 @@ fn render_patch(
 }
 
 /// Resolve a run and build the shared view every workflow command reads.
-fn load_run_view(selector: Option<&str>) -> Result<supercov_engine::run_view::RunView, String> {
+pub(crate) fn load_run_view(
+    selector: Option<&str>,
+) -> Result<supercov_engine::run_view::RunView, String> {
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;

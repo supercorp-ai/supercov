@@ -1,10 +1,10 @@
-![Coverage for coding agents and software factories 🌙](https://raw.githubusercontent.com/supercorp-ai/supercov/main/supercov.jpg)
+![Code quality and coverage for coding agents](https://raw.githubusercontent.com/supercorp-ai/supercov/main/supercov.jpg)
 
-**Coverage for coding agents and software factories 🌙**
+**Code quality and coverage for coding agents**
 
-**Supercov gives your coding agent the next useful test to write.** It runs the test command you already use, records local coverage evidence, and turns uncovered paths into small, actionable queries. Your agent writes a focused test, reruns the suite, proves what improved, and keeps going while useful gaps remain.
+**Supercov tells your coding agent what to fix and what to test.** It scores your code quality with [Jev](https://typesafe.ai), runs the test command you already use, and turns uncovered paths into small, actionable queries. Your agent picks a target, writes a focused test or a focused refactor, proves what improved, and keeps going.
 
-No account, config file, import, custom reporter, or hosted service is required. Supercov is local, free, open source, and MIT licensed.
+Coverage needs no account, config file, import, custom reporter, or hosted service. Supercov is local, free, open source, and MIT licensed. Quality uses [Jev](https://typesafe.ai) and needs a key.
 
 [Website](https://supercov.com) · [Documentation](https://supercov.com/docs) · [npm](https://www.npmjs.com/package/supercov) · [GitHub](https://github.com/supercorp-ai/supercov)
 
@@ -12,6 +12,41 @@ Supported by [Supercorp](https://supercorp.ai).
 
 [Agent workflow](https://supercov.com/docs/agent-loop): ask your coding agent
 to add a test in your own project, with a recorded example to follow along.
+
+## Score your code
+
+```bash
+export TYPESAFE_API_KEY=...   # get one at https://typesafe.ai
+npx supercov quality
+```
+
+No arguments and no configuration. It finds your source, asks Jev a set of
+yes/no questions about each file, and does the arithmetic itself, so every part
+of a score is a claim you can check against the file.
+
+```
+Quality weak (3.8/10) over 163 files.
+  11 good, 52 fair, 100 weak.
+
+Weakest:
+  weak  runtime/python/supercov_runtime.py
+        long_method 0.96, deep_nesting 0.92, complex_conditional 0.89, +9 more
+  weak  crates/supercov-engine/src/assertion_store.rs
+        long_method 0.96, deep_nesting 0.91, complex_conditional 0.86, +8 more
+```
+
+Narrow to what fired, read one file in full, or review a change:
+
+```bash
+npx supercov quality gaps
+npx supercov quality file src/server.ts
+npx supercov quality patch                    # your uncommitted work, or your branch
+npx supercov quality patch --annotate github  # workflow annotations, no token
+```
+
+Jev charges for what it reads and nothing for what it writes, so a megabyte of
+source costs a little over a cent. Answers are cached by content, so a second
+run pays only for what changed. See [Understanding quality](docs/quality.md).
 
 ## Start with the suite you already have
 
@@ -25,10 +60,31 @@ github.com/supercorp-ai/supercov/cmd/supercov@latest`.
 
 Everything after `--` is your test command. Supercov runs it without changing your source, tests, runner configuration, or normal build output.
 
-Then ask what is still uncovered:
+Then read the result and ask what is still uncovered:
+
+```bash
+npx supercov runs latest
+```
+
+```
+run run_7fc676ba671d42be
+command: npm test
+
+Coverage
+  Lines      100.00% (5/5)
+  Branches   66.67% (4/6)
+  MC/DC      33.33% (1/3)
+```
 
 ```bash
 npx supercov runs latest gaps --limit 10
+```
+
+```
+Coverage gaps — only files with unresolved obligations
+
+src/pricing.js
+  uncovered: lines 0  statements 1  functions 0  branch outcomes 0  MC/DC conditions 2
 ```
 
 After your agent adds a test, rerun the complete suite and prove the gain:
@@ -243,6 +299,7 @@ npx supercov clean             # remove all runs and the build cache
 ## Documentation
 
 - [Getting started](https://supercov.com/docs/getting-started)
+- [Understanding quality](https://supercov.com/docs/quality)
 - [Agent workflow](https://supercov.com/docs/agent-loop)
 - [Understanding assertions](docs/assertions.md)
 - [Troubleshooting](https://supercov.com/docs/troubleshooting)

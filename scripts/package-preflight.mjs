@@ -29,6 +29,7 @@ assert.deepEqual(manifest.files, [
   "docs/getting-started.md",
   "docs/agent-loop.md",
   "docs/assertions.md",
+  "docs/quality.md",
   "docs/assertion-evidence.md",
   "docs/assertion-maps.md",
   "docs/assertion-agent.md",

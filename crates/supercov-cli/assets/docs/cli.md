@@ -24,7 +24,69 @@ npx supercov --help
 | Find the tests a change affects | `npx supercov runs latest tests affected` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
+| Assess code quality with Jev | `npx supercov quality` |
+| See only files with findings | `npx supercov quality gaps` |
+| Review what a change introduced | `npx supercov quality patch` |
 | Read bundled guides | `npx supercov docs` |
+
+## Assess source quality
+
+```sh supercov-example
+supercov quality                 # this repository
+supercov quality src/            # one directory
+supercov quality gaps            # only files something fired on
+supercov quality file src/a.ts   # one file, every check
+supercov quality scope           # which files are assessed, and why
+supercov quality snapshots       # saved assessments
+supercov quality diff <older> <newer>
+```
+
+With no argument the subject is the repository you are standing in. Every
+assessment saves a snapshot, so the reading commands work afterwards with no key
+and no network.
+
+Twelve yes/no questions about named code properties go to [Jev](https://typesafe.ai);
+the score is arithmetic this command does over the answers. Text reports a band,
+`good`, `fair` or `weak`; `--json` carries the number and every check with what
+is known about it. `--all` includes test files, generated output and anything
+outside a source root, all of which are left out by default. `--dry-run` prints
+the exact requests and contacts nothing.
+
+`quality diff` reports what declined between two assessments: which files lost
+health, which properties appeared, and which files entered or left the scope.
+
+Assessing needs a TypeSafe API key in `TYPESAFE_API_KEY`; reading a saved
+assessment does not. The command prints a cost estimate before sending anything
+and caches answers by content, so a second run pays only for what changed.
+
+See [Understanding quality](https://supercov.com/docs/quality) for what the
+number is worth and which files get assessed.
+
+## Review what a change introduced
+
+```sh supercov-example
+supercov quality patch
+supercov quality patch --base origin/main
+supercov quality patch --base origin/main --annotate github --run latest
+```
+
+The same twelve properties asked of a change, plus six risk checks that only
+apply to one: a credential in source, untrusted input in a query, a change to
+who may do what, a test that now checks less, a schema migration, and debugging
+left behind.
+
+With no range it reviews uncommitted work when the tree is dirty and everything
+since this branch left its default branch when it is clean. `--unstaged`,
+`--staged` and `--base <ref>` say so explicitly; `--base` uses the merge base,
+like `runs patch`, so commits other people landed after you branched are not
+your change.
+
+`--annotate github` prints workflow annotations on stdout, needing no token and
+posting no comment. `--run <id>` reads a saved coverage run and marks any file
+where a property appeared and the run left lines uncovered.
+
+Output lists only files where something appeared. A change that introduces
+nothing prints one line saying so. About $0.0005 per changed file.
 
 ## Measure a test command
 
