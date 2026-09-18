@@ -25,18 +25,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Directories that hold a package's own code, across the languages assessed.
-/// `internal`, `pkg` and `cmd` are Go's; `src/main/java` is reached through
-/// `src`.
+/// `cmd`, `internal` and `pkg` are Go's, `include` is where C and C++ keep a
+/// public API, `sources` is SwiftPM's, and `src/main/java` is reached through
+/// `src`. Matched without regard to case, because SwiftPM capitalises.
 const SOURCE_DIRECTORIES: &[&str] = &[
     "api",
     "app",
-    "cmd",
     "client",
+    "cmd",
     "functions",
+    "include",
     "internal",
     "lib",
     "pkg",
     "server",
+    "sources",
     "src",
 ];
 
@@ -47,6 +50,7 @@ const PACKAGE_PARENTS: &[&str] = &["apps", "crates", "packages", "services", "wo
 /// A file that declares a package, in any of the ecosystems assessed.
 const MANIFESTS: &[&str] = &[
     "Cargo.toml",
+    "Package.swift",
     "Gemfile",
     "build.gradle",
     "build.gradle.kts",
@@ -326,6 +330,42 @@ fn beside_the_product(file: &str) -> Option<&'static str> {
     None
 }
 
+/// The conventional source directories a package actually has.
+///
+/// Read from the directory rather than joined blindly, so `Sources` matches on
+/// a case-sensitive filesystem as well as on a case-insensitive one. A Python
+/// package is any directory holding `__init__.py`, which is the flat layout PyPA
+/// documents beside the `src` one.
+fn conventional_directories(package: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(package) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if SOURCE_DIRECTORIES.contains(&name.as_str()) || path.join("__init__.py").is_file() {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// Go compiles every package under a module, wherever it sits, so a module root
+/// is a source root for Go files and for nothing else. Scoping it by extension
+/// keeps a `go.mod` at the top of a polyglot repository from claiming the rest
+/// of the tree.
+fn go_modules(packages: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
+    packages
+        .iter()
+        .filter(|package| package.join("go.mod").is_file())
+        .cloned()
+        .collect()
+}
+
 fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -351,11 +391,7 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
         let packages = package_roots(root);
         let mut roots = BTreeSet::new();
         for package in &packages {
-            let mut candidates: Vec<PathBuf> = SOURCE_DIRECTORIES
-                .iter()
-                .map(|name| package.join(name))
-                .filter(|path| path.is_dir())
-                .collect();
+            let mut candidates: Vec<PathBuf> = conventional_directories(package);
             candidates.extend(declared_entry_points(package));
             if candidates.is_empty() && package != root {
                 // A declared package that keeps its code somewhere
@@ -373,6 +409,11 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
         BTreeSet::new()
     } else {
         package_roots(root)
+    };
+    let modules = if explicit {
+        Vec::new()
+    } else {
+        go_modules(&packages)
     };
     let nearest = |path: &Path| -> Option<String> {
         packages
@@ -395,7 +436,10 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
             entries.push(entry(Status::Excluded, skipped.reason()));
         } else if let Some(reason) = beside_the_product(&file) {
             entries.push(entry(Status::Excluded, reason));
-        } else if roots.iter().any(|dir| path.starts_with(dir)) {
+        } else if roots.iter().any(|dir| path.starts_with(dir))
+            || (path.extension().is_some_and(|e| e == "go")
+                && modules.iter().any(|module| path.starts_with(module)))
+        {
             entries.push(entry(
                 Status::Included,
                 if explicit {

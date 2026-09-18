@@ -380,9 +380,15 @@ manifests, `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, `Gemfile`,
 `pom.xml` and the rest, at the repository root or under a conventional package
 parent (`packages`, `apps`, `crates`, `services`, `workspaces`), plus whatever a
 root manifest declares in `workspaces` or `[workspace].members`. Inside each
-package it takes the conventional source directories: `src`, `app`, `lib`,
-`server`, `client`, `api`, `functions`, and Go's `cmd`, `internal` and `pkg`. A
-declared package with no conventional layout is measured whole.
+package it takes the conventional source directories, matched without regard to
+case: `src`, `app`, `lib`, `server`, `client`, `api`, `functions`, Go's `cmd`,
+`internal` and `pkg`, C and C++'s `include`, and SwiftPM's `Sources`. A Python
+package is any directory holding an `__init__.py`, which is the flat layout PyPA
+documents beside the `src` one. A Go module root is a source root **for Go files
+only**, because Go compiles every package beneath it wherever it sits, and
+scoping that by extension keeps a `go.mod` at the top of a polyglot repository
+from claiming the rest of the tree. A declared package with no conventional
+layout is measured whole.
 
 **It also reads what the manifest itself declares**, which is how a project says
 where its code is without anyone guessing: `main`, `module`, `browser`, `bin`

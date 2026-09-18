@@ -2501,3 +2501,336 @@ fn code_kept_beside_a_package_is_named_rather_than_left_unclassified() {
     assert_eq!(entry("src/app.ts").status, scope::Status::Included);
     assert_eq!(view.ambiguous(), 0);
 }
+
+// ---- classic layouts, one language at a time ---------------------------------
+
+/// Build a project, classify it, and report each path's status and reason.
+fn layout(files: &[(&str, &str)]) -> (Temp, BTreeMap<String, (scope::Status, String)>) {
+    let temp = Temp::new();
+    for (path, body) in files {
+        temp.write(path, body);
+    }
+    let found = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &found, None);
+    let map = view
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), (e.status, e.reason.clone())))
+        .collect();
+    (temp, map)
+}
+
+#[track_caller]
+fn included(map: &BTreeMap<String, (scope::Status, String)>, paths: &[&str]) {
+    for path in paths {
+        match map.get(*path) {
+            Some((scope::Status::Included, _)) => {}
+            Some((status, reason)) => {
+                panic!("{path} should be source, got {status:?} ({reason})")
+            }
+            None => panic!("{path} was never discovered"),
+        }
+    }
+}
+
+#[track_caller]
+fn excluded_as(map: &BTreeMap<String, (scope::Status, String)>, reason: &str, paths: &[&str]) {
+    for path in paths {
+        match map.get(*path) {
+            Some((scope::Status::Excluded, got)) if got == reason => {}
+            Some((status, got)) => {
+                panic!("{path} should be excluded as {reason}, got {status:?} ({got})")
+            }
+            None => panic!("{path} was never discovered"),
+        }
+    }
+}
+
+#[test]
+fn layout_javascript_and_typescript() {
+    let (_temp, map) = layout(&[
+        (
+            "package.json",
+            r#"{"main":"dist/index.js","bin":{"cli":"bin/cli.js"}}"#,
+        ),
+        ("src/index.ts", "export const a = 1;\n"),
+        ("src/routes/page.tsx", "export default () => null;\n"),
+        ("lib/util.mjs", "export const b = 2;\n"),
+        ("app/server.cts", "export const c = 3;\n"),
+        ("bin/cli.js", "#!/usr/bin/env node\n"),
+        // Jest and Vitest.
+        ("src/__tests__/login.ts", "it('x', () => {});\n"),
+        ("src/login.test.ts", "it('x', () => {});\n"),
+        ("src/login.spec.tsx", "it('x', () => {});\n"),
+        // Mocha, Playwright and Cypress.
+        ("test/unit.js", "it('x', () => {});\n"),
+        ("e2e/checkout.spec.ts", "test('x', async () => {});\n"),
+        ("cypress/e2e/login.cy.ts", "it('x', () => {});\n"),
+        ("src/__mocks__/stripe.ts", "export default {};\n"),
+        ("api/handler.ts", "export const h = 1;\n"),
+        ("types/global.d.ts", "declare const a: number;\n"),
+    ]);
+    included(
+        &map,
+        &[
+            "src/index.ts",
+            "src/routes/page.tsx",
+            "lib/util.mjs",
+            "app/server.cts",
+            "bin/cli.js",
+            "api/handler.ts",
+        ],
+    );
+    excluded_as(
+        &map,
+        "test",
+        &[
+            "src/__tests__/login.ts",
+            "src/login.test.ts",
+            "src/login.spec.tsx",
+            "test/unit.js",
+            "e2e/checkout.spec.ts",
+            "cypress/e2e/login.cy.ts",
+            "src/__mocks__/stripe.ts",
+        ],
+    );
+    excluded_as(&map, "generated", &["types/global.d.ts"]);
+}
+
+#[test]
+fn layout_rust() {
+    let (_temp, map) = layout(&[
+        ("Cargo.toml", "[workspace]\nmembers = [\"crates/engine\"]\n"),
+        ("crates/engine/Cargo.toml", "[package]\nname = \"engine\"\n"),
+        ("crates/engine/src/lib.rs", "pub fn a() {}\n"),
+        ("crates/engine/src/bin/tool.rs", "fn main() {}\n"),
+        ("crates/engine/build.rs", "fn main() {}\n"),
+        // Cargo's own conventions for code that is not the library.
+        ("crates/engine/tests/integration.rs", "#[test] fn t() {}\n"),
+        ("crates/engine/benches/speed.rs", "fn main() {}\n"),
+        ("crates/engine/examples/demo.rs", "fn main() {}\n"),
+    ]);
+    included(
+        &map,
+        &[
+            "crates/engine/src/lib.rs",
+            "crates/engine/src/bin/tool.rs",
+            "crates/engine/build.rs",
+        ],
+    );
+    excluded_as(&map, "test", &["crates/engine/tests/integration.rs"]);
+    excluded_as(&map, "benchmark", &["crates/engine/benches/speed.rs"]);
+    excluded_as(&map, "example", &["crates/engine/examples/demo.rs"]);
+}
+
+#[test]
+fn layout_python_src_and_flat() {
+    // Both layouts PyPA documents: `src/pkg` and a package at the root.
+    let (_temp, map) = layout(&[
+        ("pyproject.toml", "[project]\nname = \"shop\"\n"),
+        ("src/shop/__init__.py", "\n"),
+        ("src/shop/orders.py", "def a(): pass\n"),
+        ("tests/test_orders.py", "def test_a(): pass\n"),
+        ("conftest.py", "\n"),
+    ]);
+    included(&map, &["src/shop/__init__.py", "src/shop/orders.py"]);
+    excluded_as(&map, "test", &["tests/test_orders.py", "conftest.py"]);
+
+    let (_temp, flat) = layout(&[
+        ("pyproject.toml", "[project]\nname = \"shop\"\n"),
+        ("shop/__init__.py", "\n"),
+        ("shop/orders.py", "def a(): pass\n"),
+        ("shop/orders_test.py", "def test_a(): pass\n"),
+    ]);
+    included(&flat, &["shop/__init__.py", "shop/orders.py"]);
+    excluded_as(&flat, "test", &["shop/orders_test.py"]);
+}
+
+#[test]
+fn layout_ruby_gem_and_rails() {
+    let (_temp, map) = layout(&[
+        ("Gemfile", "source 'https://rubygems.org'\n"),
+        ("lib/shop.rb", "module Shop; end\n"),
+        ("lib/shop/order.rb", "class Order; end\n"),
+        ("app/models/user.rb", "class User; end\n"),
+        ("app/controllers/orders_controller.rb", "class C; end\n"),
+        // RSpec, Minitest and Cucumber.
+        ("spec/models/user_spec.rb", "describe User do; end\n"),
+        ("spec/spec_helper.rb", "\n"),
+        ("test/models/user_test.rb", "class T; end\n"),
+        ("features/step_definitions/login.rb", "\n"),
+    ]);
+    included(
+        &map,
+        &[
+            "lib/shop.rb",
+            "lib/shop/order.rb",
+            "app/models/user.rb",
+            "app/controllers/orders_controller.rb",
+        ],
+    );
+    excluded_as(
+        &map,
+        "test",
+        &[
+            "spec/models/user_spec.rb",
+            "spec/spec_helper.rb",
+            "test/models/user_test.rb",
+            "features/step_definitions/login.rb",
+        ],
+    );
+}
+
+#[test]
+fn layout_go_module() {
+    let (_temp, map) = layout(&[
+        ("go.mod", "module example.com/shop\n\ngo 1.22\n"),
+        // A Go module keeps package files at its root, which is as
+        // conventional as any subdirectory.
+        ("main.go", "package main\n"),
+        ("shop.go", "package shop\n"),
+        ("cmd/server/main.go", "package main\n"),
+        ("internal/store/store.go", "package store\n"),
+        ("pkg/api/api.go", "package api\n"),
+        ("internal/store/store_test.go", "package store\n"),
+        ("internal/store/testdata/golden.go", "package store\n"),
+    ]);
+    included(
+        &map,
+        &[
+            "main.go",
+            "shop.go",
+            "cmd/server/main.go",
+            "internal/store/store.go",
+            "pkg/api/api.go",
+        ],
+    );
+    excluded_as(
+        &map,
+        "test",
+        &[
+            "internal/store/store_test.go",
+            "internal/store/testdata/golden.go",
+        ],
+    );
+}
+
+#[test]
+fn layout_java_and_kotlin_maven_gradle() {
+    let (_temp, map) = layout(&[
+        ("pom.xml", "<project/>\n"),
+        ("src/main/java/com/shop/Order.java", "class Order {}\n"),
+        ("src/main/kotlin/com/shop/User.kt", "class User\n"),
+        (
+            "src/test/java/com/shop/OrderTest.java",
+            "class OrderTest {}\n",
+        ),
+        ("src/test/kotlin/com/shop/UserSpec.kt", "class UserSpec\n"),
+        (
+            "src/integrationTest/java/com/shop/OrderIT.java",
+            "class OrderIT {}\n",
+        ),
+    ]);
+    included(
+        &map,
+        &[
+            "src/main/java/com/shop/Order.java",
+            "src/main/kotlin/com/shop/User.kt",
+        ],
+    );
+    excluded_as(
+        &map,
+        "test",
+        &[
+            "src/test/java/com/shop/OrderTest.java",
+            "src/test/kotlin/com/shop/UserSpec.kt",
+            "src/integrationTest/java/com/shop/OrderIT.java",
+        ],
+    );
+}
+
+#[test]
+fn layout_c_and_cpp() {
+    let (_temp, map) = layout(&[
+        ("package.json", "{}\n"),
+        ("src/engine.cpp", "int main() { return 0; }\n"),
+        ("src/engine.h", "#pragma once\n"),
+        // A public header directory is where a C or C++ project keeps its API.
+        ("include/shop/api.h", "#pragma once\n"),
+        ("lib/util.c", "int u(void) { return 0; }\n"),
+        ("tests/engine_test.cc", "int main() { return 0; }\n"),
+        ("src/engine_test.cpp", "int main() { return 0; }\n"),
+    ]);
+    included(
+        &map,
+        &[
+            "src/engine.cpp",
+            "src/engine.h",
+            "include/shop/api.h",
+            "lib/util.c",
+        ],
+    );
+    excluded_as(
+        &map,
+        "test",
+        &["tests/engine_test.cc", "src/engine_test.cpp"],
+    );
+}
+
+#[test]
+fn layout_csharp() {
+    let (_temp, map) = layout(&[
+        ("Shop.sln", "\n"),
+        ("src/Shop/Shop.csproj", "<Project/>\n"),
+        ("src/Shop/Order.cs", "class Order {}\n"),
+        // The .NET convention is a sibling project directory named for tests.
+        ("tests/Shop.Tests/Shop.Tests.csproj", "<Project/>\n"),
+        ("tests/Shop.Tests/OrderTests.cs", "class OrderTests {}\n"),
+        ("src/Shop/Form.designer.cs", "partial class Form {}\n"),
+    ]);
+    included(&map, &["src/Shop/Order.cs"]);
+    excluded_as(&map, "test", &["tests/Shop.Tests/OrderTests.cs"]);
+    excluded_as(&map, "generated", &["src/Shop/Form.designer.cs"]);
+}
+
+#[test]
+fn layout_swift_package() {
+    let (_temp, map) = layout(&[
+        ("Package.swift", "// swift-tools-version:5.9\n"),
+        // SwiftPM's layout is Sources/<Target> and Tests/<Target>Tests.
+        ("Sources/Shop/Order.swift", "struct Order {}\n"),
+        ("Sources/ShopCLI/main.swift", "print(1)\n"),
+        ("Tests/ShopTests/OrderTests.swift", "import XCTest\n"),
+    ]);
+    included(
+        &map,
+        &["Sources/Shop/Order.swift", "Sources/ShopCLI/main.swift"],
+    );
+    excluded_as(&map, "test", &["Tests/ShopTests/OrderTests.swift"]);
+}
+
+#[test]
+fn layout_php_composer_and_laravel() {
+    let (_temp, map) = layout(&[
+        (
+            "composer.json",
+            r#"{"autoload":{"psr-4":{"Shop\\":"src/"}}}"#,
+        ),
+        ("src/Order.php", "<?php class Order {}\n"),
+        (
+            "app/Http/Controllers/OrderController.php",
+            "<?php class C {}\n",
+        ),
+        ("tests/Feature/OrderTest.php", "<?php class OrderTest {}\n"),
+        ("src/OrderTest.php", "<?php class OrderTest {}\n"),
+    ]);
+    included(
+        &map,
+        &["src/Order.php", "app/Http/Controllers/OrderController.php"],
+    );
+    excluded_as(
+        &map,
+        "test",
+        &["tests/Feature/OrderTest.php", "src/OrderTest.php"],
+    );
+}
