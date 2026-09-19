@@ -845,8 +845,10 @@
       if (!data) return null;
       const section = node("section", "assertion-panel");
       section.append(node("div", "panel-title", "Assertion coverage"));
+      const action = () => section.append(button("How to add this", "missing-action", () => { state.prompt = "assertions"; render(); }));
       if (!data.available) {
         section.append(node("div", "missing-copy", data.error || "Not available for this run."));
+        action();
         return section;
       }
       const summary = data.summary || {};
@@ -862,6 +864,10 @@
       if (summary.reason) section.append(node("div", "quality-context", summary.reason));
       section.append(node("div", "quality-context", `${integer(statements.asserted)} of ${integer(statements.total)} measured statements credited \u00b7 ${integer(summary.assertions)} ${summary.assertions === 1 ? "assertion" : "assertions"}`));
       if (data.basis) section.append(node("div", "small muted", data.basis));
+      // Offered whatever the status. A map is never finished: the summary itself
+      // says completeness is unknown, so a partial one wants the same way
+      // forward as none at all.
+      action();
       return section;
     }
 
