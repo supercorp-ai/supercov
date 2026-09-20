@@ -294,6 +294,21 @@ fn configuration(probe_count: usize, widths: &[u8], evidence: &Path) -> String {
     )
 }
 
+/// Whether the project's own configuration asked for parallel execution.
+///
+/// Only worth telling someone about when it was on: a project that never
+/// enabled it is not having anything taken away, and a line about every run
+/// is a line nobody reads.
+fn asks_for_parallel_execution(existing: Option<&str>) -> bool {
+    existing.unwrap_or("").lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("junit.jupiter.execution.parallel.enabled")
+            && line
+                .split_once('=')
+                .is_some_and(|(_, value)| value.trim().eq_ignore_ascii_case("true"))
+    })
+}
+
 /// The project's JUnit Platform configuration with parallel execution turned
 /// off, keeping whatever else it already said.
 ///
@@ -645,6 +660,10 @@ struct InstrumentedWorkspace {
     declared_in: BTreeMap<String, String>,
     /// The build file the launcher dependency was added to, if it was.
     added_launcher: Option<&'static str>,
+    /// Modules whose own configuration asked for parallel execution and had it
+    /// turned off in the copy, so the user hears that their suite ran a
+    /// different way rather than discovering it from a test that now hangs.
+    serialised: BTreeSet<String>,
     /// Whether a JUnit 4 module was given the engine that runs it on the
     /// platform, so the user hears that their suite ran a different way.
     added_vintage: bool,
@@ -852,6 +871,7 @@ fn instrument_workspace(
     // TestNG-only project needs none of that: it already depends on the
     // framework its own listener implements.
     let mut added_launcher = None;
+    let mut serialised: BTreeSet<String> = BTreeSet::new();
     let mut added_vintage = false;
     match build {
         // Per module, not once at the top: the module's own pom is where its
@@ -932,6 +952,15 @@ fn instrument_workspace(
             )?;
             let properties = resources.join("junit-platform.properties");
             let existing = fs::read_to_string(&properties).ok();
+            // Said out loud, because it changes how the suite runs rather than
+            // how it is measured. Every other thing Supercov does to the
+            // workspace is announced -- the isolated copy, the added launcher,
+            // `-count=1` over in Go -- and this is the one with a chance of
+            // changing an outcome: a test that waits on another test's thread
+            // passes under the project's own command and hangs under this one.
+            if asks_for_parallel_execution(existing.as_deref()) {
+                serialised.insert(module.directory.clone());
+            }
             write(&properties, &sequential_properties(existing.as_deref()))?;
         }
         if frameworks.testng {
@@ -962,6 +991,7 @@ fn instrument_workspace(
         modules,
         declared_in,
         added_launcher,
+        serialised,
         added_vintage,
         relaxed,
         unmeasurable,
@@ -1048,6 +1078,19 @@ pub fn run_direct_jvm(
             writeln!(
                 diagnostics,
                 "[supercov] added a test-scoped {LAUNCHER_ARTIFACT} to the workspace's {build_file}: per-test attribution comes from a JUnit Platform listener, and the API it implements is on the test runtime classpath but not the compile one. Your own {build_file} is untouched."
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        if !instrumented.serialised.is_empty() {
+            writeln!(
+                diagnostics,
+                "[supercov] turned JUnit's parallel execution off in the workspace copy ({}): attribution is a sweep of one shared probe array at each test boundary, so two tests running at once cannot both be credited with what they reached. Your suite runs in order here and your own configuration is untouched.",
+                instrumented
+                    .serialised
+                    .iter()
+                    .map(|module| if module.is_empty() { "." } else { module.as_str() })
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
             .map_err(|error| error.to_string())?;
         }
@@ -1278,6 +1321,29 @@ pub fn run_direct_jvm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_project_that_asked_for_parallel_execution_is_told_it_lost_it() {
+        // The line is worth printing when something was taken away and noise
+        // when nothing was: most projects never enable it, and a diagnostic on
+        // every run is one nobody reads by the time it matters.
+        assert!(asks_for_parallel_execution(Some(
+            "junit.jupiter.execution.parallel.enabled=true\n"
+        )));
+        assert!(asks_for_parallel_execution(Some(
+            "  junit.jupiter.execution.parallel.enabled = True  \n"
+        )));
+        assert!(!asks_for_parallel_execution(Some(
+            "junit.jupiter.execution.parallel.enabled=false\n"
+        )));
+        // Naming the mode without enabling it leaves the suite sequential, so
+        // nothing was taken away.
+        assert!(!asks_for_parallel_execution(Some(
+            "junit.jupiter.execution.parallel.mode.default=concurrent\n"
+        )));
+        assert!(!asks_for_parallel_execution(None));
+        assert!(!asks_for_parallel_execution(Some("")));
+    }
 
     #[test]
     fn parallel_execution_is_turned_off_without_discarding_what_else_was_set() {
