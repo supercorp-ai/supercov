@@ -267,6 +267,19 @@ fn render_files(
     output
 }
 
+/// What a dimension's percentage leaves out, where it leaves anything out.
+///
+/// Silence would read as "these numbers describe every test here", and for a
+/// Go suite that mixes parallel tests with serial ones they describe only some.
+fn unattributed_note(entry: &IndexedDimensionCoverage) -> String {
+    let unattributed = entry.tests.saturating_sub(entry.attributed);
+    if unattributed == 0 {
+        String::new()
+    } else {
+        format!(" ({unattributed} not attributable)")
+    }
+}
+
 fn render_dimension(
     values: &[IndexedDimensionCoverage],
     request: &IndexedQueryRequest,
@@ -282,14 +295,25 @@ fn render_dimension(
                 .as_deref()
                 .or(entry.runner.as_deref())
                 .unwrap_or("unknown");
+            let setups = if entry.setups == 0 {
+                String::new()
+            } else {
+                format!(" + {} setup scope(s)", entry.setups)
+            };
+            // A percentage here describes the tests that have coverage of
+            // their own. Where none of them do, there is no percentage to
+            // print: the tests ran and reached real code, and what they
+            // reached is in the run's totals rather than in theirs.
+            if entry.tests > 0 && entry.attributed == 0 {
+                return format!(
+                    "{name}  {} test(s){setups}  coverage not attributable; counted run-wide",
+                    entry.tests
+                );
+            }
             format!(
-                "{name}  {} test(s){}  lines {}  branches {}  MC/DC {}",
+                "{name}  {} test(s){}{setups}  lines {}  branches {}  MC/DC {}",
                 entry.tests,
-                if entry.setups == 0 {
-                    String::new()
-                } else {
-                    format!(" + {} setup scope(s)", entry.setups)
-                },
+                unattributed_note(entry),
                 percentage(entry.summary.lines.percentage),
                 percentage(entry.summary.branches.percentage),
                 percentage(entry.summary.condition_coverage_pct),
@@ -534,13 +558,22 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             if data.coverage_by_kind.iter().any(|kind| kind.tests > 0) {
                 lines.extend([String::new(), "By test kind".into()]);
                 for kind in data.coverage_by_kind.iter().filter(|kind| kind.tests > 0) {
+                    if kind.attributed == 0 {
+                        lines.push(format!(
+                            "  {:<12} {:>4} test(s)  coverage not attributable; counted run-wide",
+                            kind.kind.as_deref().unwrap_or("unknown"),
+                            kind.tests,
+                        ));
+                        continue;
+                    }
                     lines.push(format!(
-                        "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}",
+                        "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}{}",
                         kind.kind.as_deref().unwrap_or("unknown"),
                         kind.tests,
                         percentage(kind.summary.lines.percentage),
                         percentage(kind.summary.branches.percentage),
                         percentage(kind.summary.condition_coverage_pct),
+                        unattributed_note(kind),
                     ));
                 }
                 if let Some(defaults) = data
@@ -1189,13 +1222,25 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                                 )
                             }
                         ),
-                        format!(
-                            "{} lines, {} hits, {} decisions, {} phases",
-                            test.totals.lines,
-                            test.totals.hits,
-                            test.totals.decisions,
-                            test.totals.phases
-                        ),
+                        // Zero here means two different things, and only one
+                        // of them is "this test reached nothing". A Go test
+                        // that called t.Parallel() stores into the same probe
+                        // array as the tests beside it, so what it reached was
+                        // recorded against the run: reporting that as a test
+                        // covering nothing would be a wrong number, and
+                        // reporting nothing at all is what used to answer
+                        // "Test not found" for a test that had just passed.
+                        if test.attribution == "run-wide" {
+                            "coverage not attributable to this test; it ran alongside others and what it reached is recorded run-wide".into()
+                        } else {
+                            format!(
+                                "{} lines, {} hits, {} decisions, {} phases",
+                                test.totals.lines,
+                                test.totals.hits,
+                                test.totals.decisions,
+                                test.totals.phases
+                            )
+                        },
                     ];
                     lines.extend(
                         test.lines

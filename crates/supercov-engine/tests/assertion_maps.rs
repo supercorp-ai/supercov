@@ -1439,7 +1439,9 @@ fn executions_running(inputs: &Inputs, file: &str, ran: &[&str]) -> Executions {
             },
             passed: true,
             files: [(file.to_owned(), ran.iter().map(|p| index(p)).collect())].into(),
+            attributed: true,
         }],
+        covered: [(file.to_owned(), ran.iter().map(|p| index(p)).collect())].into(),
         probed: [(
             file.to_owned(),
             code.units

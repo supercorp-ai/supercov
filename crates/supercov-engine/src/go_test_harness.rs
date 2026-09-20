@@ -146,12 +146,33 @@ pub fn instrument_test_file(
         }
         if !is_test_function(&name) {
             if is_checkpoint_only_function(&name, child, source) {
-                needs_runtime = true;
                 file.unattributed.push(name.clone());
+                // A Fuzz target takes a *testing.F, which reports an outcome
+                // the same way a *testing.T does. An Example takes nothing at
+                // all, so the only honest status for it is that it ran: `go
+                // test` fails the run when an Example's output does not match,
+                // and the run's own exit code carries that.
+                let record = match parameter_name(child, source) {
+                    Some(parameter)
+                        if parameter_type(child, source).as_deref() == Some("*testing.F") =>
+                    {
+                        format!(
+                            "\n\tdefer {HARNESS_UNATTRIBUTED_FUZZ}({parameter}, \"{name}\")()\n"
+                        )
+                    }
+                    _ => format!(
+                        "\n\tdefer func() {{ {alias}.Ran(\"{name}\", \"unknown\"); {alias}.Checkpoint() }}()\n"
+                    ),
+                };
+                // Only a file that names the runtime needs its import, and
+                // the Fuzz form names nothing but the generated helper: an
+                // import it never mentions does not fail to measure, it fails
+                // to compile, and Supercov breaks the suite it was measuring.
+                needs_runtime |= record.contains(&format!("{alias}."));
                 file.edits.push(GoEdit {
                     at: body.start_byte() + 1,
                     rank: 100,
-                    text: format!("\n\tdefer {alias}.Checkpoint()\n"),
+                    text: record,
                 });
             }
             continue;
@@ -174,11 +195,28 @@ pub fn instrument_test_file(
             // in the probe array until the process ends -- which, where the
             // end-of-run write is never reached, means it is never recorded.
             file.unattributed.push(name.clone());
-            needs_runtime = true;
+            // Named, with its real outcome, and credited with nothing. Leaving
+            // it out of the evidence entirely was what made a suite of
+            // parallel tests publish zero tests: `runs <id> test <name>`
+            // answered "Test not found" for a test that had just passed, and
+            // affected-test selection returned an empty set for a change those
+            // tests exercised.
+            let record = match parameter_name(child, source) {
+                Some(parameter) => {
+                    format!("\n\tdefer {HARNESS_UNATTRIBUTED}({parameter}, \"{name}\")()\n")
+                }
+                // `func TestX(*testing.T)` names nothing to read an outcome
+                // from, and is reported as having passed unless the run says
+                // otherwise -- the same rule the announced path uses.
+                None => format!(
+                    "\n\tdefer func() {{ {alias}.Ran(\"{name}\", \"passed\"); {alias}.Checkpoint() }}()\n"
+                ),
+            };
+            needs_runtime |= record.contains(&format!("{alias}."));
             file.edits.push(GoEdit {
                 at: body.start_byte() + 1,
                 rank: 100,
-                text: format!("\n\tdefer {alias}.Checkpoint()\n"),
+                text: record,
             });
             continue;
         }
@@ -279,6 +317,13 @@ pub fn probe_array_file(package: &str, alias: &str, import: &str, probe_count: u
 /// The package-local function every instrumented test defers to.
 pub const HARNESS_ENTER: &str = "__supercovTest";
 
+/// The package-local function a test that cannot be attributed defers to.
+pub const HARNESS_UNATTRIBUTED: &str = "__supercovUnattributed";
+
+/// The same for a Fuzz target, which reports its outcome through a
+/// `*testing.F` rather than a `*testing.T`.
+pub const HARNESS_UNATTRIBUTED_FUZZ: &str = "__supercovUnattributedFuzz";
+
 /// The generated `TestMain` for a package that has none, plus the probe count
 /// every instrumented file in the package refers to.
 pub fn synthesized_harness(
@@ -313,6 +358,15 @@ pub fn synthesized_harness(
     // imports the runtime.
     out.push_str(&format!(
         "func {HARNESS_ENTER}(t *testing.T, name string) func() {{\n\tdone := {alias}.EnterTest(name)\n\treturn func() {{\n\t\tif t.Skipped() {{\n\t\t\t{alias}.Outcome(\"skipped\")\n\t\t}} else if t.Failed() {{\n\t\t\t{alias}.Outcome(\"failed\")\n\t\t}}\n\t\tdone()\n\t}}\n}}\n\n"
+    ));
+    // Named and credited with nothing. The outcome is read here for the same
+    // reason the announced path reads it here: so the runtime never imports
+    // `testing` and never reaches a product binary.
+    out.push_str(&format!(
+        "func {HARNESS_UNATTRIBUTED}(t *testing.T, name string) func() {{\n\treturn func() {{\n\t\tstatus := \"passed\"\n\t\tif t.Skipped() {{\n\t\t\tstatus = \"skipped\"\n\t\t}} else if t.Failed() {{\n\t\t\tstatus = \"failed\"\n\t\t}}\n\t\t{alias}.Ran(name, status)\n\t\t{alias}.Checkpoint()\n\t}}\n}}\n\n"
+    ));
+    out.push_str(&format!(
+        "func {HARNESS_UNATTRIBUTED_FUZZ}(f *testing.F, name string) func() {{\n\treturn func() {{\n\t\tstatus := \"passed\"\n\t\tif f.Skipped() {{\n\t\t\tstatus = \"skipped\"\n\t\t}} else if f.Failed() {{\n\t\t\tstatus = \"failed\"\n\t\t}}\n\t\t{alias}.Ran(name, status)\n\t\t{alias}.Checkpoint()\n\t}}\n}}\n\n"
     ));
     if declares_test_main {
         // The author's TestMain arms the runtime; this keeps the widths
@@ -420,10 +474,50 @@ mod tests {
         assert_eq!(file.tests, ["TestSerial", "TestParallel"]);
         assert_eq!(file.unattributed, ["TestParallel"]);
         assert!(out.contains("__supercovTest(t, \"TestSerial\")"), "{out}");
+        // It is named, and it claims nothing. Those are different edits: the
+        // announcement binds whatever runs next to the test, and what runs
+        // next includes the other parallel tests. This one records that the
+        // test ran and how it ended, and credits it with no coverage at all.
+        //
+        // Leaving the name out entirely was the other extreme, and it read
+        // downstream as a test that never ran: a package of nothing but
+        // parallel tests published zero tests, so asking for one by name
+        // answered "Test not found" for a test that had just passed.
         assert!(
-            !out.contains("\"TestParallel\""),
+            out.contains("__supercovUnattributed(t, \"TestParallel\")"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("__supercovTest(t, \"TestParallel\")"),
             "a parallel test must not claim what ran beside it:\n{out}"
         );
+    }
+
+    #[test]
+    fn a_file_that_names_only_the_generated_helper_gains_no_import() {
+        // Go rejects an import nothing mentions, so an import added for a file
+        // that reaches the runtime only through a package-local helper does
+        // not fail to measure -- it fails to compile, and Supercov breaks the
+        // suite it was asked to measure. A Fuzz target is exactly that shape.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc FuzzWork(f *testing.F) {\n\tf.Add(1)\n\tf.Fuzz(func(t *testing.T, n int) {\n\t\tdoWork(n)\n\t})\n}\n",
+        );
+        assert_eq!(file.unattributed, ["FuzzWork"]);
+        assert!(
+            out.contains("__supercovUnattributedFuzz(f, \"FuzzWork\")"),
+            "{out}"
+        );
+        assert!(
+            !out.contains(RUNTIME_IMPORT),
+            "the file names only the generated helper:\n{out}"
+        );
+
+        // An Example has no receiver to read an outcome from, so it names the
+        // runtime directly and does need the import.
+        let (_, out) =
+            instrumented("package p\n\nfunc ExampleWork() {\n\tdoWork()\n\t// Output: 1\n}\n");
+        assert!(out.contains("__supercov.Ran(\"ExampleWork\""), "{out}");
+        assert!(out.contains(RUNTIME_IMPORT), "{out}");
     }
 
     #[test]
@@ -447,7 +541,10 @@ mod tests {
             !out.contains("__supercovTest(t, \"TestGroup\")"),
             "a parent cannot claim what its parallel subtests reached:\n{out}"
         );
-        assert!(out.contains("defer __supercov.Checkpoint()"), "{out}");
+        assert!(
+            out.contains("__supercovUnattributed(t, \"TestGroup\")"),
+            "{out}"
+        );
 
         // Where the subtests are serial there is nothing to run beside them,
         // and the parent is named for all of it as before.
@@ -472,7 +569,26 @@ mod tests {
         let (file, out) = instrumented(
             "package p\n\nimport \"testing\"\n\nfunc ExampleWork() {\n\tdoWork()\n\t// Output: 1\n}\n\nfunc FuzzWork(f *testing.F) {\n\tdoWork()\n}\n\nfunc Examples(t *testing.T) {\n\tdoWork()\n}\n\nfunc ExampleHelper(x int) {\n\tdoWork()\n}\n",
         );
-        assert_eq!(out.matches("Checkpoint()").count(), 2, "{out}");
+        // Both are swept before they return, and both are named for having
+        // run. The Example sweeps inline because it has no receiver to read an
+        // outcome from; the Fuzz target goes through the generated helper,
+        // which sweeps in turn -- so counting the word here would count one.
+        assert!(
+            out.contains("Ran(\"ExampleWork\", \"unknown\"); __supercov.Checkpoint()"),
+            "{out}"
+        );
+        let generated =
+            synthesized_harness("p", "__supercov", "example.com/rt", 0, &[], "e.bin", true);
+        assert!(
+            generated.matches("__supercov.Checkpoint()").count() == 2,
+            "both generated helpers sweep before returning:\n{generated}"
+        );
+        // A Fuzz target takes a *testing.F, which reports an outcome the same
+        // way a *testing.T does, so its status is read rather than guessed.
+        assert!(
+            out.contains("__supercovUnattributedFuzz(f, \"FuzzWork\")"),
+            "{out}"
+        );
         assert!(
             file.unattributed.contains(&"ExampleWork".to_owned()),
             "{file:?}"

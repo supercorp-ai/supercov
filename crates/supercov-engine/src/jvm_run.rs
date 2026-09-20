@@ -1169,6 +1169,8 @@ pub fn run_direct_jvm(
                         .and_then(|class| instrumented.declared_in.get(class))
                         .cloned(),
                     status: test.status.clone(),
+                    // Every JVM runner the frontend drives attributes exactly.
+                    attributed: true,
                 });
             }
             parts.push(evidence);

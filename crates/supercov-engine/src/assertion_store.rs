@@ -348,6 +348,19 @@ pub fn executions(
             probed.entry(meta.file.clone()).or_default().insert(unit);
         }
     }
+    // Everything the run reached, whoever reached it. Collected before the
+    // per-test loop because the record that holds what no test could be
+    // credited with has no test file, and the loop below skips it -- which is
+    // exactly the record a parallel suite's coverage lives in.
+    let mut covered: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for test in &coverage.view.tests {
+        for hit in &test.hits {
+            if let Some((file, unit)) = located.get(hit.as_str()) {
+                covered.entry((*file).to_owned()).or_default().insert(*unit);
+            }
+        }
+    }
+
     let mut tests: BTreeMap<TestSelector, Execution> = BTreeMap::new();
     for test in &coverage.view.tests {
         let Some(file) = &test.file else {
@@ -361,8 +374,13 @@ pub fn executions(
             test: selector,
             passed: false,
             files: BTreeMap::new(),
+            attributed: true,
         });
         record.passed |= test.outcome == "passed";
+        // One name can be recorded more than once -- retries, a test declared
+        // in two files -- and a single unattributed appearance is enough to
+        // make the whole record's file list incomplete.
+        record.attributed &= crate::coverage_report::attributed_exactly(&test.attribution);
         for hit in &test.hits {
             if let Some((file, unit)) = located.get(hit.as_str()) {
                 record
@@ -383,6 +401,10 @@ pub fn executions(
     Some(Executions {
         tests,
         probed: probed
+            .into_iter()
+            .map(|(file, units)| (file, units.into_iter().collect()))
+            .collect(),
+        covered: covered
             .into_iter()
             .map(|(file, units)| (file, units.into_iter().collect()))
             .collect(),
@@ -454,7 +476,58 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
             Some(json!({"file":file,"change":kind,"detail":detail}))
         })
         .collect::<Vec<_>>();
+    // What a test whose own reach is unknown could have reached.
+    //
+    // Nothing can narrow such a test below the run it ran in, and nothing
+    // needs to go wider: its reach is bounded above by what the run covered.
+    // So a change inside that bound could have reached it, and a change
+    // outside it -- code no test in the run ever ran, a file added since --
+    // could not have reached any test, this one included.
+    //
+    // That is a real narrowing rather than "always affected". It is also the
+    // only safe direction: reading an empty file list as "this change missed
+    // it" is what let a change to code every test exercised report `0 of 2
+    // tests affected` and exit 0, which an agent running only affected tests
+    // would act on by running nothing.
+    let beyond_the_run = changes
+        .iter()
+        .filter_map(|(file, change)| match change {
+            FileChange::Same | FileChange::CommentsOnly | FileChange::Added => None,
+            FileChange::Removed => Some(format!("{file} removed (the run covered code in it)")),
+            FileChange::Bytes => Some(format!("{file} changed (the run covered code in it)")),
+            FileChange::Code { before, diff, .. } => {
+                // Unit by unit rather than file by file: a function no test
+                // ran sits in the same file as the ones they did, so asking
+                // whether the file was covered would make every change to it
+                // reach every test.
+                let code = manifest.files.get(*file).and_then(|f| f.code.as_ref());
+                let reached = executions
+                    .covered
+                    .get(*file)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .flat_map(|unit| match code {
+                        Some(code) if *unit < code.units.len() => {
+                            code.ancestors(*unit).collect::<Vec<_>>()
+                        }
+                        _ => vec![*unit],
+                    })
+                    .collect::<BTreeSet<_>>();
+                let hit = diff
+                    .changed
+                    .iter()
+                    .filter(|unit| reached.contains(unit))
+                    .filter_map(|unit| before.units.get(*unit))
+                    .collect::<Vec<_>>();
+                (!hit.is_empty())
+                    .then(|| format!("{file}: {} changed (the run covered it)", named(hit)))
+            }
+        })
+        .collect::<Vec<_>>();
+
     let mut affected = Vec::new();
+    let mut undetermined = Vec::new();
     let mut unaffected = Vec::new();
     for record in &executions.tests {
         let mut reasons = Vec::new();
@@ -520,6 +593,25 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                 }
             }
         }
+        if !record.attributed {
+            // Its own file changing is still its own reason; everything else
+            // it could have reached is the run's bound.
+            reasons.extend(beyond_the_run.iter().cloned());
+            reasons.sort();
+            reasons.dedup();
+            let entry = json!({
+                "file": record.test.file,
+                "name": record.test.name,
+                "reasons": reasons,
+                "attribution": "run-wide",
+            });
+            if reasons.is_empty() {
+                unaffected.push(entry);
+            } else {
+                undetermined.push(entry);
+            }
+            continue;
+        }
         let entry = json!({"file":record.test.file,"name":record.test.name,"reasons":reasons});
         if reasons.is_empty() {
             unaffected.push(entry);
@@ -530,10 +622,23 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     Ok(json!({
         "run": run.id,
         "affected": affected,
+        // Kept apart from `affected` because they are a different claim. A
+        // test is affected when a change reached code it is recorded as having
+        // run; it is undetermined when nothing recorded what it ran and the
+        // change is inside what the run as a whole covered. Merging them would
+        // report a precision the run does not have -- but both have to be run,
+        // so both are in `--names`.
+        "undetermined": undetermined,
         "unaffected": unaffected,
         "changedFiles": files,
-        "summary": {"tests": executions.tests.len(), "affected": affected.len(), "unaffected": unaffected.len(), "changedFiles": files.len()},
-        "meaning": "Tests whose recorded execution a change since the run could have reached. A file the run never captured, a dependency or a configuration change is not seen here; see workingTree."
+        "summary": {
+            "tests": executions.tests.len(),
+            "affected": affected.len(),
+            "undetermined": undetermined.len(),
+            "unaffected": unaffected.len(),
+            "changedFiles": files.len(),
+        },
+        "meaning": "Tests whose recorded execution a change since the run could have reached, and those whose execution nothing recorded: a test that ran alongside others has no coverage of its own, so it is undetermined whenever a change reaches anything the run covered. Run both. A file the run never captured, a dependency or a configuration change is not seen here; see workingTree."
     }))
 }
 /// How a difference between two runs reaches the flows inherited across it.

@@ -72,6 +72,11 @@ pub struct OwnedTestEvidence {
     /// Which runner announced it. Empty where the frontend has only one, in
     /// which case that one is the answer.
     pub runner: String,
+    /// Whether what this test reached could be credited to it. False for a Go
+    /// test that called `t.Parallel()`, an Example or a Fuzz target: the test
+    /// ran and its coverage is in the run-wide totals, and nothing can say
+    /// which of those totals were its.
+    pub unattributed: bool,
     /// Probe id to the bitmask it was observed with.
     pub probes: BTreeMap<u32, u32>,
     pub vectors: Vec<PackedVector>,
@@ -132,6 +137,10 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
         let name = cursor.text(length, "test name")?;
         let status_length = cursor.u64("test status")? as usize;
         let status = cursor.text(status_length, "test status")?;
+        // Whether the probes below are this test's own. An empty probe list
+        // means "reached nothing" when they are and "nothing can say what it
+        // reached" when they are not, and the two must never be conflated.
+        let unattributed = cursor.u64("test attribution")? != 0;
         let runner_length = cursor.u64("test runner")? as usize;
         let runner = cursor.text(runner_length, "test runner")?;
         let hits = cursor.u64("test probes")? as usize;
@@ -153,6 +162,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
             name,
             status,
             runner,
+            unattributed,
             probes,
             vectors,
         });
@@ -211,6 +221,10 @@ pub struct OwnedTestOutcome {
     /// Which runner announced it, as the frontend declares that runner. Empty
     /// where the frontend has only one.
     pub runner: String,
+    /// Whether what this test reached could be credited to it. False for a Go
+    /// test that called `t.Parallel()`, an Example or a Fuzz target: it ran,
+    /// and its coverage is in the run-wide record rather than in its own.
+    pub attributed: bool,
 }
 
 /// How a language's runner attributes what it records.
@@ -627,6 +641,11 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         .iter()
         .map(|outcome| {
             let test = recorded.get(&outcome.name).copied().unwrap_or(&empty);
+            // A test nothing could be credited to takes no hits at all, and
+            // says so. Handing it the record's probes would be worse than
+            // wrong: the runtime gives an unattributed record none, so the
+            // result would read as a test that reached nothing.
+            let test = if outcome.attributed { test } else { &empty };
             let test_id = format!("{}::{}", outcome.package, outcome.name);
             let phase = test_phase(&test_id);
             let provenance = TestProvenance {
@@ -670,6 +689,12 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 flaky: false,
                 provenance: provenance.clone(),
                 role: "test".into(),
+                attribution: if outcome.attributed {
+                    crate::coverage_report::ATTRIBUTION_EXACT
+                } else {
+                    crate::coverage_report::ATTRIBUTION_RUN_WIDE
+                }
+                .into(),
                 // Every event a probe produces belongs to the test body: the
                 // runtime binds coverage at the test boundary and knows
                 // nothing of setup or teardown. One declared phase says
@@ -706,6 +731,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     let claimed = evidence
         .tests
         .iter()
+        .filter(|test| !test.unattributed)
         .flat_map(|test| test.probes.keys().copied())
         .collect::<BTreeSet<_>>();
     let unclaimed = evidence
@@ -734,6 +760,9 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             name: "background".into(),
             status: "unknown".into(),
             runner: String::new(),
+            // This record is where unattributed coverage goes; it is not
+            // itself a test whose coverage went elsewhere.
+            unattributed: false,
             probes: unclaimed,
             vectors: Vec::new(),
         };
@@ -762,6 +791,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 source: source.clone(),
             },
             role: "background".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: vec![CoveragePhase {
                 id: phase.clone(),
                 kind: "background".into(),
@@ -1062,6 +1092,7 @@ mod tests {
                 package: "example.com/p".into(),
                 file: Some("p/x_test.go".into()),
                 status: "passed".into(),
+                attributed: true,
             }],
             run_id: "run",
             generated_at: "now",

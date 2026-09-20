@@ -290,10 +290,12 @@ An `Example` with an `Output` comment and a `Fuzz` target's seed corpus are
 measured the same way: `go test` runs both, and what they reach is real
 coverage no test can claim.
 
-A package where every test calls `t.Parallel()` is published like any other.
-The summary reports how many tests ran without being able to announce
-themselves, because coverage with no owner is a different thing from an empty
-suite.
+Such a test is still recorded as having run, with its outcome, and credited
+with no coverage. `supercov runs <id> test <name>` says that rather than
+reporting zeroes, coverage percentages leave it out, and `tests affected` lists
+it as **undetermined**: nothing can say a change missed it, so `--names`
+includes it in the set to run. A package where every test calls `t.Parallel()`
+is published like any other.
 
 A file Supercov cannot parse is a hole, not the end of the run. It is named on
 the line that reports the result and recorded in the run, and a run is refused

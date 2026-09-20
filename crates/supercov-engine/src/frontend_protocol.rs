@@ -432,6 +432,7 @@ mod tests {
                     source: "explicit".into(),
                 },
                 role: "test".into(),
+                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
                 phases: vec![CoveragePhase {
                     id: "assertion".into(),
                     kind: "assertion".into(),

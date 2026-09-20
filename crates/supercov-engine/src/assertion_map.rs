@@ -366,6 +366,16 @@ pub struct Executions {
     /// Per file, the units that hold a probe of their own. A change confined
     /// to these can reach a test only by being run.
     pub probed: BTreeMap<String, Vec<usize>>,
+    /// Per file, the units the run actually reached -- every record's, the one
+    /// holding execution no test could be credited with included.
+    ///
+    /// This is the bound on a test whose own reach nothing recorded. It cannot
+    /// have run more than the run did, so a change outside this reached no
+    /// test at all and a change inside it might have reached any of them.
+    /// Without it the only sound answer for such a test would be "affected by
+    /// everything", which is true and useless.
+    #[serde(default)]
+    pub covered: BTreeMap<String, Vec<usize>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -374,6 +384,19 @@ pub struct Execution {
     pub passed: bool,
     /// Per file, the innermost unit of every probe this test fired.
     pub files: BTreeMap<String, Vec<usize>>,
+    /// Whether `files` is what this test ran, or merely empty because nothing
+    /// could say. A Go test that called `t.Parallel()` reached real code and
+    /// fired no probe of its own, so an empty map here is not evidence that a
+    /// change missed it -- it is the absence of evidence either way, and the
+    /// two must not be read alike.
+    #[serde(default = "attributed_by_default")]
+    pub attributed: bool,
+}
+
+/// Every execution recorded before attribution was a question was an
+/// attributed one, so a record that does not say is one.
+fn attributed_by_default() -> bool {
+    true
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

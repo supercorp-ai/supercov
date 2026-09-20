@@ -378,6 +378,12 @@ public final class Supercov {
         byte[] status = record.status.getBytes("UTF-8");
         putLong(out, status.length);
         out.write(status);
+        // Whether the probes below are this test's own. Every JUnit Platform
+        // and TestNG lifecycle this attaches to reports one test at a time, so
+        // it always is -- but the reader is shared with frontends where that
+        // is not true, and a field written by one writer and not the other is
+        // not a format, it is a guess about which wrote the file.
+        putLong(out, 0);
         byte[] runner = record.runner.getBytes("UTF-8");
         putLong(out, runner.length);
         out.write(runner);
