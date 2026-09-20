@@ -290,6 +290,19 @@ An `Example` with an `Output` comment and a `Fuzz` target's seed corpus are
 measured the same way. `go test` runs both, so what they reach is real
 coverage, but neither takes a `*testing.T` for a result to be named by.
 
+A package where *every* test calls `t.Parallel()` is an ordinary Go package,
+and its run is published like any other. Nothing in it can be attributed, so
+the summary reports `0 test(s)` and then says how many ran without being able
+to announce themselves — coverage with no owner is a different thing from an
+empty suite, and the run has to be able to tell you which it was. A run is
+refused only when it reached nothing at all.
+
+`new` has taken a value since Go 1.26 — `new(x)` is a pointer to a copy of `x`
+— and Supercov reads it. The grammar it parses with can only express the form
+whose argument is a type, so at a call site whose argument is a value it reads
+a stand-in of the same length: the tree describes your file byte for byte, and
+every obligation still quotes the file itself.
+
 Supercov also writes evidence as the suite runs, not only at the end. Go offers
 no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`
 call Supercov wraps — `goleak.VerifyTestMain(m)` runs the suite and exits

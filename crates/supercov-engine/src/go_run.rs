@@ -79,7 +79,16 @@ pub struct DirectGoRunResult {
     pub run_directory: PathBuf,
     pub exit_code: i32,
     pub tests: usize,
+    /// Test functions `go test` ran that no evidence can be credited to: one
+    /// that called `t.Parallel()`, and every Example or Fuzz target. What they
+    /// reached counts run-wide, so a run of nothing but these is a measured
+    /// run with no per-test attribution -- which is a different thing from an
+    /// empty suite, and the summary has to be able to say which it was.
+    pub unattributed: usize,
     pub source_files: usize,
+    /// Source files that did not parse, and so carry no obligations. A hole in
+    /// the denominator travels with the number it was taken out of.
+    pub unparseable_sources: usize,
     pub packages: usize,
     pub recovered_runs: Vec<String>,
     pub metadata: RunMetadata,
@@ -98,6 +107,9 @@ struct GoTestPackage {
     evidence: PathBuf,
     /// Which file declared each test, so a result can point at its source.
     declared_in: BTreeMap<String, String>,
+    /// What ran here and announced nothing: parallel tests, Examples, Fuzz
+    /// targets.
+    unattributed: BTreeSet<String>,
 }
 
 struct InstrumentedWorkspace {
@@ -253,6 +265,7 @@ fn instrument_workspace(
         let evidence = evidence_directory.join(evidence_name(&directory));
         let evidence_literal = evidence.to_string_lossy().replace('\\', "\\\\");
         let mut declared_in = BTreeMap::new();
+        let mut unattributed = BTreeSet::new();
         let mut declares_test_main = false;
         // The harness joins whichever package the tests are in. A directory
         // can hold both `foo` and `foo_test` files; the internal one wins,
@@ -270,6 +283,7 @@ fn instrument_workspace(
             for test in &file.tests {
                 declared_in.insert(test.clone(), relative.clone());
             }
+            unattributed.extend(file.unattributed.iter().cloned());
             let internal = source_packages.get(&directory) == Some(&name);
             if internal || harness_package.is_none() {
                 harness_package = Some(name);
@@ -300,6 +314,7 @@ fn instrument_workspace(
             directory,
             evidence,
             declared_in,
+            unattributed,
         });
     }
     Ok(InstrumentedWorkspace { project, packages })
@@ -407,6 +422,27 @@ pub fn run_direct_go(
                     .into(),
             );
         }
+        // A file that does not parse is a hole in the denominator, and one
+        // hole is reported and measured around. Every file being a hole is not
+        // a hole: there is no denominator left, and a run of nothing satisfies
+        // every floor there is. Reporting that as success with exit 0 is the
+        // failure mode most likely to go unnoticed, so it is refused here the
+        // same way a project with no test package is.
+        if instrumented.project.instrumented.is_empty()
+            && !instrumented.project.files.sources.is_empty()
+        {
+            return Err(format!(
+                "none of the {} Go source file(s) could be parsed, so the run would measure a denominator of nothing: {}",
+                instrumented.project.files.sources.len(),
+                instrumented
+                    .project
+                    .unparseable
+                    .iter()
+                    .map(|(file, reason)| format!("{file}: {reason}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
 
         let (command, forced_fresh) = command_with_fresh_results(&request.command);
         if forced_fresh {
@@ -473,12 +509,31 @@ pub fn run_direct_go(
             )
             .map_err(|error| error.to_string())?;
         }
-        if outcomes.is_empty() {
+        let evidence = merge_evidence(parts);
+        let unattributed = instrumented
+            .packages
+            .iter()
+            .map(|package| package.unattributed.len())
+            .sum::<usize>();
+        // What the run reached, whether or not a test can be named for it. A
+        // package whose every test calls `t.Parallel()` announces nothing by
+        // design -- the coverage is real and simply has no owner -- and
+        // discarding the run there threw away the lines, branches and MC/DC of
+        // a fully measured suite. `t.Parallel()` is idiomatic Go: one reported
+        // codebase calls it in 935 of its 1144 test files.
+        let reached_something = evidence.global.iter().any(|total| *total != 0);
+        if outcomes.is_empty() && !reached_something {
+            let because = if unattributed > 0 {
+                format!(
+                    "; {unattributed} test(s) ran without being able to announce themselves (t.Parallel, Example or Fuzz) and reached nothing measured either"
+                )
+            } else {
+                String::new()
+            };
             return Err(format!(
-                "no Go test recorded evidence (the command exited {exit_code}); a run that measured nothing is not published"
+                "no Go test recorded evidence (the command exited {exit_code}); a run that measured nothing is not published{because}"
             ));
         }
-        let evidence = merge_evidence(parts);
         let run = build_frontend_run(OwnedRunInputs {
             declaration: go_declaration(),
             environment: "go",
@@ -549,7 +604,9 @@ pub fn run_direct_go(
                 .map(|outcome| outcome.name.as_str())
                 .collect::<BTreeSet<_>>()
                 .len(),
+            unattributed,
             source_files: instrumented.project.instrumented.len(),
+            unparseable_sources: instrumented.project.unparseable.len(),
             packages: instrumented.packages.len(),
             recovered_runs,
             metadata,

@@ -411,3 +411,295 @@ fn a_parallel_tests_coverage_counts_even_though_no_test_can_claim_it() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// `t.Parallel()` is idiomatic, and a package where every test calls it is
+/// ordinary Go. Every such test is deliberately unattributed — what it reached
+/// while others ran beside it cannot be credited to it — and the run was then
+/// discarded for having no attributed test, so nothing was published at all:
+/// not the lines, not the branches, not the MC/DC. The evidence existed the
+/// whole time; it simply had no owner. One reporter's codebase calls
+/// `t.Parallel()` in 935 of 1144 test files, leaving 2.7% of its tests
+/// measurable.
+#[test]
+fn a_package_whose_tests_are_all_parallel_still_publishes_what_it_measured() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("all-parallel");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/allpar\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package allpar\n\nfunc Classify(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"non-positive\"\n}\n\nfunc Unreached() string {\n\treturn \"never\"\n}\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package allpar\n\nimport \"testing\"\n\nfunc TestPositive(t *testing.T) {\n\tt.Parallel()\n\tif Classify(1) != \"positive\" {\n\t\tt.Fatal(\"want positive\")\n\t}\n}\n\nfunc TestNonPositive(t *testing.T) {\n\tt.Parallel()\n\tif Classify(-1) != \"non-positive\" {\n\t\tt.Fatal(\"want non-positive\")\n\t}\n}\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-all-parallel".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "a run that measured a whole package was discarded: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    // Nothing can be attributed, and the run says so rather than implying the
+    // suite is empty: two tests ran and neither could be named for what it
+    // reached.
+    assert_eq!(result.tests, 0);
+    assert_eq!(
+        result.unattributed, 2,
+        "both tests ran and neither is named"
+    );
+
+    let records = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .filter(|entry| entry.path.ends_with("mcdc.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .collect::<Vec<_>>();
+    let background = records
+        .iter()
+        .find(|record| record.contains("\"role\":\"background\""))
+        .unwrap_or_else(|| panic!("the run carries what no test could claim: {records:?}"));
+    assert!(background.contains("go:statement:"), "{background}");
+    assert!(background.contains("\"status\":\"passed\""), "{background}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A suite that runs but reaches nothing is still a run that measured nothing,
+/// and publishing it would report a floor it never established. The parallel
+/// case is published because the evidence exists without an owner; this one
+/// has no evidence at all.
+#[test]
+fn a_suite_that_reaches_no_measured_code_is_still_refused() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("reaches-nothing");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/nothing\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package nothing\n\nfunc Unreached() string {\n\treturn \"never\"\n}\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package nothing\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {\n\tt.Parallel()\n}\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-reaches-nothing".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let error = run_direct_go(&request, &mut diagnostics)
+        .expect_err("a run with nothing in it is not published");
+    assert!(error.contains("measured nothing"), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Go 1.26 let `new` take a value. tree-sitter-go cannot express that, so
+/// every source file holding one was dropped from the denominator with a
+/// single warning — and the run then reported success over the files that were
+/// left. `Go coverage: 1 test(s) across 0 source file(s)` with exit 0 is the
+/// worst shape a wrong number can take, because an agent loop reads it as a
+/// pass.
+#[test]
+fn a_source_file_using_go_1_26_new_is_measured_like_any_other() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("new-value");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/newvalue\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package newvalue\n\nfunc Plain(n int) *int {\n\tif n > 0 {\n\t\treturn &n\n\t}\n\treturn new(int)\n}\n",
+    );
+    // The value form only compiles on Go 1.26 and the suite has to run on the
+    // toolchain that is here, so it goes in a file the toolchain skips and
+    // discovery does not. What is being proved is the half that is broken on
+    // every version: that Supercov can read the construct, and that the file
+    // holding it is in the denominator rather than dropped out of it.
+    write(
+        root.as_path(),
+        "boxed.go",
+        "//go:build ignore\n\npackage newvalue\n\nfunc Boxed() *string {\n\treturn new(\"hello\")\n}\n\nfunc Sum(a, b int) *int {\n\treturn new(a + b)\n}\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package newvalue\n\nimport \"testing\"\n\nfunc TestPlain(t *testing.T) {\n\tif *Plain(1) != 1 {\n\t\tt.Fatal(\"plain\")\n\t}\n}\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-new-value".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        result.source_files, 2,
+        "both files are in the denominator, the one using the construct included"
+    );
+    assert_eq!(result.unparseable_sources, 0);
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    assert!(!diagnostics.contains("could not parse"), "{diagnostics}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A source file Supercov cannot read is a hole in the denominator. One that
+/// leaves nothing readable at all is not a hole, it is the whole floor: the
+/// run would report coverage of zero obligations, which satisfies every
+/// threshold, with exit 0. So it is refused, the way a project with no test
+/// package already is.
+#[test]
+fn a_project_whose_sources_none_parse_is_refused_rather_than_reported_green() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("no-source-parses");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/unreadable\n\ngo 1.22\n",
+    );
+    // Unparseable to Supercov and to the Go compiler alike; what matters is
+    // that the run does not report success over a denominator of nothing.
+    write(
+        root.as_path(),
+        "lib.go",
+        "package unreadable\n\nfunc f( {\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package unreadable\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {}\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-unreadable".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let error = run_direct_go(&request, &mut diagnostics)
+        .expect_err("a run with nothing in its denominator is not published");
+    assert!(
+        error.contains("denominator of nothing"),
+        "and it names the file it could not read: {error}"
+    );
+    assert!(error.contains("lib.go"), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// One file that does not parse among several that do is a hole, not a floor:
+/// the run is published, and the hole travels with the number it was taken out
+/// of. It reaches the stored run as a blocking limitation, and the count comes
+/// back with the result so the line that reports success can say it.
+#[test]
+fn an_unparseable_file_among_readable_ones_is_published_and_counted() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("partial-hole");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/partial\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "good.go",
+        "package partial\n\nfunc Classify(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"non-positive\"\n}\n",
+    );
+    // A build constraint the toolchain honours and discovery does not, which
+    // is how a file can be unreadable to Supercov without the package failing
+    // to build — the shape a generated or platform-specific file takes.
+    write(
+        root.as_path(),
+        "gen.go",
+        "//go:build ignore\n\npackage partial\n\nfunc Broken( {\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package partial\n\nimport \"testing\"\n\nfunc TestPositive(t *testing.T) {\n\tif Classify(1) != \"positive\" {\n\t\tt.Fatal(\"want positive\")\n\t}\n}\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-partial-hole".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "one hole is not a reason to discard a measured run: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.source_files, 1, "the readable file is measured");
+    assert_eq!(result.unparseable_sources, 1, "and the hole is counted");
+
+    // Counted in the result is not enough on its own: the run has to carry it,
+    // so `supercov runs latest` can still name the file long after the build
+    // log is gone.
+    let declaration = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .find(|entry| entry.path.ends_with("manifest.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .expect("the run declares what it measured against");
+    assert!(declaration.contains("file-does-not-parse"), "{declaration}");
+    assert!(declaration.contains("gen.go"), "{declaration}");
+    std::fs::remove_dir_all(root).ok();
+}
