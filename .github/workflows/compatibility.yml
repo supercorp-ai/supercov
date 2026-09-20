@@ -178,11 +178,18 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      # Before Ruby, and that order is the whole point. `ruby/setup-ruby`
+      # installs an MSYS2 toolchain on arm64 Windows and puts its clang on
+      # PATH; `ring` has to compile C for `aarch64-pc-windows-msvc`, picks up
+      # that clang, and it cannot target MSVC. Building first leaves nothing
+      # for the shadowed compiler to be asked to do -- the build below is a
+      # cache hit.
+      - run: cargo build -p supercov
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
-      - uses: dtolnay/rust-toolchain@stable
-      - run: npm ci
       - run: npm run test:ruby-coverage
 
   rust:
