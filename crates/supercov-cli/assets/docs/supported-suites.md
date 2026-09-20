@@ -287,33 +287,17 @@ coverage never counts — a failed run cannot say which of it came from the test
 that failed.
 
 An `Example` with an `Output` comment and a `Fuzz` target's seed corpus are
-measured the same way. `go test` runs both, so what they reach is real
-coverage, but neither takes a `*testing.T` for a result to be named by.
+measured the same way: `go test` runs both, and what they reach is real
+coverage no test can claim.
 
-A package where *every* test calls `t.Parallel()` is an ordinary Go package,
-and its run is published like any other. Nothing in it can be attributed, so
-the summary reports `0 test(s)` and then says how many ran without being able
-to announce themselves — coverage with no owner is a different thing from an
-empty suite, and the run has to be able to tell you which it was. A run is
-refused only when it reached nothing at all.
+A package where every test calls `t.Parallel()` is published like any other.
+The summary reports how many tests ran without being able to announce
+themselves, because coverage with no owner is a different thing from an empty
+suite.
 
-`new` has taken a value since Go 1.26 — `new(x)` is a pointer to a copy of `x`
-— and Supercov reads it. The grammar it parses with can only express the form
-whose argument is a type, so at a call site whose argument is a value it reads
-a stand-in of the same length: the tree describes your file byte for byte, and
-every obligation still quotes the file itself.
-
-A file Supercov cannot parse is a hole rather than the end of the run. A source
-file that does not parse carries no obligations and is declared as a blocking
-limitation; a test file that does not parse costs the tests it declares their
-attribution, and what they reach counts run-wide. Both are named on the line
-that reports the result. A run is refused only when there is nothing left to
-measure at all — when no source file parsed, or when nothing was reached.
-
-A `_test.go` carrying `//go:build ignore` is not part of the build, so a
-`TestMain` in it is not the package's own and Supercov still generates its own
-harness. That is the only build constraint read without a toolchain: `ignore`
-is not a GOOS, not a GOARCH, and nothing defines it.
+A file Supercov cannot parse is a hole, not the end of the run. It is named on
+the line that reports the result and recorded in the run, and a run is refused
+only when nothing is left to measure.
 
 Supercov also writes evidence as the suite runs, not only at the end. Go offers
 no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`
