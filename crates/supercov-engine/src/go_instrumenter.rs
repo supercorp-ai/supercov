@@ -1461,6 +1461,96 @@ func classify(a int, b bool) string {
     }
 
     #[test]
+    fn the_scan_never_mistakes_text_for_code() {
+        // The scan that finds a `new(` call site has to know when Go source is
+        // not Go: a `)` inside a string closes nothing, `// new(` is a remark,
+        // and a backquoted string has no escapes at all. Reading any of them
+        // as code finds a call site that is not there, and a stand-in written
+        // over one is a rewrite of somebody's string.
+        let go = obligations(concat!(
+            "package p\n\n",
+            "func f(v int) *int {\n",
+            // Every one of these holds the text `new(` and none is a call.
+            "\t_ = \"new(\\\"x\\\") and an unclosed ( paren\"\n",
+            "\t_ = `raw new(\"y\") with ) and \\ backslash`\n",
+            "\t_ = '('\n",
+            "\t// new(\"comment\") and a stray )\n",
+            "\t/* new(\"block\") ) */\n",
+            // And this one is.
+            "\treturn new(v + 1)\n}\n",
+        ));
+        assert_eq!(
+            go.manifest
+                .points
+                .iter()
+                .filter(|p| p.kind == PointKind::Function)
+                .count(),
+            1
+        );
+
+        // The same again where the only `new(` is inside text, so the file
+        // parses without the stand-in ever being spent.
+        let untouched =
+            obligations("package p\n\nfunc g() string {\n\treturn `new(\"only in text\")`\n}\n");
+        assert!(
+            untouched
+                .manifest
+                .points
+                .iter()
+                .any(|point| point.source.contains("new(\"only in text\")")),
+            "{:?}",
+            untouched.manifest.points
+        );
+    }
+
+    #[test]
+    fn no_shape_of_input_can_make_the_scan_panic() {
+        // The scan walks bytes, and every byte position is reachable: a file
+        // can end inside a string, inside a comment, inside the argument list
+        // of a `new(` that is never closed. A wrong answer there is a file
+        // reported as unparseable; a panic is Supercov taking down the suite
+        // it was asked to measure. So every truncation of a file holding one
+        // of each is parsed, and the only claim made is that it returns.
+        let awkward = concat!(
+            "package p\n\n",
+            "// gr\u{fc}\u{df}e \u{2014} new(\"in a comment\")\n",
+            "func f(sch\u{f6}n int) *int {\n",
+            "\t_ = \"\u{fc}ber new(\\\"in a string\\\"\"\n",
+            "\t_ = `\u{e4}\u{f6}\u{fc} new(\n",
+            "\t_ = '\u{fc}'\n",
+            "\t/* new(\"unterminated\n",
+            "\treturn new(sch\u{f6}n + 1)\n}\n",
+        );
+        for end in 0..=awkward.len() {
+            // Only on a rune boundary: a `&str` cannot hold half a rune, so a
+            // split elsewhere is not an input Supercov could ever be given.
+            if !awkward.is_char_boundary(end) {
+                continue;
+            }
+            let _ = parse(&awkward[..end]);
+            // And the same read from the other end, so a construct that opens
+            // before the window is covered too.
+            if awkward.is_char_boundary(end) {
+                let _ = parse(&awkward[end..]);
+            }
+        }
+
+        // A `new(` whose argument list never closes, and one at the very end
+        // of a file, are the two positions the scan's own bounds depend on.
+        for source in [
+            "package p\n\nfunc f() {\n\t_ = new(\n",
+            "package p\n\nfunc f() {\n\t_ = new",
+            "package p\n\nfunc f() {\n\t_ = new(",
+            "package p\n\nfunc f() {\n\t_ = new()\n}\n",
+            "new",
+            "new(",
+            "",
+        ] {
+            let _ = parse(source);
+        }
+    }
+
+    #[test]
     fn a_file_that_is_simply_broken_still_does_not_parse() {
         // The stand-in must not become a way for any unparseable file to slip
         // through: what it cannot read is still a hole in the denominator, and

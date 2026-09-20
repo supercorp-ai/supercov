@@ -427,6 +427,38 @@ mod tests {
     }
 
     #[test]
+    fn a_test_whose_subtests_run_in_parallel_cannot_claim_them_either() {
+        // `t.Run(name, func(t *testing.T) { t.Parallel() })` is how a Go suite
+        // usually reaches for parallelism, and it is the same problem one
+        // level down: Go resumes the parallel subtests after the parent
+        // returns, so what they reach arrives with no announcement standing
+        // and cannot be credited to the parent that started them.
+        //
+        // The parent is therefore checkpointed rather than announced. It costs
+        // the parent its own attribution -- the serial part of its body is
+        // swept in with the rest -- which is the honest reading: nothing can
+        // say which of the two it came from.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestGroup(t *testing.T) {\n\tsetUp()\n\tfor _, c := range cases {\n\t\tt.Run(c.name, func(t *testing.T) {\n\t\t\tt.Parallel()\n\t\t\tdoWork(c)\n\t\t})\n\t}\n}\n",
+        );
+        assert_eq!(file.tests, ["TestGroup"]);
+        assert_eq!(file.unattributed, ["TestGroup"]);
+        assert!(
+            !out.contains("__supercovTest(t, \"TestGroup\")"),
+            "a parent cannot claim what its parallel subtests reached:\n{out}"
+        );
+        assert!(out.contains("defer __supercov.Checkpoint()"), "{out}");
+
+        // Where the subtests are serial there is nothing to run beside them,
+        // and the parent is named for all of it as before.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestGroup(t *testing.T) {\n\tt.Run(\"one\", func(t *testing.T) {\n\t\tdoWork()\n\t})\n}\n",
+        );
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        assert!(out.contains("__supercovTest(t, \"TestGroup\")"), "{out}");
+    }
+
+    #[test]
     fn an_example_is_swept_even_though_it_cannot_be_announced() {
         // `go test` runs an Example with an Output comment like any other
         // test, and a Fuzz target runs its seed corpus, but neither takes a

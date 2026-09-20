@@ -97,7 +97,8 @@
     "docs:sync": "node scripts/sync-docs.mjs",
     "docs:check": "node scripts/sync-docs.mjs --check",
     "test:launcher": "go vet ./cmd/... && go test ./cmd/...",
-    "test:sweep-target": "node scripts/sweep-target-test.mjs"
+    "test:sweep-target": "node scripts/sweep-target-test.mjs",
+    "test:go-versions": "cargo build -p supercov-engine --tests && node scripts/go-version-matrix.mjs"
   },
   "optionalDependencies": {
     "@supercov/cli-darwin-arm64": "1.0.1",

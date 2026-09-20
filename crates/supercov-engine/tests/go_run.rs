@@ -30,6 +30,22 @@ fn go_binary() -> Option<PathBuf> {
     None
 }
 
+/// What the toolchain on this machine calls itself, as `go version` reports.
+fn go_language_version(go: &Path) -> String {
+    Command::new(go)
+        .arg("version")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        // `go version go1.27.1 darwin/arm64`
+        .and_then(|text| {
+            text.split_whitespace()
+                .find(|word| word.starts_with("go1."))
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+}
+
 fn temporary(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "supercov-go-run-{label}-{}-{}",
@@ -701,5 +717,434 @@ fn an_unparseable_file_among_readable_ones_is_published_and_counted() {
     .expect("the run declares what it measured against");
     assert!(declaration.contains("file-does-not-parse"), "{declaration}");
     assert!(declaration.contains("gen.go"), "{declaration}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The construct from the report, compiled and run for real.
+///
+/// The parser tests prove Supercov can read `new(value)` on any toolchain;
+/// this proves the whole lifecycle around it -- that instrumented source using
+/// it still compiles, that the file is in the denominator, and that the lines
+/// inside it are reported covered or uncovered according to what the tests
+/// actually reached. It needs both halves of Go's own gate: a toolchain of
+/// 1.26 or newer, and a `go.mod` that asks for the 1.26 language.
+#[test]
+fn go_1_26_new_of_a_value_compiles_instrumented_and_reports_what_ran() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let found = go_language_version(go.as_path());
+    if !common::at_least(&found, "1.26") {
+        common::skip_below_version("go", "1.26", &found);
+        return;
+    }
+    let root = temporary("new-value-live");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/live\n\ngo 1.26\n",
+    );
+    // Every shape of the construct the report named: a literal, an expression,
+    // a call, and the nested form. Beside them the type forms that have always
+    // worked, because a stand-in written over one of those would break a file
+    // that used to be fine.
+    write(
+        root.as_path(),
+        "lib.go",
+        concat!(
+            "package live\n\n",
+            "func Greeting() *string {\n\treturn new(\"hello\")\n}\n\n",
+            "func Sum(a, b int) *int {\n\treturn new(a + b)\n}\n\n",
+            "func Nested() **int {\n\treturn new(new(5))\n}\n\n",
+            "func Widened(n int) *int64 {\n\treturn new(int64(n))\n}\n\n",
+            "func Types() (*int, *map[string]int, *[]byte, *chan int) {\n",
+            "\treturn new(int), new(map[string]int), new([]byte), new(chan int)\n}\n\n",
+            "func Unreached() *string {\n\treturn new(\"never\")\n}\n",
+        ),
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        concat!(
+            "package live\n\nimport \"testing\"\n\n",
+            "func TestValues(t *testing.T) {\n",
+            "\tif *Greeting() != \"hello\" {\n\t\tt.Fatal(\"greeting\")\n\t}\n",
+            "\tif *Sum(2, 3) != 5 {\n\t\tt.Fatal(\"sum\")\n\t}\n",
+            "\tif **Nested() != 5 {\n\t\tt.Fatal(\"nested\")\n\t}\n",
+            "\tif *Widened(7) != 7 {\n\t\tt.Fatal(\"widened\")\n\t}\n",
+            // The value form inside the test file too: that is the half that
+            // used to take the whole run down with it, exit 1.
+            "\twant := new(\"hello\")\n",
+            "\tif *want != \"hello\" {\n\t\tt.Fatal(\"want\")\n\t}\n}\n\n",
+            "func TestTypes(t *testing.T) {\n\tif _, _, _, c := Types(); c == nil {\n\t\tt.Fatal(\"types\")\n\t}\n}\n",
+        ),
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-new-value-live".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed on {found}: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    let printed = String::from_utf8_lossy(&diagnostics);
+    assert_eq!(
+        result.exit_code, 0,
+        "instrumented source using the construct has to still compile:\n{printed}"
+    );
+    assert_eq!(result.source_files, 1);
+    assert_eq!(result.unparseable_sources, 0, "{printed}");
+    assert!(!printed.contains("could not parse"), "{printed}");
+    // Both tests announced themselves: the value form in a test file no longer
+    // costs the file its instrumentation.
+    assert_eq!(result.tests, 2);
+
+    let records = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .filter(|entry| entry.path.ends_with("mcdc.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .collect::<Vec<_>>();
+    let values = records
+        .iter()
+        .find(|record| record.contains("TestValues"))
+        .unwrap_or_else(|| panic!("the test that reached the construct: {records:?}"));
+    // It is measured, not merely parsed: the test that ran the value forms
+    // claims statements of its own.
+    assert!(values.contains("go:statement:"), "{values}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A package of nothing but `Example` functions is the case the parallel
+/// report predicted would behave the same way, and it did: `go test` runs an
+/// Example with an `Output` comment like any other test, but no Example takes
+/// a `*testing.T` to be named by, so the package measured itself perfectly and
+/// published nothing.
+#[test]
+fn a_package_of_nothing_but_examples_publishes_what_it_measured() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("examples-only");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/exonly\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package exonly\n\nimport \"fmt\"\n\nfunc Classify(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"non-positive\"\n}\n\nfunc Show(n int) {\n\tfmt.Println(Classify(n))\n}\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package exonly\n\nfunc ExampleShow() {\n\tShow(1)\n\t// Output: positive\n}\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-examples-only".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "an Example is a test go runs, and what it reached was measured: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.tests, 0, "no Example can be named for what it ran");
+    assert_eq!(result.unattributed, 1);
+
+    let records = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .filter(|entry| entry.path.ends_with("mcdc.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .collect::<Vec<_>>();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("\"role\":\"background\"")
+                && record.contains("go:statement:")),
+        "{records:?}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A `Fuzz` target's seed corpus is the same shape of claim as an Example's.
+#[test]
+fn a_package_of_nothing_but_fuzz_targets_publishes_what_it_measured() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("fuzz-only");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/fuzzonly\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package fuzzonly\n\nfunc Classify(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"non-positive\"\n}\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package fuzzonly\n\nimport \"testing\"\n\nfunc FuzzClassify(f *testing.F) {\n\tf.Add(1)\n\tf.Fuzz(func(t *testing.T, n int) {\n\t\tClassify(n)\n\t})\n}\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-fuzz-only".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.unattributed, 1);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A test file Supercov cannot parse took the whole run down with it, exit 1,
+/// on a suite the toolchain itself compiled and passed.
+///
+/// That is the same fail-closed reflex a source file was corrected for, and it
+/// is worse here: the file need not even be in the build. What the file costs
+/// is attribution for the tests it declares -- there is nowhere to put the
+/// announcement -- and what they reach still counts run-wide. So the file is
+/// reported as the hole it is and the run goes on.
+#[test]
+fn an_unparseable_test_file_is_a_hole_rather_than_the_end_of_the_run() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("unparseable-test");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/badtest\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package badtest\n\nfunc Classify(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"non-positive\"\n}\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package badtest\n\nimport \"testing\"\n\nfunc TestGood(t *testing.T) {\n\tif Classify(1) != \"positive\" {\n\t\tt.Fatal(\"no\")\n\t}\n}\n",
+    );
+    // A build constraint the toolchain honours and discovery does not: the
+    // suite compiles and passes, and only Supercov has a problem with it.
+    write(
+        root.as_path(),
+        "gen_test.go",
+        "//go:build ignore\n\npackage badtest\n\nfunc Broken( {\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-unparseable-test".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "one test file it could not read is not a reason to discard a passing suite: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    // The test in the file that did parse is still attributed.
+    assert_eq!(result.tests, 1);
+    assert_eq!(result.unparseable_tests, 1);
+    let printed = String::from_utf8_lossy(&diagnostics);
+    assert!(printed.contains("gen_test.go"), "{printed}");
+
+    // And the hole is declared rather than merely printed.
+    let manifest = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .find(|entry| entry.path.ends_with("manifest.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .expect("the run declares what it measured against");
+    assert!(manifest.contains("gen_test.go"), "{manifest}");
+    assert!(manifest.contains("file-does-not-parse"), "{manifest}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A `_test.go` the toolchain never builds declares nothing.
+///
+/// `//go:build ignore` is the conventional way to keep Go beside Go without
+/// compiling it -- a reference harness, a generator's input -- and `go test`
+/// walks straight past it. Supercov read its `TestMain` as the package's own
+/// and stood its own harness down to avoid declaring a second, so the runtime
+/// was never armed: the package wrote no evidence and a passing suite
+/// published nothing, with `a run that measured nothing is not published`.
+#[test]
+fn a_test_file_the_build_ignores_does_not_stand_the_harness_down() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("ignored-test-main");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/ignoredmain\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package ignoredmain\n\nfunc Classify(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"non-positive\"\n}\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package ignoredmain\n\nimport \"testing\"\n\nfunc TestGood(t *testing.T) {\n\tif Classify(1) != \"positive\" {\n\t\tt.Fatal(\"no\")\n\t}\n}\n",
+    );
+    let harness = "package ignoredmain\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) {\n\tos.Exit(m.Run())\n}\n";
+    write(
+        root.as_path(),
+        "harness_test.go",
+        &format!("//go:build ignore\n\n{harness}"),
+    );
+
+    let mut request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-ignored-test-main".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_go(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "a file the toolchain never builds cannot stand the harness down: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.tests, 1, "the test that actually runs is measured");
+
+    // The legacy spelling says the same thing, and predates the directive by
+    // enough years to still be in real trees.
+    write(
+        root.as_path(),
+        "harness_test.go",
+        &format!("// +build ignore\n\n{harness}"),
+    );
+    request.run_id = "run-go-ignored-test-main-legacy".into();
+    let mut diagnostics = Vec::new();
+    let result = run_direct_go(&request, &mut diagnostics).unwrap_or_else(|error| {
+        panic!(
+            "{error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        )
+    });
+    assert_eq!(result.tests, 1);
+
+    // And a TestMain the build does take is still the package's own: standing
+    // the harness down there is what keeps Go's one-per-package rule.
+    write(root.as_path(), "harness_test.go", harness);
+    request.run_id = "run-go-real-test-main".into();
+    let mut diagnostics = Vec::new();
+    let result = run_direct_go(&request, &mut diagnostics).unwrap_or_else(|error| {
+        panic!(
+            "{error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        )
+    });
+    assert_eq!(result.exit_code, 0, "a second TestMain would not compile");
+    assert_eq!(result.tests, 1);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A `TestMain` in a file Supercov could not parse is still a `TestMain`.
+///
+/// Go permits exactly one per package. Skipping an unreadable test file means
+/// its declarations go unseen, and synthesising a second `TestMain` beside one
+/// that was there all along does not fail to measure -- it fails to build, and
+/// Supercov breaks a suite that worked.
+#[test]
+fn a_test_main_inside_an_unparseable_file_is_not_declared_twice() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("unparseable-test-main");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/badmain\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package badmain\n\nfunc Classify(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"non-positive\"\n}\n",
+    );
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package badmain\n\nimport \"testing\"\n\nfunc TestGood(t *testing.T) {\n\tif Classify(1) != \"positive\" {\n\t\tt.Fatal(\"no\")\n\t}\n}\n",
+    );
+    // Compiles and runs; only the parser trips, and on a construct after the
+    // TestMain rather than in it.
+    write(
+        root.as_path(),
+        "main_test.go",
+        "package badmain\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) {\n\tos.Exit(m.Run())\n}\n\nfunc unreadable( {\n",
+    );
+
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-unparseable-test-main".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = run_direct_go(&request, &mut diagnostics);
+    let printed = String::from_utf8_lossy(&diagnostics);
+    // Whatever else happens, the generated harness must not declare a second
+    // TestMain: that is a build failure, not a measurement gap.
+    assert!(
+        !printed.contains("TestMain redeclared") && !printed.contains("redeclared in this block"),
+        "Supercov declared a second TestMain beside the package's own:\n{printed}"
+    );
+    if let Ok(result) = &result {
+        assert_eq!(result.exit_code, 0, "{printed}");
+    }
     std::fs::remove_dir_all(root).ok();
 }

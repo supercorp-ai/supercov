@@ -11,6 +11,7 @@
 ///
 /// CI sets `SUPERCOV_REQUIRE_GO=1` or `SUPERCOV_REQUIRE_JVM=1`, which turns
 /// the skip into the failure it should be there.
+#[allow(dead_code)]
 pub fn skip(language: &str, reason: &str) {
     let variable = format!("SUPERCOV_REQUIRE_{}", language.to_ascii_uppercase());
     if std::env::var(&variable).as_deref() == Ok("1") {
@@ -19,6 +20,75 @@ pub fn skip(language: &str, reason: &str) {
         );
     }
     eprintln!("[{language}] skipped: {reason}");
+}
+
+/// A toolchain version as the pair that orders it.
+///
+/// Only the major and minor are read. Go's language changes land on minors and
+/// never on patches, so `1.26.0` and `1.26.8` answer the same question, and a
+/// test that asked for the patch too would skip on a perfectly capable
+/// toolchain.
+#[allow(dead_code)]
+pub fn version_pair(version: &str) -> Option<(u32, u32)> {
+    // `go1.26.8`, `1.26`, `1.26.8 linux/amd64` -- whatever the tool prints.
+    let digits = version
+        .trim()
+        .trim_start_matches(|c: char| !c.is_ascii_digit());
+    let mut parts = digits.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts
+        .next()
+        .map(|minor| minor.trim_end_matches(|c: char| !c.is_ascii_digit()))
+        .unwrap_or("0")
+        .parse()
+        .ok()?;
+    Some((major, minor))
+}
+
+/// Whether a toolchain is at least this version.
+#[allow(dead_code)]
+pub fn at_least(version: &str, minimum: &str) -> bool {
+    match (version_pair(version), version_pair(minimum)) {
+        (Some(found), Some(needed)) => found >= needed,
+        // An unreadable version is not a claim that it is new enough.
+        _ => false,
+    }
+}
+
+/// Record that a test is being skipped because the toolchain is older than the
+/// language feature it measures.
+///
+/// Unlike an absent toolchain this is a legitimate skip: the Go matrix runs
+/// 1.22 precisely to prove the floor still works, and a test of a 1.26
+/// construct has nothing to say there. But a job that promised a newer
+/// toolchain and silently got an older one would skip in exactly the same way,
+/// and the version would look verified while nothing had run.
+///
+/// So CI passes the version it believes it set up in
+/// `SUPERCOV_REQUIRE_GO_LANG`, and a skip below what that names is a failure
+/// rather than a quiet pass. Passing it on every leg means adding a version to
+/// the matrix enforces that version by itself.
+#[allow(dead_code)]
+pub fn skip_below_version(language: &str, needed: &str, found: &str) {
+    let variable = format!("SUPERCOV_REQUIRE_{}_LANG", language.to_ascii_uppercase());
+    let promised = std::env::var(&variable).ok();
+    if skipping_is_a_failure(promised.as_deref(), needed) {
+        let promised = promised.unwrap_or_default();
+        panic!(
+            "{variable}={promised} promises {language} {needed} or newer, so this test must run rather than skip -- and the toolchain here reports {found}"
+        );
+    }
+    eprintln!("[{language}] skipped: needs {needed} or newer, found {found}");
+}
+
+/// Whether skipping at `needed` betrays what the environment promised.
+///
+/// Separated from reading the variable so it can be tested at all: an
+/// environment variable is process-global, and tests that set one race every
+/// other test in the binary.
+#[allow(dead_code)]
+pub fn skipping_is_a_failure(promised: Option<&str>, needed: &str) -> bool {
+    promised.is_some_and(|promised| at_least(promised, needed))
 }
 
 /// Find a build tool or compiler, or `None` on a machine without it.

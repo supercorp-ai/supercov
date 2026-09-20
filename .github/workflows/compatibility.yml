@@ -207,8 +207,11 @@ jobs:
       matrix:
         os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         # 1.22 is the oldest the generated harness targets; the rest is what
-        # projects are actually on.
-        go: ["1.22", "1.25"]
+        # projects are actually on. 1.26 earns its place on its own: it is the
+        # release that let `new` take a value, which the grammar Supercov
+        # parses with cannot express, and nothing below it can compile the
+        # construct to prove the workaround holds.
+        go: ["1.22", "1.25", "1.26", "1.27"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -221,14 +224,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run test:go
+        env:
+          # Without this a job whose toolchain setup failed would skip every
+          # test and report success, and Go would look verified on a machine
+          # that never ran it.
+          SUPERCOV_REQUIRE_GO: "1"
+          # And the same again one level down. A test of a construct newer than
+          # this leg's toolchain skips legitimately -- that is what the 1.22
+          # leg is for -- so the skip cannot simply be banned. Naming the
+          # version this job believes it set up makes a skip above it a
+          # failure, which means adding a version to the matrix above enforces
+          # that version by itself.
+          SUPERCOV_REQUIRE_GO_LANG: ${{ matrix.go }}
       # The launcher is the way a Go project gets Supercov at all, and its
       # tests are what caught it building a download URL from a version no
       # release was ever published under. They ran nowhere until here.
       - run: npm run test:launcher
         env:
-          # Without this a job whose toolchain setup failed would skip every
-          # test and report success, and Go would look verified on a machine
-          # that never ran it.
           SUPERCOV_REQUIRE_GO: "1"
 
   jvm:

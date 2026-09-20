@@ -2241,6 +2241,14 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                         result.unparseable_sources
                     );
                 }
+                // The tests in it still ran, and what they reached still
+                // counts; what is missing is the name to put it under.
+                if result.unparseable_tests > 0 {
+                    eprintln!(
+                        "[supercov] {} test file(s) did not parse; the tests they declare ran unattributed",
+                        result.unparseable_tests
+                    );
+                }
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",

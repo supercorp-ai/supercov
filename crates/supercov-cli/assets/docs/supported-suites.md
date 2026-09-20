@@ -303,6 +303,18 @@ whose argument is a type, so at a call site whose argument is a value it reads
 a stand-in of the same length: the tree describes your file byte for byte, and
 every obligation still quotes the file itself.
 
+A file Supercov cannot parse is a hole rather than the end of the run. A source
+file that does not parse carries no obligations and is declared as a blocking
+limitation; a test file that does not parse costs the tests it declares their
+attribution, and what they reach counts run-wide. Both are named on the line
+that reports the result. A run is refused only when there is nothing left to
+measure at all — when no source file parsed, or when nothing was reached.
+
+A `_test.go` carrying `//go:build ignore` is not part of the build, so a
+`TestMain` in it is not the package's own and Supercov still generates its own
+harness. That is the only build constraint read without a toolchain: `ignore`
+is not a GOOS, not a GOARCH, and nothing defines it.
+
 Supercov also writes evidence as the suite runs, not only at the end. Go offers
 no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`
 call Supercov wraps — `goleak.VerifyTestMain(m)` runs the suite and exits

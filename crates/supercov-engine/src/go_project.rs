@@ -217,7 +217,7 @@ const LANGUAGE: &str = "go";
 /// this puts the file in the manifest, so it reaches the declaration's
 /// structural limitations and `supercov runs latest` can still name it long
 /// after the build log is gone.
-fn unparseable_limitation(file: &str, reason: &str) -> serde_json::Value {
+pub(crate) fn unparseable_limitation(file: &str, reason: &str) -> serde_json::Value {
     serde_json::json!({
         "id": crate::go_instrumenter::stable_obligation_id(LANGUAGE, file, "unparseable", 0, 0),
         "kind": "file-does-not-parse",

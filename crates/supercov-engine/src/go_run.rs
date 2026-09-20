@@ -89,6 +89,10 @@ pub struct DirectGoRunResult {
     /// Source files that did not parse, and so carry no obligations. A hole in
     /// the denominator travels with the number it was taken out of.
     pub unparseable_sources: usize,
+    /// Test files that did not parse. Their tests still run and still reach
+    /// what they reach; what is lost is the announcement that would name them
+    /// for it.
+    pub unparseable_tests: usize,
     pub packages: usize,
     pub recovered_runs: Vec<String>,
     pub metadata: RunMetadata,
@@ -115,6 +119,9 @@ struct GoTestPackage {
 struct InstrumentedWorkspace {
     project: PreparedGoProject,
     packages: Vec<GoTestPackage>,
+    /// Test files that did not parse, with the reason. They cost the tests
+    /// they declare their attribution and nothing else.
+    unparseable_tests: Vec<(String, String)>,
 }
 
 fn directory_of(relative: &str) -> String {
@@ -180,7 +187,8 @@ fn instrument_workspace(
     workspace: &Path,
     evidence_directory: &Path,
 ) -> Result<InstrumentedWorkspace, String> {
-    let project = prepare_go_project(workspace)?;
+    let mut project = prepare_go_project(workspace)?;
+    let mut unparseable_tests: Vec<(String, String)> = Vec::new();
 
     // A go.work repository has several modules and no module at its root, so
     // each gets a runtime of its own: an import is resolved against the module
@@ -277,17 +285,47 @@ fn instrument_workspace(
             let Some(name) = package_name(&source) else {
                 continue;
             };
-            let file = instrument_test_file(&source, RUNTIME_ALIAS, &evidence_literal)
-                .map_err(|error| format!("{relative}: {error}"))?;
-            declares_test_main |= file.declares_test_main;
-            for test in &file.tests {
-                declared_in.insert(test.clone(), relative.clone());
-            }
-            unattributed.extend(file.unattributed.iter().cloned());
+            // The package a harness joins is read from the text, so it is
+            // known whether or not the file parses -- and a package whose only
+            // test file is unreadable still needs one.
             let internal = source_packages.get(&directory) == Some(&name);
             if internal || harness_package.is_none() {
                 harness_package = Some(name);
             }
+            // A file the toolchain never builds declares nothing Supercov has
+            // to work around, and reading its `TestMain` as the package's own
+            // stood the harness down for a package that had none -- so the
+            // runtime was never armed and a passing suite published nothing.
+            let built = !build_ignored(&source);
+            let file =
+                match instrument_test_file(&source, RUNTIME_ALIAS, &evidence_literal) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        // Taking the run down with it is the reflex a source file
+                        // was corrected for, and it is worse here: a test file
+                        // need not even be in the build for Supercov to refuse the
+                        // suite the toolchain just passed. What it costs is the
+                        // attribution of the tests it declares, because there is
+                        // nowhere to put the announcement. What they reach still
+                        // counts run-wide, like any execution no test could claim.
+                        project.manifest.limitations.push(
+                            crate::go_project::unparseable_limitation(relative, &error.to_string()),
+                        );
+                        unparseable_tests.push((relative.clone(), error.to_string()));
+                        // A TestMain nobody could read is still a TestMain, and Go
+                        // permits one per package. Synthesising a second does not
+                        // fail to measure, it fails to build -- so this is scanned
+                        // for rather than parsed for, which is the one question
+                        // that cannot go unanswered.
+                        declares_test_main |= built && declares_test_main_textually(&source);
+                        continue;
+                    }
+                };
+            declares_test_main |= built && file.declares_test_main;
+            for test in &file.tests {
+                declared_in.insert(test.clone(), relative.clone());
+            }
+            unattributed.extend(file.unattributed.iter().cloned());
             if !file.edits.is_empty() {
                 write(
                     &path,
@@ -317,7 +355,62 @@ fn instrument_workspace(
             unattributed,
         });
     }
-    Ok(InstrumentedWorkspace { project, packages })
+    Ok(InstrumentedWorkspace {
+        project,
+        packages,
+        unparseable_tests,
+    })
+}
+
+/// Whether the toolchain will refuse to build this file whatever it is asked.
+///
+/// Build constraints in general cannot be answered without knowing the GOOS,
+/// GOARCH and tags a build will use, and guessing at them would drop files a
+/// run does measure. `ignore` needs none of that: it is not a GOOS, not a
+/// GOARCH, and nothing defines it, which is exactly why it is the convention
+/// for Go kept beside Go without being compiled -- a reference harness, a
+/// generator's input. So it is the one constraint that can be read alone, and
+/// the only one that is.
+fn build_ignored(source: &str) -> bool {
+    // Constraints live above the package clause and nowhere else: the
+    // toolchain stops reading them there, so a `//go:build ignore` in a
+    // comment further down is text about Go rather than a constraint on it.
+    let header = if source.starts_with("package ") {
+        // Nothing precedes a clause on the first line, and looking for a
+        // newline before it would find none and read the whole file.
+        ""
+    } else {
+        source
+            .find("\npackage ")
+            .map_or(source, |clause| &source[..clause])
+    };
+    header
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            line.strip_prefix("//go:build")
+                // The spelling Go used before 1.17, still in trees today.
+                .or_else(|| line.strip_prefix("// +build"))
+        })
+        .any(|constraint| {
+            constraint
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|term| term == "ignore")
+        })
+}
+
+/// Whether a file declares `TestMain`, read from the text rather than a tree.
+///
+/// Only ever asked of a file that did not parse, which is exactly when there
+/// is no tree to ask. It errs towards seeing one: believing in a `TestMain`
+/// that is not there costs the package Supercov's own harness, while missing
+/// one that is there declares it twice and the package stops compiling.
+fn declares_test_main_textually(source: &str) -> bool {
+    source.split("func TestMain").skip(1).any(|rest| {
+        rest.trim_start()
+            .strip_prefix('(')
+            .is_some_and(|arguments| arguments.contains("testing.M"))
+    })
 }
 
 /// `go test` caches a package that passed, and a cached package does not run.
@@ -413,6 +506,13 @@ pub fn run_direct_go(
             writeln!(
                 diagnostics,
                 "[supercov] could not parse {file}: {reason}; it carries no obligations"
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        for (file, reason) in &instrumented.unparseable_tests {
+            writeln!(
+                diagnostics,
+                "[supercov] could not parse {file}: {reason}; the tests it declares run unattributed and what they reach counts run-wide"
             )
             .map_err(|error| error.to_string())?;
         }
@@ -607,6 +707,7 @@ pub fn run_direct_go(
             unattributed,
             source_files: instrumented.project.instrumented.len(),
             unparseable_sources: instrumented.project.unparseable.len(),
+            unparseable_tests: instrumented.unparseable_tests.len(),
             packages: instrumented.packages.len(),
             recovered_runs,
             metadata,
@@ -677,5 +778,70 @@ mod tests {
         assert_ne!(evidence_name("internal/auth"), evidence_name("internal/db"));
         assert_eq!(evidence_name("."), "_.bin");
         assert!(!evidence_name("internal/auth").contains('/'));
+    }
+
+    #[test]
+    fn only_the_constraint_nothing_ever_defines_is_read_alone() {
+        // `ignore` is not a GOOS, not a GOARCH, and nothing sets it, which is
+        // why it is the convention for Go kept beside Go without being
+        // compiled. Every other constraint needs a GOOS, a GOARCH and a tag
+        // set to answer, and guessing at those would drop files a run does
+        // measure.
+        assert!(build_ignored("//go:build ignore\n\npackage p\n"));
+        assert!(build_ignored("// +build ignore\n\npackage p\n"));
+        assert!(build_ignored(
+            "// Copyright.\n\n//go:build ignore\n\npackage p\n"
+        ));
+        // Constraints combine, and one of the terms is still the term.
+        assert!(build_ignored("//go:build ignore || linux\n\npackage p\n"));
+
+        // Everything else is a question this cannot answer, so it does not.
+        assert!(!build_ignored("//go:build linux\n\npackage p\n"));
+        assert!(!build_ignored("//go:build !windows\n\npackage p\n"));
+        assert!(!build_ignored("package p\n"));
+        // A tag that merely starts with the word is a different tag.
+        assert!(!build_ignored("//go:build ignored\n\npackage p\n"));
+        assert!(!build_ignored("//go:build ignore_me\n\npackage p\n"));
+        // And a constraint has to be above the package clause to be one. The
+        // toolchain ignores the text below it, so reading it there would drop
+        // a file the build takes.
+        assert!(!build_ignored(
+            "package p\n\n//go:build ignore\n\nfunc f() {}\n"
+        ));
+        assert!(!build_ignored(
+            "package p\n\nvar doc = \"//go:build ignore\"\n"
+        ));
+    }
+
+    #[test]
+    fn a_test_main_is_seen_in_a_file_nothing_could_parse() {
+        // Only ever asked of a file that did not parse, which is exactly when
+        // there is no tree to ask. Missing a real one declares a second
+        // TestMain and the package stops compiling, so this errs towards
+        // seeing one -- but not so far that any mention of the word counts.
+        assert!(declares_test_main_textually(
+            "package p\n\nfunc TestMain(m *testing.M) {\n\tos.Exit(m.Run())\n}\n"
+        ));
+        // Spacing is the author's business.
+        assert!(declares_test_main_textually(
+            "package p\n\nfunc TestMain( m  *testing.M ) {}\n"
+        ));
+        assert!(declares_test_main_textually(
+            "package p\n\nfunc TestMain(m *testing.M) { broken( }\n"
+        ));
+
+        // `TestMainHelper` is an ordinary function whose name starts with the
+        // word, exactly as `Testify` is not a test.
+        assert!(!declares_test_main_textually(
+            "package p\n\nfunc TestMainHelper(t *testing.T) {}\n"
+        ));
+        // A test that merely takes a *testing.T is not the package's harness.
+        assert!(!declares_test_main_textually(
+            "package p\n\nfunc TestMain(t *testing.T) {}\n"
+        ));
+        assert!(!declares_test_main_textually(
+            "package p\n\n// func TestMain\n"
+        ));
+        assert!(!declares_test_main_textually("package p\n"));
     }
 }
