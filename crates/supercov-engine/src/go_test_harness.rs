@@ -557,6 +557,58 @@ mod tests {
     }
 
     #[test]
+    fn a_serialised_run_leaves_a_serial_test_where_it_was() {
+        // `serialised` only moves the announcement for a test that pauses
+        // itself. A serial test in the same run has no `t.Parallel()` to wait
+        // for, and putting its announcement anywhere but the top of the body
+        // would leave whatever ran first uncredited.
+        //
+        // Measured rather than guessed: the decision that reads `serialised &&
+        // calls_parallel(..)` had no witness for the second operand until this
+        // existed, so nothing showed the two apart.
+        let source =
+            "package p\n\nimport \"testing\"\n\nfunc TestSerial(t *testing.T) {\n\tdoWork()\n}\n";
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", true).expect("instrument");
+        let out = rewrite(source, &file.edits);
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        let announced = out
+            .find("__supercovTest(t, \"TestSerial\")")
+            .expect("announced");
+        let work = out.find("doWork()").expect("body");
+        assert!(
+            announced < work,
+            "a serial test is announced before anything it calls:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_test_file_is_read_past_whatever_else_it_declares() {
+        // A `_test.go` holds more than functions -- fixtures, tables, helper
+        // types -- and the scan has to walk past all of it rather than stop.
+        let (file, out) = instrumented(concat!(
+            "package p\n\nimport \"testing\"\n\n",
+            "type fixture struct{ n int }\n\n",
+            "var cases = []fixture{{1}, {2}}\n\n",
+            "const limit = 3\n\n",
+            "func TestOne(t *testing.T) {\n\tdoWork()\n}\n",
+        ));
+        assert_eq!(file.tests, ["TestOne"]);
+        assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+    }
+
+    #[test]
+    fn a_test_file_with_nothing_in_it_is_read_without_complaint() {
+        // The loop over a file's declarations has to survive having none.
+        let file = instrument_test_file("package p\n", "__supercov", "evidence.bin", false)
+            .expect("instrument");
+        assert!(file.tests.is_empty());
+        assert!(file.edits.is_empty(), "{file:?}");
+        assert!(!file.declares_test_main);
+    }
+
+    #[test]
     fn a_parallel_test_is_named_rather_than_attributed_by_guesswork() {
         // Go runs these alongside each other. Binding probes to whichever was
         // most recently announced would produce per-test numbers that look

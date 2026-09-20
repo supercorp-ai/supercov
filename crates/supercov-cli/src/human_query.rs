@@ -1679,4 +1679,46 @@ mod tests {
             "zero-iteration outcome not observed"
         );
     }
+
+    #[test]
+    fn the_attribution_line_offers_only_what_would_help() {
+        use supercov_engine::coverage_query::TestAttributionCounts;
+
+        let counts = |exact, partial, run_wide| TestAttributionCounts {
+            exact,
+            partial,
+            run_wide,
+        };
+
+        // The ordinary answer, printed on every run so the question is
+        // familiar before it matters.
+        assert_eq!(attribution_line(&counts(16, 0, 0)), "Exact for 16 test(s)");
+
+        // Where running the suite in order would buy the credit back, say so.
+        let offered = attribution_line(&counts(0, 0, 2));
+        assert!(offered.contains("2 counted run-wide"), "{offered}");
+        assert!(offered.contains("--exact-attribution"), "{offered}");
+
+        // Where it would not, do not: Ruby credits a line to the first test
+        // that reaches it, and running in order changes nothing about that.
+        // An offer that cannot be taken is worse than silence.
+        let lower_bound = attribution_line(&counts(0, 3, 0));
+        assert!(lower_bound.contains("3 a lower bound"), "{lower_bound}");
+        assert!(
+            !lower_bound.contains("--exact-attribution"),
+            "nothing here is bought by running in order: {lower_bound}"
+        );
+
+        // A mixed run names each part rather than rounding to the worst.
+        let mixed = attribution_line(&counts(5, 0, 2));
+        assert!(mixed.contains("5 exact"), "{mixed}");
+        assert!(mixed.contains("2 counted run-wide"), "{mixed}");
+
+        // And a run with no tests says that, rather than claiming exactness
+        // over nothing -- which is the shape every floor is satisfied by.
+        assert_eq!(
+            attribution_line(&counts(0, 0, 0)),
+            "No test recorded coverage"
+        );
+    }
 }

@@ -1551,6 +1551,59 @@ func classify(a int, b bool) string {
     }
 
     #[test]
+    fn the_scan_reads_new_the_way_go_spells_it() {
+        // Every shape of the call site the scanner has to recognise or leave
+        // alone, gathered because the measurement said so: the whitespace
+        // Go permits between a callee and its arguments was written for and
+        // never exercised, and neither was an identifier that merely ends in
+        // the word.
+        let go = obligations(concat!(
+            "package p\n\n",
+            "type pool struct{}\n\n",
+            "func (p pool) new(v int) *int {\n\treturn &v\n}\n\n",
+            "func renew(v string) *string {\n\treturn &v\n}\n\n",
+            "func f(p pool, v int) *int {\n",
+            // Go allows space, and a newline, between `new` and its argument.
+            "\t_ = new (\"spaced\")\n",
+            "\t_ = new\t(\"tabbed\")\n",
+            // A method of somebody's own, which is not the builtin.
+            "\t_ = p.new(2)\n",
+            // An identifier that ends in the word, which is not it either.
+            "\t_ = renew(\"x\")\n",
+            // And an identifier that starts with it.
+            "\tnewValue := v\n",
+            "\treturn new(newValue)\n}\n",
+        ));
+        assert_eq!(
+            go.manifest
+                .points
+                .iter()
+                .filter(|p| p.kind == PointKind::Function)
+                .count(),
+            3,
+            "{:?}",
+            go.manifest.points
+        );
+        // What the author wrote is what the obligations quote, spacing and all.
+        assert!(
+            go.manifest
+                .points
+                .iter()
+                .any(|point| point.source.contains("new (\"spaced\")")),
+            "{:?}",
+            go.manifest.points
+        );
+        assert!(
+            !go.manifest
+                .points
+                .iter()
+                .any(|point| point.source.contains("nEw")),
+            "{:?}",
+            go.manifest.points
+        );
+    }
+
+    #[test]
     fn a_file_that_is_simply_broken_still_does_not_parse() {
         // The stand-in must not become a way for any unparseable file to slip
         // through: what it cannot read is still a hole in the denominator, and
