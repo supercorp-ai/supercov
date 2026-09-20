@@ -11,6 +11,12 @@ on:
         description: "JSON list of runners for the per-OS jobs. Empty runs all five."
         default: ""
         type: string
+  # Every language on a pull request, so a change to one of them is measured
+  # before it merges rather than whenever somebody dispatches this by hand.
+  # Linux only here: the per-OS legs exist to catch what differs between
+  # platforms, and paying for all five on every push to a branch buys far less
+  # than running every language once. A dispatch still runs all five.
+  pull_request:
 permissions:
   contents: read
 
@@ -101,7 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -125,7 +131,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
         python: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
@@ -150,7 +156,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
         # 3.3 measures through Coverage alone and declares the rest; 3.4 is
         # the first version the probes can measure everything on.
         ruby: ["3.3", "3.4", "4.0"]
@@ -179,7 +185,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -205,7 +211,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
         # 1.22 is the oldest the generated harness targets; the rest is what
         # projects are actually on. 1.26 earns its place on its own: it is the
         # release that let `new` take a value, which the grammar Supercov
@@ -251,7 +257,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
         # 17 is the floor the documentation claims; 21 is the current LTS.
         java: ["17", "21"]
         exclude:
