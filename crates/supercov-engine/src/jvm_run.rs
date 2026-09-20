@@ -207,6 +207,15 @@ pub struct DirectJvmRunRequest {
     pub command: Vec<String>,
     pub run_id: String,
     pub started_at: String,
+    /// Credit every test with what it reached, by running the suite in order.
+    ///
+    /// Attribution is a sweep of one shared probe array at each test boundary,
+    /// so two tests running at once cannot both be credited. Turning JUnit's
+    /// parallel execution off is what buys that, and what it costs is the
+    /// suite's own parallelism -- 3.6x on sixteen I/O-bound tests across
+    /// fifteen cores. Supercov used to spend that without being asked.
+    #[serde(default)]
+    pub exact_attribution: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -664,6 +673,9 @@ struct InstrumentedWorkspace {
     /// turned off in the copy, so the user hears that their suite ran a
     /// different way rather than discovering it from a test that now hangs.
     serialised: BTreeSet<String>,
+    /// Modules left running their tests at once, where what overlaps cannot be
+    /// credited to either test that produced it.
+    concurrent: BTreeSet<String>,
     /// Whether a JUnit 4 module was given the engine that runs it on the
     /// platform, so the user hears that their suite ran a different way.
     added_vintage: bool,
@@ -700,6 +712,7 @@ fn class_of(test_name: &str) -> Option<&str> {
 fn instrument_workspace(
     workspace: &Path,
     evidence_directory: &Path,
+    exact_attribution: bool,
 ) -> Result<InstrumentedWorkspace, String> {
     let project = prepare_jvm_project(workspace)?;
     let build = detect_build(workspace);
@@ -872,6 +885,7 @@ fn instrument_workspace(
     // framework its own listener implements.
     let mut added_launcher = None;
     let mut serialised: BTreeSet<String> = BTreeSet::new();
+    let mut concurrent: BTreeSet<String> = BTreeSet::new();
     let mut added_vintage = false;
     match build {
         // Per module, not once at the top: the module's own pom is where its
@@ -952,6 +966,17 @@ fn instrument_workspace(
             )?;
             let properties = resources.join("junit-platform.properties");
             let existing = fs::read_to_string(&properties).ok();
+            if !exact_attribution {
+                // The suite runs the way its author wrote it. Where that means
+                // tests run at once the runtime notices, says what it could
+                // not credit, and the run records it -- which is a smaller
+                // price than several times the suite's wall time, and not one
+                // Supercov gets to spend on somebody's behalf.
+                if asks_for_parallel_execution(existing.as_deref()) {
+                    concurrent.insert(module.directory.clone());
+                }
+                continue;
+            }
             // Said out loud, because it changes how the suite runs rather than
             // how it is measured. Every other thing Supercov does to the
             // workspace is announced -- the isolated copy, the added launcher,
@@ -992,6 +1017,7 @@ fn instrument_workspace(
         declared_in,
         added_launcher,
         serialised,
+        concurrent,
         added_vintage,
         relaxed,
         unmeasurable,
@@ -1059,7 +1085,8 @@ pub fn run_direct_jvm(
             prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
         let evidence_directory = work_directory.join("jvm");
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
-        let instrumented = instrument_workspace(&workspace, &evidence_directory)?;
+        let instrumented =
+            instrument_workspace(&workspace, &evidence_directory, request.exact_attribution)?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
         writeln!(
@@ -1087,6 +1114,19 @@ pub fn run_direct_jvm(
                 "[supercov] turned JUnit's parallel execution off in the workspace copy ({}): attribution is a sweep of one shared probe array at each test boundary, so two tests running at once cannot both be credited with what they reached. Your suite runs in order here and your own configuration is untouched.",
                 instrumented
                     .serialised
+                    .iter()
+                    .map(|module| if module.is_empty() { "." } else { module.as_str() })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        if !instrumented.concurrent.is_empty() {
+            writeln!(
+                diagnostics,
+                "[supercov] JUnit runs this suite's tests at once ({}), so what they reach while they overlap is recorded against the run rather than against a test. `--exact-attribution` credits each of them instead, by running the suite in order.",
+                instrumented
+                    .concurrent
                     .iter()
                     .map(|module| if module.is_empty() { "." } else { module.as_str() })
                     .collect::<Vec<_>>()
@@ -1212,8 +1252,12 @@ pub fn run_direct_jvm(
                         .and_then(|class| instrumented.declared_in.get(class))
                         .cloned(),
                     status: test.status.clone(),
-                    // Every JVM runner the frontend drives attributes exactly.
-                    attributed: true,
+                    // True while the suite runs its tests one at a time, which
+                    // is what `--exact-attribution` asks for. Left to run as
+                    // written, JUnit may run them at once; the runtime says so
+                    // per record, and a test that overlapped is credited with
+                    // nothing rather than with a neighbour's work.
+                    attributed: !test.unattributed,
                 });
             }
             parts.push(evidence);
@@ -1627,7 +1671,7 @@ mod tests {
         .unwrap();
 
         let evidence = root.join("evidence");
-        let instrumented = instrument_workspace(&root, &evidence).expect("instrument");
+        let instrumented = instrument_workspace(&root, &evidence, false).expect("instrument");
         assert_eq!(instrumented.modular, ["boundaries"]);
 
         // The listener goes into the ordinary module and not the named one.

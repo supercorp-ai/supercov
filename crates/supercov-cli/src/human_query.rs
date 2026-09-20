@@ -280,6 +280,45 @@ fn unattributed_note(entry: &IndexedDimensionCoverage) -> String {
     }
 }
 
+/// How completely the run could credit each test with what it reached.
+///
+/// Here whether or not anything is wrong, the way `Instrumentation` is: a
+/// reader who only ever sees "Exact for every test" has still learned that the
+/// question exists, and will recognise the other answer when a suite starts
+/// running its tests at once.
+fn attribution_line(counts: &supercov_engine::coverage_query::TestAttributionCounts) -> String {
+    let total = counts.total();
+    if total == 0 {
+        return "No test recorded coverage".into();
+    }
+    if counts.exact == total {
+        return format!("Exact for {} test(s)", count(total));
+    }
+    let mut parts = Vec::new();
+    if counts.exact > 0 {
+        parts.push(format!("{} exact", count(counts.exact)));
+    }
+    if counts.partial > 0 {
+        // Ruby records a line for the first test that reaches it, so a later
+        // test running the same line is credited with none of it.
+        parts.push(format!("{} a lower bound", count(counts.partial)));
+    }
+    if counts.run_wide > 0 {
+        parts.push(format!("{} counted run-wide", count(counts.run_wide)));
+    }
+    let detail = parts.join(", ");
+    // The offer belongs only where it would change the answer. Running the
+    // suite in order is what buys back a run-wide credit; it buys nothing for
+    // a lower bound, which is how the language reports coverage at all.
+    if counts.run_wide > 0 {
+        format!(
+            "{detail} — `--exact-attribution` credits them individually, running your suite in order"
+        )
+    } else {
+        detail
+    }
+}
+
 fn render_dimension(
     values: &[IndexedDimensionCoverage],
     request: &IndexedQueryRequest,
@@ -618,6 +657,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 String::new(),
                 "Measurement".into(),
                 format!("  Instrumentation  {measurement}"),
+                format!("  Attribution      {}", attribution_line(&data.test_attribution)),
                 "  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.".into(),
             ]);
             if let Some(workspace) = &data.workspace {

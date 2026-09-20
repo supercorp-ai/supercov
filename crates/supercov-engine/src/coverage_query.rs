@@ -304,6 +304,24 @@ pub struct CoverageRunnersData {
     pub runners: Vec<IndexedDimensionCoverage>,
 }
 
+/// Tests by how completely their coverage is their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestAttributionCounts {
+    /// Credited with exactly what they reached.
+    pub exact: usize,
+    /// Credited with some of what they reached, and no way to say how much.
+    pub partial: usize,
+    /// Credited with none of it; what they reached is in the run's totals.
+    pub run_wide: usize,
+}
+
+impl TestAttributionCounts {
+    pub fn total(&self) -> usize {
+        self.exact + self.partial + self.run_wide
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageDiagnostic {
@@ -342,6 +360,12 @@ pub struct CoverageSummaryData {
     pub e2e_gap_context: Option<CoverageKindGapContext>,
     pub coverage_by_runner: Vec<IndexedDimensionCoverage>,
     pub attribution: crate::coverage_index::IndexedAttribution,
+    /// How completely each test's coverage could be credited to it.
+    ///
+    /// Counted here rather than stored, because the per-test answer is already
+    /// in the run and a total is a read of it. A run written before the field
+    /// existed reports every test as exact, which is what its records say.
+    pub test_attribution: TestAttributionCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<TransportStats>,
     pub diagnostics: Vec<CoverageDiagnostic>,
@@ -2492,6 +2516,21 @@ pub fn coverage_summary_query(
         e2e_gap_context,
         coverage_by_runner,
         attribution: projection.attribution,
+        test_attribution: {
+            let mut counts = TestAttributionCounts::default();
+            for test in index
+                .test_summaries(options.view)?
+                .iter()
+                .filter(|test| test.role == "test")
+            {
+                match test.attribution.as_str() {
+                    crate::coverage_report::ATTRIBUTION_RUN_WIDE => counts.run_wide += 1,
+                    crate::coverage_report::ATTRIBUTION_PARTIAL => counts.partial += 1,
+                    _ => counts.exact += 1,
+                }
+            }
+            counts
+        },
         transport: projection.transport,
         diagnostics,
         confidence: (options.kind.is_none() && options.runner.is_none())

@@ -273,6 +273,31 @@ npx supercov -- ruby -Itest test/shapes_test.rb
 npx supercov -- bin/rails test
 ```
 
+## Crediting a test with what it reached
+
+Most runners attribute exactly at no cost: Supercov runs each Rust test in its
+own process, Python's workers are processes, and JavaScript keeps a coverage
+map per test. Two cases cannot, because probes are a store into one array the
+whole process shares and two tests running at once cannot both be credited
+with what they reached:
+
+| | Left as written | `--exact-attribution` |
+| --- | --- | --- |
+| A Go test calling `t.Parallel()` | counted run-wide | announced after it resumes, with `-parallel=1` |
+| A JUnit suite with parallel execution enabled | counted run-wide | run in order |
+
+```sh supercov
+npx supercov --exact-attribution -- go test ./...
+```
+
+By default your command runs as you wrote it, and the run says what it could
+not credit. `--exact-attribution` buys that back by running the suite in order,
+which costs whatever its parallelism was worth — on sixteen I/O-bound JUnit
+tests across fifteen cores, 3.6x. Either way the coverage totals are the same;
+what changes is whether a line can be traced to the test that ran it.
+
+`supercov runs latest` reports which you got, under `Attribution`.
+
 ## Go
 
 | Runner | Attribution | Current requirement |

@@ -97,10 +97,17 @@ fn parameter_name(node: Node, source: &str) -> Option<String> {
 }
 
 /// Instrument one `_test.go` file so every test announces itself.
+///
+/// `serialised` says the run was asked for exact attribution and the command
+/// carries `-parallel=1`, so a test that calls `t.Parallel()` is the only test
+/// running while its probes fire. It can then be announced like any other, and
+/// the run credits it with what it reached. Without that, announcing it would
+/// bind whatever ran beside it to its name.
 pub fn instrument_test_file(
     source: &str,
     alias: &str,
     evidence_path: &str,
+    serialised: bool,
 ) -> Result<GoTestFile, GoInstrumenterError> {
     let tree = parse(source)?;
     let mut file = GoTestFile {
@@ -183,7 +190,15 @@ pub fn instrument_test_file(
             continue;
         }
         file.tests.push(name.clone());
-        if calls_parallel(body, source) {
+        // Serialised, and the test pauses itself: the announcement waits until
+        // `t.Parallel()` has returned, which is when this test is the one
+        // running.
+        let announce_at = if serialised && calls_parallel(body, source) {
+            own_parallel_call_end(body, source).unwrap_or(body.start_byte() + 1)
+        } else {
+            body.start_byte() + 1
+        };
+        if calls_parallel(body, source) && !serialised {
             // Announcing it would bind whatever runs next to this test, and
             // what runs next includes the other parallel tests. Its coverage
             // still counts run-wide; it simply belongs to no test, which is
@@ -236,7 +251,7 @@ pub fn instrument_test_file(
             needs_runtime = true;
         }
         file.edits.push(GoEdit {
-            at: body.start_byte() + 1,
+            at: announce_at,
             rank: 100,
             text: announcement,
         });
@@ -247,6 +262,53 @@ pub fn instrument_test_file(
         file.edits.push(import);
     }
     Ok(file)
+}
+
+/// Where a test's own `t.Parallel()` call ends, if it makes one directly.
+///
+/// `t.Parallel()` does not return until the serial phase is over and this test
+/// is the one being run, so a statement after it runs with the test actually
+/// running. That is the only place an announcement can go when the run is
+/// serialised: at the top of the body it would fire while every other parallel
+/// test was also entering and pausing, all of them open at once, and the
+/// runtime would rightly give up on attributing any of them.
+///
+/// Only a call the test makes itself counts. `t.Parallel()` inside a subtest
+/// closure pauses the subtest, not this function, so there is nothing to wait
+/// for here.
+fn own_parallel_call_end(body: Node, source: &str) -> Option<usize> {
+    // A block holds its statements in a `statement_list`, not directly, so the
+    // statements are one level further down than a block's own children.
+    let statements = {
+        let mut cursor = body.walk();
+        body.children(&mut cursor)
+            .find(|child| child.kind() == "statement_list")
+            .unwrap_or(body)
+    };
+    let mut cursor = statements.walk();
+    for statement in statements.children(&mut cursor).filter(Node::is_named) {
+        let call = match statement.kind() {
+            "call_expression" => statement,
+            "expression_statement" => match statement.named_child(0) {
+                Some(inner) if inner.kind() == "call_expression" => inner,
+                // Some other expression standing alone, which is not the call
+                // being looked for; the next statement might be.
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if call
+            .child_by_field_name("function")
+            .is_some_and(|function| {
+                source[function.byte_range()]
+                    .trim_end()
+                    .ends_with(".Parallel")
+            })
+        {
+            return Some(statement.end_byte());
+        }
+    }
+    None
 }
 
 /// Whether a test hands itself to Go's parallel scheduler.
@@ -386,7 +448,8 @@ mod tests {
     use crate::go_instrumenter::rewrite;
 
     fn instrumented(source: &str) -> (GoTestFile, String) {
-        let file = instrument_test_file(source, "__supercov", "evidence.bin").expect("instrument");
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", false).expect("instrument");
         let out = rewrite(source, &file.edits);
         parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
         (file, out)
@@ -460,6 +523,36 @@ mod tests {
         assert!(
             alongside.contains("func __supercovTest(t *testing.T"),
             "every package gets the announcement helper, TestMain or not:\n{alongside}"
+        );
+    }
+
+    #[test]
+    fn a_serialised_parallel_test_is_announced_after_it_resumes() {
+        // `t.Parallel()` does not return until the serial phase is over, so an
+        // announcement above it fires while every other parallel test is also
+        // entering and pausing. All of them would be open at once and the
+        // runtime would give up attributing any of them -- which is how asking
+        // for exact attribution produced a run with no tests in it at all.
+        let file = instrument_test_file(
+            "package p\n\nimport \"testing\"\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tdoWork()\n}\n",
+            "__supercov",
+            "evidence.bin",
+            true,
+        )
+        .expect("instrument");
+        let out = rewrite(
+            "package p\n\nimport \"testing\"\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tdoWork()\n}\n",
+            &file.edits,
+        );
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        let parallel = out.find("t.Parallel()").expect("the call");
+        let announced = out
+            .find("__supercovTest(t, \"TestParallel\")")
+            .expect("announced");
+        assert!(
+            parallel < announced,
+            "the announcement has to wait for the test to resume:\n{out}"
         );
     }
 

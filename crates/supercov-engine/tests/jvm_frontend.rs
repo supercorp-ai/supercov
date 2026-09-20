@@ -807,11 +807,34 @@ public class Driver {
 
     let evidence = read_evidence(&std::fs::read(&evidence_path).expect("evidence"))
         .expect("the runtime's own transport");
-    assert!(
-        evidence.tests.is_empty(),
-        "attribution nobody can trust should be absent, not present: {:?}",
+    // Present, named, and credited with nothing. Absence was the older answer
+    // and it is the one that misleads: a record that is not there reads
+    // downstream as a test that never ran, so a suite of nothing but
+    // concurrent tests published no tests at all and `runs <id> test <name>`
+    // answered "Test not found" for a test that had just passed.
+    //
+    // What must not survive is the attribution, and none of it does.
+    assert_eq!(
+        evidence
+            .tests
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"],
+        "both tests ran and both are recorded: {:?}",
         evidence.tests
     );
+    for test in &evidence.tests {
+        assert!(
+            test.unattributed,
+            "a record from an overlapped run says it cannot be credited: {test:?}"
+        );
+        assert!(
+            test.probes.is_empty() && test.vectors.is_empty(),
+            "attribution nobody can trust should be absent, not present: {test:?}"
+        );
+        assert_eq!(test.status, "passed", "{test:?}");
+    }
     assert!(
         evidence.global.iter().any(|&mask| mask != 0),
         "run-wide totals are a union and should survive the overlap"

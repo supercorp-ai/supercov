@@ -168,6 +168,7 @@ fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reach
         command: vec![mvn.display().to_string(), "test".into()],
         run_id: "run-jvm-maven".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_jvm(&request, &mut diagnostics) {
@@ -311,6 +312,7 @@ fn a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reac
         ],
         run_id: "run-jvm-gradle".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_jvm(&request, &mut diagnostics) {
@@ -431,6 +433,7 @@ fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
         command: vec![mvn.display().to_string(), "-q".into(), "test".into()],
         run_id: "run-jvm-testng".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_jvm(&request, &mut diagnostics) {
@@ -597,6 +600,7 @@ fn a_kotlin_project_is_measured_like_any_other_jvm_one() {
         ],
         run_id: "run-jvm-kotlin".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_jvm(&request, &mut diagnostics) {
@@ -740,6 +744,7 @@ fn every_module_of_a_multi_module_build_is_measured_and_merged() {
         command: vec![mvn.display().to_string(), "-q".into(), "test".into()],
         run_id: "run-jvm-multi".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_jvm(&request, &mut diagnostics) {
@@ -876,6 +881,7 @@ fn a_multi_project_gradle_build_reaches_every_subproject() {
         ],
         run_id: "run-jvm-multi-gradle".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_jvm(&request, &mut diagnostics) {
@@ -947,6 +953,7 @@ fn a_kotest_spec_is_attributed_under_the_names_kotest_reports() {
         ],
         run_id: "run-jvm-kotest".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_jvm(&request, &mut diagnostics) {
@@ -1061,6 +1068,7 @@ fn a_spock_specification_is_measured_though_its_tests_are_groovy() {
         ],
         run_id: "run-jvm-spock".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_jvm(&request, &mut diagnostics) {
@@ -1155,6 +1163,7 @@ fn every_forked_jvm_is_merged_rather_than_overwriting_the_last() {
         ],
         run_id: "run-jvm-forks".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_jvm(&request, &mut diagnostics) {

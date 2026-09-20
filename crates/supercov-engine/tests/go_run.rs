@@ -108,6 +108,7 @@ fn a_multi_package_module_runs_and_publishes_what_each_test_reached() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-multi".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -170,6 +171,7 @@ fn decisions_in_different_packages_keep_their_own_condition_state() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-decisions".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -261,6 +263,7 @@ fn every_module_of_a_workspace_is_measured_and_merged() {
         ],
         run_id: "run-go-workspace".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -335,6 +338,7 @@ fn a_nested_module_does_not_break_the_build_around_it() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-nested".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -386,6 +390,7 @@ fn a_parallel_tests_coverage_counts_even_though_no_test_can_claim_it() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-parallel".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -466,6 +471,7 @@ fn a_package_whose_tests_are_all_parallel_still_publishes_what_it_measured() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-all-parallel".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -539,6 +545,7 @@ fn a_suite_whose_tests_reach_nothing_is_published_as_the_zero_it_is() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-reaches-nothing".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -590,6 +597,7 @@ fn a_run_that_observed_no_test_at_all_is_refused() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-observed-nothing".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let error = run_direct_go(&request, &mut diagnostics)
@@ -642,6 +650,7 @@ fn a_source_file_using_go_1_26_new_is_measured_like_any_other() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-new-value".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -697,6 +706,7 @@ fn a_project_whose_sources_none_parse_is_refused_rather_than_reported_green() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-unreadable".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let error = run_direct_go(&request, &mut diagnostics)
@@ -749,6 +759,7 @@ fn an_unparseable_file_among_readable_ones_is_published_and_counted() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-partial-hole".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -844,6 +855,7 @@ fn go_1_26_new_of_a_value_compiles_instrumented_and_reports_what_ran() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-new-value-live".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -916,6 +928,7 @@ fn a_package_of_nothing_but_examples_publishes_what_it_measured() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-examples-only".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -977,6 +990,7 @@ fn a_package_of_nothing_but_fuzz_targets_publishes_what_it_measured() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-fuzz-only".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -1034,6 +1048,7 @@ fn an_unparseable_test_file_is_a_hole_rather_than_the_end_of_the_run() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-unparseable-test".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -1106,6 +1121,7 @@ fn a_test_file_the_build_ignores_does_not_stand_the_harness_down() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-ignored-test-main".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -1192,6 +1208,7 @@ fn a_test_main_inside_an_unparseable_file_is_not_declared_twice() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-unparseable-test-main".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = run_direct_go(&request, &mut diagnostics);
@@ -1246,6 +1263,7 @@ fn a_parallel_test_is_recorded_as_having_run_and_credited_with_nothing() {
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-parallel-records".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     let result = match run_direct_go(&request, &mut diagnostics) {
@@ -1353,6 +1371,7 @@ fn a_change_selects_the_tests_nothing_could_attribute_when_it_could_have_reached
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-affected-parallel".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
     };
     let mut diagnostics = Vec::new();
     run_direct_go(&request, &mut diagnostics).unwrap_or_else(|error| {
@@ -1420,5 +1439,106 @@ fn a_change_selects_the_tests_nothing_could_attribute_when_it_could_have_reached
         ["TestNonPositive", "TestPositive"],
         "a change to the function both tests exercised has to select both"
     );
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// What `--exact-attribution` buys, and that it is bought rather than assumed.
+///
+/// A test that calls `t.Parallel()` cannot be credited with what it reached
+/// while others run beside it, so by default it is counted run-wide and the
+/// suite keeps its parallelism. Asking for exact attribution runs the package
+/// one test at a time, and then each is credited with its own.
+///
+/// The announcement has to wait for `t.Parallel()` to return. Above it, every
+/// parallel test would announce itself while entering and pausing -- all of
+/// them open at once -- and the runtime would rightly give up attributing any
+/// of them, which produced a run with no tests in it at all.
+#[test]
+fn exact_attribution_credits_a_parallel_test_by_running_it_alone() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("exact-attribution");
+    write(
+        root.as_path(),
+        "go.mod",
+        "module example.com/exact\n\ngo 1.22\n",
+    );
+    write(
+        root.as_path(),
+        "lib.go",
+        "package exact\n\nfunc Positive(n int) bool {\n\tif n > 0 {\n\t\treturn true\n\t}\n\treturn false\n}\n\nfunc Negative(n int) bool {\n\tif n < 0 {\n\t\treturn true\n\t}\n\treturn false\n}\n",
+    );
+    // Each test reaches a different function, so exact attribution is a claim
+    // with an observable consequence: each is credited with its own and not
+    // the other's.
+    write(
+        root.as_path(),
+        "lib_test.go",
+        "package exact\n\nimport \"testing\"\n\nfunc TestPositive(t *testing.T) {\n\tt.Parallel()\n\tif !Positive(1) {\n\t\tt.Fatal(\"positive\")\n\t}\n}\n\nfunc TestNegative(t *testing.T) {\n\tt.Parallel()\n\tif !Negative(-1) {\n\t\tt.Fatal(\"negative\")\n\t}\n}\n",
+    );
+
+    let base = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-as-written".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+
+    // As written: the suite keeps its parallelism and neither test is credited.
+    let mut diagnostics = Vec::new();
+    let as_written = run_direct_go(&base, &mut diagnostics).unwrap_or_else(|error| {
+        panic!(
+            "{error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        )
+    });
+    assert_eq!(as_written.tests, 2);
+    assert_eq!(as_written.unattributed, 2);
+    let printed = String::from_utf8_lossy(&diagnostics);
+    assert!(!printed.contains("-parallel=1"), "{printed}");
+
+    // Asked for: run in order, and each test carries its own coverage.
+    let request = DirectGoRunRequest {
+        run_id: "run-go-exact".into(),
+        exact_attribution: true,
+        ..base
+    };
+    let mut diagnostics = Vec::new();
+    let exact = run_direct_go(&request, &mut diagnostics).unwrap_or_else(|error| {
+        panic!(
+            "{error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        )
+    });
+    let printed = String::from_utf8_lossy(&diagnostics);
+    assert!(printed.contains("-parallel=1"), "{printed}");
+    assert_eq!(exact.tests, 2);
+    assert_eq!(
+        exact.unattributed, 0,
+        "running them alone is what makes them attributable: {printed}"
+    );
+
+    let records = supercov_engine::evidence_archive::read_archive(
+        &exact.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .filter(|entry| entry.path.ends_with("mcdc.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .collect::<Vec<_>>();
+    for name in ["TestPositive", "TestNegative"] {
+        let record = records
+            .iter()
+            .find(|record| record.contains(&format!("\"test\":\"{name}\"")))
+            .unwrap_or_else(|| panic!("{name} is in the run: {records:?}"));
+        assert!(record.contains("\"attribution\":\"exact\""), "{record}");
+        assert!(
+            record.contains("go:statement:"),
+            "{name} is credited with what it reached:\n{record}"
+        );
+    }
     std::fs::remove_dir_all(root).ok();
 }
