@@ -77,7 +77,7 @@
     "test:test262": "cargo build --release -p supercov && node scripts/test262-equivalence.mjs",
     "benchmark:check": "cargo build --release -p supercov && node scripts/rust-transform-benchmark.mjs",
     "benchmark:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-benchmark.mjs",
-    "check": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && npm run test && npm run test:runtime && npm run test:rust-assets && npm run test:assertion-maps && npm run test:sweep-target && node scripts/package-preflight.mjs && node scripts/verify-binstall-metadata.mjs --offline",
+    "check": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && npm run test && npm run test:runtime && npm run test:rust-assets && npm run test:assertion-maps && npm run test:sweep-target && npm run test:skip-guard && node scripts/package-preflight.mjs && node scripts/verify-binstall-metadata.mjs --offline",
     "release:check": "cargo clean && node scripts/sweep-target.mjs && npm run check && npm run test:engine && npm run test:go && npm run test:jvm && npm run test:launcher && npm run test:fixture && npm run test:watchdog && npm run test:engine-contract && npm run test:agent && npm run test:child-attribution && npm run test:host-loader && npm run test:python-monitoring && npm run test:ruby-coverage && npm run test:rust-public-cargo && npm run test:packed-npx && npm run test:clang-mcdc && npm run benchmark:check",
     "release:bump": "node scripts/bump-version.mjs",
     "sweep": "node scripts/sweep-target.mjs",
@@ -98,7 +98,8 @@
     "docs:check": "node scripts/sync-docs.mjs --check",
     "test:launcher": "go vet ./cmd/... && go test ./cmd/...",
     "test:sweep-target": "node scripts/sweep-target-test.mjs",
-    "test:go-versions": "cargo build -p supercov-engine --tests && node scripts/go-version-matrix.mjs"
+    "test:go-versions": "cargo build -p supercov-engine --tests && node scripts/go-version-matrix.mjs",
+    "test:skip-guard": "node scripts/skip-guard-test.mjs"
   },
   "optionalDependencies": {
     "@supercov/cli-darwin-arm64": "1.0.1",
