@@ -11,11 +11,11 @@ on:
         description: "JSON list of runners for the per-OS jobs. Empty runs all five."
         default: ""
         type: string
-  # Every language on a pull request, so a change to one of them is measured
-  # before it merges rather than whenever somebody dispatches this by hand.
-  # Linux only here: the per-OS legs exist to catch what differs between
-  # platforms, and paying for all five on every push to a branch buys far less
-  # than running every language once. A dispatch still runs all five.
+  # Every language on every platform, on the pull request. The per-OS legs
+  # exist because what breaks is usually a path, a shell or a line ending
+  # rather than logic, and finding that after a merge costs more than the
+  # runners do. Narrow it back to `["ubuntu-latest"]` below if the wait ever
+  # outgrows the value.
   pull_request:
 permissions:
   contents: read
@@ -71,7 +71,15 @@ jobs:
           PLAYWRIGHT_VERSION: ${{ matrix.playwright }}
           VITE_VERSION: ${{ matrix.vite }}
           VITEST_VERSION: ${{ matrix.vitest }}
-        run: npm install --no-save "@playwright/test@$PLAYWRIGHT_VERSION" "vite@$VITE_VERSION" "vitest@$VITEST_VERSION"
+        # `@vitest/browser-playwright` is how Vitest 4 ships the browser
+        # provider that earlier versions built in, so it has no release this
+        # leg's Vitest could use and its peer range pins the very version the
+        # leg exists to move away from. Dropping it is what lets the older set
+        # resolve; nothing here runs Vitest Browser Mode, which lives in
+        # `test:react` and `test:engine`.
+        run: |
+          npm pkg delete 'devDependencies.@vitest/browser-playwright'
+          npm install --no-save "@playwright/test@$PLAYWRIGHT_VERSION" "vite@$VITE_VERSION" "vitest@$VITEST_VERSION"
       # The fixture matrix drives Chromium, Firefox and WebKit.
       - run: npx playwright install --with-deps
       - run: npm run test:fixture
@@ -107,7 +115,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -131,7 +139,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         python: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
@@ -156,7 +164,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         # 3.3 measures through Coverage alone and declares the rest; 3.4 is
         # the first version the probes can measure everything on.
         ruby: ["3.3", "3.4", "4.0"]
@@ -185,7 +193,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -211,7 +219,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         # 1.22 is the oldest the generated harness targets; the rest is what
         # projects are actually on. 1.26 earns its place on its own: it is the
         # release that let `new` take a value, which the grammar Supercov
@@ -257,7 +265,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || (github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]')) }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         # 17 is the floor the documentation claims; 21 is the current LTS.
         java: ["17", "21"]
         exclude:
