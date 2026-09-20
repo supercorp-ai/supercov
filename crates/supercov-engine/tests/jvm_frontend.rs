@@ -814,12 +814,17 @@ public class Driver {
     // answered "Test not found" for a test that had just passed.
     //
     // What must not survive is the attribution, and none of it does.
+    // Sorted, because the two threads race by design: whichever reaches
+    // `enterTest` first is recorded first, and asserting the order would be a
+    // test that passes on the machine it was written on.
+    let mut names = evidence
+        .tests
+        .iter()
+        .map(|test| test.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
     assert_eq!(
-        evidence
-            .tests
-            .iter()
-            .map(|test| test.name.as_str())
-            .collect::<Vec<_>>(),
+        names,
         ["first", "second"],
         "both tests ran and both are recorded: {:?}",
         evidence.tests
