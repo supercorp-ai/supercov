@@ -105,7 +105,8 @@ pub(crate) fn stable_obligation_id(
     format!("{language}:{kind}:{encoded}")
 }
 
-pub fn parse(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
+/// One parse, with no attempt to read past anything the grammar refuses.
+fn parse_exactly(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_go::LANGUAGE.into())
@@ -117,6 +118,205 @@ pub fn parse(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
         return Err(GoInstrumenterError::Parse(parse_failure(&tree, source)));
     }
     Ok(tree)
+}
+
+/// The three-byte stand-in written over `new` where its argument is a value.
+///
+/// Any identifier of the same length would do; the parse never resolves it and
+/// the stand-in is never written to disk. Three bytes is the whole point: byte
+/// ranges are what every obligation, probe and edit is anchored by, so the
+/// tree read from the stand-in has to describe the author's file offset for
+/// offset.
+const NEW_VALUE_STAND_IN: &str = "nEw";
+
+/// Go 1.26 extended `new` to take a value: `new(x)` is a pointer to a copy of
+/// `x`, where before the argument could only be a type.
+///
+/// tree-sitter-go still models `new` and `make` as a call whose argument list
+/// holds a type, so `new("hello")` does not parse -- and a Go file Supercov
+/// cannot parse carries no obligations, which is how a package using the
+/// construct came to be measured as though it held nothing at all. It is not a
+/// rare corner: one codebase this was reported from has 913 call sites across
+/// 94 files, and code generators emit it, so a project reintroduces it on
+/// every `go generate`.
+///
+/// The grammar cannot express it, so the parse reads a stand-in: at each call
+/// site whose argument is not a type, the three bytes of `new` become another
+/// identifier, which makes the call an ordinary one the grammar does accept.
+/// Nothing else changes -- not a byte of length, not a token beside it -- so
+/// the tree is the author's file in every respect that is measured, and the
+/// text every obligation quotes is still sliced from the file itself.
+///
+/// Per call site rather than per file, because the type forms must be left
+/// alone: `new(map[string]int)` parses only while `new` is the builtin, and
+/// `new(v)` is a type to the grammar and a value to the compiler without
+/// either of them being able to tell from the syntax. Whichever it is, both
+/// readings parse, so the stand-in is spent only where the argument is
+/// something no type could be.
+fn stand_in_for_new_values(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut masked: Option<String> = None;
+    let mut at = 0;
+    while at < bytes.len() {
+        if let Some(past) = skip_literal_or_comment(bytes, at) {
+            at = past;
+            continue;
+        }
+        let Some(open) = builtin_new_at(bytes, at) else {
+            at += 1;
+            continue;
+        };
+        let Some(close) = closing_parenthesis(bytes, open) else {
+            at += 3;
+            continue;
+        };
+        if !parses_as_a_type(&source[open + 1..close]) {
+            masked
+                .get_or_insert_with(|| source.to_owned())
+                .replace_range(at..at + 3, NEW_VALUE_STAND_IN);
+        }
+        at += 3;
+    }
+    masked
+}
+
+/// Whether `new` starts here as the builtin being called, and where its
+/// argument list opens.
+///
+/// `new` is not a keyword in Go. `pool.new(v)` is somebody's own method and
+/// `renewed` is an ordinary identifier, and the grammar reads both perfectly
+/// well already; only a bare `new` immediately followed by `(` is the builtin
+/// the grammar has a special rule for.
+///
+/// Read as bytes rather than as text, and the whole scan with it. Go source is
+/// UTF-8, and a `&str` sliced part way through a rune does not return a wrong
+/// answer, it panics -- which would mean Supercov breaking the suite it was
+/// asked to measure over an accent in a comment. Bytes are safe to walk
+/// because no byte of a multi-byte rune is ever ASCII, so nothing the scan
+/// looks for can be found inside one.
+fn builtin_new_at(bytes: &[u8], at: usize) -> Option<usize> {
+    if !bytes[at..].starts_with(b"new") {
+        return None;
+    }
+    if at > 0 && (is_identifier_byte(bytes[at - 1]) || bytes[at - 1] == b'.') {
+        return None;
+    }
+    // Go permits whitespace between the callee and its arguments.
+    let mut open = at + 3;
+    while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+        open += 1;
+    }
+    (bytes.get(open) == Some(&b'(')).then_some(open)
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    // Anything outside ASCII is a continuation or lead byte of a rune, and Go
+    // identifiers may hold those; treating them as part of a name is what
+    // keeps `naïvenew` from reading as the builtin.
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+/// The parenthesis that closes the one opened at `open`, counting only what is
+/// outside a comment or a literal.
+fn closing_parenthesis(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut at = open;
+    while at < bytes.len() {
+        if let Some(past) = skip_literal_or_comment(bytes, at) {
+            at = past;
+            continue;
+        }
+        match bytes[at] {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+/// Whether this argument is something Go could name a type by.
+///
+/// Asked of the grammar rather than guessed at, because the two readings are
+/// not distinguishable by shape: `new(int)` and `new(someVar)` are the same
+/// syntax, and only the type checker knows which is which. That ambiguity does
+/// no harm here -- both readings parse -- so the only question worth asking is
+/// whether the argument is something no type could be, which a declaration
+/// answers exactly.
+fn parses_as_a_type(argument: &str) -> bool {
+    // `parse_exactly`, never `parse`: an argument may hold a `new(...)` of its
+    // own, and asking the tolerant parser would start again from the top.
+    parse_exactly(&format!("package p\n\nvar _ {}\n", argument.trim())).is_ok()
+}
+
+/// Just past the comment or literal starting here, or None if one does not.
+///
+/// Scanning for a construct in Go text means knowing when the text is not
+/// code: a `)` inside a string closes nothing, and `// new(` is a remark.
+fn skip_literal_or_comment(bytes: &[u8], at: usize) -> Option<usize> {
+    let rest = &bytes[at..];
+    if rest.starts_with(b"//") {
+        return Some(
+            bytes[at..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |end| at + end),
+        );
+    }
+    if rest.starts_with(b"/*") {
+        return Some(
+            bytes[at + 2..]
+                .windows(2)
+                .position(|pair| pair == b"*/")
+                .map_or(bytes.len(), |end| at + 4 + end),
+        );
+    }
+    // A raw string runs to its next backquote and holds no escapes at all.
+    if bytes[at] == b'`' {
+        return Some(
+            bytes[at + 1..]
+                .iter()
+                .position(|byte| *byte == b'`')
+                .map_or(bytes.len(), |end| at + 2 + end),
+        );
+    }
+    let quote = match bytes[at] {
+        b'"' | b'\'' => bytes[at],
+        _ => return None,
+    };
+    let mut cursor = at + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            // An escape consumes whatever follows it, so `"\""` is one string
+            // and not two.
+            b'\\' => cursor += 2,
+            // An unterminated literal is not Go; the file will not parse
+            // either way, and stopping at the line keeps the scan bounded.
+            b'\n' => return Some(cursor),
+            byte if byte == quote => return Some(cursor + 1),
+            _ => cursor += 1,
+        }
+    }
+    Some(bytes.len())
+}
+
+pub fn parse(source: &str) -> Result<tree_sitter::Tree, GoInstrumenterError> {
+    let refusal = match parse_exactly(source) {
+        Ok(tree) => return Ok(tree),
+        Err(refusal) => refusal,
+    };
+    // Only now, so every file the grammar already reads costs nothing extra
+    // and reads exactly as it did before.
+    let stand_in = stand_in_for_new_values(source).ok_or_else(|| refusal.clone())?;
+    // And the refusal reported is the one about the author's own file: a
+    // stand-in that did not help must not put its own name in the message.
+    parse_exactly(&stand_in).map_err(|_| refusal)
 }
 
 /// Where a parse went wrong, phrased so a reader knows where to look.
@@ -1130,6 +1330,147 @@ func classify(a int, b bool) string {
             build_go_obligations(
                 "broken.go",
                 "package main\nfunc f( {",
+                &mut next,
+                &mut decisions
+            ),
+            Err(GoInstrumenterError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn go_1_26_new_of_a_value_is_measured_rather_than_dropped() {
+        // Go 1.26 let `new` take a value, not only a type: `new(x)` returns a
+        // pointer to a copy of `x`. tree-sitter-go still models new and make
+        // as a call whose one argument must be a type, so every file holding
+        // one failed to parse -- and a file that does not parse carries no
+        // obligations, so a package using the construct was measured as
+        // though it held nothing. It appears 913 times in one codebase this
+        // was reported from, and code generators emit it, so a project can
+        // reintroduce it on every `go generate`.
+        let go = obligations(
+            "package p\n\nfunc Greeting() *string {\n\treturn new(\"hello\")\n}\n\nfunc Sum(a, b int) *int {\n\treturn new(a + b)\n}\n\nfunc Copy(v int) *int {\n\tif v > 0 {\n\t\treturn new(v)\n\t}\n\treturn new(0)\n}\n",
+        );
+        assert_eq!(
+            go.manifest
+                .points
+                .iter()
+                .filter(|p| p.kind == PointKind::Function)
+                .count(),
+            3,
+            "every function in the file is an obligation: {:?}",
+            go.manifest.points
+        );
+        assert_eq!(
+            go.manifest.branches.len(),
+            1,
+            "the `if` beside it is still a branch with both arms to answer for"
+        );
+        // And the obligation quotes the source the author wrote. The parse
+        // reads a stand-in for the construct tree-sitter cannot express; what
+        // the manifest records has to be the file itself, or the report shows
+        // the reader a line that is not in their repository.
+        assert!(
+            go.manifest
+                .points
+                .iter()
+                .any(|point| point.source.contains("new(\"hello\")")),
+            "{:?}",
+            go.manifest.points
+        );
+        assert!(
+            !go.manifest
+                .points
+                .iter()
+                .any(|point| point.source.contains("nEw")),
+            "{:?}",
+            go.manifest.points
+        );
+    }
+
+    #[test]
+    fn new_of_a_type_is_left_exactly_as_it_was() {
+        // Only the value form needs the stand-in. Every type form already
+        // parses, and rewriting those would turn `new(map[string]int)` --
+        // whose argument is a type and nothing else -- into something that
+        // does not parse at all.
+        let go = obligations(
+            "package p\n\nfunc Types() {\n\t_ = new(int)\n\t_ = new(map[string]int)\n\t_ = new([]byte)\n\t_ = new(chan int)\n\t_ = new(struct{ A int })\n\t_ = new(func(int) error)\n\t_ = new([3]int)\n\t_ = new(interface{})\n}\n",
+        );
+        assert_eq!(
+            go.manifest
+                .points
+                .iter()
+                .filter(|p| p.kind == PointKind::Function)
+                .count(),
+            1
+        );
+        // The same file gaining one value form must not cost the type forms
+        // their parse: the stand-in is chosen per call site, not per file.
+        let mixed = obligations(
+            "package p\n\nfunc Mixed(v int) {\n\t_ = new(map[string][]chan int)\n\t_ = new(v)\n\t_ = new(\"x\")\n}\n",
+        );
+        assert_eq!(
+            mixed
+                .manifest
+                .points
+                .iter()
+                .filter(|p| p.kind == PointKind::Function)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_method_called_new_is_not_the_builtin() {
+        // `new` is not a keyword, so `x.new(v)` is an ordinary method call and
+        // always parsed. A stand-in written over it would be a rewrite of
+        // somebody's own API for no reason -- and the file still has to parse
+        // because of the builtin call beside it.
+        let go = obligations(
+            "package p\n\ntype pool struct{}\n\nfunc (p pool) new(v int) *int {\n\treturn new(v + 1)\n}\n\nfunc use(p pool) *int {\n\treturn p.new(2)\n}\n",
+        );
+        assert!(
+            go.manifest
+                .points
+                .iter()
+                .any(|point| point.source.contains("p.new(2)")),
+            "{:?}",
+            go.manifest.points
+        );
+    }
+
+    #[test]
+    fn a_file_with_runes_outside_ascii_is_scanned_without_splitting_one() {
+        // The scan that finds a `new(` call site walks bytes, and Go source is
+        // UTF-8: a comment or a string with a rune in it puts multi-byte
+        // sequences between the scanner and the call. Splitting one is not a
+        // wrong answer, it is a panic -- Supercov would take down the suite it
+        // was asked to measure, on a file whose only crime is a name with an
+        // accent in it.
+        let go = obligations(
+            "package p\n\n// Prüfen: gibt \u{e4}\u{f6}\u{fc} zur\u{fc}ck.\nfunc Gr\u{fc}\u{df}en() *string {\n\tsch\u{f6}n := \"gr\u{fc}\u{df}e \u{2014} \u{fc}ber alles\"\n\treturn new(sch\u{f6}n + \"!\")\n}\n",
+        );
+        assert_eq!(
+            go.manifest
+                .points
+                .iter()
+                .filter(|p| p.kind == PointKind::Function)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_simply_broken_still_does_not_parse() {
+        // The stand-in must not become a way for any unparseable file to slip
+        // through: what it cannot read is still a hole in the denominator, and
+        // a hole reported as measured is a wrong number.
+        let mut next = 0;
+        let mut decisions = 0;
+        assert!(matches!(
+            build_go_obligations(
+                "broken.go",
+                "package p\n\nfunc f() {\n\t_ = new(1)\n\tif {\n}\n",
                 &mut next,
                 &mut decisions
             ),
