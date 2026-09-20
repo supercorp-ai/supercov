@@ -287,12 +287,14 @@ fn own_parallel_call_end(body: Node, source: &str) -> Option<usize> {
     };
     let mut cursor = statements.walk();
     for statement in statements.children(&mut cursor).filter(Node::is_named) {
+        // The grammar wraps a call standing alone as a statement in an
+        // `expression_statement`; it is never a statement's child on its own.
         let call = match statement.kind() {
-            "call_expression" => statement,
             "expression_statement" => match statement.named_child(0) {
                 Some(inner) if inner.kind() == "call_expression" => inner,
-                // Some other expression standing alone, which is not the call
-                // being looked for; the next statement might be.
+                // Some other expression standing alone -- a channel receive,
+                // say -- which is not the call being looked for; the next
+                // statement might be.
                 _ => continue,
             },
             _ => continue,
@@ -592,6 +594,57 @@ mod tests {
             "type fixture struct{ n int }\n\n",
             "var cases = []fixture{{1}, {2}}\n\n",
             "const limit = 3\n\n",
+            "func TestOne(t *testing.T) {\n\tdoWork()\n}\n",
+        ));
+        assert_eq!(file.tests, ["TestOne"]);
+        assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+    }
+
+    #[test]
+    fn a_parallel_call_is_found_wherever_the_test_makes_it() {
+        // `t.Parallel()` first is the shape every other test here uses, and it
+        // is not the shape most suites are written in: a test sets something
+        // up and then hands itself to the scheduler. The scan has to walk past
+        // whatever came before, which is a path nothing exercised -- the
+        // measurement showed the statement loop only ever matching on its
+        // first look.
+        let source = concat!(
+            "package p\n\nimport \"testing\"\n\n",
+            "func TestLater(t *testing.T) {\n",
+            "\tsetUp()\n",
+            "\tname := \"x\"\n",
+            "\t<-ready\n",
+            "\tt.Parallel()\n",
+            "\tdoWork(name)\n}\n",
+        );
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", true).expect("instrument");
+        let out = rewrite(source, &file.edits);
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        let parallel = out.find("t.Parallel()").expect("the call");
+        let announced = out
+            .find("__supercovTest(t, \"TestLater\")")
+            .expect("announced");
+        assert!(
+            parallel < announced,
+            "the announcement still waits for the call, wherever it is:\n{out}"
+        );
+        // And it waits for that call rather than landing after the setup it
+        // happened to follow.
+        let work = out.find("doWork(name)").expect("body");
+        assert!(announced < work, "{out}");
+    }
+
+    #[test]
+    fn a_function_with_no_body_is_walked_past() {
+        // Go declares a function with no body when the implementation is in
+        // assembly. It is not a test, it has nothing to instrument, and the
+        // scan has to keep going rather than reach for a body that is not
+        // there.
+        let (file, out) = instrumented(concat!(
+            "package p\n\nimport \"testing\"\n\n",
+            "func fastSum(a, b int) int\n\n",
             "func TestOne(t *testing.T) {\n\tdoWork()\n}\n",
         ));
         assert_eq!(file.tests, ["TestOne"]);
