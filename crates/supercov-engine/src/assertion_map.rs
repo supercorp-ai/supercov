@@ -384,19 +384,22 @@ pub struct Execution {
     pub passed: bool,
     /// Per file, the innermost unit of every probe this test fired.
     pub files: BTreeMap<String, Vec<usize>>,
-    /// Whether `files` is what this test ran, or merely empty because nothing
-    /// could say. A Go test that called `t.Parallel()` reached real code and
-    /// fired no probe of its own, so an empty map here is not evidence that a
-    /// change missed it -- it is the absence of evidence either way, and the
-    /// two must not be read alike.
-    #[serde(default = "attributed_by_default")]
-    pub attributed: bool,
+    /// How completely `files` describes what this test ran: `exact`, `partial`
+    /// where it is a lower bound, or `run-wide` where nothing was recorded.
+    ///
+    /// Only under `exact` does an absence here mean the test did not run the
+    /// code. A Go test that called `t.Parallel()` records nothing of its own,
+    /// and a Ruby test records only the lines no earlier test had reached --
+    /// so reading either silence as proof is how a change to code a test
+    /// exercised comes back as "this test is unaffected".
+    #[serde(default = "exact_by_default")]
+    pub attribution: String,
 }
 
-/// Every execution recorded before attribution was a question was an
-/// attributed one, so a record that does not say is one.
-fn attributed_by_default() -> bool {
-    true
+/// Every execution recorded before attribution was a question was an exact
+/// one, so a record that does not say is one.
+fn exact_by_default() -> String {
+    crate::coverage_report::ATTRIBUTION_EXACT.to_owned()
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

@@ -242,7 +242,7 @@ fn render(data: &Value) -> String {
     entries(&mut out, &affected);
     if !undetermined.is_empty() {
         out.push_str(
-            "\nUndetermined — these ran alongside other tests, so nothing recorded what they\nreached. A change inside what the run covered could have reached them. Run them.\n",
+            "\nUndetermined — what these ran was not fully recorded, so nothing can say the\nchange missed them. It is inside what the run covered, so it could have reached\nthem. Run them.\n",
         );
         entries(&mut out, &undetermined);
     }

@@ -1232,6 +1232,18 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         // "Test not found" for a test that had just passed.
                         if test.attribution == "run-wide" {
                             "coverage not attributable to this test; it ran alongside others and what it reached is recorded run-wide".into()
+                        } else if test.attribution == "partial" {
+                            // The numbers are real and they are not all of it.
+                            // Ruby credits a line to the first test that runs
+                            // it, so a later test that runs the same line is
+                            // recorded against none of it.
+                            format!(
+                                "at least {} lines, {} hits, {} decisions, {} phases (a line already recorded for an earlier test is not recorded again)",
+                                test.totals.lines,
+                                test.totals.hits,
+                                test.totals.decisions,
+                                test.totals.phases
+                            )
                         } else {
                             format!(
                                 "{} lines, {} hits, {} decisions, {} phases",

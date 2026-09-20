@@ -3138,7 +3138,7 @@ pub fn minimum_test_set(
     metric: MinimizeMetric,
     max_states: usize,
 ) -> Result<MinimumTestSetResult, QueryError> {
-    use crate::coverage_report::attributed_exactly;
+    use crate::coverage_report::coverage_is_complete;
     if !target.is_finite() || !(0.0..=100.0).contains(&target) {
         return Err(QueryError::InvalidTarget(target));
     }
@@ -3156,7 +3156,7 @@ pub fn minimum_test_set(
     if view
         .tests
         .iter()
-        .any(|test| test.role == "test" && !attributed_exactly(&test.attribution))
+        .any(|test| test.role == "test" && !coverage_is_complete(&test.attribution))
     {
         return Err(QueryError::UnattributedEvidence);
     }

@@ -218,11 +218,34 @@ npx supercov -- python -m unittest
 | Runner | Attribution | Current requirement |
 | --- | --- | --- |
 | RSpec | Exact example and before/example/after phase identity | Ruby 3.4 or newer for full measurement; run with `npx supercov -- rspec` or `bundle exec rspec` |
-| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
+| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; a test's coverage is a lower bound (see below); skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
 | test-unit | Exact test and setup/test/teardown identity; omissions and pendings recorded | `ruby -Itest ...`, `rake test` |
 | parallel_tests, Rails process workers | Exact per worker process | Workers inherit the run through `RUBYOPT`; verified on a Rails app with bootsnap, Zeitwerk and two forked workers |
 | Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
 | Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
+
+A Ruby test's coverage is a lower bound on what it ran.
+=======================================================
+
+Ruby's `Coverage` reports a line the first time it executes in the process and
+never again, which is what makes collecting it cheap enough to leave on. So the
+first test to reach a line is credited with it, and a later test that runs the
+same line is recorded against none of it. What a test is credited with really
+is its own; what it is *not* credited with is not evidence that it did not run
+the code.
+
+Supercov records that as `attribution: partial`, and reads it the only way it
+can be read soundly:
+
+- Coverage percentages are unaffected. Every line is credited to exactly one
+  test, so a union over tests is still a union of things that happened.
+- `supercov runs <id> test <name>` reports its numbers as "at least", because
+  that is what they are.
+- `supercov runs <id> tests affected` keeps the strong claim where a test's own
+  record proves the change reached it, and reports the rest as **undetermined**
+  rather than unaffected: their reach is bounded above by what the run covered,
+  so a change inside that bound could have reached them. `--names` emits both,
+  because that is the set that is safe to run.
 
 Your project runs in place with its own interpreter and bundle. Supercov loads
 through `RUBYOPT`; application files on disk and their backtrace line numbers

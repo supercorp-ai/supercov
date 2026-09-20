@@ -116,7 +116,7 @@ fn build() -> (Inputs, AssertionMap, State) {
         },
         passed: true,
         files: ran.clone(),
-        attributed: true,
+        attribution: "exact".into(),
     });
     state.executions = Some(Executions {
         tests,

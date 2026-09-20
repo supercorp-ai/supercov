@@ -274,9 +274,34 @@ pub const ATTRIBUTION_EXACT: &str = "exact";
 /// against it. Its own reach is unknown, and bounded above by the run's.
 pub const ATTRIBUTION_RUN_WIDE: &str = "run-wide";
 
-/// Whether this test's coverage could be credited to it exactly.
-pub fn attributed_exactly(attribution: &str) -> bool {
+/// What this test is recorded as reaching is really its own, and is not all of
+/// it: a lower bound, with the run's coverage as the upper one.
+///
+/// Ruby records a line against the first test that reaches it and never again,
+/// which is what makes its collection cheap. Every later test that runs the
+/// same line is recorded as having reached nothing there -- so a test's hits
+/// prove what it ran and its silence proves nothing.
+pub const ATTRIBUTION_PARTIAL: &str = "partial";
+
+/// Whether what this test is recorded as reaching is its own.
+///
+/// True for `exact` and for `partial`: both record real coverage of this
+/// test's, and a union over them is a union of things that happened. False
+/// only where the coverage went to the run instead, and counting the test in a
+/// percentage would divide by a test that contributes nothing.
+pub fn coverage_is_its_own(attribution: &str) -> bool {
     attribution != ATTRIBUTION_RUN_WIDE
+}
+
+/// Whether this test's silence means it did not run the code.
+///
+/// Only `exact` earns that. Under `partial` a test that is recorded as
+/// reaching nothing may have run the same lines as the test that was credited
+/// with them, and under `run-wide` nothing was recorded at all -- so reading
+/// an absence as proof is how a change to code a test exercised comes back as
+/// "this test is unaffected".
+pub fn coverage_is_complete(attribution: &str) -> bool {
+    attribution == ATTRIBUTION_EXACT || attribution.is_empty()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2020,7 +2045,7 @@ fn create_coverage_view_with_model(
                 let selected = tests
                     .iter()
                     .filter(in_dimension)
-                    .filter(|test| attributed_exactly(&test.attribution))
+                    .filter(|test| coverage_is_its_own(&test.attribution))
                     .map(|test| test.id.clone())
                     .collect::<BTreeSet<_>>();
                 let counted = tests
@@ -3333,11 +3358,25 @@ mod tests {
         let mut run_wide = exact("parallel", "unit");
         run_wide.attribution = ATTRIBUTION_RUN_WIDE.into();
 
-        assert!(attributed_exactly(&exact("serial", "unit").attribution));
-        assert!(!attributed_exactly(&run_wide.attribution));
+        // Whose coverage it is, and whether all of it is there, are separate
+        // questions, and conflating them gets one of them wrong.
+        //
+        // `partial` coverage is the test's own -- Ruby credits a line to the
+        // first test that reaches it, and that crediting is true -- so it
+        // counts in a percentage, and a union over such tests is a union of
+        // things that happened. What it cannot support is the opposite
+        // inference: that a test not recorded against a line did not run it.
+        assert!(coverage_is_its_own(&exact("serial", "unit").attribution));
+        assert!(coverage_is_its_own(ATTRIBUTION_PARTIAL));
+        assert!(!coverage_is_its_own(&run_wide.attribution));
+
+        assert!(coverage_is_complete(ATTRIBUTION_EXACT));
+        assert!(!coverage_is_complete(ATTRIBUTION_PARTIAL));
+        assert!(!coverage_is_complete(ATTRIBUTION_RUN_WIDE));
+
         // And a frontend that has never heard of the field keeps its meaning:
         // absent is exact, so nothing already measured changes shape.
-        assert!(attributed_exactly(""));
-        assert!(attributed_exactly("exact"));
+        assert!(coverage_is_its_own(""));
+        assert!(coverage_is_complete(""));
     }
 }

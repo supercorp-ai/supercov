@@ -374,13 +374,17 @@ pub fn executions(
             test: selector,
             passed: false,
             files: BTreeMap::new(),
-            attributed: true,
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.to_owned(),
         });
         record.passed |= test.outcome == "passed";
         // One name can be recorded more than once -- retries, a test declared
-        // in two files -- and a single unattributed appearance is enough to
-        // make the whole record's file list incomplete.
-        record.attributed &= crate::coverage_report::attributed_exactly(&test.attribution);
+        // in two files -- and a single incomplete appearance is enough to make
+        // the whole record's file list a lower bound.
+        if !crate::coverage_report::coverage_is_complete(&record.attribution) {
+            // already the weaker claim
+        } else if !crate::coverage_report::coverage_is_complete(&test.attribution) {
+            record.attribution = test.attribution.clone();
+        }
         for hit in &test.hits {
             if let Some((file, unit)) = located.get(hit.as_str()) {
                 record
@@ -593,19 +597,28 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                 }
             }
         }
-        if !record.attributed {
-            // Its own file changing is still its own reason; everything else
-            // it could have reached is the run's bound.
-            reasons.extend(beyond_the_run.iter().cloned());
-            reasons.sort();
-            reasons.dedup();
+        if !crate::coverage_report::coverage_is_complete(&record.attribution) {
+            // What its own record proves is the strong claim, and it keeps it:
+            // a Ruby test credited with the changed line ran the changed line,
+            // whatever else it also ran unrecorded.
+            let proven = !reasons.is_empty();
+            // The run's bound is what stands in for a record this test does
+            // not have. Where it has one that already proves the change
+            // reached it, saying so twice says nothing twice.
+            if !proven {
+                reasons.extend(beyond_the_run.iter().cloned());
+                reasons.sort();
+                reasons.dedup();
+            }
             let entry = json!({
                 "file": record.test.file,
                 "name": record.test.name,
                 "reasons": reasons,
-                "attribution": "run-wide",
+                "attribution": record.attribution,
             });
-            if reasons.is_empty() {
+            if proven {
+                affected.push(entry);
+            } else if reasons.is_empty() {
                 unaffected.push(entry);
             } else {
                 undetermined.push(entry);
