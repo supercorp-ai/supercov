@@ -224,28 +224,17 @@ npx supercov -- python -m unittest
 | Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
 | Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
 
-A Ruby test's coverage is a lower bound on what it ran.
-=======================================================
+Ruby reports a line the first time it executes and never again, which is what
+makes collecting coverage cheap enough to leave on. So a test is credited with
+the lines it was first to reach, and a later test running the same lines is
+credited with none of them: what a test is credited with is really its own, and
+what it is not credited with is not evidence it did not run the code.
 
-Ruby's `Coverage` reports a line the first time it executes in the process and
-never again, which is what makes collecting it cheap enough to leave on. So the
-first test to reach a line is credited with it, and a later test that runs the
-same line is recorded against none of it. What a test is credited with really
-is its own; what it is *not* credited with is not evidence that it did not run
-the code.
-
-Supercov records that as `attribution: partial`, and reads it the only way it
-can be read soundly:
-
-- Coverage percentages are unaffected. Every line is credited to exactly one
-  test, so a union over tests is still a union of things that happened.
-- `supercov runs <id> test <name>` reports its numbers as "at least", because
-  that is what they are.
-- `supercov runs <id> tests affected` keeps the strong claim where a test's own
-  record proves the change reached it, and reports the rest as **undetermined**
-  rather than unaffected: their reach is bounded above by what the run covered,
-  so a change inside that bound could have reached them. `--names` emits both,
-  because that is the set that is safe to run.
+Totals are unaffected — every line is credited to exactly one test. What this
+changes is per-test reporting: `supercov runs <id> test <name>` gives its
+numbers as "at least", and `tests affected` reports a test whose own record
+cannot settle the question as **undetermined** rather than unaffected, so
+`--names` includes it in the set to run.
 
 Your project runs in place with its own interpreter and bundle. Supercov loads
 through `RUBYOPT`; application files on disk and their backtrace line numbers
