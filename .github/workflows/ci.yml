@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+  # The gate every change is expected to pass, on the change itself. It ran
+  # only when someone remembered to ask for it, which meant a pull request's
+  # green tick said the React and assertion-map jobs had passed and nothing
+  # about `cargo fmt`, clippy, the workspace tests or the packaged assets.
+  pull_request:
 
 permissions:
   contents: read

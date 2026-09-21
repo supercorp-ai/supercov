@@ -427,6 +427,38 @@ mod tests {
     }
 
     #[test]
+    fn a_test_whose_subtests_run_in_parallel_cannot_claim_them_either() {
+        // `t.Run(name, func(t *testing.T) { t.Parallel() })` is how a Go suite
+        // usually reaches for parallelism, and it is the same problem one
+        // level down: Go resumes the parallel subtests after the parent
+        // returns, so what they reach arrives with no announcement standing
+        // and cannot be credited to the parent that started them.
+        //
+        // The parent is therefore checkpointed rather than announced. It costs
+        // the parent its own attribution -- the serial part of its body is
+        // swept in with the rest -- which is the honest reading: nothing can
+        // say which of the two it came from.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestGroup(t *testing.T) {\n\tsetUp()\n\tfor _, c := range cases {\n\t\tt.Run(c.name, func(t *testing.T) {\n\t\t\tt.Parallel()\n\t\t\tdoWork(c)\n\t\t})\n\t}\n}\n",
+        );
+        assert_eq!(file.tests, ["TestGroup"]);
+        assert_eq!(file.unattributed, ["TestGroup"]);
+        assert!(
+            !out.contains("__supercovTest(t, \"TestGroup\")"),
+            "a parent cannot claim what its parallel subtests reached:\n{out}"
+        );
+        assert!(out.contains("defer __supercov.Checkpoint()"), "{out}");
+
+        // Where the subtests are serial there is nothing to run beside them,
+        // and the parent is named for all of it as before.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestGroup(t *testing.T) {\n\tt.Run(\"one\", func(t *testing.T) {\n\t\tdoWork()\n\t})\n}\n",
+        );
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        assert!(out.contains("__supercovTest(t, \"TestGroup\")"), "{out}");
+    }
+
+    #[test]
     fn an_example_is_swept_even_though_it_cannot_be_announced() {
         // `go test` runs an Example with an Output comment like any other
         // test, and a Fuzz target runs its seed corpus, but neither takes a
@@ -486,6 +518,23 @@ mod tests {
             out.contains(RUNTIME_IMPORT),
             "naming the runtime directly requires its import:\n{out}"
         );
+    }
+
+    #[test]
+    fn a_test_file_using_go_1_26_new_is_still_instrumented() {
+        // A source file that could not be parsed was dropped and the run went
+        // on; a test file that could not be parsed took the whole run down
+        // with it, exit 1. Both came from the same construct, and neither is
+        // the author's mistake -- `new` has taken a value since Go 1.26.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\twant := new(\"hello\")\n\tif *greet() != *want {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n",
+        );
+        assert_eq!(file.tests, ["TestOne"]);
+        assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+        // And what is written back is the author's own file, not the stand-in
+        // the parse read.
+        assert!(out.contains("new(\"hello\")"), "{out}");
+        assert!(!out.contains("nEw"), "{out}");
     }
 
     #[test]

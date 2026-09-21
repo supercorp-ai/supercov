@@ -602,9 +602,6 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         test_exit_code,
         coverage_model,
     } = inputs;
-    if outcomes.is_empty() {
-        return Err(OwnedEvidenceError::NoTests);
-    }
     // The runner every result claims must be one the declaration names: a
     // result attributed to a runner nobody declared is a result nothing can
     // say the precision of, and the reader refuses it rather than guess.
@@ -788,6 +785,16 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         });
     }
 
+    // Nothing to publish only when neither a test nor the run as a whole
+    // reached anything. An empty list of outcomes on its own is not that: a Go
+    // package whose every test calls `t.Parallel()` announces no test by
+    // design, and refusing it there discarded a fully measured package --
+    // lines, branches and MC/DC alike -- over the fact that the evidence had
+    // no owner. The background record above is the owner it has.
+    if raw_results.is_empty() {
+        return Err(OwnedEvidenceError::NoTests);
+    }
+
     // A declaration naming a runner that produced nothing claims something the
     // run did not do, and the reader refuses it — rightly. A JVM frontend can
     // drive JUnit and TestNG, but any one project usually runs one of them, so
@@ -883,6 +890,10 @@ mod tests {
 
     #[test]
     fn a_run_with_no_tests_is_an_error_not_an_empty_report() {
+        // Nothing announced itself and nothing was reached: there is no run
+        // here, and an empty report would claim a floor it never established.
+        // What makes this an error is the second half, not the first -- see
+        // the test below.
         let evidence = OwnedEvidence::default();
         let manifest = CoverageManifest {
             decisions: Vec::new(),
@@ -907,6 +918,67 @@ mod tests {
             })
             .err(),
             Some(OwnedEvidenceError::NoTests)
+        );
+    }
+
+    #[test]
+    fn a_run_nothing_could_be_attributed_to_is_still_a_run() {
+        // A Go package where every test calls `t.Parallel()` announces no test
+        // by design: probes are a store into one shared array, so what a test
+        // reaches while others run beside it cannot be credited to it. The
+        // coverage is real and has no owner, and refusing the run over that
+        // discarded a fully measured package -- lines, branches and MC/DC
+        // alike -- which is how an idiomatic Go suite came to publish nothing
+        // at all.
+        let evidence = OwnedEvidence {
+            global: vec![1],
+            ..OwnedEvidence::default()
+        };
+        let manifest = CoverageManifest {
+            decisions: Vec::new(),
+            points: vec![crate::coverage_report::PointMeta {
+                id: "go:statement:one".into(),
+                kind: crate::coverage_analysis::PointKind::Statement,
+                file: "lib.go".into(),
+                line: 1,
+                column: 1,
+                source: "return 1".into(),
+                label: None,
+            }],
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            unmeasured: Vec::new(),
+            scope: None,
+        };
+        let probes = BTreeMap::from([(
+            0_u64,
+            GoProbe {
+                id: 0,
+                target: GoProbeTarget::Statement {
+                    id: "go:statement:one".into(),
+                },
+                at: 0,
+            },
+        )]);
+        let run = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &probes,
+            evidence: &evidence,
+            outcomes: &[],
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 0,
+            coverage_model: go_coverage_model(),
+        })
+        .expect("a measured package publishes even when no test can claim it");
+        assert_eq!(run.tests, 1, "the one record is what nobody could claim");
+        assert_eq!(run.request.raw_results[0].role, "background");
+        assert_eq!(
+            run.request.raw_results[0].status.as_deref(),
+            Some("passed"),
+            "it counts as coverage because the run passed"
         );
     }
 

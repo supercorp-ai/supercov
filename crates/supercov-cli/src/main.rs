@@ -2222,6 +2222,33 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     "[supercov] Go coverage: {} test(s) across {} source file(s) in {} package(s)",
                     result.tests, result.source_files, result.packages
                 );
+                // A run of nothing but parallel tests measures a whole package
+                // and can name none of it. Printing "0 test(s)" and stopping
+                // reads as an empty suite, which is a different thing and the
+                // wrong thing to act on.
+                if result.unattributed > 0 {
+                    eprintln!(
+                        "[supercov] {} test(s) could not announce themselves (t.Parallel, Example or Fuzz); what they reached counts run-wide and belongs to no test",
+                        result.unattributed
+                    );
+                }
+                // A hole in the denominator travels with the number it was
+                // taken out of: the warning above scrolls past, this is on the
+                // line that reports the result.
+                if result.unparseable_sources > 0 {
+                    eprintln!(
+                        "[supercov] {} source file(s) did not parse and are absent from the denominator; the run records them as a blocking limitation",
+                        result.unparseable_sources
+                    );
+                }
+                // The tests in it still ran, and what they reached still
+                // counts; what is missing is the name to put it under.
+                if result.unparseable_tests > 0 {
+                    eprintln!(
+                        "[supercov] {} test file(s) did not parse; the tests they declare ran unattributed",
+                        result.unparseable_tests
+                    );
+                }
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",

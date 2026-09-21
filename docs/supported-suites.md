@@ -287,8 +287,17 @@ coverage never counts — a failed run cannot say which of it came from the test
 that failed.
 
 An `Example` with an `Output` comment and a `Fuzz` target's seed corpus are
-measured the same way. `go test` runs both, so what they reach is real
-coverage, but neither takes a `*testing.T` for a result to be named by.
+measured the same way: `go test` runs both, and what they reach is real
+coverage no test can claim.
+
+A package where every test calls `t.Parallel()` is published like any other.
+The summary reports how many tests ran without being able to announce
+themselves, because coverage with no owner is a different thing from an empty
+suite.
+
+A file Supercov cannot parse is a hole, not the end of the run. It is named on
+the line that reports the result and recorded in the run, and a run is refused
+only when nothing is left to measure.
 
 Supercov also writes evidence as the suite runs, not only at the end. Go offers
 no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`
