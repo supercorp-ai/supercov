@@ -326,3 +326,4 @@ npx supercov clean             # remove all runs and the build cache
 ## Contributors
 
 - [@DaVinciTachyon](https://github.com/DaVinciTachyon)
+- [@Uhbif2](https://github.com/Uhbif2)
