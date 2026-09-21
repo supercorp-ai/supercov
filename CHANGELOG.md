@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.1.0
+
+**Added**
+
+- `--exact-attribution` credits every test with what it reached, by running the suite in order: `-parallel=1` in Go, and JUnit's parallel execution turned off in the workspace copy. Without it a suite that runs its tests at once is measured as its author runs it, and what overlapped is recorded against the run rather than against a test.
+- A measurement says how its tests were attributed, so coverage that belongs to no single test is visible rather than implied.
+
+**Fixed**
+
+- A Go package whose tests all call `t.Parallel()` published no run at all and exited 1. Probes are a store into one shared array, so what a test reaches while others run beside it cannot be credited to it — but the coverage is real and the package was fully measured. The run is published, and each parallel test is named, carries its real outcome, and is credited with nothing. (#30)
+- Go 1.26's `new(value)` failed to parse, and a single unparseable file silently zeroed the whole measurement: 0 files measured, exit 0. The value form is read, and a file Supercov cannot parse is reported rather than taking the run down with it. (#31)
+- A Ruby test's coverage is read as the lower bound it is. `Coverage.start(oneshot_lines: true)` reports a line once per process, so a line some earlier test reached first is missing from this one's record. It is marked partial rather than presented as the whole of what the test ran.
+- Cleaning old runs kept the largest run IDs rather than the newest runs.
+
+**Changed**
+
+- `supercov` with no arguments lists the supported languages, each with its own install and start command.
+- A source-discovery scope is reported in the language that was measured.
+
 ## 1.0.1
 
 **Changed**
