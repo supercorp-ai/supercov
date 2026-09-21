@@ -21,6 +21,8 @@ use std::{
 pub const MAP_FILE: &str = "assertions.json";
 pub const STATE_FILE: &str = "assertions.state.json";
 const REPORT_CACHE_FILE: &str = "assertions.report.cache.json";
+/// Kept apart from the full report so a summary can never be read back as one.
+const SUMMARY_CACHE_FILE: &str = "assertions.summary.cache.json";
 pub struct RunManifest {
     pub manifest: InputManifest,
     pub evidence_digest: String,
@@ -701,10 +703,28 @@ pub fn coverage(run: &StoredRun) -> Result<CoverageReport, String> {
     .map_err(|e| format!("{e:?}"))
 }
 fn byte_column(source: &str, line: usize, column: usize, language: &str) -> Option<usize> {
+    byte_column_in(
+        source,
+        &crate::assertion_map::line_starts(source),
+        line,
+        column,
+        language,
+    )
+}
+
+/// `byte_column`, given where each line starts, so that resolving a whole
+/// file's statements looks each line up instead of walking the file to it.
+fn byte_column_in(
+    source: &str,
+    starts: &[usize],
+    line: usize,
+    column: usize,
+    language: &str,
+) -> Option<usize> {
     if line == 0 {
         return None;
     }
-    let line = source.lines().nth(line - 1)?;
+    let line = crate::assertion_map::line_text(source, starts, line)?;
     if language != "javascript" {
         // Native Rust, Python and Ruby manifests use zero-based byte columns.
         return column.checked_add(1);
@@ -744,13 +764,23 @@ fn phase_location<'a>(
 /// Cache derived assessments separately from immutable coverage evidence.
 /// Every query still verifies current source, map and managed-state identities.
 pub fn report(root: &Path, run: &StoredRun) -> Result<Value, String> {
-    report_with_detail(root, run, None)
+    report_with_detail(root, run, None, true)
+}
+/// The report `runs latest` shows: every count, none of the per-statement and
+/// per-line lists. See `assess_summary`.
+pub fn report_summary(root: &Path, run: &StoredRun) -> Result<Value, String> {
+    report_with_detail(root, run, None, false)
 }
 /// Read authored flows and their assessment from the same map snapshot.
 pub fn assertion(root: &Path, run: &StoredRun, id: &str) -> Result<Value, String> {
-    report_with_detail(root, run, Some(id))
+    report_with_detail(root, run, Some(id), true)
 }
-fn report_with_detail(root: &Path, run: &StoredRun, id: Option<&str>) -> Result<Value, String> {
+fn report_with_detail(
+    root: &Path,
+    run: &StoredRun,
+    id: Option<&str>,
+    detail: bool,
+) -> Result<Value, String> {
     let input = load_inputs(root, run)?;
     let (map, state) = load(run, &input)?;
     let cache_key = digest(&(
@@ -761,23 +791,31 @@ fn report_with_detail(root: &Path, run: &StoredRun, id: Option<&str>) -> Result<
         &state,
         &input.evidence_digest,
     ));
-    let cache_path = run.directory.join(REPORT_CACHE_FILE);
+    let cache_file = if detail {
+        REPORT_CACHE_FILE
+    } else {
+        SUMMARY_CACHE_FILE
+    };
+    let cache_path = run.directory.join(cache_file);
     let mut report = read_report_cache(&cache_path, &cache_key).unwrap_or_else(|| Value::Null);
     if report.is_null() {
         let coverage = coverage(run)?;
-        report = assess(
+        report = assess_with(
             &map,
             &state,
             &input.inputs,
             &coverage,
             run.metadata.test_exit_code == Some(0),
+            detail,
         );
-        report["excludedStatements"] = json!(input.statement_exclusions);
+        if detail {
+            report["excludedStatements"] = json!(input.statement_exclusions);
+        }
         report["summary"]["excludedStatements"] = json!(input.statement_exclusions.len());
         // This is disposable acceleration. A read-only directory or corrupt
         // cache must never prevent a freshly computed report from working.
         let cached = json!({"key":cache_key,"digest":digest(&report),"report":report});
-        let _ = write_json(root, run, REPORT_CACHE_FILE, &cached);
+        let _ = write_json(root, run, cache_file, &cached);
     }
     if let Some(id) = id {
         let matches = report["assertions"]
@@ -839,7 +877,37 @@ pub fn assess(
     coverage: &CoverageReport,
     passed: bool,
 ) -> Value {
+    assess_with(map, state, inputs, coverage, passed, true)
+}
+
+/// The assessment's summary and everything but its per-statement and per-line
+/// lists. `runs latest` shows five fields of the assessment and used to build
+/// all of it to get them: every measured statement, each carrying the source of
+/// the node around it. On a 300-file project that was 300,000 entries, a 177 MB
+/// cache, and 4 GB held to print a handful of counts. Every count is computed
+/// the same way here as in the full assessment; only the lists are skipped.
+pub fn assess_summary(
+    map: &AssertionMap,
+    state: &State,
+    inputs: &Inputs,
+    coverage: &CoverageReport,
+    passed: bool,
+) -> Value {
+    assess_with(map, state, inputs, coverage, passed, false)
+}
+
+fn assess_with(
+    map: &AssertionMap,
+    state: &State,
+    inputs: &Inputs,
+    coverage: &CoverageReport,
+    passed: bool,
+    detail: bool,
+) -> Value {
     let manifest = inputs.manifest();
+    // Every statement is located in its file below, so each file's line starts
+    // are found once here rather than by a walk from the top per statement.
+    let lines = crate::assertion_map::LineIndex::new(&inputs.files);
     let ledger = model::Ledger::new(map, state, &manifest);
     let validation = model::validation(map, state, inputs);
     let errors = validation["errors"]
@@ -885,9 +953,14 @@ pub fn assess(
             .entry((point.meta.file.clone(), point.meta.line))
             .or_default()
             .push(point);
-        if let Some(text) = inputs.files.get(&point.meta.file)
-            && let Some(column) =
-                byte_column(text, point.meta.line, point.meta.column, &inputs.language)
+        if let Some((text, starts)) = lines.get(&point.meta.file)
+            && let Some(column) = byte_column_in(
+                text,
+                starts,
+                point.meta.line,
+                point.meta.column,
+                &inputs.language,
+            )
         {
             let at = Anchor {
                 file: point.meta.file.clone(),
@@ -895,7 +968,7 @@ pub fn assess(
                 column,
                 text: point.meta.source.clone(),
             };
-            if let Some(start) = at.offset(&inputs.files) {
+            if let Some(start) = at.offset_in(text, starts) {
                 by_file
                     .entry(&point.meta.file)
                     .or_default()
@@ -1292,16 +1365,38 @@ pub fn assess(
         })
         .count();
     let total = denominator.len();
-    let statements = measured_statements.iter().map(|p| {
-        let at = inputs.files.get(&p.meta.file)
-            .and_then(|text| byte_column(text, p.meta.line, p.meta.column, &inputs.language))
-            .map(|column| Anchor { file: p.meta.file.clone(), line: p.meta.line, column, text: p.meta.source.clone() })
-            .filter(|at| at.offset(&inputs.files).is_some());
+    // Each measured statement is located once. The detail list and the
+    // summary's count of statements that cannot be located read these same
+    // answers, so a summary built without the list cannot disagree with it.
+    let located = measured_statements
+        .iter()
+        .map(|p| {
+            let (text, starts) = lines.get(&p.meta.file)?;
+            let column =
+                byte_column_in(text, starts, p.meta.line, p.meta.column, &inputs.language)?;
+            crate::assertion_map::locate(
+                &p.meta.file,
+                p.meta.line,
+                column,
+                &p.meta.source,
+                text,
+                starts,
+            )
+            .map(|_| column)
+        })
+        .collect::<Vec<_>>();
+    let unanchored = located.iter().filter(|column| column.is_none()).count();
+    let statements = if !detail {
+        Vec::new()
+    } else {
+        measured_statements.iter().zip(&located).map(|(p, column)| {
+        let at = column.map(|column| Anchor { file: p.meta.file.clone(), line: p.meta.line, column, text: p.meta.source.clone() });
         let all = all_points.get(&p.meta.id);
         json!({"id":p.meta.id,"file":p.meta.file,"line":p.meta.line,"at":at,"covered":p.covered,"tests":p.tests,"declared":claimed_points.contains(&p.meta.id),"asserted":credited_points.contains(&p.meta.id),"flows":point_flows.get(&p.meta.id).cloned().unwrap_or_default(),
             "executionEvidence":{"anyExecution":all.is_some_and(|p| p.covered),"passingTests":p.tests.iter().filter(|id| tests.contains_key(id)).collect::<Vec<_>>(),
                 "outsidePassingTests":all.into_iter().flat_map(|p| &p.tests).filter(|id| !tests.contains_key(id)).collect::<Vec<_>>()}})
-    }).collect::<Vec<_>>();
+    }).collect::<Vec<_>>()
+    };
     json!({"basis":"agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
         "summary":{"status":status,"reason":reason,"pendingChanges":pending_changes,"metric":"measured statements","statements":{"asserted":credited_points.len(),"declared":claimed_points.len(),"total":measured_statements.len(),"percentage":if status != "available" { None } else {Some(credited_points.len() as f64 * 100.0 / measured_statements.len() as f64)}},"assertions":map.assertions.len(),"inventoryAssertions":inputs.assertions.len(),"missingInventoryAssertions":missing_inventory,
             "assertionsWithFlows":rows.iter().filter(|a| a["flows"].as_array().is_some_and(|f| !f.is_empty())).count(),
@@ -1311,13 +1406,13 @@ pub fn assess(
             "currentFlows":current_flows,"draftFlows":draft_flows,"staleFlows":stale_flows,"invalidFlows":invalid_flows,"eligibleFlows":credit_flows,"retiredAssertions":map.retired_assertions.len(),
             "unobservedAssertions":rows.iter().filter(|a| a["observedPassingTests"].as_array().is_none_or(Vec::is_empty)).count(),
             "inventoryFailures":inputs.limitations.iter().filter(|s| s.starts_with("Inventory unavailable for ")).count(),
-            "unanchoredStatements":statements.iter().filter(|s| s["at"].is_null()).count(),
+            "unanchoredStatements":unanchored,
             "runPassed":passed,
             "lines":{"asserted":credited.len(),"declared":declared.len(),"total":total,"percentage":if total==0 || status != "available" {None} else {Some(credited.len() as f64 * 100.0 / total as f64)}}},
         "assertions":rows,"statements":statements,"tests":coverage.view.tests.iter().map(|t| json!({"id":t.id,"file":t.file,"name":t.name,"role":t.role,"outcome":t.outcome,"provenance":t.provenance,
             "hasExecutionEvidence":!t.hits.is_empty() || !t.decisions.is_empty() || !t.lines.is_empty()})).collect::<Vec<_>>(),
-        "creditedLines":credited.iter().map(|loc| json!({"file":loc.0,"line":loc.1,"assertions":line_assertions.get(loc)})).collect::<Vec<_>>(),
-        "unassertedLines":denominator.difference(&credited).map(|(f,l)| json!({"file":f,"line":l})).collect::<Vec<_>>(),
+        "creditedLines":if !detail { Vec::new() } else { credited.iter().map(|loc| json!({"file":loc.0,"line":loc.1,"assertions":line_assertions.get(loc)})).collect::<Vec<_>>() },
+        "unassertedLines":if !detail { Vec::new() } else { denominator.difference(&credited).map(|(f,l)| json!({"file":f,"line":l})).collect::<Vec<_>>() },
         "changes":validation["changes"],"validationErrors":errors,"advisories":model::advisories(map),"limitations":inputs.limitations})
 }
 
@@ -1336,6 +1431,62 @@ mod tests {
             combined: "combined".into(),
             source_files: 1,
             test_files: 1,
+        }
+    }
+
+    /// `byte_column` as it was before it took line starts.
+    fn reference_byte_column(
+        source: &str,
+        line: usize,
+        column: usize,
+        language: &str,
+    ) -> Option<usize> {
+        if line == 0 {
+            return None;
+        }
+        let line = source.lines().nth(line - 1)?;
+        if language != "javascript" {
+            return column.checked_add(1);
+        }
+        if column == 0 {
+            return None;
+        }
+        let mut units = 0;
+        for (byte, ch) in line.char_indices() {
+            if units == column - 1 {
+                return Some(byte + 1);
+            }
+            units += ch.len_utf16();
+        }
+        (units == column - 1).then_some(line.len() + 1)
+    }
+
+    #[test]
+    fn a_column_from_line_starts_agrees_with_walking_the_file() {
+        // JavaScript columns count UTF-16 units, so text whose widths differ --
+        // accents, and an emoji that is two units -- is where they could part.
+        for source in [
+            "",
+            "a",
+            "a\n",
+            "a\r\nb\r\n",
+            "x\r",
+            "héllo\nwörld\n",
+            "😀x\ny😀z\n",
+            "const a = 1;\n  b();\n",
+        ] {
+            let starts = crate::assertion_map::line_starts(source);
+            for language in ["javascript", "python"] {
+                for line in 0..source.len() + 3 {
+                    for column in 0..source.len() + 4 {
+                        assert_eq!(
+                            byte_column_in(source, &starts, line, column, language),
+                            reference_byte_column(source, line, column, language),
+                            "{language} {line}:{column} in {source:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 
