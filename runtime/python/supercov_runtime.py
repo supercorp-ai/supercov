@@ -438,6 +438,7 @@ class Runtime:
         self.output_token = f"{time.time_ns():x}-{id(self) & 0xFFFF:x}"
         self.dropped_records = 0
         self.closed = False
+        self.registered_events: tuple = ()
         self.branch_pairs = hasattr(_monitoring.events, "BRANCH_LEFT")
 
     # -- evidence transport -------------------------------------------------
@@ -580,6 +581,16 @@ class Runtime:
 
     def _record(self, record: dict) -> None:
         with self.lock:
+            # Close stops observing before it closes the transport, so nothing
+            # new is scheduled after it. A callback already running on another
+            # thread when close began waits on this lock and arrives here once
+            # the transport is gone. Reopening it would rebuild the very path
+            # close left on disk -- same worker, same pid, the same token -- and
+            # O_EXCL refuses that, which surfaced as a traceback in a suite
+            # whose daemon threads outlived its tests. What a thread runs after
+            # every atexit handler belongs to no test, so it is not recorded.
+            if self.closed:
+                return
             self._ensure_process_output()
             self._write_record(record)
 
@@ -1543,6 +1554,14 @@ class Runtime:
             _monitoring.register_callback(self.tool_id, events.BRANCH_RIGHT, on_branch)
         else:
             _monitoring.register_callback(self.tool_id, events.BRANCH, on_branch)
+        # Kept so close can take back exactly what install gave out.
+        self.registered_events = (
+            events.PY_START,
+            events.LINE,
+            events.INSTRUCTION,
+            events.JUMP,
+            events.PY_RETURN,
+        ) + ((events.BRANCH_LEFT, events.BRANCH_RIGHT) if self.branch_pairs else (events.BRANCH,))
         _monitoring.set_events(self.tool_id, events.PY_START)
         inherited = os.environ.get(CONTEXT_ENV)
         if inherited:
@@ -1559,12 +1578,31 @@ class Runtime:
         except Exception as error:  # noqa: BLE001 - the adapter must never break the interpreter
             self.limitation("python-unittest-adapter-unavailable", f"unittest adapter failed to install: {error!r}")
 
+    def _stop_observing(self) -> None:
+        # Global events off, so no code object is armed from here on, and every
+        # callback withdrawn, so the ones already armed call into nothing. The
+        # collector would otherwise keep running on each line executed during
+        # shutdown only to discard the result, on the path where module globals
+        # are already being torn down.
+        if self.tool_id is None:
+            return
+        try:
+            _monitoring.set_events(self.tool_id, 0)
+            for event in self.registered_events:
+                _monitoring.register_callback(self.tool_id, event, None)
+        except Exception:  # noqa: BLE001 - shutdown must never raise into the interpreter
+            pass
+
     def close(self) -> None:
         with self.lock:
             if self.closed:
                 return
-            self.closed = True
+            self._stop_observing()
+            # The exit marker is the transport's last record, so it is written
+            # while the transport is open -- before `closed` turns every later
+            # record away, this one included.
             self._record({"t": "exit", "at": _now_ms()})
+            self.closed = True
             self._close_output(flush=True)
             unmatched = self.worker == "main" and bool(self.path_cache) and not self.under_root
         if unmatched:
