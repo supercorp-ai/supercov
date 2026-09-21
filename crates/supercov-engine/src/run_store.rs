@@ -124,7 +124,7 @@ pub struct RunMetadata {
 
 #[cfg(test)]
 pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
-    create_analyzable_run(root, id, false)
+    create_analyzable_run(root, id, None)
 }
 
 /// The same run as a suite that ran its tests at once: the coverage sits in
@@ -133,11 +133,19 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
 /// package whose tests all call `t.Parallel()`.
 #[cfg(test)]
 pub(crate) fn create_run_wide_test_run(root: &Path, id: &str) -> PathBuf {
-    create_analyzable_run(root, id, true)
+    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE))
+}
+
+/// The same run as a Ruby suite: the test keeps the coverage it was credited
+/// with, and that coverage is a lower bound rather than the whole of what it
+/// ran. What its own record proves, it still proves.
+#[cfg(test)]
+pub(crate) fn create_partial_test_run(root: &Path, id: &str) -> PathBuf {
+    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_PARTIAL))
 }
 
 #[cfg(test)]
-fn create_analyzable_run(root: &Path, id: &str, run_wide: bool) -> PathBuf {
+fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> PathBuf {
     use crate::{
         coverage_analysis::{McdcVector, PointKind},
         coverage_report::{
@@ -243,7 +251,12 @@ fn create_analyzable_run(root: &Path, id: &str, run_wide: bool) -> PathBuf {
         browser: vec![],
         server: vec![],
     };
-    let results = if run_wide {
+    let results = if attribution == Some(crate::coverage_report::ATTRIBUTION_PARTIAL) {
+        // It keeps its hits: a lower bound is still a claim.
+        let mut partial = result.clone();
+        partial.attribution = crate::coverage_report::ATTRIBUTION_PARTIAL.into();
+        vec![partial]
+    } else if attribution == Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE) {
         let mut unclaimed = result.clone();
         unclaimed.test = "run".into();
         unclaimed.test_id = Some("run".into());
