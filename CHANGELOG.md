@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1
+
+**Fixed**
+
+- `SUPERCOV_SOURCE_ROOTS` narrows what is measured in every language. It was read on the JavaScript path alone while the reference described it without one, so a Python project that set it measured everything anyway: a vendored tree beside a flat layout came out at 660 files instead of about fifteen. If you already set it on a Python, Ruby, Go, Rust or JVM project, this release measures the roots you named and nothing else, and your numbers will change accordingly. A root is a directory or a single file, since a flat layout keeps its own modules at the root, and `supercov runs latest scope` lists what was kept and what was left out. (#35)
+- Roots that name nothing to measure are refused, with the name quoted, rather than published as a run over zero files. (#35)
+- A Python suite whose threads outlive its tests no longer ends with a `FileExistsError` from the collector. (#35)
+- `supercov runs latest` costs what it shows rather than what it could show. A summary of a 300-file project took 21 seconds and 4 GB of memory, and 81 seconds where files are as long as generated bindings; it now takes 8 and 9 seconds. What it prints is unchanged. (#35)
+- `go run github.com/supercorp-ai/supercov/cmd/supercov@latest` asks GitHub again when it answers with a gateway timeout, rate-limits the request or drops the connection, instead of ending the install outright. It says so while it waits.
+
 ## 1.1.0
 
 **Added**
