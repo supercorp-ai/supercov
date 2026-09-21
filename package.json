@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Code quality and coverage for coding agents",
   "license": "MIT",
   "repository": {
@@ -105,14 +105,14 @@
     "test:windows-tls": "node scripts/windows-tls-test.mjs"
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "1.1.0",
-    "@supercov/cli-darwin-x64": "1.1.0",
-    "@supercov/cli-linux-arm64-gnu": "1.1.0",
-    "@supercov/cli-linux-arm64-musl": "1.1.0",
-    "@supercov/cli-linux-x64-gnu": "1.1.0",
-    "@supercov/cli-linux-x64-musl": "1.1.0",
-    "@supercov/cli-win32-arm64": "1.1.0",
-    "@supercov/cli-win32-x64": "1.1.0"
+    "@supercov/cli-darwin-arm64": "1.1.1",
+    "@supercov/cli-darwin-x64": "1.1.1",
+    "@supercov/cli-linux-arm64-gnu": "1.1.1",
+    "@supercov/cli-linux-arm64-musl": "1.1.1",
+    "@supercov/cli-linux-x64-gnu": "1.1.1",
+    "@supercov/cli-linux-x64-musl": "1.1.1",
+    "@supercov/cli-win32-arm64": "1.1.1",
+    "@supercov/cli-win32-x64": "1.1.1"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",
