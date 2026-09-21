@@ -218,11 +218,23 @@ npx supercov -- python -m unittest
 | Runner | Attribution | Current requirement |
 | --- | --- | --- |
 | RSpec | Exact example and before/example/after phase identity | Ruby 3.4 or newer for full measurement; run with `npx supercov -- rspec` or `bundle exec rspec` |
-| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
+| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; a test's coverage is a lower bound (see below); skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
 | test-unit | Exact test and setup/test/teardown identity; omissions and pendings recorded | `ruby -Itest ...`, `rake test` |
 | parallel_tests, Rails process workers | Exact per worker process | Workers inherit the run through `RUBYOPT`; verified on a Rails app with bootsnap, Zeitwerk and two forked workers |
 | Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
 | Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
+
+Ruby reports a line the first time it executes and never again, which is what
+makes collecting coverage cheap enough to leave on. So a test is credited with
+the lines it was first to reach, and a later test running the same lines is
+credited with none of them: what a test is credited with is really its own, and
+what it is not credited with is not evidence it did not run the code.
+
+Totals are unaffected — every line is credited to exactly one test. What this
+changes is per-test reporting: `supercov runs <id> test <name>` gives its
+numbers as "at least", and `tests affected` reports a test whose own record
+cannot settle the question as **undetermined** rather than unaffected, so
+`--names` includes it in the set to run.
 
 Your project runs in place with its own interpreter and bundle. Supercov loads
 through `RUBYOPT`; application files on disk and their backtrace line numbers
@@ -290,10 +302,12 @@ An `Example` with an `Output` comment and a `Fuzz` target's seed corpus are
 measured the same way: `go test` runs both, and what they reach is real
 coverage no test can claim.
 
-A package where every test calls `t.Parallel()` is published like any other.
-The summary reports how many tests ran without being able to announce
-themselves, because coverage with no owner is a different thing from an empty
-suite.
+Such a test is still recorded as having run, with its outcome, and credited
+with no coverage. `supercov runs <id> test <name>` says that rather than
+reporting zeroes, coverage percentages leave it out, and `tests affected` lists
+it as **undetermined**: nothing can say a change missed it, so `--names`
+includes it in the set to run. A package where every test calls `t.Parallel()`
+is published like any other.
 
 A file Supercov cannot parse is a hole, not the end of the run. It is named on
 the line that reports the result and recorded in the run, and a run is refused

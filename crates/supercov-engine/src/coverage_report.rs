@@ -235,6 +235,20 @@ pub struct RawTestResult {
     pub provenance: TestProvenance,
     #[serde(default = "default_test_role")]
     pub role: String,
+    /// How exactly this test's coverage could be credited to it.
+    ///
+    /// `exact` is the ordinary case and the default, so a frontend that has
+    /// not been taught the difference keeps its behaviour. `run-wide` says the
+    /// test ran and reached code, and that nothing can say which code: a Go
+    /// test that called `t.Parallel()` stores into the same probe array as the
+    /// tests running beside it.
+    ///
+    /// The distinction is the whole point of the field. A test that reached
+    /// nothing and a test whose reach cannot be narrowed both have an empty
+    /// hit set, and reporting the second as the first is a wrong number
+    /// wearing the shape of a right one.
+    #[serde(default = "default_attribution")]
+    pub attribution: String,
     #[serde(default)]
     pub phases: Vec<CoveragePhase>,
     #[serde(default)]
@@ -247,6 +261,47 @@ pub struct RawTestResult {
 
 fn default_test_role() -> String {
     "test".into()
+}
+
+fn default_attribution() -> String {
+    ATTRIBUTION_EXACT.into()
+}
+
+/// This test's coverage is its own: what it reached was credited to it.
+pub const ATTRIBUTION_EXACT: &str = "exact";
+
+/// This test ran, and what it reached was recorded against the run rather than
+/// against it. Its own reach is unknown, and bounded above by the run's.
+pub const ATTRIBUTION_RUN_WIDE: &str = "run-wide";
+
+/// What this test is recorded as reaching is really its own, and is not all of
+/// it: a lower bound, with the run's coverage as the upper one.
+///
+/// Ruby records a line against the first test that reaches it and never again,
+/// which is what makes its collection cheap. Every later test that runs the
+/// same line is recorded as having reached nothing there -- so a test's hits
+/// prove what it ran and its silence proves nothing.
+pub const ATTRIBUTION_PARTIAL: &str = "partial";
+
+/// Whether what this test is recorded as reaching is its own.
+///
+/// True for `exact` and for `partial`: both record real coverage of this
+/// test's, and a union over them is a union of things that happened. False
+/// only where the coverage went to the run instead, and counting the test in a
+/// percentage would divide by a test that contributes nothing.
+pub fn coverage_is_its_own(attribution: &str) -> bool {
+    attribution != ATTRIBUTION_RUN_WIDE
+}
+
+/// Whether this test's silence means it did not run the code.
+///
+/// Only `exact` earns that. Under `partial` a test that is recorded as
+/// reaching nothing may have run the same lines as the test that was credited
+/// with them, and under `run-wide` nothing was recorded at all -- so reading
+/// an absence as proof is how a change to code a test exercised comes back as
+/// "this test is unaffected".
+pub fn coverage_is_complete(attribution: &str) -> bool {
+    attribution == ATTRIBUTION_EXACT || attribution.is_empty()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -399,6 +454,9 @@ pub struct TestCoverageResult {
     pub outcome: String,
     pub provenance: TestProvenance,
     pub role: String,
+    /// `exact`, or `run-wide` when the test ran but nothing can say what it
+    /// reached. An empty `hits` means "reached nothing" only under `exact`.
+    pub attribution: String,
     pub hits: Vec<String>,
     pub decisions: Vec<TestDecisionResult>,
     pub lines: Vec<SourceLine>,
@@ -442,6 +500,11 @@ pub struct DimensionCoverage {
     pub runner: Option<String>,
     pub tests: usize,
     pub setups: usize,
+    /// How many of `tests` have coverage of their own. The summary below is
+    /// computed over exactly these: a test whose reach nothing can narrow
+    /// contributes no hits, and counting it would report a suite that covers
+    /// everything as covering nothing.
+    pub attributed: usize,
     pub summary: CoverageSummary,
 }
 
@@ -791,6 +854,7 @@ struct MutableTest {
     runner_reported_flaky: bool,
     provenance: TestProvenance,
     role: String,
+    attribution: String,
     hits: BTreeSet<String>,
     decisions: BTreeMap<String, OrderedVectors>,
 }
@@ -1271,6 +1335,7 @@ fn create_coverage_view_with_model(
                     runner_reported_flaky: raw.flaky,
                     provenance: raw.provenance.clone(),
                     role: raw.role.clone(),
+                    attribution: raw.attribution.clone(),
                     hits: BTreeSet::new(),
                     decisions: BTreeMap::new(),
                 },
@@ -1822,6 +1887,7 @@ fn create_coverage_view_with_model(
                 outcome: test_outcome(test),
                 provenance: test.provenance.clone(),
                 role: test.role.clone(),
+                attribution: test.attribution.clone(),
                 hits: sorted(&test.hits),
                 decisions: test
                     .decisions
@@ -1963,27 +2029,46 @@ fn create_coverage_view_with_model(
         values
             .into_iter()
             .map(|value| {
+                let in_dimension = |test: &&TestCoverageResult| {
+                    if field == "kind" {
+                        test.provenance.kind == value
+                    } else {
+                        test.provenance.runner == value
+                    }
+                };
+                // Coverage is summarised over the tests that have coverage of
+                // their own. A Go test that called `t.Parallel()` reached real
+                // code and contributes no hits, because nothing can say which
+                // code -- so counting it here reported a package covered
+                // entirely by parallel tests as covered 0%, which is a wrong
+                // number rather than a missing one.
                 let selected = tests
                     .iter()
-                    .filter(|test| {
-                        if field == "kind" {
-                            test.provenance.kind == value
-                        } else {
-                            test.provenance.runner == value
-                        }
-                    })
+                    .filter(in_dimension)
+                    .filter(|test| coverage_is_its_own(&test.attribution))
+                    .map(|test| test.id.clone())
+                    .collect::<BTreeSet<_>>();
+                let counted = tests
+                    .iter()
+                    .filter(in_dimension)
                     .map(|test| test.id.clone())
                     .collect::<BTreeSet<_>>();
                 Ok(DimensionCoverage {
                     kind: (field == "kind").then(|| value.clone()),
                     runner: (field == "runner").then(|| value.clone()),
+                    // Counted whether or not anything could be attributed to
+                    // them: they ran.
                     tests: tests
                         .iter()
-                        .filter(|test| selected.contains(&test.id) && test.role == "test")
+                        .filter(|test| counted.contains(&test.id) && test.role == "test")
                         .count(),
                     setups: tests
                         .iter()
-                        .filter(|test| selected.contains(&test.id) && test.role == "setup")
+                        .filter(|test| counted.contains(&test.id) && test.role == "setup")
+                        .count(),
+                    attributed: tests
+                        .iter()
+                        .filter(|test| selected.contains(&test.id) && test.role == "test")
                         .count(),
                     summary: summary_for_results(
                         &decisions,
@@ -2306,6 +2391,7 @@ pub fn analyze_coverage_archive(
                 source: "explicit".into(),
             },
             role: "background".into(),
+            attribution: ATTRIBUTION_EXACT.into(),
             phases: vec![],
             runtime: vec![],
             browser: vec![],
@@ -2425,6 +2511,7 @@ mod tests {
                 source: "runner-default".into(),
             },
             role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: vec![],
             runtime: vec![RuntimeSnapshot {
                 decisions: vec![],
@@ -3240,5 +3327,56 @@ mod tests {
                 valid: false,
             })
         );
+    }
+    #[test]
+    fn a_dimension_is_summarised_over_the_tests_it_can_describe() {
+        // A test whose reach nothing recorded contributes no hits. Counting it
+        // in the denominator of a coverage percentage reported a package
+        // covered entirely by parallel tests as covered 0.00% -- a wrong
+        // number, which is worse than a missing one, because it reads as a
+        // suite that tests nothing.
+        let exact = |id: &str, kind: &str| TestCoverageResult {
+            id: id.into(),
+            name: id.into(),
+            file: None,
+            title: None,
+            retries: vec![],
+            attempts: vec![],
+            outcome: "passed".into(),
+            provenance: TestProvenance {
+                runner: "go-test".into(),
+                kind: kind.into(),
+                project: None,
+                source: String::new(),
+            },
+            role: "test".into(),
+            attribution: ATTRIBUTION_EXACT.into(),
+            hits: vec![],
+            decisions: vec![],
+            lines: vec![],
+        };
+        let mut run_wide = exact("parallel", "unit");
+        run_wide.attribution = ATTRIBUTION_RUN_WIDE.into();
+
+        // Whose coverage it is, and whether all of it is there, are separate
+        // questions, and conflating them gets one of them wrong.
+        //
+        // `partial` coverage is the test's own -- Ruby credits a line to the
+        // first test that reaches it, and that crediting is true -- so it
+        // counts in a percentage, and a union over such tests is a union of
+        // things that happened. What it cannot support is the opposite
+        // inference: that a test not recorded against a line did not run it.
+        assert!(coverage_is_its_own(&exact("serial", "unit").attribution));
+        assert!(coverage_is_its_own(ATTRIBUTION_PARTIAL));
+        assert!(!coverage_is_its_own(&run_wide.attribution));
+
+        assert!(coverage_is_complete(ATTRIBUTION_EXACT));
+        assert!(!coverage_is_complete(ATTRIBUTION_PARTIAL));
+        assert!(!coverage_is_complete(ATTRIBUTION_RUN_WIDE));
+
+        // And a frontend that has never heard of the field keeps its meaning:
+        // absent is exact, so nothing already measured changes shape.
+        assert!(coverage_is_its_own(""));
+        assert!(coverage_is_complete(""));
     }
 }

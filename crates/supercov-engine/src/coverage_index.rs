@@ -358,6 +358,10 @@ pub struct IndexedDimensionCoverage {
     pub runner: Option<String>,
     pub tests: usize,
     pub setups: usize,
+    /// How many of `tests` the summary below actually describes. Where this is
+    /// zero and `tests` is not, the dimension ran tests whose coverage nothing
+    /// can narrow, and its summary describes none of them.
+    pub attributed: usize,
     pub summary: CoverageSummary,
 }
 
@@ -508,6 +512,10 @@ pub struct IndexedTestSummary {
     pub title: Option<String>,
     pub outcome: String,
     pub role: String,
+    /// `exact`, or `run-wide` when this test ran and nothing can say what it
+    /// reached. Read before any statement about this test's coverage: an
+    /// empty hit set means "reached nothing" only under `exact`.
+    pub attribution: String,
     pub provenance: crate::coverage_report::TestProvenance,
 }
 
@@ -887,6 +895,10 @@ fn dimension_record(
     put_u32(&mut record, 4, strings.intern(name)?);
     put_u64(&mut record, 8, usize_u64(value.tests)?);
     put_u64(&mut record, 16, usize_u64(value.setups)?);
+    // Bytes 184..192 were reserved from the start and the reader refuses a
+    // record that sets them, so this is an addition rather than a format
+    // change: the record is the same 192 bytes it always was.
+    put_u64(&mut record, 184, usize_u64(value.attributed)?);
     put_summary_payload(&mut record, 24, 32, &value.summary)?;
     Ok(record)
 }
@@ -1454,6 +1466,15 @@ fn test_summary_record(
         "setup" => 1,
         "background" => 2,
         _ => return Err(CoverageIndexError::InvalidRecord("test role")),
+    };
+    // Byte 3 was reserved from the start and the reader refuses a record that
+    // sets it, which is what makes this an addition rather than a format
+    // change: the record is the same 64 bytes it always was.
+    record[3] = match test.attribution.as_str() {
+        crate::coverage_report::ATTRIBUTION_EXACT => 0,
+        crate::coverage_report::ATTRIBUTION_RUN_WIDE => 1,
+        crate::coverage_report::ATTRIBUTION_PARTIAL => 2,
+        _ => return Err(CoverageIndexError::InvalidRecord("test attribution")),
     };
     record[2] = match test.outcome.as_str() {
         "passed" => 0,
@@ -2921,9 +2942,7 @@ impl<'a> CoverageIndex<'a> {
             if record_dimension != dimension {
                 continue;
             }
-            if record[26..32].iter().any(|byte| *byte != 0)
-                || record[184..].iter().any(|byte| *byte != 0)
-            {
+            if record[26..32].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord(
                     "dimension reserved bytes",
                 ));
@@ -2935,6 +2954,8 @@ impl<'a> CoverageIndex<'a> {
                 tests: usize::try_from(get_u64(record, 8)?)
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 setups: usize::try_from(get_u64(record, 16)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                attributed: usize::try_from(get_u64(record, 184)?)
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 summary: decode_summary(record, 24, 32)?,
             });
@@ -3109,7 +3130,7 @@ impl<'a> CoverageIndex<'a> {
             if CoverageViewId::try_from(record[0])? != view {
                 continue;
             }
-            if record[3] != 0 || record[36..].iter().any(|byte| *byte != 0) {
+            if record[36..].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("test summary record"));
             }
             tests.push(IndexedTestSummary {
@@ -3122,6 +3143,13 @@ impl<'a> CoverageIndex<'a> {
                     1 => "setup",
                     2 => "background",
                     _ => return Err(CoverageIndexError::InvalidRecord("test role")),
+                }
+                .into(),
+                attribution: match record[3] {
+                    0 => crate::coverage_report::ATTRIBUTION_EXACT,
+                    1 => crate::coverage_report::ATTRIBUTION_RUN_WIDE,
+                    2 => crate::coverage_report::ATTRIBUTION_PARTIAL,
+                    _ => return Err(CoverageIndexError::InvalidRecord("test attribution")),
                 }
                 .into(),
                 outcome: match record[2] {
@@ -3834,6 +3862,7 @@ mod tests {
                     source: "runner-default".into(),
                 },
                 role: "test".into(),
+                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
                 phases: Vec::new(),
                 runtime: vec![RuntimeSnapshot {
                     decisions: vec![crate::coverage_report::DecisionSnapshot {
@@ -3979,6 +4008,7 @@ mod tests {
                     source: "selected-but-not-started".into(),
                 },
                 role: "test".into(),
+                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
                 phases: Vec::new(),
                 runtime: Vec::new(),
                 browser: Vec::new(),

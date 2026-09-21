@@ -987,6 +987,10 @@ pub struct CoverageSelectedTest {
     pub outcome: String,
     pub provenance: TestProvenance,
     pub role: String,
+    /// `exact`, or `run-wide` when this test ran and nothing can say what it
+    /// reached. Under `run-wide` the totals below are zero because the test
+    /// has no coverage of its own, not because it reached nothing.
+    pub attribution: String,
     pub hits: Vec<String>,
     pub decisions: Vec<CoverageTestDecision>,
     pub lines: Vec<SourceLine>,
@@ -1206,6 +1210,7 @@ pub fn coverage_test_query(
                 outcome: test.summary.outcome,
                 provenance: test.summary.provenance,
                 role: test.summary.role,
+                attribution: test.summary.attribution,
                 hits,
                 decisions: test_decisions,
                 lines,
@@ -3133,12 +3138,26 @@ pub fn minimum_test_set(
     metric: MinimizeMetric,
     max_states: usize,
 ) -> Result<MinimumTestSetResult, QueryError> {
+    use crate::coverage_report::coverage_is_complete;
     if !target.is_finite() || !(0.0..=100.0).contains(&target) {
         return Err(QueryError::InvalidTarget(target));
     }
     if view.tests.iter().any(|test| {
         test.role == "background" && (!test.hits.is_empty() || !test.decisions.is_empty())
     }) {
+        return Err(QueryError::UnattributedEvidence);
+    }
+    // And a test whose own coverage nothing recorded cannot be minimized
+    // around either. Its empty hit set would read as a test that adds nothing
+    // to any set, so the smallest set would drop it -- and what it covers is
+    // precisely what nothing knows. The check above catches this whenever the
+    // run-wide record holds anything, which is nearly always; this catches the
+    // case where those tests happened to reach nothing measured.
+    if view
+        .tests
+        .iter()
+        .any(|test| test.role == "test" && !coverage_is_complete(&test.attribution))
+    {
         return Err(QueryError::UnattributedEvidence);
     }
     let candidate_tests = view
@@ -3276,6 +3295,7 @@ mod tests {
                 source: "runner-default".into(),
             },
             role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: Vec::new(),
             runtime: vec![RuntimeSnapshot {
                 decisions: vec![crate::coverage_report::DecisionSnapshot {

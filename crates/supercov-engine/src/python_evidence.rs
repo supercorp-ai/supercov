@@ -1192,6 +1192,7 @@ pub fn build_python_frontend_run(
                 source: PYTHON_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1251,6 +1252,7 @@ pub fn build_python_frontend_run(
                 source: PYTHON_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1286,6 +1288,7 @@ pub fn build_python_frontend_run(
                 source: PYTHON_FRONTEND_VERSION.into(),
             },
             role: "background".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: vec![CoveragePhase {
                 id: phase.clone(),
                 kind: "background".into(),

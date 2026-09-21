@@ -254,6 +254,7 @@ fn javascript_archive_entries(
                 source: "engine".into(),
             },
             role: "setup".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: vec![],
             runtime: vec![],
             browser: vec![],

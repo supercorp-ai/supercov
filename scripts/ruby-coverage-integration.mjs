@@ -5,7 +5,7 @@
 // denominator and observations the fixture is designed to produce.
 
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -232,6 +232,72 @@ try {
   assert.match(runners.stdout, /minitest\s+3 test\(s\)/);
   const matcher = query(['runs', 'latest', 'line', 'lib/shapes.rb:51'], environment);
   assert.match(JSON.stringify(matcher), /ShapesTest#test_matcher/, 'Minitest identity reaches the line');
+
+  // A test's coverage is a lower bound, and affected-test selection has to
+  // treat it as one.
+  //
+  // Ruby's Coverage reports a line the first time it executes in the process
+  // and never again -- that is what makes collecting it cheap -- so the first
+  // test to reach a line is credited with it and every later test that runs
+  // the same line is recorded against none of it. Reading that silence as "the
+  // change missed this test" dropped tests that ran the changed code out of
+  // the selection, with exit 0: three tests all exercising one method offered
+  // two of them to a runner.
+  //
+  // What `--names` emits has to be the set that is safe to run, so it carries
+  // the tests whose own record proves the change reached them and the tests
+  // whose record cannot say.
+  writeFileSync(
+    resolve(project, 'test/shared_line_test.rb'),
+    [
+      'require "minitest/autorun"',
+      'require_relative "../lib/shapes"',
+      '',
+      'class SharedLineTest < Minitest::Test',
+      '  def test_first',
+      '    assert_equal :yes, Shapes.classify(true, true, false)',
+      '  end',
+      '',
+      '  def test_second',
+      '    assert_equal :yes, Shapes.classify(true, true, false)',
+      '  end',
+      '',
+      '  def test_third',
+      '    assert_equal :yes, Shapes.classify(true, true, false)',
+      '  end',
+      'end',
+      '',
+    ].join('\n'),
+  );
+  const shared = supercov(['--', 'ruby', '-Itest', 'test/shared_line_test.rb'], environment);
+  assert.equal(shared.status, 0, `${shared.stdout}\n${shared.stderr}`);
+  assert.match(shared.stderr, /3 test\(s\)/, shared.stderr);
+
+  // Change the body all three ran. Exactly one of them is credited with the
+  // line; which one depends on Minitest's order, so the check is on the
+  // selection rather than on any test's numbers.
+  const shapes = resolve(project, 'lib/shapes.rb');
+  const before = readFileSync(shapes, 'utf8');
+  assert.ok(before.includes('      :yes\n'), 'the fixture still has the branch this rests on');
+  writeFileSync(shapes, before.replace('      :yes\n', '      :indeed\n'));
+  try {
+    const names = supercov(['runs', 'latest', 'tests', 'affected', '--names'], environment);
+    assert.equal(names.status, 0, names.stderr);
+    const selected = names.stdout.split('\n').filter(Boolean);
+    for (const test of [
+      'SharedLineTest#test_first',
+      'SharedLineTest#test_second',
+      'SharedLineTest#test_third',
+    ]) {
+      assert.ok(
+        selected.includes(test),
+        `${test} ran the changed method, so a runner has to be offered it: ${selected.join(', ')}`,
+      );
+    }
+  } finally {
+    writeFileSync(shapes, before);
+    rmSync(resolve(project, 'test/shared_line_test.rb'), { force: true });
+  }
 
   const testUnit = supercov(['--', 'ruby', '-Itest', 'test/unit_style_test.rb'], environment);
   assert.equal(testUnit.status, 0, `${testUnit.stdout}\n${testUnit.stderr}`);

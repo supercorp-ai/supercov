@@ -194,6 +194,7 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
             source: "test-fixture".into(),
         },
         role: "test".into(),
+        attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
         phases: vec![],
         runtime: vec![RuntimeSnapshot {
             decisions: vec![DecisionSnapshot {

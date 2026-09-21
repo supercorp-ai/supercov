@@ -144,6 +144,12 @@ fn decode(bytes: &[u8]) -> Evidence {
         let name = cursor.text(length);
         let status_length = cursor.u64() as usize;
         statuses.insert(name.clone(), cursor.text(status_length));
+        // Whether the probes below are this test's own. A test that called
+        // t.Parallel() stores into the same array as the tests beside it, so
+        // it records its name and outcome and claims none of them -- and an
+        // empty probe list means "reached nothing" only when this is zero.
+        let unattributed = cursor.u64();
+        assert!(unattributed <= 1, "a flag is 0 or 1, got {unattributed}");
         // Which runner announced it. Go has one, so its records leave this
         // empty and the engine reads the frontend's own.
         let runner_length = cursor.u64() as usize;
@@ -357,6 +363,7 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
                 package: "example.com/probe".into(),
                 file: Some("main_test.go".into()),
                 status: "passed".into(),
+                attributed: true,
             },
             OwnedTestOutcome {
                 name: "TestZero".into(),
@@ -364,6 +371,7 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
                 package: "example.com/probe".into(),
                 file: Some("main_test.go".into()),
                 status: "passed".into(),
+                attributed: true,
             },
         ],
         run_id: "run_go",

@@ -593,6 +593,7 @@ public final class SupercovConfig {{
             package: "CalculatorTest".into(),
             file: Some("CalculatorTest.java".into()),
             status: "passed".into(),
+            attributed: true,
         })
         .collect::<Vec<_>>();
     let run = build_frontend_run(OwnedRunInputs {

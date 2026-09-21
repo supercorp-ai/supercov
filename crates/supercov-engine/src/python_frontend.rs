@@ -719,6 +719,7 @@ pub fn import_python_coverage_json(
                 source: "python-coverage-v1".into(),
             },
             role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -749,6 +750,7 @@ pub fn import_python_coverage_json(
                 source: "python-coverage-v1".into(),
             },
             role: "background".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: vec![CoveragePhase {
                 id: phase.clone(),
                 kind: "background".into(),

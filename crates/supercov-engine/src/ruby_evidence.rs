@@ -1219,6 +1219,14 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
+            // What a Ruby test is recorded as reaching is its own and is not
+            // all of it. The runtime asks Ruby's Coverage for one-shot lines,
+            // which report a line the first time it executes in the process
+            // and never again -- so the first test to reach a line is credited
+            // with it and every later test that runs the same line is recorded
+            // as having reached nothing there. Cheap to collect, and it makes
+            // a test's hits a lower bound rather than a description.
+            attribution: crate::coverage_report::ATTRIBUTION_PARTIAL.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1278,6 +1286,14 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
+            // What a Ruby test is recorded as reaching is its own and is not
+            // all of it. The runtime asks Ruby's Coverage for one-shot lines,
+            // which report a line the first time it executes in the process
+            // and never again -- so the first test to reach a line is credited
+            // with it and every later test that runs the same line is recorded
+            // as having reached nothing there. Cheap to collect, and it makes
+            // a test's hits a lower bound rather than a description.
+            attribution: crate::coverage_report::ATTRIBUTION_PARTIAL.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1313,6 +1329,7 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "background".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: vec![CoveragePhase {
                 id: phase.clone(),
                 kind: "background".into(),
@@ -1427,11 +1444,29 @@ pub fn build_ruby_frontend_run(
                         action: AttributionPrecision::Unavailable,
                         assertion: AttributionPrecision::Exact,
                     },
-                    limitations: vec![FrontendLimitation {
-                        id: format!("ruby-{runner}-action-linkage"),
-                        scopes: vec![FrontendLimitationScope::Action],
-                        reason: format!("{runner} exposes no general action lifecycle"),
-                    }],
+                    limitations: vec![
+                        FrontendLimitation {
+                            id: format!("ruby-{runner}-action-linkage"),
+                            scopes: vec![FrontendLimitationScope::Action],
+                            reason: format!("{runner} exposes no general action lifecycle"),
+                        },
+                        // Declared because it was not, and the declaration is
+                        // what a reader checks a number against. Ruby's
+                        // Coverage reports a line the first time it executes
+                        // in the process and never again, which is what makes
+                        // collecting it cheap: the first test to reach a line
+                        // is credited with it and every later test that runs
+                        // the same line is recorded against none of it. What a
+                        // test is credited with is its own; what it is not
+                        // credited with is not evidence it did not run.
+                        FrontendLimitation {
+                            id: format!("ruby-{runner}-first-sighting-lines"),
+                            scopes: vec![FrontendLimitationScope::Test],
+                            reason:
+                                "Ruby records a line for the first test that reaches it, so a test's coverage is a lower bound and the run's is its upper one"
+                                    .into(),
+                        },
+                    ],
                 })
                 .collect(),
             structural_limitations,
