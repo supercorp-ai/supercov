@@ -23,7 +23,19 @@ function rust(command, request) {
     input: JSON.stringify(request),
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  return JSON.parse(result.stdout.trim().split('\n').at(-1));
+  const value = JSON.parse(result.stdout.trim().split('\n').at(-1));
+  // What the wrapped command printed, kept off the value's own fields so that
+  // comparing it or printing it as JSON is unchanged. Without it a suite that
+  // failed under Supercov reported only its exit code: a flaky browser test
+  // and a broken one looked the same, and telling them apart took a rerun.
+  Object.defineProperty(value, 'output', { value: tail(`${result.stdout}${result.stderr}`) });
+  return value;
+}
+
+// The end of what a command printed, where the failure is, bounded so an
+// assertion message stays readable.
+function tail(text, lines = 200) {
+  return text.trimEnd().split('\n').slice(-lines).join('\n');
 }
 
 function query(runId, filter, command, extra = {}) {
@@ -114,7 +126,7 @@ try {
     runId: 'rust-direct-jest',
     startedAt: '2026-09-08T00:00:02.000Z',
   });
-  assert.equal(run.exitCode, 1, 'the failing test fails the command');
+  assert.equal(run.exitCode, 1, `the failing test fails the command\n${run.output}`);
   assert.equal(readFileSync(resolve(project, 'src/permission.js'), 'utf8'), application);
 
   const all = query(run.runId, 'all', 'summary');
@@ -162,7 +174,7 @@ try {
     root: project, command: ['npm', 'test'], runId: 'rust-babel-jest',
     startedAt: '2026-09-15T00:00:02.000Z',
   });
-  assert.equal(transformed.exitCode, 0, 'Babel-transformed ESM test executes under Jest');
+  assert.equal(transformed.exitCode, 0, `Babel-transformed ESM test executes under Jest\n${transformed.output}`);
   const transformedSummary = query(transformed.runId, 'all', 'summary');
   assert.equal(transformedSummary.data.testOutcomes.passed, 1);
   assert.deepEqual(transformedSummary.data.diagnostics, []);
@@ -179,7 +191,7 @@ try {
     root: project, command: ['node', proxy, '--config=jest.config.js', '--runInBand'],
     runId: 'rust-forwarded-jest', startedAt: '2026-09-15T00:00:03.000Z',
   });
-  assert.equal(forwarded.exitCode, 0, 'forwarded generated config does not recurse');
+  assert.equal(forwarded.exitCode, 0, `forwarded generated config does not recurse\n${forwarded.output}`);
   assert.equal(query(forwarded.runId, 'all', 'summary').data.testOutcomes.passed, 1);
 
   // Arbitrarily named declared setup files remain infrastructure even under src/.
@@ -196,7 +208,7 @@ try {
     "import { permission } from '@app';\nimport {hostname} from 'node:os';\ntest('declared setup keeps hoisted mock factories', () => expect([hostname(), permission(true, false)]).toEqual(['mock-host', 'allowed']));\njest.retryTimes(1);\nlet attempt = 0;\ntest('same title', () => { expect(++attempt).toBe(2); expect(permission(true, false)).toBe('allowed'); });\ntest('same title', () => expect(permission(false, false)).toBe('denied'));\ntest.each([true, false])('same table title', allowed => expect(permission(allowed, false)).toBe(allowed ? 'allowed' : 'denied'));\n");
   const setupRun = rust('__run-js-direct', {root:project, command:['npm','test'],
     runId:'rust-declared-setup-jest', startedAt:'2026-09-15T00:00:04.000Z'});
-  assert.equal(setupRun.exitCode, 0, 'declared setup retains hoisted mocks');
+  assert.equal(setupRun.exitCode, 0, `declared setup retains hoisted mocks\n${setupRun.output}`);
   assert.equal(query(setupRun.runId, 'all', 'summary').data.tests, 5);
   assert.equal(query(setupRun.runId, 'all', 'summary').data.testOutcomes.passed, 4);
   assert.equal(query(setupRun.runId, 'all', 'summary').data.testOutcomes.flaky, 1);

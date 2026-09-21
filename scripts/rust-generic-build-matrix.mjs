@@ -22,7 +22,19 @@ function rust(command, request) {
     input: JSON.stringify(request),
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  return JSON.parse(result.stdout.trim().split('\n').at(-1));
+  const value = JSON.parse(result.stdout.trim().split('\n').at(-1));
+  // What the wrapped command printed, kept off the value's own fields so that
+  // comparing it or printing it as JSON is unchanged. Without it a suite that
+  // failed under Supercov reported only its exit code: a flaky browser test
+  // and a broken one looked the same, and telling them apart took a rerun.
+  Object.defineProperty(value, 'output', { value: tail(`${result.stdout}${result.stderr}`) });
+  return value;
+}
+
+// The end of what a command printed, where the failure is, bounded so an
+// assertion message stays readable.
+function tail(text, lines = 200) {
+  return text.trimEnd().split('\n').slice(-lines).join('\n');
 }
 
 function copyFixture(name, extraFiles) {
@@ -56,7 +68,7 @@ function verify(name, project, sourceFile, runId) {
     runId,
     startedAt: `2026-08-25T00:00:${runId.endsWith('webpack') ? '08' : '09'}.000Z`,
   });
-  assert.equal(run.exitCode, 0, `${name} test command failed`);
+  assert.equal(run.exitCode, 0, `${name} test command failed\n${run.output}`);
   assert.equal(run.assertionCalls, 1);
   assert.equal(readFileSync(resolve(project, sourceFile), 'utf8'), original);
   assert.ok(run.metadata.timings.instrumentedBuildMs > 0);
