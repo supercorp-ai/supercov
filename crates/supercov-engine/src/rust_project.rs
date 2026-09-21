@@ -52,6 +52,7 @@ pub enum RustProjectError {
     Instrument { file: String, reason: String },
     DuplicateObligation(String),
     Runtime(String),
+    SourceRoots(String),
 }
 
 impl std::fmt::Display for RustProjectError {
@@ -80,6 +81,7 @@ impl std::fmt::Display for RustProjectError {
                 write!(formatter, "duplicate Rust obligation ID: {id}")
             }
             Self::Runtime(reason) => write!(formatter, "could not generate Rust runtime: {reason}"),
+            Self::SourceRoots(reason) => write!(formatter, "{reason}"),
         }
     }
 }
@@ -731,7 +733,12 @@ fn merge_manifest(
     Ok(())
 }
 
-pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, RustProjectError> {
+pub fn prepare_rust_project(
+    workspace: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+) -> Result<PreparedRustProject, RustProjectError> {
+    // Named apart from the crate roots below, which reuse `roots`.
+    let source_roots = roots;
     let elapsed = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
     let mut preparation = RustPreparationTimings::default();
     let workspace = canonical_directory(workspace)?;
@@ -778,6 +785,20 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
     preparation.discovery_ms = elapsed(started);
     let started = std::time::Instant::now();
     let runtime_module = runtime_module_name(&sources);
+    // Narrowed only after the runtime's name is chosen: that name must not
+    // collide with any module in the crate, including those the roots leave
+    // out. A module left out is simply not instrumented, and compiles as the
+    // author wrote it.
+    let mut outside = Vec::new();
+    if let Some(source_roots) = source_roots {
+        let mut kept = sources.keys().cloned().collect::<Vec<_>>();
+        source_roots.narrow(&mut kept, &mut outside, String::as_str);
+        let kept = kept.into_iter().collect::<BTreeSet<_>>();
+        sources.retain(|relative, _| kept.contains(relative));
+        source_roots
+            .refuse_if_empty(sources.len(), "Rust")
+            .map_err(RustProjectError::SourceRoots)?;
+    }
     let runtime_path = format!("crate::{runtime_module}");
     let mut manifest = CoverageManifest {
         unmeasured: Vec::new(),
@@ -853,6 +874,17 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
             target_directory.display().to_string(),
         ));
     }
+    // Only when roots shaped what is measured, so default output is unchanged.
+    if let Some(source_roots) = source_roots {
+        let kept = sources.keys().cloned().collect::<Vec<_>>();
+        let scope = source_roots
+            .scope(&kept, &outside)
+            .map_err(|error| RustProjectError::SourceRoots(error.to_string()))?;
+        manifest.scope = Some(
+            serde_json::to_value(scope)
+                .map_err(|error| RustProjectError::SourceRoots(error.to_string()))?,
+        );
+    }
     Ok(PreparedRustProject {
         workspace_root: workspace,
         target_directory,
@@ -927,6 +959,64 @@ fn integration_choice() {
     }
 
     #[test]
+    fn explicit_roots_narrow_what_rust_instruments() {
+        // A module the roots leave out is not instrumented, so it compiles as
+        // the author wrote it. The runtime module is still declared in the
+        // crate root whether or not that root is kept, which is what lets the
+        // modules that are kept refer to it.
+        let root = fixture();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='rust_project_fixture'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "mod helper;\nmod vendored;\npub fn entry(flag: bool) -> i32 { if flag { helper::one() } else { vendored::two() } }\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/helper.rs"), "pub fn one() -> i32 { 1 }\n").unwrap();
+        let vendored = "pub fn two() -> i32 { 2 }\n";
+        fs::write(root.join("src/vendored.rs"), vendored).unwrap();
+
+        let roots = crate::source_discovery::ExplicitSourceRoots::resolve(
+            &root,
+            &["src/lib.rs".to_owned(), "src/helper.rs".to_owned()],
+        )
+        .unwrap();
+        let prepared = prepare_rust_project(&root, Some(&roots)).unwrap();
+        assert_eq!(prepared.source_files, ["src/helper.rs", "src/lib.rs"]);
+        assert!(
+            prepared
+                .manifest
+                .points
+                .iter()
+                .all(|point| point.file != "src/vendored.rs"),
+            "a module outside the roots carries no obligations"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("src/vendored.rs")).unwrap(),
+            vendored,
+            "and is left exactly as written"
+        );
+        let scope: crate::source_discovery::SourceScope =
+            serde_json::from_value(prepared.manifest.scope.clone().expect("a scope")).unwrap();
+        assert_eq!(
+            scope.mode,
+            crate::source_discovery::SourceScopeMode::Explicit
+        );
+        assert!(
+            scope
+                .entries
+                .iter()
+                .any(|entry| entry.file == "src/vendored.rs"
+                    && entry.reason == "outside explicit source roots"),
+            "{scope:?}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn a_proc_macro_crates_own_code_is_declined() {
         // async-trait, serde_derive and thiserror-impl compile to compiler
         // plugins: rustc loads them while building the crate under test and
@@ -948,7 +1038,7 @@ fn integration_choice() {
         .unwrap();
         fs::write(root.join("src/helper.rs"), "pub fn one() -> i32 { 1 }\n").unwrap();
 
-        let prepared = prepare_rust_project(&root).unwrap();
+        let prepared = prepare_rust_project(&root, None).unwrap();
         // The files are still instrumented and still in the manifest; their
         // obligations are declined, and a limitation says why.
         let declined = prepared.manifest.unmeasured.iter().collect::<BTreeSet<_>>();
@@ -999,7 +1089,7 @@ fn integration_choice() {
         fs::write(root.join("src/little.rs"), "pub fn v() -> i32 { 1 }\n").unwrap();
         fs::write(root.join("src/big.rs"), "pub fn v() -> i32 { 2 }\n").unwrap();
 
-        let prepared = prepare_rust_project(&root).unwrap();
+        let prepared = prepare_rust_project(&root, None).unwrap();
         // Both arms, and never the inline module, which has no file.
         assert_eq!(
             prepared.source_files,
@@ -1092,7 +1182,7 @@ fn integration_choice() {
         )
         .unwrap();
 
-        let prepared = prepare_rust_project(&root).unwrap();
+        let prepared = prepare_rust_project(&root, None).unwrap();
         assert_eq!(
             prepared.source_files,
             [
@@ -1163,7 +1253,7 @@ fn integration_choice() {
             ),
         )
         .unwrap();
-        let prepared = prepare_rust_project(&root).unwrap();
+        let prepared = prepare_rust_project(&root, None).unwrap();
         // The target's path, once; never the symlink's spelling.
         let shared = prepared
             .source_files
@@ -1192,7 +1282,7 @@ fn integration_choice() {
     #[test]
     fn crate_keys_carry_the_manifest_token() {
         let root = fixture();
-        let prepared = prepare_rust_project(&root).unwrap();
+        let prepared = prepare_rust_project(&root, None).unwrap();
         let token = manifest_token(&prepared.manifest);
         assert_eq!(token.len(), 12);
         assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
@@ -1215,7 +1305,7 @@ fn integration_choice() {
     fn prepares_every_workspace_crate_root_and_compiles_without_manifest_changes() {
         let root = fixture();
         let manifest_before = fs::read(root.join("Cargo.toml")).unwrap();
-        let prepared = prepare_rust_project(&root).unwrap();
+        let prepared = prepare_rust_project(&root, None).unwrap();
         assert_eq!(
             prepared.source_files,
             ["src/lib.rs", "tests/integration.rs"]

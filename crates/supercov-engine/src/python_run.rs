@@ -185,15 +185,24 @@ fn environment(
 pub fn current_python_integrity(
     root: &Path,
     command: &[String],
+    source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
     let root = canonicalize_simplified(root).map_err(|error| error.to_string())?;
-    let files = crate::python_project::discover_python_files(&root)?;
-    create_explicit_run_integrity(
-        &root,
-        &python_integrity_inputs(&files, command),
-        &FrontendIntegrityInputs::embedded_python(),
-    )
-    .map_err(|error| error.to_string())
+    let mut files = crate::python_project::discover_python_files(&root)?;
+    // The roots the run was measured under, not this shell's: the run
+    // digested the files they kept, and nothing else would match it.
+    if let Some(configured) = source_roots.filter(|roots| !roots.is_empty()) {
+        crate::source_discovery::ExplicitSourceRoots::resolve(&root, configured)
+            .map_err(|error| error.to_string())?
+            .narrow(&mut files.sources, &mut files.excluded, String::as_str);
+    }
+    let mut inputs = python_integrity_inputs(&files, command);
+    crate::source_discovery::fold_roots_into_configuration(
+        &mut inputs.execution_configuration,
+        source_roots,
+    );
+    create_explicit_run_integrity(&root, &inputs, &FrontendIntegrityInputs::embedded_python())
+        .map_err(|error| error.to_string())
 }
 
 pub fn run_direct_python(
@@ -224,10 +233,21 @@ pub fn run_direct_python(
         }
 
         let adapter_started = Instant::now();
-        let project: PreparedPythonProject = prepare_python_project(&root)?;
+        let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(&root, &ambient)
+            .map_err(|error| error.to_string())?;
+        let project: PreparedPythonProject = prepare_python_project(&root, roots.as_ref())?;
+        let source_roots = crate::source_discovery::configured_source_roots(
+            &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
+        );
+        let mut integrity_inputs = python_integrity_inputs(&project.files, &request.command);
+        crate::source_discovery::fold_roots_into_configuration(
+            &mut integrity_inputs.execution_configuration,
+            source_roots.as_deref(),
+        );
         let integrity = create_explicit_run_integrity(
             &root,
-            &python_integrity_inputs(&project.files, &request.command),
+            &integrity_inputs,
             &FrontendIntegrityInputs::embedded_python(),
         )
         .map_err(|error| error.to_string())?;
@@ -357,6 +377,7 @@ pub fn run_direct_python(
             timings: Some(timings),
             merged: None,
             parents: None,
+            source_roots: source_roots.clone(),
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
@@ -381,5 +402,82 @@ pub fn run_direct_python(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source_discovery::{ExplicitSourceRoots, fold_roots_into_configuration};
+
+    fn fixture(name: &str) -> PathBuf {
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-run-{}-{}-{name}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        for (file, contents) in [
+            ("a.py", "def f(x):\n    return x if x else 0\n"),
+            ("vendor/pkg/b.py", "def g():\n    return 1\n"),
+            ("test/test_a.py", "from a import f\n"),
+        ] {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        canonicalize_simplified(&root).unwrap()
+    }
+
+    #[test]
+    fn a_rooted_run_is_current_whatever_shell_asks() {
+        // A run recorded under roots digested only the files they kept, while
+        // the query that later judged it rediscovered every file: the two could
+        // never agree, and each rooted run read as stale the moment it was
+        // written. The query has to replay the roots the run recorded, because
+        // the shell it runs in is usually not the one the run came from.
+        let root = fixture("current");
+        let configured = vec!["a.py".to_owned()];
+        let command = vec!["python".to_owned(), "-m".to_owned(), "unittest".to_owned()];
+
+        let roots = ExplicitSourceRoots::resolve(&root, &configured).unwrap();
+        let project = crate::python_project::prepare_python_project(&root, Some(&roots)).unwrap();
+        let mut inputs = python_integrity_inputs(&project.files, &command);
+        fold_roots_into_configuration(&mut inputs.execution_configuration, Some(&configured));
+        let recorded = create_explicit_run_integrity(
+            &root,
+            &inputs,
+            &FrontendIntegrityInputs::embedded_python(),
+        )
+        .unwrap();
+
+        let replayed = current_python_integrity(&root, &command, Some(&configured)).unwrap();
+        assert_eq!(recorded.fingerprint, replayed.fingerprint);
+
+        // Judged without the roots, it is a different run -- which is what the
+        // query used to do.
+        let ignoring = current_python_integrity(&root, &command, None).unwrap();
+        assert_ne!(recorded.fingerprint, ignoring.fingerprint);
+
+        // A change the roots left out is not a change to this run; one they
+        // kept is.
+        fs::write(root.join("vendor/pkg/b.py"), "def g():\n    return 2\n").unwrap();
+        assert_eq!(
+            current_python_integrity(&root, &command, Some(&configured))
+                .unwrap()
+                .fingerprint,
+            recorded.fingerprint,
+            "a vendored file changing does not make a rooted run stale"
+        );
+        fs::write(root.join("a.py"), "def f(x):\n    return 1\n").unwrap();
+        assert_ne!(
+            current_python_integrity(&root, &command, Some(&configured))
+                .unwrap()
+                .fingerprint,
+            recorded.fingerprint,
+            "a first-party file changing does"
+        );
+        fs::remove_dir_all(root).ok();
     }
 }

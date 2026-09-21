@@ -410,7 +410,7 @@ terminal or offline environment after the package has been downloaded.
 
 | Variable | Use |
 | --- | --- |
-| `SUPERCOV_SOURCE_ROOTS` | Set comma-separated first-party source roots when automatic discovery is ambiguous |
+| `SUPERCOV_SOURCE_ROOTS` | Comma-separated directories or files that hold your own code, in any language; everything else is left out |
 | `SUPERCOV_TEST_KIND` | Label the wrapped command as a test level such as `unit` or `e2e` |
 
 Examples:

@@ -120,6 +120,14 @@ pub struct RunMetadata {
     pub merged: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parents: Option<Vec<String>>,
+    /// The `SUPERCOV_SOURCE_ROOTS` the run was measured under. It decides what
+    /// the run measures, so it is part of what the run is, replayed like the
+    /// command when a later query asks whether the checkout has moved on. The
+    /// environment of that later query is no guide: it is usually a different
+    /// shell, and a run judged against roots it was not measured under read as
+    /// stale the moment it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_roots: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -380,6 +388,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
         timings: None,
         merged: None,
         parents: None,
+        source_roots: None,
     };
     fs::write(
         directory.join("run.json"),
@@ -790,6 +799,23 @@ fn open_validated_query_index(
     Ok(index)
 }
 
+/// Open the index this process has just written. It was synced and renamed
+/// into place from the very bytes its page digests were computed over, so
+/// hashing the whole file again re-derives what the write already guarantees
+/// -- and on a 300-file run that was 726 MB, 29% of the query that follows a
+/// test run. Nothing unverified is trusted: every page is still checked against
+/// its digest the first time a query reads it. An index found on disk later is
+/// verified in full on open, as before, since it may have been torn or changed
+/// since it was written.
+fn open_written_query_index(
+    path: &Path,
+    identity: &QueryIndexIdentity,
+) -> Result<QueryIndex, RunIndexError> {
+    let index = QueryIndex::open(path, identity)?;
+    CoverageIndex::new(&index)?;
+    Ok(index)
+}
+
 /// Open an existing valid index without triggering analysis or publication.
 pub fn open_existing_query_index(run: &StoredRun) -> Result<Option<QueryIndex>, RunIndexError> {
     match fs::symlink_metadata(&run.query_index_path) {
@@ -825,7 +851,7 @@ pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunInd
         return Err(RunIndexError::EvidenceChanged);
     }
     write_query_index(&sections, &identity, &run.query_index_path)?;
-    let index = open_validated_query_index(&run.query_index_path, &identity)?;
+    let index = open_written_query_index(&run.query_index_path, &identity)?;
     if query_index_identity(run)? != identity {
         return Err(RunIndexError::EvidenceChanged);
     }
@@ -926,6 +952,7 @@ mod tests {
             timings: None,
             merged: None,
             parents: None,
+            source_roots: None,
         };
         fs::write(
             directory.join("run.json"),
@@ -1204,6 +1231,42 @@ mod tests {
             index.verify_all().unwrap();
         }
         assert_eq!(fs::read(&run.query_index_path).unwrap(), canonical);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_index_opened_without_the_full_check_still_refuses_a_corrupt_page() {
+        // The index a process has just written is opened without hashing every
+        // page first, since the write already guarantees them. What keeps that
+        // safe is that no page is trusted before it is checked: reading one
+        // that does not match its digest must fail, not return its bytes.
+        let root = temporary_directory("written-index");
+        let run = create_indexable_python_run(&root);
+        let identity = query_index_identity(&run).unwrap();
+        drop(open_or_rebuild_query_index(&run).unwrap());
+        let lines = QueryIndex::open(&run.query_index_path, &identity)
+            .unwrap()
+            .descriptor(crate::coverage_index::SECTION_LINES)
+            .unwrap();
+        assert!(lines.length > 0, "the fixture has line records to corrupt");
+
+        let mut bytes = fs::read(&run.query_index_path).unwrap();
+        bytes[lines.offset as usize] ^= 0xff;
+        fs::write(&run.query_index_path, bytes).unwrap();
+
+        let index = open_written_query_index(&run.query_index_path, &identity)
+            .expect("opening does not hash every page");
+        assert!(
+            matches!(
+                index.bytes(crate::coverage_index::SECTION_LINES, 0, 1),
+                Err(crate::query_index::QueryIndexError::CorruptPage { .. })
+            ),
+            "the corrupt page is refused when it is read"
+        );
+        assert!(
+            index.verify_all().is_err(),
+            "and a full check still finds it"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

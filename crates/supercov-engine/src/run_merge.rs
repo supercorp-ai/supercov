@@ -292,6 +292,7 @@ pub fn merge_coverage_runs(
             timings: None,
             merged: Some(true),
             parents: Some(run_ids.to_vec()),
+            source_roots: None,
         };
         publish_run(root, &metadata, &archive_path)
             .map_err(|error| format!("Could not publish merged run: {error}"))?;

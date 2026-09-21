@@ -4,7 +4,7 @@
 //! links and turns unclassified first-party files into explicit blockers.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Component, Path, PathBuf},
 };
@@ -169,6 +169,257 @@ fn io_error(path: &Path, source: io::Error) -> SourceDiscoveryError {
         path: path.to_owned(),
         source,
     }
+}
+
+/// The variable that names first-party source roots, for every frontend.
+pub const SOURCE_ROOTS_VARIABLE: &str = "SUPERCOV_SOURCE_ROOTS";
+
+/// Why a file a frontend would otherwise measure was left out.
+pub const OUTSIDE_EXPLICIT_ROOTS: &str = "outside explicit source roots";
+
+/// The first-party source roots named in `SUPERCOV_SOURCE_ROOTS`:
+/// comma-separated, trimmed, empties dropped. `None` when the variable is unset
+/// or names nothing, which leaves discovery automatic.
+///
+/// Every frontend reads the roots through here. It used to be read on the
+/// JavaScript path alone while the documentation described it without a
+/// language, so a Python project that set it had every file measured anyway --
+/// a vendored tree beside flat-layout sources came out at 660 files instead of
+/// fifteen, with nothing to say the variable had been ignored.
+pub fn configured_source_roots(environment: &BTreeMap<String, String>) -> Option<Vec<String>> {
+    let roots = environment
+        .get(SOURCE_ROOTS_VARIABLE)?
+        .split(',')
+        .map(str::trim)
+        .filter(|root| !root.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    (!roots.is_empty()).then_some(roots)
+}
+
+/// Fold the roots a run was measured under into its execution configuration,
+/// the part of a run's identity that records how it was asked to run. Two runs
+/// over different roots measure different denominators and are not the same
+/// run; nothing is appended when no roots were named, so every existing
+/// fingerprint stays as it was.
+pub fn fold_roots_into_configuration(configuration: &mut Vec<u8>, roots: Option<&[String]>) {
+    let Some(roots) = roots.filter(|roots| !roots.is_empty()) else {
+        return;
+    };
+    configuration.push(0);
+    configuration
+        .extend_from_slice(format!("{SOURCE_ROOTS_VARIABLE}={}", roots.join(",")).as_bytes());
+}
+
+/// Explicit source roots resolved against a project root. Each is an existing
+/// directory or a single file, so a flat layout can name the modules it keeps
+/// at the root one by one. A root that does not exist names nothing to measure
+/// and is skipped; one that is neither a file nor a directory is refused, since
+/// a symlink root would reach outside what the project owns.
+#[derive(Debug, Clone)]
+pub struct ExplicitSourceRoots {
+    root: PathBuf,
+    roots: Vec<PathBuf>,
+    configured: Vec<String>,
+}
+
+impl ExplicitSourceRoots {
+    pub fn resolve(root: &Path, configured: &[String]) -> Result<Self, SourceDiscoveryError> {
+        let root = lexical_normalize(root);
+        let roots = existing_roots(configured.iter().map(|value| resolve(&root, value)))?;
+        Ok(Self {
+            root,
+            roots,
+            configured: configured.to_vec(),
+        })
+    }
+
+    /// Read the roots from the environment, if any are named.
+    pub fn from_environment(
+        root: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Option<Self>, SourceDiscoveryError> {
+        configured_source_roots(environment)
+            .map(|configured| Self::resolve(root, &configured))
+            .transpose()
+    }
+
+    /// Read the roots named against `project`, resolved inside `workspace` --
+    /// the isolated copy Go, the JVM and Rust measure. The copy mirrors the
+    /// project, so a relative root names the same file in both. An absolute one
+    /// names the original tree, which nothing in the copy lies under, so it is
+    /// rebased onto the copy; without that it would match nothing and read as a
+    /// typo. The roots are still quoted as they were written.
+    pub fn from_environment_in(
+        project: &Path,
+        workspace: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Option<Self>, SourceDiscoveryError> {
+        let Some(configured) = configured_source_roots(environment) else {
+            return Ok(None);
+        };
+        let project = lexical_normalize(project);
+        let rebased = configured
+            .iter()
+            .map(|value| {
+                let path = Path::new(value);
+                if !path.is_absolute() {
+                    return value.clone();
+                }
+                lexical_normalize(path)
+                    .strip_prefix(&project)
+                    .map(|rest| {
+                        let rest = rest.to_string_lossy().into_owned();
+                        if rest.is_empty() { ".".into() } else { rest }
+                    })
+                    .unwrap_or_else(|_| value.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut roots = Self::resolve(workspace, &rebased)?;
+        roots.configured = configured;
+        Ok(Some(roots))
+    }
+
+    /// Whether a project-relative file lies under these roots: inside a
+    /// directory root, or the very file a file root names.
+    pub fn contains(&self, relative: &str) -> bool {
+        root_contains(&self.roots, &lexical_normalize(&self.root.join(relative)))
+    }
+
+    /// The roots exactly as they were written, including any that name nothing.
+    /// An error about roots quotes these, because the one that does not exist
+    /// is usually the typo the person needs to see.
+    pub fn configured(&self) -> &[String] {
+        &self.configured
+    }
+
+    /// Refuse roots that left a frontend nothing to measure. A typo in the
+    /// variable must not become a green run over zero files -- the failure mode
+    /// most likely to pass unnoticed in an agent loop.
+    pub fn refuse_if_empty(&self, remaining: usize, language: &str) -> Result<(), String> {
+        if remaining > 0 {
+            return Ok(());
+        }
+        let missing = self
+            .configured
+            .iter()
+            .filter(|value| fs::symlink_metadata(resolve(&self.root, value)).is_err())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut message = format!(
+            "{SOURCE_ROOTS_VARIABLE}={} left no {language} source to measure",
+            self.configured.join(",")
+        );
+        if !missing.is_empty() {
+            message.push_str(&format!("; {} does not exist", missing.join(", ")));
+        }
+        message.push_str("; name the directories or files that hold your own code");
+        Err(message)
+    }
+
+    /// The scope a frontend that has no scope of its own records when explicit
+    /// roots shaped what it measures: the files kept, and the files the roots
+    /// left out. Without it, honouring the variable would be as invisible as
+    /// ignoring it -- the complaint that started this -- since `runs <id>
+    /// scope` would have nothing to show.
+    pub fn scope(
+        &self,
+        included: &[String],
+        excluded: &[(String, &'static str)],
+    ) -> Result<SourceScope, SourceDiscoveryError> {
+        let mut entries = included
+            .iter()
+            .map(|file| SourceScopeEntry {
+                file: file.clone(),
+                status: SourceScopeStatus::Included,
+                reason: "explicit source root".into(),
+                package_root: None,
+            })
+            .chain(
+                excluded
+                    .iter()
+                    .filter(|(_, reason)| *reason == OUTSIDE_EXPLICIT_ROOTS)
+                    .map(|(file, reason)| SourceScopeEntry {
+                        file: file.clone(),
+                        status: SourceScopeStatus::Excluded,
+                        reason: (*reason).into(),
+                        package_root: None,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.file.cmp(&right.file));
+        Ok(SourceScope {
+            version: 1,
+            mode: SourceScopeMode::Explicit,
+            roots: self.local_roots()?,
+            entries,
+        })
+    }
+
+    /// The roots as project-relative paths, as the recorded scope names them.
+    pub fn local_roots(&self) -> Result<Vec<String>, SourceDiscoveryError> {
+        self.roots
+            .iter()
+            .map(|path| local_path(&self.root, path))
+            .collect()
+    }
+
+    /// Split `sources` into the files these roots keep and the ones they leave
+    /// out, recording why each was left out. A frontend's own exclusions --
+    /// tests, environments, build output -- have already been applied, so a
+    /// root narrows what is measured and never pulls a test file back in.
+    pub fn narrow<T>(
+        &self,
+        sources: &mut Vec<T>,
+        excluded: &mut Vec<(String, &'static str)>,
+        file: impl Fn(&T) -> &str,
+    ) {
+        let (kept, outside): (Vec<T>, Vec<T>) = sources
+            .drain(..)
+            .partition(|source| self.contains(file(source)));
+        excluded.extend(
+            outside
+                .iter()
+                .map(|source| (file(source).to_owned(), OUTSIDE_EXPLICIT_ROOTS)),
+        );
+        *sources = kept;
+    }
+}
+
+/// The configured or discovered roots that exist, each a regular file or
+/// directory. Shared by explicit and automatic discovery so the two cannot
+/// disagree about what counts as a root.
+fn existing_roots(
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
+    let mut existing = BTreeSet::new();
+    for path in candidates {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_dir() => {
+                existing.insert(path);
+            }
+            Ok(_) => return Err(SourceDiscoveryError::InvalidRoot(path)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&path, error)),
+        }
+    }
+    Ok(existing.into_iter().collect())
+}
+
+/// Whether `path` lies under one of `roots`: inside a directory root, or equal
+/// to a file root.
+fn root_contains(roots: &[PathBuf], path: &Path) -> bool {
+    roots.iter().any(|directory| {
+        fs::symlink_metadata(directory)
+            .map(|metadata| {
+                if metadata.file_type().is_dir() {
+                    within(directory, path)
+                } else {
+                    directory == path
+                }
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -770,18 +1021,7 @@ pub fn discover_source_scope(
             })
             .collect()
     };
-    let mut existing_roots = BTreeSet::new();
-    for path in include_roots {
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_dir() => {
-                existing_roots.insert(path);
-            }
-            Ok(_) => return Err(SourceDiscoveryError::InvalidRoot(path)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(&path, error)),
-        }
-    }
-    let existing_roots = existing_roots.into_iter().collect::<Vec<_>>();
+    let existing_roots = existing_roots(include_roots)?;
     let mut all_files = Vec::new();
     files_under(&root, &root, &mut all_files)?;
     all_files.sort();
@@ -819,17 +1059,7 @@ pub fn discover_source_scope(
             ));
         } else if built_asset(&file) {
             entries.push(entry(SourceScopeStatus::Excluded, BUILT_ASSET_REASON));
-        } else if existing_roots.iter().any(|directory| {
-            fs::symlink_metadata(directory)
-                .map(|metadata| {
-                    if metadata.file_type().is_dir() {
-                        within(directory, &path)
-                    } else {
-                        directory == &path
-                    }
-                })
-                .unwrap_or(false)
-        }) {
+        } else if root_contains(&existing_roots, &path) {
             included.push(path);
             entries.push(entry(
                 SourceScopeStatus::Included,
@@ -1134,6 +1364,41 @@ mod tests {
             "nested checkout files must not appear in scope at all"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn roots_enter_a_runs_identity_only_when_named() {
+        // Appending nothing when no roots are named is what keeps every
+        // fingerprint recorded before this change valid.
+        let mut unchanged = b"pytest\0-q".to_vec();
+        fold_roots_into_configuration(&mut unchanged, None);
+        assert_eq!(unchanged, b"pytest\0-q");
+        fold_roots_into_configuration(&mut unchanged, Some(&[]));
+        assert_eq!(unchanged, b"pytest\0-q");
+
+        let mut folded = b"pytest\0-q".to_vec();
+        fold_roots_into_configuration(&mut folded, Some(&["src".to_owned(), "a.py".to_owned()]));
+        assert_eq!(folded, b"pytest\0-q\0SUPERCOV_SOURCE_ROOTS=src,a.py");
+    }
+
+    #[test]
+    fn the_variable_is_read_the_same_way_for_every_frontend() {
+        let read = |value: &str| {
+            configured_source_roots(&BTreeMap::from([(
+                SOURCE_ROOTS_VARIABLE.to_owned(),
+                value.to_owned(),
+            )]))
+        };
+        assert_eq!(
+            read(" src , app ,"),
+            Some(vec!["src".to_owned(), "app".to_owned()])
+        );
+        assert_eq!(
+            read(" , "),
+            None,
+            "naming nothing leaves discovery automatic"
+        );
+        assert_eq!(configured_source_roots(&BTreeMap::new()), None);
     }
 
     #[test]

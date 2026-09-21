@@ -197,8 +197,9 @@ fn instrument_workspace(
     workspace: &Path,
     evidence_directory: &Path,
     serialised: bool,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<InstrumentedWorkspace, String> {
-    let mut project = prepare_go_project(workspace)?;
+    let mut project = prepare_go_project(workspace, roots)?;
     let mut unparseable_tests: Vec<(String, String)> = Vec::new();
 
     // A go.work repository has several modules and no module at its root, so
@@ -469,15 +470,17 @@ fn command_with_fresh_results(command: &[String]) -> (Vec<String>, bool) {
 pub fn current_go_integrity(
     root: &Path,
     command: &[String],
+    source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
     let root = canonicalize_simplified(root).map_err(|error| error.to_string())?;
     let files = crate::go_project::discover_go_files(&root)?;
-    create_explicit_run_integrity(
-        &root,
-        &go_integrity_inputs(&files, command),
-        &FrontendIntegrityInputs::embedded_go(),
-    )
-    .map_err(|error| error.to_string())
+    let mut inputs = go_integrity_inputs(&files, command);
+    crate::source_discovery::fold_roots_into_configuration(
+        &mut inputs.execution_configuration,
+        source_roots,
+    );
+    create_explicit_run_integrity(&root, &inputs, &FrontendIntegrityInputs::embedded_go())
+        .map_err(|error| error.to_string())
 }
 
 pub fn run_direct_go(
@@ -509,7 +512,14 @@ pub fn run_direct_go(
 
         let adapter_started = Instant::now();
         let files = crate::go_project::discover_go_files(&root)?;
-        let integrity_inputs = go_integrity_inputs(&files, &request.command);
+        let source_roots = crate::source_discovery::configured_source_roots(
+            &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
+        );
+        let mut integrity_inputs = go_integrity_inputs(&files, &request.command);
+        crate::source_discovery::fold_roots_into_configuration(
+            &mut integrity_inputs.execution_configuration,
+            source_roots.as_deref(),
+        );
         let assertion_inputs =
             crate::assertion_inputs::capture(&root, "go", integrity_inputs.assertion_paths())?;
         let integrity = create_explicit_run_integrity(
@@ -532,7 +542,13 @@ pub fn run_direct_go(
         } else {
             (request.command.clone(), false)
         };
-        let instrumented = instrument_workspace(&workspace, &evidence_directory, serialised)?;
+        let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment_in(
+            &root, &workspace, &ambient,
+        )
+        .map_err(|error| error.to_string())?;
+        let instrumented =
+            instrument_workspace(&workspace, &evidence_directory, serialised, roots.as_ref())?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
         writeln!(
@@ -740,6 +756,7 @@ pub fn run_direct_go(
             timings: Some(timings),
             merged: None,
             parents: None,
+            source_roots: source_roots.clone(),
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;

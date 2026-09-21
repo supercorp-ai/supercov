@@ -774,14 +774,7 @@ pub fn discover_coverage_project(
     command: &[String],
 ) -> Result<CoverageProject, ProjectDiscoveryError> {
     let manifest = package_json(root);
-    let configured_roots = environment.get("SUPERCOV_SOURCE_ROOTS").map(|roots| {
-        roots
-            .split(',')
-            .map(str::trim)
-            .filter(|root| !root.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    });
+    let configured_roots = crate::source_discovery::configured_source_roots(environment);
     let DiscoveredSourceScope {
         source_files,
         source_roots,

@@ -1,6 +1,10 @@
 use serde_json::json;
 use std::collections::BTreeSet;
-use supercov_engine::{assertion_map::*, assertion_store::assess, coverage_report::*};
+use supercov_engine::{
+    assertion_map::*,
+    assertion_store::{assess, assess_summary},
+    coverage_report::*,
+};
 
 fn anchor(file: &str, text: &str, needle: &str) -> Anchor {
     let start = text.find(needle).unwrap();
@@ -1945,4 +1949,74 @@ fn a_map_edit_says_which_part_of_the_claim_moved() {
             .any(|r| r.contains("claim or inputs changed")),
         "a state written before parts were recorded must still say something"
     );
+}
+
+#[test]
+fn a_summary_counts_exactly_what_the_full_assessment_counts() {
+    // `runs latest` shows five fields of the assessment and used to build all of
+    // it to get them: every measured statement, each carrying the source of the
+    // node around it. On a 300-file run that was 300,000 entries and 4 GB. The
+    // summary now skips that list, so the one thing that must not happen is the
+    // two computing different numbers -- which is what every scenario checks,
+    // including one where a statement cannot be located, since that count is the
+    // one taken from the list the summary no longer builds.
+    let (inputs, map, state) = fixture();
+    let mut unlocatable = inputs.clone();
+    unlocatable
+        .files
+        .insert("src/b.js".into(), "something else entirely;\n".into());
+    let scenarios = [
+        (
+            "both statements reached",
+            inputs.clone(),
+            report_fixture(&["a", "b"], true),
+            true,
+        ),
+        (
+            "one reached",
+            inputs.clone(),
+            report_fixture(&["a"], true),
+            true,
+        ),
+        (
+            "none reached",
+            inputs.clone(),
+            report_fixture(&[], true),
+            true,
+        ),
+        (
+            "assertion failed",
+            inputs.clone(),
+            report_fixture(&["a", "b"], false),
+            false,
+        ),
+        (
+            "a statement cannot be located",
+            unlocatable,
+            report_fixture(&["a", "b"], true),
+            true,
+        ),
+    ];
+    for (name, inputs, coverage, passed) in scenarios {
+        let full = assess(&map, &state, &inputs, &coverage, passed);
+        let summary = assess_summary(&map, &state, &inputs, &coverage, passed);
+        assert_eq!(full["summary"], summary["summary"], "{name}");
+        assert_eq!(
+            full["statements"].as_array().map(Vec::len),
+            Some(2),
+            "{name}"
+        );
+        for list in ["statements", "creditedLines", "unassertedLines"] {
+            assert!(
+                summary[list].as_array().is_none_or(Vec::is_empty),
+                "{name}: the summary builds no {list}"
+            );
+        }
+        if name == "a statement cannot be located" {
+            assert_eq!(
+                summary["summary"]["unanchoredStatements"], 1,
+                "the count taken from the skipped list is still counted"
+            );
+        }
+    }
 }

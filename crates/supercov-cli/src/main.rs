@@ -2575,8 +2575,9 @@ fn run_store_agent_error(error: RunStoreError) -> agent_json::AgentError {
 fn current_javascript_integrity(
     root: &Path,
     command: &[String],
+    source_roots: Option<&[String]>,
 ) -> Option<supercov_engine::run_store::RunIntegrity> {
-    supercov_engine::javascript_run::current_javascript_integrity(root, command).ok()
+    supercov_engine::javascript_run::current_javascript_integrity(root, command, source_roots).ok()
 }
 
 /// Which frontend measured a run, from the contract version it recorded.
@@ -2619,15 +2620,20 @@ fn current_integrity_for_run(
     run: &StoredRun,
 ) -> Option<supercov_engine::run_store::RunIntegrity> {
     let command = &run.metadata.command;
+    let roots = run.metadata.source_roots.as_deref();
     match frontend_of(&run.metadata.integrity.instrumenter_version) {
-        Frontend::Rust => supercov_engine::rust_run::current_rust_integrity(root, command).ok(),
-        Frontend::Ruby => supercov_engine::ruby_run::current_ruby_integrity(root, command).ok(),
-        Frontend::Python => {
-            supercov_engine::python_run::current_python_integrity(root, command).ok()
+        Frontend::Rust => {
+            supercov_engine::rust_run::current_rust_integrity(root, command, roots).ok()
         }
-        Frontend::Go => supercov_engine::go_run::current_go_integrity(root, command).ok(),
-        Frontend::Jvm => supercov_engine::jvm_run::current_jvm_integrity(root, command).ok(),
-        Frontend::JavaScript => current_javascript_integrity(root, command),
+        Frontend::Ruby => {
+            supercov_engine::ruby_run::current_ruby_integrity(root, command, roots).ok()
+        }
+        Frontend::Python => {
+            supercov_engine::python_run::current_python_integrity(root, command, roots).ok()
+        }
+        Frontend::Go => supercov_engine::go_run::current_go_integrity(root, command, roots).ok(),
+        Frontend::Jvm => supercov_engine::jvm_run::current_jvm_integrity(root, command, roots).ok(),
+        Frontend::JavaScript => current_javascript_integrity(root, command, roots),
     }
 }
 
@@ -2884,7 +2890,7 @@ fn execute_public_query(
                         data.command.clone_from(&run.metadata.command);
                         if run.directory.join(supercov_engine::assertion_store::MAP_FILE).exists() {
                             data.assertion_coverage = Some(match if current.as_ref().is_some_and(|c| !compare_run_integrity(Some(&run.metadata.integrity), c).stale) {
-                                supercov_engine::assertion_store::report(root, run)
+                                supercov_engine::assertion_store::report_summary(root, run)
                             } else { Err("Current checkout differs from the run or cannot be verified; rerun tests to inherit the assertion map".into()) } {
                                 Ok(report) => serde_json::json!({"available":true,"summary":report["summary"],"basis":report["basis"],"revision":report["revision"],"inheritance":report["inheritance"],"map":run.directory.join(supercov_engine::assertion_store::MAP_FILE),"validationErrors":report["validationErrors"],"scope":"whole run with matching current source; independent of structural query filters"}),
                                 Err(error) => serde_json::json!({"available":false,"error":error}),

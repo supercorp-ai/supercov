@@ -170,14 +170,16 @@ pub(crate) fn collect_integrity_inputs(
 pub fn current_rust_integrity(
     root: &Path,
     command: &[String],
+    source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
     let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
-    create_explicit_run_integrity(
-        &root,
-        &collect_integrity_inputs(&root, command)?,
-        &FrontendIntegrityInputs::embedded_rust(),
-    )
-    .map_err(|error| error.to_string())
+    let mut inputs = collect_integrity_inputs(&root, command)?;
+    crate::source_discovery::fold_roots_into_configuration(
+        &mut inputs.execution_configuration,
+        source_roots,
+    );
+    create_explicit_run_integrity(&root, &inputs, &FrontendIntegrityInputs::embedded_rust())
+        .map_err(|error| error.to_string())
 }
 
 pub fn run_direct_rust(
@@ -221,7 +223,14 @@ pub fn run_direct_rust(
         }
 
         let adapter_started = Instant::now();
-        let integrity_inputs = collect_integrity_inputs(&root, &request.command)?;
+        let source_roots = crate::source_discovery::configured_source_roots(
+            &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
+        );
+        let mut integrity_inputs = collect_integrity_inputs(&root, &request.command)?;
+        crate::source_discovery::fold_roots_into_configuration(
+            &mut integrity_inputs.execution_configuration,
+            source_roots.as_deref(),
+        );
         let assertion_inputs =
             crate::assertion_inputs::capture(&root, "rust", integrity_inputs.assertion_paths())?;
         let integrity = create_explicit_run_integrity(
@@ -269,7 +278,12 @@ pub fn run_direct_rust(
                 workspace.display()
             )
             .map_err(|error| error.to_string())?;
-            prepare_rust_project(&workspace).map_err(|error| error.to_string())?
+            let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+            let roots = crate::source_discovery::ExplicitSourceRoots::from_environment_in(
+                &root, &workspace, &ambient,
+            )
+            .map_err(|error| error.to_string())?;
+            prepare_rust_project(&workspace, roots.as_ref()).map_err(|error| error.to_string())?
         };
         project.target_directory = target_directory;
         fs::create_dir_all(&project.target_directory).map_err(|error| error.to_string())?;
@@ -374,6 +388,7 @@ pub fn run_direct_rust(
             timings: Some(timings),
             merged: None,
             parents: None,
+            source_roots: source_roots.clone(),
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;

@@ -278,8 +278,19 @@ fn unparseable_limitation(file: &str, reason: &str) -> serde_json::Value {
     })
 }
 
-pub fn prepare_jvm_project(root: &Path) -> Result<PreparedJvmProject, String> {
-    let files = discover_jvm_files(root)?;
+pub fn prepare_jvm_project(
+    root: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+) -> Result<PreparedJvmProject, String> {
+    let mut files = discover_jvm_files(root)?;
+    if let Some(roots) = roots {
+        roots.narrow(
+            &mut files.sources,
+            &mut files.excluded,
+            |(file, _): &(String, JvmLanguage)| file.as_str(),
+        );
+        roots.refuse_if_empty(files.sources.len(), "Java or Kotlin")?;
+    }
     if files.sources.is_empty() && files.tests.is_empty() {
         return Err(
             "no Java or Kotlin sources were found under src/main or src/test; Supercov measures the source sets Maven and Gradle define"
@@ -339,6 +350,23 @@ pub fn prepare_jvm_project(root: &Path) -> Result<PreparedJvmProject, String> {
             }
         }
     }
+    // Only when roots shaped what is measured: without them this frontend
+    // records no scope, and its default output stays exactly as it was.
+    if let Some(roots) = roots {
+        let kept = files
+            .sources
+            .iter()
+            .map(|(file, _)| file.clone())
+            .collect::<Vec<_>>();
+        manifest.scope = Some(
+            serde_json::to_value(
+                roots
+                    .scope(&kept, &files.excluded)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
+        );
+    }
     Ok(PreparedJvmProject {
         root: root.to_owned(),
         files,
@@ -391,6 +419,73 @@ mod tests {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+    }
+
+    fn explicit_roots(root: &Path, roots: &[&str]) -> crate::source_discovery::ExplicitSourceRoots {
+        let roots = roots
+            .iter()
+            .map(|root| (*root).to_owned())
+            .collect::<Vec<_>>();
+        crate::source_discovery::ExplicitSourceRoots::resolve(root, &roots).unwrap()
+    }
+
+    #[test]
+    fn explicit_roots_narrow_the_jvm_to_the_code_they_name() {
+        let root = fixture("explicit-roots");
+        write(&root, "pom.xml", "<project/>");
+        write(
+            &root,
+            "src/main/java/app/Good.java",
+            "class Good { int f(int a) { return a; } }",
+        );
+        write(
+            &root,
+            "src/main/java/shaded/Dep.java",
+            "class Dep { int g() { return 1; } }",
+        );
+
+        let project =
+            prepare_jvm_project(&root, Some(&explicit_roots(&root, &["src/main/java/app"])))
+                .unwrap();
+        assert_eq!(
+            project
+                .files
+                .sources
+                .iter()
+                .map(|(file, _)| file.as_str())
+                .collect::<Vec<_>>(),
+            ["src/main/java/app/Good.java"],
+            "{:?}",
+            project.files
+        );
+        assert!(
+            project.files.excluded.contains(&(
+                "src/main/java/shaded/Dep.java".into(),
+                "outside explicit source roots"
+            )),
+            "{:?}",
+            project.files.excluded
+        );
+        let scope: crate::source_discovery::SourceScope = serde_json::from_value(
+            project
+                .manifest
+                .scope
+                .clone()
+                .expect("explicit roots leave a scope"),
+        )
+        .unwrap();
+        assert_eq!(
+            scope.mode,
+            crate::source_discovery::SourceScopeMode::Explicit
+        );
+        assert!(
+            prepare_jvm_project(&root, None)
+                .unwrap()
+                .manifest
+                .scope
+                .is_none()
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -490,7 +585,7 @@ mod tests {
             "class Broken { void f( {",
         );
 
-        let project = prepare_jvm_project(&root).unwrap();
+        let project = prepare_jvm_project(&root, None).unwrap();
         assert_eq!(project.unparseable.len(), 1);
         assert!(project.unparseable[0].0.ends_with("Broken.java"));
         // And the hole it leaves is declared, not merely printed: a
@@ -525,7 +620,7 @@ mod tests {
         // project that proved nothing is worse than refusing to start.
         let root = fixture("empty");
         write(&root, "pom.xml", "<project/>");
-        assert!(prepare_jvm_project(&root).is_err());
+        assert!(prepare_jvm_project(&root, None).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

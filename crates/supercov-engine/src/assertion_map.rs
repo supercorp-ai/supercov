@@ -44,24 +44,104 @@ impl Anchor {
         }
     }
     pub fn offset(&self, files: &Files) -> Option<usize> {
-        if !local_path(&self.file) || self.text.is_empty() || self.line == 0 || self.column == 0 {
-            return None;
-        }
         let source = files.get(&self.file)?;
-        let start = source
-            .split_inclusive('\n')
-            .take(self.line - 1)
-            .map(str::len)
-            .sum::<usize>();
-        if source[..start].bytes().filter(|b| *b == b'\n').count() != self.line - 1 {
-            return None;
+        self.offset_in(source, &line_starts(source))
+    }
+
+    /// `offset`, given where each line of the anchor's file starts. A caller
+    /// locating many anchors computes those starts once per file: scanning
+    /// from the top of the file for every anchor made an assessment quadratic
+    /// in file length, and a fifth of `runs latest` on a 300-file run was
+    /// spent here.
+    pub fn offset_in(&self, source: &str, starts: &[usize]) -> Option<usize> {
+        locate(
+            &self.file,
+            self.line,
+            self.column,
+            &self.text,
+            source,
+            starts,
+        )
+    }
+}
+
+/// Where an anchor with these parts starts in `source`, without building one.
+/// Counting the statements that cannot be located needs only this answer, and
+/// building an anchor clones the source text of the node around the statement
+/// -- once per statement, which is the allocation a summary exists to avoid.
+pub fn locate(
+    file: &str,
+    line: usize,
+    column: usize,
+    text: &str,
+    source: &str,
+    starts: &[usize],
+) -> Option<usize> {
+    if !local_path(file) || text.is_empty() || line == 0 || column == 0 {
+        return None;
+    }
+    // A line the file does not reach has no start; this is the check the scan
+    // used to make by counting the line feeds before it.
+    let start = *starts.get(line - 1)?;
+    let row = source.get(start..)?.split('\n').next()?;
+    if column - 1 > row.len() {
+        return None;
+    }
+    let pos = start.checked_add(column - 1)?;
+    source.get(pos..)?.starts_with(text).then_some(pos)
+}
+
+/// The byte offset at which each line of `source` starts: 0, then one past
+/// every line feed.
+pub fn line_starts(source: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+        .collect()
+}
+
+/// The text of 1-based `line`, exactly as `str::lines` would yield it: without
+/// its line ending, with a carriage return stripped only where a line feed
+/// follows it, and with no empty line after a final line feed.
+pub fn line_text<'s>(source: &'s str, starts: &[usize], line: usize) -> Option<&'s str> {
+    let start = *starts.get(line.checked_sub(1)?)?;
+    if start >= source.len() {
+        return None;
+    }
+    match starts.get(line) {
+        Some(next) => {
+            let text = &source[start..next - 1];
+            Some(text.strip_suffix('\r').unwrap_or(text))
         }
-        let line = source.get(start..)?.split('\n').next()?;
-        if self.column - 1 > line.len() {
-            return None;
+        None => Some(&source[start..]),
+    }
+}
+
+/// Line starts for every file of a source set, computed once.
+pub struct LineIndex<'a> {
+    starts: BTreeMap<&'a str, (&'a str, Vec<usize>)>,
+}
+
+impl<'a> LineIndex<'a> {
+    pub fn new(files: &'a Files) -> Self {
+        Self {
+            starts: files
+                .iter()
+                .map(|(file, source)| (file.as_str(), (source.as_str(), line_starts(source))))
+                .collect(),
         }
-        let pos = start.checked_add(self.column - 1)?;
-        source.get(pos..)?.starts_with(&self.text).then_some(pos)
+    }
+
+    /// A file's source and the start of each of its lines.
+    pub fn get(&self, file: &str) -> Option<(&'a str, &[usize])> {
+        self.starts
+            .get(file)
+            .map(|(source, starts)| (*source, starts.as_slice()))
+    }
+
+    /// The same answer as `Anchor::offset`, without rescanning the file.
+    pub fn offset(&self, anchor: &Anchor) -> Option<usize> {
+        let (source, starts) = self.get(&anchor.file)?;
+        anchor.offset_in(source, starts)
     }
 }
 
@@ -1815,5 +1895,110 @@ pub fn parse_state(
         Ok(state)
     } else {
         legacy::state(bytes, map, inputs, evidence, legacy_digest)
+    }
+}
+
+#[cfg(test)]
+mod line_index_tests {
+    use super::*;
+
+    // The awkward shapes: no final line feed, a final one, blank lines, CRLF,
+    // a lone carriage return, an empty file, and text whose UTF-8 and UTF-16
+    // widths differ.
+    const SOURCES: &[&str] = &[
+        "",
+        "a",
+        "a\n",
+        "a\n\n",
+        "\n\n\n",
+        "a\r\nb",
+        "a\r\nb\r\n",
+        "a\rb\nc",
+        "x\r",
+        "héllo\nwörld\n",
+        "😀x\ny😀z\n",
+        "def f(a):\n    if a:\n        return 1\n    return 0\n",
+    ];
+
+    /// `Anchor::offset` as it was before it took line starts: the oracle the
+    /// new form must agree with everywhere.
+    fn reference_offset(anchor: &Anchor, source: &str) -> Option<usize> {
+        if !local_path(&anchor.file)
+            || anchor.text.is_empty()
+            || anchor.line == 0
+            || anchor.column == 0
+        {
+            return None;
+        }
+        let start = source
+            .split_inclusive('\n')
+            .take(anchor.line - 1)
+            .map(str::len)
+            .sum::<usize>();
+        if source[..start].bytes().filter(|b| *b == b'\n').count() != anchor.line - 1 {
+            return None;
+        }
+        let line = source.get(start..)?.split('\n').next()?;
+        if anchor.column - 1 > line.len() {
+            return None;
+        }
+        let pos = start.checked_add(anchor.column - 1)?;
+        source.get(pos..)?.starts_with(&anchor.text).then_some(pos)
+    }
+
+    #[test]
+    fn a_line_reads_exactly_as_str_lines_reads_it() {
+        for source in SOURCES {
+            let starts = line_starts(source);
+            for line in 0..source.len() + 3 {
+                let expected = line.checked_sub(1).and_then(|n| source.lines().nth(n));
+                assert_eq!(
+                    line_text(source, &starts, line),
+                    expected,
+                    "line {line} of {source:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_offset_from_line_starts_agrees_with_scanning_everywhere() {
+        let mut compared = 0;
+        for source in SOURCES {
+            let files = Files::from([("f.py".to_owned(), (*source).to_owned())]);
+            let index = LineIndex::new(&files);
+            // Every text that occurs, a text that does not, and every position
+            // around each line -- including just past its end.
+            let mut texts = vec!["zzz".to_owned()];
+            for start in 0..=source.len() {
+                for end in start..=source.len() {
+                    if let Some(text) = source.get(start..end) {
+                        texts.push(text.to_owned());
+                    }
+                }
+            }
+            texts.sort();
+            texts.dedup();
+            for line in 0..source.lines().count() + 3 {
+                for column in 0..source.len() + 3 {
+                    for text in &texts {
+                        let anchor = Anchor {
+                            file: "f.py".into(),
+                            line,
+                            column,
+                            text: text.clone(),
+                        };
+                        let expected = reference_offset(&anchor, source);
+                        assert_eq!(anchor.offset(&files), expected, "{anchor:?} in {source:?}");
+                        assert_eq!(index.offset(&anchor), expected, "{anchor:?} in {source:?}");
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            compared > 10_000,
+            "the comparison has to be broad to mean anything: {compared}"
+        );
     }
 }
