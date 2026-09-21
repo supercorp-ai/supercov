@@ -95,6 +95,6 @@ flow, `--view nodes` or `--view edges` pages the details; `--compact` omits repe
 source text while keeping locations and credit reasons. See
 [Investigating assertion evidence](assertion-evidence.md#read-a-large-flow).
 
-The disposable `assertions.report.cache.json` file lives beside the map. A missing
-or damaged cache is rebuilt. Removing it affects the next query's speed, not
+The disposable `assertions.report.cache.json` and `assertions.summary.cache.json`
+files live beside the map. A missing or damaged cache is rebuilt. Removing it affects the next query's speed, not
 your saved explanations.
