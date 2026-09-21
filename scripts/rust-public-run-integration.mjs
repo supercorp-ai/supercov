@@ -70,7 +70,7 @@ try {
   assert.equal(missing.stderr, 'Usage: supercov -- <test command>\n');
   const help = run(['--help']);
   assert.equal(help.status, 0, help.stderr);
-  assert.match(help.stdout, /Measure your FULL test command/u);
+  assert.match(help.stdout, /Measure your full test command/u);
   assert.match(help.stdout, /npx supercov -- npm test/u);
   const agentGuide = run(['docs', 'agent-loop']);
   assert.equal(agentGuide.status, 0, agentGuide.stderr);
