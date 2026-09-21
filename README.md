@@ -322,3 +322,7 @@ npx supercov clean             # remove all runs and the build cache
 ## Free and open source
 
 [MIT licensed](LICENSE). Inspect, extend, and run it anywhere.
+
+## Contributors
+
+- [@DaVinciTachyon](https://github.com/DaVinciTachyon)
