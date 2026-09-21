@@ -33,7 +33,19 @@ function query(command, request) {
     input: JSON.stringify(request),
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  return JSON.parse(result.stdout.trim().split('\n').at(-1));
+  const value = JSON.parse(result.stdout.trim().split('\n').at(-1));
+  // What the wrapped command printed, kept off the value's own fields so that
+  // comparing it or printing it as JSON is unchanged. Without it a suite that
+  // failed under Supercov reported only its exit code: a flaky browser test
+  // and a broken one looked the same, and telling them apart took a rerun.
+  Object.defineProperty(value, 'output', { value: tail(`${result.stdout}${result.stderr}`) });
+  return value;
+}
+
+// The end of what a command printed, where the failure is, bounded so an
+// assertion message stays readable.
+function tail(text, lines = 200) {
+  return text.trimEnd().split('\n').slice(-lines).join('\n');
 }
 try {
   mkdirSync(resolve(root, 'src'));
@@ -118,7 +130,7 @@ export default {${common}, test:{include:['tests/**/*.test.js'],setupFiles:['./t
       runId: `projects-${name}`,
       startedAt: new Date().toISOString(),
     });
-    assert.equal(run.exitCode, 0, JSON.stringify(run));
+    assert.equal(run.exitCode, 0, `${JSON.stringify(run)}\n${run.output}`);
     const summary = query('__query-stored-run', {
       root,
       query: { runId: run.runId, command: 'summary', filter: 'all' },
