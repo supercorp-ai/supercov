@@ -67,6 +67,7 @@ Score the source with Jev:
 Measure your full test command:
   npx supercov -- npm test
   supercov -- <test command>           measure the complete command
+  supercov --exact-attribution -- ...  credit every test, running yours in order
 
 Inspect a run with small, paginated answers:
   supercov runs latest                 newest run summary
@@ -278,7 +279,26 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Some("--") => public_coverage_run(arguments.collect()),
+        Some("--") => public_coverage_run(arguments.collect(), RunOptions::default()),
+        // The one thing worth asking for before the command: credit every test
+        // with what it reached, wherever that can only be had by running the
+        // suite differently. Written once here rather than as a flag per
+        // language, because what someone wants is the same thing in all of
+        // them.
+        Some("--exact-attribution") => match arguments.next().as_deref() {
+            Some("--") => public_coverage_run(
+                arguments.collect(),
+                RunOptions {
+                    exact_attribution: true,
+                },
+            ),
+            _ => {
+                eprintln!(
+                    "[supercov] --exact-attribution goes before the command: supercov --exact-attribution -- <test command>"
+                );
+                ExitCode::from(2)
+            }
+        },
         Some("__instrument-js") => instrument_js(),
         Some("__analyze-coverage-core") => analyze_coverage_core(),
         Some("__analyze-coverage-results") => analyze_coverage_report(),
@@ -2085,11 +2105,25 @@ fn format_run_timings(timings: &supercov_engine::run_store::RunTimings, total_ms
     )
 }
 
+/// What the caller asked for beyond the command itself.
+#[derive(Debug, Clone, Copy, Default)]
+struct RunOptions {
+    /// Credit every test with what it reached, at whatever the language's
+    /// frontend has to do differently to manage it.
+    ///
+    /// Off by default, because what it costs is not measurement time but the
+    /// suite's own: a JUnit project with parallel execution runs in order, and
+    /// so does a Go package whose tests call `t.Parallel()`. Where a frontend
+    /// attributes exactly at no cost -- one process per test, per-test
+    /// coverage maps -- it already does, and this changes nothing.
+    exact_attribution: bool,
+}
+
 fn process_exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-fn public_coverage_run(command: Vec<String>) -> ExitCode {
+fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     if command.is_empty() {
         eprintln!("Usage: supercov -- <test command>");
         return ExitCode::from(2);
@@ -2208,6 +2242,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             command,
             run_id,
             started_at,
+            exact_attribution: options.exact_attribution,
         };
         let mut diagnostics = std::io::stderr().lock();
         let result = supercov_engine::go_run::run_direct_go(&request, &mut diagnostics);
@@ -2269,6 +2304,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             command,
             run_id,
             started_at,
+            exact_attribution: options.exact_attribution,
         };
         let mut diagnostics = std::io::stderr().lock();
         let result = supercov_engine::jvm_run::run_direct_jvm(&request, &mut diagnostics);

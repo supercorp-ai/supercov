@@ -124,6 +124,28 @@ pub struct RunMetadata {
 
 #[cfg(test)]
 pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
+    create_analyzable_run(root, id, None)
+}
+
+/// The same run as a suite that ran its tests at once: the coverage sits in
+/// the record nobody could be credited with, and the test beside it is named,
+/// run-wide, and holds nothing of its own. It is the shape Go publishes for a
+/// package whose tests all call `t.Parallel()`.
+#[cfg(test)]
+pub(crate) fn create_run_wide_test_run(root: &Path, id: &str) -> PathBuf {
+    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE))
+}
+
+/// The same run as a Ruby suite: the test keeps the coverage it was credited
+/// with, and that coverage is a lower bound rather than the whole of what it
+/// ran. What its own record proves, it still proves.
+#[cfg(test)]
+pub(crate) fn create_partial_test_run(root: &Path, id: &str) -> PathBuf {
+    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_PARTIAL))
+}
+
+#[cfg(test)]
+fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> PathBuf {
     use crate::{
         coverage_analysis::{McdcVector, PointKind},
         coverage_report::{
@@ -229,63 +251,96 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
         browser: vec![],
         server: vec![],
     };
-    let archive = write_archive(
-        vec![
-            EvidenceArchiveEntry {
-                path: "coverage-model.json".into(),
-                contents: serde_json::to_vec(&serde_json::json!({
-                    "schemaVersion": 1,
-                    "language": "javascript",
-                    "variant": "fixture-v1",
-                    "name": "Fixture model",
-                    "completenessMeaning": "Every fixture obligation was observed.",
-                    "measured": ["fixture obligations"],
-                    "notMeasured": []
-                }))
-                .unwrap(),
-            },
-            EvidenceArchiveEntry {
-                path: "frontend.json".into(),
-                contents: serde_json::to_vec(&serde_json::json!({
-                    "protocolVersion": 2,
-                    "frontendId": "javascript",
-                    "frontendVersion": "fixture-v1",
-                    "language": "javascript",
-                    "structuralSource": "owned-probes",
-                    "runners": [{
-                        "runner": "node:test",
-                        "executionModel": "serial-in-process",
-                        "attribution": {
-                            "run": "exact",
-                            "worker": "unavailable",
-                            "test": "exact",
-                            "retry": "exact",
-                            "phase": "exact",
-                            "action": "exact",
-                            "assertion": "exact"
-                        },
-                        "limitations": [{
-                            "id": "fixture-worker-unavailable",
-                            "scopes": ["worker"],
-                            "reason": "The fixture intentionally has no worker identity"
-                        }]
-                    }],
-                    "structuralLimitations": []
-                }))
-                .unwrap(),
-            },
-            EvidenceArchiveEntry {
-                path: "manifest.json".into(),
-                contents: serde_json::to_vec(&manifest).unwrap(),
-            },
-            EvidenceArchiveEntry {
-                path: "worker/mcdc.json".into(),
-                contents: serde_json::to_vec(&result).unwrap(),
-            },
-        ],
-        &directory.join("evidence.raw.gz"),
-    )
-    .unwrap();
+    let results = if attribution == Some(crate::coverage_report::ATTRIBUTION_PARTIAL) {
+        // It keeps its hits: a lower bound is still a claim.
+        let mut partial = result.clone();
+        partial.attribution = crate::coverage_report::ATTRIBUTION_PARTIAL.into();
+        vec![partial]
+    } else if attribution == Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE) {
+        let mut unclaimed = result.clone();
+        unclaimed.test = "run".into();
+        unclaimed.test_id = Some("run".into());
+        unclaimed.test_file = None;
+        unclaimed.role = "background".into();
+        let mut parallel = result.clone();
+        parallel.attribution = crate::coverage_report::ATTRIBUTION_RUN_WIDE.into();
+        // Named, with its real outcome, and credited with nothing.
+        parallel.runtime = vec![RuntimeSnapshot {
+            decisions: vec![],
+            hits: vec![],
+            events: vec![],
+            logicals: vec![],
+        }];
+        vec![unclaimed, parallel]
+    } else {
+        vec![result]
+    };
+    let mut entries = vec![
+        EvidenceArchiveEntry {
+            path: "coverage-model.json".into(),
+            contents: serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "language": "javascript",
+                "variant": "fixture-v1",
+                "name": "Fixture model",
+                "completenessMeaning": "Every fixture obligation was observed.",
+                "measured": ["fixture obligations"],
+                "notMeasured": []
+            }))
+            .unwrap(),
+        },
+        EvidenceArchiveEntry {
+            path: "frontend.json".into(),
+            contents: serde_json::to_vec(&serde_json::json!({
+                "protocolVersion": 2,
+                "frontendId": "javascript",
+                "frontendVersion": "fixture-v1",
+                "language": "javascript",
+                "structuralSource": "owned-probes",
+                "runners": [{
+                    "runner": "node:test",
+                    "executionModel": "serial-in-process",
+                    "attribution": {
+                        "run": "exact",
+                        "worker": "unavailable",
+                        "test": "exact",
+                        "retry": "exact",
+                        "phase": "exact",
+                        "action": "exact",
+                        "assertion": "exact"
+                    },
+                    "limitations": [{
+                        "id": "fixture-worker-unavailable",
+                        "scopes": ["worker"],
+                        "reason": "The fixture intentionally has no worker identity"
+                    }]
+                }],
+                "structuralLimitations": []
+            }))
+            .unwrap(),
+        },
+        EvidenceArchiveEntry {
+            path: "manifest.json".into(),
+            contents: serde_json::to_vec(&manifest).unwrap(),
+        },
+    ];
+    for (at, result) in results.iter().enumerate() {
+        entries.push(EvidenceArchiveEntry {
+            // One record per worker directory: the reader matches
+            // `<anything>/mcdc.json`, so a second record needs its own
+            // directory rather than a decorated file name.
+            path: format!(
+                "worker{}/mcdc.json",
+                if at == 0 {
+                    String::new()
+                } else {
+                    format!("-{at}")
+                }
+            ),
+            contents: serde_json::to_vec(result).unwrap(),
+        });
+    }
+    let archive = write_archive(entries, &directory.join("evidence.raw.gz")).unwrap();
     let digest = |character: char| std::iter::repeat_n(character, 64).collect::<String>();
     let metadata = RunMetadata {
         id: id.into(),

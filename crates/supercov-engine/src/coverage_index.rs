@@ -3887,6 +3887,65 @@ mod tests {
         .unwrap()
     }
 
+    fn report_attributed(attribution: &str) -> CoverageReport {
+        let mut report = report();
+        for view in [
+            &mut report.view,
+            &mut report.filters.passed,
+            &mut report.filters.failed,
+        ] {
+            for test in &mut view.tests {
+                test.attribution = attribution.to_owned();
+            }
+        }
+        report
+    }
+
+    #[test]
+    fn a_test_keeps_the_attribution_it_was_written_with() {
+        // Attribution rides in a byte the reader used to refuse outright, so a
+        // value that does not survive the trip is not a wrong number on a
+        // report -- it is a run that will not open. Only `exact` was ever
+        // written by a test, which left the other two arms of both the encoder
+        // and the decoder standing on the claim that they matched.
+        let root = root();
+        for attribution in [
+            crate::coverage_report::ATTRIBUTION_EXACT,
+            crate::coverage_report::ATTRIBUTION_RUN_WIDE,
+            crate::coverage_report::ATTRIBUTION_PARTIAL,
+        ] {
+            let report = report_attributed(attribution);
+            let path = root.join(format!("query-index-{attribution}.v1.bin"));
+            write_query_index(
+                &coverage_index_sections(&report).unwrap(),
+                &identity(),
+                &path,
+            )
+            .unwrap();
+            let container = QueryIndex::open(&path, &identity()).unwrap();
+            let index = CoverageIndex::new(&container).unwrap();
+            let tests = index.test_summaries(CoverageViewId::All).unwrap();
+            assert_eq!(tests.len(), 1);
+            assert_eq!(
+                tests[0].attribution, attribution,
+                "written as `{attribution}` and read back as `{}`",
+                tests[0].attribution
+            );
+        }
+    }
+
+    #[test]
+    fn an_attribution_the_byte_has_no_room_for_is_refused_at_the_write() {
+        // Refusing here is what keeps the reserved byte honest: a value nobody
+        // taught the encoder must not be written as some neighbouring one and
+        // read back as a measurement.
+        let error = coverage_index_sections(&report_attributed("probably-exact")).unwrap_err();
+        assert!(
+            matches!(error, CoverageIndexError::InvalidRecord("test attribution")),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn typed_columns_round_trip_all_outcome_views_without_json() {
         let report = report();

@@ -280,6 +280,45 @@ fn unattributed_note(entry: &IndexedDimensionCoverage) -> String {
     }
 }
 
+/// How completely the run could credit each test with what it reached.
+///
+/// Here whether or not anything is wrong, the way `Instrumentation` is: a
+/// reader who only ever sees "Exact for every test" has still learned that the
+/// question exists, and will recognise the other answer when a suite starts
+/// running its tests at once.
+fn attribution_line(counts: &supercov_engine::coverage_query::TestAttributionCounts) -> String {
+    let total = counts.total();
+    if total == 0 {
+        return "No test recorded coverage".into();
+    }
+    if counts.exact == total {
+        return format!("Exact for {} test(s)", count(total));
+    }
+    let mut parts = Vec::new();
+    if counts.exact > 0 {
+        parts.push(format!("{} exact", count(counts.exact)));
+    }
+    if counts.partial > 0 {
+        // Ruby records a line for the first test that reaches it, so a later
+        // test running the same line is credited with none of it.
+        parts.push(format!("{} a lower bound", count(counts.partial)));
+    }
+    if counts.run_wide > 0 {
+        parts.push(format!("{} counted run-wide", count(counts.run_wide)));
+    }
+    let detail = parts.join(", ");
+    // The offer belongs only where it would change the answer. Running the
+    // suite in order is what buys back a run-wide credit; it buys nothing for
+    // a lower bound, which is how the language reports coverage at all.
+    if counts.run_wide > 0 {
+        format!(
+            "{detail} — `--exact-attribution` credits them individually, running your suite in order"
+        )
+    } else {
+        detail
+    }
+}
+
 fn render_dimension(
     values: &[IndexedDimensionCoverage],
     request: &IndexedQueryRequest,
@@ -618,6 +657,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 String::new(),
                 "Measurement".into(),
                 format!("  Instrumentation  {measurement}"),
+                format!("  Attribution      {}", attribution_line(&data.test_attribution)),
                 "  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.".into(),
             ]);
             if let Some(workspace) = &data.workspace {
@@ -1637,6 +1677,48 @@ mod tests {
         assert_eq!(
             branch_need("zero iterations"),
             "zero-iteration outcome not observed"
+        );
+    }
+
+    #[test]
+    fn the_attribution_line_offers_only_what_would_help() {
+        use supercov_engine::coverage_query::TestAttributionCounts;
+
+        let counts = |exact, partial, run_wide| TestAttributionCounts {
+            exact,
+            partial,
+            run_wide,
+        };
+
+        // The ordinary answer, printed on every run so the question is
+        // familiar before it matters.
+        assert_eq!(attribution_line(&counts(16, 0, 0)), "Exact for 16 test(s)");
+
+        // Where running the suite in order would buy the credit back, say so.
+        let offered = attribution_line(&counts(0, 0, 2));
+        assert!(offered.contains("2 counted run-wide"), "{offered}");
+        assert!(offered.contains("--exact-attribution"), "{offered}");
+
+        // Where it would not, do not: Ruby credits a line to the first test
+        // that reaches it, and running in order changes nothing about that.
+        // An offer that cannot be taken is worse than silence.
+        let lower_bound = attribution_line(&counts(0, 3, 0));
+        assert!(lower_bound.contains("3 a lower bound"), "{lower_bound}");
+        assert!(
+            !lower_bound.contains("--exact-attribution"),
+            "nothing here is bought by running in order: {lower_bound}"
+        );
+
+        // A mixed run names each part rather than rounding to the worst.
+        let mixed = attribution_line(&counts(5, 0, 2));
+        assert!(mixed.contains("5 exact"), "{mixed}");
+        assert!(mixed.contains("2 counted run-wide"), "{mixed}");
+
+        // And a run with no tests says that, rather than claiming exactness
+        // over nothing -- which is the shape every floor is satisfied by.
+        assert_eq!(
+            attribution_line(&counts(0, 0, 0)),
+            "No test recorded coverage"
         );
     }
 }

@@ -97,10 +97,17 @@ fn parameter_name(node: Node, source: &str) -> Option<String> {
 }
 
 /// Instrument one `_test.go` file so every test announces itself.
+///
+/// `serialised` says the run was asked for exact attribution and the command
+/// carries `-parallel=1`, so a test that calls `t.Parallel()` is the only test
+/// running while its probes fire. It can then be announced like any other, and
+/// the run credits it with what it reached. Without that, announcing it would
+/// bind whatever ran beside it to its name.
 pub fn instrument_test_file(
     source: &str,
     alias: &str,
     evidence_path: &str,
+    serialised: bool,
 ) -> Result<GoTestFile, GoInstrumenterError> {
     let tree = parse(source)?;
     let mut file = GoTestFile {
@@ -183,7 +190,15 @@ pub fn instrument_test_file(
             continue;
         }
         file.tests.push(name.clone());
-        if calls_parallel(body, source) {
+        // Serialised, and the test pauses itself: the announcement waits until
+        // `t.Parallel()` has returned, which is when this test is the one
+        // running.
+        let announce_at = if serialised && calls_parallel(body, source) {
+            own_parallel_call_end(body, source).unwrap_or(body.start_byte() + 1)
+        } else {
+            body.start_byte() + 1
+        };
+        if calls_parallel(body, source) && !serialised {
             // Announcing it would bind whatever runs next to this test, and
             // what runs next includes the other parallel tests. Its coverage
             // still counts run-wide; it simply belongs to no test, which is
@@ -236,7 +251,7 @@ pub fn instrument_test_file(
             needs_runtime = true;
         }
         file.edits.push(GoEdit {
-            at: body.start_byte() + 1,
+            at: announce_at,
             rank: 100,
             text: announcement,
         });
@@ -247,6 +262,55 @@ pub fn instrument_test_file(
         file.edits.push(import);
     }
     Ok(file)
+}
+
+/// Where a test's own `t.Parallel()` call ends, if it makes one directly.
+///
+/// `t.Parallel()` does not return until the serial phase is over and this test
+/// is the one being run, so a statement after it runs with the test actually
+/// running. That is the only place an announcement can go when the run is
+/// serialised: at the top of the body it would fire while every other parallel
+/// test was also entering and pausing, all of them open at once, and the
+/// runtime would rightly give up on attributing any of them.
+///
+/// Only a call the test makes itself counts. `t.Parallel()` inside a subtest
+/// closure pauses the subtest, not this function, so there is nothing to wait
+/// for here.
+fn own_parallel_call_end(body: Node, source: &str) -> Option<usize> {
+    // A block holds its statements in a `statement_list`, not directly, so the
+    // statements are one level further down than a block's own children.
+    let statements = {
+        let mut cursor = body.walk();
+        body.children(&mut cursor)
+            .find(|child| child.kind() == "statement_list")
+            .unwrap_or(body)
+    };
+    let mut cursor = statements.walk();
+    for statement in statements.children(&mut cursor).filter(Node::is_named) {
+        // The grammar wraps a call standing alone as a statement in an
+        // `expression_statement`; it is never a statement's child on its own.
+        let call = match statement.kind() {
+            "expression_statement" => match statement.named_child(0) {
+                Some(inner) if inner.kind() == "call_expression" => inner,
+                // Some other expression standing alone -- a channel receive,
+                // say -- which is not the call being looked for; the next
+                // statement might be.
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if call
+            .child_by_field_name("function")
+            .is_some_and(|function| {
+                source[function.byte_range()]
+                    .trim_end()
+                    .ends_with(".Parallel")
+            })
+        {
+            return Some(statement.end_byte());
+        }
+    }
+    None
 }
 
 /// Whether a test hands itself to Go's parallel scheduler.
@@ -386,7 +450,8 @@ mod tests {
     use crate::go_instrumenter::rewrite;
 
     fn instrumented(source: &str) -> (GoTestFile, String) {
-        let file = instrument_test_file(source, "__supercov", "evidence.bin").expect("instrument");
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", false).expect("instrument");
         let out = rewrite(source, &file.edits);
         parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
         (file, out)
@@ -461,6 +526,139 @@ mod tests {
             alongside.contains("func __supercovTest(t *testing.T"),
             "every package gets the announcement helper, TestMain or not:\n{alongside}"
         );
+    }
+
+    #[test]
+    fn a_serialised_parallel_test_is_announced_after_it_resumes() {
+        // `t.Parallel()` does not return until the serial phase is over, so an
+        // announcement above it fires while every other parallel test is also
+        // entering and pausing. All of them would be open at once and the
+        // runtime would give up attributing any of them -- which is how asking
+        // for exact attribution produced a run with no tests in it at all.
+        let file = instrument_test_file(
+            "package p\n\nimport \"testing\"\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tdoWork()\n}\n",
+            "__supercov",
+            "evidence.bin",
+            true,
+        )
+        .expect("instrument");
+        let out = rewrite(
+            "package p\n\nimport \"testing\"\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tdoWork()\n}\n",
+            &file.edits,
+        );
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        let parallel = out.find("t.Parallel()").expect("the call");
+        let announced = out
+            .find("__supercovTest(t, \"TestParallel\")")
+            .expect("announced");
+        assert!(
+            parallel < announced,
+            "the announcement has to wait for the test to resume:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_serialised_run_leaves_a_serial_test_where_it_was() {
+        // `serialised` only moves the announcement for a test that pauses
+        // itself. A serial test in the same run has no `t.Parallel()` to wait
+        // for, and putting its announcement anywhere but the top of the body
+        // would leave whatever ran first uncredited.
+        //
+        // Measured rather than guessed: the decision that reads `serialised &&
+        // calls_parallel(..)` had no witness for the second operand until this
+        // existed, so nothing showed the two apart.
+        let source =
+            "package p\n\nimport \"testing\"\n\nfunc TestSerial(t *testing.T) {\n\tdoWork()\n}\n";
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", true).expect("instrument");
+        let out = rewrite(source, &file.edits);
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        let announced = out
+            .find("__supercovTest(t, \"TestSerial\")")
+            .expect("announced");
+        let work = out.find("doWork()").expect("body");
+        assert!(
+            announced < work,
+            "a serial test is announced before anything it calls:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_test_file_is_read_past_whatever_else_it_declares() {
+        // A `_test.go` holds more than functions -- fixtures, tables, helper
+        // types -- and the scan has to walk past all of it rather than stop.
+        let (file, out) = instrumented(concat!(
+            "package p\n\nimport \"testing\"\n\n",
+            "type fixture struct{ n int }\n\n",
+            "var cases = []fixture{{1}, {2}}\n\n",
+            "const limit = 3\n\n",
+            "func TestOne(t *testing.T) {\n\tdoWork()\n}\n",
+        ));
+        assert_eq!(file.tests, ["TestOne"]);
+        assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+    }
+
+    #[test]
+    fn a_parallel_call_is_found_wherever_the_test_makes_it() {
+        // `t.Parallel()` first is the shape every other test here uses, and it
+        // is not the shape most suites are written in: a test sets something
+        // up and then hands itself to the scheduler. The scan has to walk past
+        // whatever came before, which is a path nothing exercised -- the
+        // measurement showed the statement loop only ever matching on its
+        // first look.
+        let source = concat!(
+            "package p\n\nimport \"testing\"\n\n",
+            "func TestLater(t *testing.T) {\n",
+            "\tsetUp()\n",
+            "\tname := \"x\"\n",
+            "\t<-ready\n",
+            "\tt.Parallel()\n",
+            "\tdoWork(name)\n}\n",
+        );
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", true).expect("instrument");
+        let out = rewrite(source, &file.edits);
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        let parallel = out.find("t.Parallel()").expect("the call");
+        let announced = out
+            .find("__supercovTest(t, \"TestLater\")")
+            .expect("announced");
+        assert!(
+            parallel < announced,
+            "the announcement still waits for the call, wherever it is:\n{out}"
+        );
+        // And it waits for that call rather than landing after the setup it
+        // happened to follow.
+        let work = out.find("doWork(name)").expect("body");
+        assert!(announced < work, "{out}");
+    }
+
+    #[test]
+    fn a_function_with_no_body_is_walked_past() {
+        // Go declares a function with no body when the implementation is in
+        // assembly. It is not a test, it has nothing to instrument, and the
+        // scan has to keep going rather than reach for a body that is not
+        // there.
+        let (file, out) = instrumented(concat!(
+            "package p\n\nimport \"testing\"\n\n",
+            "func fastSum(a, b int) int\n\n",
+            "func TestOne(t *testing.T) {\n\tdoWork()\n}\n",
+        ));
+        assert_eq!(file.tests, ["TestOne"]);
+        assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+    }
+
+    #[test]
+    fn a_test_file_with_nothing_in_it_is_read_without_complaint() {
+        // The loop over a file's declarations has to survive having none.
+        let file = instrument_test_file("package p\n", "__supercov", "evidence.bin", false)
+            .expect("instrument");
+        assert!(file.tests.is_empty());
+        assert!(file.edits.is_empty(), "{file:?}");
+        assert!(!file.declares_test_main);
     }
 
     #[test]

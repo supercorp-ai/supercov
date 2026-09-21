@@ -71,6 +71,16 @@ pub struct DirectGoRunRequest {
     pub command: Vec<String>,
     pub run_id: String,
     pub started_at: String,
+    /// Credit every test with what it reached, by running the package's tests
+    /// one at a time.
+    ///
+    /// Probes are a store into one array the whole process shares, so a test
+    /// that called `t.Parallel()` can only be credited with its own work if
+    /// nothing else is running while it does it. `-parallel 1` is what buys
+    /// that, and what it costs is the suite's own parallelism -- which is why
+    /// it is asked for rather than assumed.
+    #[serde(default)]
+    pub exact_attribution: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,6 +196,7 @@ fn evidence_name(directory: &str) -> String {
 fn instrument_workspace(
     workspace: &Path,
     evidence_directory: &Path,
+    serialised: bool,
 ) -> Result<InstrumentedWorkspace, String> {
     let mut project = prepare_go_project(workspace)?;
     let mut unparseable_tests: Vec<(String, String)> = Vec::new();
@@ -298,7 +309,7 @@ fn instrument_workspace(
             // runtime was never armed and a passing suite published nothing.
             let built = !build_ignored(&source);
             let file =
-                match instrument_test_file(&source, RUNTIME_ALIAS, &evidence_literal) {
+                match instrument_test_file(&source, RUNTIME_ALIAS, &evidence_literal, serialised) {
                     Ok(file) => file,
                     Err(error) => {
                         // Taking the run down with it is the reflex a source file
@@ -414,6 +425,29 @@ fn declares_test_main_textually(source: &str) -> bool {
 }
 
 /// `go test` caches a package that passed, and a cached package does not run.
+/// The command with Go's test parallelism turned down to one.
+///
+/// `-parallel` bounds how many tests calling `t.Parallel()` run at once. At 1
+/// they resume one at a time, so each is the only test running when its probes
+/// fire and the harness can announce it like any serial test.
+fn command_run_in_order(command: &[String]) -> (Vec<String>, bool) {
+    if command
+        .iter()
+        .any(|argument| argument == "-parallel" || argument.starts_with("-parallel="))
+    {
+        // The author already said what they wanted; saying it louder is not
+        // Supercov's call.
+        return (command.to_vec(), false);
+    }
+    let mut updated = command.to_vec();
+    let position = updated
+        .iter()
+        .position(|argument| argument == "test")
+        .map_or(updated.len(), |index| index + 1);
+    updated.insert(position, "-parallel=1".into());
+    (updated, true)
+}
+
 fn command_with_fresh_results(command: &[String]) -> (Vec<String>, bool) {
     if command
         .iter()
@@ -491,7 +525,14 @@ pub fn run_direct_go(
             prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
         let evidence_directory = work_directory.join("go/evidence");
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
-        let instrumented = instrument_workspace(&workspace, &evidence_directory)?;
+        // Decided before instrumenting, because whether a parallel test can be
+        // announced depends on whether anything will be running beside it.
+        let (command, serialised) = if request.exact_attribution {
+            command_run_in_order(&request.command)
+        } else {
+            (request.command.clone(), false)
+        };
+        let instrumented = instrument_workspace(&workspace, &evidence_directory, serialised)?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
         writeln!(
@@ -544,7 +585,14 @@ pub fn run_direct_go(
             ));
         }
 
-        let (command, forced_fresh) = command_with_fresh_results(&request.command);
+        if serialised {
+            writeln!(
+                diagnostics,
+                "[supercov] added -parallel=1 for --exact-attribution: a test that calls t.Parallel() can only be credited with what it reached when nothing else is running. Your suite runs in order, which is slower."
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        let (command, forced_fresh) = command_with_fresh_results(&command);
         if forced_fresh {
             writeln!(
                 diagnostics,

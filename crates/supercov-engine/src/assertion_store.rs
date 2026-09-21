@@ -1538,6 +1538,198 @@ mod tests {
     }
 
     #[test]
+    fn a_test_that_ran_beside_others_is_undetermined_rather_than_unaffected() {
+        // A parallel suite's coverage sits in the record nobody could claim,
+        // and the tests beside it hold nothing of their own. Reading "this
+        // test's record does not mention the changed file" as "this test is
+        // unaffected" would answer `0 of 1 tests affected` for a change to the
+        // only code the run executed -- and an agent running only the affected
+        // tests would run nothing. The run's own bound is what stands in.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-undetermined-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        let app = "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n";
+        let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
+        fs::write(root.join("src/app.js"), app).unwrap();
+        fs::write(root.join("tests/app.test.js"), test).unwrap();
+        let inputs = crate::assertion_inputs::capture(
+            &root,
+            "python",
+            ["src/app.js".into(), "tests/app.test.js".into()],
+        )
+        .unwrap();
+        let directory = crate::run_store::create_run_wide_test_run(&root, "parallel");
+        let path = directory.join("evidence.raw.gz");
+        let entries =
+            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let archive = write_archive(entries, &path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence.files = archive.files;
+        metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        prepare_publication(&root, &directory, &metadata).unwrap();
+        let run = discover_runs(&root).unwrap().runs.remove(0);
+
+        let (_, state) = load(&run, &load_manifest(&run).unwrap()).unwrap();
+        let executions = state.executions.as_ref().expect("a record");
+        assert_eq!(executions.tests.len(), 1, "the named test, not the record");
+        let record = &executions.tests[0];
+        assert_eq!(
+            record.attribution,
+            crate::coverage_report::ATTRIBUTION_RUN_WIDE
+        );
+        assert!(
+            record.files.is_empty(),
+            "it is credited with nothing: {:?}",
+            record.files
+        );
+        assert!(
+            !executions.covered["src/app.js"].is_empty(),
+            "and the run is credited with what it reached"
+        );
+
+        let bucket = |value: &Value, key: &str| {
+            value[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        // Nothing changed: nothing to rerun, and the run's bound says nothing
+        // either.
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(bucket(&report, "unaffected"), ["test"], "{report}");
+        assert!(bucket(&report, "undetermined").is_empty(), "{report}");
+
+        // The one function the run executed changed. The test's own record
+        // cannot say whether it reached it, and the run's can.
+        fs::write(
+            root.join("src/app.js"),
+            app.replace("return 1;", "return 3;"),
+        )
+        .unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert!(
+            bucket(&report, "affected").is_empty(),
+            "nothing proves it ran the change: {report}"
+        );
+        assert_eq!(
+            bucket(&report, "undetermined"),
+            ["test"],
+            "the run reached it, so this test might have: {report}"
+        );
+        assert_eq!(
+            report["undetermined"][0]["attribution"],
+            crate::coverage_report::ATTRIBUTION_RUN_WIDE,
+            "{report}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_lower_bound_still_proves_what_it_recorded() {
+        // Ruby's is the other incomplete attribution: the test is credited
+        // with coverage, and that coverage is a floor rather than the whole of
+        // what it ran. The floor is still evidence -- a test credited with the
+        // changed line ran the changed line -- so it is affected outright,
+        // with its own reason, rather than swept into the bucket for tests
+        // nothing can say anything about.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-partial-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        let app = "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n";
+        let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
+        fs::write(root.join("src/app.js"), app).unwrap();
+        fs::write(root.join("tests/app.test.js"), test).unwrap();
+        let inputs = crate::assertion_inputs::capture(
+            &root,
+            "python",
+            ["src/app.js".into(), "tests/app.test.js".into()],
+        )
+        .unwrap();
+        let directory = crate::run_store::create_partial_test_run(&root, "partial");
+        let path = directory.join("evidence.raw.gz");
+        let entries =
+            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let archive = write_archive(entries, &path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence.files = archive.files;
+        metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        prepare_publication(&root, &directory, &metadata).unwrap();
+        let run = discover_runs(&root).unwrap().runs.remove(0);
+
+        let (_, state) = load(&run, &load_manifest(&run).unwrap()).unwrap();
+        let record = &state.executions.as_ref().expect("a record").tests[0];
+        assert_eq!(
+            record.attribution,
+            crate::coverage_report::ATTRIBUTION_PARTIAL
+        );
+        assert!(
+            !record.files.is_empty(),
+            "a lower bound is coverage it was credited with"
+        );
+
+        let names = |value: &Value, key: &str| {
+            value[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        fs::write(
+            root.join("src/app.js"),
+            app.replace("return 1;", "return 3;"),
+        )
+        .unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(
+            names(&report, "affected"),
+            ["test"],
+            "what its own record proves, it proves: {report}"
+        );
+        assert!(names(&report, "undetermined").is_empty(), "{report}");
+        // And the reason is its own, not the run's stand-in.
+        let reasons = report["affected"][0]["reasons"].as_array().unwrap();
+        assert_eq!(reasons.len(), 1, "{report}");
+        let reason = reasons[0].as_str().unwrap();
+        assert!(
+            reason.contains("this test ran it"),
+            "the reason is its own: {report}"
+        );
+        assert!(
+            !reason.contains("the run covered"),
+            "and not the run's stand-in: {report}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn legacy_maps_import_without_the_old_checkout_and_require_review() {
         let root = std::env::temp_dir().join(format!("supercov-legacy-map-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();

@@ -227,7 +227,8 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
 
     // The test file goes in as the author wrote it and comes out bound to its
     // evidence, which is the whole point of the harness generator.
-    let harness = instrument_test_file(TESTS, "__supercov", "evidence.bin").expect("harness");
+    let harness =
+        instrument_test_file(TESTS, "__supercov", "evidence.bin", false).expect("harness");
     assert_eq!(harness.tests, ["TestBig", "TestZero", "TestSkipped"]);
     assert!(!harness.declares_test_main);
     write(
@@ -616,7 +617,8 @@ fn go_s_own_scoping_survives_instrumentation() {
         "both conditions over an initialiser's names carry vectors"
     );
 
-    let harness = instrument_test_file(SHAPE_TESTS, "__supercov", "evidence.bin").expect("harness");
+    let harness =
+        instrument_test_file(SHAPE_TESTS, "__supercov", "evidence.bin", false).expect("harness");
     write(
         &root,
         "shapes_test.go",

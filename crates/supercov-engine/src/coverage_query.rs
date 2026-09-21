@@ -304,6 +304,24 @@ pub struct CoverageRunnersData {
     pub runners: Vec<IndexedDimensionCoverage>,
 }
 
+/// Tests by how completely their coverage is their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestAttributionCounts {
+    /// Credited with exactly what they reached.
+    pub exact: usize,
+    /// Credited with some of what they reached, and no way to say how much.
+    pub partial: usize,
+    /// Credited with none of it; what they reached is in the run's totals.
+    pub run_wide: usize,
+}
+
+impl TestAttributionCounts {
+    pub fn total(&self) -> usize {
+        self.exact + self.partial + self.run_wide
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageDiagnostic {
@@ -342,6 +360,12 @@ pub struct CoverageSummaryData {
     pub e2e_gap_context: Option<CoverageKindGapContext>,
     pub coverage_by_runner: Vec<IndexedDimensionCoverage>,
     pub attribution: crate::coverage_index::IndexedAttribution,
+    /// How completely each test's coverage could be credited to it.
+    ///
+    /// Counted here rather than stored, because the per-test answer is already
+    /// in the run and a total is a read of it. A run written before the field
+    /// existed reports every test as exact, which is what its records say.
+    pub test_attribution: TestAttributionCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<TransportStats>,
     pub diagnostics: Vec<CoverageDiagnostic>,
@@ -2492,6 +2516,21 @@ pub fn coverage_summary_query(
         e2e_gap_context,
         coverage_by_runner,
         attribution: projection.attribution,
+        test_attribution: {
+            let mut counts = TestAttributionCounts::default();
+            for test in index
+                .test_summaries(options.view)?
+                .iter()
+                .filter(|test| test.role == "test")
+            {
+                match test.attribution.as_str() {
+                    crate::coverage_report::ATTRIBUTION_RUN_WIDE => counts.run_wide += 1,
+                    crate::coverage_report::ATTRIBUTION_PARTIAL => counts.partial += 1,
+                    _ => counts.exact += 1,
+                }
+            }
+            counts
+        },
         transport: projection.transport,
         diagnostics,
         confidence: (options.kind.is_none() && options.runner.is_none())
@@ -3380,6 +3419,99 @@ mod tests {
         assert!(minimized.selected.contains(&"owner".into()));
         assert!(minimized.selected.contains(&"neither".into()));
         assert_eq!(minimized.summary.condition_coverage_pct, 100.0);
+    }
+
+    #[test]
+    fn a_test_that_belongs_to_no_test_is_not_minimized_away() {
+        // The first guard catches this whenever the run-wide record holds
+        // anything, which is nearly always -- so it is the rare run, where
+        // those tests happened to reach nothing measured, that reaches this
+        // one. Without it the smallest set would quietly drop a test whose
+        // coverage is unknown rather than absent, and report the drop as a
+        // saving.
+        let mut parallel = result(
+            "parallel",
+            McdcVector {
+                values: vec![Some(false), Some(false)],
+                outcome: false,
+            },
+        );
+        parallel.attribution = crate::coverage_report::ATTRIBUTION_RUN_WIDE.into();
+        assert!(matches!(
+            minimum_test_set(
+                &report(vec![parallel]).view,
+                100.0,
+                MinimizeMetric::Mcdc,
+                5_000,
+            ),
+            Err(QueryError::UnattributedEvidence)
+        ));
+    }
+
+    #[test]
+    fn the_summary_counts_each_test_under_the_attribution_it_carries() {
+        // These three numbers are what the `Attribution` line reads out, and
+        // nothing -- here or in the integration scripts -- had ever checked
+        // that a test lands in the bucket it was written with.
+        let vector = || McdcVector {
+            values: vec![Some(false), Some(false)],
+            outcome: false,
+        };
+        let mut serial = result("serial", vector());
+        serial.attribution = crate::coverage_report::ATTRIBUTION_EXACT.into();
+        let mut parallel = result("parallel", vector());
+        parallel.attribution = crate::coverage_report::ATTRIBUTION_RUN_WIDE.into();
+        let mut ruby = result("ruby", vector());
+        ruby.attribution = crate::coverage_report::ATTRIBUTION_PARTIAL.into();
+        let mut also_parallel = result("also-parallel", vector());
+        also_parallel.attribution = crate::coverage_report::ATTRIBUTION_RUN_WIDE.into();
+        let report = report(vec![serial, parallel, ruby, also_parallel]);
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-attribution-counts-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("query-index.v1.bin");
+        let identity = crate::query_index::QueryIndexIdentity {
+            evidence_sha256: [1; 32],
+            evidence_bytes: 100,
+            analysis_sha256: [2; 32],
+            producer_sha256: [3; 32],
+            archive_schema_version: 2,
+        };
+        crate::query_index::write_query_index(
+            &crate::coverage_index::coverage_index_sections(&report).unwrap(),
+            &identity,
+            &path,
+        )
+        .unwrap();
+        let container = crate::query_index::QueryIndex::open(&path, &identity).unwrap();
+        let index = crate::coverage_index::CoverageIndex::new(&container).unwrap();
+
+        let summary = coverage_summary_query(
+            &index,
+            CoverageSummaryQueryOptions {
+                run: "run",
+                view: CoverageViewId::All,
+                kind: None,
+                runner: None,
+                valid: true,
+                test_exit_code: Some(0),
+                stale: false,
+                stale_reasons: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.test_attribution.exact, 1);
+        assert_eq!(summary.test_attribution.run_wide, 2);
+        assert_eq!(summary.test_attribution.partial, 1);
+        assert_eq!(summary.test_attribution.total(), 4);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
