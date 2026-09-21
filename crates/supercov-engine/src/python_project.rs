@@ -213,8 +213,15 @@ fn limitation(id: &str, kind: &str, file: &str, reason: &str) -> serde_json::Val
     })
 }
 
-pub fn prepare_python_project(root: &Path) -> Result<PreparedPythonProject, String> {
-    let files = discover_python_files(root)?;
+pub fn prepare_python_project(
+    root: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+) -> Result<PreparedPythonProject, String> {
+    let mut files = discover_python_files(root)?;
+    if let Some(roots) = roots {
+        roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
+        roots.refuse_if_empty(files.sources.len(), "Python")?;
+    }
     if files.sources.is_empty() && files.tests.is_empty() {
         return Err(
             "no Python source files were found under the project root; Supercov measures .py files outside virtual environments, build output and test directories".into(),
@@ -306,8 +313,15 @@ pub fn prepare_python_project(root: &Path) -> Result<PreparedPythonProject, Stri
     manifest.scope = Some(
         serde_json::to_value(SourceScope {
             version: 1,
-            mode: SourceScopeMode::Automatic,
-            roots: vec![".".into()],
+            mode: if roots.is_some() {
+                SourceScopeMode::Explicit
+            } else {
+                SourceScopeMode::Automatic
+            },
+            roots: match roots {
+                Some(roots) => roots.local_roots().map_err(|error| error.to_string())?,
+                None => vec![".".into()],
+            },
             entries,
         })
         .map_err(|error| error.to_string())?,
@@ -394,7 +408,7 @@ mod tests {
         write(&root, "pytest.ini", "[pytest]\n");
         write(&root, ".python-version", "3.13\n");
         write(&root, "src/pkg/core.py", "def f(a):\n    return a\n");
-        let project = prepare_python_project(&root).unwrap();
+        let project = prepare_python_project(&root, None).unwrap();
         assert_eq!(
             project.files.configuration_files,
             [
@@ -403,6 +417,97 @@ mod tests {
             ]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn scope_of(project: &PreparedPythonProject) -> crate::source_discovery::SourceScope {
+        serde_json::from_value(project.manifest.scope.clone().expect("a scope")).unwrap()
+    }
+
+    fn explicit(root: &Path, roots: &[&str]) -> crate::source_discovery::ExplicitSourceRoots {
+        let roots = roots
+            .iter()
+            .map(|root| (*root).to_owned())
+            .collect::<Vec<_>>();
+        crate::source_discovery::ExplicitSourceRoots::resolve(root, &roots).unwrap()
+    }
+
+    #[test]
+    fn explicit_roots_narrow_a_flat_layout_to_the_modules_it_names() {
+        // The reported project kept its own modules at the root with a vendored
+        // PySide6 tree beside them, and measured 660 files instead of about
+        // fifteen: nothing on the Python path read SUPERCOV_SOURCE_ROOTS. A flat
+        // layout has no directory to name, so a file has to be a root too, the
+        // way it already is for JavaScript.
+        let root = fixture("flat-roots");
+        write(&root, "a.py", "def f(x):\n    return x if x else 0\n");
+        write(&root, "vendor/pkg/b.py", "def g():\n    return 1\n");
+        write(&root, "test/test_a.py", "from a import f\n");
+
+        let project = prepare_python_project(&root, Some(&explicit(&root, &["a.py"]))).unwrap();
+        assert_eq!(project.files.sources, ["a.py"], "{:?}", project.files);
+        assert_eq!(
+            project.plan.files.keys().collect::<Vec<_>>(),
+            ["a.py"],
+            "the runtime is not handed a file the roots leave out, which is what \
+             keeps it from being instrumented at all"
+        );
+        assert!(
+            project
+                .files
+                .excluded
+                .contains(&("vendor/pkg/b.py".into(), "outside explicit source roots")),
+            "{:?}",
+            project.files.excluded
+        );
+        let scope = scope_of(&project);
+        assert_eq!(
+            scope.mode,
+            crate::source_discovery::SourceScopeMode::Explicit
+        );
+        assert_eq!(scope.roots, ["a.py"]);
+
+        // A directory is a root just as well, and narrows to what is under it.
+        let project = prepare_python_project(&root, Some(&explicit(&root, &["vendor"]))).unwrap();
+        assert_eq!(project.files.sources, ["vendor/pkg/b.py"]);
+
+        // Unset, discovery is what it always was.
+        let project = prepare_python_project(&root, None).unwrap();
+        assert_eq!(project.files.sources, ["a.py", "vendor/pkg/b.py"]);
+        assert_eq!(
+            scope_of(&project).mode,
+            crate::source_discovery::SourceScopeMode::Automatic
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn roots_that_name_nothing_are_refused_rather_than_measuring_nothing() {
+        // A typo in the variable must not become a green run over zero files,
+        // the failure mode most likely to pass unnoticed in an agent loop.
+        let root = fixture("roots-name-nothing");
+        write(&root, "a.py", "x = 1\n");
+        write(&root, "test/test_a.py", "import a\n");
+        let error = prepare_python_project(&root, Some(&explicit(&root, &["scr"]))).unwrap_err();
+        assert!(error.contains("SUPERCOV_SOURCE_ROOTS=scr"), "{error}");
+        assert!(
+            error.contains("scr does not exist"),
+            "the typo is what the person needs to see: {error}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_root_never_pulls_a_test_back_into_the_denominator() {
+        // Roots narrow what would be measured; they are not a second way to
+        // choose files. A root that happens to contain the test directory must
+        // still leave its tests out.
+        let root = fixture("roots-keep-tests-out");
+        write(&root, "a.py", "x = 1\n");
+        write(&root, "test/test_a.py", "import a\n");
+        let project = prepare_python_project(&root, Some(&explicit(&root, &["."]))).unwrap();
+        assert_eq!(project.files.sources, ["a.py"]);
+        assert!(project.files.tests.contains(&"test/test_a.py".to_owned()));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -420,7 +525,7 @@ mod tests {
         write(&root, "env2/pyvenv.cfg", "home = /usr\n");
         write(&root, "env2/lib/thing.py", "y = 2\n");
         write(&root, "broken/old.py", "print 'python 2'\n");
-        let project = prepare_python_project(&root).unwrap();
+        let project = prepare_python_project(&root, None).unwrap();
         assert_eq!(
             project.files.sources,
             ["broken/old.py", "src/pkg/__init__.py", "src/pkg/core.py"]

@@ -2575,8 +2575,9 @@ fn run_store_agent_error(error: RunStoreError) -> agent_json::AgentError {
 fn current_javascript_integrity(
     root: &Path,
     command: &[String],
+    source_roots: Option<&[String]>,
 ) -> Option<supercov_engine::run_store::RunIntegrity> {
-    supercov_engine::javascript_run::current_javascript_integrity(root, command).ok()
+    supercov_engine::javascript_run::current_javascript_integrity(root, command, source_roots).ok()
 }
 
 /// Which frontend measured a run, from the contract version it recorded.
@@ -2619,15 +2620,20 @@ fn current_integrity_for_run(
     run: &StoredRun,
 ) -> Option<supercov_engine::run_store::RunIntegrity> {
     let command = &run.metadata.command;
+    let roots = run.metadata.source_roots.as_deref();
     match frontend_of(&run.metadata.integrity.instrumenter_version) {
-        Frontend::Rust => supercov_engine::rust_run::current_rust_integrity(root, command).ok(),
-        Frontend::Ruby => supercov_engine::ruby_run::current_ruby_integrity(root, command).ok(),
-        Frontend::Python => {
-            supercov_engine::python_run::current_python_integrity(root, command).ok()
+        Frontend::Rust => {
+            supercov_engine::rust_run::current_rust_integrity(root, command, roots).ok()
         }
-        Frontend::Go => supercov_engine::go_run::current_go_integrity(root, command).ok(),
-        Frontend::Jvm => supercov_engine::jvm_run::current_jvm_integrity(root, command).ok(),
-        Frontend::JavaScript => current_javascript_integrity(root, command),
+        Frontend::Ruby => {
+            supercov_engine::ruby_run::current_ruby_integrity(root, command, roots).ok()
+        }
+        Frontend::Python => {
+            supercov_engine::python_run::current_python_integrity(root, command, roots).ok()
+        }
+        Frontend::Go => supercov_engine::go_run::current_go_integrity(root, command, roots).ok(),
+        Frontend::Jvm => supercov_engine::jvm_run::current_jvm_integrity(root, command, roots).ok(),
+        Frontend::JavaScript => current_javascript_integrity(root, command, roots),
     }
 }
 

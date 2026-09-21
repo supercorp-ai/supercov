@@ -1000,6 +1000,7 @@ mod tests {
             timings: None,
             merged: None,
             parents: None,
+            source_roots: None,
         }
     }
 

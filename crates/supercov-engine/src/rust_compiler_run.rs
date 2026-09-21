@@ -191,7 +191,7 @@ pub fn run_direct_rust_compiler(
             .map_err(|error| error.to_string())?;
         }
         let adapter_started = Instant::now();
-        let integrity = current_rust_integrity(&root, &request.command)?;
+        let integrity = current_rust_integrity(&root, &request.command, None)?;
         let assertion_inputs = crate::assertion_inputs::capture(
             &root,
             "rust",
@@ -300,6 +300,7 @@ pub fn run_direct_rust_compiler(
             timings: Some(timings),
             merged: None,
             parents: None,
+            source_roots: None,
         };
         let tests = run
             .request

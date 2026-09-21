@@ -120,6 +120,14 @@ pub struct RunMetadata {
     pub merged: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parents: Option<Vec<String>>,
+    /// The `SUPERCOV_SOURCE_ROOTS` the run was measured under. It decides what
+    /// the run measures, so it is part of what the run is, replayed like the
+    /// command when a later query asks whether the checkout has moved on. The
+    /// environment of that later query is no guide: it is usually a different
+    /// shell, and a run judged against roots it was not measured under read as
+    /// stale the moment it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_roots: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -380,6 +388,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
         timings: None,
         merged: None,
         parents: None,
+        source_roots: None,
     };
     fs::write(
         directory.join("run.json"),
@@ -926,6 +935,7 @@ mod tests {
             timings: None,
             merged: None,
             parents: None,
+            source_roots: None,
         };
         fs::write(
             directory.join("run.json"),

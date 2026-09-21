@@ -167,8 +167,15 @@ pub fn discover_ruby_files(root: &Path) -> Result<RubyFiles, String> {
     Ok(files)
 }
 
-pub fn prepare_ruby_project(root: &Path) -> Result<PreparedRubyProject, String> {
-    let files = discover_ruby_files(root)?;
+pub fn prepare_ruby_project(
+    root: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+) -> Result<PreparedRubyProject, String> {
+    let mut files = discover_ruby_files(root)?;
+    if let Some(roots) = roots {
+        roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
+        roots.refuse_if_empty(files.sources.len(), "Ruby")?;
+    }
     if files.sources.is_empty() && files.tests.is_empty() {
         return Err(
             "no Ruby source files were found under the project root; Supercov measures .rb files outside vendor, db, bin and test directories".into(),
@@ -262,8 +269,15 @@ pub fn prepare_ruby_project(root: &Path) -> Result<PreparedRubyProject, String> 
     manifest.scope = Some(
         serde_json::to_value(SourceScope {
             version: 1,
-            mode: SourceScopeMode::Automatic,
-            roots: vec![".".into()],
+            mode: if roots.is_some() {
+                SourceScopeMode::Explicit
+            } else {
+                SourceScopeMode::Automatic
+            },
+            roots: match roots {
+                Some(roots) => roots.local_roots().map_err(|error| error.to_string())?,
+                None => vec![".".into()],
+            },
             entries,
         })
         .map_err(|error| error.to_string())?,
@@ -334,6 +348,49 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    fn explicit_roots(root: &Path, roots: &[&str]) -> crate::source_discovery::ExplicitSourceRoots {
+        let roots = roots
+            .iter()
+            .map(|root| (*root).to_owned())
+            .collect::<Vec<_>>();
+        crate::source_discovery::ExplicitSourceRoots::resolve(root, &roots).unwrap()
+    }
+
+    #[test]
+    fn explicit_roots_narrow_ruby_to_the_code_they_name() {
+        // `third_party`, not `vendor`: vendor is already left out by default,
+        // and a test that passed for that reason would prove nothing.
+        let root = fixture("explicit-roots");
+        write(&root, "Gemfile", "source 'https://rubygems.org'\n");
+        write(&root, "lib/app.rb", "def f(a)\n  a && 1\nend\n");
+        write(&root, "third_party/dep.rb", "def g\n  1\nend\n");
+
+        let project = prepare_ruby_project(&root, Some(&explicit_roots(&root, &["lib"]))).unwrap();
+        assert_eq!(project.files.sources, ["lib/app.rb"], "{:?}", project.files);
+        assert!(
+            project
+                .files
+                .excluded
+                .contains(&("third_party/dep.rb".into(), "outside explicit source roots")),
+            "{:?}",
+            project.files.excluded
+        );
+        let scope: crate::source_discovery::SourceScope =
+            serde_json::from_value(project.manifest.scope.clone().unwrap()).unwrap();
+        assert_eq!(
+            scope.mode,
+            crate::source_discovery::SourceScopeMode::Explicit
+        );
+        assert_eq!(scope.roots, ["lib"]);
+
+        // A single file is a root as well.
+        let project =
+            prepare_ruby_project(&root, Some(&explicit_roots(&root, &["third_party/dep.rb"])))
+                .unwrap();
+        assert_eq!(project.files.sources, ["third_party/dep.rb"]);
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn separates_sources_tests_and_tooling() {
         let root = fixture("discover");
@@ -347,7 +404,7 @@ mod tests {
         write(&root, "vendor/bundle/gem.rb", "x = 1\n");
         write(&root, "db/schema.rb", "x = 1\n");
         write(&root, "broken/old.rb", "def (\n");
-        let project = prepare_ruby_project(&root).unwrap();
+        let project = prepare_ruby_project(&root, None).unwrap();
         assert_eq!(
             project.files.sources,
             ["broken/old.rb", "lib/app.rb", "lib/app/version.rb"]
