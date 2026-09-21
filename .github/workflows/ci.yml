@@ -30,3 +30,23 @@ jobs:
           components: clippy, rustfmt
       - run: npm ci
       - run: npm run check
+
+  # The twelve integration scripts that drive the public wrapper, process
+  # supervision and every JavaScript runner. They lived only in `test:engine`,
+  # which nothing but a release chain runs, so a stale assertion in one of them
+  # sat in main through the 1.0.1 release and was found by the 1.1.0 release
+  # chain -- the worst moment to find it. They run on the change now.
+  engine-integrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: npm ci
+      # Three of the scripts drive a real browser through Playwright.
+      - run: npx playwright install --with-deps
+      - run: npm run test:engine-integrations
