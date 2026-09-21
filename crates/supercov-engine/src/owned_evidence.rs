@@ -1069,6 +1069,145 @@ mod tests {
     }
 
     #[test]
+    fn a_test_nothing_can_credit_is_named_without_being_handed_the_run() {
+        // This is the whole of the fix in one place. A test that called
+        // `t.Parallel()` is announced by name and with its real outcome, and a
+        // record for it exists -- but the probes in that record are a store
+        // into one shared array, so they are whatever ran beside it. Handing
+        // them over would read as a measurement of this test, which is the
+        // failure the run-wide label exists to prevent: it must take no hits
+        // at all and say why, while the test beside it keeps its own.
+        let manifest = CoverageManifest {
+            decisions: Vec::new(),
+            points: vec![
+                crate::coverage_report::PointMeta {
+                    id: "go:statement:one".into(),
+                    kind: crate::coverage_analysis::PointKind::Statement,
+                    file: "lib.go".into(),
+                    line: 1,
+                    column: 1,
+                    source: "return 1".into(),
+                    label: None,
+                },
+                crate::coverage_report::PointMeta {
+                    id: "go:statement:two".into(),
+                    kind: crate::coverage_analysis::PointKind::Statement,
+                    file: "lib.go".into(),
+                    line: 2,
+                    column: 1,
+                    source: "return 2".into(),
+                    label: None,
+                },
+            ],
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            unmeasured: Vec::new(),
+            scope: None,
+        };
+        let probes = BTreeMap::from([
+            (
+                0_u64,
+                GoProbe {
+                    id: 0,
+                    target: GoProbeTarget::Statement {
+                        id: "go:statement:one".into(),
+                    },
+                    at: 0,
+                },
+            ),
+            (
+                1_u64,
+                GoProbe {
+                    id: 1,
+                    target: GoProbeTarget::Statement {
+                        id: "go:statement:two".into(),
+                    },
+                    at: 0,
+                },
+            ),
+        ]);
+        // Both records hold probes. Only one of them owns what it holds.
+        let evidence = OwnedEvidence {
+            global: vec![1, 1],
+            tests: vec![
+                OwnedTestEvidence {
+                    name: "TestSerial".into(),
+                    status: "passed".into(),
+                    runner: String::new(),
+                    unattributed: false,
+                    probes: BTreeMap::from([(0, 1)]),
+                    vectors: Vec::new(),
+                },
+                OwnedTestEvidence {
+                    name: "TestParallel".into(),
+                    status: "passed".into(),
+                    runner: String::new(),
+                    unattributed: true,
+                    probes: BTreeMap::from([(0, 1), (1, 1)]),
+                    vectors: Vec::new(),
+                },
+            ],
+            ..OwnedEvidence::default()
+        };
+        let outcome = |name: &str, attributed| OwnedTestOutcome {
+            name: name.into(),
+            runner: String::new(),
+            package: "example.com/p".into(),
+            file: Some("p/x_test.go".into()),
+            status: "passed".into(),
+            attributed,
+        };
+        let run = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &probes,
+            evidence: &evidence,
+            outcomes: &[outcome("TestSerial", true), outcome("TestParallel", false)],
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 0,
+            coverage_model: go_coverage_model(),
+        })
+        .expect("run");
+
+        let result = |name: &str| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|result| result.test == name)
+                .unwrap_or_else(|| panic!("{name} is missing from the run"))
+        };
+        let serial = result("TestSerial");
+        assert_eq!(
+            serial.attribution,
+            crate::coverage_report::ATTRIBUTION_EXACT
+        );
+        assert_eq!(
+            serial.runtime[0].hits,
+            ["go:statement:one"],
+            "a test that ran alone keeps what it reached"
+        );
+
+        let parallel = result("TestParallel");
+        assert_eq!(
+            parallel.attribution,
+            crate::coverage_report::ATTRIBUTION_RUN_WIDE,
+            "it ran, and what it reached belongs to the run rather than to it"
+        );
+        assert_eq!(
+            parallel.status.as_deref(),
+            Some("passed"),
+            "unattributed is not unknown: the runner said how it ended"
+        );
+        assert!(
+            parallel.runtime[0].hits.is_empty(),
+            "it was handed the record's probes and they are not its own: {:?}",
+            parallel.runtime[0].hits
+        );
+    }
+
+    #[test]
     fn a_test_the_runner_saw_but_that_recorded_nothing_still_appears() {
         // Dropping it would make the suite look smaller than it is, and a test
         // that reached no measured line is a fact worth seeing.

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use supercov_engine::jvm_project::JvmBuild;
-use supercov_engine::jvm_run::{DirectJvmRunRequest, run_direct_jvm};
+use supercov_engine::jvm_run::{DirectJvmRunRequest, DirectJvmRunResult, run_direct_jvm};
 
 mod common;
 
@@ -1189,6 +1189,143 @@ fn every_forked_jvm_is_merged_rather_than_overwriting_the_last() {
         assert!(
             records.iter().any(|record| record.contains(class)),
             "{class} is missing, so a fork was lost: {records:?}"
+        );
+    }
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn records_of(result: &DirectJvmRunResult) -> Vec<String> {
+    supercov_engine::evidence_archive::read_archive(&result.run_directory.join("evidence.raw.gz"))
+        .expect("published archive")
+        .into_iter()
+        .filter(|entry| entry.path.ends_with("mcdc.json"))
+        .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+        .collect()
+}
+
+/// JUnit runs a suite's tests at once when the project asks it to, and two
+/// tests sharing one probe array cannot both be credited with what they
+/// reached. Everything else in this file runs a suite that never asked, which
+/// left both halves of that choice -- recording it against the run, and
+/// `--exact-attribution` running the suite in order instead -- resting on the
+/// claim that they worked.
+#[test]
+#[ignore = "drives a real Maven build; run it with `npm run test:jvm`"]
+fn a_suite_that_runs_at_once_is_credited_per_test_only_when_asked() {
+    let _building = common::building();
+    let Some(mvn) = common::tool("mvn") else {
+        common::skip("jvm", "no Maven found");
+        return;
+    };
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("maven-parallel-warmup");
+        let built = maven_can_resolve(&mvn, &warmup);
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
+    if !resolvable {
+        common::skip(
+            "jvm",
+            "Maven cannot resolve this project's dependencies here",
+        );
+        return;
+    }
+
+    let root = temporary("maven-parallel");
+    fixture(&root);
+    // The project's own choice, which is what makes this a measurement of the
+    // suite as its author runs it.
+    write(
+        &root,
+        "src/test/resources/junit-platform.properties",
+        "junit.jupiter.execution.parallel.enabled=true\n\
+         junit.jupiter.execution.parallel.mode.default=concurrent\n",
+    );
+    let properties = root.join("src/test/resources/junit-platform.properties");
+    let before = std::fs::read_to_string(&properties).unwrap();
+
+    let base = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![mvn.display().to_string(), "test".into()],
+        run_id: "run-jvm-as-written".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+
+    // As written: the suite keeps its parallelism, and what overlaps belongs
+    // to the run.
+    let mut diagnostics = Vec::new();
+    let as_written = run_direct_jvm(&base, &mut diagnostics).unwrap_or_else(|error| {
+        panic!(
+            "{error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        )
+    });
+    let printed = String::from_utf8_lossy(&diagnostics).into_owned();
+    assert_eq!(as_written.exit_code, 0, "{printed}");
+    assert!(
+        printed.contains("recorded against the run rather than against a test"),
+        "the suite was left parallel and the run has to say so:\n{printed}"
+    );
+    assert!(
+        printed.contains("--exact-attribution"),
+        "and say what to do about it:\n{printed}"
+    );
+    assert!(
+        !printed.contains("turned JUnit's parallel execution off"),
+        "nothing was taken away from the suite as written:\n{printed}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&properties).unwrap(),
+        before,
+        "the author's own properties are not rewritten"
+    );
+    // And the records say the same thing the diagnostic does. Saying it only
+    // in prose would leave the evidence free to credit a test with whatever
+    // ran beside it.
+    let overlapped = records_of(&as_written);
+    assert!(
+        overlapped
+            .iter()
+            .any(|record| record.contains("\"attribution\":\"run-wide\"")),
+        "what overlapped belongs to the run: {overlapped:?}"
+    );
+
+    // Asked for: the workspace copy runs in order, and each test carries its
+    // own coverage.
+    let request = DirectJvmRunRequest {
+        run_id: "run-jvm-exact".into(),
+        exact_attribution: true,
+        ..base
+    };
+    let mut diagnostics = Vec::new();
+    let exact = run_direct_jvm(&request, &mut diagnostics).unwrap_or_else(|error| {
+        panic!(
+            "{error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        )
+    });
+    let printed = String::from_utf8_lossy(&diagnostics).into_owned();
+    assert_eq!(exact.exit_code, 0, "{printed}");
+    assert!(
+        printed.contains("turned JUnit's parallel execution off"),
+        "changing how the suite runs is said out loud:\n{printed}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&properties).unwrap(),
+        before,
+        "and it is said about the copy: the author's file is untouched"
+    );
+
+    let records = records_of(&exact);
+    for name in ["bigWhenLoudAndLarge", "smallOtherwise"] {
+        let record = records
+            .iter()
+            .find(|record| record.contains(name))
+            .unwrap_or_else(|| panic!("{name} is in the run: {records:?}"));
+        assert!(
+            record.contains("\"attribution\":\"exact\""),
+            "running them in order is what makes them attributable:\n{record}"
         );
     }
     std::fs::remove_dir_all(root).ok();
