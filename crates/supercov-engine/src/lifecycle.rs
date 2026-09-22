@@ -1450,7 +1450,13 @@ mod tests {
         fs::write(evidence.join("main.jsonl"), "what the run saw").unwrap();
 
         let told = note_kept_evidence(&root, &evidence, "run_told", "boom".into());
-        let kept = root.join(".supercov/failed-evidence/run_told");
+        // Taken from the keeper rather than spelled out here: a path written as
+        // one string renders every separator the same way, which is not what a
+        // Windows path built join by join looks like, so asserting on the
+        // spelling tested this test instead of the message. Keeping is
+        // idempotent, so asking again names the directory already kept.
+        let kept = keep_failed_evidence(&root, &evidence, "run_told").expect("the evidence");
+        assert_eq!(kept, root.join(FAILED_EVIDENCE).join("run_told"));
         assert!(
             told.starts_with("boom\n"),
             "the failure itself came second: {told}"
