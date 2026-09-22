@@ -4122,7 +4122,7 @@ mod tests {
         ] {
             view.scope = Some(scope.clone());
             view.model.language = "python".into();
-            view.model.name = "python-monitoring-v1".into();
+            view.model.name = "python-probes-v1".into();
         }
         let root = root();
         let path = root.join("query-index.python.bin");
@@ -4137,7 +4137,7 @@ mod tests {
         let projection = index.projection(CoverageViewId::All, None, None).unwrap();
         let source_scope = projection.source_scope.unwrap();
         assert_eq!(source_scope.language, "python");
-        assert_eq!(source_scope.model, "python-monitoring-v1");
+        assert_eq!(source_scope.model, "python-probes-v1");
         assert_eq!(source_scope.kind, "source-discovery");
         assert_eq!(source_scope.included, 1);
         assert_eq!(index.scope_entries(CoverageViewId::All).unwrap().len(), 1);

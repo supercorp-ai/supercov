@@ -41,13 +41,20 @@ import sys
 import tempfile
 from typing import Callable
 
-PROBE_VERSION = 1
+PROBE_VERSION = 2
+# A context's hit array is a slot file mapped into memory. Its first bytes
+# name the context for the reader, so obligations are numbered from here.
+SLOT_HEADER = 16
+# A multi-condition decision up to this wide has a region in the slot indexed
+# by its evaluation mask, so a vector is a byte store like any hit; wider ones
+# are reported through the runtime instead.
+MAX_REGION_WIDTH = 6
 
 # Bound by the runtime at install: the callables the probes reach through the
 # alias each instrumented module imports from here. Kept as module attributes
 # so `from supercov_probes import hits_get as <alias>` works in any namespace
 # a planned file is executed in, not only ones the loader controls.
-hits_get: Callable[[], bytearray] = lambda: bytearray()  # noqa: E731 - replaced at install
+hits_get: Callable[[], object] = lambda: bytearray()  # noqa: E731 - replaced at install
 value_probe: Callable[[int, object], object] = lambda k, value: value  # noqa: E731
 condition_probe: Callable[[int, int, object, bool], bool] = lambda d, i, value, inv: bool(value)  # noqa: E731
 decision_probe: Callable[[int, object], bool] = lambda d, value: bool(value)  # noqa: E731
@@ -156,25 +163,39 @@ class FileProbes:
             self.boolop_groups.append(plans)
             self.boolops[span] = g
         # A decision with one condition needs no evaluation state: its
-        # outcome is its vector. Two slots in the hit array, one per truth,
-        # that the harvest turns into the vector and the outcome hit.
+        # outcome is its vector. Two bytes of its region, one per truth,
+        # that the harvest turns into the vector and the outcome hit. The
+        # region's place in the slot is assigned by `index_plan`.
         self.singles: dict[tuple[int, int, int, int], int] = {}
         for span, d in list(self.decisions.items()):
             if len(self.decision_plans[d][0]["conditions"]) == 1:
-                slot = len(self.ids) + base
-                self.ids.append(("vector", d, False))
-                self.ids.append(("vector", d, True))
-                self.singles[span] = slot
+                self.singles[span] = d
                 del self.decisions[span]
                 leaf = next(key for key, (dd, i, inv) in self.leaves.items() if dd == d)
                 del self.leaves[leaf]
-        self.digest = hashlib.sha256(
-            repr((PROBE_VERSION, relative, base, self.ids, len(self.decision_plans), len(self.boolop_groups))).encode("utf-8")
-        ).hexdigest()
+        self.digest = ""
 
     def _number(self, identifier: str) -> int:
         self.ids.append(identifier)
         return self.base + len(self.ids) - 1
+
+    def _finish(self) -> None:
+        """The digest of everything the probes bake into bytecode: a cached
+        module is reused only for an identical numbering."""
+        self.digest = hashlib.sha256(
+            repr(
+                (
+                    PROBE_VERSION,
+                    self.relative,
+                    self.base,
+                    self.ids,
+                    sorted(self.decisions.items()),
+                    sorted(self.singles.items()),
+                    sorted(self.leaves.items()),
+                    sorted(self.boolops.items()),
+                )
+            ).encode("utf-8")
+        ).hexdigest()
 
     @property
     def count(self) -> int:
@@ -196,7 +217,17 @@ class SiteProbes:
 
 
 class PlanIndex:
-    """Every planned file's obligations numbered into one run-wide space."""
+    """Every planned file's obligations numbered into one slot layout.
+
+    A slot is one context's bytes: `SLOT_HEADER` bytes naming the context,
+    one byte per obligation (`ids[k - SLOT_HEADER]` is obligation `k`), then
+    a region per decision that has one -- two bytes for a single condition,
+    indexed by its truth; `2 * 3 ** width` bytes up to `MAX_REGION_WIDTH`,
+    indexed by `2 * mask + outcome`, where the mask holds one base-3 digit
+    per condition: 0 not evaluated, 1 false, 2 true -- the digits a vector is
+    written in. `regions[d]` is decision `d`'s first byte, or -1 when it is
+    too wide for a region and is reported through the runtime instead.
+    """
 
     def __init__(self, plan: dict) -> None:
         self.files: dict[str, FileProbes] = {}
@@ -211,19 +242,69 @@ class PlanIndex:
             if relative not in plan["files"]
         }
         for relative, file_plan in plan["files"].items():
-            probes = FileProbes(relative, file_plan, len(self.ids))
+            probes = FileProbes(relative, file_plan, SLOT_HEADER + len(self.ids))
             self.files[relative] = probes
             self.ids.extend(probes.ids)
             decision_base = len(self.decisions)
             self.decisions.extend(probes.decision_plans)
             probes.decisions = {span: decision_base + d for span, d in probes.decisions.items()}
-            for offset, entry in enumerate(probes.ids):
-                if isinstance(entry, tuple):
-                    self.ids[probes.base + offset] = (entry[0], decision_base + entry[1], entry[2])
+            probes.singles = {span: decision_base + d for span, d in probes.singles.items()}
             probes.leaves = {span: (decision_base + d, i, inv) for span, (d, i, inv) in probes.leaves.items()}
             group_base = len(self.boolop_groups)
             self.boolop_groups.extend(probes.boolop_groups)
             probes.boolops = {span: group_base + g for span, g in probes.boolops.items()}
+        cursor = SLOT_HEADER + len(self.ids)
+        self.regions: list[int] = []
+        self.region_table: list[tuple[int, int, int]] = []
+        for d, (decision, _) in enumerate(self.decisions):
+            width = len(decision["conditions"])
+            if width > MAX_REGION_WIDTH:
+                self.regions.append(-1)
+                continue
+            self.regions.append(cursor)
+            self.region_table.append((cursor, width, d))
+            cursor += 2 if width == 1 else 2 * 3**width
+        self.slot_bytes = cursor
+        for probes in self.files.values():
+            probes.singles = {span: self.regions[d] for span, d in probes.singles.items()}
+            probes._finish()
+        self.digest = hashlib.sha256(
+            repr((PROBE_VERSION, SLOT_HEADER, self.ids, self.region_table)).encode("utf-8")
+        ).hexdigest()
+
+    def layout(self) -> dict:
+        """What the reader needs to decode a slot a harvest never reached:
+        the obligation at each byte, and each region's decision with what its
+        vectors imply -- the outcome hit, and each logical operator's."""
+        decisions = []
+        for start, width, d in self.region_table:
+            decision, logical = self.decisions[d]
+            decisions.append(
+                {
+                    "start": start,
+                    "width": width,
+                    "id": decision["id"],
+                    "outcomeTrue": decision["outcomeTrue"],
+                    "outcomeFalse": decision["outcomeFalse"],
+                    "logical": [
+                        {
+                            "evaluated": item["evaluated"],
+                            "shortCircuit": item["shortCircuit"],
+                            "previousLeaves": item["previousLeaves"],
+                            "operandLeaves": item["operandLeaves"],
+                        }
+                        for item in logical
+                    ],
+                }
+            )
+        return {
+            "version": PROBE_VERSION,
+            "digest": self.digest,
+            "header": SLOT_HEADER,
+            "bytes": self.slot_bytes,
+            "ids": self.ids,
+            "decisions": decisions,
+        }
 
 
 def index_plan(plan: dict) -> PlanIndex:

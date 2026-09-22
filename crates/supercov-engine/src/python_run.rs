@@ -295,13 +295,8 @@ pub fn run_direct_python(
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
         writeln!(
             diagnostics,
-            "[supercov] detected Python; measuring {} source file(s) in place through {}",
+            "[supercov] detected Python; measuring {} source file(s) in place through probes compiled at import",
             project.plan.files.len(),
-            if std::env::var("SUPERCOV_PYTHON_FRONTEND").as_deref() == Ok("monitoring") {
-                "CPython monitoring"
-            } else {
-                "probes compiled at import"
-            }
         )
         .map_err(|error| error.to_string())?;
         for (file, reason) in &project.unparseable {

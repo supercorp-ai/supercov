@@ -8,6 +8,7 @@ each phase runs and records pytest's phase outcomes. It computes no coverage.
 
 import importlib
 import os
+import threading
 
 import pytest
 
@@ -46,7 +47,7 @@ def pytest_load_initial_conftests(early_config, parser, args):
     """Name the bytecode cache for rewrites made with the assertion-pass hook.
 
     Supercov no longer turns `enable_assertion_pass_hook` on: assertion sites
-    come from line events on the lines the plan names, and the hook made
+    come from site probes on the lines the plan names, and the hook made
     pytest build a failure explanation for every passing assertion. A user
     who enables it still gets `pytest_assertion_pass` below, and pytest only
     calls that from modules rewritten with the option on -- but it caches
@@ -64,29 +65,84 @@ def pytest_load_initial_conftests(early_config, parser, args):
     if _runtime is None:
         return
     try:
-        # Rewrites made with the hook on, and rewrites the probe frontend
-        # adds site probes to, both leave bytecode a plain run must not load.
-        # The tail says what was done to the rewrite, so a cache from another
-        # mode or another Supercov is never loaded: hook-on rewrites carry
-        # explanation calls, probed ones carry site probes of one version.
+        # Every rewrite Supercov sees carries site probes, and rewrites made
+        # with the hook on carry explanation calls too: bytecode a plain run
+        # must not load. The tail says what was done to the rewrite, so a
+        # cache from another mode or another Supercov is never loaded.
+        import supercov_probes
+
         marks = []
         if bool(early_config.getini("enable_assertion_pass_hook")):
             marks.append("hook")
-        if getattr(_runtime, "frontend", "") == "probes":
-            import supercov_probes
-
-            marks.append(f"probes{supercov_probes.PROBE_VERSION}")
+        marks.append(f"probes{supercov_probes.PROBE_VERSION}")
         from _pytest.assertion import rewrite
 
         tail = rewrite.PYC_TAIL
-        if marks and "-supercov" not in tail:
+        if "-supercov" not in tail:
             stem, extension = tail.rsplit(".", 1)
             rewrite.PYC_TAIL = f"{stem}-supercov-{'-'.join(marks)}.{extension}"
+        _name_planned_rewrites(rewrite)
     except Exception as error:  # noqa: BLE001 - never break the user's test run
         _runtime.limitation(
             "python-pytest-assertion-hook-unavailable",
             f"this pytest exposes no rewrite cache Supercov can name ({error!r}); plain assert statements are not linked to assertions",
         )
+
+
+_planned_rewrite_lock = threading.Lock()
+
+
+def _name_planned_rewrites(rewrite) -> None:
+    """Key a rewritten *measured* module's bytecode on its probe numbering.
+
+    pytest rewrites a module registered with `register_assert_rewrite` itself,
+    ahead of Supercov's finder, and caches the result under its source's
+    mtime alone. A test file only carries site probes, which name a file and a
+    line; a measured module carries probes numbered into the run's slot
+    layout, which moves whenever another measured file gains or loses an
+    obligation. Its cached bytecode would then store into another
+    obligation's byte. Such a module's cache name carries its numbering's
+    digest instead, and the names left by earlier numberings are removed, so
+    the cache holds one per module rather than one per edit.
+    """
+    hook = getattr(rewrite, "AssertionRewritingHook", None)
+    original = getattr(hook, "exec_module", None)
+    if original is None or getattr(original, "_supercov", False):
+        return
+
+    def exec_module(self, module):
+        probing = getattr(_runtime, "probing", None)
+        spec = getattr(module, "__spec__", None)
+        probes = None if probing is None or spec is None else probing.probes_for(spec.origin)
+        if probes is None:
+            return original(self, module)
+        with _planned_rewrite_lock:
+            tail = rewrite.PYC_TAIL
+            stem, extension = tail.rsplit(".", 1)
+            rewrite.PYC_TAIL = f"{stem}-{probes.digest[:16]}.{extension}"
+            try:
+                original(self, module)
+            finally:
+                current = rewrite.PYC_TAIL
+                rewrite.PYC_TAIL = tail
+            _remove_stale_rewrites(rewrite, spec.origin, stem, current)
+
+    exec_module._supercov = True
+    hook.exec_module = exec_module
+
+
+def _remove_stale_rewrites(rewrite, origin: str, stem: str, current: str) -> None:
+    try:
+        from pathlib import Path
+
+        source = Path(origin)
+        cache = rewrite.get_cache_dir(source)
+        prefix = source.name[:-3] + stem + "-"
+        for entry in cache.iterdir():
+            if entry.name.startswith(prefix) and entry.name != source.name[:-3] + current:
+                entry.unlink()
+    except (OSError, AttributeError, ValueError):
+        pass
 
 
 def _hook_expectation_contexts() -> None:
