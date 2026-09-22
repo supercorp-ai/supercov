@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import atexit
 import contextvars
+import weakref
 import dis
 import json
 import mmap
@@ -31,6 +32,7 @@ import weakref
 PLAN_VERSION = 1
 EVIDENCE_VERSION = 1
 CONTEXT_ENV = "SUPERCOV_CONTEXT"
+FRONTEND_ENV = "SUPERCOV_PYTHON_FRONTEND"
 PLAN_ENV = "SUPERCOV_PYTHON_PLAN"
 EVIDENCE_DIR_ENV = "SUPERCOV_PYTHON_EVIDENCE_DIR"
 RUN_ID_ENV = "SUPERCOV_RUN_ID"
@@ -78,7 +80,7 @@ MAX_OPEN_EVALUATIONS = 64
 # zero-iteration execution is still observed before the loop goes quiet.
 MAX_LOOP_REARMS = 16
 
-_monitoring = sys.monitoring
+_monitoring = getattr(sys, "monitoring", None)  # absent before 3.12; the probe frontend does not need it
 _BRANCH_OPNAMES = frozenset(
     {
         "POP_JUMP_IF_FALSE",
@@ -409,6 +411,18 @@ class _FilePlan:
                         self.alternatives_by_line.setdefault(line, []).append(try_plan["raised"])
 
 
+class _Hits(bytearray):
+    """A context's hit array: one byte per obligation in the run.
+
+    A subclass so it can carry its context and be weakly referenced: the
+    runtime drops its strong reference at the phase switch and the array
+    lives exactly as long as some thread or task still holds the context --
+    harvested again at close, freed otherwise.
+    """
+
+    __slots__ = ("context", "__weakref__")
+
+
 class Runtime:
     def __init__(self, plan_path: str, evidence_dir: str, run_id: str, worker: str) -> None:
         with open(plan_path, "r", encoding="utf-8") as stream:
@@ -459,7 +473,19 @@ class Runtime:
         self.dropped_records = 0
         self.closed = False
         self.registered_events: tuple = ()
-        self.branch_pairs = hasattr(_monitoring.events, "BRANCH_LEFT")
+        self.branch_pairs = _monitoring is not None and hasattr(_monitoring.events, "BRANCH_LEFT")
+        # The probe frontend: obligations numbered into one array per context,
+        # reached from a probe through `hits_var.get()`; see supercov_probes.
+        self.frontend = os.environ.get(FRONTEND_ENV, "monitoring")
+        self.probe_files: dict = {}
+        self.probe_ids: list = []
+        self.hits_var = contextvars.ContextVar("supercov_hits")
+        self.hit_arrays: "weakref.WeakValueDictionary[int, _Hits]" = weakref.WeakValueDictionary()
+        if self.frontend == "probes":
+            import supercov_probes
+
+            self.probe_files, self.probe_ids = supercov_probes.index_plan(plan)
+            self.hits_var = contextvars.ContextVar("supercov_hits", default=self._new_hits(0))
 
     # -- evidence transport -------------------------------------------------
 
@@ -691,6 +717,9 @@ class Runtime:
                 }
                 self.identities[context] = stored
                 self._record({"t": "phase", "ctx": context, "at": _now_ms(), **stored})
+            if self.frontend == "probes":
+                self._harvest(self.hits_var.get())
+                self.hits_var.set(self._new_hits(context))
             self.context.set(context)
             self.flush()
             touched = self.touched
@@ -1629,7 +1658,49 @@ class Runtime:
 
     # -- installation -------------------------------------------------------
 
+    # -- probe frontend -------------------------------------------------------
+
+    def _new_hits(self, context: int) -> "_Hits":
+        array = _Hits(len(self.probe_ids))
+        array.context = context
+        self.hit_arrays[context] = array
+        return array
+
+    def _value_probe(self, k: int, value):
+        """A lambda's entry: record and hand the value back unchanged."""
+        self.hits_var.get()[k] = 1
+        return value
+
+    def _harvest(self, array: "_Hits") -> None:
+        """Turn an array's set bytes into hit records, and clear them.
+
+        `find` walks the array in C. Clearing lets the next harvest of the
+        same array -- a context a background thread kept alive -- emit only
+        what is new; `_hit` deduplicates in any case.
+        """
+        ids = self.probe_ids
+        context = array.context
+        index = array.find(1)
+        while index != -1:
+            array[index] = 0
+            self._hit(context, ids[index])
+            index = array.find(1, index + 1)
+
+    def _install_probes(self) -> None:
+        import supercov_probes
+
+        supercov_probes.install(
+            self.probe_files,
+            self._relative_path,
+            os.path.join(self.root, ".supercov", "cache", "python"),
+            self.hits_var.get,
+            self._value_probe,
+        )
+
     def install(self) -> None:
+        if self.frontend == "probes":
+            self._install_common(probes=True)
+            return
         with self.lock:
             if self.tool_id is not None:
                 return
@@ -1665,6 +1736,16 @@ class Runtime:
         ) + ((events.BRANCH_LEFT, events.BRANCH_RIGHT) if self.branch_pairs else (events.BRANCH,))
         if STUB != "nothing":
             _monitoring.set_events(self.tool_id, events.PY_START)
+        self._install_common(probes=False)
+
+    def _install_common(self, probes: bool) -> None:
+        """What both frontends share once observation is armed."""
+        if probes:
+            with self.lock:
+                if self.output is not None:
+                    return
+                self._open_output()
+            self._install_probes()
         inherited = os.environ.get(CONTEXT_ENV)
         if inherited:
             try:
@@ -1700,6 +1781,8 @@ class Runtime:
             if self.closed:
                 return
             self._stop_observing()
+            for array in list(self.hit_arrays.values()):
+                self._harvest(array)
             # The exit marker is the transport's last record, so it is written
             # while the transport is open -- before `closed` turns every later
             # record away, this one included.
@@ -1828,7 +1911,7 @@ def install() -> Runtime | None:
     run_id = os.environ.get(RUN_ID_ENV)
     if not plan_path or not evidence_dir or not run_id:
         return None
-    if sys.version_info < (3, 12):
+    if sys.version_info < (3, 12) and os.environ.get(FRONTEND_ENV, "monitoring") != "probes":
         _INSTALL_ERROR = f"Supercov requires CPython 3.12 or newer, found {sys.version.split()[0]}"
         sys.stderr.write(f"[supercov] {_INSTALL_ERROR}\n")
         return None

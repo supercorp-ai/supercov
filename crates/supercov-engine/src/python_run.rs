@@ -59,7 +59,7 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
-fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 4] {
+fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 5] {
     [
         (
             "sitecustomize.py",
@@ -76,6 +76,10 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 4] {
         (
             "supercov_unittest.py",
             include_bytes!("../runtime-assets/python/supercov_unittest.py"),
+        ),
+        (
+            "supercov_probes.py",
+            include_bytes!("../runtime-assets/python/supercov_probes.py"),
         ),
     ]
 }
