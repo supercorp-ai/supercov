@@ -498,6 +498,7 @@ class Runtime:
         self.frontend = os.environ.get(FRONTEND_ENV, "monitoring")
         self.probe_files: dict = {}
         self.probe_ids: list = []
+        self.probing = None
         self.hits_var = contextvars.ContextVar("supercov_hits")
         self.hit_arrays: "weakref.WeakValueDictionary[int, _Hits]" = weakref.WeakValueDictionary()
         if self.frontend == "probes":
@@ -1881,10 +1882,25 @@ class Runtime:
                 )
                 self._write_payload(b'{"ctx":%d,"t":"decs","v":[' % context + body + b"]}")
 
+    def _detect_unprobed(self, code, offset):
+        """PY_START as a detector only: a planned file's code object the probe
+        loader did not produce reached the interpreter another way. Every
+        code object fires once and is then disabled."""
+        probing = self.probing
+        if probing is not None and id(code) not in probing.code_objects:
+            relative = self._relative_path(code.co_filename)
+            if relative is not None and relative in self.probe_files:
+                self.limitation(
+                    "python-probes-unobserved-module",
+                    "measured code reached the interpreter by a path the import hook did not see, so its execution was not observed",
+                    relative,
+                )
+        return _monitoring.DISABLE
+
     def _install_probes(self) -> None:
         import supercov_probes
 
-        supercov_probes.install(
+        self.probing = supercov_probes.install(
             self.probe_files,
             self._relative_path,
             os.path.join(self.root, ".supercov", "cache", "python"),
@@ -1899,9 +1915,21 @@ class Runtime:
                 "iter_probe": self._iter_probe,
                 "aiter_probe": self._aiter_probe,
                 "site_probe": self._site_probe,
+                "limitation": self.limitation,
             },
             self.probe_sites,
         )
+        if _monitoring is not None and STUB != "nothing":
+            # The detector (3.12+): one PY_START per code object, then off.
+            for candidate in (3, 4, 1):
+                if _monitoring.get_tool(candidate) is None:
+                    _monitoring.use_tool_id(candidate, "supercov")
+                    self.tool_id = candidate
+                    break
+            if self.tool_id is not None:
+                _monitoring.register_callback(self.tool_id, _monitoring.events.PY_START, self._detect_unprobed)
+                self.registered_events = (_monitoring.events.PY_START,)
+                _monitoring.set_events(self.tool_id, _monitoring.events.PY_START)
 
     def install(self) -> None:
         if self.frontend == "probes":

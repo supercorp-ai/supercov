@@ -222,6 +222,41 @@ try {
   const stray = readdirSync(cwd, { recursive: true }).filter((entry) => /\.supercov_|_scv_|supercov_probes/.test(String(entry)) && !String(entry).startsWith('.supercov'));
   assert.deepEqual(stray, [], 'the project holds no Supercov artefacts outside .supercov');
 
+  // -- what the probe frontend declares rather than misses --------------------
+  // A planned file compiled past the import hook runs unprobed; the detector
+  // names it as a limitation instead of letting the count come out short. An
+  // `except*` clause that matched nothing is not observable by a probe, and
+  // is declared for its handler.
+  const declared = project('fixture-declared');
+  writeFileSync(
+    resolve(declared, 'app/grouped.py'),
+    'def grouped(values):\n    count = -1\n    try:\n        raise ExceptionGroup("g", [ValueError(v) for v in values])\n    except* ValueError as group:\n        count = len(group.exceptions)\n    except* TypeError:\n        count = -2\n    return count\n',
+  );
+  writeFileSync(
+    resolve(declared, 'tests/test_declared.py'),
+    [
+      'import os',
+      'from app import grouped',
+      '',
+      'def test_grouped():',
+      '    assert grouped.grouped([1, 2]) == 2',
+      '',
+      'def test_unprobed_copy():',
+      '    import supercov_probes',
+      '    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "shapes.py"))',
+      '    code = supercov_probes._original_compile(open(path).read(), path, "exec")',
+      '    namespace = {"__name__": "app.shapes_plain"}',
+      '    exec(code, namespace)',
+      '    assert namespace["chained"](3) == "small"',
+      '',
+    ].join('\n'),
+  );
+  ok(supercov(declared, 'probes', ['--', interpreter, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests/test_declared.py'], environment), 'declared limitations run');
+  const declaredRun = latestRun(declared);
+  assert.equal(summary(declared, declaredRun).complete, false, 'a run with declared limitations is not complete');
+  const limited = Object.fromEntries(query(declared, declaredRun, ['files', '--limit', '50']).files.filter((file) => file.measurementLimitations > 0).map((file) => [file.file, file.measurementLimitations]));
+  assert.deepEqual(limited, { 'app/grouped.py': 1, 'app/shapes.py': 1 }, 'the except* handler and the unprobed copy are each declared once, on their file');
+
   // -- an interpreter the monitoring frontend cannot measure ------------------
   const olderInterpreters = ['python3.11', 'python3.10', 'python3.9'].filter((candidate) => run(candidate, ['-c', 'pass']).status === 0);
   if (olderInterpreters.length === 0) console.log('[python-probes] no CPython 3.9-3.11 on PATH; the older-interpreter case was not run');

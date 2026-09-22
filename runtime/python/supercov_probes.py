@@ -19,7 +19,10 @@ Three doors admit measured code into the interpreter, and each is covered:
   and a hand-rolled `exec(compile(open(p).read(), p, "exec"))` all reach it
   with the real filename (verified 2026-09-22), and get probed there.
 - The main script of `python script.py` is compiled in C and reaches
-  neither; the launcher runs it through `supercov_main` instead.
+  neither. Supercov measures test-runner commands, which never put a
+  planned file in `sys.argv[0]`; a script-shaped runner such as Django's
+  `manage.py test` is a detection feature first, and this is where its
+  entry would go.
 
 Stdlib only, CPython 3.9 or newer.
 """
@@ -343,6 +346,9 @@ class _Inserter(ast.NodeTransformer):
         self.value = names["value_probe"]
         self.names = names
         self.inserted = 0
+        # (limitation id, reason, obligation id): what this file's probes
+        # cannot observe, for the runtime to declare.
+        self.limitations: list = []
 
     def _call(self, alias: str, arguments: list, node: ast.AST) -> ast.Call:
         """`alias(*arguments)` positioned on `node`; constants get positions
@@ -523,6 +529,22 @@ class _Inserter(ast.NodeTransformer):
             node.handlers[-1].type is None  # type: ignore[attr-defined]
             or (isinstance(node.handlers[-1].type, ast.Name) and node.handlers[-1].type.id == "BaseException")  # type: ignore[attr-defined]
         )
+        if star:
+            # `except*` splits an exception group across handlers; a clause
+            # that matched nothing is not a jump a probe can stand in for.
+            for _, missed, bare in handlers:
+                if not bare:
+                    self.limitations.append(
+                        (
+                            "python-try-star-miss-unobserved",
+                            "an except* clause that matched no exception in the group is not observed",
+                            self.probes.relative,
+                            # A limitation names the obligation, not one of
+                            # its alternatives: the handler's id without the
+                            # `:missed` the alternative carries.
+                            self.probes.ids[missed - self.probes.base].rsplit(":", 1)[0],
+                        )
+                    )
         if not star and not catch_all:
             # No handler matched: every typed handler was missed, and a
             # `finally` is reached the way an exception reaches it.
@@ -700,6 +722,9 @@ def instrument(tree: ast.Module, probes) -> ast.Module:
     inserter = _Inserter(probes, names)
     inserter.visit(tree)
     _import_aliases(tree, names)
+    if inserter.limitations and _probing is not None:
+        for limitation in inserter.limitations:
+            _probing.report(*limitation)
     return tree
 
 
@@ -753,6 +778,8 @@ class Probing:
         self.relative_for = relative_for
         self.cache_directory = cache_directory
         self.code_objects: set[int] = set()
+        # The runtime's `limitation(identifier, reason, file, obligation)`, once installed.
+        self.report: Callable[[str, str, str, str], None] = lambda identifier, reason, file, obligation: None
 
     def probes_for(self, filename: str | None) -> FileProbes | None:
         """A measured file's probes: what the finder swaps a loader for."""
@@ -930,6 +957,7 @@ def install(
     for attribute in PROBE_NAMES:
         globals()[attribute] = entry_points[attribute]
     probing = Probing(files, relative_for, cache_directory, sites)
+    probing.report = entry_points.get("limitation", probing.report)
     _probing = probing
     if not any(isinstance(finder, ProbeFinder) for finder in sys.meta_path):
         sys.meta_path.insert(0, ProbeFinder(probing))
