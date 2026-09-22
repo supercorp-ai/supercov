@@ -152,20 +152,21 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
-      # The probe frontend is the default and measures 3.9 and up; the
-      # monitoring frontend needs 3.12 and keeps its own gate there.
-      - run: npm run test:python-probes
+      # Every interpreter measures itself: the gate refuses to fall back to
+      # another Python on the runner, and asserts the version it measured.
+      - run: npm run test:python
         env:
           SUPERCOV_PYTHON: python
-      - if: ${{ matrix.python != '3.9' && matrix.python != '3.10' && matrix.python != '3.11' }}
-        run: npm run test:python-monitoring
+      # Slots are shared pages: close must take them back and a fork must
+      # not write into its parent's, on every platform's mmap.
+      - run: node --test tests/runtime/python-lifecycle.test.mjs
         env:
           SUPERCOV_PYTHON: python
-      # What a measured line costs is a property of the runtime, not of a host
-      # or an interpreter version, so one combination guards it. Running it on
-      # all fifteen would pay fifteen times over for the same signal.
-      - if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
-        run: npm run benchmark:python-monitoring
+      # A probe's cost is the interpreter's: 3.11 specializes the stores a
+      # probe compiles to and 3.9 does not, so every version is held to the
+      # budget, on one host.
+      - if: matrix.os == 'ubuntu-latest'
+        run: npm run benchmark:python
         env:
           SUPERCOV_PYTHON: python
 

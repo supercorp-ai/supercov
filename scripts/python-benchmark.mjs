@@ -2,14 +2,13 @@
 // Overhead benchmark for a Python suite that executes a realistic number of
 // measured lines.
 //
-// A suite's bill is not its test count. A measured line is disabled after its
-// first hit in a test and re-armed for the next, so every (test, statement)
-// pair costs one callback that writes a record; every condition costs a branch
-// callback per execution (per direction on 3.14); every code object costs a
-// discovery. An earlier shape of this benchmark gave each test one four-line
-// `classify(a, b)` call -- 7.1 measured lines per test -- and reported 1.1x,
-// while a real library (h11) executes about 2,100 lines per test and measured
-// 5.8x. The number it printed could not move when the cost that matters
+// A suite's bill is not its test count. Every execution of a measured
+// statement runs its probe -- a byte store into the context's slot -- and
+// every condition its probe call; what a test pays grows with the measured
+// lines it executes. An earlier shape of this benchmark gave each test one
+// four-line `classify(a, b)` call -- 7.1 measured lines per test -- and
+// reported 1.1x, while a real library (h11) executes about 2,100 lines per
+// test. The number it printed could not move when the cost that matters
 // changed, so it is the measured lines per test that must be realistic here.
 
 import assert from 'node:assert/strict';
@@ -53,9 +52,9 @@ try {
   for (let index = 0; index < moduleCount; index += 1) {
     writeFileSync(
       resolve(project, `src/mod_${index.toString().padStart(3, '0')}.py`),
-      // A body of distinct statements, so a call pays for the callback on each
-      // of them and for the records a first execution writes, the way measured
-      // code does. A loop over two lines would exercise only the first.
+      // A body of distinct statements, so a call pays for the probe on each of
+      // them, the way measured code does. A loop over two lines would
+      // exercise only the first.
       //
       // One statement in ten branches. Making every one of them a conditional
       // measured decision recording rather than line coverage, and reported an
