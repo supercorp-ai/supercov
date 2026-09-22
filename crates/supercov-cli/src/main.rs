@@ -2483,10 +2483,20 @@ fn cleanup_summary(
     result: &supercov_engine::lifecycle::CleanupResult,
 ) -> String {
     format!(
-        "[supercov] {} {} stored run(s), {} per-run workspace(s), and {} isolated build cache; keeping {} newest run(s)",
+        "[supercov] {} {} stored run(s), {} per-run workspace(s), {}and {} isolated build cache; keeping {} newest run(s)",
         if dry_run { "would remove" } else { "removed" },
         result.removed_runs.len(),
         result.removed_workspaces.len(),
+        // Named separately because it is not a run: it is what a run Supercov
+        // failed to publish measured, and removing it is irreversible.
+        if result.removed_failed_evidence.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "the kept evidence of {} failed run(s), ",
+                result.removed_failed_evidence.len()
+            )
+        },
         if result.removed_build_cache {
             "the"
         } else {
@@ -4614,11 +4624,22 @@ mod tests {
             removed_runs: vec!["run-1".into(), "run-0".into()],
             removed_workspaces: vec!["run-1".into()],
             removed_evidence: vec![],
+            removed_failed_evidence: vec![],
             removed_build_cache: false,
         };
         assert_eq!(
             cleanup_summary(0, false, &result),
             "[supercov] removed 2 stored run(s), 1 per-run workspace(s), and no isolated build cache; keeping 0 newest run(s)"
+        );
+        // Kept evidence is the one thing here a user cannot get back, so the
+        // line says it went rather than leaving it to the run count.
+        let with_kept = supercov_engine::lifecycle::CleanupResult {
+            removed_failed_evidence: vec!["run_kept".into()],
+            ..result
+        };
+        assert_eq!(
+            cleanup_summary(0, false, &with_kept),
+            "[supercov] removed 2 stored run(s), 1 per-run workspace(s), the kept evidence of 1 failed run(s), and no isolated build cache; keeping 0 newest run(s)"
         );
     }
 

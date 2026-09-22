@@ -22,8 +22,8 @@ use crate::{
     frontend_protocol::validate_frontend_report_request,
     integrity::{FrontendIntegrityInputs, create_explicit_run_integrity},
     lifecycle::{
-        ProjectLock, finalize_published_run, publish_run, recover_abandoned_runs,
-        remove_stored_tree_deferred,
+        ProjectLock, finalize_published_run, note_kept_evidence, publish_run,
+        recover_abandoned_runs, remove_stored_tree_deferred,
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
@@ -196,6 +196,10 @@ pub fn run_direct_ruby(
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
     let work_directory = root.join(".supercov/work").join(&request.run_id);
+    // Whether the tests were measured. A run that failed before that has no
+    // evidence worth keeping; one that failed after has evidence that cost the
+    // suite its wall clock.
+    let measured = std::cell::Cell::new(false);
     let result = (|| {
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
@@ -301,6 +305,7 @@ pub fn run_direct_ruby(
             copy_tree(&ruby_directory, &debug_directory)?;
         }
         let publication_started = Instant::now();
+        measured.set(true);
         let run: RubyFrontendRun = build_ruby_frontend_run(
             &project.manifest,
             &evidence_directory,
@@ -363,6 +368,17 @@ pub fn run_direct_ruby(
             metadata,
         })
     })();
+    let result = result.map_err(|error| {
+        if !measured.get() {
+            return error;
+        }
+        note_kept_evidence(
+            &root,
+            &work_directory.join("ruby/evidence"),
+            &request.run_id,
+            error,
+        )
+    });
     if result.is_err() {
         let _ = remove_stored_tree_deferred(&root, &work_directory);
     }

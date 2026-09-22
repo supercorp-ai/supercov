@@ -609,11 +609,12 @@ fn read_evidence_file(
                 if let Some(file) = file.filter(|path| !path.is_empty()) {
                     evidence.test_files.entry(key.clone()).or_insert(file);
                 }
-                evidence
-                    .outcomes
-                    .entry(key)
-                    .or_default()
-                    .push((phase, outcome, xfail));
+                fold_outcome(
+                    evidence.outcomes.entry(key).or_default(),
+                    phase,
+                    outcome,
+                    xfail,
+                );
             }
             Record::Hit { ctx, id } => {
                 if let Some(before) = before_assertion.get_mut(&ctx) {
@@ -919,6 +920,39 @@ fn snapshot(
         events,
         logicals: Vec::new(),
     })
+}
+
+/// One phase, however many times its runner reported it. pytest-subtests
+/// reports every subtest under the same node id and `call` phase, so an
+/// attempt carries several outcomes for the identity a phase id is derived
+/// from; each became a phase of its own with the same id, and the run was
+/// refused whole. The outcomes fold the way an attempt's do -- a failure
+/// anywhere is the phase's, then a skip -- because that is what the phase
+/// ended up doing, and the coverage recorded under that identity is one
+/// phase's however the runner chose to narrate it.
+fn fold_outcome(
+    outcomes: &mut Vec<(String, String, bool)>,
+    phase: String,
+    outcome: String,
+    xfail: bool,
+) {
+    let Some(reported) = outcomes.iter_mut().find(|(name, _, _)| *name == phase) else {
+        outcomes.push((phase, outcome, xfail));
+        return;
+    };
+    if outcome_severity(&outcome) > outcome_severity(&reported.1) {
+        reported.1 = outcome;
+    }
+    reported.2 |= xfail;
+}
+
+/// The order `attempt_status` reads outcomes in, as one value.
+fn outcome_severity(outcome: &str) -> u8 {
+    match outcome {
+        "failed" | "rerun" | "error" => 2,
+        "skipped" => 1,
+        _ => 0,
+    }
 }
 
 fn attempt_status(outcomes: &[(String, String, bool)]) -> String {
@@ -1788,6 +1822,73 @@ mod tests {
                 .structural_limitations
                 .contains(&"python-decision-partially-mapped".to_owned())
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_phase_its_runner_reported_more_than_once_is_one_phase() {
+        // pytest-subtests reports every subtest under the same node id and the
+        // same `call` phase, so an attempt carries several outcomes for the
+        // identity a phase id is derived from. Each became its own phase with
+        // the same id, and the run was refused whole -- a suite of 6872 tests
+        // lost two and three-quarter hours of measurement to it (#40). The
+        // outcomes fold the way an attempt's do: a failure anywhere is the
+        // phase's.
+        let source = "def f(a):\n    return a\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let directory = temporary("subtests");
+        let subtest = |outcome: &str| {
+            json!({"t":"outcome","worker":"main","test":"tests/test_m.py::test_many","retry":0,
+                   "phase":"call","outcome":outcome,"xfail":false})
+        };
+        let lines = [
+            json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]}),
+            json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"tests/test_m.py::test_many","retry":0,"phase":"call"}),
+            json!({"t":"hit","ctx":1,"id":obligations.plan.statements[0].id}),
+            json!({"t":"outcome","worker":"main","test":"tests/test_m.py::test_many","retry":0,"phase":"setup","outcome":"passed","xfail":false}),
+            subtest("passed"),
+            subtest("passed"),
+            subtest("failed"),
+            subtest("passed"),
+            json!({"t":"outcome","worker":"main","test":"tests/test_m.py::test_many","retry":0,"phase":"teardown","outcome":"passed","xfail":false}),
+            json!({"t":"exit","at":9}),
+        ];
+        write_transport(&directory.join("main.1.mmap"), &lines, 0);
+        let run = build_python_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            1,
+            &PythonAssertionInventory::empty(),
+        )
+        .unwrap();
+        // The protocol refuses a repeated phase id, which is what threw the
+        // run away; nothing may reach it twice.
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        let test = &run.request.raw_results[0];
+        assert_eq!(
+            test.phases.len(),
+            3,
+            "setup, one call, teardown: {:?}",
+            test.phases
+        );
+        assert_eq!(
+            test.phases
+                .iter()
+                .filter(|phase| phase.kind == "test")
+                .count(),
+            1,
+            "the subtests share the call phase their coverage was recorded under"
+        );
+        assert_eq!(
+            test.status.as_deref(),
+            Some("failed"),
+            "a subtest that failed fails its test"
+        );
+        // And the coverage recorded under that identity survives the fold.
+        assert_eq!(test.runtime.len(), 1);
+        assert!(!test.runtime[0].hits.is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 

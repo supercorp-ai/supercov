@@ -184,7 +184,7 @@ try {
   const venvPython = resolve(venv, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   run(venvPython, [
     '-m', 'pip', 'install', '--disable-pip-version-check', '-q',
-    'pytest', 'pytest-xdist', 'pytest-rerunfailures',
+    'pytest', 'pytest-xdist', 'pytest-rerunfailures', 'pytest-subtests',
   ]);
 
   const project = createProject(monitoringFixture, 'monitoring');
@@ -308,6 +308,51 @@ try {
   const failedSubtestSummary = query(project, ['runs', 'latest'], environment);
   assert.equal(failedSubtestSummary.testOutcomes.failed, 1);
   assert.equal(failedSubtestSummary.measurement.complete, true, JSON.stringify(failedSubtestSummary.measurement));
+
+  // pytest-subtests reports every subtest as its own result under the same
+  // node id and the same call phase, so an attempt carries several outcomes
+  // for the identity a phase id is derived from. Each became a phase of its
+  // own with the same id, the run was refused whole, and a suite of 6872 tests
+  // lost two and three-quarter hours of measurement to it (#40). The same
+  // subtests as above, under the runner that narrates them one by one.
+  successfulSupercov(
+    project,
+    [
+      '--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
+      'tests_extended/test_unittest_subtests.py::SubTestCases::test_passing_subtests',
+    ],
+    environment,
+  );
+  const pytestSubtests = query(project, ['runs', 'latest'], environment);
+  assert.equal(pytestSubtests.tests, 1, 'the subtests are the one test that ran them');
+  assert.equal(pytestSubtests.testOutcomes.passed, 1);
+  assert.match(
+    JSON.stringify(query(project, ['runs', 'latest', 'line', 'app/shapes.py:35'], environment)),
+    /test_passing_subtests/,
+    'the coverage the subtests recorded belongs to the test that ran them',
+  );
+
+  // And a subtest that fails fails its test, rather than folding into a pass.
+  const failedPytestSubtest = supercov(
+    project,
+    [
+      '--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
+      'tests_extended/test_unittest_subtests.py::SubTestCases::test_failing_subtest_rolls_up',
+    ],
+    environment,
+  );
+  assert.equal(
+    failedPytestSubtest.status,
+    1,
+    `${failedPytestSubtest.stdout}\n${failedPytestSubtest.stderr}`,
+  );
+  assert.doesNotMatch(
+    `${failedPytestSubtest.stdout}${failedPytestSubtest.stderr}`,
+    /duplicate frontend phase/,
+    'the run is published rather than refused whole',
+  );
+  const failedPytestSummary = query(project, ['runs', 'latest'], environment);
+  assert.equal(failedPytestSummary.testOutcomes.failed, 1);
 
   // One failing and one passing test per runner, reported as such. Everything
   // under `tests/` passes, so a runner whose failure path broke would look
