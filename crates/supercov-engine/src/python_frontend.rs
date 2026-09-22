@@ -413,6 +413,15 @@ fn validate_export(export: &PythonCoverageExport, run_id: &str) -> Result<(), Py
             }
         }
     }
+    // One outcome per (worker, test, retry, phase), and a repeat is refused
+    // rather than folded. The product frontend folds instead, because a runner
+    // does repeat a phase -- pytest-subtests reports every subtest under one
+    // node id and one `call` phase, which cost a run in #40. That fold is
+    // right there and wrong here: this importer exists to disagree with the
+    // product independently, and an oracle that quietly accepts a shape it was
+    // not built for reports agreement it did not establish. Its inputs are
+    // fixtures written by its own tests, never a real suite, so there is no
+    // repeat to accept. Widen it only together with a fixture that repeats.
     let mut outcome_keys = BTreeSet::new();
     for outcome in &export.outcomes {
         if outcome.run_id != run_id {
