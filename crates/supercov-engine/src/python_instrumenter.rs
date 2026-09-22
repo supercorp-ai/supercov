@@ -252,6 +252,14 @@ pub struct PythonProbePlan {
     pub version: u32,
     pub root: String,
     pub files: BTreeMap<String, PythonFilePlan>,
+    /// Project-relative test file -> the lines holding an inventoried
+    /// assertion site, sorted. Test files are not measured, but the runtime
+    /// arms line events on their code objects for exactly these lines, so an
+    /// assertion's site is recorded when its line runs -- and pytest's
+    /// assertion-pass hook, which built a failure explanation for every
+    /// passing assertion, is no longer needed for it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub assertion_sites: BTreeMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

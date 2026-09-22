@@ -45,11 +45,14 @@ def _switch(item, phase: str) -> None:
 def pytest_load_initial_conftests(early_config, parser, args):
     """Name the bytecode cache for rewrites made with the assertion-pass hook.
 
-    Supercov turns `enable_assertion_pass_hook` on through `PYTEST_ADDOPTS`,
-    and pytest only calls `pytest_assertion_pass` from modules rewritten with
-    it on -- but it caches rewritten modules by pytest version alone, so a
-    module a plain run had cached would keep its silent bytecode, and a
-    Supercov run would leave hook calls in the plain run's cache. Rewrites
+    Supercov no longer turns `enable_assertion_pass_hook` on: assertion sites
+    come from line events on the lines the plan names, and the hook made
+    pytest build a failure explanation for every passing assertion. A user
+    who enables it still gets `pytest_assertion_pass` below, and pytest only
+    calls that from modules rewritten with the option on -- but it caches
+    rewritten modules by pytest version alone, so a module a plain run had
+    cached would keep its silent bytecode, and a run with the hook on would
+    leave hook calls in the plain run's cache. Rewrites
     made with the hook on go under a name of their own; with the hook off
     (the user's own `-o` wins) the bytecode is pytest's, and shares its
     cache. This runs before pytest loads the first conftest, the first module

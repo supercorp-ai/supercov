@@ -7,6 +7,7 @@
 //! user's command unchanged, and publishes the joined evidence.
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     fs,
     io::Write,
@@ -141,17 +142,14 @@ fn environment(
     };
     let python_path = prepend_path_list(take("PYTHONPATH"), runtime_directory);
     let pytest_plugins = append_list(take("PYTEST_PLUGINS"), "supercov_pytest", ",");
-    // pytest calls its assertion-pass hook only from modules rewritten with
-    // this option on; the plugin gives those rewrites a cache name of their
-    // own. First in the list, so an explicit `-o` on the command line wins.
-    let pytest_addopts = {
-        let mut value = OsString::from("-o enable_assertion_pass_hook=true");
-        if let Some(existing) = take("PYTEST_ADDOPTS").filter(|existing| !existing.is_empty()) {
-            value.push(" ");
-            value.push(existing);
-        }
-        value
-    };
+    // Supercov no longer turns on pytest's assertion-pass hook. Assertion
+    // sites come from line events on the lines the plan names, and the hook
+    // made pytest build a failure explanation for every passing assertion --
+    // 30 microseconds each on two integers, 140 on a nested dict, more than
+    // everything else the runtime does put together. A user's own
+    // `PYTEST_ADDOPTS` passes through untouched; if it enables the hook, the
+    // plugin still records what the hook reports.
+    let pytest_addopts = take("PYTEST_ADDOPTS").unwrap_or_default();
     for key in [
         "SUPERCOV_PYTHON_PLAN",
         "SUPERCOV_PYTHON_EVIDENCE_DIR",
@@ -203,6 +201,26 @@ pub fn current_python_integrity(
     );
     create_explicit_run_integrity(&root, &inputs, &FrontendIntegrityInputs::embedded_python())
         .map_err(|error| error.to_string())
+}
+
+/// The lines of each test file that hold an inventoried assertion site, for
+/// the plan. Sorted and deduplicated: a line with two sites is one line to
+/// arm, and the report keeps telling the two apart by column.
+fn assertion_sites(
+    inventory: &[crate::assertion_map::InventorySite],
+) -> BTreeMap<String, Vec<usize>> {
+    let mut sites = BTreeMap::<String, Vec<usize>>::new();
+    for site in inventory {
+        sites
+            .entry(site.at.file.clone())
+            .or_default()
+            .push(site.at.line);
+    }
+    for lines in sites.values_mut() {
+        lines.sort_unstable();
+        lines.dedup();
+    }
+    sites
 }
 
 pub fn run_direct_python(
@@ -262,9 +280,13 @@ pub fn run_direct_python(
         let plan_path = python_directory.join("plan.json");
         write_runtime(&runtime_directory)?;
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
+        let plan = crate::python_instrumenter::PythonProbePlan {
+            assertion_sites: assertion_sites(&assertion_inputs.assertions),
+            ..project.plan.clone()
+        };
         fs::write(
             &plan_path,
-            serde_json::to_vec(&project.plan).map_err(|error| error.to_string())?,
+            serde_json::to_vec(&plan).map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
         writeln!(
@@ -407,6 +429,62 @@ pub fn run_direct_python(
 
 #[cfg(test)]
 mod tests {
+
+    // The plan names each test file's assertion lines from the inventory, so
+    // the runtime can record a site from the line event that runs it and
+    // pytest's assertion-pass hook -- a failure explanation built for every
+    // passing assertion -- stays off.
+    #[test]
+    fn the_plan_names_each_test_files_assertion_lines_once_and_sorted() {
+        use crate::assertion_map::{Anchor, InventorySite};
+        let site = |file: &str, line: usize, column: usize| InventorySite {
+            at: Anchor {
+                file: file.into(),
+                line,
+                column,
+                text: String::new(),
+            },
+            operation: "assert".into(),
+        };
+        let inventory = vec![
+            site("tests/test_b.py", 9, 4),
+            site("tests/test_a.py", 12, 4),
+            // Two sites on one line are one line to arm.
+            site("tests/test_a.py", 12, 30),
+            site("tests/test_a.py", 3, 4),
+        ];
+        let sites = assertion_sites(&inventory);
+        assert_eq!(
+            sites,
+            BTreeMap::from([
+                ("tests/test_a.py".to_string(), vec![3, 12]),
+                ("tests/test_b.py".to_string(), vec![9]),
+            ])
+        );
+
+        // Serialized under the key the runtime reads, and absent -- not an
+        // empty object -- when there is nothing to arm.
+        let plan = crate::python_instrumenter::PythonProbePlan {
+            version: 1,
+            root: "/p".into(),
+            files: BTreeMap::new(),
+            assertion_sites: sites,
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            json.contains("\"assertionSites\":{\"tests/test_a.py\":[3,12]"),
+            "{json}"
+        );
+        let empty = crate::python_instrumenter::PythonProbePlan {
+            assertion_sites: BTreeMap::new(),
+            ..plan
+        };
+        assert!(
+            !serde_json::to_string(&empty)
+                .unwrap()
+                .contains("assertionSites")
+        );
+    }
     use super::*;
     use crate::source_discovery::{ExplicitSourceRoots, fold_roots_into_configuration};
 

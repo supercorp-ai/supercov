@@ -40,7 +40,12 @@ pub const PYTEST_RUNNER: &str = "pytest";
 pub const UNITTEST_RUNNER: &str = "unittest";
 
 const TRANSPORT_MAGIC: &[u8; 8] = b"SCVPYTH1";
-const TRANSPORT_VERSION: u32 = 1;
+/// Version 2 checksums records with CRC-32; version 1 used FNV-1a, and the
+/// runtime computed it a byte at a time in Python -- two microseconds of every
+/// record's five. Evidence kept from a failed run by an older runtime still
+/// reads, by its own checksum.
+const TRANSPORT_VERSION: u32 = 2;
+const TRANSPORT_VERSION_FNV: u32 = 1;
 const TRANSPORT_HEADER_SIZE: usize = 64;
 const TRANSPORT_RECORD_HEADER_SIZE: usize = 16;
 const TRANSPORT_MAX_RECORD_SIZE: usize = 4 * 1024 * 1024;
@@ -406,10 +411,13 @@ fn transport_u64(bytes: &[u8], offset: usize) -> Option<u64> {
         .map(u64::from_le_bytes)
 }
 
-fn transport_checksum(payload: &[u8]) -> u32 {
-    payload.iter().fold(0x811c_9dc5_u32, |value, byte| {
-        (value ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
-    })
+fn transport_checksum(payload: &[u8], version: u32) -> u32 {
+    if version == TRANSPORT_VERSION_FNV {
+        return payload.iter().fold(0x811c_9dc5_u32, |value, byte| {
+            (value ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
+        });
+    }
+    crc32fast::hash(payload)
 }
 
 fn align_transport(value: usize) -> Option<usize> {
@@ -426,13 +434,15 @@ fn read_evidence_file(
         file: name.into(),
         reason: reason.into(),
     };
+    let version = transport_u32(contents, 8);
     if contents.len() < TRANSPORT_HEADER_SIZE
         || contents.get(..8) != Some(TRANSPORT_MAGIC.as_slice())
-        || transport_u32(contents, 8) != Some(TRANSPORT_VERSION)
+        || !matches!(version, Some(TRANSPORT_VERSION | TRANSPORT_VERSION_FNV))
         || transport_u32(contents, 12) != Some(TRANSPORT_HEADER_SIZE as u32)
     {
         return Err(invalid_transport("header or version does not match"));
     }
+    let version = version.unwrap_or(TRANSPORT_VERSION);
     let declared_capacity =
         transport_u64(contents, 16).ok_or_else(|| invalid_transport("capacity is missing"))?;
     if declared_capacity < TRANSPORT_HEADER_SIZE as u64 || declared_capacity > contents.len() as u64
@@ -502,7 +512,7 @@ fn read_evidence_file(
         let payload = &contents[payload_start..payload_end];
         let expected_checksum = transport_u32(contents, cursor + 8)
             .ok_or_else(|| invalid("payload checksum is missing"))?;
-        if transport_checksum(payload) != expected_checksum {
+        if transport_checksum(payload, version) != expected_checksum {
             return Err(invalid("payload checksum does not match"));
         }
         let record: Record = serde_json::from_slice(payload).map_err(|error| {
@@ -1109,10 +1119,17 @@ pub fn build_python_frontend_run(
                 // witnesses only, and a site the inventory does not know is
                 // skipped rather than guessed at.
                 let attempt = (worker.clone(), test.clone(), retry);
+                // Keyed on the located site, not on the spelling reported:
+                // two spellings of one file name one site, and a phase id
+                // minted twice refuses the run, as it did in #40.
+                let mut located = BTreeSet::new();
                 for (path, line) in sites.get(&attempt).into_iter().flatten() {
                     let Some(location) = assertions.locate(path, *line) else {
                         continue;
                     };
+                    if !located.insert(location.clone()) {
+                        continue;
+                    }
                     phases.push(CoveragePhase {
                         id: stable_id("python-assertion", &[run_id, &id, &location]),
                         kind: "assertion".into(),
@@ -1449,6 +1466,18 @@ mod tests {
     }
 
     fn write_transport(path: &Path, records: &[serde_json::Value], dropped: u64) {
+        write_transport_version(path, records, dropped, TRANSPORT_VERSION, None);
+    }
+
+    /// A transport of any version, checksummed as that version does -- or,
+    /// with `corrupt`, with one payload's checksum deliberately wrong.
+    fn write_transport_version(
+        path: &Path,
+        records: &[serde_json::Value],
+        dropped: u64,
+        version: u32,
+        corrupt: Option<usize>,
+    ) {
         let payloads = records
             .iter()
             .map(|record| serde_json::to_vec(record).unwrap())
@@ -1461,19 +1490,29 @@ mod tests {
             + 64;
         let mut bytes = vec![0_u8; capacity];
         bytes[..8].copy_from_slice(TRANSPORT_MAGIC);
-        bytes[8..12].copy_from_slice(&TRANSPORT_VERSION.to_le_bytes());
+        bytes[8..12].copy_from_slice(&version.to_le_bytes());
         bytes[12..16].copy_from_slice(&(TRANSPORT_HEADER_SIZE as u32).to_le_bytes());
         bytes[16..24].copy_from_slice(&(capacity as u64).to_le_bytes());
         bytes[24..32].copy_from_slice(&dropped.to_le_bytes());
         bytes[32..40].copy_from_slice(&1_u64.to_le_bytes());
         let mut cursor = TRANSPORT_HEADER_SIZE;
-        for payload in payloads {
+        for (index, payload) in payloads.into_iter().enumerate() {
             let payload_start = cursor + TRANSPORT_RECORD_HEADER_SIZE;
             let payload_end = payload_start + payload.len();
             bytes[payload_start..payload_end].copy_from_slice(&payload);
             bytes[cursor + 4..cursor + 8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-            bytes[cursor + 8..cursor + 12]
-                .copy_from_slice(&transport_checksum(&payload).to_le_bytes());
+            // Computed here, not through the reader's own function: a test of
+            // which checksum a version means must not share the code under
+            // test with the transport it writes.
+            let expected = if version == TRANSPORT_VERSION_FNV {
+                payload.iter().fold(0x811c_9dc5_u32, |value, byte| {
+                    (value ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
+                })
+            } else {
+                crc32fast::hash(&payload)
+            };
+            let checksum = expected ^ u32::from(corrupt == Some(index));
+            bytes[cursor + 8..cursor + 12].copy_from_slice(&checksum.to_le_bytes());
             bytes[cursor] = 1;
             cursor = align_transport(payload_end).unwrap();
         }
@@ -1789,6 +1828,53 @@ mod tests {
                 .contains(&"python-decision-partially-mapped".to_owned())
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    // Version 2 checksums with CRC-32, version 1 with FNV-1a. A runtime older
+    // than this reader -- evidence kept from a failed run, say -- still reads,
+    // by its own checksum; a payload that does not match its checksum, and a
+    // version this reader does not know, are refused rather than guessed at.
+    #[test]
+    fn a_transport_reads_by_its_own_versions_checksum() {
+        let obligations = build_python_obligations("m.py", "x = 1\n").unwrap();
+        let process = json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"p","argv":[]});
+        let read = |name: &str, version: u32, corrupt: Option<usize>| {
+            let directory = temporary(name);
+            write_transport_version(
+                &directory.join("main.1.mmap"),
+                std::slice::from_ref(&process),
+                0,
+                version,
+                corrupt,
+            );
+            let outcome = build_python_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                &PythonAssertionInventory::empty(),
+            );
+            fs::remove_dir_all(directory).unwrap();
+            outcome.map(|_| ()).map_err(|error| error.to_string())
+        };
+        let current = read("checksum-v2", TRANSPORT_VERSION, None);
+        let older = read("checksum-v1", TRANSPORT_VERSION_FNV, None);
+        assert_eq!(
+            older, current,
+            "a version 1 transport reads as a version 2 one does"
+        );
+        assert!(
+            !current
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("checksum")),
+            "{current:?}"
+        );
+        let corrupted = read("checksum-bad", TRANSPORT_VERSION, Some(0)).unwrap_err();
+        assert!(corrupted.contains("checksum does not match"), "{corrupted}");
+        let unknown = read("checksum-v3", TRANSPORT_VERSION + 1, None).unwrap_err();
+        assert!(unknown.contains("version"), "{unknown}");
     }
 
     #[test]

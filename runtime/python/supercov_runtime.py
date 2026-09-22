@@ -24,6 +24,7 @@ import os
 import struct
 import sys
 import threading
+import zlib
 import time
 import weakref
 
@@ -36,6 +37,8 @@ RUN_ID_ENV = "SUPERCOV_RUN_ID"
 WORKER_ENV = "SUPERCOV_PYTHON_WORKER"
 DEBUG = bool(os.environ.get("SUPERCOV_PYTHON_DEBUG"))
 TIMING = bool(os.environ.get("SUPERCOV_PYTHON_TIMING"))
+# Debug only: leave out one piece of the runtime to measure what it costs.
+STUB = os.environ.get("SUPERCOV_PYTHON_STUB", "")
 _timing = {
     "start": [0, 0.0],
     "line": [0, 0.0],
@@ -44,6 +47,7 @@ _timing = {
     "jump": [0, 0.0],
     "return": [0, 0.0],
     "switch": [0, 0.0],
+    "build": [0, 0.0],
 }
 
 
@@ -63,7 +67,7 @@ def _timed(name, function):
 
     return wrapper
 TRANSPORT_MAGIC = b"SCVPYTH1"
-TRANSPORT_VERSION = 1
+TRANSPORT_VERSION = 2
 TRANSPORT_HEADER_SIZE = 64
 TRANSPORT_RECORD_HEADER_SIZE = 16
 TRANSPORT_INITIAL_CAPACITY = 1024 * 1024
@@ -303,14 +307,22 @@ class _CodeInfo:
         "returns",
         "live_lines",
         "aliases",
+        "assert_lines",
+        "site_file",
     )
 
     def __init__(self, code, file_plan) -> None:
         self.code = code
         self.file = file_plan
         self.function_id = None
-        self.statements = file_plan.statements_by_line
-        self.line_alternatives = file_plan.alternatives_by_line
+        # A test file's code object is not measured; it is armed only so the
+        # lines holding assertion sites are seen. `assert_lines` names them
+        # and `site_file` is the project-relative path a site is recorded
+        # under. Both are None for measured code.
+        self.assert_lines = None
+        self.site_file = None
+        self.statements = file_plan.statements_by_line if file_plan is not None else {}
+        self.line_alternatives = file_plan.alternatives_by_line if file_plan is not None else {}
         self.consumers = {}
         self.positions = {}
         self.armed = False
@@ -405,6 +417,9 @@ class Runtime:
             raise RuntimeError(f"unsupported Supercov Python plan version {plan.get('version')!r}")
         self.root = os.path.realpath(plan["root"])
         self.files = {path: _FilePlan(path, file_plan) for path, file_plan in plan["files"].items()}
+        self.assertion_sites = {
+            path: frozenset(lines) for path, lines in plan.get("assertionSites", {}).items()
+        }
         self.evidence_dir = evidence_dir
         self.run_id = run_id
         self.worker = worker
@@ -421,6 +436,11 @@ class Runtime:
         self.asserted_sites: set[tuple[int, str, int]] = set()
         self.seen_hits: set = set()
         self.seen_vectors: set = set()
+        self._id_json: dict = {}
+        # (decision, leaf, value) -> the vector that leaf value determines when
+        # every evaluation reaching the leaf took the same earlier values. A
+        # pure function of the decision's structure, so computed once.
+        self.leaf_vectors: dict = {}
         self.vector_counts: dict = {}
         self.open_evaluations: dict = {}
         self.loop_entered: dict = {}
@@ -528,11 +548,9 @@ class Runtime:
 
     @staticmethod
     def _checksum(payload: bytes) -> int:
-        value = 0x811C9DC5
-        for byte in payload:
-            value ^= byte
-            value = (value * 0x01000193) & 0xFFFFFFFF
-        return value
+        # CRC-32 in C. FNV-1a in a Python loop cost two microseconds of every
+        # record's five; the reader tells the two apart by transport version.
+        return zlib.crc32(payload)
 
     def _grow_output(self, required: int) -> bool:
         if self.output is None or self.output_descriptor is None:
@@ -551,9 +569,31 @@ class Runtime:
         return True
 
     def _write_record(self, record: dict) -> None:
+        self._write_payload(json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+
+    def _json_id(self, identifier: str) -> bytes:
+        # The JSON spelling of an obligation or decision id, once. Every test
+        # that reaches it writes it again, and encoding a dict for each was a
+        # microsecond of a five-microsecond record.
+        encoded = self._id_json.get(identifier)
+        if encoded is None:
+            encoded = self._id_json[identifier] = json.dumps(identifier).encode("utf-8")
+        return encoded
+
+    def _write_hit(self, context: int, obligation: str) -> None:
+        # Byte for byte what `_write_record` produces for the same dict: keys
+        # sorted, no spaces. The reader does not know the difference.
+        self._write_payload(b'{"ctx":%d,"id":%s,"t":"hit"}' % (context, self._json_id(obligation)))
+
+    def _write_vector(self, context: int, decision_id: str, digits: str, outcome: bool) -> None:
+        self._write_payload(
+            b'{"ctx":%d,"id":%s,"o":%d,"t":"dec","v":"%s"}'
+            % (context, self._json_id(decision_id), 1 if outcome else 0, digits.encode("ascii"))
+        )
+
+    def _write_payload(self, payload: bytes) -> None:
         if self.output is None:
             raise RuntimeError("Python evidence transport is not open")
-        payload = json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
         if len(payload) > TRANSPORT_MAX_RECORD_SIZE:
             self._drop_record()
             return
@@ -736,6 +776,13 @@ class Runtime:
         context = self.context.get()
         if context == 0:
             return
+        # One spelling per site, whoever reports it: the line event names the
+        # project-relative path and a frame names whatever the interpreter
+        # loaded. The reader keys a site on the text it is given, and two
+        # spellings of one site became two assertion phases with one id.
+        file = self._relative_path(file)
+        if file is None:
+            return
         key = (context, file, line)
         if key in self.asserted_sites:
             return
@@ -758,18 +805,30 @@ class Runtime:
             if key in self.seen_hits:
                 return
             self.seen_hits.add(key)
-            self._record({"t": "hit", "ctx": context, "id": obligation})
+            # `_record` inlined: the lock is already held, and this is the one
+            # record written on every first hit. Same guard against a record
+            # after close, for the reason given there.
+            if self.closed:
+                return
+            self._ensure_process_output()
+            self._write_hit(context, obligation)
 
     def _vector(self, context: int, decision: _Decision, values: list, outcome: bool) -> None:
         digits = "".join("0" if value is None else ("2" if value else "1") for value in values)
         key = (context, decision.id, digits)
+        # Checked before the lock, as `_hit` does: a loop evaluates the same
+        # decision the same way thousands of times in one test.
+        if key in self.seen_vectors:
+            return
         with self.lock:
             if key in self.seen_vectors:
                 return
             self.seen_vectors.add(key)
             count_key = (context, decision.id)
             self.vector_counts[count_key] = self.vector_counts.get(count_key, 0) + 1
-            self._record({"t": "dec", "ctx": context, "id": decision.id, "v": digits, "o": 1 if outcome else 0})
+            if not self.closed:
+                self._ensure_process_output()
+                self._write_vector(context, decision.id, digits, outcome)
         self._hit(context, decision.outcome_true if outcome else decision.outcome_false)
         for logical in decision.logical:
             previous_reached = any(values[index] is not None for index in logical["previousLeaves"])
@@ -798,7 +857,7 @@ class Runtime:
                 if real == self.root or real.startswith(self.root + os.sep):
                     self.under_root = True
                     relative = real[len(self.root) + 1 :].replace(os.sep, "/")
-                    if relative in self.files:
+                    if relative in self.files or relative in self.assertion_sites:
                         break
                     relative = None
         self.path_cache[filename] = relative
@@ -833,10 +892,27 @@ class Runtime:
         return table
 
     def _build_code_info(self, code) -> _CodeInfo | None:
+        if STUB == "discovery":
+            return None
+        began = time.perf_counter() if TIMING else 0.0
+        try:
+            return self._build_code_info_timed(code)
+        finally:
+            if TIMING:
+                _timing["build"][0] += 1
+                _timing["build"][1] += time.perf_counter() - began
+
+    def _build_code_info_timed(self, code) -> _CodeInfo | None:
         relative = self._relative_path(code.co_filename)
         if relative is None:
             return None
-        file_plan = self.files[relative]
+        file_plan = self.files.get(relative)
+        if file_plan is None:
+            # A test file: armed for its assertion sites and nothing else.
+            info = _CodeInfo(code, None)
+            info.assert_lines = self.assertion_sites[relative]
+            info.site_file = relative
+            return info
         info = _CodeInfo(code, file_plan)
         instructions = list(dis.get_instructions(code))
         candidates = file_plan.functions.get((code.co_firstlineno, code.co_name), [])
@@ -1334,9 +1410,20 @@ class Runtime:
             self.touched.append(info)
 
     def _on_line(self, code, line):
+        if STUB == "line":
+            return _monitoring.DISABLE
         entry = self._cached_code_info(code)
         info = entry[1] if entry is not None else None
         if info is None:
+            return _monitoring.DISABLE
+        if info.assert_lines is not None:
+            # A test file's line: record the site when it is one, and disable
+            # the line until the next phase re-arms what this one touched.
+            if not info.touched:
+                self._touch(info)
+            if line in info.assert_lines:
+                self.assertion_site(info.site_file, line)
+                self.assertion()
             return _monitoring.DISABLE
         context = self.context.get()
         if not info.touched:
@@ -1353,6 +1440,8 @@ class Runtime:
         return None if line in info.live_lines else _monitoring.DISABLE
 
     def _on_branch(self, code, offset, destination):
+        if STUB == "branch":
+            return _monitoring.DISABLE
         entry = self._cached_code_info(code)
         info = entry[1] if entry is not None else None
         if info is None:
@@ -1463,13 +1552,19 @@ class Runtime:
             # decision, and carries nothing new when it continues. Either way
             # the direction can go quiet until the next phase re-arms it.
             if next_leaf is None:
-                values = [None] * decision.width
-                for earlier, earlier_value in prefix.items():
-                    values[earlier] = earlier_value
-                values[index] = value
-                reached = set()
-                outcome = _evaluate_tree(decision.tree, values, reached)
-                if outcome is None or reached != {i for i, v in enumerate(values) if v is not None}:
+                memo_key = (id(decision), index, value)
+                determined = self.leaf_vectors.get(memo_key)
+                if determined is None:
+                    values = [None] * decision.width
+                    for earlier, earlier_value in prefix.items():
+                        values[earlier] = earlier_value
+                    values[index] = value
+                    reached = set()
+                    outcome = _evaluate_tree(decision.tree, values, reached)
+                    consistent = outcome is not None and reached == {i for i, v in enumerate(values) if v is not None}
+                    determined = self.leaf_vectors[memo_key] = (values, outcome, consistent)
+                values, outcome, consistent = determined
+                if not consistent:
                     self.limitation(
                         "python-decision-vector-inconsistent",
                         "observed conditional jumps do not form a short-circuit evaluation of the source decision",
@@ -1562,7 +1657,8 @@ class Runtime:
             events.JUMP,
             events.PY_RETURN,
         ) + ((events.BRANCH_LEFT, events.BRANCH_RIGHT) if self.branch_pairs else (events.BRANCH,))
-        _monitoring.set_events(self.tool_id, events.PY_START)
+        if STUB != "nothing":
+            _monitoring.set_events(self.tool_id, events.PY_START)
         inherited = os.environ.get(CONTEXT_ENV)
         if inherited:
             try:
