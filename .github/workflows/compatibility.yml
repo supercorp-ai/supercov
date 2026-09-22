@@ -155,6 +155,13 @@ jobs:
       - run: npm run test:python-monitoring
         env:
           SUPERCOV_PYTHON: python
+      # What a measured line costs is a property of the runtime, not of a host
+      # or an interpreter version, so one combination guards it. Running it on
+      # all fifteen would pay fifteen times over for the same signal.
+      - if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: npm run benchmark:python-monitoring
+        env:
+          SUPERCOV_PYTHON: python
 
   ruby:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,') }}
