@@ -46,6 +46,10 @@ PROBE_VERSION = 1
 # a planned file is executed in, not only ones the loader controls.
 hits_get: Callable[[], bytearray] = lambda: bytearray()  # noqa: E731 - replaced at install
 value_probe: Callable[[int, object], object] = lambda k, value: value  # noqa: E731
+condition_probe: Callable[[int, int, object, bool], bool] = lambda d, i, value, inv: bool(value)  # noqa: E731
+decision_probe: Callable[[int, object], bool] = lambda d, value: bool(value)  # noqa: E731
+operand_probe: Callable[[int, int, object], object] = lambda g, i, value: value  # noqa: E731
+boolop_probe: Callable[[int, object], object] = lambda g, value: value  # noqa: E731
 
 
 # -- the plan, indexed for probing -------------------------------------------
@@ -68,6 +72,14 @@ class FileProbes:
         self.statements: dict[tuple[int, int], int] = {}
         self.functions: dict[tuple[int, int], int] = {}
         self.lambdas: dict[tuple[int, int, int, int], int] = {}
+        # Decisions and their leaves by expression span; logical BoolOps
+        # outside any decision tree by span, with their operand plans. Run-wide
+        # indexes are assigned by `index_plan`, which owns the counters.
+        self.decisions: dict[tuple[int, int, int, int], int] = {}
+        self.leaves: dict[tuple[int, int, int, int], tuple[int, int, bool]] = {}
+        self.boolops: dict[tuple[int, int, int, int], int] = {}
+        self.decision_plans: list = []
+        self.boolop_groups: list = []
         for statement in file_plan.get("statements", ()):
             self.statements[(statement["start"][0], statement["start"][1])] = self._number(
                 statement["id"]
@@ -79,8 +91,29 @@ class FileProbes:
                 self.lambdas[(line, column, end_line, end_column)] = k
             else:
                 self.functions[(line, column)] = k
+        logical_by_decision: dict[str, list] = {}
+        standalone: dict[tuple[int, int, int, int], list] = {}
+        for logical in file_plan.get("logical", ()):
+            if logical.get("decision") is not None:
+                logical_by_decision.setdefault(logical["decision"], []).append(logical)
+            else:
+                (line, column), (end_line, end_column) = logical["boolop"]
+                standalone.setdefault((line, column, end_line, end_column), []).append(logical)
+        for decision in file_plan.get("decisions", ()):
+            (line, column), (end_line, end_column) = decision["span"]
+            d = len(self.decision_plans)
+            self.decision_plans.append((decision, logical_by_decision.get(decision["id"], [])))
+            self.decisions[(line, column, end_line, end_column)] = d
+            for index, condition in enumerate(decision["conditions"]):
+                (line, column), (end_line, end_column) = condition["span"]
+                self.leaves[(line, column, end_line, end_column)] = (d, index, condition["not"] % 2 == 1)
+        for span, plans in standalone.items():
+            g = len(self.boolop_groups)
+            plans.sort(key=lambda logical: logical["operand"])
+            self.boolop_groups.append(plans)
+            self.boolops[span] = g
         self.digest = hashlib.sha256(
-            repr((PROBE_VERSION, relative, base, self.ids)).encode("utf-8")
+            repr((PROBE_VERSION, relative, base, self.ids, len(self.decision_plans), len(self.boolop_groups))).encode("utf-8")
         ).hexdigest()
 
     def _number(self, identifier: str) -> int:
@@ -92,15 +125,31 @@ class FileProbes:
         return len(self.ids)
 
 
-def index_plan(plan: dict) -> tuple[dict[str, FileProbes], list[str]]:
-    """Number every planned file's obligations into one array, in plan order."""
-    files: dict[str, FileProbes] = {}
-    ids: list[str] = []
-    for relative, file_plan in plan["files"].items():
-        probes = FileProbes(relative, file_plan, len(ids))
-        files[relative] = probes
-        ids.extend(probes.ids)
-    return files, ids
+class PlanIndex:
+    """Every planned file's obligations numbered into one run-wide space."""
+
+    def __init__(self, plan: dict) -> None:
+        self.files: dict[str, FileProbes] = {}
+        self.ids: list[str] = []
+        # Run-wide: (decision plan, its logical plans) by decision index, and
+        # a standalone BoolOp's operand plans by group index.
+        self.decisions: list = []
+        self.boolop_groups: list = []
+        for relative, file_plan in plan["files"].items():
+            probes = FileProbes(relative, file_plan, len(self.ids))
+            self.files[relative] = probes
+            self.ids.extend(probes.ids)
+            decision_base = len(self.decisions)
+            self.decisions.extend(probes.decision_plans)
+            probes.decisions = {span: decision_base + d for span, d in probes.decisions.items()}
+            probes.leaves = {span: (decision_base + d, i, inv) for span, (d, i, inv) in probes.leaves.items()}
+            group_base = len(self.boolop_groups)
+            self.boolop_groups.extend(probes.boolop_groups)
+            probes.boolops = {span: group_base + g for span, g in probes.boolops.items()}
+
+
+def index_plan(plan: dict) -> PlanIndex:
+    return PlanIndex(plan)
 
 
 # -- the transform -------------------------------------------------------------
@@ -179,11 +228,65 @@ class _Inserter(ast.NodeTransformer):
     interpreter adds are covered the same way.
     """
 
-    def __init__(self, probes: FileProbes, hits: str, value: str) -> None:
+    def __init__(self, probes: FileProbes, names: dict[str, str]) -> None:
         self.probes = probes
-        self.hits = hits
-        self.value = value
+        self.hits = names["hits_get"]
+        self.value = names["value_probe"]
+        self.names = names
         self.inserted = 0
+
+    def _call(self, alias: str, arguments: list, node: ast.AST) -> ast.Call:
+        """`alias(*arguments)` positioned on `node`; constants get positions
+        too, the wrapped expression keeps its own."""
+        call = ast.Call(
+            func=ast.Name(id=self.names[alias], ctx=ast.Load()), args=arguments, keywords=[]
+        )
+        for argument in arguments:
+            if isinstance(argument, ast.Constant) and not hasattr(argument, "lineno"):
+                _at(argument, node.lineno, node.col_offset)
+        _at(call.func, node.lineno, node.col_offset)
+        call.lineno, call.col_offset = node.lineno, node.col_offset
+        call.end_lineno, call.end_col_offset = node.end_lineno, node.end_col_offset
+        self.inserted += 1
+        return call
+
+    @staticmethod
+    def _span(node: ast.AST):
+        return (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset)
+
+    def visit(self, node: ast.AST) -> ast.AST:
+        node = super().visit(node)
+        if not isinstance(node, ast.expr) or not hasattr(node, "end_col_offset"):
+            return node
+        span = self._span(node)
+        # Innermost first: a test that is its own single condition becomes
+        # `decision(d, condition(d, 0, test, inv))`.
+        leaf = self.probes.leaves.get(span)
+        if leaf is not None:
+            d, index, inverted = leaf
+            node = self._call(
+                "condition_probe",
+                [ast.Constant(value=d), ast.Constant(value=index), node, ast.Constant(value=inverted)],
+                node,
+            )
+        d = self.probes.decisions.get(span)
+        if d is not None:
+            node = self._call("decision_probe", [ast.Constant(value=d), node], node)
+        return node
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> ast.AST:
+        # A BoolOp inside a decision's tree is observed through its leaves;
+        # one outside any decision reports its own short-circuits.
+        g = self.probes.boolops.get(self._span(node))
+        node = self.generic_visit(node)  # type: ignore[assignment]
+        if g is None:
+            return node
+        for index in range(1, len(node.values)):
+            operand = node.values[index]
+            node.values[index] = self._call(
+                "operand_probe", [ast.Constant(value=g), ast.Constant(value=index), operand], operand
+            )
+        return self._call("boolop_probe", [ast.Constant(value=g), node], node)
 
     def _hit(self, k: int, line: int, column: int) -> ast.stmt:
         node = ast.Assign(
@@ -265,11 +368,29 @@ class _Inserter(ast.NodeTransformer):
         return node
 
 
+PROBE_NAMES = {
+    "hits_get": "h",
+    "value_probe": "v",
+    "condition_probe": "c",
+    "decision_probe": "d",
+    "operand_probe": "o",
+    "boolop_probe": "b",
+}
+
+
 def instrument(tree: ast.Module, probes: FileProbes) -> ast.Module:
     """Insert the plan's probes into a parsed module, in place."""
-    hits = choose_alias(tree, "h")
-    value = choose_alias(tree, "v")
-    inserter = _Inserter(probes, hits, value)
+    taken = _identifiers(tree)
+    names = {}
+    for attribute, stem in PROBE_NAMES.items():
+        candidate = f"_scv_{stem}"
+        counter = 0
+        while candidate in taken:
+            counter += 1
+            candidate = f"_scv_{stem}{counter}"
+        taken.add(candidate)
+        names[attribute] = candidate
+    inserter = _Inserter(probes, names)
     inserter.visit(tree)
     # The aliases are imported from this module so the probes resolve in
     # whatever namespace the file is executed in. After the docstring and
@@ -287,10 +408,7 @@ def instrument(tree: ast.Module, probes: FileProbes) -> ast.Module:
         _at(
             ast.ImportFrom(
                 module="supercov_probes",
-                names=[
-                    ast.alias(name="hits_get", asname=hits),
-                    ast.alias(name="value_probe", asname=value),
-                ],
+                names=[ast.alias(name=attribute, asname=alias) for attribute, alias in names.items()],
                 level=0,
             ),
             line,
@@ -472,13 +590,15 @@ def install(
     files: dict[str, FileProbes],
     relative_for: Callable[[str], str | None],
     cache_directory: str | None,
-    hits: Callable[[], bytearray],
-    value: Callable[[int, object], object],
+    entry_points: dict[str, Callable],
 ) -> Probing:
-    """Arm the finder and the compile wrapper for this process."""
-    global _probing, hits_get, value_probe
-    hits_get = hits
-    value_probe = value
+    """Arm the finder and the compile wrapper for this process.
+
+    `entry_points` binds every name in `PROBE_NAMES` to the runtime's callable.
+    """
+    global _probing
+    for attribute in PROBE_NAMES:
+        globals()[attribute] = entry_points[attribute]
     probing = Probing(files, relative_for, cache_directory)
     _probing = probing
     if not any(isinstance(finder, ProbeFinder) for finder in sys.meta_path):
@@ -497,10 +617,11 @@ if __name__ == "__main__":  # pragma: no cover - a development aid
 
     plan_path, relative = sys.argv[1], sys.argv[2]
     plan = json.load(open(plan_path, encoding="utf-8"))
-    files, ids = index_plan(plan)
+    index = index_plan(plan)
     source_path = os.path.join(plan["root"], relative)
     tree = ast.parse(open(source_path, "rb").read(), filename=source_path)
-    instrument(tree, files[relative])
+    instrument(tree, index.files[relative])
     print(ast.unparse(tree))
     _original_compile(tree, source_path, "exec")
-    print(f"# compiled; {files[relative].count} obligations, {len(ids)} in the run", file=sys.stderr)
+    probes = index.files[relative]
+    print(f"# compiled; {probes.count} obligations, {len(probes.decisions)} decisions, {len(probes.boolops)} standalone boolops; {len(index.ids)} obligations in the run", file=sys.stderr)

@@ -484,7 +484,15 @@ class Runtime:
         if self.frontend == "probes":
             import supercov_probes
 
-            self.probe_files, self.probe_ids = supercov_probes.index_plan(plan)
+            index = supercov_probes.index_plan(plan)
+            self.probe_files, self.probe_ids = index.files, index.ids
+            self.probe_decisions = [_Decision(plan_, logical) for plan_, logical in index.decisions]
+            self.probe_boolops = index.boolop_groups
+            # Open evaluations by (context, decision) and (context, group):
+            # stacks, because a leaf can re-enter its own decision through a
+            # recursive call before the outer evaluation has finished.
+            self.probe_open: dict = {}
+            self.probe_open_boolops: dict = {}
             self.hits_var = contextvars.ContextVar("supercov_hits", default=self._new_hits(0))
 
     # -- evidence transport -------------------------------------------------
@@ -1671,6 +1679,66 @@ class Runtime:
         self.hits_var.get()[k] = 1
         return value
 
+    def _condition_probe(self, d: int, index: int, value, inverted: bool) -> bool:
+        """One condition of a decision evaluated: record its truth.
+
+        Returns the truth rather than the value: inside a decision only the
+        truth is used, so the interpreter's own test runs on this bool and an
+        object's `__bool__` is consulted exactly once, by us.
+        """
+        truth = bool(value)
+        # The leaf's value is the condition as written, `not` included; what
+        # goes back to the source is the operand's truth, and the source's
+        # own `not` then applies to it exactly once.
+        recorded = (not truth) if inverted else truth
+        key = (self.context.get(), d)
+        stack = self.probe_open.get(key)
+        if stack is None:
+            stack = self.probe_open[key] = []
+        # Leaves arrive in index order within one evaluation; an index at or
+        # before the last one seen is a nested evaluation of the same decision.
+        if not stack or index <= stack[-1].last:
+            if len(stack) >= MAX_OPEN_EVALUATIONS:
+                del stack[0]
+            stack.append(_Evaluation(self.probe_decisions[d].width))
+        evaluation = stack[-1]
+        evaluation.last = index
+        evaluation.values[index] = recorded
+        return truth
+
+    def _decision_probe(self, d: int, value) -> bool:
+        """A decision's test evaluated: emit the vector its leaves recorded."""
+        outcome = bool(value)
+        context = self.context.get()
+        stack = self.probe_open.get((context, d))
+        if stack:
+            evaluation = stack.pop()
+            self._vector(context, self.probe_decisions[d], evaluation.values, outcome)
+        return outcome
+
+    def _operand_probe(self, g: int, index: int, value):
+        """A standalone BoolOp's right operand was evaluated."""
+        key = (self.context.get(), g)
+        stack = self.probe_open_boolops.get(key)
+        if stack is None:
+            stack = self.probe_open_boolops[key] = []
+        if not stack or index <= stack[-1][-1]:
+            if len(stack) >= MAX_OPEN_EVALUATIONS:
+                del stack[0]
+            stack.append([0])
+        stack[-1].append(index)
+        return value
+
+    def _boolop_probe(self, g: int, value):
+        """A standalone BoolOp finished: operands not evaluated short-circuited."""
+        context = self.context.get()
+        stack = self.probe_open_boolops.get((context, g))
+        evaluated = set(stack.pop()) if stack else {0}
+        for logical in self.probe_boolops[g]:
+            operand = logical["operand"]
+            self._hit(context, logical["evaluated"] if operand in evaluated else logical["shortCircuit"])
+        return value
+
     def _harvest(self, array: "_Hits") -> None:
         """Turn an array's set bytes into hit records, and clear them.
 
@@ -1693,8 +1761,14 @@ class Runtime:
             self.probe_files,
             self._relative_path,
             os.path.join(self.root, ".supercov", "cache", "python"),
-            self.hits_var.get,
-            self._value_probe,
+            {
+                "hits_get": self.hits_var.get,
+                "value_probe": self._value_probe,
+                "condition_probe": self._condition_probe,
+                "decision_probe": self._decision_probe,
+                "operand_probe": self._operand_probe,
+                "boolop_probe": self._boolop_probe,
+            },
         )
 
     def install(self) -> None:
