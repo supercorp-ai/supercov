@@ -1469,8 +1469,14 @@ class Runtime:
                 _, loop, fallthrough = consumer
                 key = (context, loop["id"])
                 if destination == fallthrough:
-                    self.loop_entered[key] = True
-                    self._hit(context, loop["entered"])
+                    # Every iteration of the loop arrives here on a single
+                    # BRANCH event (3.12, 3.13). The entry is recorded the
+                    # first time; after that the write is idempotent and the
+                    # hit already seen, so neither is worth the microsecond a
+                    # parser's byte loop paid for them a million times over.
+                    if not self.loop_entered.get(key):
+                        self.loop_entered[key] = True
+                        self._hit(context, loop["entered"])
                     # FOR_ITER fires on every iteration through this direction.
                     # With per-direction events (3.14+) only the body direction
                     # goes quiet; the exit direction below re-arms the code
