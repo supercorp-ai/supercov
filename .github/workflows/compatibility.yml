@@ -147,9 +147,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # python.org publishes no arm64 Windows build before 3.11, so an arm64
+      # Windows user on 3.9 or 3.10 runs the x64 build under emulation, and
+      # so does this job.
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.os == 'windows-11-arm' && (matrix.python == '3.9' || matrix.python == '3.10') && 'x64' || '' }}
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       # Every interpreter measures itself: the gate refuses to fall back to
