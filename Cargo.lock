@@ -2358,6 +2358,7 @@ dependencies = [
  "base64 0.22.1",
  "cargo-config2",
  "cargo-platform",
+ "crc32fast",
  "flate2",
  "getrandom 0.3.4",
  "junction",

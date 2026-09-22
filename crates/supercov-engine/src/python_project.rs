@@ -332,6 +332,7 @@ pub fn prepare_python_project(
             version: PYTHON_PROBE_PLAN_VERSION,
             root: root.display().to_string(),
             files: plan_files,
+            assertion_sites: BTreeMap::new(),
         },
         manifest,
         files,
