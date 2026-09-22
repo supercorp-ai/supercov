@@ -98,11 +98,23 @@ enum Record {
         ctx: u64,
         id: String,
     },
+    /// Many hits of one context in one record: the probe frontend harvests
+    /// a context's array at the phase switch and writes what it found at
+    /// once, instead of a record per first hit.
+    Hits {
+        ctx: u64,
+        ids: Vec<String>,
+    },
     Dec {
         ctx: u64,
         id: String,
         v: String,
         o: u8,
+    },
+    /// Many decision vectors of one context: (id, digits, outcome).
+    Decs {
+        ctx: u64,
+        v: Vec<(String, String, u8)>,
     },
     /// The first assertion of a call phase: what the context recorded before
     /// this record is the assertion's evidence too.
@@ -643,6 +655,23 @@ fn read_evidence_file(
                 .hits
                 .insert(id);
             }
+            Record::Hits { ctx, ids } => {
+                for id in ids {
+                    if let Some(before) = before_assertion.get_mut(&ctx) {
+                        before.hits.insert(id.clone());
+                    }
+                    observations(
+                        evidence,
+                        &contexts,
+                        process_worker.as_deref(),
+                        ctx,
+                        name,
+                        line_number,
+                    )?
+                    .hits
+                    .insert(id);
+                }
+            }
             Record::Dec { ctx, id, v, o } => {
                 if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
                     return Err(invalid("decision vector digits must be 0, 1 or 2"));
@@ -677,6 +706,43 @@ fn read_evidence_file(
                 .entry(id)
                 .or_default()
                 .insert((values, o == 1));
+            }
+            Record::Decs { ctx, v: vectors } => {
+                for (id, v, o) in vectors {
+                    if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
+                        return Err(invalid("decision vector digits must be 0, 1 or 2"));
+                    }
+                    if o > 1 {
+                        return Err(invalid("decision outcome must be 0 or 1"));
+                    }
+                    let values = v
+                        .bytes()
+                        .map(|digit| match digit {
+                            b'0' => None,
+                            b'1' => Some(false),
+                            _ => Some(true),
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(before) = before_assertion.get_mut(&ctx) {
+                        before
+                            .vectors
+                            .entry(id.clone())
+                            .or_default()
+                            .insert((values.clone(), o == 1));
+                    }
+                    observations(
+                        evidence,
+                        &contexts,
+                        process_worker.as_deref(),
+                        ctx,
+                        name,
+                        line_number,
+                    )?
+                    .vectors
+                    .entry(id)
+                    .or_default()
+                    .insert((values, o == 1));
+                }
             }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a

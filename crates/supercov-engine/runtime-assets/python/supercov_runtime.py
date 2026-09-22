@@ -421,7 +421,7 @@ class _Hits(bytearray):
     harvested again at close, freed otherwise.
     """
 
-    __slots__ = ("context", "states", "__weakref__")
+    __slots__ = ("context", "states", "vectors", "__weakref__")
 
 
 class _DecisionState:
@@ -1692,6 +1692,9 @@ class Runtime:
         array = _Hits(len(self.probe_ids))
         array.context = context
         array.states = [None] * len(self.probe_decisions)
+        # (decision, mask, outcome) of each vector first seen in this
+        # context, resolved at the harvest rather than in the probe.
+        array.vectors = []
         self.hit_arrays[context] = array
         return array
 
@@ -1745,12 +1748,7 @@ class Runtime:
         if mask in state.seen:
             return outcome
         state.seen.add(mask)
-        decision = self.probe_decisions[d]
-        values = [
-            (bool(mask & (1 << (2 * index + 1))) if mask & (1 << (2 * index)) else None)
-            for index in range(decision.width)
-        ]
-        self._vector(hits.context, decision, values, outcome)
+        hits.vectors.append((d, mask, outcome))
         return outcome
 
     def _operand_probe(self, g: int, index: int, value):
@@ -1808,33 +1806,80 @@ class Runtime:
         self.assertion()
 
     def _harvest(self, array: "_Hits") -> None:
-        """Turn an array's set bytes into records, and clear them.
+        """Turn an array's set bytes and deferred vectors into records.
 
         `find` walks the array in C. Every set byte is a first sighting in
         its context by construction -- the array is cleared as it is read --
-        so the hits go straight to the transport under one lock. A vector
-        slot stands for a one-condition decision's truth and goes through
-        `_vector`, which emits the vector, the outcome and the logical hits.
+        so the hits need no deduplication. They go out as one `hits` record
+        per context (chunked under the transport's record bound) and the
+        vectors as one `decs` record: a record per first hit was most of a
+        parser suite's remaining overhead.
         """
+        if STUB == "harvest":
+            return
         ids = self.probe_ids
         context = array.context
-        vectors = []
+        hit_ids: list = []
+        vectors: list = []
+        index = array.find(1)
+        while index != -1:
+            array[index] = 0
+            entry = ids[index]
+            if isinstance(entry, str):
+                hit_ids.append(entry)
+            else:
+                vectors.append((entry[1], None, entry[2]))
+            index = array.find(1, index + 1)
+        deferred = array.vectors
+        if deferred:
+            array.vectors = []
+            vectors.extend(deferred)
+        decs: list = []
+        for d, mask, outcome in vectors:
+            decision = self.probe_decisions[d]
+            if mask is None:
+                values = [outcome]
+            else:
+                values = [
+                    (bool(mask & (1 << (2 * i + 1))) if mask & (1 << (2 * i)) else None)
+                    for i in range(decision.width)
+                ]
+            digits = "".join("0" if value is None else ("2" if value else "1") for value in values)
+            key = (context, decision.id, digits)
+            if key in self.seen_vectors:
+                continue
+            self.seen_vectors.add(key)
+            decs.append((decision.id, digits, 1 if outcome else 0))
+            # What the vector implies, as `_vector` derives it.
+            hit_ids.append(decision.outcome_true if outcome else decision.outcome_false)
+            for logical in decision.logical:
+                previous_reached = any(values[i] is not None for i in logical["previousLeaves"])
+                operand_reached = any(values[i] is not None for i in logical["operandLeaves"])
+                if operand_reached:
+                    hit_ids.append(logical["evaluated"])
+                elif previous_reached:
+                    hit_ids.append(logical["shortCircuit"])
+        if not hit_ids and not decs:
+            return
         with self.lock:
             if self.closed:
                 return
             self._ensure_process_output()
-            index = array.find(1)
-            while index != -1:
-                array[index] = 0
-                entry = ids[index]
-                if isinstance(entry, str):
-                    self.seen_hits.add((context, entry))
-                    self._write_hit(context, entry)
-                else:
-                    vectors.append(entry)
-                index = array.find(1, index + 1)
-        for _, d, truth in vectors:
-            self._vector(context, self.probe_decisions[d], [truth], truth)
+            prefix = b'{"ctx":%d,"ids":[' % context
+            # Chunked: the transport refuses a record over its bound.
+            step = 40000
+            for start in range(0, len(hit_ids), step):
+                chunk = hit_ids[start : start + step]
+                seen = set()
+                unique = [identifier for identifier in chunk if not (identifier in seen or seen.add(identifier))]
+                self._write_payload(prefix + b",".join(self._json_id(identifier) for identifier in unique) + b'],"t":"hits"}')
+            for start in range(0, len(decs), step):
+                chunk = decs[start : start + step]
+                body = b",".join(
+                    b'[%s,"%s",%d]' % (self._json_id(identifier), digits.encode("ascii"), outcome)
+                    for identifier, digits, outcome in chunk
+                )
+                self._write_payload(b'{"ctx":%d,"t":"decs","v":[' % context + body + b"]}")
 
     def _install_probes(self) -> None:
         import supercov_probes

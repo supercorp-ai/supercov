@@ -66,15 +66,22 @@ def pytest_load_initial_conftests(early_config, parser, args):
     try:
         # Rewrites made with the hook on, and rewrites the probe frontend
         # adds site probes to, both leave bytecode a plain run must not load.
-        enabled = bool(early_config.getini("enable_assertion_pass_hook")) or getattr(
-            _runtime, "frontend", ""
-        ) == "probes"
+        # The tail says what was done to the rewrite, so a cache from another
+        # mode or another Supercov is never loaded: hook-on rewrites carry
+        # explanation calls, probed ones carry site probes of one version.
+        marks = []
+        if bool(early_config.getini("enable_assertion_pass_hook")):
+            marks.append("hook")
+        if getattr(_runtime, "frontend", "") == "probes":
+            import supercov_probes
+
+            marks.append(f"probes{supercov_probes.PROBE_VERSION}")
         from _pytest.assertion import rewrite
 
         tail = rewrite.PYC_TAIL
-        if enabled and "-supercov" not in tail:
+        if marks and "-supercov" not in tail:
             stem, extension = tail.rsplit(".", 1)
-            rewrite.PYC_TAIL = f"{stem}-supercov.{extension}"
+            rewrite.PYC_TAIL = f"{stem}-supercov-{'-'.join(marks)}.{extension}"
     except Exception as error:  # noqa: BLE001 - never break the user's test run
         _runtime.limitation(
             "python-pytest-assertion-hook-unavailable",

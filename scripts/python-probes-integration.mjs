@@ -9,7 +9,7 @@
 // frontend has to get right: bytecode it leaves in pytest's cache must not
 // break a plain run, and an interpreter older than 3.12 must be measured.
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, rmSync, cpSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, cpSync, statSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -44,6 +44,49 @@ function project(name) {
   for (const entry of readdirSync(directory, { recursive: true, withFileTypes: true })) {
     if (entry.isDirectory() && entry.name === '__pycache__') rmSync(join(entry.parentPath ?? entry.path, entry.name), { recursive: true, force: true });
   }
+  ok(run('git', ['init', '-q', '.'], { cwd: directory }), 'git init');
+  return directory;
+}
+
+function legacyProject(name) {
+  // A project every CPython from 3.9 parses: no `match`, no `except*`.
+  const directory = resolve(temporary, name);
+  mkdirSync(resolve(directory, 'app'), { recursive: true });
+  mkdirSync(resolve(directory, 'tests'), { recursive: true });
+  writeFileSync(resolve(directory, 'app/__init__.py'), '');
+  writeFileSync(
+    resolve(directory, 'app/legacy.py'),
+    [
+      'def classify(items, strict):',
+      '    total = 0',
+      '    for item in items:',
+      '        if item > 2 and strict:',
+      '            total += item',
+      '    evens = [x for x in items if x % 2 == 0]',
+      '    try:',
+      '        ratio = total / len(evens)',
+      '    except ZeroDivisionError:',
+      '        ratio = -1.0',
+      '    while total > 100:',
+      '        total -= 50',
+      '    return total, evens, ratio',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    resolve(directory, 'tests/test_legacy.py'),
+    [
+      'from app.legacy import classify',
+      '',
+      'def test_some():',
+      '    assert classify([1, 3, 4], True) == (7, [4], 7 / 1)',
+      '',
+      'def test_none():',
+      '    assert classify([], False) == (0, [], -1.0)',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(resolve(directory, 'pyproject.toml'), '[tool.pytest.ini_options]\naddopts = "-p no:cacheprovider"\n');
   ok(run('git', ['init', '-q', '.'], { cwd: directory }), 'git init');
   return directory;
 }
@@ -180,21 +223,30 @@ try {
   assert.deepEqual(stray, [], 'the project holds no Supercov artefacts outside .supercov');
 
   // -- an interpreter the monitoring frontend cannot measure ------------------
-  const older = ['python3.11', 'python3.10', 'python3.9'].find((candidate) => run(candidate, ['-c', 'pass']).status === 0);
-  if (older) {
-    const olderInterpreter = venv(older, 'venv-older', ['pytest']);
-    const olderProject = project('fixture-older');
-    // The fixture uses `match`, which needs 3.10; on 3.9 measure a file
-    // without it.
-    const suite = run(older, ['-c', 'import sys; print(sys.version_info >= (3, 10))']).stdout.trim() === 'True' ? 'tests' : 'tests/test_unittest_style.py';
+  const olderInterpreters = ['python3.11', 'python3.10', 'python3.9'].filter((candidate) => run(candidate, ['-c', 'pass']).status === 0);
+  if (olderInterpreters.length === 0) console.log('[python-probes] no CPython 3.9-3.11 on PATH; the older-interpreter case was not run');
+  for (const older of olderInterpreters) {
+    let olderInterpreter;
+    try {
+      olderInterpreter = venv(older, `venv-${older}`, ['pytest']);
+    } catch (error) {
+      // A broken bundled pip is this machine's problem, not the frontend's.
+      console.log(`[python-probes] ${older}: could not install pytest into a venv; skipped`);
+      continue;
+    }
+    // The fixture uses `match`, which 3.9 cannot parse at all, so below 3.10
+    // a small project without it stands in: statements, a decision, a loop
+    // with a zero-iteration execution, a try that raises and one that does
+    // not, and a comprehension.
+    const hasMatch = run(older, ['-c', 'import sys; print(sys.version_info >= (3, 10))']).stdout.trim() === 'True';
+    const olderProject = hasMatch ? project(`fixture-${older}`) : legacyProject(`legacy-${older}`);
+    const suite = 'tests';
     const result = supercov(olderProject, 'probes', ['--', olderInterpreter, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', suite], { PATH: `${resolve(olderInterpreter, '..')}${delimiter}${process.env.PATH}` });
     ok(result, `probes on ${older}`);
     assert.match(result.stderr, /Python coverage: \d+ test\(s\)/, `${older}: measured through probes`);
     const olderSummary = summary(olderProject, latestRun(olderProject));
     assert.ok(olderSummary.lines[0] > 0, `${older}: lines covered`);
     console.log(`[python-probes] ${older}: ${olderSummary.lines.join('/')} lines`);
-  } else {
-    console.log('[python-probes] no CPython 3.9-3.11 on PATH; the older-interpreter case was not run');
   }
 
   console.log(`[python-probes] probes agree with monitoring on ${locations.length} decisions, lines ${probes.lines.join('/')}, branches ${probes.branches.join('/')}, conditions ${probes.conditions.join('/')}`);
