@@ -13,7 +13,7 @@
 // imported by the product path.
 
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -231,6 +231,15 @@ try {
     environment,
   );
   assert.match(serial.stdout, /\[coverage\] evidence:/);
+  // Publication analyses the evidence once and stores what the first query
+  // reads, and says what that cost: a run's query views used to be analysed
+  // twice more, untimed, by the first query after it.
+  const evidencePath = serial.stdout.match(/\[coverage\] evidence: (.+)/)[1].trim();
+  const runDirectory = evidencePath.slice(0, -'evidence.raw.gz'.length);
+  for (const name of ['query-index.v1.bin', 'assertions.summary.cache.json']) {
+    assert.ok(existsSync(resolve(runDirectory, name)), `publication wrote ${name} before any query`);
+  }
+  assert.match(serial.stderr, /\[supercov\] timings .* evidence=\d+(?:\.\d)?ms publication=\d+(?:\.\d)?ms total=/);
   assert.match(serial.stderr, new RegExp(`${hasMatch ? 14 : 13} test\\(s\\) across 3 source file\\(s\\)`));
   assert.match(serial.stderr, new RegExp(`interpreter process\\(es\\) on Python 3\\.${version.minor}\\.`));
   assertFixtureTotals(query(project, ['runs', 'latest'], environment), fixtureTotals);

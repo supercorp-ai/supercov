@@ -648,11 +648,40 @@ pub(crate) fn publish_run_with_fault(
     let mut json = serde_json::to_vec_pretty(metadata).map_err(LifecycleError::Metadata)?;
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
-    if let Err(reason) = crate::assertion_store::prepare_publication(root, &staging, metadata) {
+    // Everything publication derives from the evidence -- the assertion map's
+    // record of what each test ran, the summary `runs latest` shows, the query
+    // index -- comes from one analysis of it, made here. Each used to analyse
+    // the archive on its own: once here, twice more in the first query after
+    // the run, and on a 3,900-test Python suite each analysis took 5 to 8
+    // seconds. Evidence that will not analyse is published as before; the
+    // first query then reports why.
+    let staged = crate::run_store::StoredRun {
+        id: metadata.id.clone(),
+        directory: staging.clone(),
+        evidence_path: staging.join("evidence.raw.gz"),
+        metadata_path: staging.join("run.json"),
+        query_index_path: staging.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+        metadata: metadata.clone(),
+    };
+    let analysed = if metadata.merged == Some(true) {
+        None
+    } else {
+        crate::run_store::analyze_stored_run(&staged).ok()
+    };
+    if let Err(reason) =
+        crate::assertion_store::prepare_publication(root, &staging, metadata, analysed.as_ref())
+    {
         let _ = remove_stored_tree_deferred(root, &staging);
         return Err(LifecycleError::InvalidState(format!(
             "assertion map publication: {reason}"
         )));
+    }
+    if let Some(report) = &analysed {
+        // Disposable, like every query index: one that failed to write is
+        // rebuilt by the first query.
+        if crate::run_store::write_query_index_from(&staged, report).is_err() {
+            let _ = fs::remove_file(&staged.query_index_path);
+        }
     }
     sync_directory(&staging)?;
     let runs = destination.parent().expect("runs parent");
