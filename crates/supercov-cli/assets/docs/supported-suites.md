@@ -184,7 +184,7 @@ attribution.
 
 | Runner | Attribution | Current requirement |
 | --- | --- | --- |
-| pytest | Exact test, worker, retry, and setup/call/teardown phase identity | CPython 3.12 or newer; run with `npx supercov -- pytest` or `python -m pytest` |
+| pytest | Exact test, worker, retry, and setup/call/teardown phase identity | CPython 3.9 or newer; run with `npx supercov -- pytest` or `python -m pytest` |
 | pytest-xdist | Exact per worker | Workers inherit the run through the environment |
 | pytest-rerunfailures | Exact per attempt; flaky tests are reported as such | |
 | `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test |

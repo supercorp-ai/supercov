@@ -100,9 +100,15 @@ function venv(python, name, packages) {
 }
 
 function supercov(cwd, frontend, args, extra = {}) {
-  const environment = { ...process.env, SUPERCOV_PYTHON_FRONTEND: frontend, ...extra };
+  const environment = { ...process.env, ...extra };
   delete environment.SUPERCOV_KEEP_WORK;
+  delete environment.SUPERCOV_PYTHON_FRONTEND;
+  if (frontend !== undefined) environment.SUPERCOV_PYTHON_FRONTEND = frontend;
   return run(binary, args, { cwd, env: environment });
+}
+
+function environment_(interpreter) {
+  return { PATH: `${resolve(interpreter, '..')}${delimiter}${process.env.PATH}` };
 }
 
 function latestRun(cwd) {
@@ -167,6 +173,10 @@ try {
   const python = findInterpreter();
   assert.ok(python, 'no CPython 3.12+ on PATH (or SUPERCOV_PYTHON)');
   const interpreter = venv(python, 'venv', ['pytest', 'pytest-xdist', 'pytest-rerunfailures']);
+  // The default is probes: a run that names no frontend is a probe run.
+  const unnamed = supercov(project('fixture-default'), undefined, ['--', interpreter, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests'], environment_(interpreter));
+  ok(unnamed, 'default frontend run');
+  assert.equal(summary(resolve(temporary, 'fixture-default'), latestRun(resolve(temporary, 'fixture-default'))).variant, 'python-owned-probes', 'probes are the default');
   const cwd = project('fixture');
   const environment = { PATH: `${resolve(interpreter, '..')}${delimiter}${process.env.PATH}` };
 
@@ -180,6 +190,8 @@ try {
   }
   const monitoring = summary(cwd, runs.monitoring);
   const probes = summary(cwd, runs.probes);
+  assert.equal(monitoring.variant, 'python-owned-monitoring');
+  assert.equal(probes.variant, 'python-owned-probes');
   for (const key of ['lines', 'branches', 'conditions', 'tests', 'complete']) {
     assert.deepEqual(probes[key], monitoring[key], `${key}: probes ${JSON.stringify(probes[key])} vs monitoring ${JSON.stringify(monitoring[key])}`);
   }

@@ -36,6 +36,16 @@ use crate::{
 
 pub const PYTHON_EVIDENCE_VERSION: u32 = 1;
 pub const PYTHON_FRONTEND_VERSION: &str = "python-monitoring-v1";
+pub const PYTHON_PROBES_FRONTEND_VERSION: &str = "python-probes-v1";
+
+/// The frontend version a run's evidence names: what measured it.
+fn frontend_version(frontend: &str) -> &'static str {
+    if frontend == "probes" {
+        PYTHON_PROBES_FRONTEND_VERSION
+    } else {
+        PYTHON_FRONTEND_VERSION
+    }
+}
 pub const PYTEST_RUNNER: &str = "pytest";
 pub const UNITTEST_RUNNER: &str = "unittest";
 
@@ -68,6 +78,11 @@ enum Record {
         python: String,
         executable: String,
         argv: Vec<String>,
+        /// `probes` or `monitoring`: which observer measured this process.
+        /// Absent from a runtime older than the probe frontend, which could
+        /// only have been monitoring.
+        #[serde(default)]
+        frontend: Option<String>,
     },
     Worker {
         worker: String,
@@ -365,6 +380,8 @@ struct Evidence {
     test_files: TestFilesByAttempt,
     sites: SitesByAttempt,
     limitations: Vec<RuntimeLimitation>,
+    /// The frontends the processes reported; one run uses one.
+    frontends: BTreeSet<String>,
 }
 
 fn read_evidence_directory(
@@ -541,8 +558,12 @@ fn read_evidence_file(
                 pid,
                 worker,
                 python,
+                frontend,
                 ..
             } => {
+                evidence
+                    .frontends
+                    .insert(frontend.unwrap_or_else(|| "monitoring".into()));
                 if v != PYTHON_EVIDENCE_VERSION {
                     return Err(PythonEvidenceError::UnsupportedVersion(v));
                 }
@@ -838,11 +859,25 @@ fn observations<'a>(
 }
 
 pub fn python_coverage_model() -> CoverageModelDeclaration {
+    python_coverage_model_for("monitoring")
+}
+
+/// The model for the frontend that measured the run. The probe frontend
+/// observes through probes compiled into the code at import; the monitoring
+/// frontend through CPython's monitoring events. The obligations are the
+/// same plan's either way.
+pub fn python_coverage_model_for(frontend: &str) -> CoverageModelDeclaration {
+    let probes = frontend == "probes";
     CoverageModelDeclaration {
         language: "python".into(),
-        variant: "python-owned-monitoring".into(),
-        name: "python-sys-monitoring-v1".into(),
-        completeness_meaning: "Every statement, function, decision vector, loop, short-circuit, match and exception-flow obligation Supercov derived from the source was observed through CPython's monitoring events with exact test identity; the declared runtime limitations remain separate.".into(),
+        variant: if probes { "python-owned-probes" } else { "python-owned-monitoring" }.into(),
+        name: if probes { "python-probes-v1" } else { "python-sys-monitoring-v1" }.into(),
+        completeness_meaning: if probes {
+            "Every statement, function, decision vector, loop, short-circuit, match and exception-flow obligation Supercov derived from the source was observed through probes compiled into the code at import, with exact test identity; the declared runtime limitations remain separate."
+        } else {
+            "Every statement, function, decision vector, loop, short-circuit, match and exception-flow obligation Supercov derived from the source was observed through CPython's monitoring events with exact test identity; the declared runtime limitations remain separate."
+        }
+        .into(),
         measured: vec![
             "executable statements proven by CPython LINE events on their header lines, or INSTRUCTION events when they share a line".into(),
             "function and lambda entry".into(),
@@ -1070,6 +1105,12 @@ pub fn build_python_frontend_run(
     if evidence.interpreters == 0 {
         return Err(PythonEvidenceError::NoInterpreter);
     }
+    let frontend = evidence
+        .frontends
+        .iter()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "monitoring".into());
     if evidence.outcomes.is_empty() {
         return Err(PythonEvidenceError::NoTests);
     }
@@ -1083,6 +1124,7 @@ pub fn build_python_frontend_run(
         test_files,
         sites,
         limitations,
+        frontends: _,
     } = evidence;
     let mut manifest = manifest.clone();
     let index = ManifestIndex::new(&manifest);
@@ -1275,7 +1317,7 @@ pub fn build_python_frontend_run(
                 runner: runner.clone(),
                 kind: "unit".into(),
                 project: None,
-                source: PYTHON_FRONTEND_VERSION.into(),
+                source: frontend_version(&frontend).into(),
             },
             role: "test".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -1335,7 +1377,7 @@ pub fn build_python_frontend_run(
                 runner: runner.clone(),
                 kind: "unit".into(),
                 project: None,
-                source: PYTHON_FRONTEND_VERSION.into(),
+                source: frontend_version(&frontend).into(),
             },
             role: "test".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -1371,7 +1413,7 @@ pub fn build_python_frontend_run(
                 runner: default_observed.clone(),
                 kind: "unit".into(),
                 project: None,
-                source: PYTHON_FRONTEND_VERSION.into(),
+                source: frontend_version(&frontend).into(),
             },
             role: "background".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -1466,7 +1508,7 @@ pub fn build_python_frontend_run(
         declaration: FrontendRunDeclaration {
             protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
             frontend_id: "python".into(),
-            frontend_version: PYTHON_FRONTEND_VERSION.into(),
+            frontend_version: frontend_version(&frontend).into(),
             language: "python".into(),
             structural_source: StructuralSource::OwnedProbes,
             runners: observed_runners
@@ -1501,7 +1543,7 @@ pub fn build_python_frontend_run(
             manifest,
             raw_results,
             generated_at: generated_at.into(),
-            coverage_model: Some(python_coverage_model()),
+            coverage_model: Some(python_coverage_model_for(&frontend)),
             integrity: None,
             test_exit_code: ExitCodeInput::Present(Some(test_exit_code)),
         },

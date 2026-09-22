@@ -63,6 +63,9 @@ function environmentFor(project, venv) {
     SUPERCOV_RUST_BINARY: binary,
     PATH: `${resolve(venv, process.platform === 'win32' ? 'Scripts' : 'bin')}${delimiter}${process.env.PATH}`,
     SUPERCOV_PROJECT_ROOT: project,
+    // This gate is the monitoring frontend's; probes are the default and
+    // have their own (python-probes-integration.mjs).
+    SUPERCOV_PYTHON_FRONTEND: 'monitoring',
   };
   delete environment.PYTHONPATH;
   delete environment.PYTEST_PLUGINS;

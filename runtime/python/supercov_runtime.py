@@ -495,7 +495,7 @@ class Runtime:
         self.branch_pairs = _monitoring is not None and hasattr(_monitoring.events, "BRANCH_LEFT")
         # The probe frontend: obligations numbered into one array per context,
         # reached from a probe through `hits_var.get()`; see supercov_probes.
-        self.frontend = os.environ.get(FRONTEND_ENV, "monitoring")
+        self.frontend = os.environ.get(FRONTEND_ENV, "probes")
         self.probe_files: dict = {}
         self.probe_ids: list = []
         self.probing = None
@@ -562,6 +562,7 @@ class Runtime:
                 "run": self.run_id,
                 "pid": pid,
                 "worker": self.worker,
+                "frontend": self.frontend,
                 "python": sys.version.split()[0],
                 "executable": sys.executable,
                 "argv": sys.argv,
@@ -2145,7 +2146,7 @@ def install() -> Runtime | None:
     run_id = os.environ.get(RUN_ID_ENV)
     if not plan_path or not evidence_dir or not run_id:
         return None
-    if sys.version_info < (3, 12) and os.environ.get(FRONTEND_ENV, "monitoring") != "probes":
+    if sys.version_info < (3, 12) and os.environ.get(FRONTEND_ENV, "probes") != "probes":
         _INSTALL_ERROR = f"Supercov requires CPython 3.12 or newer, found {sys.version.split()[0]}"
         sys.stderr.write(f"[supercov] {_INSTALL_ERROR}\n")
         return None
