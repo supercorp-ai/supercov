@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.0
+
+**Changed**
+
+- Python suites run nearly four times faster under Supercov. On h11's 3,900 tests, pytest's own session takes 3.4 to 3.9 seconds where 1.1.1 took 12.8 to 14.1, against 2.0 to 2.3 without Supercov, on CPython 3.13 and 3.14 alike; the whole command takes 18 to 22 seconds rather than 32 to 36.
+- Python is measured by probes compiled into each measured module as it is imported, replacing the `sys.monitoring` observer, which is removed rather than kept behind a switch. Nothing on disk changes, and tracebacks keep their line numbers.
+- CPython 3.9, 3.10 and 3.11 are measured. 3.12 was the floor.
+- Decisions the observer left out of the denominator without saying so are measured: on h11, 704 branches and 172 conditions rather than 692 and 160. A Python project's branch and condition totals can rise for that reason alone.
+- A process that ends mid-test -- `os._exit`, SIGTERM, SIGKILL, a killed xdist worker -- keeps what it executed.
+- Running under `-X no_debug_ranges` no longer removes lines from the measurement.
+
+**Fixed**
+
+- A Python suite using `pytest-subtests` published no result. Each subtest is reported under its test's `call` phase, so one phase arrived several times and the run was refused. A phase reported more than once is now one phase, and a failing subtest still fails its test. Thanks to [@maik-intellicoach](https://github.com/maik-intellicoach), whose 6,872-test run lost 2 hours 43 minutes to it. (#40)
+- When Supercov itself fails a run, what the run measured is kept in `.supercov/failed-evidence/<run id>` and the failure names that path, instead of being deleted with the work directory. Reported by [@maik-intellicoach](https://github.com/maik-intellicoach). (#40)
+- A thread started by a measured test is freed when it ends, rather than when the cycle collector next runs.
+- A `match` case with an or-pattern whose first alternative fails is no longer also reported as not selected.
+- Opening a run's index verifies its pages about five times faster on Arm macOS and Linux, where the CPU's SHA-256 instructions were going unused, and an index stores each list of tests once however many lines name it: a real 206 MB index came out a quarter smaller.
+
 ## 1.1.1
 
 **Fixed**
