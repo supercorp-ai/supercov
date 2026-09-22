@@ -23,8 +23,8 @@ use crate::{
     frontend_protocol::validate_frontend_report_request,
     integrity::{FrontendIntegrityInputs, create_explicit_run_integrity},
     lifecycle::{
-        ProjectLock, finalize_published_run, publish_run, recover_abandoned_runs,
-        remove_stored_tree_deferred,
+        ProjectLock, finalize_published_run, note_kept_evidence, publish_run,
+        recover_abandoned_runs, remove_stored_tree_deferred,
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
@@ -242,6 +242,10 @@ pub fn run_direct_python(
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
     let work_directory = root.join(".supercov/work").join(&request.run_id);
+    // Whether the tests were measured. A run that failed before that has no
+    // evidence worth keeping; one that failed after has evidence that cost the
+    // suite its wall clock.
+    let measured = std::cell::Cell::new(false);
     let result = (|| {
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
@@ -343,6 +347,7 @@ pub fn run_direct_python(
         let verbose = std::env::var("SUPERCOV_VERBOSE")
             .or_else(|_| std::env::var("SUPERCOV_DEBUG"))
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+        measured.set(true);
         let run: PythonFrontendRun = build_python_frontend_run(
             &project.manifest,
             &evidence_directory,
@@ -420,6 +425,17 @@ pub fn run_direct_python(
             metadata,
         })
     })();
+    let result = result.map_err(|error| {
+        if !measured.get() {
+            return error;
+        }
+        note_kept_evidence(
+            &root,
+            &work_directory.join("python/evidence"),
+            &request.run_id,
+            error,
+        )
+    });
     if result.is_err() {
         let _ = remove_stored_tree_deferred(&root, &work_directory);
     }
