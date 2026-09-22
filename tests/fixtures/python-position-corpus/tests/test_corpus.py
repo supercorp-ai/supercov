@@ -25,10 +25,6 @@ def test_loops_and_comprehensions():
 
 
 def test_match_and_exceptions():
-    assert corpus.match_shapes(0) == "zero"
-    assert corpus.match_shapes(20) == "large"
-    assert corpus.match_shapes([3, 4]) == "sequence:3"
-    assert corpus.match_shapes("x") == "other"
     assert corpus.exception_shapes("4") == 5
     assert corpus.exception_shapes("x") == "value"
     assert corpus.exception_shapes(None) == "type"

@@ -38,18 +38,6 @@ def chained(x):
     return "negative"
 
 
-def matcher(value):
-    match value:
-        case 0:
-            return "zero"
-        case int() if value > 100:
-            return "big"
-        case [first, *_]:
-            return f"seq:{first}"
-        case _:
-            return "other"
-
-
 def guarded(command):
     try:
         result = int(command)

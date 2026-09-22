@@ -140,26 +140,37 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
-        python: ["3.12", "3.13", "3.14"]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
+      # python.org publishes no arm64 Windows build before 3.11, so an arm64
+      # Windows user on 3.9 or 3.10 runs the x64 build under emulation, and
+      # so does this job.
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.os == 'windows-11-arm' && (matrix.python == '3.9' || matrix.python == '3.10') && 'x64' || '' }}
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
-      - run: npm run test:python-monitoring
+      # Every interpreter measures itself: the gate refuses to fall back to
+      # another Python on the runner, and asserts the version it measured.
+      - run: npm run test:python
         env:
           SUPERCOV_PYTHON: python
-      # What a measured line costs is a property of the runtime, not of a host
-      # or an interpreter version, so one combination guards it. Running it on
-      # all fifteen would pay fifteen times over for the same signal.
-      - if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
-        run: npm run benchmark:python-monitoring
+      # Slots are shared pages: close must take them back and a fork must
+      # not write into its parent's, on every platform's mmap.
+      - run: node --test tests/runtime/python-lifecycle.test.mjs
+        env:
+          SUPERCOV_PYTHON: python
+      # A probe's cost is the interpreter's: 3.11 specializes the stores a
+      # probe compiles to and 3.9 does not, so every version is held to the
+      # budget, on one host.
+      - if: matrix.os == 'ubuntu-latest'
+        run: npm run benchmark:python
         env:
           SUPERCOV_PYTHON: python
 

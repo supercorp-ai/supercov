@@ -84,6 +84,7 @@ const mappings = [
     "supercov_pytest.py",
     "supercov_runtime.py",
     "supercov_unittest.py",
+    "supercov_probes.py",
   ]),
   // Nested rather than flat: a Go package is a directory and a JVM class is
   // its package path, so the layout is part of what makes these compile.
