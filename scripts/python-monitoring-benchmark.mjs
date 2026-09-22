@@ -1,11 +1,22 @@
 #!/usr/bin/env node
-// Publication benchmark for a moderately wide Python suite. It is separate
-// from the conformance gate because wall-clock budgets vary across CI hosts.
+// Overhead benchmark for a Python suite that executes a realistic number of
+// measured lines.
+//
+// A suite's bill is not its test count. A measured line is disabled after its
+// first hit in a test and re-armed for the next, so every (test, statement)
+// pair costs one callback that writes a record; every condition costs a branch
+// callback per execution (per direction on 3.14); every code object costs a
+// discovery. An earlier shape of this benchmark gave each test one four-line
+// `classify(a, b)` call -- 7.1 measured lines per test -- and reported 1.1x,
+// while a real library (h11) executes about 2,100 lines per test and measured
+// 5.8x. The number it printed could not move when the cost that matters
+// changed, so it is the measured lines per test that must be realistic here.
 
 import assert from 'node:assert/strict';
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -21,6 +32,11 @@ const venv = resolve(temporary, 'venv');
 const python = process.env.SUPERCOV_PYTHON ?? 'python3';
 const moduleCount = 200;
 const testCount = 1000;
+// Statements in the measured function, and how many times a test calls it.
+// Their product is the line events a test pays for; `h11` sits near 2,100.
+const statementCount = 100;
+const callsPerTest = 20;
+const linesPerTest = statementCount * callsPerTest;
 
 function run(program, args, options = {}) {
   const started = performance.now();
@@ -37,7 +53,20 @@ try {
   for (let index = 0; index < moduleCount; index += 1) {
     writeFileSync(
       resolve(project, `src/mod_${index.toString().padStart(3, '0')}.py`),
-      'def classify(a, b):\n    if a and b:\n        return 1\n    return 0\n',
+      // A body of distinct statements, so a call pays for the callback on each
+      // of them and for the records a first execution writes, the way measured
+      // code does. A loop over two lines would exercise only the first.
+      //
+      // One statement in ten branches. Making every one of them a conditional
+      // measured decision recording rather than line coverage, and reported an
+      // overhead no ordinary code would ever pay.
+      `def classify(a, b):\n    total = 0\n${Array.from(
+        { length: statementCount - 2 },
+        (_, step) =>
+          step % 10 === 9
+            ? `    total = total + (1 if a else 0)\n`
+            : `    total = total + ${step % 7}\n`,
+      ).join('')}    return 1 if (a and b) else 0\n`,
     );
   }
   const imports = Array.from(
@@ -50,7 +79,7 @@ try {
   ).join(', ');
   writeFileSync(
     resolve(project, 'tests/test_many.py'),
-    `${imports}\n\nMODULES = [${modules}]\n\ndef make_test(index):\n    def test():\n        assert MODULES[index % len(MODULES)].classify(True, index % 2 == 0) == int(index % 2 == 0)\n    return test\n\nfor index in range(${testCount}):\n    globals()[f"test_{index:04}"] = make_test(index)\n`,
+    `${imports}\n\nMODULES = [${modules}]\n\ndef make_test(index):\n    def test():\n        module = MODULES[index % len(MODULES)]\n        for _ in range(${callsPerTest}):\n            assert module.classify(True, index % 2 == 0) == int(index % 2 == 0)\n    return test\n\nfor index in range(${testCount}):\n    globals()[f"test_{index:04}"] = make_test(index)\n`,
   );
   writeFileSync(
     resolve(project, 'pyproject.toml'),
@@ -78,13 +107,32 @@ try {
   );
   assert(timings, measured.stderr);
   const publication = timings.slice(1).map(Number);
+  // The generator decides how many measured lines a test executes, so the
+  // line events are known without counting them at runtime: the loop's own
+  // two lines per call, plus the body's statements.
+  const lineEvents = testCount * (linesPerTest + callsPerTest * 2);
+  // Against the tests phase, not the whole command. What a measured line costs
+  // is paid inside the interpreter; publication is Rust, reported separately
+  // below, and swings by an order of magnitude between a debug and a release
+  // build -- folding it in would make this say more about the build than the
+  // runtime.
+  const phase = measured.stderr.match(/timings .*?tests=([0-9.]+)ms/);
+  assert(phase, `no phase timings in:\n${measured.stderr}`);
+  const testsMs = Number(phase[1]);
+  const ratio = Math.round((testsMs / plain.elapsedMs) * 100) / 100;
+  const nsPerLine = Math.round(((testsMs - plain.elapsedMs) * 1e6) / lineEvents);
   console.log(JSON.stringify({
     python,
     modules: moduleCount,
     tests: testCount,
+    linesPerTest,
+    lineEvents,
     plainMs: plain.elapsedMs,
     supercovMs: measured.elapsedMs,
-    overheadMs: Math.round((measured.elapsedMs - plain.elapsedMs) * 10) / 10,
+    testsMs,
+    overheadMs: Math.round((testsMs - plain.elapsedMs) * 10) / 10,
+    ratio,
+    nsPerLine,
     publicationMs: {
       join: publication[0],
       serialize: publication[1],
@@ -92,6 +140,19 @@ try {
       total: Math.round(publication.reduce((sum, value) => sum + value, 0) * 10) / 10,
     },
   }, null, 2));
+  // A ratio rather than an absolute time: both halves scale with the host, so
+  // it survives a slower CI box where a wall-clock budget would not.
+  const budget = JSON.parse(
+    readFileSync(resolve(repository, 'benchmarks/budget.json'), 'utf8'),
+  ).pythonOverheadRatioMax;
+  assert(
+    typeof budget === 'number',
+    'benchmarks/budget.json must set pythonOverheadRatioMax',
+  );
+  assert(
+    ratio <= budget,
+    `Python overhead is ${ratio}x on ${linesPerTest} measured lines per test, over the ${budget}x budget (${nsPerLine}ns per line event)`,
+  );
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 }
