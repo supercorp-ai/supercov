@@ -39,8 +39,8 @@ use crate::{
         JvmBuild, PreparedJvmProject, detect_build, jvm_integrity_inputs, prepare_jvm_project,
     },
     lifecycle::{
-        ProjectLock, finalize_published_run, publish_run, recover_abandoned_runs,
-        remove_stored_tree_deferred,
+        ProjectLock, finalize_published_run, note_kept_evidence, publish_run,
+        recover_abandoned_runs, remove_stored_tree_deferred,
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     owned_evidence::{
@@ -1058,6 +1058,10 @@ pub fn run_direct_jvm(
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
     let work_directory = root.join(".supercov/work").join(&request.run_id);
+    // Whether the tests were measured. A run that failed before that has no
+    // evidence worth keeping; one that failed after has evidence that cost the
+    // suite its wall clock.
+    let measured = std::cell::Cell::new(false);
     let result = (|| {
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
@@ -1296,6 +1300,7 @@ pub fn run_direct_jvm(
             ));
         }
         let evidence = merge_evidence(parts);
+        measured.set(true);
         let run = build_frontend_run(OwnedRunInputs {
             declaration: jvm_declaration(),
             environment: "jvm",
@@ -1371,6 +1376,12 @@ pub fn run_direct_jvm(
             metadata,
         })
     })();
+    let result = result.map_err(|error| {
+        if !measured.get() {
+            return error;
+        }
+        note_kept_evidence(&root, &work_directory.join("jvm"), &request.run_id, error)
+    });
     if result.is_err() {
         let _ = remove_stored_tree_deferred(&root, &work_directory);
     }

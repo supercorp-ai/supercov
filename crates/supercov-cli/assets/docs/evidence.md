@@ -110,6 +110,14 @@ Preview cleanup first. The final command removes all runs and the isolated build
 cache; `--keep 20` preserves the 20 newest runs. Cleanup removes only
 marker-owned Supercov data.
 
+### Evidence of a run that failed to publish
+
+A suite pays for its measurement in wall clock. If Supercov itself cannot
+publish a run the tests already finished, the run's raw evidence is kept in
+`.supercov/failed-evidence/<run-id>/` rather than going with the work directory,
+and the error names the path. Attach that directory to the bug report. A full
+`clean` reclaims it; `--keep N` does not.
+
 ## Understand test kinds
 
 Reports group tests by kind, such as unit, integration or E2E. Supercov uses

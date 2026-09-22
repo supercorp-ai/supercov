@@ -395,6 +395,12 @@ By default, `clean` removes all stored runs and the isolated build cache.
 `--keep N` keeps the newest N runs. Cleanup removes only marker-owned Supercov
 storage.
 
+If Supercov itself fails to publish a run the tests already paid for, it keeps
+that run's raw evidence in `.supercov/failed-evidence/<run id>` and says so in
+the error. Report the failure with that directory: it is what diagnoses it. Only
+a full `clean` reclaims it -- `--keep N` leaves it alone -- and the summary says
+when it goes.
+
 ## Read bundled documentation
 
 ```sh supercov
