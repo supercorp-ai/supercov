@@ -190,8 +190,10 @@ attribution.
 | `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test |
 
 Your project runs in place with its own interpreter and virtual environment.
-Supercov adds its monitoring and runner hooks through the process environment;
-you do not need to rewrite tests or configure a different build.
+Supercov adds its runner hooks through the process environment and places a
+probe for every obligation into each measured module as it is imported --
+nothing on disk changes, and tracebacks keep their line numbers. You do not
+need to rewrite tests or configure a different build.
 
 Coverage includes statements, functions, boolean decisions, loops,
 comprehensions, short-circuit operators, `match` cases and exception paths.
@@ -202,9 +204,11 @@ assertion checks.
 
 Interpreters launched with `-I`, `-E` or `-S` ignore the required startup hook
 and are not measured. Code compiled from strings at runtime has no source
-obligations. Completed observations can survive a hard kill, but a corrupt or
-exhausted evidence channel fails the run rather than reporting partial data as
-complete.
+obligations. A measured module imported before Supercov starts, or compiled
+past the import system, runs without probes; the run names it as a limitation
+rather than reporting it uncovered. What a test executed survives the process
+being killed -- `os._exit`, SIGTERM or SIGKILL -- but a corrupt or exhausted
+evidence channel fails the run rather than reporting partial data as complete.
 
 ```sh
 npx supercov -- pytest
