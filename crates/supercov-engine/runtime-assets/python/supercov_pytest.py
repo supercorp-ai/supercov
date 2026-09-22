@@ -64,7 +64,11 @@ def pytest_load_initial_conftests(early_config, parser, args):
     if _runtime is None:
         return
     try:
-        enabled = bool(early_config.getini("enable_assertion_pass_hook"))
+        # Rewrites made with the hook on, and rewrites the probe frontend
+        # adds site probes to, both leave bytecode a plain run must not load.
+        enabled = bool(early_config.getini("enable_assertion_pass_hook")) or getattr(
+            _runtime, "frontend", ""
+        ) == "probes"
         from _pytest.assertion import rewrite
 
         tail = rewrite.PYC_TAIL

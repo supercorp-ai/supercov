@@ -207,14 +207,14 @@ impl std::fmt::Display for PythonEvidenceError {
                 "Python decision {id} reported {actual} condition values, expected {expected}"
             ),
             Self::NoInterpreter => formatter.write_str(
-                "no Supercov-hooked Python interpreter ran: the test command did not start CPython 3.12+ with Supercov's start-up hook (PYTHONPATH may be ignored by -I/-E/-S, or the runner is not Python)",
+                "no Supercov-hooked Python interpreter ran: the test command did not start CPython 3.9+ with Supercov's start-up hook (PYTHONPATH may be ignored by -I/-E/-S, or the runner is not Python)",
             ),
             Self::NoTests => formatter.write_str(
                 "the Python run produced no test outcomes; Supercov measures Python through pytest and unittest",
             ),
             Self::UnsupportedPython(version) => write!(
                 formatter,
-                "Supercov measures CPython 3.12 or newer; the test command ran Python {version}"
+                "Supercov measures CPython 3.9 or newer; the test command ran Python {version}"
             ),
         }
     }
@@ -548,7 +548,10 @@ fn read_evidence_file(
                     .take(2)
                     .map(|part| part.parse::<u32>().ok())
                     .collect::<Option<Vec<_>>>()
-                    .is_some_and(|parts| parts.len() == 2 && (parts[0], parts[1]) >= (3, 12));
+                    // The probe frontend measures 3.9 and newer; the monitoring
+                    // runtime refuses anything older than 3.12 itself, so a
+                    // record from an older interpreter can only be probes.
+                    .is_some_and(|parts| parts.len() == 2 && (parts[0], parts[1]) >= (3, 9));
                 if !supported {
                     return Err(PythonEvidenceError::UnsupportedPython(python));
                 }
@@ -1938,7 +1941,7 @@ mod tests {
         write_transport(
             &path,
             &[
-                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.11.9","executable":"p","argv":[]}),
+                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.8.20","executable":"p","argv":[]}),
             ],
             0,
         );

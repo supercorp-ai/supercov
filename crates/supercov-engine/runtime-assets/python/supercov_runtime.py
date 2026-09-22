@@ -19,6 +19,7 @@ import atexit
 import contextvars
 import weakref
 import dis
+import itertools
 import json
 import mmap
 import os
@@ -420,7 +421,25 @@ class _Hits(bytearray):
     harvested again at close, freed otherwise.
     """
 
-    __slots__ = ("context", "__weakref__")
+    __slots__ = ("context", "states", "__weakref__")
+
+
+class _DecisionState:
+    """One multi-condition decision's evaluation in one context.
+
+    `mask` holds two bits per leaf, known and truth, for the evaluation in
+    progress; `seen` the masks already reported. A nested evaluation of the
+    same decision -- a recursive call inside a condition -- saves the outer
+    one and restores it when the inner closes.
+    """
+
+    __slots__ = ("mask", "last", "seen", "saved")
+
+    def __init__(self) -> None:
+        self.mask = 0
+        self.last = -1
+        self.seen: set = set()
+        self.saved: list = []
 
 
 class Runtime:
@@ -486,6 +505,7 @@ class Runtime:
 
             index = supercov_probes.index_plan(plan)
             self.probe_files, self.probe_ids = index.files, index.ids
+            self.probe_sites = index.sites
             self.probe_decisions = [_Decision(plan_, logical) for plan_, logical in index.decisions]
             self.probe_boolops = index.boolop_groups
             # Open evaluations by (context, decision) and (context, group):
@@ -1671,6 +1691,7 @@ class Runtime:
     def _new_hits(self, context: int) -> "_Hits":
         array = _Hits(len(self.probe_ids))
         array.context = context
+        array.states = [None] * len(self.probe_decisions)
         self.hit_arrays[context] = array
         return array
 
@@ -1679,41 +1700,57 @@ class Runtime:
         self.hits_var.get()[k] = 1
         return value
 
-    def _condition_probe(self, d: int, index: int, value, inverted: bool) -> bool:
-        """One condition of a decision evaluated: record its truth.
+    def _single_probe(self, slot: int, value) -> bool:
+        """A one-condition decision: its truth is its vector, one byte each."""
+        truth = bool(value)
+        self.hits_var.get()[slot + truth] = 1
+        return truth
 
-        Returns the truth rather than the value: inside a decision only the
-        truth is used, so the interpreter's own test runs on this bool and an
-        object's `__bool__` is consulted exactly once, by us.
+    def _condition_probe(self, d: int, index: int, value, inverted: bool) -> bool:
+        """One condition of a multi-condition decision: record its truth.
+
+        Returns the operand's truth rather than the value: inside a decision
+        only the truth is used, so the interpreter's own test runs on this
+        bool and an object's `__bool__` is consulted exactly once, by us. The
+        recorded value is the condition as written, `not` included; the
+        source's own `not` then applies to what is returned, once.
         """
         truth = bool(value)
-        # The leaf's value is the condition as written, `not` included; what
-        # goes back to the source is the operand's truth, and the source's
-        # own `not` then applies to it exactly once.
-        recorded = (not truth) if inverted else truth
-        key = (self.context.get(), d)
-        stack = self.probe_open.get(key)
-        if stack is None:
-            stack = self.probe_open[key] = []
+        states = self.hits_var.get().states
+        state = states[d]
+        if state is None:
+            state = states[d] = _DecisionState()
         # Leaves arrive in index order within one evaluation; an index at or
         # before the last one seen is a nested evaluation of the same decision.
-        if not stack or index <= stack[-1].last:
-            if len(stack) >= MAX_OPEN_EVALUATIONS:
-                del stack[0]
-            stack.append(_Evaluation(self.probe_decisions[d].width))
-        evaluation = stack[-1]
-        evaluation.last = index
-        evaluation.values[index] = recorded
+        if index <= state.last:
+            state.saved.append((state.mask, state.last))
+            state.mask = 0
+        state.last = index
+        state.mask |= (1 << (2 * index)) | (((not truth) if inverted else truth) << (2 * index + 1))
         return truth
 
     def _decision_probe(self, d: int, value) -> bool:
-        """A decision's test evaluated: emit the vector its leaves recorded."""
+        """A multi-condition decision's test evaluated: report a new vector."""
         outcome = bool(value)
-        context = self.context.get()
-        stack = self.probe_open.get((context, d))
-        if stack:
-            evaluation = stack.pop()
-            self._vector(context, self.probe_decisions[d], evaluation.values, outcome)
+        hits = self.hits_var.get()
+        state = hits.states[d]
+        if state is None:
+            return outcome
+        mask = state.mask
+        if state.saved:
+            state.mask, state.last = state.saved.pop()
+        else:
+            state.mask = 0
+            state.last = -1
+        if mask in state.seen:
+            return outcome
+        state.seen.add(mask)
+        decision = self.probe_decisions[d]
+        values = [
+            (bool(mask & (1 << (2 * index + 1))) if mask & (1 << (2 * index)) else None)
+            for index in range(decision.width)
+        ]
+        self._vector(hits.context, decision, values, outcome)
         return outcome
 
     def _operand_probe(self, g: int, index: int, value):
@@ -1739,20 +1776,65 @@ class Runtime:
             self._hit(context, logical["evaluated"] if operand in evaluated else logical["shortCircuit"])
         return value
 
-    def _harvest(self, array: "_Hits") -> None:
-        """Turn an array's set bytes into hit records, and clear them.
+    def _iter_probe(self, entered: int, zero: int, iterable):
+        """A comprehension's loop: `entered` on the first item, `zero` on an
+        empty exhaustion, per evaluation. The rest of the iteration runs in C.
+        """
+        hits = self.hits_var.get()
+        iterator = iter(iterable)
+        try:
+            first = next(iterator)
+        except StopIteration:
+            hits[zero] = 1
+            return iter(())
+        hits[entered] = 1
+        return itertools.chain((first,), iterator)
 
-        `find` walks the array in C. Clearing lets the next harvest of the
-        same array -- a context a background thread kept alive -- emit only
-        what is new; `_hit` deduplicates in any case.
+    async def _aiter_probe(self, entered: int, zero: int, iterable):
+        hits = self.hits_var.get()
+        iterator = iterable.__aiter__()
+        try:
+            first = await iterator.__anext__()
+        except StopAsyncIteration:
+            hits[zero] = 1
+            return
+        hits[entered] = 1
+        yield first
+        async for item in iterator:
+            yield item
+
+    def _site_probe(self, file: str, line: int) -> None:
+        self.assertion_site(file, line)
+        self.assertion()
+
+    def _harvest(self, array: "_Hits") -> None:
+        """Turn an array's set bytes into records, and clear them.
+
+        `find` walks the array in C. Every set byte is a first sighting in
+        its context by construction -- the array is cleared as it is read --
+        so the hits go straight to the transport under one lock. A vector
+        slot stands for a one-condition decision's truth and goes through
+        `_vector`, which emits the vector, the outcome and the logical hits.
         """
         ids = self.probe_ids
         context = array.context
-        index = array.find(1)
-        while index != -1:
-            array[index] = 0
-            self._hit(context, ids[index])
-            index = array.find(1, index + 1)
+        vectors = []
+        with self.lock:
+            if self.closed:
+                return
+            self._ensure_process_output()
+            index = array.find(1)
+            while index != -1:
+                array[index] = 0
+                entry = ids[index]
+                if isinstance(entry, str):
+                    self.seen_hits.add((context, entry))
+                    self._write_hit(context, entry)
+                else:
+                    vectors.append(entry)
+                index = array.find(1, index + 1)
+        for _, d, truth in vectors:
+            self._vector(context, self.probe_decisions[d], [truth], truth)
 
     def _install_probes(self) -> None:
         import supercov_probes
@@ -1766,9 +1848,14 @@ class Runtime:
                 "value_probe": self._value_probe,
                 "condition_probe": self._condition_probe,
                 "decision_probe": self._decision_probe,
+                "single_probe": self._single_probe,
                 "operand_probe": self._operand_probe,
                 "boolop_probe": self._boolop_probe,
+                "iter_probe": self._iter_probe,
+                "aiter_probe": self._aiter_probe,
+                "site_probe": self._site_probe,
             },
+            self.probe_sites,
         )
 
     def install(self) -> None:

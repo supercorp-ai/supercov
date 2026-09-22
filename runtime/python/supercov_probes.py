@@ -48,8 +48,12 @@ hits_get: Callable[[], bytearray] = lambda: bytearray()  # noqa: E731 - replaced
 value_probe: Callable[[int, object], object] = lambda k, value: value  # noqa: E731
 condition_probe: Callable[[int, int, object, bool], bool] = lambda d, i, value, inv: bool(value)  # noqa: E731
 decision_probe: Callable[[int, object], bool] = lambda d, value: bool(value)  # noqa: E731
+single_probe: Callable[[int, object], bool] = lambda k, value: bool(value)  # noqa: E731
 operand_probe: Callable[[int, int, object], object] = lambda g, i, value: value  # noqa: E731
 boolop_probe: Callable[[int, object], object] = lambda g, value: value  # noqa: E731
+iter_probe: Callable[[int, int, object], object] = lambda entered, zero, iterable: iterable  # noqa: E731
+aiter_probe: Callable[[int, int, object], object] = lambda entered, zero, iterable: iterable  # noqa: E731
+site_probe: Callable[[str, int], None] = lambda file, line: None  # noqa: E731
 
 
 # -- the plan, indexed for probing -------------------------------------------
@@ -80,6 +84,13 @@ class FileProbes:
         self.boolops: dict[tuple[int, int, int, int], int] = {}
         self.decision_plans: list = []
         self.boolop_groups: list = []
+        # Loops by the iterable's span: (entered k, zero k). Tries by their
+        # body's first statement: (success k, [(selected k, missed k, bare)],
+        # raised k). Matches by the statement's span: ([(selected k, missed k,
+        # irrefutable)], (matched k, unmatched k) or None).
+        self.loops: dict[tuple[int, int, int, int], tuple[int, int]] = {}
+        self.tries: dict[tuple[int, int], tuple[int, list, int]] = {}
+        self.matches: dict[tuple[int, int], tuple[list, tuple | None]] = {}
         for statement in file_plan.get("statements", ()):
             self.statements[(statement["start"][0], statement["start"][1])] = self._number(
                 statement["id"]
@@ -91,6 +102,35 @@ class FileProbes:
                 self.lambdas[(line, column, end_line, end_column)] = k
             else:
                 self.functions[(line, column)] = k
+        for loop in file_plan.get("loops", ()):
+            (line, column), (end_line, end_column) = loop["iter"]
+            self.loops[(line, column, end_line, end_column)] = (
+                self._number(loop["entered"]),
+                self._number(loop["zero"]),
+            )
+        for try_plan in file_plan.get("tries", ()):
+            (line, column), _ = try_plan["body"]
+            handlers = [
+                (self._number(h["selected"]), self._number(h["missed"]), h["bare"])
+                for h in try_plan["handlers"]
+            ]
+            self.tries[(line, column)] = (
+                self._number(try_plan["success"]),
+                handlers,
+                self._number(try_plan["raised"]),
+                try_plan.get("finalbody") is not None,
+            )
+        for match in file_plan.get("matches", ()):
+            (line, column), _ = match["span"]
+            cases = [
+                (self._number(c["selected"]), self._number(c["missed"]), c["irrefutable"])
+                for c in match["cases"]
+            ]
+            no_case = match.get("noCase")
+            self.matches[(line, column)] = (
+                cases,
+                None if no_case is None else (self._number(no_case["matched"]), self._number(no_case["unmatched"])),
+            )
         logical_by_decision: dict[str, list] = {}
         standalone: dict[tuple[int, int, int, int], list] = {}
         for logical in file_plan.get("logical", ()):
@@ -112,6 +152,19 @@ class FileProbes:
             plans.sort(key=lambda logical: logical["operand"])
             self.boolop_groups.append(plans)
             self.boolops[span] = g
+        # A decision with one condition needs no evaluation state: its
+        # outcome is its vector. Two slots in the hit array, one per truth,
+        # that the harvest turns into the vector and the outcome hit.
+        self.singles: dict[tuple[int, int, int, int], int] = {}
+        for span, d in list(self.decisions.items()):
+            if len(self.decision_plans[d][0]["conditions"]) == 1:
+                slot = len(self.ids) + base
+                self.ids.append(("vector", d, False))
+                self.ids.append(("vector", d, True))
+                self.singles[span] = slot
+                del self.decisions[span]
+                leaf = next(key for key, (dd, i, inv) in self.leaves.items() if dd == d)
+                del self.leaves[leaf]
         self.digest = hashlib.sha256(
             repr((PROBE_VERSION, relative, base, self.ids, len(self.decision_plans), len(self.boolop_groups))).encode("utf-8")
         ).hexdigest()
@@ -125,6 +178,20 @@ class FileProbes:
         return len(self.ids)
 
 
+class SiteProbes:
+    """A test file: not measured, but its assertion sites are recorded.
+
+    The plan names the lines holding an inventoried `assert`; a site probe
+    goes before the first statement on each of those lines -- which, once
+    pytest has rewritten the assert, is the rewrite's first statement.
+    """
+
+    def __init__(self, relative: str, lines) -> None:
+        self.relative = relative
+        self.lines = frozenset(lines)
+        self.digest = hashlib.sha256(repr((PROBE_VERSION, "sites", relative, sorted(self.lines))).encode()).hexdigest()
+
+
 class PlanIndex:
     """Every planned file's obligations numbered into one run-wide space."""
 
@@ -135,6 +202,11 @@ class PlanIndex:
         # a standalone BoolOp's operand plans by group index.
         self.decisions: list = []
         self.boolop_groups: list = []
+        self.sites: dict[str, SiteProbes] = {
+            relative: SiteProbes(relative, lines)
+            for relative, lines in plan.get("assertionSites", {}).items()
+            if relative not in plan["files"]
+        }
         for relative, file_plan in plan["files"].items():
             probes = FileProbes(relative, file_plan, len(self.ids))
             self.files[relative] = probes
@@ -142,6 +214,9 @@ class PlanIndex:
             decision_base = len(self.decisions)
             self.decisions.extend(probes.decision_plans)
             probes.decisions = {span: decision_base + d for span, d in probes.decisions.items()}
+            for offset, entry in enumerate(probes.ids):
+                if isinstance(entry, tuple):
+                    self.ids[probes.base + offset] = (entry[0], decision_base + entry[1], entry[2])
             probes.leaves = {span: (decision_base + d, i, inv) for span, (d, i, inv) in probes.leaves.items()}
             group_base = len(self.boolop_groups)
             self.boolop_groups.extend(probes.boolop_groups)
@@ -220,6 +295,40 @@ def _is_future_import(statement: ast.stmt) -> bool:
     return isinstance(statement, ast.ImportFrom) and statement.module == "__future__"
 
 
+def _exits(body: list, make_hit, k: int) -> None:
+    """Insert `hit(k)` before every statement that leaves a try body early.
+
+    A `return` anywhere in the body leaves it; a `break` or `continue` leaves
+    it only when the loop it belongs to encloses the try. Nested functions,
+    classes and lambdas are their own scopes and are not entered.
+    """
+
+    def walk(statements: list, loop_depth: int) -> None:
+        index = 0
+        while index < len(statements):
+            statement = statements[index]
+            leaves = isinstance(statement, ast.Return) or (
+                isinstance(statement, (ast.Break, ast.Continue)) and loop_depth == 0
+            )
+            if leaves:
+                statements.insert(index, make_hit(k, statement.lineno, statement.col_offset))
+                index += 1
+            elif not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                nested_loop = isinstance(statement, (ast.For, ast.AsyncFor, ast.While))
+                for field, value in ast.iter_fields(statement):
+                    if isinstance(value, list) and value and all(isinstance(item, ast.stmt) for item in value):
+                        walk(value, loop_depth + (1 if nested_loop else 0))
+                    elif isinstance(value, list):
+                        for item in value:
+                            # except handlers and match cases carry bodies
+                            for inner_field, inner in ast.iter_fields(item) if isinstance(item, ast.AST) else ():
+                                if isinstance(inner, list) and inner and all(isinstance(x, ast.stmt) for x in inner):
+                                    walk(inner, loop_depth)
+            index += 1
+
+    walk(body, 0)
+
+
 class _Inserter(ast.NodeTransformer):
     """Insert probes into every statement list of a tree.
 
@@ -272,6 +381,10 @@ class _Inserter(ast.NodeTransformer):
         d = self.probes.decisions.get(span)
         if d is not None:
             node = self._call("decision_probe", [ast.Constant(value=d), node], node)
+        slot = self.probes.singles.get(span)
+        if slot is not None:
+            # `d1(slot, test)`: the truth as written is the whole vector.
+            node = self._call("single_probe", [ast.Constant(value=slot), node], node)
         return node
 
     def visit_BoolOp(self, node: ast.BoolOp) -> ast.AST:
@@ -302,6 +415,9 @@ class _Inserter(ast.NodeTransformer):
         self.inserted += 1
         return _at(node, line, column)
 
+    def _hits(self, ks, anchor: ast.AST) -> list[ast.stmt]:
+        return [self._hit(k, anchor.lineno, anchor.col_offset) for k in ks]
+
     def _body(self, statements: list[ast.stmt]) -> list[ast.stmt]:
         out: list[ast.stmt] = []
         for statement in statements:
@@ -311,10 +427,159 @@ class _Inserter(ast.NodeTransformer):
             # follows it; if the import raises, the module never runs at all.
             if probe is not None and not _is_future_import(statement):
                 out.append(probe)
-            out.append(self.visit(statement))
+            visited = self.visit(statement)
+            if isinstance(visited, list):
+                out.extend(visited)
+            else:
+                out.append(visited)
             if probe is not None and _is_future_import(statement):
                 out.append(probe)
         return out
+
+    # -- loops ---------------------------------------------------------------
+
+    def _loop(self, node: ast.AST):
+        """`for`: a local flag set by the body's first statement, checked after
+        the whole statement. `entered` and `zero` are exact per execution."""
+        span = self._span(node.iter)  # type: ignore[attr-defined]
+        plan = self.probes.loops.get(span)
+        node = self.generic_visit(node)
+        if plan is None:
+            return node
+        entered, zero = plan
+        flag = f"{self.hits}_f{entered}"
+        line, column = node.lineno, node.col_offset
+        reset = _at(ast.Assign(targets=[ast.Name(id=flag, ctx=ast.Store())], value=ast.Constant(value=0)), line, column)
+        first = node.body[0]  # type: ignore[attr-defined]
+        # `flag = hits()[entered] = 1`: the flag and the hit in one statement.
+        mark = _at(
+            ast.Assign(
+                targets=[
+                    ast.Name(id=flag, ctx=ast.Store()),
+                    ast.Subscript(
+                        value=ast.Call(func=ast.Name(id=self.hits, ctx=ast.Load()), args=[], keywords=[]),
+                        slice=ast.Constant(value=entered),
+                        ctx=ast.Store(),
+                    ),
+                ],
+                value=ast.Constant(value=1),
+            ),
+            first.lineno,
+            first.col_offset,
+        )
+        node.body.insert(0, mark)  # type: ignore[attr-defined]
+        after = _at(
+            ast.If(
+                test=ast.UnaryOp(op=ast.Not(), operand=ast.Name(id=flag, ctx=ast.Load())),
+                body=[self._hit(zero, line, column)],
+                orelse=[],
+            ),
+            line,
+            column,
+        )
+        self.inserted += 2
+        return [reset, node, after]
+
+    visit_For = _loop
+    visit_AsyncFor = _loop
+
+    def visit_comprehension(self, node: ast.comprehension) -> ast.AST:
+        span = self._span(node.iter)
+        node = self.generic_visit(node)  # type: ignore[assignment]
+        plan = self.probes.loops.get(span)
+        if plan is not None:
+            entered, zero = plan
+            node.iter = self._call(
+                "aiter_probe" if node.is_async else "iter_probe",
+                [ast.Constant(value=entered), ast.Constant(value=zero), node.iter],
+                node.iter,
+            )
+        return node
+
+    # -- try -----------------------------------------------------------------
+
+    def _try(self, node: ast.AST):
+        first = node.body[0]  # type: ignore[attr-defined]
+        plan = self.probes.tries.get((first.lineno, first.col_offset))
+        star = type(node).__name__ == "TryStar"
+        node = self.generic_visit(node)
+        if plan is None:
+            return node
+        success, handlers, raised, has_finally = plan
+        body = node.body  # type: ignore[attr-defined]
+        # Completing the body is success, and so is leaving it early: a
+        # `return`, or a `break`/`continue` whose loop is outside the try.
+        _exits(body, self._hit, success)
+        last = body[-1]
+        body.append(self._hit(success, last.end_lineno or last.lineno, last.col_offset))
+        for index, handler in enumerate(node.handlers):  # type: ignore[attr-defined]
+            selected, _, _ = handlers[index]
+            anchor = handler.body[0]
+            probes = [raised, selected] + [
+                missed for selected_, missed, bare in handlers[:index] if not bare
+            ]
+            handler.body[0:0] = self._hits(probes, anchor)
+        catch_all = node.handlers and (  # type: ignore[attr-defined]
+            node.handlers[-1].type is None  # type: ignore[attr-defined]
+            or (isinstance(node.handlers[-1].type, ast.Name) and node.handlers[-1].type.id == "BaseException")  # type: ignore[attr-defined]
+        )
+        if not star and not catch_all:
+            # No handler matched: every typed handler was missed, and a
+            # `finally` is reached the way an exception reaches it.
+            probes = [missed for _, missed, bare in handlers if not bare]
+            if has_finally:
+                probes.append(raised)
+            anchor = node.handlers[-1] if node.handlers else node  # type: ignore[attr-defined]
+            handler = ast.ExceptHandler(
+                type=ast.Name(id="BaseException", ctx=ast.Load()),
+                name=None,
+                body=self._hits(probes, anchor) + [ast.Raise(exc=None, cause=None)],
+            )
+            _at(handler, anchor.lineno, anchor.col_offset)
+            for probe in handler.body[:-1]:
+                _at(probe, anchor.lineno, anchor.col_offset)
+            node.handlers.append(handler)  # type: ignore[attr-defined]
+            self.inserted += 1
+        return node
+
+    visit_Try = _try
+    visit_TryStar = _try
+
+    # -- match ---------------------------------------------------------------
+
+    def visit_Match(self, node: ast.Match) -> ast.AST:
+        plan = self.probes.matches.get((node.lineno, node.col_offset))
+        node = self.generic_visit(node)  # type: ignore[assignment]
+        if plan is None:
+            return node
+        cases, no_case = plan
+        for index, case in enumerate(node.cases):
+            selected, _, _ = cases[index]
+            anchor = case.body[0]
+            probes = [selected]
+            if no_case is not None:
+                probes.append(no_case[0])
+            probes += [missed for _, missed, irrefutable in cases[:index] if not irrefutable]
+            # A later irrefutable case is "not selected" exactly when an
+            # earlier one was.
+            probes += [missed for _, missed, irrefutable in cases[index + 1 :] if irrefutable]
+            case.body[0:0] = self._hits(probes, anchor)
+        if not any(irrefutable for _, _, irrefutable in cases):
+            probes = [missed for _, missed, irrefutable in cases if not irrefutable]
+            if no_case is not None:
+                probes.append(no_case[1])
+            anchor = node.cases[-1]
+            wildcard = ast.match_case(
+                pattern=ast.MatchAs(pattern=None, name=None),
+                guard=None,
+                body=self._hits(probes, anchor) or [ast.Pass()],
+            )
+            _at(wildcard.pattern, anchor.lineno, anchor.col_offset)
+            for statement in wildcard.body:
+                _at(statement, anchor.lineno, anchor.col_offset)
+            node.cases.append(wildcard)
+            self.inserted += 1
+        return node
 
     def generic_visit(self, node: ast.AST) -> ast.AST:
         for field, value in ast.iter_fields(node):
@@ -373,13 +638,55 @@ PROBE_NAMES = {
     "value_probe": "v",
     "condition_probe": "c",
     "decision_probe": "d",
+    "single_probe": "d1",
     "operand_probe": "o",
     "boolop_probe": "b",
+    "iter_probe": "i",
+    "aiter_probe": "ai",
+    "site_probe": "s",
 }
 
 
-def instrument(tree: ast.Module, probes: FileProbes) -> ast.Module:
+def instrument_sites(tree: ast.Module, sites: SiteProbes, alias: str) -> None:
+    """Record an assertion site before the first statement on each of its lines."""
+    seen: set[int] = set()
+
+    def walk(statements: list) -> None:
+        index = 0
+        while index < len(statements):
+            statement = statements[index]
+            if statement.lineno in sites.lines and statement.lineno not in seen:
+                seen.add(statement.lineno)
+                call = ast.Expr(
+                    value=ast.Call(
+                        func=ast.Name(id=alias, ctx=ast.Load()),
+                        args=[ast.Constant(value=sites.relative), ast.Constant(value=statement.lineno)],
+                        keywords=[],
+                    )
+                )
+                statements.insert(index, _at(call, statement.lineno, statement.col_offset))
+                index += 1
+            for field, value in ast.iter_fields(statement):
+                if isinstance(value, list) and value and all(isinstance(item, ast.stmt) for item in value):
+                    walk(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, ast.AST):
+                            for _, inner in ast.iter_fields(item):
+                                if isinstance(inner, list) and inner and all(isinstance(x, ast.stmt) for x in inner):
+                                    walk(inner)
+            index += 1
+
+    walk(tree.body)
+
+
+def instrument(tree: ast.Module, probes) -> ast.Module:
     """Insert the plan's probes into a parsed module, in place."""
+    if isinstance(probes, SiteProbes):
+        alias = choose_alias(tree, "s")
+        instrument_sites(tree, probes, alias)
+        _import_aliases(tree, {"site_probe": alias})
+        return tree
     taken = _identifiers(tree)
     names = {}
     for attribute, stem in PROBE_NAMES.items():
@@ -392,6 +699,11 @@ def instrument(tree: ast.Module, probes: FileProbes) -> ast.Module:
         names[attribute] = candidate
     inserter = _Inserter(probes, names)
     inserter.visit(tree)
+    _import_aliases(tree, names)
+    return tree
+
+
+def _import_aliases(tree: ast.Module, names: dict[str, str]) -> None:
     # The aliases are imported from this module so the probes resolve in
     # whatever namespace the file is executed in. After the docstring and
     # any `from __future__` imports, which nothing may precede.
@@ -403,19 +715,24 @@ def instrument(tree: ast.Module, probes: FileProbes) -> ast.Module:
         position += 1
     anchor = tree.body[position] if position < len(tree.body) else None
     line, column = (anchor.lineno, anchor.col_offset) if anchor is not None else (1, 0)
-    tree.body.insert(
-        position,
-        _at(
-            ast.ImportFrom(
-                module="supercov_probes",
-                names=[ast.alias(name=attribute, asname=alias) for attribute, alias in names.items()],
-                level=0,
-            ),
-            line,
-            column,
-        ),
+    # Fail-safe: probed bytecode can outlive the run in a cache Supercov does
+    # not own -- pytest's rewriter caches what it compiles -- and a plain run
+    # loading it must still import. Without the runtime the aliases become
+    # sinks that accept every probe and record nothing.
+    imports = ", ".join(f"{attribute} as {alias}" for attribute, alias in names.items())
+    sinks = "\n".join(
+        f"    {alias} = _scv_sink"
+        for alias in names.values()
     )
-    return tree
+    fallback = ast.parse(
+        f"try:\n    from supercov_probes import {imports}\nexcept ImportError:\n"
+        f"    class _scv_sink:\n        def __setitem__(self, key, value):\n            pass\n"
+        f"        def __call__(self, *arguments):\n            return arguments[-1] if arguments else self\n"
+        f"    _scv_sink = _scv_sink()\n{sinks}\n"
+    ).body
+    for statement in fallback:
+        _at(statement, line, column)
+    tree.body[position:position] = fallback
 
 
 # -- compiling with a cache ---------------------------------------------------
@@ -429,19 +746,30 @@ class Probing:
         files: dict[str, FileProbes],
         relative_for: Callable[[str], str | None],
         cache_directory: str | None,
+        sites: dict[str, SiteProbes] | None = None,
     ) -> None:
         self.files = files
+        self.sites = sites or {}
         self.relative_for = relative_for
         self.cache_directory = cache_directory
         self.code_objects: set[int] = set()
 
     def probes_for(self, filename: str | None) -> FileProbes | None:
+        """A measured file's probes: what the finder swaps a loader for."""
         if not filename or filename.startswith("<"):
             return None
         relative = self.relative_for(filename)
         return None if relative is None else self.files.get(relative)
 
-    def compile(self, source: bytes | str | ast.AST, filename: str, probes: FileProbes, *, flags: int = 0, dont_inherit: bool = False, optimize: int = -1):
+    def sites_for(self, filename: str | None) -> SiteProbes | None:
+        """A test file's assertion sites: applied where the file is compiled,
+        which pytest's rewriter does itself, so the finder leaves it alone."""
+        if not filename or filename.startswith("<"):
+            return None
+        relative = self.relative_for(filename)
+        return None if relative is None else self.sites.get(relative)
+
+    def compile(self, source: bytes | str | ast.AST, filename: str, probes, *, flags: int = 0, dont_inherit: bool = False, optimize: int = -1):
         """Probed code for `source`, from the cache when it has been seen.
 
         The key is the source, the file's numbered obligations and the
@@ -578,7 +906,8 @@ def _compile_probed(source, filename, mode, flags=0, dont_inherit=False, optimiz
         and not (flags & ast.PyCF_ONLY_AST)
         and not keywords
     ):
-        probes = _probing.probes_for(filename if isinstance(filename, str) else None)
+        name = filename if isinstance(filename, str) else None
+        probes = _probing.probes_for(name) or _probing.sites_for(name)
         if probes is not None:
             return _probing.compile(
                 source, filename, probes, flags=flags, dont_inherit=dont_inherit, optimize=optimize
@@ -591,6 +920,7 @@ def install(
     relative_for: Callable[[str], str | None],
     cache_directory: str | None,
     entry_points: dict[str, Callable],
+    sites: dict[str, SiteProbes] | None = None,
 ) -> Probing:
     """Arm the finder and the compile wrapper for this process.
 
@@ -599,7 +929,7 @@ def install(
     global _probing
     for attribute in PROBE_NAMES:
         globals()[attribute] = entry_points[attribute]
-    probing = Probing(files, relative_for, cache_directory)
+    probing = Probing(files, relative_for, cache_directory, sites)
     _probing = probing
     if not any(isinstance(finder, ProbeFinder) for finder in sys.meta_path):
         sys.meta_path.insert(0, ProbeFinder(probing))

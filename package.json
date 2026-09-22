@@ -89,6 +89,7 @@
     "test:child-attribution": "cargo build -p supercov && node scripts/rust-child-attribution-integration.mjs",
     "test:host-loader": "cargo build -p supercov && node scripts/rust-host-loader-integration.mjs",
     "test:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-integration.mjs",
+    "test:python-probes": "cargo build -p supercov && node scripts/python-probes-integration.mjs",
     "test:ruby-coverage": "cargo build -p supercov && node scripts/ruby-coverage-integration.mjs",
     "test:go": "cargo test --no-fail-fast -p supercov-engine --test go_frontend --test go_run",
     "test:jvm": "cargo test --no-fail-fast -p supercov-engine --test jvm_frontend --test jvm_run -- --include-ignored --test-threads=1",
