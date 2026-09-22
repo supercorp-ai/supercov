@@ -166,19 +166,38 @@ struct StringTable {
 #[derive(Default)]
 struct StringRelations {
     values: Vec<u32>,
+    /// Where each distinct run already sits. Readers reach a run only through
+    /// the (offset, count) pair the record stores, so two records naming the
+    /// same run can share one copy of it and nothing downstream can tell.
+    interned: HashMap<Vec<u32>, (u64, u64)>,
 }
 
 impl StringRelations {
+    /// Append a run of interned strings, or point at an identical one already
+    /// stored.
+    ///
+    /// The same run is named over and over: a filtered view repeats the whole
+    /// relation of the view it filters, and one list of tests covers many
+    /// lines of the file they exercise. Appending each time made this the
+    /// largest section in the container -- 61 MB of a 210 MB index, 15.3
+    /// million entries -- for a number of distinct runs far smaller.
     fn push(
         &mut self,
         values: impl IntoIterator<Item = String>,
         strings: &mut StringTable,
     ) -> Result<(u64, u64), CoverageIndexError> {
-        let offset = usize_u64(self.values.len())?;
+        let mut run = Vec::new();
         for value in values {
-            self.values.push(strings.intern(&value)?);
+            run.push(strings.intern(&value)?);
         }
-        Ok((offset, usize_u64(self.values.len())? - offset))
+        if let Some(found) = self.interned.get(&run) {
+            return Ok(*found);
+        }
+        let offset = usize_u64(self.values.len())?;
+        let count = usize_u64(run.len())?;
+        self.values.extend_from_slice(&run);
+        self.interned.insert(run, (offset, count));
+        Ok((offset, count))
     }
 
     fn section(self) -> Result<QueryIndexSection, CoverageIndexError> {
@@ -3944,6 +3963,44 @@ mod tests {
             matches!(error, CoverageIndexError::InvalidRecord("test attribution")),
             "{error:?}"
         );
+    }
+
+    // The same run is named over and over -- a filtered view repeats the
+    // relation of the view it filters, and one list of tests covers many lines
+    // of the file they exercise. Storing each naming separately made this the
+    // largest section in the container: 61 MB of a 210 MB index.
+    #[test]
+    fn a_relation_named_twice_is_stored_once() {
+        let mut strings = StringTable::default();
+        let mut relations = StringRelations::default();
+        let run = || ["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+
+        let first = relations.push(run(), &mut strings).unwrap();
+        let second = relations.push(run(), &mut strings).unwrap();
+        assert_eq!(first, second, "the second naming points at the first run");
+        assert_eq!(relations.values.len(), 3, "and nothing was appended for it");
+
+        // A different run still gets its own storage, after the one already
+        // there -- readers reach a run only by (offset, count), so the
+        // existing pair must keep meaning what it meant.
+        let other = relations
+            .push(["alpha".to_string(), "delta".to_string()], &mut strings)
+            .unwrap();
+        assert_eq!(other, (3, 2));
+        assert_eq!(relations.values.len(), 5);
+
+        // A prefix of a stored run is a different run, and is stored as one
+        // rather than aliasing into the middle of another.
+        let prefix = relations.push(["alpha".to_string()], &mut strings).unwrap();
+        assert_eq!(prefix, (5, 1));
+
+        // What each pair resolves to is what was pushed.
+        let read = |(offset, count): (u64, u64)| {
+            relations.values[offset as usize..(offset + count) as usize].to_vec()
+        };
+        assert_eq!(read(first), read(second));
+        assert_eq!(read(first).len(), 3);
+        assert_ne!(read(first), read(other));
     }
 
     #[test]
