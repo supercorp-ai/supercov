@@ -85,6 +85,36 @@ project, or discard the dedicated `PYTHONPYCACHEPREFIX` directory used by the
 old run. Rebuild those caches with plain Python before comparing test outcomes.
 Updating Supercov cannot repair bytecode already written by an older version.
 
+## A Python file has tests but no measured lines
+
+Python imports and `python -m package.module` pass through Supercov's probe
+loader. CPython compiles a direct entry script (`python path/to/script.py`)
+outside that loader. Supercov declares this boundary on the affected file,
+including on Python 3.9–3.11. It does not silently rewrite the child command,
+which could change imports, `sys.argv`, or process behavior.
+
+A file can therefore have tests that touched it through an import, while a
+separate direct execution makes its overall coverage unmeasured. Those lines
+are excluded from both the measured denominator and the uncovered-lines list.
+Inspect the file's measurement limitations before treating a zero denominator
+as complete coverage.
+
+## Python subprocess output or timeout assertions fail
+
+Supercov adds interpreter startup and execution time. A timeout that expires
+before the child reaches its first write can return empty partial output.
+When testing timeout handling, synchronize with the child's readiness first;
+when testing an actual performance deadline, compare the plain run separately.
+
+Ordinary helpers that import no application code stay silent. Set
+`SUPERCOV_PYTHON_TIMING=1` only for diagnostics: it deliberately adds stderr
+output. Explicit child environments that omit Supercov's plan are left alone.
+
+Runtime evidence descriptors are close-on-exec. After an exec, Python or
+Supercov may reuse a closed descriptor's number. A descriptor-leak test should
+compare the original open file's identity, rather than only whether its number
+is open in the new process.
+
 ## A Ruby file behaves differently while Supercov measures it
 
 Supercov splices probe calls into Ruby sources in memory as they load, and a

@@ -955,6 +955,18 @@ class Runtime:
                     "measured code was imported before Supercov installed, so its execution was not observed",
                     relative,
                 )
+        # CPython compiles an entry script in C, bypassing both the import
+        # loader and builtins.compile. Detect this on 3.9–3.11 too, where
+        # sys.monitoring cannot report the missed code object later.
+        entry = sys.argv[0] if sys.argv else ""
+        if entry and not entry.startswith("-"):
+            relative = self._relative_path(entry)
+            if relative is not None and relative in self.probe_files:
+                self.limitation(
+                    "python-probes-unobserved-module",
+                    "CPython compiled the entry script without import probes; its execution was not observed",
+                    relative,
+                )
         if hasattr(os, "register_at_fork"):
             os.register_at_fork(after_in_child=self._after_fork_in_child)
         inherited = os.environ.get(CONTEXT_ENV)
@@ -1014,12 +1026,14 @@ class Runtime:
                 os.close(slot.descriptor)
             except (OSError, ValueError):
                 pass
-        if unmatched:
+        if unmatched and TIMING:
             # Every file the interpreter imported lay outside the measured
             # tree. That is what a run reports as zero coverage without a word
             # of explanation -- on Windows the root once carried a `\\?\`
             # prefix its files did not -- so name the root and one file that
-            # missed it.
+            # missed it. This is diagnostic output only: a healthy child may
+            # deliberately run nothing but stdlib code, and its stderr is
+            # part of the program's observable behavior.
             sample = next(
                 (name for name in self.path_cache if not name.startswith("<")),
                 next(iter(self.path_cache)),
@@ -1084,9 +1098,12 @@ def _install_propagation(runtime: Runtime) -> None:
         def init_with_context(process, *args, **kwargs):
             additions = runtime.child_environment()
             if additions:
-                environment = dict(os.environ if kwargs.get("env") is None else kwargs["env"])
-                environment.update(additions)
-                kwargs["env"] = environment
+                environment = os.environ if kwargs.get("env") is None else kwargs["env"]
+                # An explicitly isolated environment cannot load this run's
+                # observer. Do not add a stray context variable to it: callers
+                # use env= to define exactly what their child receives.
+                if environment.get(PLAN_ENV) or environment.get(PLAN_ENV.encode()):
+                    kwargs["env"] = {**environment, **additions}
             original_init(process, *args, **kwargs)
 
         subprocess.Popen.__init__ = init_with_context

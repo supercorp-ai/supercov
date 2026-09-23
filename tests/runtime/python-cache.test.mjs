@@ -126,3 +126,23 @@ assert all(not os.get_inheritable(slot.descriptor) for slot in runtime.live_slot
     launch = 'import os, sys; keeper=os.open(os.devnull,os.O_RDONLY); os.dup2(keeper,3,inheritable=True); os.set_inheritable(3,True); fd=os.open("launch",os.O_RDONLY); os.dup2(fd,9,inheritable=False); os.execve(sys.executable,[sys.executable,"-c",' + repr(inspect) + '], ' + repr(env) + ')'
     child(launch, root, plain)
 `));
+
+test('stdlib-only children preserve stdout, stderr and exit status', { skip }, () => run(fixture + `
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary); plan = root / 'plan.json'
+    plan.write_text(json.dumps({'version':1,'root':str(root),'files':{'a.py':file_plan('a')}}))
+    plain = {k:v for k,v in os.environ.items() if not k.startswith('SUPERCOV_') and k != 'PYTHONPATH'}
+    env = dict(plain, PYTHONPATH=sys.argv[1], SUPERCOV_PYTHON_PLAN=str(plan), SUPERCOV_RUN_ID='streams', SUPERCOV_PYTHON_EVIDENCE_DIR=str(root / 'evidence'))
+    for code in ['pass', 'print("ready")', 'import sys;sys.stderr.write("expected stderr\\\\n");sys.exit(3)']:
+        baseline = subprocess.run([sys.executable,'-c',code], env=plain, cwd=root, capture_output=True)
+        measured = subprocess.run([sys.executable,'-c',code], env=env, cwd=root, capture_output=True)
+        assert (measured.returncode, measured.stdout, measured.stderr) == (baseline.returncode, baseline.stdout, baseline.stderr), (code, measured.stderr)
+    child('''import os,sys,subprocess,supercov_runtime
+supercov_runtime.runtime().switch({'test':'isolated-env','phase':'call'})
+environment = {k:v for k,v in os.environ.items() if not k.startswith('SUPERCOV_') and k != 'PYTHONPATH'}
+code = 'import os; assert not any(k.startswith("SUPERCOV_") for k in os.environ)'
+result = subprocess.run([sys.executable,'-c',code], env=environment, capture_output=True)
+assert result.returncode == 0, result.stderr
+assert result.stdout == result.stderr == b''
+''', root, env)
+`));

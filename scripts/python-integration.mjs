@@ -574,6 +574,25 @@ try {
     );
   }
 
+  // Child supervision must preserve the same observable behavior. Compare
+  // plain and measured runs, then verify the direct-script measurement
+  // boundary on every interpreter (including those without monitoring).
+  const processes = createProject(resolve(repository, 'tests/fixtures/python-subprocess'), 'subprocess-edge-cases');
+  const processesEnvironment = environmentFor(processes, venv);
+  run('python', ['-m', 'unittest', '-q'], { cwd: processes, env: processesEnvironment });
+  successfulSupercov(processes, ['--', 'python', '-m', 'unittest', '-q'], processesEnvironment);
+  const processFiles = query(processes, ['runs', 'latest', 'files'], processesEnvironment).files;
+  for (const file of ['app/entry_one.py', 'app/entry_two.py']) {
+    const detail = query(processes, ['runs', 'latest', 'file', file], processesEnvironment);
+    assert.equal(detail.counts.totalLines, 0, 'native entry scripts are declared unmeasured, not missed');
+    assert.ok(detail.totalTests > 0, 'the parent also imported this source, retaining its observed test identity');
+    assert.equal(processFiles.find(row => row.file === file).uncoveredLines, 0);
+    assert.equal(processFiles.find(row => row.file === file).measurementLimitations, 1, 'each affected script keeps its own limitation');
+  }
+  const moduleEntry = query(processes, ['runs', 'latest', 'file', 'app/module_entry.py'], processesEnvironment);
+  assert.ok(moduleEntry.counts.coveredLines > 0, 'a module entry goes through the import loader and stays measured');
+  assert.equal(moduleEntry.counts.measurementLimitations, 0);
+
   // -- what probes compiled at import have to get right on their own --------
   // pytest keeps the bytecode it rewrote, site probes included; a plain run
   // after a measured one must not load it, and must not see Supercov at all.
@@ -665,7 +684,8 @@ try {
         .map((file) => [file.file, file.measurementLimitations]),
     );
     const expected = {};
-    if (hasExceptStar) expected['app/grouped.py'] = 1;
+    // Each except* handler has its own unobservable missed alternative.
+    if (hasExceptStar) expected['app/grouped.py'] = 2;
     if (detects) expected['app/shapes.py'] = 1;
     assert.deepEqual(limited, expected, 'each declared limitation is named once, on its file');
     if (detects) {

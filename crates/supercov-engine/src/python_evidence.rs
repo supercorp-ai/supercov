@@ -375,7 +375,7 @@ struct Evidence {
     runners: RunnersByAttempt,
     test_files: TestFilesByAttempt,
     sites: SitesByAttempt,
-    limitations: Vec<RuntimeLimitation>,
+    limitations: BTreeMap<(String, Option<String>, Option<String>), RuntimeLimitation>,
 }
 
 fn read_evidence_directory(
@@ -1063,12 +1063,20 @@ fn read_evidence_file(
                 reason,
                 file,
                 obligation,
-            } => evidence.limitations.push(RuntimeLimitation {
-                id,
-                reason,
-                file,
-                obligation,
-            }),
+            } => {
+                // Thousands of interpreters may report the same limitation.
+                // Deduplicate before expanding file-wide obligations, while
+                // retaining each affected file and obligation independently.
+                evidence
+                    .limitations
+                    .entry((id.clone(), file.clone(), obligation.clone()))
+                    .or_insert(RuntimeLimitation {
+                        id,
+                        reason,
+                        file,
+                        obligation,
+                    });
+            }
             Record::Exit { .. } => {}
         }
         Ok(())
@@ -1231,6 +1239,7 @@ struct ManifestIndex<'a> {
     alternatives: BTreeSet<&'a str>,
     decisions: BTreeMap<&'a str, &'a DecisionMeta>,
     lines: BTreeMap<&'a str, (String, usize)>,
+    files: BTreeMap<String, Vec<&'a str>>,
 }
 
 impl<'a> ManifestIndex<'a> {
@@ -1244,6 +1253,10 @@ impl<'a> ManifestIndex<'a> {
         }
         for branch in &manifest.branches {
             lines.insert(branch.id.as_str(), (branch.file.clone(), branch.line));
+        }
+        let mut files = BTreeMap::<String, Vec<&str>>::new();
+        for (id, (file, _)) in &lines {
+            files.entry(file.clone()).or_default().push(*id);
         }
         Self {
             points: manifest
@@ -1262,6 +1275,7 @@ impl<'a> ManifestIndex<'a> {
                 .map(|decision| (decision.id.as_str(), decision))
                 .collect(),
             lines,
+            files,
         }
     }
 }
@@ -1771,7 +1785,7 @@ pub fn build_python_frontend_run(
         .collect::<BTreeSet<_>>();
     let mut unmeasured = manifest.unmeasured.iter().cloned().collect::<BTreeSet<_>>();
     let mut new_limitations = Vec::new();
-    for limitation in &limitations {
+    for limitation in limitations.values() {
         if let Some(obligation) = &limitation.obligation {
             if !index.lines.contains_key(obligation.as_str()) {
                 return Err(PythonEvidenceError::UnknownObligation(obligation.clone()));
@@ -1782,15 +1796,22 @@ pub fn build_python_frontend_run(
             // every obligation in that source file from being observed. Mark
             // the whole file unmeasured instead of presenting its denominator
             // as ordinary uncovered code.
-            unmeasured.extend(
-                index
-                    .lines
-                    .iter()
-                    .filter(|(_, (obligation_file, _))| obligation_file == file)
-                    .map(|(id, _)| (*id).to_owned()),
-            );
+            if let Some(obligations) = index.files.get(file) {
+                unmeasured.extend(obligations.iter().map(|id| (*id).to_owned()));
+            }
         }
-        if limitation_ids.insert(limitation.id.clone()) {
+        let id = if limitation.file.is_some() || limitation.obligation.is_some() {
+            stable_id(
+                &limitation.id,
+                &[
+                    limitation.file.as_deref().unwrap_or_default(),
+                    limitation.obligation.as_deref().unwrap_or_default(),
+                ],
+            )
+        } else {
+            limitation.id.clone()
+        };
+        if limitation_ids.insert(id.clone()) {
             let (file, line) = limitation
                 .obligation
                 .as_deref()
@@ -1807,7 +1828,8 @@ pub fn build_python_frontend_run(
                     )
                 });
             new_limitations.push(json!({
-                "id": limitation.id,
+                "id": id,
+                "code": limitation.id,
                 "kind": "semantic-safety",
                 "file": file,
                 "line": line,
@@ -2375,6 +2397,52 @@ mod tests {
     }
 
     #[test]
+    fn repeated_runtime_limitations_keep_each_affected_file_once() {
+        let mut manifest = build_python_obligations("a.py", "x = 1\n")
+            .unwrap()
+            .manifest;
+        let second = build_python_obligations("b.py", "y = 2\n")
+            .unwrap()
+            .manifest;
+        manifest.points.extend(second.points);
+        let directory = temporary("repeated-limitations");
+        let mut records = vec![
+            json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.11","executable":"python","argv":[]}),
+            json!({"t":"outcome","worker":"main","test":"test_a","retry":0,"phase":"call","outcome":"passed","xfail":false}),
+        ];
+        for _ in 0..1000 {
+            for file in ["a.py", "b.py"] {
+                records.push(json!({"t":"limitation","id":"python-probes-unobserved-module","file":file,"reason":"entry script"}));
+            }
+        }
+        write_transport(&directory.join("main.1.mmap"), &records, 0);
+        let evidence = read_evidence_directory(&directory, "run-1").unwrap();
+        assert_eq!(
+            evidence.limitations.len(),
+            2,
+            "deduplicate before manifest expansion"
+        );
+        let run = build_python_frontend_run(
+            &manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            &PythonAssertionInventory::empty(),
+        )
+        .unwrap();
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        let limitations = &run.request.manifest.limitations;
+        assert_eq!(limitations.len(), 2);
+        assert_ne!(limitations[0]["id"], limitations[1]["id"]);
+        assert_eq!(limitations[0]["file"], "a.py");
+        assert_eq!(limitations[1]["file"], "b.py");
+        assert_eq!(limitations[0]["code"], "python-probes-unobserved-module");
+        assert_eq!(run.request.manifest.unmeasured.len(), 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn joins_phases_outcomes_hits_and_vectors_into_exact_results() {
         let source = "def f(a, b):\n    if a and b:\n        return 1\n    return 0\n";
         let obligations = build_python_obligations("m.py", source).unwrap();
@@ -2420,11 +2488,10 @@ mod tests {
         let background = &run.request.raw_results[1];
         assert_eq!(background.role, "background");
         assert!(run.request.manifest.unmeasured.contains(&decision.id));
-        assert!(
-            run.declaration
-                .structural_limitations
-                .contains(&"python-decision-partially-mapped".to_owned())
-        );
+        assert!(run.declaration.structural_limitations.contains(&stable_id(
+            "python-decision-partially-mapped",
+            &["", &decision.id]
+        )));
         fs::remove_dir_all(directory).unwrap();
     }
 

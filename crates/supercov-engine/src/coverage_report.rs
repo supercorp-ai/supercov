@@ -1823,6 +1823,7 @@ fn create_coverage_view_with_model(
     }
 
     let no_references = BTreeSet::new();
+    let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
     let points = manifest
         .points
         .iter()
@@ -1834,7 +1835,7 @@ fn create_coverage_view_with_model(
                 .get(&meta.id)
                 .unwrap_or(&no_references);
             PointResult {
-                measured: !manifest.unmeasured.contains(&meta.id),
+                measured: !declined.contains(&meta.id),
                 covered: tests_by_hit.contains_key(&meta.id),
                 confidence: confidence_for(tests, phases, explicit, &tests_by_id, &phases_by_id),
                 meta,
@@ -1887,8 +1888,6 @@ fn create_coverage_view_with_model(
     // measurement gap as a coverage gap — a wrong number, and wrong numbers get
     // trusted. They are reported separately instead, alongside the share of
     // obligations that were measured exactly.
-    let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
-
     // Lines are folded from every point, declined ones included, so a file
     // Supercov could not measure still has addressable lines to report a
     // limitation against. Only what was measured decides the line's state and
