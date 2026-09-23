@@ -23,6 +23,7 @@ pub mod go_run;
 pub mod go_test_harness;
 pub mod indexed_query;
 pub mod integrity;
+pub mod interned;
 pub mod javascript_frontend;
 pub mod javascript_run;
 pub mod js_instrumenter;

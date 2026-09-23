@@ -16,6 +16,7 @@ use crate::{
     coverage_report::{
         CoverageModel, CoverageReport, CoverageView, TransportStats, coverage_summary_for_tests,
     },
+    interned::Id,
     query_index::{QueryIndex, QueryIndexError, QueryIndexSection},
 };
 
@@ -183,12 +184,12 @@ impl StringRelations {
     /// million entries -- for a number of distinct runs far smaller.
     fn push(
         &mut self,
-        values: impl IntoIterator<Item = String>,
+        values: impl IntoIterator<Item = impl AsRef<str>>,
         strings: &mut StringTable,
     ) -> Result<(u64, u64), CoverageIndexError> {
         let mut run = Vec::new();
         for value in values {
-            run.push(strings.intern(&value)?);
+            run.push(strings.intern(value.as_ref())?);
         }
         if let Some(found) = self.interned.get(&run) {
             return Ok(*found);
@@ -620,9 +621,13 @@ fn limitation_kind(value: &serde_json::Value) -> Option<(&str, &str)> {
     Some((value.get("file")?.as_str()?, value.get("kind")?.as_str()?))
 }
 
-fn includes_selected(tests: &[String], selected: Option<&BTreeSet<String>>, covered: bool) -> bool {
+fn includes_selected<T: AsRef<str>>(
+    tests: &[T],
+    selected: Option<&BTreeSet<String>>,
+    covered: bool,
+) -> bool {
     selected.map_or(covered, |selected| {
-        tests.iter().any(|test| selected.contains(test))
+        tests.iter().any(|test| selected.contains(test.as_ref()))
     })
 }
 
@@ -1109,7 +1114,7 @@ fn projection_record(
     let phases = view
         .phases
         .iter()
-        .filter(|phase| selected.is_none_or(|selected| selected.contains(&phase.test)));
+        .filter(|phase| selected.is_none_or(|selected| selected.contains(phase.test.as_str())));
     let mut attribution = [0_usize; 4];
     for phase in phases {
         attribution[0] += phase.explicit_browser_events;
@@ -1433,10 +1438,18 @@ fn confidence_record(
         | (u8::from(confidence.asserted) << 2)
         | (u8::from(confidence.e2e) << 3);
     for (index, values) in [
-        confidence.tests.clone(),
-        confidence.asserted_tests.clone(),
-        confidence.runners.clone(),
-        confidence.kinds.clone(),
+        confidence
+            .tests
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        confidence
+            .asserted_tests
+            .iter()
+            .map(|id| id.as_str())
+            .collect(),
+        confidence.runners.iter().map(String::as_str).collect(),
+        confidence.kinds.iter().map(String::as_str).collect(),
     ]
     .into_iter()
     .enumerate()
@@ -1579,7 +1592,7 @@ struct AnchorInput<'a> {
     column: usize,
     covered: bool,
     conditions: Option<(usize, usize)>,
-    tests: &'a [String],
+    tests: &'a [Id],
 }
 
 fn anchor_record(
@@ -1708,7 +1721,7 @@ struct HitMetadataInput<'a> {
     label: Option<&'a str>,
     alternative: Option<&'a str>,
     source: &'a str,
-    tests: &'a [String],
+    tests: &'a [Id],
 }
 
 fn hit_metadata_record(
@@ -2665,6 +2678,14 @@ impl<'a> CoverageIndex<'a> {
         }
     }
 
+    fn relation_ids(&self, offset: u64, count: u64) -> Result<Vec<Id>, CoverageIndexError> {
+        Ok(self
+            .relation_strings(offset, count)?
+            .into_iter()
+            .map(Id::from)
+            .collect())
+    }
+
     fn relation_strings(&self, offset: u64, count: u64) -> Result<Vec<String>, CoverageIndexError> {
         let end = offset
             .checked_add(count)
@@ -3068,8 +3089,8 @@ impl<'a> CoverageIndex<'a> {
             background_only: record[1] & 2 != 0,
             asserted: record[1] & 4 != 0,
             e2e: record[1] & 8 != 0,
-            tests: values[0].clone(),
-            asserted_tests: values[1].clone(),
+            tests: values[0].iter().map(Id::from).collect(),
+            asserted_tests: values[1].iter().map(Id::from).collect(),
             runners: values[2].clone(),
             kinds: values[3].clone(),
         })
@@ -3302,7 +3323,7 @@ impl<'a> CoverageIndex<'a> {
                 details[position]
                     .lines
                     .push(crate::coverage_report::SourceLine {
-                        file: self.string(get_u32(record, 8)?)?,
+                        file: self.string(get_u32(record, 8)?)?.into(),
                         line: usize::try_from(get_u64(record, 16)?)
                             .map_err(|_| CoverageIndexError::SizeOverflow)?,
                     });
@@ -3477,9 +3498,9 @@ impl<'a> CoverageIndex<'a> {
         Ok(crate::coverage_report::VectorObservation {
             confidence: self.confidence(get_u64(record, 0)?)?,
             vector: self.test_vector(get_u64(record, 8)?)?,
-            tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
-            phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
-            explicit_phases: self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?,
+            tests: self.relation_ids(get_u64(record, 16)?, get_u64(record, 24)?)?,
+            phases: self.relation_ids(get_u64(record, 32)?, get_u64(record, 40)?)?,
+            explicit_phases: self.relation_ids(get_u64(record, 48)?, get_u64(record, 56)?)?,
         })
     }
 
@@ -3516,7 +3537,10 @@ impl<'a> CoverageIndex<'a> {
             covered: record[0] & 1 != 0,
             assertion_covered: record[0] & 2 != 0,
             witness,
-            witness_tests: has_witness.then_some([first_tests, second_tests]),
+            witness_tests: has_witness.then_some([
+                first_tests.into_iter().map(Id::from).collect(),
+                second_tests.into_iter().map(Id::from).collect(),
+            ]),
         })
     }
 
@@ -3597,7 +3621,7 @@ impl<'a> CoverageIndex<'a> {
                     .collect(),
                 vector_observations: observations,
                 conditions,
-                tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
+                tests: self.relation_ids(get_u64(record, 16)?, get_u64(record, 24)?)?,
                 confidence: self.confidence(get_u64(record, 8)?)?,
             });
         }
