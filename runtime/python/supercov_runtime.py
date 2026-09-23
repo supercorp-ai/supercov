@@ -1098,12 +1098,27 @@ def _install_propagation(runtime: Runtime) -> None:
         def init_with_context(process, *args, **kwargs):
             additions = runtime.child_environment()
             if additions:
-                environment = os.environ if kwargs.get("env") is None else kwargs["env"]
+                # env is Popen's eleventh positional parameter on every
+                # supported CPython. Preserve that calling convention too.
+                supplied = args[10] if len(args) > 10 else kwargs.get("env")
+                environment = dict(os.environ if supplied is None else supplied)
                 # An explicitly isolated environment cannot load this run's
                 # observer. Do not add a stray context variable to it: callers
                 # use env= to define exactly what their child receives.
-                if environment.get(PLAN_ENV) or environment.get(PLAN_ENV.encode()):
-                    kwargs["env"] = {**environment, **additions}
+                text_plan = environment.get(PLAN_ENV)
+                bytes_plan = environment.get(PLAN_ENV.encode())
+                if text_plan or bytes_plan:
+                    for key, value in additions.items():
+                        environment.pop(key, None)
+                        environment.pop(key.encode(), None)
+                        if bytes_plan and not text_plan:
+                            environment[key.encode()] = value.encode()
+                        else:
+                            environment[key] = value
+                    if len(args) > 10:
+                        args = (*args[:10], environment, *args[11:])
+                    else:
+                        kwargs["env"] = environment
             original_init(process, *args, **kwargs)
 
         subprocess.Popen.__init__ = init_with_context

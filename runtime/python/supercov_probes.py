@@ -8,7 +8,7 @@ compiled under the file's real name. Nothing on disk changes, every line
 number a traceback shows is the file's own, and a probe is a store into the
 current context's hit array -- specialised bytecode, not a callback.
 
-Three doors admit measured code into the interpreter, and each is covered:
+Import and compilation hooks cover these entry paths:
 
 - `ProbeFinder` sits first on `sys.meta_path`, asks the other finders where
   a module lives, and replaces the loader for a planned file. Path
@@ -18,11 +18,11 @@ Three doors admit measured code into the interpreter, and each is covered:
 - `builtins.compile` is wrapped: `runpy.run_path`, `spec_from_file_location`
   and a hand-rolled `exec(compile(open(p).read(), p, "exec"))` all reach it
   with the real filename (verified 2026-09-22), and get probed there.
-- The main script of `python script.py` is compiled in C and reaches
-  neither. Supercov measures test-runner commands, which never put a
-  planned file in `sys.argv[0]`; a script-shaped runner such as Django's
-  `manage.py test` is a detection feature first, and this is where its
-  entry would go.
+
+The main script of `python script.py` is compiled in C and reaches neither.
+A test may launch a planned file this way as a child. The runtime declares
+that file unmeasured instead of silently changing the child command; a
+`python -m package.module` entry passes through the loader and is measured.
 
 Stdlib only, CPython 3.9 or newer.
 """

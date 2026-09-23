@@ -44,6 +44,34 @@ class Processes(unittest.TestCase):
         environment = {key: value for key, value in os.environ.items() if not key.startswith("SUPERCOV_") and key != "PYTHONPATH"}
         self.assertEqual(self.call(["-c", "import os;assert not any(k.startswith('SUPERCOV_') for k in os.environ)"], env=environment), b"")
 
+    def test_positional_environment(self):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("SUPERCOV_") and key != "PYTHONPATH"}
+        code = "import os;assert not any(k.startswith('SUPERCOV_') for k in os.environ)"
+        child = subprocess.Popen([sys.executable, "-c", code], -1, None, None, subprocess.PIPE, subprocess.PIPE, None, True, False, None, environment)
+        out, err = child.communicate()
+        self.assertEqual((child.returncode, out, err), (0, b"", b""))
+
+    def test_parent_removes_observer_environment(self):
+        removed = {key: value for key, value in os.environ.items() if key.startswith("SUPERCOV_") or key == "PYTHONPATH"}
+        try:
+            for key in removed:
+                del os.environ[key]
+            self.assertEqual(self.call(["-c", "print('isolated')"]), b"isolated\n")
+        finally:
+            os.environ.update(removed)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX bytes environment")
+    def test_bytes_environment(self):
+        environment = {os.fsencode(key): os.fsencode(value) for key, value in os.environ.items()}
+        expected = os.environ.get("SUPERCOV_PYTHON_PLAN")
+        # Context must come from the current test, not a stale bytes key.
+        if expected:
+            environment[b"SUPERCOV_CONTEXT"] = b'{"test":"stale","phase":"call"}'
+        code = "from app.module_entry import value; print(value())"
+        if expected:
+            code += ";import supercov_runtime as s;assert 'test_bytes_environment' in s.runtime().current_identity()['test']"
+        self.assertEqual(self.call(["-c", code], env=environment), b"module\n")
+
     def test_timeout_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:
             ready = Path(directory) / "ready"
