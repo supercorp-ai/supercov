@@ -14,6 +14,8 @@ Scoring needs a [TypeSafe AI](https://typesafe.ai) API key, and your coding agen
 
 [Website](https://supercov.com) · [Documentation](https://supercov.com/docs) · [npm](https://www.npmjs.com/package/supercov) · [GitHub](https://github.com/supercorp-ai/supercov)
 
+Supported languages: [JavaScript](https://supercov.com/docs/javascript) · [TypeScript](https://supercov.com/docs/javascript) · [Rust](https://supercov.com/docs/rust) · [Python](https://supercov.com/docs/python) · [Ruby](https://supercov.com/docs/ruby) · [Go](https://supercov.com/docs/go) · [Java](https://supercov.com/docs/java) · [Kotlin](https://supercov.com/docs/kotlin).
+
 Supported by [Supercorp](https://supercorp.ai).
 
 [Agent workflow](https://supercov.com/docs/agent-loop): ask your coding agent
@@ -229,21 +231,21 @@ Java and Kotlin have no registry of their own here, so a JVM project takes the b
 
 ## Supported languages
 
-| Language | Status | Start with |
-| --- | --- | --- |
-| JavaScript | Available | `npx supercov -- npm test` |
-| TypeScript | Available | `npx supercov -- npm test` |
-| Rust | Available | `npx supercov -- cargo test` |
-| Python | Available | `npx supercov -- pytest` |
-| Ruby | Available | `npx supercov -- rspec` |
-| Go | Available | `go run github.com/supercorp-ai/supercov/cmd/supercov@latest -- go test ./...` |
-| Java | Available | `npx supercov -- mvn test` |
-| Kotlin | Available | `npx supercov -- ./gradlew test` |
-| Zig | Coming soon | — |
-| PHP | Coming soon | — |
-| C | Coming soon | — |
+| Language | Status | Install | Start with |
+| --- | --- | --- | --- |
+| [JavaScript](https://supercov.com/docs/javascript) | Available | nothing, `npx` fetches it | `npx supercov -- npm test` |
+| [TypeScript](https://supercov.com/docs/javascript) | Available | nothing, `npx` fetches it | `npx supercov -- npm test` |
+| [Rust](https://supercov.com/docs/rust) | Available | `cargo install supercov` | `supercov -- cargo test` |
+| [Python](https://supercov.com/docs/python) | Available | `python -m pip install supercov-cli` | `supercov -- python -m pytest` |
+| [Ruby](https://supercov.com/docs/ruby) | Available | `gem install supercov` | `supercov -- bundle exec rspec` |
+| [Go](https://supercov.com/docs/go) | Available | nothing, `go run` fetches it | `go run github.com/supercorp-ai/supercov/cmd/supercov@latest -- go test ./...` |
+| [Java](https://supercov.com/docs/java) | Available | `brew install supercorp-ai/tap/supercov` | `supercov -- mvn test` |
+| [Kotlin](https://supercov.com/docs/kotlin) | Available | `brew install supercorp-ai/tap/supercov` | `supercov -- ./gradlew test` |
+| Zig | Coming soon | — | — |
+| PHP | Coming soon | — | — |
+| C | Coming soon | — | — |
 
-Supercov requires Node.js 22 or newer. Rust support currently uses Rust 1.95; cargo-nextest 0.9.138 and 0.9.140 are supported. Python support requires CPython 3.12 or newer and measures pytest and unittest runs. Ruby support requires Ruby 3.3 or newer (3.4 or newer for full measurement) and measures RSpec, Minitest, test-unit and Cucumber runs. Go support requires Go 1.22 or newer and measures `go test`. Java and Kotlin support requires a JDK 17 or newer with Maven or Gradle, and measures every JUnit Platform engine -- JUnit 5, JUnit 4 through Vintage, Kotest and Spock -- as well as TestNG.
+The `npx` path requires Node.js 22 or newer; the other installs need no Node. Rust support currently uses Rust 1.95; cargo-nextest 0.9.138 and 0.9.140 are supported. Python support requires CPython 3.9 or newer and measures pytest and unittest runs. Ruby support requires Ruby 3.3 or newer (3.4 or newer for full measurement) and measures RSpec, Minitest, test-unit and Cucumber runs. Go support requires Go 1.22 or newer and measures `go test`. Java and Kotlin support requires a JDK 17 or newer with Maven or Gradle, and measures every JUnit Platform engine -- JUnit 5, JUnit 4 through Vintage, Kotest and Spock -- as well as TestNG.
 
 ## Supported operating systems and architectures
 
@@ -255,7 +257,7 @@ The CLI is a single native binary. `npx supercov` selects the build for the mach
 | Linux | arm64, x64 | glibc 2.28 or newer (Debian 10, Ubuntu 18.10, RHEL 8 and later), or musl (Alpine); chosen automatically |
 | Windows | arm64, x64 | Windows 10 or newer |
 
-JavaScript, TypeScript, Python, Ruby, Rust, Go, Java and Kotlin suites are verified on Linux, macOS and Windows -- CPython 3.12, 3.13 and 3.14, Ruby 3.3, 3.4 and 4.0, and Go 1.22 and 1.25 on every one, and JDK 17 and 21 on every one that has them (Temurin publishes no 17 for arm64 Windows, so that pairing is 21 alone). Containers, VMs, and remote executors run the same Linux builds. Every release publishes the same binaries to npm, PyPI (`supercov-cli`, a wheel per platform) and RubyGems (`supercov`, a gem per platform except arm64 Windows, which Ruby has no platform for), and the source to crates.io (`supercov`).
+JavaScript, TypeScript, Python, Ruby, Rust, Go, Java and Kotlin suites are verified on Linux, macOS and Windows -- CPython 3.9 through 3.14 (on arm64 Windows, 3.9 and 3.10 as the x64 builds, since python.org publishes no arm64 build before 3.11), Ruby 3.3, 3.4 and 4.0, and Go 1.22, 1.25, 1.26 and 1.27 on every one, and JDK 17 and 21 on every one that has them (Temurin publishes no 17 for arm64 Windows, so that pairing is 21 alone). Containers, VMs, and remote executors run the same Linux builds. Every release publishes the same binaries to npm, PyPI (`supercov-cli`, a wheel per platform) and RubyGems (`supercov`, a gem per platform except arm64 Windows, which Ruby has no platform for), and the source to crates.io (`supercov`).
 
 ## Supported test suites
 
@@ -336,3 +338,9 @@ npx supercov runs clean             # remove all runs and the build cache
 ## Free and open source
 
 [MIT licensed](LICENSE). Inspect, extend, and run it anywhere.
+
+## Contributors
+
+- [@DaVinciTachyon](https://github.com/DaVinciTachyon)
+- [@Uhbif2](https://github.com/Uhbif2)
+- [@maik-intellicoach](https://github.com/maik-intellicoach)

@@ -3,15 +3,15 @@
 //! Ruff's Rust parser supplies syntax and exact byte ranges. Supercov owns the
 //! denominator: every statement, function, decision and branch obligation is
 //! decided here, ahead of the run, from source alone. Alongside the shared
-//! [`CoverageManifest`] this module emits a *probe plan*: the source spans,
-//! `not` polarity, and/or trees and trigger lines the stdlib-only Python
-//! runtime needs to map `sys.monitoring` events back onto those obligations.
-//! The runtime never decides what counts; it only reports what it observed.
+//! [`CoverageManifest`] this module emits a *probe plan*: the source spans and
+//! `not` polarity the stdlib-only Python runtime needs to place a probe for
+//! each obligation in the measured modules as they are imported. The runtime
+//! never decides what counts; it only reports what it observed.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use ruff_python_ast::{
-    BoolOp, CmpOp, Comprehension, Expr, Stmt, UnaryOp,
+    BoolOp, Comprehension, Expr, Stmt, UnaryOp,
     helpers::is_docstring_stmt,
     visitor::{Visitor, walk_comprehension, walk_expr, walk_stmt},
 };
@@ -77,23 +77,15 @@ impl From<PlanSpan> for [[usize; 2]; 2] {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StatementPlan {
     pub id: String,
-    /// Inclusive line range in which a `LINE` event proves the statement ran.
-    pub lines: [usize; 2],
-    /// Start and end positions of the statement in line and byte column.
+    /// Where the statement starts, in line and byte column: the runtime puts
+    /// the statement's probe before the node that starts here.
     pub start: [usize; 2],
-    pub end: [usize; 2],
-    /// True when an earlier statement already owns the first line, so only an
-    /// `INSTRUCTION` event at the statement's first instruction can prove it.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub exact: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FunctionPlan {
     pub id: String,
-    /// `co_firstlineno` of the code object: the first decorator line.
-    pub line: usize,
     pub name: String,
     /// Whole definition span; disambiguates several lambdas on one line.
     pub span: PlanSpan,
@@ -103,10 +95,6 @@ pub struct FunctionPlan {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HandlerPlan {
     pub id: String,
-    /// From `except` up to the handler body: the type-match instructions live
-    /// here. Empty-span bare handlers have no test.
-    pub header: PlanSpan,
-    pub body_lines: [usize; 2],
     pub bare: bool,
     pub missed: String,
     pub selected: String,
@@ -118,8 +106,6 @@ pub struct TryPlan {
     pub id: String,
     pub body: PlanSpan,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub orelse: Option<PlanSpan>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub finalbody: Option<PlanSpan>,
     pub handlers: Vec<HandlerPlan>,
     pub success: String,
@@ -130,20 +116,15 @@ pub struct TryPlan {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConditionPlan {
     pub span: PlanSpan,
-    /// Number of `not` operators wrapping the tested operand; odd depth inverts
-    /// the truthiness the conditional jump observes.
+    /// Number of `not` operators wrapping the tested operand; odd depth
+    /// inverts the value the condition contributes to its decision.
     pub not: usize,
-    /// For CPython's specialized `POP_JUMP_IF_(NOT_)NONE` instructions: true
-    /// when the un-negated source condition is `value is None`, false for
-    /// `value is not None`, absent for every other expression.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub none_when_true: Option<bool>,
 }
 
-/// Short-circuit structure of a decision. Leaves are condition indexes. A
-/// negated node models `not (a and b)`: CPython still emits one jump per
-/// operand, so the operands stay separate conditions and the negation applies
-/// to the node's result.
+/// Short-circuit structure of a decision, while the plan is built: leaves are
+/// condition indexes, and a negated node models `not (a and b)`, whose operands
+/// stay separate conditions. Each BoolOp's logical branches are derived from
+/// it; the runtime never sees the tree itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ConditionTree {
@@ -163,12 +144,6 @@ pub struct DecisionPlan {
     pub kind: String,
     pub span: PlanSpan,
     pub conditions: Vec<ConditionPlan>,
-    pub tree: ConditionTree,
-    /// Present for comprehension filters: CPython 3.13+ stamps their jumps
-    /// with the element expression's position, so the runtime falls back to
-    /// offset order inside this span.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub comprehension: Option<PlanSpan>,
     pub outcome_true: String,
     pub outcome_false: String,
 }
@@ -208,10 +183,7 @@ pub struct LogicalPlan {
 pub struct MatchCasePlan {
     pub id: String,
     pub span: PlanSpan,
-    /// Pattern plus guard: conditional jumps positioned here decide the case.
-    pub test: PlanSpan,
     pub irrefutable: bool,
-    pub body_lines: [usize; 2],
     pub missed: String,
     pub selected: String,
 }
@@ -252,6 +224,14 @@ pub struct PythonProbePlan {
     pub version: u32,
     pub root: String,
     pub files: BTreeMap<String, PythonFilePlan>,
+    /// Project-relative test file -> the lines holding an inventoried
+    /// assertion site, sorted. Test files are not measured, but the runtime
+    /// arms line events on their code objects for exactly these lines, so an
+    /// assertion's site is recorded when its line runs -- and pytest's
+    /// assertion-pass hook, which built a failure explanation for every
+    /// passing assertion, is no longer needed for it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub assertion_sites: BTreeMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -339,20 +319,6 @@ fn is_unobservable_statement(statement: &Stmt, first_in_body: bool) -> bool {
         || (first_in_body && is_docstring_stmt(statement))
 }
 
-fn first_body_statement(statement: &Stmt) -> Option<&Stmt> {
-    match statement {
-        Stmt::FunctionDef(inner) => inner.body.first(),
-        Stmt::ClassDef(inner) => inner.body.first(),
-        Stmt::If(inner) => inner.body.first(),
-        Stmt::While(inner) => inner.body.first(),
-        Stmt::For(inner) => inner.body.first(),
-        Stmt::With(inner) => inner.body.first(),
-        Stmt::Try(inner) => inner.body.first(),
-        Stmt::Match(inner) => inner.cases.first().and_then(|case| case.body.first()),
-        _ => None,
-    }
-}
-
 /// A BoolOp that belongs to a decision's tree: the decision ID and the leaf
 /// indexes contributed by each operand.
 type DecisionBoolOp = (String, Vec<Vec<usize>>);
@@ -368,7 +334,6 @@ struct PythonObligationCollector<'a> {
     /// Lines already claimed by a statement trigger; later statements on the
     /// same line are proven by an `INSTRUCTION` event at their first
     /// instruction instead of a `LINE` event.
-    claimed_lines: BTreeSet<usize>,
     /// BoolOp ranges that form a decision's and/or tree, with the decision ID
     /// and the leaf indexes of each operand.
     decision_boolops: BTreeMap<(usize, usize), DecisionBoolOp>,
@@ -392,7 +357,6 @@ impl<'a> PythonObligationCollector<'a> {
             point_ids: BTreeSet::new(),
             decision_ids: BTreeSet::new(),
             branch_ids: BTreeSet::new(),
-            claimed_lines: BTreeSet::new(),
             decision_boolops: BTreeMap::new(),
             error: None,
         }
@@ -446,30 +410,9 @@ impl<'a> PythonObligationCollector<'a> {
         let Some(span) = self.span(range) else {
             return;
         };
-        let start_line = span.start[0];
-        // A compound statement is proven by its header expressions. CPython
-        // stamps the header's instructions with the lines those expressions
-        // occupy, never the keyword line alone, so claim every header line up
-        // to the first body statement.
-        let end_line = match first_body_statement(statement) {
-            Some(body) => match self.span(body.range()) {
-                Some(body_span) => body_span.start[0].saturating_sub(1).max(start_line),
-                None => return,
-            },
-            None => span.end[0],
-        };
-        let exact = self.claimed_lines.contains(&start_line);
-        if !exact {
-            for line in start_line..=end_line {
-                self.claimed_lines.insert(line);
-            }
-        }
         self.plan.statements.push(StatementPlan {
             id,
-            lines: [start_line, end_line],
             start: span.start,
-            end: span.end,
-            exact,
         });
     }
 
@@ -484,7 +427,6 @@ impl<'a> PythonObligationCollector<'a> {
         };
         self.plan.functions.push(FunctionPlan {
             id,
-            line: span.start[0],
             name: name.to_owned(),
             span,
         });
@@ -501,28 +443,6 @@ impl<'a> PythonObligationCollector<'a> {
             current = &unary.operand;
         }
         (current, depth)
-    }
-
-    fn none_when_true(expr: &Expr) -> Option<bool> {
-        let Expr::Compare(comparison) = expr else {
-            return None;
-        };
-        let [operator] = comparison.ops.as_ref() else {
-            return None;
-        };
-        let [right] = comparison.comparators.as_ref() else {
-            return None;
-        };
-        if !matches!(comparison.left.as_ref(), Expr::NoneLiteral(_))
-            && !matches!(right, Expr::NoneLiteral(_))
-        {
-            return None;
-        }
-        match operator {
-            CmpOp::Is => Some(true),
-            CmpOp::IsNot => Some(false),
-            _ => None,
-        }
     }
 
     /// Flatten a test expression into leaves and a short-circuit tree. A
@@ -556,15 +476,11 @@ impl<'a> PythonObligationCollector<'a> {
             });
         }
         let span = self.span(operand.range())?;
-        leaves.push(ConditionPlan {
-            span,
-            not,
-            none_when_true: Self::none_when_true(operand),
-        });
+        leaves.push(ConditionPlan { span, not });
         Some(ConditionTree::Leaf(leaves.len() - 1))
     }
 
-    fn decision(&mut self, test: &Expr, kind: &str, comprehension: Option<TextRange>) {
+    fn decision(&mut self, test: &Expr, kind: &str) {
         let range = test.range();
         let id = stable_id(self.file, "decision", range, kind);
         if !self.decision_ids.insert(id.clone()) {
@@ -575,9 +491,9 @@ impl<'a> PythonObligationCollector<'a> {
         };
         let mut leaves = Vec::new();
         let mut boolops = Vec::new();
-        let Some(tree) = self.tree(test, &mut leaves, &mut boolops) else {
+        if self.tree(test, &mut leaves, &mut boolops).is_none() {
             return;
-        };
+        }
         let mut conditions = Vec::with_capacity(leaves.len());
         for leaf in &leaves {
             let leaf_range = TextRange::new(
@@ -633,20 +549,11 @@ impl<'a> PythonObligationCollector<'a> {
         let Some(span) = self.span(range) else {
             return;
         };
-        let comprehension = match comprehension {
-            Some(range) => match self.span(range) {
-                Some(span) => Some(span),
-                None => return,
-            },
-            None => None,
-        };
         self.plan.decisions.push(DecisionPlan {
             id,
             kind: kind.into(),
             span,
             conditions: leaves,
-            tree,
-            comprehension,
             outcome_true: format!("{outcome_id}:true"),
             outcome_false: format!("{outcome_id}:false"),
         });
@@ -735,9 +642,6 @@ impl<'a> PythonObligationCollector<'a> {
                 _ => Some(None),
             }
         };
-        let Some(orelse) = block_span(self, &statement.orelse) else {
-            return;
-        };
         let Some(finalbody) = block_span(self, &statement.finalbody) else {
             return;
         };
@@ -751,23 +655,10 @@ impl<'a> PythonObligationCollector<'a> {
                 return;
             };
             let ruff_python_ast::ExceptHandler::ExceptHandler(clause) = handler;
-            let (Some(first), Some(last)) = (clause.body.first(), clause.body.last()) else {
-                return;
-            };
-            let header_range = TextRange::new(clause.range.start(), first.start());
-            let (Some(header), Some(first_span), Some(last_span)) = (
-                self.span(header_range),
-                self.span(first.range()),
-                self.span(last.range()),
-            ) else {
-                return;
-            };
             handlers.push(HandlerPlan {
                 missed: format!("{handler_id}:missed"),
                 selected: format!("{handler_id}:selected"),
                 id: handler_id,
-                header,
-                body_lines: [first_span.start[0], last_span.end[0]],
                 bare: clause.type_.is_none(),
             });
         }
@@ -776,7 +667,6 @@ impl<'a> PythonObligationCollector<'a> {
             raised: format!("{id}:raised"),
             id,
             body,
-            orelse,
             finalbody,
             handlers,
         });
@@ -845,33 +735,17 @@ impl<'a> PythonObligationCollector<'a> {
                 return;
             };
             if let Some(guard) = &case.guard {
-                self.decision(guard, "match-guard", None);
+                self.decision(guard, "match-guard");
             }
-            let test_range = match &case.guard {
-                Some(guard) => TextRange::new(case.pattern.start(), guard.end()),
-                None => case.pattern.range(),
-            };
-            let (Some(case_span), Some(test)) = (self.span(case.range), self.span(test_range))
-            else {
+            let Some(case_span) = self.span(case.range) else {
                 return;
-            };
-            let body_lines = match (case.body.first(), case.body.last()) {
-                (Some(first), Some(last)) => {
-                    match (self.span(first.range()), self.span(last.range())) {
-                        (Some(first), Some(last)) => [first.start[0], last.end[0]],
-                        _ => return,
-                    }
-                }
-                _ => [case_span.start[0], case_span.end[0]],
             };
             cases.push(MatchCasePlan {
                 missed: format!("{id}:missed"),
                 selected: format!("{id}:selected"),
                 id,
                 span: case_span,
-                test,
                 irrefutable: case.guard.is_none() && case.pattern.is_irrefutable(),
-                body_lines,
             });
         }
         let no_case = if statement
@@ -924,15 +798,15 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
         match statement {
             Stmt::FunctionDef(function) => self.function(function.range, &function.name),
             Stmt::If(statement) => {
-                self.decision(&statement.test, "if", None);
+                self.decision(&statement.test, "if");
                 for clause in &statement.elif_else_clauses {
                     if let Some(test) = &clause.test {
-                        self.decision(test, "elif", None);
+                        self.decision(test, "elif");
                     }
                 }
             }
             Stmt::While(statement) => {
-                self.decision(&statement.test, "while", None);
+                self.decision(&statement.test, "while");
             }
             Stmt::For(statement) => self.loop_branch(
                 statement.range,
@@ -946,7 +820,7 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
             Stmt::Match(statement) => self.match_statement(statement),
             Stmt::Try(statement) => self.try_statement(statement),
             Stmt::Assert(statement) => {
-                self.decision(&statement.test, "assert", None);
+                self.decision(&statement.test, "assert");
             }
             _ => {}
         }
@@ -957,7 +831,7 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
         match expression {
             Expr::Lambda(lambda) => self.function(lambda.range, "<lambda>"),
             Expr::If(expression) => {
-                self.decision(&expression.test, "ternary", None);
+                self.decision(&expression.test, "ternary");
             }
             Expr::BoolOp(expression) => self.logical(expression),
             _ => {}
@@ -976,7 +850,7 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
             },
         );
         for condition in &comprehension.ifs {
-            self.decision(condition, "comprehension-if", Some(comprehension.range));
+            self.decision(condition, "comprehension-if");
         }
         walk_comprehension(self, comprehension);
     }
@@ -1098,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_carries_spans_polarity_trees_and_trigger_lines() {
+    fn plan_carries_spans_polarity_and_logical_leaves() {
         let plan = build_python_obligations("src/app.py", SOURCE).unwrap().plan;
         let if_plan = plan
             .decisions
@@ -1109,52 +983,42 @@ mod tests {
         assert_eq!(if_plan.conditions[0].span.start, [4, 11]);
         assert_eq!(if_plan.conditions[0].span.end, [4, 24]);
         assert_eq!(if_plan.conditions[1].span.start, [4, 30]);
-        assert_eq!(
-            if_plan.tree,
-            ConditionTree::Node {
-                op: "and".into(),
-                items: vec![
-                    ConditionTree::Leaf(0),
-                    ConditionTree::Node {
-                        op: "or".into(),
-                        items: vec![ConditionTree::Leaf(1), ConditionTree::Leaf(2)],
-                        negate: false,
-                    },
-                ],
-                negate: false,
-            }
-        );
-        // The decision-tree BoolOps produce logical branches derived from the
-        // vector rather than from value-context jumps.
-        let logical_or = plan
+        // `a and (b or c)`: the decision's BoolOps become logical branches
+        // the runtime derives from the vector, each naming the conditions of
+        // the operand before it and of its own.
+        let mut in_decision = plan
             .logical
             .iter()
-            .find(|logical| logical.decision.as_deref() == Some(if_plan.id.as_str()))
-            .unwrap();
-        assert!(logical_or.previous_leaves.is_some());
+            .filter(|logical| logical.decision.as_deref() == Some(if_plan.id.as_str()))
+            .map(|logical| {
+                (
+                    logical.previous_leaves.clone().unwrap(),
+                    logical.operand_leaves.clone().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        in_decision.sort();
+        assert_eq!(in_decision, [(vec![0], vec![1, 2]), (vec![1], vec![2])]);
         // The lambda's `value or flag` is value context.
         assert!(
             plan.logical
                 .iter()
                 .any(|logical| logical.decision.is_none())
         );
-        let comprehension = plan
-            .decisions
-            .iter()
-            .find(|decision| decision.kind == "comprehension-if")
-            .unwrap();
-        assert!(comprehension.comprehension.is_some());
-        // `async def classify` header spans line 1 only; its body starts on 2.
-        let function_statement = plan
-            .statements
-            .iter()
-            .find(|statement| statement.lines[0] == 1)
-            .unwrap();
-        assert_eq!(function_statement.lines, [1, 1]);
+        assert!(
+            plan.decisions
+                .iter()
+                .any(|decision| decision.kind == "comprehension-if")
+        );
+        assert!(
+            plan.statements
+                .iter()
+                .any(|statement| statement.start == [1, 0])
+        );
         assert!(
             plan.functions
                 .iter()
-                .any(|function| function.name == "classify" && function.line == 1)
+                .any(|function| function.name == "classify" && function.span.start[0] == 1)
         );
         assert_eq!(plan.loops.len(), 2);
         assert_eq!(plan.matches.len(), 1);
@@ -1164,7 +1028,6 @@ mod tests {
         let try_plan = &plan.tries[0];
         assert_eq!(try_plan.body.start, [9, 8]);
         assert_eq!(try_plan.handlers.len(), 1);
-        assert_eq!(try_plan.handlers[0].body_lines, [15, 15]);
         assert!(!try_plan.handlers[0].bare);
         assert!(try_plan.finalbody.is_none());
     }
@@ -1174,18 +1037,10 @@ mod tests {
         let source = "def f(a, b):\n    if not (a and b): return 1\n    x = 1; y = 2\n    g = lambda: 1; h = lambda: 2\n    return x + y\n";
         let obligations = build_python_obligations("m.py", source).unwrap();
         let decision = &obligations.plan.decisions[0];
-        // `not (a and b)` keeps `a` and `b` as separate conditions and negates
-        // the node, matching the one-jump-per-operand bytecode.
+        // `not (a and b)` keeps `a` and `b` as separate conditions, each as
+        // written; the negation applies to the node's result.
         assert_eq!(decision.conditions.len(), 2);
         assert_eq!(decision.conditions[0].not, 0);
-        assert_eq!(
-            decision.tree,
-            ConditionTree::Node {
-                op: "and".into(),
-                items: vec![ConditionTree::Leaf(0), ConditionTree::Leaf(1)],
-                negate: true,
-            }
-        );
         assert_eq!(obligations.manifest.decisions[0].conditions, ["a", "b"]);
         let negated_leaf = build_python_obligations(
             "n.py",
@@ -1197,26 +1052,18 @@ mod tests {
         .unwrap();
         assert_eq!(negated_leaf.plan.decisions[0].conditions[0].not, 1);
         assert_eq!(negated_leaf.manifest.decisions[0].conditions, ["not a"]);
-        let none_comparisons = build_python_obligations(
-            "none.py",
-            "def g(a, b):\n    if a is None or b is not None:\n        return 1\n",
-        )
-        .unwrap();
-        let conditions = &none_comparisons.plan.decisions[0].conditions;
-        assert_eq!(conditions[0].none_when_true, Some(true));
-        assert_eq!(conditions[1].none_when_true, Some(false));
         // `return 1` shares line 2 with the `if`, `y = 2` shares line 3 with
-        // `x = 1`, and `h = ...` shares line 4 with `g = ...`: those three are
-        // proven by INSTRUCTION events at their exact start, nothing is
-        // unmeasured, and both lambdas keep their spans.
-        let exact = obligations
+        // `x = 1`, and `h = ...` shares line 4 with `g = ...`: each is its own
+        // statement, probed at its own start, and nothing is unmeasured.
+        let starts = obligations
             .plan
             .statements
             .iter()
-            .filter(|statement| statement.exact)
             .map(|statement| statement.start)
             .collect::<Vec<_>>();
-        assert_eq!(exact, [[2, 22], [3, 11], [4, 19]]);
+        for shared in [[2, 22], [3, 11], [4, 19]] {
+            assert!(starts.contains(&shared), "{shared:?} in {starts:?}");
+        }
         assert!(obligations.manifest.unmeasured.is_empty());
         assert!(obligations.manifest.limitations.is_empty());
         let lambdas = obligations
@@ -1242,13 +1089,6 @@ mod tests {
             }
         );
         assert_eq!(
-            try_plan.orelse,
-            Some(PlanSpan {
-                start: [9, 8],
-                end: [9, 14]
-            })
-        );
-        assert_eq!(
             try_plan.finalbody,
             Some(PlanSpan {
                 start: [11, 8],
@@ -1256,16 +1096,8 @@ mod tests {
             })
         );
         assert_eq!(try_plan.handlers.len(), 2);
-        assert_eq!(
-            try_plan.handlers[0].header,
-            PlanSpan {
-                start: [4, 4],
-                end: [5, 8]
-            }
-        );
         assert!(!try_plan.handlers[0].bare);
         assert!(try_plan.handlers[1].bare);
-        assert_eq!(try_plan.handlers[1].body_lines, [7, 7]);
     }
 
     #[test]

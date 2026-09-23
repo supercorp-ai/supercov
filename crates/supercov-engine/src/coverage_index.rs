@@ -16,6 +16,7 @@ use crate::{
     coverage_report::{
         CoverageModel, CoverageReport, CoverageView, TransportStats, coverage_summary_for_tests,
     },
+    interned::Id,
     query_index::{QueryIndex, QueryIndexError, QueryIndexSection},
 };
 
@@ -166,19 +167,38 @@ struct StringTable {
 #[derive(Default)]
 struct StringRelations {
     values: Vec<u32>,
+    /// Where each distinct run already sits. Readers reach a run only through
+    /// the (offset, count) pair the record stores, so two records naming the
+    /// same run can share one copy of it and nothing downstream can tell.
+    interned: HashMap<Vec<u32>, (u64, u64)>,
 }
 
 impl StringRelations {
+    /// Append a run of interned strings, or point at an identical one already
+    /// stored.
+    ///
+    /// The same run is named over and over: a filtered view repeats the whole
+    /// relation of the view it filters, and one list of tests covers many
+    /// lines of the file they exercise. Appending each time made this the
+    /// largest section in the container -- 61 MB of a 210 MB index, 15.3
+    /// million entries -- for a number of distinct runs far smaller.
     fn push(
         &mut self,
-        values: impl IntoIterator<Item = String>,
+        values: impl IntoIterator<Item = impl AsRef<str>>,
         strings: &mut StringTable,
     ) -> Result<(u64, u64), CoverageIndexError> {
-        let offset = usize_u64(self.values.len())?;
+        let mut run = Vec::new();
         for value in values {
-            self.values.push(strings.intern(&value)?);
+            run.push(strings.intern(value.as_ref())?);
         }
-        Ok((offset, usize_u64(self.values.len())? - offset))
+        if let Some(found) = self.interned.get(&run) {
+            return Ok(*found);
+        }
+        let offset = usize_u64(self.values.len())?;
+        let count = usize_u64(run.len())?;
+        self.values.extend_from_slice(&run);
+        self.interned.insert(run, (offset, count));
+        Ok((offset, count))
     }
 
     fn section(self) -> Result<QueryIndexSection, CoverageIndexError> {
@@ -358,6 +378,10 @@ pub struct IndexedDimensionCoverage {
     pub runner: Option<String>,
     pub tests: usize,
     pub setups: usize,
+    /// How many of `tests` the summary below actually describes. Where this is
+    /// zero and `tests` is not, the dimension ran tests whose coverage nothing
+    /// can narrow, and its summary describes none of them.
+    pub attributed: usize,
     pub summary: CoverageSummary,
 }
 
@@ -508,6 +532,10 @@ pub struct IndexedTestSummary {
     pub title: Option<String>,
     pub outcome: String,
     pub role: String,
+    /// `exact`, or `run-wide` when this test ran and nothing can say what it
+    /// reached. Read before any statement about this test's coverage: an
+    /// empty hit set means "reached nothing" only under `exact`.
+    pub attribution: String,
     pub provenance: crate::coverage_report::TestProvenance,
 }
 
@@ -593,9 +621,13 @@ fn limitation_kind(value: &serde_json::Value) -> Option<(&str, &str)> {
     Some((value.get("file")?.as_str()?, value.get("kind")?.as_str()?))
 }
 
-fn includes_selected(tests: &[String], selected: Option<&BTreeSet<String>>, covered: bool) -> bool {
+fn includes_selected<T: AsRef<str>>(
+    tests: &[T],
+    selected: Option<&BTreeSet<String>>,
+    covered: bool,
+) -> bool {
     selected.map_or(covered, |selected| {
-        tests.iter().any(|test| selected.contains(test))
+        tests.iter().any(|test| selected.contains(test.as_ref()))
     })
 }
 
@@ -887,6 +919,10 @@ fn dimension_record(
     put_u32(&mut record, 4, strings.intern(name)?);
     put_u64(&mut record, 8, usize_u64(value.tests)?);
     put_u64(&mut record, 16, usize_u64(value.setups)?);
+    // Bytes 184..192 were reserved from the start and the reader refuses a
+    // record that sets them, so this is an addition rather than a format
+    // change: the record is the same 192 bytes it always was.
+    put_u64(&mut record, 184, usize_u64(value.attributed)?);
     put_summary_payload(&mut record, 24, 32, &value.summary)?;
     Ok(record)
 }
@@ -1078,7 +1114,7 @@ fn projection_record(
     let phases = view
         .phases
         .iter()
-        .filter(|phase| selected.is_none_or(|selected| selected.contains(&phase.test)));
+        .filter(|phase| selected.is_none_or(|selected| selected.contains(phase.test.as_str())));
     let mut attribution = [0_usize; 4];
     for phase in phases {
         attribution[0] += phase.explicit_browser_events;
@@ -1402,10 +1438,18 @@ fn confidence_record(
         | (u8::from(confidence.asserted) << 2)
         | (u8::from(confidence.e2e) << 3);
     for (index, values) in [
-        confidence.tests.clone(),
-        confidence.asserted_tests.clone(),
-        confidence.runners.clone(),
-        confidence.kinds.clone(),
+        confidence
+            .tests
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        confidence
+            .asserted_tests
+            .iter()
+            .map(|id| id.as_str())
+            .collect(),
+        confidence.runners.iter().map(String::as_str).collect(),
+        confidence.kinds.iter().map(String::as_str).collect(),
     ]
     .into_iter()
     .enumerate()
@@ -1454,6 +1498,15 @@ fn test_summary_record(
         "setup" => 1,
         "background" => 2,
         _ => return Err(CoverageIndexError::InvalidRecord("test role")),
+    };
+    // Byte 3 was reserved from the start and the reader refuses a record that
+    // sets it, which is what makes this an addition rather than a format
+    // change: the record is the same 64 bytes it always was.
+    record[3] = match test.attribution.as_str() {
+        crate::coverage_report::ATTRIBUTION_EXACT => 0,
+        crate::coverage_report::ATTRIBUTION_RUN_WIDE => 1,
+        crate::coverage_report::ATTRIBUTION_PARTIAL => 2,
+        _ => return Err(CoverageIndexError::InvalidRecord("test attribution")),
     };
     record[2] = match test.outcome.as_str() {
         "passed" => 0,
@@ -1539,7 +1592,7 @@ struct AnchorInput<'a> {
     column: usize,
     covered: bool,
     conditions: Option<(usize, usize)>,
-    tests: &'a [String],
+    tests: &'a [Id],
 }
 
 fn anchor_record(
@@ -1668,7 +1721,7 @@ struct HitMetadataInput<'a> {
     label: Option<&'a str>,
     alternative: Option<&'a str>,
     source: &'a str,
-    tests: &'a [String],
+    tests: &'a [Id],
 }
 
 fn hit_metadata_record(
@@ -2625,6 +2678,14 @@ impl<'a> CoverageIndex<'a> {
         }
     }
 
+    fn relation_ids(&self, offset: u64, count: u64) -> Result<Vec<Id>, CoverageIndexError> {
+        Ok(self
+            .relation_strings(offset, count)?
+            .into_iter()
+            .map(Id::from)
+            .collect())
+    }
+
     fn relation_strings(&self, offset: u64, count: u64) -> Result<Vec<String>, CoverageIndexError> {
         let end = offset
             .checked_add(count)
@@ -2921,9 +2982,7 @@ impl<'a> CoverageIndex<'a> {
             if record_dimension != dimension {
                 continue;
             }
-            if record[26..32].iter().any(|byte| *byte != 0)
-                || record[184..].iter().any(|byte| *byte != 0)
-            {
+            if record[26..32].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord(
                     "dimension reserved bytes",
                 ));
@@ -2935,6 +2994,8 @@ impl<'a> CoverageIndex<'a> {
                 tests: usize::try_from(get_u64(record, 8)?)
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 setups: usize::try_from(get_u64(record, 16)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                attributed: usize::try_from(get_u64(record, 184)?)
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 summary: decode_summary(record, 24, 32)?,
             });
@@ -3028,8 +3089,8 @@ impl<'a> CoverageIndex<'a> {
             background_only: record[1] & 2 != 0,
             asserted: record[1] & 4 != 0,
             e2e: record[1] & 8 != 0,
-            tests: values[0].clone(),
-            asserted_tests: values[1].clone(),
+            tests: values[0].iter().map(Id::from).collect(),
+            asserted_tests: values[1].iter().map(Id::from).collect(),
             runners: values[2].clone(),
             kinds: values[3].clone(),
         })
@@ -3109,7 +3170,7 @@ impl<'a> CoverageIndex<'a> {
             if CoverageViewId::try_from(record[0])? != view {
                 continue;
             }
-            if record[3] != 0 || record[36..].iter().any(|byte| *byte != 0) {
+            if record[36..].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("test summary record"));
             }
             tests.push(IndexedTestSummary {
@@ -3122,6 +3183,13 @@ impl<'a> CoverageIndex<'a> {
                     1 => "setup",
                     2 => "background",
                     _ => return Err(CoverageIndexError::InvalidRecord("test role")),
+                }
+                .into(),
+                attribution: match record[3] {
+                    0 => crate::coverage_report::ATTRIBUTION_EXACT,
+                    1 => crate::coverage_report::ATTRIBUTION_RUN_WIDE,
+                    2 => crate::coverage_report::ATTRIBUTION_PARTIAL,
+                    _ => return Err(CoverageIndexError::InvalidRecord("test attribution")),
                 }
                 .into(),
                 outcome: match record[2] {
@@ -3255,7 +3323,7 @@ impl<'a> CoverageIndex<'a> {
                 details[position]
                     .lines
                     .push(crate::coverage_report::SourceLine {
-                        file: self.string(get_u32(record, 8)?)?,
+                        file: self.string(get_u32(record, 8)?)?.into(),
                         line: usize::try_from(get_u64(record, 16)?)
                             .map_err(|_| CoverageIndexError::SizeOverflow)?,
                     });
@@ -3430,9 +3498,9 @@ impl<'a> CoverageIndex<'a> {
         Ok(crate::coverage_report::VectorObservation {
             confidence: self.confidence(get_u64(record, 0)?)?,
             vector: self.test_vector(get_u64(record, 8)?)?,
-            tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
-            phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
-            explicit_phases: self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?,
+            tests: self.relation_ids(get_u64(record, 16)?, get_u64(record, 24)?)?,
+            phases: self.relation_ids(get_u64(record, 32)?, get_u64(record, 40)?)?,
+            explicit_phases: self.relation_ids(get_u64(record, 48)?, get_u64(record, 56)?)?,
         })
     }
 
@@ -3469,7 +3537,10 @@ impl<'a> CoverageIndex<'a> {
             covered: record[0] & 1 != 0,
             assertion_covered: record[0] & 2 != 0,
             witness,
-            witness_tests: has_witness.then_some([first_tests, second_tests]),
+            witness_tests: has_witness.then_some([
+                first_tests.into_iter().map(Id::from).collect(),
+                second_tests.into_iter().map(Id::from).collect(),
+            ]),
         })
     }
 
@@ -3550,7 +3621,7 @@ impl<'a> CoverageIndex<'a> {
                     .collect(),
                 vector_observations: observations,
                 conditions,
-                tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
+                tests: self.relation_ids(get_u64(record, 16)?, get_u64(record, 24)?)?,
                 confidence: self.confidence(get_u64(record, 8)?)?,
             });
         }
@@ -3834,6 +3905,7 @@ mod tests {
                     source: "runner-default".into(),
                 },
                 role: "test".into(),
+                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
                 phases: Vec::new(),
                 runtime: vec![RuntimeSnapshot {
                     decisions: vec![crate::coverage_report::DecisionSnapshot {
@@ -3856,6 +3928,103 @@ mod tests {
             test_exit_code: ExitCodeInput::Present(Some(0)),
         })
         .unwrap()
+    }
+
+    fn report_attributed(attribution: &str) -> CoverageReport {
+        let mut report = report();
+        for view in [
+            &mut report.view,
+            &mut report.filters.passed,
+            &mut report.filters.failed,
+        ] {
+            for test in &mut view.tests {
+                test.attribution = attribution.to_owned();
+            }
+        }
+        report
+    }
+
+    #[test]
+    fn a_test_keeps_the_attribution_it_was_written_with() {
+        // Attribution rides in a byte the reader used to refuse outright, so a
+        // value that does not survive the trip is not a wrong number on a
+        // report -- it is a run that will not open. Only `exact` was ever
+        // written by a test, which left the other two arms of both the encoder
+        // and the decoder standing on the claim that they matched.
+        let root = root();
+        for attribution in [
+            crate::coverage_report::ATTRIBUTION_EXACT,
+            crate::coverage_report::ATTRIBUTION_RUN_WIDE,
+            crate::coverage_report::ATTRIBUTION_PARTIAL,
+        ] {
+            let report = report_attributed(attribution);
+            let path = root.join(format!("query-index-{attribution}.v1.bin"));
+            write_query_index(
+                &coverage_index_sections(&report).unwrap(),
+                &identity(),
+                &path,
+            )
+            .unwrap();
+            let container = QueryIndex::open(&path, &identity()).unwrap();
+            let index = CoverageIndex::new(&container).unwrap();
+            let tests = index.test_summaries(CoverageViewId::All).unwrap();
+            assert_eq!(tests.len(), 1);
+            assert_eq!(
+                tests[0].attribution, attribution,
+                "written as `{attribution}` and read back as `{}`",
+                tests[0].attribution
+            );
+        }
+    }
+
+    #[test]
+    fn an_attribution_the_byte_has_no_room_for_is_refused_at_the_write() {
+        // Refusing here is what keeps the reserved byte honest: a value nobody
+        // taught the encoder must not be written as some neighbouring one and
+        // read back as a measurement.
+        let error = coverage_index_sections(&report_attributed("probably-exact")).unwrap_err();
+        assert!(
+            matches!(error, CoverageIndexError::InvalidRecord("test attribution")),
+            "{error:?}"
+        );
+    }
+
+    // The same run is named over and over -- a filtered view repeats the
+    // relation of the view it filters, and one list of tests covers many lines
+    // of the file they exercise. Storing each naming separately made this the
+    // largest section in the container: 61 MB of a 210 MB index.
+    #[test]
+    fn a_relation_named_twice_is_stored_once() {
+        let mut strings = StringTable::default();
+        let mut relations = StringRelations::default();
+        let run = || ["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+
+        let first = relations.push(run(), &mut strings).unwrap();
+        let second = relations.push(run(), &mut strings).unwrap();
+        assert_eq!(first, second, "the second naming points at the first run");
+        assert_eq!(relations.values.len(), 3, "and nothing was appended for it");
+
+        // A different run still gets its own storage, after the one already
+        // there -- readers reach a run only by (offset, count), so the
+        // existing pair must keep meaning what it meant.
+        let other = relations
+            .push(["alpha".to_string(), "delta".to_string()], &mut strings)
+            .unwrap();
+        assert_eq!(other, (3, 2));
+        assert_eq!(relations.values.len(), 5);
+
+        // A prefix of a stored run is a different run, and is stored as one
+        // rather than aliasing into the middle of another.
+        let prefix = relations.push(["alpha".to_string()], &mut strings).unwrap();
+        assert_eq!(prefix, (5, 1));
+
+        // What each pair resolves to is what was pushed.
+        let read = |(offset, count): (u64, u64)| {
+            relations.values[offset as usize..(offset + count) as usize].to_vec()
+        };
+        assert_eq!(read(first), read(second));
+        assert_eq!(read(first).len(), 3);
+        assert_ne!(read(first), read(other));
     }
 
     #[test]
@@ -3979,6 +4148,7 @@ mod tests {
                     source: "selected-but-not-started".into(),
                 },
                 role: "test".into(),
+                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
                 phases: Vec::new(),
                 runtime: Vec::new(),
                 browser: Vec::new(),
@@ -4033,7 +4203,7 @@ mod tests {
         ] {
             view.scope = Some(scope.clone());
             view.model.language = "python".into();
-            view.model.name = "python-monitoring-v1".into();
+            view.model.name = "python-probes-v1".into();
         }
         let root = root();
         let path = root.join("query-index.python.bin");
@@ -4048,7 +4218,7 @@ mod tests {
         let projection = index.projection(CoverageViewId::All, None, None).unwrap();
         let source_scope = projection.source_scope.unwrap();
         assert_eq!(source_scope.language, "python");
-        assert_eq!(source_scope.model, "python-monitoring-v1");
+        assert_eq!(source_scope.model, "python-probes-v1");
         assert_eq!(source_scope.kind, "source-discovery");
         assert_eq!(source_scope.included, 1);
         assert_eq!(index.scope_entries(CoverageViewId::All).unwrap().len(), 1);

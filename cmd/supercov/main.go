@@ -21,16 +21,104 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const repository = "https://github.com/supercorp-ai/supercov"
+
+// Where releases are listed and fetched from. Variables only so the tests can
+// stand a local server in for GitHub; nothing else changes them.
+var (
+	releaseAPI      = "https://api.github.com/repos/supercorp-ai/supercov"
+	releaseDownload = repository + "/releases/download"
+)
+
+// A release is served by a CDN that times out now and then, and a single 504
+// used to end an install outright -- for a Go user it is the whole of
+// `go run .../cmd/supercov@latest`. What a moment later might answer is worth
+// asking again; these are the waits between attempts.
+var (
+	retryDelays = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	// A Retry-After longer than this is not waited out: the install reports
+	// the refusal instead of hanging on it.
+	maxRetryAfter = 30 * time.Second
+	sleep         = time.Sleep
+)
+
+// transient is an answer that says nothing about the release itself. 404 is
+// not among them: it is how an unpublished archive is recognised, which the
+// launcher falls back on. Nor is 403, GitHub's answer when its rate limit is
+// spent, which no wait of seconds will change.
+func transient(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+// fetch sends request, asking again while the answer is transient or the
+// connection failed before any answer came. Once the attempts run out it
+// returns the last answer as it stands, so each caller reports it exactly as
+// it would have. A client timeout is not retried: it has already waited as
+// long as that request is allowed to take.
+func fetch(client *http.Client, request *http.Request) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		response, err := client.Do(request.Clone(request.Context()))
+		last := attempt == len(retryDelays)
+		if err != nil {
+			var network net.Error
+			if last || (errors.As(err, &network) && network.Timeout()) {
+				return nil, err
+			}
+			retrying(request, "did not answer", retryDelays[attempt])
+			sleep(retryDelays[attempt])
+			continue
+		}
+		if last || !transient(response.StatusCode) {
+			return response, nil
+		}
+		wait := retryDelays[attempt]
+		if after, ok := retryAfter(response); ok && after > wait {
+			if after > maxRetryAfter {
+				return response, nil
+			}
+			wait = after
+		}
+		response.Body.Close()
+		retrying(request, "answered "+response.Status, wait)
+		sleep(wait)
+	}
+}
+
+// retrying says why an install has gone quiet. The waits add up to seconds,
+// and a launcher that stops printing mid-install looks hung.
+func retrying(request *http.Request, what string, wait time.Duration) {
+	fmt.Fprintf(os.Stderr, "supercov: %s %s; asking again in %s\n", request.URL.Host, what, wait)
+}
+
+// retryAfter reads the seconds form of Retry-After, which is what GitHub
+// sends. The date form is left unread and the usual wait applies.
+func retryAfter(response *http.Response) (time.Duration, bool) {
+	seconds, err := strconv.Atoi(strings.TrimSpace(response.Header.Get("Retry-After")))
+	if err != nil || seconds < 0 {
+		return 0, false
+	}
+	return time.Duration(seconds) * time.Second, true
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -105,15 +193,14 @@ func looksLikeVersion(value string) bool {
 func latest() (string, error) {
 	request, err := http.NewRequest(
 		http.MethodGet,
-		"https://api.github.com/repos/supercorp-ai/supercov/releases/latest",
+		releaseAPI+"/releases/latest",
 		nil,
 	)
 	if err != nil {
 		return "", err
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	response, err := client.Do(request)
+	response, err := fetch(&http.Client{Timeout: 30 * time.Second}, request)
 	if err != nil {
 		return "", fmt.Errorf("asking GitHub for the latest release: %w", err)
 	}
@@ -187,14 +274,14 @@ func published() (string, error) {
 	}
 	request, err := http.NewRequest(
 		http.MethodGet,
-		"https://api.github.com/repos/supercorp-ai/supercov/releases?per_page=20",
+		releaseAPI+"/releases?per_page=20",
 		nil,
 	)
 	if err != nil {
 		return "", err
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
-	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+	response, err := fetch(&http.Client{Timeout: 30 * time.Second}, request)
 	if err != nil {
 		return "", err
 	}
@@ -270,7 +357,7 @@ func install(version string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	url := fmt.Sprintf("%s/releases/download/v%s/%s", repository, version, archive)
+	url := fmt.Sprintf("%s/v%s/%s", releaseDownload, version, archive)
 	fmt.Fprintf(os.Stderr, "supercov: fetching %s\n", archive)
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return "", err
@@ -287,8 +374,11 @@ func install(version string) (string, error) {
 // publishes; the binary sits at package/bin/ inside. `cargo binstall` reads the
 // same asset the same way.
 func download(url, directory, name string) error {
-	client := &http.Client{Timeout: 10 * time.Minute}
-	response, err := client.Get(url)
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	response, err := fetch(&http.Client{Timeout: 10 * time.Minute}, request)
 	if err != nil {
 		return fmt.Errorf("downloading %s: %w", url, err)
 	}

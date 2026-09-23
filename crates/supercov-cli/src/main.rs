@@ -64,10 +64,13 @@ Score the source with Jev:
   supercov quality file <path>         one file, every check
   supercov quality patch               what a change introduced
   supercov quality --help              every quality query
+  supercov security                    security surface, file by file
+  supercov security patch              what a change introduced, security only
 
 Measure your full test command:
   npx supercov -- npm test
   supercov -- <test command>           measure the complete command
+  supercov --exact-attribution -- ...  credit every test, running yours in order
 
 Inspect a run with small, paginated answers:
   supercov runs latest                 newest run summary
@@ -105,6 +108,7 @@ const DOC_TOPICS: &[&str] = &[
     "cli",
     "coverage-model",
     "quality",
+    "security",
     "evidence",
     "supported-suites",
     "verification",
@@ -282,7 +286,26 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Some("--") => public_coverage_run(arguments.collect()),
+        Some("--") => public_coverage_run(arguments.collect(), RunOptions::default()),
+        // The one thing worth asking for before the command: credit every test
+        // with what it reached, wherever that can only be had by running the
+        // suite differently. Written once here rather than as a flag per
+        // language, because what someone wants is the same thing in all of
+        // them.
+        Some("--exact-attribution") => match arguments.next().as_deref() {
+            Some("--") => public_coverage_run(
+                arguments.collect(),
+                RunOptions {
+                    exact_attribution: true,
+                },
+            ),
+            _ => {
+                eprintln!(
+                    "[supercov] --exact-attribution goes before the command: supercov --exact-attribution -- <test command>"
+                );
+                ExitCode::from(2)
+            }
+        },
         Some("__instrument-js") => instrument_js(),
         Some("__analyze-coverage-core") => analyze_coverage_core(),
         Some("__analyze-coverage-results") => analyze_coverage_report(),
@@ -316,6 +339,7 @@ fn main() -> ExitCode {
         Some("__build-rust-compiler") => build_rust_compiler(),
         Some("__run-rust-compiler") => run_rust_compiler(),
         Some("quality") => quality::command(arguments.collect()),
+        Some("security") => quality::security_command(arguments.collect()),
         Some("docs") => docs_command(arguments.collect()),
         Some("assertions") => assertions_query::global_command(&arguments.collect::<Vec<_>>()),
         Some("runs") => {
@@ -432,6 +456,7 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         "cli" => Some(include_str!("../assets/docs/cli.md")),
         "coverage-model" => Some(include_str!("../assets/docs/coverage-model.md")),
         "quality" => Some(include_str!("../assets/docs/quality.md")),
+        "security" => Some(include_str!("../assets/docs/security.md")),
         "evidence" => Some(include_str!("../assets/docs/evidence.md")),
         "supported-suites" => Some(include_str!("../assets/docs/supported-suites.md")),
         "verification" => Some(include_str!("../assets/docs/verification.md")),
@@ -1905,6 +1930,120 @@ pub(crate) fn load_run_view(
     .map_err(|error| format!("{error:?}"))
 }
 
+/// A flow of a saved run's assertion map with the lines it is credited with,
+/// and the text the agent wrote about it. The text is what makes the credit
+/// mean something: an assertion that checks the injection succeeded and one
+/// that checks the input was rejected credit the same sink line.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct CreditedFlow {
+    pub key: String,
+    pub assertion: String,
+    pub observes: Vec<String>,
+    pub explanation: String,
+    pub nodes: Vec<String>,
+    pub lines: Vec<(String, u64)>,
+}
+
+/// Every credited flow of the run the coverage join uses, so a security
+/// finding can be placed on one of three shelves: code no test executes, code
+/// tests execute but no assertion is credited with, and code an assertion
+/// checks, where the flow's own text says what was checked. Empty when the
+/// run carries no assertion map; that is not an error.
+pub(crate) fn load_credited_flows(selector: Option<&str>) -> Result<Vec<CreditedFlow>, String> {
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+    let report = supercov_engine::assertion_store::report(&root, run)?;
+    let empty = Vec::new();
+    let mut flows = Vec::new();
+    for assertion in report["assertions"].as_array().unwrap_or(&empty) {
+        let text = assertion["at"]["text"].as_str().unwrap_or("").to_owned();
+        let observes: Vec<String> = assertion["observes"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .filter_map(|o| o.as_str().map(str::to_owned))
+            .collect();
+        for flow in assertion["flows"].as_array().unwrap_or(&empty) {
+            let mut lines = Vec::new();
+            let mut nodes = Vec::new();
+            for node in flow["nodeCredit"].as_array().unwrap_or(&empty) {
+                if let Some(t) = node["text"].as_str() {
+                    nodes.push(t.to_owned());
+                }
+                if node["status"] == "credited"
+                    && let (Some(file), Some(line)) = (
+                        node["location"]["file"].as_str(),
+                        node["location"]["line"].as_u64(),
+                    )
+                {
+                    lines.push((file.to_owned(), line));
+                }
+            }
+            if lines.is_empty() {
+                continue;
+            }
+            flows.push(CreditedFlow {
+                key: format!(
+                    "{}/{}",
+                    assertion["id"].as_str().unwrap_or("?"),
+                    flow["id"].as_str().unwrap_or("?")
+                ),
+                assertion: text.clone(),
+                observes: observes.clone(),
+                explanation: flow["explanation"].as_str().unwrap_or("").to_owned(),
+                nodes,
+                lines,
+            });
+        }
+    }
+    Ok(flows)
+}
+
+/// Which lines of which files a saved run's assertions are credited with.
+pub(crate) fn load_asserted_lines(
+    selector: Option<&str>,
+) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<u64>>, String> {
+    let mut lines: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
+        Default::default();
+    for flow in load_credited_flows(selector)? {
+        for (file, line) in flow.lines {
+            lines.entry(file).or_default().insert(line);
+        }
+    }
+    Ok(lines)
+}
+
+/// Which tests executed which lines, from a saved run: every covered
+/// statement with the tests credited for it. This is the run's own account of
+/// what ran together, which no import graph can give: a handler and a helper
+/// reached only through a lookup table are still executed by one test.
+pub(crate) fn load_point_tests(
+    selector: Option<&str>,
+) -> Result<Vec<(String, usize, Vec<String>)>, String> {
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+    let coverage = supercov_engine::assertion_store::coverage(run)?;
+    Ok(coverage
+        .view
+        .points
+        .iter()
+        .filter(|point| point.covered && !point.tests.is_empty())
+        .map(|point| {
+            (
+                point.meta.file.clone(),
+                point.meta.line,
+                point
+                    .tests
+                    .iter()
+                    .map(|test| test.as_str().to_owned())
+                    .collect(),
+            )
+        })
+        .collect())
+}
+
 /// The format names live in the engine module the packaging audit reads, so
 /// this file never spells them: Supercov emits those formats and must never
 /// look like it invokes the tools they are named after.
@@ -2082,24 +2221,56 @@ fn javascript_number(value: f64) -> String {
     }
 }
 
-fn format_run_timings(timings: &supercov_engine::run_store::RunTimings, total_ms: f64) -> String {
-    format!(
-        "initialization={}ms workspace={}ms setup={}ms build={}ms tests={}ms evidence={}ms total={}ms",
+/// `run_ms` is the engine's own clock, which stops before the run is published;
+/// `command_ms`, when the run was published, is the whole command. What lies
+/// between is publication -- analysing the evidence once for the assertion map,
+/// the summary and the query index -- and it is reported, so that the total is
+/// what the command cost rather than what it cost before publishing.
+fn format_run_timings(
+    timings: &supercov_engine::run_store::RunTimings,
+    run_ms: f64,
+    command_ms: Option<f64>,
+) -> String {
+    let phases = format!(
+        "initialization={}ms workspace={}ms setup={}ms build={}ms tests={}ms evidence={}ms",
         javascript_number(timings.initialization_ms),
         javascript_number(timings.workspace_preparation_ms),
         javascript_number(timings.adapter_setup_ms),
         javascript_number(timings.instrumented_build_ms),
         javascript_number(timings.test_command_ms),
         javascript_number(timings.evidence_publication_ms),
-        javascript_number(total_ms),
-    )
+    );
+    match command_ms {
+        Some(command_ms) => format!(
+            "{phases} publication={}ms total={}ms",
+            javascript_number((command_ms - run_ms).max(0.0)),
+            javascript_number(command_ms.max(run_ms)),
+        ),
+        None => format!("{phases} total={}ms", javascript_number(run_ms)),
+    }
+}
+
+/// What the caller asked for beyond the command itself.
+#[derive(Debug, Clone, Copy, Default)]
+struct RunOptions {
+    /// Credit every test with what it reached, at whatever the language's
+    /// frontend has to do differently to manage it.
+    ///
+    /// Off by default, because what it costs is not measurement time but the
+    /// suite's own: a JUnit project with parallel execution runs in order, and
+    /// so does a Go package whose tests call `t.Parallel()`. Where a frontend
+    /// attributes exactly at no cost -- one process per test, per-test
+    /// coverage maps -- it already does, and this changes nothing.
+    exact_attribution: bool,
 }
 
 fn process_exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-fn public_coverage_run(command: Vec<String>) -> ExitCode {
+fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
+    let command_started = Instant::now();
+    let command_ms = || command_started.elapsed().as_secs_f64() * 1000.0;
     if command.is_empty() {
         eprintln!("Usage: supercov -- <test command>");
         return ExitCode::from(2);
@@ -2201,7 +2372,11 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2218,6 +2393,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             command,
             run_id,
             started_at,
+            exact_attribution: options.exact_attribution,
         };
         let mut diagnostics = std::io::stderr().lock();
         let result = supercov_engine::go_run::run_direct_go(&request, &mut diagnostics);
@@ -2232,10 +2408,41 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     "[supercov] Go coverage: {} test(s) across {} source file(s) in {} package(s)",
                     result.tests, result.source_files, result.packages
                 );
+                // A run of nothing but parallel tests measures a whole package
+                // and can name none of it. Printing "0 test(s)" and stopping
+                // reads as an empty suite, which is a different thing and the
+                // wrong thing to act on.
+                if result.unattributed > 0 {
+                    eprintln!(
+                        "[supercov] {} test(s) could not announce themselves (t.Parallel, Example or Fuzz); what they reached counts run-wide and belongs to no test",
+                        result.unattributed
+                    );
+                }
+                // A hole in the denominator travels with the number it was
+                // taken out of: the warning above scrolls past, this is on the
+                // line that reports the result.
+                if result.unparseable_sources > 0 {
+                    eprintln!(
+                        "[supercov] {} source file(s) did not parse and are absent from the denominator; the run records them as a blocking limitation",
+                        result.unparseable_sources
+                    );
+                }
+                // The tests in it still ran, and what they reached still
+                // counts; what is missing is the name to put it under.
+                if result.unparseable_tests > 0 {
+                    eprintln!(
+                        "[supercov] {} test file(s) did not parse; the tests they declare ran unattributed",
+                        result.unparseable_tests
+                    );
+                }
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2252,6 +2459,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             command,
             run_id,
             started_at,
+            exact_attribution: options.exact_attribution,
         };
         let mut diagnostics = std::io::stderr().lock();
         let result = supercov_engine::jvm_run::run_direct_jvm(&request, &mut diagnostics);
@@ -2269,7 +2477,11 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2306,7 +2518,11 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2343,7 +2559,11 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2376,7 +2596,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             if let Some(timings) = &result.metadata.timings {
                 eprintln!(
                     "[supercov] timings {}",
-                    format_run_timings(timings, result.metadata.duration_ms)
+                    format_run_timings(timings, result.metadata.duration_ms, Some(command_ms()))
                 );
             }
             process_exit_code(result.exit_code)
@@ -2389,7 +2609,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
         }) => {
             eprintln!(
                 "[supercov] timings {}",
-                format_run_timings(&timings, total_ms)
+                format_run_timings(&timings, total_ms, None)
             );
             process_exit_code(exit_code)
         }
@@ -2430,10 +2650,20 @@ fn cleanup_summary(
     result: &supercov_engine::lifecycle::CleanupResult,
 ) -> String {
     format!(
-        "[supercov] {} {} stored run(s), {} per-run workspace(s), and {} isolated build cache; keeping {} newest run(s)",
+        "[supercov] {} {} stored run(s), {} per-run workspace(s), {}and {} isolated build cache; keeping {} newest run(s)",
         if dry_run { "would remove" } else { "removed" },
         result.removed_runs.len(),
         result.removed_workspaces.len(),
+        // Named separately because it is not a run: it is what a run Supercov
+        // failed to publish measured, and removing it is irreversible.
+        if result.removed_failed_evidence.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "the kept evidence of {} failed run(s), ",
+                result.removed_failed_evidence.len()
+            )
+        },
         if result.removed_build_cache {
             "the"
         } else {
@@ -2522,8 +2752,9 @@ fn run_store_agent_error(error: RunStoreError) -> agent_json::AgentError {
 fn current_javascript_integrity(
     root: &Path,
     command: &[String],
+    source_roots: Option<&[String]>,
 ) -> Option<supercov_engine::run_store::RunIntegrity> {
-    supercov_engine::javascript_run::current_javascript_integrity(root, command).ok()
+    supercov_engine::javascript_run::current_javascript_integrity(root, command, source_roots).ok()
 }
 
 /// Which frontend measured a run, from the contract version it recorded.
@@ -2566,15 +2797,20 @@ fn current_integrity_for_run(
     run: &StoredRun,
 ) -> Option<supercov_engine::run_store::RunIntegrity> {
     let command = &run.metadata.command;
+    let roots = run.metadata.source_roots.as_deref();
     match frontend_of(&run.metadata.integrity.instrumenter_version) {
-        Frontend::Rust => supercov_engine::rust_run::current_rust_integrity(root, command).ok(),
-        Frontend::Ruby => supercov_engine::ruby_run::current_ruby_integrity(root, command).ok(),
-        Frontend::Python => {
-            supercov_engine::python_run::current_python_integrity(root, command).ok()
+        Frontend::Rust => {
+            supercov_engine::rust_run::current_rust_integrity(root, command, roots).ok()
         }
-        Frontend::Go => supercov_engine::go_run::current_go_integrity(root, command).ok(),
-        Frontend::Jvm => supercov_engine::jvm_run::current_jvm_integrity(root, command).ok(),
-        Frontend::JavaScript => current_javascript_integrity(root, command),
+        Frontend::Ruby => {
+            supercov_engine::ruby_run::current_ruby_integrity(root, command, roots).ok()
+        }
+        Frontend::Python => {
+            supercov_engine::python_run::current_python_integrity(root, command, roots).ok()
+        }
+        Frontend::Go => supercov_engine::go_run::current_go_integrity(root, command, roots).ok(),
+        Frontend::Jvm => supercov_engine::jvm_run::current_jvm_integrity(root, command, roots).ok(),
+        Frontend::JavaScript => current_javascript_integrity(root, command, roots),
     }
 }
 
@@ -2831,7 +3067,7 @@ fn execute_public_query(
                         data.command.clone_from(&run.metadata.command);
                         if run.directory.join(supercov_engine::assertion_store::MAP_FILE).exists() {
                             data.assertion_coverage = Some(match if current.as_ref().is_some_and(|c| !compare_run_integrity(Some(&run.metadata.integrity), c).stale) {
-                                supercov_engine::assertion_store::report(root, run)
+                                supercov_engine::assertion_store::report_summary(root, run)
                             } else { Err("Current checkout differs from the run or cannot be verified; rerun tests to inherit the assertion map".into()) } {
                                 Ok(report) => serde_json::json!({"available":true,"summary":report["summary"],"basis":report["basis"],"revision":report["revision"],"inheritance":report["inheritance"],"map":run.directory.join(supercov_engine::assertion_store::MAP_FILE),"validationErrors":report["validationErrors"],"scope":"whole run with matching current source; independent of structural query filters"}),
                                 Err(error) => serde_json::json!({"available":false,"error":error}),
@@ -4276,6 +4512,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_timings_line_reports_publication_and_the_whole_command() {
+        let timings = supercov_engine::run_store::RunTimings {
+            initialization_ms: 1.0,
+            workspace_preparation_ms: 2.0,
+            adapter_setup_ms: 3.0,
+            instrumented_build_ms: 4.0,
+            test_command_ms: 5.0,
+            evidence_publication_ms: 6.0,
+        };
+        // Published: the command ran 30 ms, 21 of them before the engine's
+        // clock stopped, so publication took the other 9 and total is 30.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, Some(30.0)),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms publication=9ms total=30ms"
+        );
+        // A clock that reads a hair under the engine's never reports negative
+        // publication or a total below what the engine measured.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, Some(20.9)),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms publication=0ms total=21ms"
+        );
+        // Interrupted: nothing was published, and the line says only that.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, None),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms total=21ms"
+        );
+    }
+
+    #[test]
     fn shell_reports_the_public_engine() {
         assert!(HELP.contains("Code quality and coverage for coding agents"));
         assert!(HELP.contains("full test command"));
@@ -4555,11 +4820,22 @@ mod tests {
             removed_runs: vec!["run-1".into(), "run-0".into()],
             removed_workspaces: vec!["run-1".into()],
             removed_evidence: vec![],
+            removed_failed_evidence: vec![],
             removed_build_cache: false,
         };
         assert_eq!(
             cleanup_summary(0, false, &result),
             "[supercov] removed 2 stored run(s), 1 per-run workspace(s), and no isolated build cache; keeping 0 newest run(s)"
+        );
+        // Kept evidence is the one thing here a user cannot get back, so the
+        // line says it went rather than leaving it to the run count.
+        let with_kept = supercov_engine::lifecycle::CleanupResult {
+            removed_failed_evidence: vec!["run_kept".into()],
+            ..result
+        };
+        assert_eq!(
+            cleanup_summary(0, false, &with_kept),
+            "[supercov] removed 2 stored run(s), 1 per-run workspace(s), the kept evidence of 1 failed run(s), and no isolated build cache; keeping 0 newest run(s)"
         );
     }
 

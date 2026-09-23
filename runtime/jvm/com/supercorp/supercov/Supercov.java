@@ -80,6 +80,13 @@ public final class Supercov {
     // required: a test that reports nothing finished normally, and the
     // runtime should not need the framework's cooperation to say so.
     String status = "passed";
+    /// Whether what this test reached could be credited to it. False for every
+    /// record once tests have been seen running at once: the test ran and has
+    /// an outcome, and its coverage is in the run-wide totals rather than its
+    /// own. Leaving such a test out entirely reads downstream as a test that
+    /// never ran, and a suite of nothing but concurrent tests then published
+    /// no tests at all.
+    boolean unattributed = false;
     final List<int[]> probes = new ArrayList<>();
     final List<long[]> vectors = new ArrayList<>();
 
@@ -137,11 +144,18 @@ public final class Supercov {
       overlap();
     }
     open++;
-    if (overlapped) {
-      return;
-    }
     Record record = new Record(name);
     record.runner = runner;
+    if (overlapped) {
+      // Named and credited with nothing. `current` is left alone so no probe
+      // is attributed to it, and the thread remembers which record is its own
+      // so the outcome can still be written when the test ends -- tests that
+      // overlap do not finish in the order they started.
+      record.unattributed = true;
+      records.add(record);
+      concurrentRecord.set(records.size() - 1);
+      return;
+    }
     records.add(record);
     current = records.size() - 1;
   }
@@ -153,7 +167,13 @@ public final class Supercov {
 
   /** Ends the running test, recording how the framework says it ended. */
   public static synchronized void exitTest(String status) {
-    if (!overlapped && current >= 0 && current < records.size()) {
+    if (overlapped) {
+      Integer mine = concurrentRecord.get();
+      if (mine != null && mine >= 0 && mine < records.size()) {
+        records.get(mine).status = status;
+      }
+      concurrentRecord.remove();
+    } else if (current >= 0 && current < records.size()) {
       records.get(current).status = status;
     }
     harvest();
@@ -179,12 +199,25 @@ public final class Supercov {
    * <p>Supercov disables parallel execution in the workspace it generates, so
    * reaching this means something else turned it back on.
    */
+  /// Which record belongs to the test this thread is running, once records
+  /// stopped being attributable. Tests that overlap do not end in the order
+  /// they began, so the outcome cannot be written to whichever was last.
+  private static final ThreadLocal<Integer> concurrentRecord = new ThreadLocal<>();
+
   private static void overlap() {
     if (overlapped) {
       return;
     }
     overlapped = true;
-    records.clear();
+    // What was recorded before the overlap was noticed may have had a
+    // neighbour's hits swept into it, so no record keeps its probes. They keep
+    // their names and outcomes: those tests ran, and saying otherwise is how a
+    // concurrent suite came to publish nothing at all.
+    for (Record earlier : records) {
+      earlier.unattributed = true;
+      earlier.probes.clear();
+      earlier.vectors.clear();
+    }
     current = -1;
     // Condition state is read-modify-write, so concurrent evaluations lose
     // updates and the vectors they produce describe an evaluation that never
@@ -378,6 +411,12 @@ public final class Supercov {
         byte[] status = record.status.getBytes("UTF-8");
         putLong(out, status.length);
         out.write(status);
+        // Whether the probes below are this test's own. Every JUnit Platform
+        // and TestNG lifecycle this attaches to reports one test at a time, so
+        // it always is -- but the reader is shared with frontends where that
+        // is not true, and a field written by one writer and not the other is
+        // not a format, it is a guess about which wrote the file.
+        putLong(out, record.unattributed ? 1 : 0);
         byte[] runner = record.runner.getBytes("UTF-8");
         putLong(out, runner.length);
         out.write(runner);

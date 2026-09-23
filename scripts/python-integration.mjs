@@ -1,26 +1,33 @@
 #!/usr/bin/env node
-// End-to-end conformance gate for the owned Python frontend. A real supported
-// CPython runs the public CLI through serial pytest, xdist, reruns, a killed
-// worker, concurrency adapters, unittest and the instruction-position corpus.
-// The coverage.py fixture remains an independent line/branch-outcome oracle;
-// coverage.py itself is never imported by the product path.
+// End-to-end conformance gate for the Python frontend, on one interpreter:
+// SUPERCOV_PYTHON when set -- CI runs this once per supported CPython, 3.9
+// through 3.14 -- otherwise the newest on PATH. The public CLI measures
+// serial pytest, xdist, reruns, a killed worker, signalled children,
+// concurrency adapters, unittest and the position corpus, and every total is
+// pinned: the suites that avoid `match` must produce identical numbers on
+// every interpreter, and the full suites (3.10+) theirs. Then what probes
+// compiled at import have to get right on their own: bytecode left in
+// pytest's cache, nothing written into the project, and what cannot be
+// observed declared rather than missed. The coverage.py fixture remains an
+// independent line/branch-outcome oracle; coverage.py itself is never
+// imported by the product path.
 
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, delimiter, resolve } from 'node:path';
+import { basename, delimiter, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const launcher = resolve(repository, 'bin/supercov.js');
-const monitoringFixture = resolve(repository, 'tests/fixtures/python-monitoring');
+const conformanceFixture = resolve(repository, 'tests/fixtures/python-conformance');
 const positionFixture = resolve(repository, 'tests/fixtures/python-position-corpus');
 const oracleFixture = resolve(repository, 'tests/fixtures/python-pytest');
 // The runner spells TEMP as an 8.3 short name; the product resolves paths
 // to long names, and a Ruby load path in two spellings loads every file
 // twice. Real installations live under long names, so hand it those.
-const temporary = mkdtempSync(resolve(realpathSync.native(tmpdir()), 'supercov-python-monitoring-'));
+const temporary = mkdtempSync(resolve(realpathSync.native(tmpdir()), 'supercov-python-'));
 
 function interpreterVersion(program) {
   const probe = spawnSync(program, ['-c', 'import sys; print(sys.version_info[0], sys.version_info[1])'], {
@@ -31,16 +38,21 @@ function interpreterVersion(program) {
   return { major, minor };
 }
 
+// The interpreter named is the one measured: a CI job for 3.9 that quietly
+// fell back to the runner's own newer Python would prove nothing about 3.9.
 function findInterpreter() {
-  const candidates = process.env.SUPERCOV_PYTHON
-    ? [process.env.SUPERCOV_PYTHON]
-    : ['python3.14', 'python3.13', 'python3.12', 'python3', 'python'];
+  const named = process.env.SUPERCOV_PYTHON;
+  const candidates = named
+    ? [named]
+    : ['python3.14', 'python3.13', 'python3.12', 'python3.11', 'python3.10', 'python3.9', 'python3', 'python'];
   for (const candidate of candidates) {
     const version = interpreterVersion(candidate);
-    if (version && version.major === 3 && version.minor >= 12) return candidate;
+    if (version && version.major === 3 && version.minor >= 9) return { program: candidate, version };
   }
   throw new Error(
-    'python-monitoring integration needs CPython 3.12 or newer on PATH (or SUPERCOV_PYTHON)',
+    named
+      ? `SUPERCOV_PYTHON=${named} is not CPython 3.9 or newer`
+      : 'python integration needs CPython 3.9 or newer on PATH (or SUPERCOV_PYTHON)',
   );
 }
 
@@ -137,24 +149,33 @@ function decisionVectors(project, location, environment, filter = null) {
     .sort();
 }
 
-function assertFixtureTotals(summary) {
-  assert.equal(summary.model.variant, 'python-owned-monitoring');
+function totals(summary) {
+  const coverage = summary.coverage;
+  return [
+    coverage.lines.covered, coverage.lines.total,
+    coverage.statements.covered, coverage.statements.total,
+    coverage.functions.covered, coverage.functions.total,
+    coverage.branches.covered, coverage.branches.total,
+    coverage.coveredConditions, coverage.conditions,
+  ];
+}
+
+// Lines, statements, functions, branches, conditions: covered then total.
+// `core` leaves out tests/test_patterns.py, whose `match` 3.9 cannot parse,
+// and has to come out the same on every interpreter.
+const FIXTURE_TOTALS = {
+  full: [81, 82, 83, 84, 18, 18, 79, 94, 8, 16],
+  core: [75, 82, 77, 84, 17, 18, 69, 94, 8, 16],
+};
+const CORPUS_TOTALS = {
+  full: [67, 67, 69, 69, 17, 17, 94, 114, 12, 27],
+  core: [61, 67, 63, 69, 16, 17, 82, 114, 12, 27],
+};
+
+function assertFixtureTotals(summary, expected = FIXTURE_TOTALS.full) {
+  assert.equal(summary.model.variant, 'python-owned-probes');
   assert.equal(summary.measurement.complete, true, JSON.stringify(summary.measurement));
-  assert.deepEqual(
-    [summary.coverage.lines.covered, summary.coverage.lines.total],
-    [81, 82],
-    JSON.stringify(summary.coverage),
-  );
-  assert.deepEqual(
-    [summary.coverage.branches.covered, summary.coverage.branches.total],
-    [79, 94],
-    JSON.stringify(summary.coverage),
-  );
-  assert.deepEqual(
-    [summary.coverage.coveredConditions, summary.coverage.conditions],
-    [8, 16],
-    JSON.stringify(summary.coverage),
-  );
+  assert.deepEqual(totals(summary), expected, JSON.stringify(summary.coverage));
   assert.equal(summary.testExitCode, 0);
 }
 
@@ -178,34 +199,57 @@ function assertOracleAgreement(project, environment) {
 }
 
 try {
-  const python = findInterpreter();
+  const { program: python, version } = findInterpreter();
+  // `match` arrived in 3.10 and `except*` in 3.11.
+  const hasMatch = version.minor >= 10;
+  const hasExceptStar = version.minor >= 11;
   const venv = resolve(temporary, 'venv');
   run(python, ['-m', 'venv', venv]);
   const venvPython = resolve(venv, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   run(venvPython, [
     '-m', 'pip', 'install', '--disable-pip-version-check', '-q',
-    'pytest', 'pytest-xdist', 'pytest-rerunfailures',
+    'pytest', 'pytest-xdist', 'pytest-rerunfailures', 'pytest-subtests',
   ]);
 
-  const project = createProject(monitoringFixture, 'monitoring');
+  const project = createProject(conformanceFixture, 'conformance');
   const environment = environmentFor(project, venv);
+  const suite = hasMatch ? ['tests'] : ['tests', '--ignore=tests/test_patterns.py'];
+  const ranTestFiles = ['tests/test_shapes.py', 'tests/test_unittest_style.py', ...(hasMatch ? ['tests/test_patterns.py'] : [])];
+  const fixtureTotals = hasMatch ? FIXTURE_TOTALS.full : FIXTURE_TOTALS.core;
+
+  // The same suite on every interpreter, the same numbers.
+  successfulSupercov(
+    project,
+    ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests', '--ignore=tests/test_patterns.py'],
+    environment,
+  );
+  assertFixtureTotals(query(project, ['runs', 'latest'], environment), FIXTURE_TOTALS.core);
 
   const serial = successfulSupercov(
     project,
-    ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests'],
+    ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', ...suite],
     environment,
   );
   assert.match(serial.stdout, /\[coverage\] evidence:/);
-  assert.match(serial.stderr, /14 test\(s\) across 2 source file\(s\)/);
-  assert.match(serial.stderr, /interpreter process\(es\) on Python 3\./);
-  assertFixtureTotals(query(project, ['runs', 'latest'], environment));
+  // Publication analyses the evidence once and stores what the first query
+  // reads, and says what that cost: a run's query views used to be analysed
+  // twice more, untimed, by the first query after it.
+  const evidencePath = serial.stdout.match(/\[coverage\] evidence: (.+)/)[1].trim();
+  const runDirectory = evidencePath.slice(0, -'evidence.raw.gz'.length);
+  for (const name of ['query-index.v1.bin', 'assertions.summary.cache.json']) {
+    assert.ok(existsSync(resolve(runDirectory, name)), `publication wrote ${name} before any query`);
+  }
+  assert.match(serial.stderr, /\[supercov\] timings .* evidence=\d+(?:\.\d)?ms publication=\d+(?:\.\d)?ms total=/);
+  assert.match(serial.stderr, new RegExp(`${hasMatch ? 14 : 13} test\\(s\\) across 3 source file\\(s\\)`));
+  assert.match(serial.stderr, new RegExp(`interpreter process\\(es\\) on Python 3\\.${version.minor}\\.`));
+  assertFixtureTotals(query(project, ['runs', 'latest'], environment), fixtureTotals);
   // pytest's rewriter reports the line of each assert it passes, and a
   // TestCase pytest runs reaches the wrapped unittest methods instead.
   assertAssertionsAreObserved(
     project,
     environment,
     'pytest',
-    ['tests/test_shapes.py', 'tests/test_unittest_style.py'],
+    ranTestFiles,
     // The only assertion in an @unittest.expectedFailure test: it fails by
     // design, so it never has a passing occurrence to witness with.
     ['tests/test_unittest_style.py:19'],
@@ -216,26 +260,33 @@ try {
     'not (a and b) keeps both operands as conditions',
   );
 
+  // test_account builds its Account before its first assertion: that line
+  // is the assertion's evidence, and must be linked to it.
+  const beforeAssertion = query(project, ['runs', 'latest', 'line', 'app/shapes.py:70'], environment);
+  assert.ok(
+    beforeAssertion.phases.some((phase) => phase.kind === 'assertion' && phase.source.endsWith('test_account')),
+    `evidence before the first assertion links to it: ${JSON.stringify(beforeAssertion.phases)}`,
+  );
   const comprehension = query(project, ['runs', 'latest', 'decision', 'app/shapes.py:12'], environment);
   assert.equal(comprehension.decisions[0].executed, true, 'comprehension filter mapped by offset order');
   const subprocessLine = query(project, ['runs', 'latest', 'line', 'app/shapes.py:34'], environment);
   assert.match(JSON.stringify(subprocessLine), /test_thread_and_subprocess/, 'child interpreter inherits exact identity');
-  const exceptions = query(project, ['runs', 'latest', 'line', 'app/shapes.py:93'], environment);
+  const exceptions = query(project, ['runs', 'latest', 'line', 'app/shapes.py:81'], environment);
   assert.doesNotMatch(JSON.stringify(exceptions), /not observed: try completed/, 'try completion is structural');
 
   successfulSupercov(
     project,
-    ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '-n', '2', 'tests'],
+    ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '-n', '2', ...suite],
     environment,
   );
-  assertFixtureTotals(query(project, ['runs', 'latest'], environment));
+  assertFixtureTotals(query(project, ['runs', 'latest'], environment), fixtureTotals);
   // Each xdist worker is its own process with its own contexts and evidence
   // file, so the sites have to survive being joined from several of them.
   assertAssertionsAreObserved(
     project,
     environment,
     'pytest -n 2',
-    ['tests/test_shapes.py', 'tests/test_unittest_style.py'],
+    ranTestFiles,
     ['tests/test_unittest_style.py:19'],
   );
 
@@ -244,7 +295,7 @@ try {
     ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests_extended/test_rerun.py'],
     environment,
   );
-  assert.match(rerun.stderr, /1 test\(s\) across 2 source file\(s\)/, 'retry count is one logical test');
+  assert.match(rerun.stderr, /1 test\(s\) across 3 source file\(s\)/, 'retry count is one logical test');
   const rerunSummary = query(project, ['runs', 'latest'], environment);
   assert.equal(rerunSummary.tests, 1);
   assert.equal(rerunSummary.testOutcomes.flaky, 1);
@@ -269,7 +320,7 @@ try {
   assert.deepEqual(
     decisionVectors(project, 'app/shapes.py:26', crashEnvironment),
     ['TF->T', 'TT->F'],
-    'mmap retains the killed worker decision before os._exit',
+    "the killed worker's slot keeps the decision it recorded before os._exit",
   );
   assert.deepEqual(decisionVectors(project, 'app/shapes.py:26', crashEnvironment, 'failed'), ['TF->T']);
 
@@ -309,6 +360,51 @@ try {
   assert.equal(failedSubtestSummary.testOutcomes.failed, 1);
   assert.equal(failedSubtestSummary.measurement.complete, true, JSON.stringify(failedSubtestSummary.measurement));
 
+  // pytest-subtests reports every subtest as its own result under the same
+  // node id and the same call phase, so an attempt carries several outcomes
+  // for the identity a phase id is derived from. Each became a phase of its
+  // own with the same id, the run was refused whole, and a suite of 6872 tests
+  // lost two and three-quarter hours of measurement to it (#40). The same
+  // subtests as above, under the runner that narrates them one by one.
+  successfulSupercov(
+    project,
+    [
+      '--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
+      'tests_extended/test_unittest_subtests.py::SubTestCases::test_passing_subtests',
+    ],
+    environment,
+  );
+  const pytestSubtests = query(project, ['runs', 'latest'], environment);
+  assert.equal(pytestSubtests.tests, 1, 'the subtests are the one test that ran them');
+  assert.equal(pytestSubtests.testOutcomes.passed, 1);
+  assert.match(
+    JSON.stringify(query(project, ['runs', 'latest', 'line', 'app/shapes.py:35'], environment)),
+    /test_passing_subtests/,
+    'the coverage the subtests recorded belongs to the test that ran them',
+  );
+
+  // And a subtest that fails fails its test, rather than folding into a pass.
+  const failedPytestSubtest = supercov(
+    project,
+    [
+      '--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
+      'tests_extended/test_unittest_subtests.py::SubTestCases::test_failing_subtest_rolls_up',
+    ],
+    environment,
+  );
+  assert.equal(
+    failedPytestSubtest.status,
+    1,
+    `${failedPytestSubtest.stdout}\n${failedPytestSubtest.stderr}`,
+  );
+  assert.doesNotMatch(
+    `${failedPytestSubtest.stdout}${failedPytestSubtest.stderr}`,
+    /duplicate frontend phase/,
+    'the run is published rather than refused whole',
+  );
+  const failedPytestSummary = query(project, ['runs', 'latest'], environment);
+  assert.equal(failedPytestSummary.testOutcomes.failed, 1);
+
   // One failing and one passing test per runner, reported as such. Everything
   // under `tests/` passes, so a runner whose failure path broke would look
   // fine to the totals above; the Ruby gate found exactly that in test-unit.
@@ -335,10 +431,13 @@ try {
     ],
     environment,
   );
+  // Probes are placed from the parse, not from bytecode positions, so an
+  // interpreter compiling without column tables measures exactly the same.
   const noDebug = query(project, ['runs', 'latest'], environment);
-  assert(noDebug.filesWithMeasurementLimitations > 0, 'missing positions must be a blocking limitation');
-  const limitedLine = query(project, ['runs', 'latest', 'line', 'app/shapes.py:34'], environment);
-  assert.equal(limitedLine.totalRemaining, 0, 'missing positions must remove the line from the measured denominator');
+  assert.equal(noDebug.filesWithMeasurementLimitations, 0, 'no_debug_ranges costs nothing');
+  assert.equal(noDebug.measurement.complete, true, JSON.stringify(noDebug.measurement));
+  const noDebugLine = query(project, ['runs', 'latest', 'line', 'app/shapes.py:35'], environment);
+  assert.equal(noDebugLine.covered, true, 'the line test_chained runs is covered without column tables');
 
   const isolated = supercov(
     project,
@@ -353,9 +452,10 @@ try {
 
   const positionProject = createProject(positionFixture, 'positions');
   const positionEnvironment = environmentFor(positionProject, venv);
+  const corpusSuite = hasMatch ? ['tests'] : ['tests', '--ignore=tests/test_patterns.py'];
   successfulSupercov(
     positionProject,
-    ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests'],
+    ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', ...corpusSuite],
     positionEnvironment,
   );
   const positionSummary = query(positionProject, ['runs', 'latest'], positionEnvironment);
@@ -371,19 +471,8 @@ try {
   );
   assert.equal(positionSummary.testExitCode, 0);
   assert.deepEqual(
-    [
-      positionSummary.coverage.lines.covered,
-      positionSummary.coverage.lines.total,
-      positionSummary.coverage.statements.covered,
-      positionSummary.coverage.statements.total,
-      positionSummary.coverage.functions.covered,
-      positionSummary.coverage.functions.total,
-      positionSummary.coverage.branches.covered,
-      positionSummary.coverage.branches.total,
-      positionSummary.coverage.coveredConditions,
-      positionSummary.coverage.conditions,
-    ],
-    [67, 67, 69, 69, 17, 17, 94, 114, 12, 27],
+    totals(positionSummary),
+    hasMatch ? CORPUS_TOTALS.full : CORPUS_TOTALS.core,
     'position corpus must have identical gaps on every supported interpreter',
   );
 
@@ -485,8 +574,103 @@ try {
     );
   }
 
+  // -- what probes compiled at import have to get right on their own --------
+  // pytest keeps the bytecode it rewrote, site probes included; a plain run
+  // after a measured one must not load it, and must not see Supercov at all.
+  const venvPath = `${resolve(venv, process.platform === 'win32' ? 'Scripts' : 'bin')}${delimiter}${process.env.PATH}`;
+  successfulSupercov(project, ['--', 'python', '-m', 'pytest', '-q', ...suite], environment);
+  const plain = spawnSync('python', ['-m', 'pytest', '-q', ...suite], {
+    cwd: project,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: venvPath, PYTHONPATH: '' },
+  });
+  assert.equal(plain.status, 0, `a plain run after a measured one\n${plain.stdout}\n${plain.stderr}`);
+  assert.doesNotMatch(plain.stdout + plain.stderr, /supercov|_scv_/i, 'nothing of Supercov surfaces in a plain run');
+  // Nothing is written into the project but pytest's own cache and .supercov.
+  const stray = readdirSync(project, { recursive: true })
+    .map(String)
+    .filter((entry) => !entry.startsWith('.supercov') && !entry.startsWith('.git'))
+    .filter((entry) => /supercov|_scv_|\.slot$/i.test(basename(entry)) && !/-supercov-probes\d+(-[0-9a-f]+)?\.pyc$/.test(entry));
+  assert.deepEqual(stray, [], 'the project holds no Supercov artefacts outside .supercov and pytest\'s cache');
+
+  // A measured module pytest rewrites itself -- registered with
+  // register_assert_rewrite -- is cached by pytest under its own source's
+  // mtime. Its probes are numbered into the run's slot layout, which moves
+  // when another measured file changes; bytecode from before must not be
+  // loaded after, or its stores land on other obligations' bytes.
+  const rewritten = resolve(temporary, 'rewritten');
+  mkdirSync(resolve(rewritten, 'app'), { recursive: true });
+  mkdirSync(resolve(rewritten, 'tests'), { recursive: true });
+  writeFileSync(resolve(rewritten, 'app/__init__.py'), '');
+  writeFileSync(resolve(rewritten, 'app/helpers.py'), 'def double(x):\n    y = x * 2\n    return y\n\n\ndef unused(x):\n    return x - 1\n');
+  writeFileSync(resolve(rewritten, 'conftest.py'), 'import pytest\npytest.register_assert_rewrite("app.helpers")\n');
+  writeFileSync(resolve(rewritten, 'tests/test_helpers.py'), 'from app import helpers\n\n\ndef test_double():\n    assert helpers.double(2) == 4\n');
+  run('git', ['init', '-q', '.'], { cwd: rewritten });
+  const rewrittenEnvironment = environmentFor(rewritten, venv);
+  const helperGaps = () =>
+    query(rewritten, ['runs', 'latest', 'file', 'app/helpers.py'], rewrittenEnvironment).gapLines.map((line) => line.line);
+  successfulSupercov(rewritten, ['--', 'python', '-m', 'pytest', '-q', 'tests'], rewrittenEnvironment);
+  assert.deepEqual(helperGaps(), [6, 7]);
+  // A file ahead of it in the plan gains obligations, so its numbering moves.
+  writeFileSync(resolve(rewritten, 'app/__init__.py'), 'def a():\n    return 1\n\n\ndef b():\n    return 2\n');
+  successfulSupercov(rewritten, ['--', 'python', '-m', 'pytest', '-q', 'tests'], rewrittenEnvironment);
+  assert.deepEqual(helperGaps(), [6, 7], 'the rewritten module was measured through its current numbering');
+  assert.deepEqual(
+    totals(query(rewritten, ['runs', 'latest'], rewrittenEnvironment)).slice(0, 2),
+    [6, 9],
+    'and nothing it ran was credited to another file',
+  );
+  const helperCaches = readdirSync(resolve(rewritten, 'app/__pycache__')).filter((name) => name.startsWith('helpers.') && name.includes('-supercov-'));
+  assert.equal(helperCaches.length, 1, `one cached rewrite per module, not one per numbering: ${helperCaches}`);
+
+  // What probes cannot observe is declared on its file, never missed. An
+  // `except*` clause that matched nothing leaves no trace a probe can see
+  // (3.11+); a planned file compiled past the import system runs unprobed,
+  // and the 3.12+ detector names it.
+  const detects = version.minor >= 12;
+  if (hasExceptStar || detects) {
+    const declared = createProject(conformanceFixture, 'declared');
+    const declaredEnvironment = environmentFor(declared, venv);
+    const lines = ['import os'];
+    if (hasExceptStar) {
+      writeFileSync(
+        resolve(declared, 'app/grouped.py'),
+        'def grouped(values):\n    count = -1\n    try:\n        raise ExceptionGroup("g", [ValueError(v) for v in values])\n    except* ValueError as group:\n        count = len(group.exceptions)\n    except* TypeError:\n        count = -2\n    return count\n',
+      );
+      lines.push('from app import grouped', '', 'def test_grouped():', '    assert grouped.grouped([1, 2]) == 2', '');
+    }
+    lines.push(
+      '',
+      'def test_unprobed_copy():',
+      '    import supercov_probes',
+      '    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "shapes.py"))',
+      '    code = supercov_probes._original_compile(open(path).read(), path, "exec")',
+      '    namespace = {"__name__": "app.shapes_plain"}',
+      '    exec(code, namespace)',
+      '    assert namespace["chained"](3) == "small"',
+      '',
+    );
+    writeFileSync(resolve(declared, 'tests/test_declared.py'), lines.join('\n'));
+    successfulSupercov(
+      declared,
+      ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests/test_declared.py'],
+      declaredEnvironment,
+    );
+    const declaredSummary = query(declared, ['runs', 'latest'], declaredEnvironment);
+    assert.equal(declaredSummary.measurement.complete, false, 'a run with declared limitations is not complete');
+    const limited = Object.fromEntries(
+      query(declared, ['runs', 'latest', 'files', '--limit', '50'], declaredEnvironment)
+        .files.filter((file) => file.measurementLimitations > 0)
+        .map((file) => [file.file, file.measurementLimitations]),
+    );
+    const expected = {};
+    if (hasExceptStar) expected['app/grouped.py'] = 1;
+    if (detects) expected['app/shapes.py'] = 1;
+    assert.deepEqual(limited, expected, 'each declared limitation is named once, on its file');
+  }
+
   console.log(
-    `[python-monitoring] ${basename(python)} passed serial, xdist, retry, crash, concurrency, unittest, positions, signalled children and oracle differentials`,
+    `[python] ${basename(python)} (3.${version.minor}) passed serial, xdist, retry, crash, concurrency, unittest, positions, signalled children, oracle differentials, cache safety, renumbered rewrites and declared limitations`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });

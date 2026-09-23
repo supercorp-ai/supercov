@@ -21,6 +21,8 @@ use std::{
 pub const MAP_FILE: &str = "assertions.json";
 pub const STATE_FILE: &str = "assertions.state.json";
 const REPORT_CACHE_FILE: &str = "assertions.report.cache.json";
+/// Kept apart from the full report so a summary can never be read back as one.
+const SUMMARY_CACHE_FILE: &str = "assertions.summary.cache.json";
 pub struct RunManifest {
     pub manifest: InputManifest,
     pub evidence_digest: String,
@@ -134,10 +136,15 @@ fn write_json(
 /// Create the map inside the unpublished run directory. The lifecycle publishes
 /// evidence, map and review state together with one directory rename. Older
 /// archives without assertion manifests and merged runs retain their existing behavior.
+///
+/// `analysed` is the run's coverage when the caller has already analysed its
+/// evidence -- publication does so once for everything it derives. Without it
+/// the archive is analysed here.
 pub(crate) fn prepare_publication(
     root: &Path,
     directory: &Path,
     metadata: &RunMetadata,
+    analysed: Option<&CoverageReport>,
 ) -> Result<(), String> {
     if metadata.merged == Some(true) {
         return Ok(());
@@ -286,9 +293,17 @@ pub(crate) fn prepare_publication(
     // What each test ran, so the next carry can tell a change the test saw
     // from one it could not have. Evidence that will not analyse leaves the
     // record out; every flow is then judged by its files, as before.
-    state.executions = coverage(&run).ok().and_then(|report| {
+    let owned;
+    let analysed = match analysed {
+        Some(report) => Some(report),
+        None => {
+            owned = coverage(&run).ok();
+            owned.as_ref()
+        }
+    };
+    state.executions = analysed.and_then(|report| {
         executions(
-            &report,
+            report,
             &input.manifest,
             current.as_ref().ok().map(|inputs| &inputs.files),
         )
@@ -308,6 +323,12 @@ pub(crate) fn prepare_publication(
     state.inheritance = Some(inheritance);
     write_json(root, &run, MAP_FILE, &map)?;
     write_json(root, &run, STATE_FILE, &state)?;
+    // The summary `runs latest` shows, from the coverage already in hand. It is
+    // a cache: failing to write it costs the first query the analysis, nothing
+    // more, so it never fails the publication.
+    if let Some(report) = analysed {
+        let _ = report_with_detail_using(root, &run, None, false, Some(report));
+    }
     Ok(())
 }
 /// Each test's execution, placed in the declarations of the run's own
@@ -348,6 +369,19 @@ pub fn executions(
             probed.entry(meta.file.clone()).or_default().insert(unit);
         }
     }
+    // Everything the run reached, whoever reached it. Collected before the
+    // per-test loop because the record that holds what no test could be
+    // credited with has no test file, and the loop below skips it -- which is
+    // exactly the record a parallel suite's coverage lives in.
+    let mut covered: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for test in &coverage.view.tests {
+        for hit in &test.hits {
+            if let Some((file, unit)) = located.get(hit.as_str()) {
+                covered.entry((*file).to_owned()).or_default().insert(*unit);
+            }
+        }
+    }
+
     let mut tests: BTreeMap<TestSelector, Execution> = BTreeMap::new();
     for test in &coverage.view.tests {
         let Some(file) = &test.file else {
@@ -361,8 +395,17 @@ pub fn executions(
             test: selector,
             passed: false,
             files: BTreeMap::new(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.to_owned(),
         });
         record.passed |= test.outcome == "passed";
+        // One name can be recorded more than once -- retries, a test declared
+        // in two files -- and a single incomplete appearance is enough to make
+        // the whole record's file list a lower bound.
+        if !crate::coverage_report::coverage_is_complete(&record.attribution) {
+            // already the weaker claim
+        } else if !crate::coverage_report::coverage_is_complete(&test.attribution) {
+            record.attribution = test.attribution.clone();
+        }
         for hit in &test.hits {
             if let Some((file, unit)) = located.get(hit.as_str()) {
                 record
@@ -383,6 +426,10 @@ pub fn executions(
     Some(Executions {
         tests,
         probed: probed
+            .into_iter()
+            .map(|(file, units)| (file, units.into_iter().collect()))
+            .collect(),
+        covered: covered
             .into_iter()
             .map(|(file, units)| (file, units.into_iter().collect()))
             .collect(),
@@ -454,7 +501,58 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
             Some(json!({"file":file,"change":kind,"detail":detail}))
         })
         .collect::<Vec<_>>();
+    // What a test whose own reach is unknown could have reached.
+    //
+    // Nothing can narrow such a test below the run it ran in, and nothing
+    // needs to go wider: its reach is bounded above by what the run covered.
+    // So a change inside that bound could have reached it, and a change
+    // outside it -- code no test in the run ever ran, a file added since --
+    // could not have reached any test, this one included.
+    //
+    // That is a real narrowing rather than "always affected". It is also the
+    // only safe direction: reading an empty file list as "this change missed
+    // it" is what let a change to code every test exercised report `0 of 2
+    // tests affected` and exit 0, which an agent running only affected tests
+    // would act on by running nothing.
+    let beyond_the_run = changes
+        .iter()
+        .filter_map(|(file, change)| match change {
+            FileChange::Same | FileChange::CommentsOnly | FileChange::Added => None,
+            FileChange::Removed => Some(format!("{file} removed (the run covered code in it)")),
+            FileChange::Bytes => Some(format!("{file} changed (the run covered code in it)")),
+            FileChange::Code { before, diff, .. } => {
+                // Unit by unit rather than file by file: a function no test
+                // ran sits in the same file as the ones they did, so asking
+                // whether the file was covered would make every change to it
+                // reach every test.
+                let code = manifest.files.get(*file).and_then(|f| f.code.as_ref());
+                let reached = executions
+                    .covered
+                    .get(*file)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .flat_map(|unit| match code {
+                        Some(code) if *unit < code.units.len() => {
+                            code.ancestors(*unit).collect::<Vec<_>>()
+                        }
+                        _ => vec![*unit],
+                    })
+                    .collect::<BTreeSet<_>>();
+                let hit = diff
+                    .changed
+                    .iter()
+                    .filter(|unit| reached.contains(unit))
+                    .filter_map(|unit| before.units.get(*unit))
+                    .collect::<Vec<_>>();
+                (!hit.is_empty())
+                    .then(|| format!("{file}: {} changed (the run covered it)", named(hit)))
+            }
+        })
+        .collect::<Vec<_>>();
+
     let mut affected = Vec::new();
+    let mut undetermined = Vec::new();
     let mut unaffected = Vec::new();
     for record in &executions.tests {
         let mut reasons = Vec::new();
@@ -520,6 +618,34 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                 }
             }
         }
+        if !crate::coverage_report::coverage_is_complete(&record.attribution) {
+            // What its own record proves is the strong claim, and it keeps it:
+            // a Ruby test credited with the changed line ran the changed line,
+            // whatever else it also ran unrecorded.
+            let proven = !reasons.is_empty();
+            // The run's bound is what stands in for a record this test does
+            // not have. Where it has one that already proves the change
+            // reached it, saying so twice says nothing twice.
+            if !proven {
+                reasons.extend(beyond_the_run.iter().cloned());
+                reasons.sort();
+                reasons.dedup();
+            }
+            let entry = json!({
+                "file": record.test.file,
+                "name": record.test.name,
+                "reasons": reasons,
+                "attribution": record.attribution,
+            });
+            if proven {
+                affected.push(entry);
+            } else if reasons.is_empty() {
+                unaffected.push(entry);
+            } else {
+                undetermined.push(entry);
+            }
+            continue;
+        }
         let entry = json!({"file":record.test.file,"name":record.test.name,"reasons":reasons});
         if reasons.is_empty() {
             unaffected.push(entry);
@@ -530,10 +656,23 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     Ok(json!({
         "run": run.id,
         "affected": affected,
+        // Kept apart from `affected` because they are a different claim. A
+        // test is affected when a change reached code it is recorded as having
+        // run; it is undetermined when nothing recorded what it ran and the
+        // change is inside what the run as a whole covered. Merging them would
+        // report a precision the run does not have -- but both have to be run,
+        // so both are in `--names`.
+        "undetermined": undetermined,
         "unaffected": unaffected,
         "changedFiles": files,
-        "summary": {"tests": executions.tests.len(), "affected": affected.len(), "unaffected": unaffected.len(), "changedFiles": files.len()},
-        "meaning": "Tests whose recorded execution a change since the run could have reached. A file the run never captured, a dependency or a configuration change is not seen here; see workingTree."
+        "summary": {
+            "tests": executions.tests.len(),
+            "affected": affected.len(),
+            "undetermined": undetermined.len(),
+            "unaffected": unaffected.len(),
+            "changedFiles": files.len(),
+        },
+        "meaning": "Tests whose recorded execution a change since the run could have reached, and those whose execution nothing recorded: a test that ran alongside others has no coverage of its own, so it is undetermined whenever a change reaches anything the run covered. Run both. A file the run never captured, a dependency or a configuration change is not seen here; see workingTree."
     }))
 }
 /// How a difference between two runs reaches the flows inherited across it.
@@ -583,10 +722,28 @@ pub fn coverage(run: &StoredRun) -> Result<CoverageReport, String> {
     .map_err(|e| format!("{e:?}"))
 }
 fn byte_column(source: &str, line: usize, column: usize, language: &str) -> Option<usize> {
+    byte_column_in(
+        source,
+        &crate::assertion_map::line_starts(source),
+        line,
+        column,
+        language,
+    )
+}
+
+/// `byte_column`, given where each line starts, so that resolving a whole
+/// file's statements looks each line up instead of walking the file to it.
+fn byte_column_in(
+    source: &str,
+    starts: &[usize],
+    line: usize,
+    column: usize,
+    language: &str,
+) -> Option<usize> {
     if line == 0 {
         return None;
     }
-    let line = source.lines().nth(line - 1)?;
+    let line = crate::assertion_map::line_text(source, starts, line)?;
     if language != "javascript" {
         // Native Rust, Python and Ruby manifests use zero-based byte columns.
         return column.checked_add(1);
@@ -626,13 +783,33 @@ fn phase_location<'a>(
 /// Cache derived assessments separately from immutable coverage evidence.
 /// Every query still verifies current source, map and managed-state identities.
 pub fn report(root: &Path, run: &StoredRun) -> Result<Value, String> {
-    report_with_detail(root, run, None)
+    report_with_detail(root, run, None, true)
+}
+/// The report `runs latest` shows: every count, none of the per-statement and
+/// per-line lists. See `assess_summary`.
+pub fn report_summary(root: &Path, run: &StoredRun) -> Result<Value, String> {
+    report_with_detail(root, run, None, false)
 }
 /// Read authored flows and their assessment from the same map snapshot.
 pub fn assertion(root: &Path, run: &StoredRun, id: &str) -> Result<Value, String> {
-    report_with_detail(root, run, Some(id))
+    report_with_detail(root, run, Some(id), true)
 }
-fn report_with_detail(root: &Path, run: &StoredRun, id: Option<&str>) -> Result<Value, String> {
+fn report_with_detail(
+    root: &Path,
+    run: &StoredRun,
+    id: Option<&str>,
+    detail: bool,
+) -> Result<Value, String> {
+    report_with_detail_using(root, run, id, detail, None)
+}
+/// `report_with_detail`, given the run's coverage when it is already analysed.
+fn report_with_detail_using(
+    root: &Path,
+    run: &StoredRun,
+    id: Option<&str>,
+    detail: bool,
+    analysed: Option<&CoverageReport>,
+) -> Result<Value, String> {
     let input = load_inputs(root, run)?;
     let (map, state) = load(run, &input)?;
     let cache_key = digest(&(
@@ -643,23 +820,38 @@ fn report_with_detail(root: &Path, run: &StoredRun, id: Option<&str>) -> Result<
         &state,
         &input.evidence_digest,
     ));
-    let cache_path = run.directory.join(REPORT_CACHE_FILE);
+    let cache_file = if detail {
+        REPORT_CACHE_FILE
+    } else {
+        SUMMARY_CACHE_FILE
+    };
+    let cache_path = run.directory.join(cache_file);
     let mut report = read_report_cache(&cache_path, &cache_key).unwrap_or_else(|| Value::Null);
     if report.is_null() {
-        let coverage = coverage(run)?;
-        report = assess(
+        let owned;
+        let coverage = match analysed {
+            Some(report) => report,
+            None => {
+                owned = coverage(run)?;
+                &owned
+            }
+        };
+        report = assess_with(
             &map,
             &state,
             &input.inputs,
-            &coverage,
+            coverage,
             run.metadata.test_exit_code == Some(0),
+            detail,
         );
-        report["excludedStatements"] = json!(input.statement_exclusions);
+        if detail {
+            report["excludedStatements"] = json!(input.statement_exclusions);
+        }
         report["summary"]["excludedStatements"] = json!(input.statement_exclusions.len());
         // This is disposable acceleration. A read-only directory or corrupt
         // cache must never prevent a freshly computed report from working.
         let cached = json!({"key":cache_key,"digest":digest(&report),"report":report});
-        let _ = write_json(root, run, REPORT_CACHE_FILE, &cached);
+        let _ = write_json(root, run, cache_file, &cached);
     }
     if let Some(id) = id {
         let matches = report["assertions"]
@@ -721,7 +913,37 @@ pub fn assess(
     coverage: &CoverageReport,
     passed: bool,
 ) -> Value {
+    assess_with(map, state, inputs, coverage, passed, true)
+}
+
+/// The assessment's summary and everything but its per-statement and per-line
+/// lists. `runs latest` shows five fields of the assessment and used to build
+/// all of it to get them: every measured statement, each carrying the source of
+/// the node around it. On a 300-file project that was 300,000 entries, a 177 MB
+/// cache, and 4 GB held to print a handful of counts. Every count is computed
+/// the same way here as in the full assessment; only the lists are skipped.
+pub fn assess_summary(
+    map: &AssertionMap,
+    state: &State,
+    inputs: &Inputs,
+    coverage: &CoverageReport,
+    passed: bool,
+) -> Value {
+    assess_with(map, state, inputs, coverage, passed, false)
+}
+
+fn assess_with(
+    map: &AssertionMap,
+    state: &State,
+    inputs: &Inputs,
+    coverage: &CoverageReport,
+    passed: bool,
+    detail: bool,
+) -> Value {
     let manifest = inputs.manifest();
+    // Every statement is located in its file below, so each file's line starts
+    // are found once here rather than by a walk from the top per statement.
+    let lines = crate::assertion_map::LineIndex::new(&inputs.files);
     let ledger = model::Ledger::new(map, state, &manifest);
     let validation = model::validation(map, state, inputs);
     let errors = validation["errors"]
@@ -741,7 +963,7 @@ pub fn assess(
         .tests
         .iter()
         .filter(|t| t.role == "test")
-        .map(|t| (&t.id, t))
+        .map(|t| (t.id.as_str(), t))
         .collect::<BTreeMap<_, _>>();
     let measured_statements = view
         .points
@@ -758,7 +980,7 @@ pub fn assess(
         .view
         .tests
         .iter()
-        .map(|t| (&t.id, t))
+        .map(|t| (t.id.as_str(), t))
         .collect::<BTreeMap<_, _>>();
     let mut by_file = BTreeMap::<&str, Vec<(usize, &crate::coverage_report::PointResult)>>::new();
     let mut by_line = BTreeMap::<(String, usize), Vec<&crate::coverage_report::PointResult>>::new();
@@ -767,9 +989,14 @@ pub fn assess(
             .entry((point.meta.file.clone(), point.meta.line))
             .or_default()
             .push(point);
-        if let Some(text) = inputs.files.get(&point.meta.file)
-            && let Some(column) =
-                byte_column(text, point.meta.line, point.meta.column, &inputs.language)
+        if let Some((text, starts)) = lines.get(&point.meta.file)
+            && let Some(column) = byte_column_in(
+                text,
+                starts,
+                point.meta.line,
+                point.meta.column,
+                &inputs.language,
+            )
         {
             let at = Anchor {
                 file: point.meta.file.clone(),
@@ -777,7 +1004,7 @@ pub fn assess(
                 column,
                 text: point.meta.source.clone(),
             };
-            if let Some(start) = at.offset(&inputs.files) {
+            if let Some(start) = at.offset_in(text, starts) {
                 by_file
                     .entry(&point.meta.file)
                     .or_default()
@@ -808,7 +1035,7 @@ pub fn assess(
     // for every assertion/phase pair. This is evidence lookup, not inference.
     let mut phases_by_location = BTreeMap::new();
     for p in &view.phases {
-        if !tests.contains_key(&p.test) {
+        if !tests.contains_key(p.test.as_str()) {
             continue;
         }
         if let Some(location) = phase_location(&p.phase, inputs) {
@@ -908,7 +1135,10 @@ pub fn assess(
                     })
                     .collect::<Vec<_>>();
                 let status = match matches.as_slice() {
-                    [test] if witnesses.contains(&test.id) && tests.contains_key(&test.id) => {
+                    [test]
+                        if witnesses.contains(test.id.as_str())
+                            && tests.contains_key(test.id.as_str()) =>
+                    {
                         resolved.insert(test.id.clone());
                         "observed"
                     }
@@ -966,7 +1196,7 @@ pub fn assess(
                     .iter()
                     .filter(|p| p.covered)
                     .flat_map(|p| p.tests.iter())
-                    .filter(|test| applicable.contains(*test))
+                    .filter(|test| applicable.contains(test.as_str()))
                     .collect::<BTreeSet<_>>();
                 let credited = claimed && eligible && !matching_tests.is_empty();
                 let mut reasons = Vec::new();
@@ -1016,10 +1246,11 @@ pub fn assess(
                                 .filter(|p| p.covered)
                                 .collect::<Vec<_>>();
                             if !executed.is_empty() {
-                                let setup = executed
-                                    .iter()
-                                    .flat_map(|p| &p.tests)
-                                    .any(|id| all_tests.get(id).is_some_and(|t| t.role == "setup"));
+                                let setup = executed.iter().flat_map(|p| &p.tests).any(|id| {
+                                    all_tests
+                                        .get(id.as_str())
+                                        .is_some_and(|t| t.role == "setup")
+                                });
                                 reason(if setup {"shared_setup_execution"} else {"execution_outside_passing_tests"},
                                     if setup {"Execution was recorded in a separate setup scope. Shared setup is not automatically credited to consuming tests."} else {"Execution was recorded outside passing tests (for example module initialization, background work or a failed test). It cannot establish same-test execution."}.into());
                             }
@@ -1029,11 +1260,11 @@ pub fn assess(
                                     .into(),
                             );
                         } else if !applicable.is_empty() && matching_tests.is_empty() {
-                            if matched
-                                .iter()
-                                .flat_map(|p| &p.tests)
-                                .any(|id| all_tests.get(id).is_some_and(|t| t.role == "setup"))
-                            {
+                            if matched.iter().flat_map(|p| &p.tests).any(|id| {
+                                all_tests
+                                    .get(id.as_str())
+                                    .is_some_and(|t| t.role == "setup")
+                            }) {
                                 reason("shared_setup_execution", "Execution was recorded in a separate setup scope. Shared setup is not automatically credited to consuming tests.".into());
                             }
                             reason("no_same_test_execution", "No execution evidence attributed to a selected passing test for this assertion.".into());
@@ -1052,7 +1283,7 @@ pub fn assess(
                     claimed_points.insert(point.meta.id.clone());
                     if eligible
                         && point.covered
-                        && point.tests.iter().any(|t| applicable.contains(t))
+                        && point.tests.iter().any(|t| applicable.contains(t.as_str()))
                     {
                         credited_points.insert(point.meta.id.clone());
                         point_flows
@@ -1174,16 +1405,38 @@ pub fn assess(
         })
         .count();
     let total = denominator.len();
-    let statements = measured_statements.iter().map(|p| {
-        let at = inputs.files.get(&p.meta.file)
-            .and_then(|text| byte_column(text, p.meta.line, p.meta.column, &inputs.language))
-            .map(|column| Anchor { file: p.meta.file.clone(), line: p.meta.line, column, text: p.meta.source.clone() })
-            .filter(|at| at.offset(&inputs.files).is_some());
+    // Each measured statement is located once. The detail list and the
+    // summary's count of statements that cannot be located read these same
+    // answers, so a summary built without the list cannot disagree with it.
+    let located = measured_statements
+        .iter()
+        .map(|p| {
+            let (text, starts) = lines.get(&p.meta.file)?;
+            let column =
+                byte_column_in(text, starts, p.meta.line, p.meta.column, &inputs.language)?;
+            crate::assertion_map::locate(
+                &p.meta.file,
+                p.meta.line,
+                column,
+                &p.meta.source,
+                text,
+                starts,
+            )
+            .map(|_| column)
+        })
+        .collect::<Vec<_>>();
+    let unanchored = located.iter().filter(|column| column.is_none()).count();
+    let statements = if !detail {
+        Vec::new()
+    } else {
+        measured_statements.iter().zip(&located).map(|(p, column)| {
+        let at = column.map(|column| Anchor { file: p.meta.file.clone(), line: p.meta.line, column, text: p.meta.source.clone() });
         let all = all_points.get(&p.meta.id);
         json!({"id":p.meta.id,"file":p.meta.file,"line":p.meta.line,"at":at,"covered":p.covered,"tests":p.tests,"declared":claimed_points.contains(&p.meta.id),"asserted":credited_points.contains(&p.meta.id),"flows":point_flows.get(&p.meta.id).cloned().unwrap_or_default(),
-            "executionEvidence":{"anyExecution":all.is_some_and(|p| p.covered),"passingTests":p.tests.iter().filter(|id| tests.contains_key(id)).collect::<Vec<_>>(),
-                "outsidePassingTests":all.into_iter().flat_map(|p| &p.tests).filter(|id| !tests.contains_key(id)).collect::<Vec<_>>()}})
-    }).collect::<Vec<_>>();
+            "executionEvidence":{"anyExecution":all.is_some_and(|p| p.covered),"passingTests":p.tests.iter().filter(|id| tests.contains_key(id.as_str())).collect::<Vec<_>>(),
+                "outsidePassingTests":all.into_iter().flat_map(|p| &p.tests).filter(|id| !tests.contains_key(id.as_str())).collect::<Vec<_>>()}})
+    }).collect::<Vec<_>>()
+    };
     json!({"basis":"agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
         "summary":{"status":status,"reason":reason,"pendingChanges":pending_changes,"metric":"measured statements","statements":{"asserted":credited_points.len(),"declared":claimed_points.len(),"total":measured_statements.len(),"percentage":if status != "available" { None } else {Some(credited_points.len() as f64 * 100.0 / measured_statements.len() as f64)}},"assertions":map.assertions.len(),"inventoryAssertions":inputs.assertions.len(),"missingInventoryAssertions":missing_inventory,
             "assertionsWithFlows":rows.iter().filter(|a| a["flows"].as_array().is_some_and(|f| !f.is_empty())).count(),
@@ -1193,13 +1446,13 @@ pub fn assess(
             "currentFlows":current_flows,"draftFlows":draft_flows,"staleFlows":stale_flows,"invalidFlows":invalid_flows,"eligibleFlows":credit_flows,"retiredAssertions":map.retired_assertions.len(),
             "unobservedAssertions":rows.iter().filter(|a| a["observedPassingTests"].as_array().is_none_or(Vec::is_empty)).count(),
             "inventoryFailures":inputs.limitations.iter().filter(|s| s.starts_with("Inventory unavailable for ")).count(),
-            "unanchoredStatements":statements.iter().filter(|s| s["at"].is_null()).count(),
+            "unanchoredStatements":unanchored,
             "runPassed":passed,
             "lines":{"asserted":credited.len(),"declared":declared.len(),"total":total,"percentage":if total==0 || status != "available" {None} else {Some(credited.len() as f64 * 100.0 / total as f64)}}},
         "assertions":rows,"statements":statements,"tests":coverage.view.tests.iter().map(|t| json!({"id":t.id,"file":t.file,"name":t.name,"role":t.role,"outcome":t.outcome,"provenance":t.provenance,
             "hasExecutionEvidence":!t.hits.is_empty() || !t.decisions.is_empty() || !t.lines.is_empty()})).collect::<Vec<_>>(),
-        "creditedLines":credited.iter().map(|loc| json!({"file":loc.0,"line":loc.1,"assertions":line_assertions.get(loc)})).collect::<Vec<_>>(),
-        "unassertedLines":denominator.difference(&credited).map(|(f,l)| json!({"file":f,"line":l})).collect::<Vec<_>>(),
+        "creditedLines":if !detail { Vec::new() } else { credited.iter().map(|loc| json!({"file":loc.0,"line":loc.1,"assertions":line_assertions.get(loc)})).collect::<Vec<_>>() },
+        "unassertedLines":if !detail { Vec::new() } else { denominator.difference(&credited).map(|(f,l)| json!({"file":f,"line":l})).collect::<Vec<_>>() },
         "changes":validation["changes"],"validationErrors":errors,"advisories":model::advisories(map),"limitations":inputs.limitations})
 }
 
@@ -1218,6 +1471,62 @@ mod tests {
             combined: "combined".into(),
             source_files: 1,
             test_files: 1,
+        }
+    }
+
+    /// `byte_column` as it was before it took line starts.
+    fn reference_byte_column(
+        source: &str,
+        line: usize,
+        column: usize,
+        language: &str,
+    ) -> Option<usize> {
+        if line == 0 {
+            return None;
+        }
+        let line = source.lines().nth(line - 1)?;
+        if language != "javascript" {
+            return column.checked_add(1);
+        }
+        if column == 0 {
+            return None;
+        }
+        let mut units = 0;
+        for (byte, ch) in line.char_indices() {
+            if units == column - 1 {
+                return Some(byte + 1);
+            }
+            units += ch.len_utf16();
+        }
+        (units == column - 1).then_some(line.len() + 1)
+    }
+
+    #[test]
+    fn a_column_from_line_starts_agrees_with_walking_the_file() {
+        // JavaScript columns count UTF-16 units, so text whose widths differ --
+        // accents, and an emoji that is two units -- is where they could part.
+        for source in [
+            "",
+            "a",
+            "a\n",
+            "a\r\nb\r\n",
+            "x\r",
+            "héllo\nwörld\n",
+            "😀x\ny😀z\n",
+            "const a = 1;\n  b();\n",
+        ] {
+            let starts = crate::assertion_map::line_starts(source);
+            for language in ["javascript", "python"] {
+                for line in 0..source.len() + 3 {
+                    for column in 0..source.len() + 4 {
+                        assert_eq!(
+                            byte_column_in(source, &starts, line, column, language),
+                            reference_byte_column(source, line, column, language),
+                            "{language} {line}:{column} in {source:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1283,6 +1592,75 @@ mod tests {
     }
     use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
 
+    /// Publication writes the summary `runs latest` shows from the coverage it
+    /// analysed; a query that computes it from the evidence must arrive at the
+    /// same cache, byte for byte.
+    #[test]
+    fn the_summary_written_at_publication_is_the_one_a_query_computes() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-summary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("src/app.js"),
+            "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/app.test.js"),
+            "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n",
+        )
+        .unwrap();
+        let inputs = crate::assertion_inputs::capture(
+            &root,
+            "python",
+            ["src/app.js".into(), "tests/app.test.js".into()],
+        )
+        .unwrap();
+        let directory = crate::run_store::create_analyzable_test_run(&root, "first");
+        let path = directory.join("evidence.raw.gz");
+        let entries =
+            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let archive = write_archive(entries, &path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence.files = archive.files;
+        metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let run = discover_runs(&root).unwrap().runs.remove(0);
+        let analysed = crate::run_store::analyze_stored_run(&run).unwrap();
+        // The one analysis publication makes is the one the assertion store
+        // made for itself, but for the run's integrity record, which neither
+        // the summary nor the execution record reads.
+        let mut own = coverage(&run).unwrap();
+        for (view, published) in [
+            (&mut own.view, &analysed.view),
+            (&mut own.filters.passed, &analysed.filters.passed),
+            (&mut own.filters.failed, &analysed.filters.failed),
+        ] {
+            assert!(view.integrity.is_none() && published.integrity.is_some());
+            view.integrity = published.integrity.clone();
+        }
+        assert_eq!(own, analysed);
+        prepare_publication(&root, &directory, &metadata, Some(&analysed)).unwrap();
+        let cache = directory.join(SUMMARY_CACHE_FILE);
+        let written = fs::read(&cache).expect("publication wrote the summary");
+        let summary = report_summary(&root, &run).unwrap();
+        fs::remove_file(&cache).unwrap();
+        let computed = report_summary(&root, &run).unwrap();
+        assert_eq!(fs::read(&cache).unwrap(), written, "the same cache");
+        assert_eq!(summary, computed, "and the same summary");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Publish one run over a two-function file whose test ran one of them,
     /// then ask which tests each edit affects.
     #[test]
@@ -1319,7 +1697,7 @@ mod tests {
         metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
         metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
         fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-        prepare_publication(&root, &directory, &metadata).unwrap();
+        prepare_publication(&root, &directory, &metadata, None).unwrap();
         let run = discover_runs(&root).unwrap().runs.remove(0);
         let stored = load_manifest(&run).unwrap();
         let (_, state) = load(&run, &stored).unwrap();
@@ -1420,6 +1798,198 @@ mod tests {
     }
 
     #[test]
+    fn a_test_that_ran_beside_others_is_undetermined_rather_than_unaffected() {
+        // A parallel suite's coverage sits in the record nobody could claim,
+        // and the tests beside it hold nothing of their own. Reading "this
+        // test's record does not mention the changed file" as "this test is
+        // unaffected" would answer `0 of 1 tests affected` for a change to the
+        // only code the run executed -- and an agent running only the affected
+        // tests would run nothing. The run's own bound is what stands in.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-undetermined-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        let app = "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n";
+        let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
+        fs::write(root.join("src/app.js"), app).unwrap();
+        fs::write(root.join("tests/app.test.js"), test).unwrap();
+        let inputs = crate::assertion_inputs::capture(
+            &root,
+            "python",
+            ["src/app.js".into(), "tests/app.test.js".into()],
+        )
+        .unwrap();
+        let directory = crate::run_store::create_run_wide_test_run(&root, "parallel");
+        let path = directory.join("evidence.raw.gz");
+        let entries =
+            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let archive = write_archive(entries, &path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence.files = archive.files;
+        metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        prepare_publication(&root, &directory, &metadata, None).unwrap();
+        let run = discover_runs(&root).unwrap().runs.remove(0);
+
+        let (_, state) = load(&run, &load_manifest(&run).unwrap()).unwrap();
+        let executions = state.executions.as_ref().expect("a record");
+        assert_eq!(executions.tests.len(), 1, "the named test, not the record");
+        let record = &executions.tests[0];
+        assert_eq!(
+            record.attribution,
+            crate::coverage_report::ATTRIBUTION_RUN_WIDE
+        );
+        assert!(
+            record.files.is_empty(),
+            "it is credited with nothing: {:?}",
+            record.files
+        );
+        assert!(
+            !executions.covered["src/app.js"].is_empty(),
+            "and the run is credited with what it reached"
+        );
+
+        let bucket = |value: &Value, key: &str| {
+            value[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        // Nothing changed: nothing to rerun, and the run's bound says nothing
+        // either.
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(bucket(&report, "unaffected"), ["test"], "{report}");
+        assert!(bucket(&report, "undetermined").is_empty(), "{report}");
+
+        // The one function the run executed changed. The test's own record
+        // cannot say whether it reached it, and the run's can.
+        fs::write(
+            root.join("src/app.js"),
+            app.replace("return 1;", "return 3;"),
+        )
+        .unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert!(
+            bucket(&report, "affected").is_empty(),
+            "nothing proves it ran the change: {report}"
+        );
+        assert_eq!(
+            bucket(&report, "undetermined"),
+            ["test"],
+            "the run reached it, so this test might have: {report}"
+        );
+        assert_eq!(
+            report["undetermined"][0]["attribution"],
+            crate::coverage_report::ATTRIBUTION_RUN_WIDE,
+            "{report}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_lower_bound_still_proves_what_it_recorded() {
+        // Ruby's is the other incomplete attribution: the test is credited
+        // with coverage, and that coverage is a floor rather than the whole of
+        // what it ran. The floor is still evidence -- a test credited with the
+        // changed line ran the changed line -- so it is affected outright,
+        // with its own reason, rather than swept into the bucket for tests
+        // nothing can say anything about.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-partial-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        let app = "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n";
+        let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
+        fs::write(root.join("src/app.js"), app).unwrap();
+        fs::write(root.join("tests/app.test.js"), test).unwrap();
+        let inputs = crate::assertion_inputs::capture(
+            &root,
+            "python",
+            ["src/app.js".into(), "tests/app.test.js".into()],
+        )
+        .unwrap();
+        let directory = crate::run_store::create_partial_test_run(&root, "partial");
+        let path = directory.join("evidence.raw.gz");
+        let entries =
+            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let archive = write_archive(entries, &path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence.files = archive.files;
+        metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        prepare_publication(&root, &directory, &metadata, None).unwrap();
+        let run = discover_runs(&root).unwrap().runs.remove(0);
+
+        let (_, state) = load(&run, &load_manifest(&run).unwrap()).unwrap();
+        let record = &state.executions.as_ref().expect("a record").tests[0];
+        assert_eq!(
+            record.attribution,
+            crate::coverage_report::ATTRIBUTION_PARTIAL
+        );
+        assert!(
+            !record.files.is_empty(),
+            "a lower bound is coverage it was credited with"
+        );
+
+        let names = |value: &Value, key: &str| {
+            value[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        fs::write(
+            root.join("src/app.js"),
+            app.replace("return 1;", "return 3;"),
+        )
+        .unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(
+            names(&report, "affected"),
+            ["test"],
+            "what its own record proves, it proves: {report}"
+        );
+        assert!(names(&report, "undetermined").is_empty(), "{report}");
+        // And the reason is its own, not the run's stand-in.
+        let reasons = report["affected"][0]["reasons"].as_array().unwrap();
+        assert_eq!(reasons.len(), 1, "{report}");
+        let reason = reasons[0].as_str().unwrap();
+        assert!(
+            reason.contains("this test ran it"),
+            "the reason is its own: {report}"
+        );
+        assert!(
+            !reason.contains("the run covered"),
+            "and not the run's stand-in: {report}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn legacy_maps_import_without_the_old_checkout_and_require_review() {
         let root = std::env::temp_dir().join(format!("supercov-legacy-map-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
@@ -1493,7 +2063,7 @@ mod tests {
         )
         .unwrap();
         fs::remove_file(root.join("test.js")).unwrap();
-        prepare_publication(&root, &next_directory, &next_metadata).unwrap();
+        prepare_publication(&root, &next_directory, &next_metadata, None).unwrap();
         let next_run = discover_runs(&root)
             .unwrap()
             .runs

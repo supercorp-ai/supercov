@@ -72,7 +72,7 @@ impl FrontendIntegrityInputs {
     pub fn embedded_python() -> Self {
         Self {
             language: "python".into(),
-            version: "python-monitoring-v1".into(),
+            version: crate::python_evidence::PYTHON_FRONTEND_VERSION.into(),
             root: PathBuf::from("."),
             instrumenter_files: Vec::new(),
             execution_files: Vec::new(),

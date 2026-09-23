@@ -100,15 +100,16 @@ the merge base so commits other people landed after you branched are not
 counted as yours.
 
 It asks the twelve properties differentially, whether the new version shows
-something the old one did not, and adds six checks that only make sense for a
-change:
+something the old one did not, adds three checks that only make sense for a
+change, and asks the twelve [security surface](security.md) checks the same
+differential way:
 
-- a credential written into source
-- untrusted input interpolated into a query
-- a change to how the system decides who may do what
 - a test that now checks less than it did
 - a database schema or data migration
 - debugging left behind
+- a secret in source, an injection sink, unescaped output, a path or
+  destination taken from a caller, a handler with no visible authorisation, and
+  the rest of the security catalog, each only if the change introduced it
 
 Output lists only files where something appeared. A change that introduces
 nothing says so in one line.

@@ -25,9 +25,22 @@ type testRecord struct {
 	// How the test ended, as the framework saw it. Defaulted rather than
 	// required: a test that reports nothing finished normally, and the
 	// runtime should not need the framework's cooperation to say so.
-	status  string
-	probes  []probeHit
-	vectors []vectorHit
+	status string
+	// Whether what this test reached could be credited to it.
+	//
+	// A test that called t.Parallel() stores into the same probe array as the
+	// tests running beside it, so its own reach cannot be separated from
+	// theirs. It still ran, it still has an outcome, and what it reached is
+	// still in the run-wide totals -- so the record exists and says that its
+	// probes are not its own rather than being left out, which would read
+	// downstream as a test that never ran.
+	//
+	// The distinction matters because an empty probe list means two different
+	// things. Under attribution it means the test reached nothing. Here it
+	// means nothing can say what it reached.
+	unattributed bool
+	probes       []probeHit
+	vectors      []vectorHit
 }
 
 type probeHit struct {
@@ -282,6 +295,29 @@ func flush() {
 func Checkpoint() {
 	mu.Lock()
 	harvest()
+	flush()
+	mu.Unlock()
+}
+
+// Ran records that a test ran and how it ended, without claiming any of the
+// coverage it produced.
+//
+// For the tests the harness deliberately does not announce: one that calls
+// t.Parallel(), an Example, a Fuzz target. Announcing them would bind whatever
+// ran next to them, and what runs next includes the other parallel tests.
+// Leaving them out entirely was the other extreme, and it is the one that
+// reads as a lie: a suite of nothing but parallel tests published zero tests,
+// so `runs <id> test <name>` answered "Test not found" for a test that had
+// just passed, and affected-test selection returned an empty set for a change
+// that those tests exercised.
+//
+// The record never becomes current, so no probe is ever credited to it.
+func Ran(name, status string) {
+	mu.Lock()
+	// Whatever this test reached belongs to the run before the record exists,
+	// so the sweep happens first.
+	harvest()
+	records = append(records, testRecord{name: name, status: status, unattributed: true})
 	flush()
 	mu.Unlock()
 }
@@ -628,6 +664,16 @@ func writeLocked(path string) error {
 			return err
 		}
 		if _, err := out.WriteString(record.status); err != nil {
+			return err
+		}
+		// Whether the probes below are this test's own. Written for every
+		// record rather than only the unattributed ones, so the reader never
+		// has to infer it from an absence.
+		var unattributed uint64
+		if record.unattributed {
+			unattributed = 1
+		}
+		if err := put(unattributed); err != nil {
 			return err
 		}
 		// Which runner announced the test. Go has one, so the record leaves it

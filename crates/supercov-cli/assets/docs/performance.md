@@ -21,6 +21,11 @@ The summary separates:
 | Test command | The wrapped command, including browser, VM, or remote latency |
 | Evidence publication | Validating and storing the completed run |
 
+The line Supercov prints when a run ends also reports publication: analysing
+the evidence once for the stored query views, the summary and the assertion
+map. That is why the first query after a run opens at once rather than
+analysing the evidence itself.
+
 The first `npx` invocation may also download the package. That download happens
 before Supercov starts and is not coverage-engine overhead.
 
@@ -95,6 +100,6 @@ flow, `--view nodes` or `--view edges` pages the details; `--compact` omits repe
 source text while keeping locations and credit reasons. See
 [Investigating assertion evidence](assertion-evidence.md#read-a-large-flow).
 
-The disposable `assertions.report.cache.json` file lives beside the map. A missing
-or damaged cache is rebuilt. Removing it affects the next query's speed, not
+The disposable `assertions.report.cache.json` and `assertions.summary.cache.json`
+files live beside the map. A missing or damaged cache is rebuilt. Removing it affects the next query's speed, not
 your saved explanations.

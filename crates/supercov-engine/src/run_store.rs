@@ -17,7 +17,9 @@ use supercov_contracts::EVIDENCE_ARCHIVE_SCHEMA_VERSION;
 use crate::query_index::{QUERY_INDEX_SCHEMA_VERSION, QueryIndexIdentity};
 use crate::{
     coverage_index::{CoverageIndex, CoverageIndexError, coverage_index_sections},
-    coverage_report::{ArchiveReportRequest, ExitCodeInput, ReportError, analyze_coverage_archive},
+    coverage_report::{
+        ArchiveReportRequest, CoverageReport, ExitCodeInput, ReportError, analyze_coverage_archive,
+    },
     evidence_archive::read_archive_schema_version,
     query_index::{QueryIndex, QueryIndexError, write_query_index},
 };
@@ -120,10 +122,40 @@ pub struct RunMetadata {
     pub merged: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parents: Option<Vec<String>>,
+    /// The `SUPERCOV_SOURCE_ROOTS` the run was measured under. It decides what
+    /// the run measures, so it is part of what the run is, replayed like the
+    /// command when a later query asks whether the checkout has moved on. The
+    /// environment of that later query is no guide: it is usually a different
+    /// shell, and a run judged against roots it was not measured under read as
+    /// stale the moment it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_roots: Option<Vec<String>>,
 }
 
 #[cfg(test)]
 pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
+    create_analyzable_run(root, id, None)
+}
+
+/// The same run as a suite that ran its tests at once: the coverage sits in
+/// the record nobody could be credited with, and the test beside it is named,
+/// run-wide, and holds nothing of its own. It is the shape Go publishes for a
+/// package whose tests all call `t.Parallel()`.
+#[cfg(test)]
+pub(crate) fn create_run_wide_test_run(root: &Path, id: &str) -> PathBuf {
+    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE))
+}
+
+/// The same run as a Ruby suite: the test keeps the coverage it was credited
+/// with, and that coverage is a lower bound rather than the whole of what it
+/// ran. What its own record proves, it still proves.
+#[cfg(test)]
+pub(crate) fn create_partial_test_run(root: &Path, id: &str) -> PathBuf {
+    create_analyzable_run(root, id, Some(crate::coverage_report::ATTRIBUTION_PARTIAL))
+}
+
+#[cfg(test)]
+fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> PathBuf {
     use crate::{
         coverage_analysis::{McdcVector, PointKind},
         coverage_report::{
@@ -194,6 +226,7 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
             source: "test-fixture".into(),
         },
         role: "test".into(),
+        attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
         phases: vec![],
         runtime: vec![RuntimeSnapshot {
             decisions: vec![DecisionSnapshot {
@@ -228,63 +261,96 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
         browser: vec![],
         server: vec![],
     };
-    let archive = write_archive(
-        vec![
-            EvidenceArchiveEntry {
-                path: "coverage-model.json".into(),
-                contents: serde_json::to_vec(&serde_json::json!({
-                    "schemaVersion": 1,
-                    "language": "javascript",
-                    "variant": "fixture-v1",
-                    "name": "Fixture model",
-                    "completenessMeaning": "Every fixture obligation was observed.",
-                    "measured": ["fixture obligations"],
-                    "notMeasured": []
-                }))
-                .unwrap(),
-            },
-            EvidenceArchiveEntry {
-                path: "frontend.json".into(),
-                contents: serde_json::to_vec(&serde_json::json!({
-                    "protocolVersion": 2,
-                    "frontendId": "javascript",
-                    "frontendVersion": "fixture-v1",
-                    "language": "javascript",
-                    "structuralSource": "owned-probes",
-                    "runners": [{
-                        "runner": "node:test",
-                        "executionModel": "serial-in-process",
-                        "attribution": {
-                            "run": "exact",
-                            "worker": "unavailable",
-                            "test": "exact",
-                            "retry": "exact",
-                            "phase": "exact",
-                            "action": "exact",
-                            "assertion": "exact"
-                        },
-                        "limitations": [{
-                            "id": "fixture-worker-unavailable",
-                            "scopes": ["worker"],
-                            "reason": "The fixture intentionally has no worker identity"
-                        }]
-                    }],
-                    "structuralLimitations": []
-                }))
-                .unwrap(),
-            },
-            EvidenceArchiveEntry {
-                path: "manifest.json".into(),
-                contents: serde_json::to_vec(&manifest).unwrap(),
-            },
-            EvidenceArchiveEntry {
-                path: "worker/mcdc.json".into(),
-                contents: serde_json::to_vec(&result).unwrap(),
-            },
-        ],
-        &directory.join("evidence.raw.gz"),
-    )
-    .unwrap();
+    let results = if attribution == Some(crate::coverage_report::ATTRIBUTION_PARTIAL) {
+        // It keeps its hits: a lower bound is still a claim.
+        let mut partial = result.clone();
+        partial.attribution = crate::coverage_report::ATTRIBUTION_PARTIAL.into();
+        vec![partial]
+    } else if attribution == Some(crate::coverage_report::ATTRIBUTION_RUN_WIDE) {
+        let mut unclaimed = result.clone();
+        unclaimed.test = "run".into();
+        unclaimed.test_id = Some("run".into());
+        unclaimed.test_file = None;
+        unclaimed.role = "background".into();
+        let mut parallel = result.clone();
+        parallel.attribution = crate::coverage_report::ATTRIBUTION_RUN_WIDE.into();
+        // Named, with its real outcome, and credited with nothing.
+        parallel.runtime = vec![RuntimeSnapshot {
+            decisions: vec![],
+            hits: vec![],
+            events: vec![],
+            logicals: vec![],
+        }];
+        vec![unclaimed, parallel]
+    } else {
+        vec![result]
+    };
+    let mut entries = vec![
+        EvidenceArchiveEntry {
+            path: "coverage-model.json".into(),
+            contents: serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "language": "javascript",
+                "variant": "fixture-v1",
+                "name": "Fixture model",
+                "completenessMeaning": "Every fixture obligation was observed.",
+                "measured": ["fixture obligations"],
+                "notMeasured": []
+            }))
+            .unwrap(),
+        },
+        EvidenceArchiveEntry {
+            path: "frontend.json".into(),
+            contents: serde_json::to_vec(&serde_json::json!({
+                "protocolVersion": 2,
+                "frontendId": "javascript",
+                "frontendVersion": "fixture-v1",
+                "language": "javascript",
+                "structuralSource": "owned-probes",
+                "runners": [{
+                    "runner": "node:test",
+                    "executionModel": "serial-in-process",
+                    "attribution": {
+                        "run": "exact",
+                        "worker": "unavailable",
+                        "test": "exact",
+                        "retry": "exact",
+                        "phase": "exact",
+                        "action": "exact",
+                        "assertion": "exact"
+                    },
+                    "limitations": [{
+                        "id": "fixture-worker-unavailable",
+                        "scopes": ["worker"],
+                        "reason": "The fixture intentionally has no worker identity"
+                    }]
+                }],
+                "structuralLimitations": []
+            }))
+            .unwrap(),
+        },
+        EvidenceArchiveEntry {
+            path: "manifest.json".into(),
+            contents: serde_json::to_vec(&manifest).unwrap(),
+        },
+    ];
+    for (at, result) in results.iter().enumerate() {
+        entries.push(EvidenceArchiveEntry {
+            // One record per worker directory: the reader matches
+            // `<anything>/mcdc.json`, so a second record needs its own
+            // directory rather than a decorated file name.
+            path: format!(
+                "worker{}/mcdc.json",
+                if at == 0 {
+                    String::new()
+                } else {
+                    format!("-{at}")
+                }
+            ),
+            contents: serde_json::to_vec(result).unwrap(),
+        });
+    }
+    let archive = write_archive(entries, &directory.join("evidence.raw.gz")).unwrap();
     let digest = |character: char| std::iter::repeat_n(character, 64).collect::<String>();
     let metadata = RunMetadata {
         id: id.into(),
@@ -324,6 +390,7 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
         timings: None,
         merged: None,
         parents: None,
+        source_roots: None,
     };
     fs::write(
         directory.join("run.json"),
@@ -734,6 +801,23 @@ fn open_validated_query_index(
     Ok(index)
 }
 
+/// Open the index this process has just written. It was synced and renamed
+/// into place from the very bytes its page digests were computed over, so
+/// hashing the whole file again re-derives what the write already guarantees
+/// -- and on a 300-file run that was 726 MB, 29% of the query that follows a
+/// test run. Nothing unverified is trusted: every page is still checked against
+/// its digest the first time a query reads it. An index found on disk later is
+/// verified in full on open, as before, since it may have been torn or changed
+/// since it was written.
+fn open_written_query_index(
+    path: &Path,
+    identity: &QueryIndexIdentity,
+) -> Result<QueryIndex, RunIndexError> {
+    let index = QueryIndex::open(path, identity)?;
+    CoverageIndex::new(&index)?;
+    Ok(index)
+}
+
 /// Open an existing valid index without triggering analysis or publication.
 pub fn open_existing_query_index(run: &StoredRun) -> Result<Option<QueryIndex>, RunIndexError> {
     match fs::symlink_metadata(&run.query_index_path) {
@@ -743,6 +827,31 @@ pub fn open_existing_query_index(run: &StoredRun) -> Result<Option<QueryIndex>, 
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(RunStoreError::Io(error).into()),
     }
+}
+
+/// A run's coverage, analysed from its evidence archive as its query index is.
+pub fn analyze_stored_run(run: &StoredRun) -> Result<CoverageReport, RunIndexError> {
+    Ok(analyze_coverage_archive(&ArchiveReportRequest {
+        archive_path: run.evidence_path.clone(),
+        run_id: run.id.clone(),
+        generated_at: run.metadata.started_at.clone(),
+        integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
+        test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
+    })?)
+}
+
+/// Write a run's query index from coverage already analysed from its evidence,
+/// so the first query opens it instead of analysing the archive again. The
+/// identity is the evidence's digest, not its path, so an index written beside
+/// staged evidence stays valid once the directory is renamed into place.
+pub(crate) fn write_query_index_from(
+    run: &StoredRun,
+    report: &CoverageReport,
+) -> Result<(), RunIndexError> {
+    let identity = query_index_identity(run)?;
+    let sections = coverage_index_sections(report)?;
+    write_query_index(&sections, &identity, &run.query_index_path)?;
+    Ok(())
 }
 
 /// Open a valid disposable index or atomically reconstruct it from evidence.
@@ -757,19 +866,13 @@ pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunInd
         return Ok(index);
     }
 
-    let report = analyze_coverage_archive(&ArchiveReportRequest {
-        archive_path: run.evidence_path.clone(),
-        run_id: run.id.clone(),
-        generated_at: run.metadata.started_at.clone(),
-        integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
-        test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
-    })?;
+    let report = analyze_stored_run(run)?;
     let sections = coverage_index_sections(&report)?;
     if query_index_identity(run)? != identity {
         return Err(RunIndexError::EvidenceChanged);
     }
     write_query_index(&sections, &identity, &run.query_index_path)?;
-    let index = open_validated_query_index(&run.query_index_path, &identity)?;
+    let index = open_written_query_index(&run.query_index_path, &identity)?;
     if query_index_identity(run)? != identity {
         return Err(RunIndexError::EvidenceChanged);
     }
@@ -870,6 +973,7 @@ mod tests {
             timings: None,
             merged: None,
             parents: None,
+            source_roots: None,
         };
         fs::write(
             directory.join("run.json"),
@@ -1148,6 +1252,42 @@ mod tests {
             index.verify_all().unwrap();
         }
         assert_eq!(fs::read(&run.query_index_path).unwrap(), canonical);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_index_opened_without_the_full_check_still_refuses_a_corrupt_page() {
+        // The index a process has just written is opened without hashing every
+        // page first, since the write already guarantees them. What keeps that
+        // safe is that no page is trusted before it is checked: reading one
+        // that does not match its digest must fail, not return its bytes.
+        let root = temporary_directory("written-index");
+        let run = create_indexable_python_run(&root);
+        let identity = query_index_identity(&run).unwrap();
+        drop(open_or_rebuild_query_index(&run).unwrap());
+        let lines = QueryIndex::open(&run.query_index_path, &identity)
+            .unwrap()
+            .descriptor(crate::coverage_index::SECTION_LINES)
+            .unwrap();
+        assert!(lines.length > 0, "the fixture has line records to corrupt");
+
+        let mut bytes = fs::read(&run.query_index_path).unwrap();
+        bytes[lines.offset as usize] ^= 0xff;
+        fs::write(&run.query_index_path, bytes).unwrap();
+
+        let index = open_written_query_index(&run.query_index_path, &identity)
+            .expect("opening does not hash every page");
+        assert!(
+            matches!(
+                index.bytes(crate::coverage_index::SECTION_LINES, 0, 1),
+                Err(crate::query_index::QueryIndexError::CorruptPage { .. })
+            ),
+            "the corrupt page is refused when it is read"
+        );
+        assert!(
+            index.verify_all().is_err(),
+            "and a full check still finds it"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

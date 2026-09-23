@@ -9,7 +9,14 @@
   "execution": {
     "exitCode": 0,
     "sourceUnchanged": true,
-    "publishedFiles": ["assertions.json", "assertions.state.json", "evidence.raw.gz", "run.json"],
+    "publishedFiles": [
+      "assertions.json",
+      "assertions.state.json",
+      "assertions.summary.cache.json",
+      "evidence.raw.gz",
+      "query-index.v1.bin",
+      "run.json"
+    ],
     "looseEvidenceRetained": false,
     "terminalWorkRetained": false,
     "metadata": {

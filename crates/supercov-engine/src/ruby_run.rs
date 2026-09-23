@@ -22,8 +22,8 @@ use crate::{
     frontend_protocol::validate_frontend_report_request,
     integrity::{FrontendIntegrityInputs, create_explicit_run_integrity},
     lifecycle::{
-        ProjectLock, finalize_published_run, publish_run, recover_abandoned_runs,
-        remove_stored_tree_deferred,
+        ProjectLock, finalize_published_run, note_kept_evidence, publish_run,
+        recover_abandoned_runs, remove_stored_tree_deferred,
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
@@ -161,15 +161,24 @@ fn environment(
 pub fn current_ruby_integrity(
     root: &Path,
     command: &[String],
+    source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
     let root = canonicalize_simplified(root).map_err(|error| error.to_string())?;
-    let files = crate::ruby_project::discover_ruby_files(&root)?;
-    create_explicit_run_integrity(
-        &root,
-        &ruby_integrity_inputs(&files, command),
-        &FrontendIntegrityInputs::embedded_ruby(),
-    )
-    .map_err(|error| error.to_string())
+    let mut files = crate::ruby_project::discover_ruby_files(&root)?;
+    // The roots the run was measured under, not this shell's: the run
+    // digested the files they kept, and nothing else would match it.
+    if let Some(configured) = source_roots.filter(|roots| !roots.is_empty()) {
+        crate::source_discovery::ExplicitSourceRoots::resolve(&root, configured)
+            .map_err(|error| error.to_string())?
+            .narrow(&mut files.sources, &mut files.excluded, String::as_str);
+    }
+    let mut inputs = ruby_integrity_inputs(&files, command);
+    crate::source_discovery::fold_roots_into_configuration(
+        &mut inputs.execution_configuration,
+        source_roots,
+    );
+    create_explicit_run_integrity(&root, &inputs, &FrontendIntegrityInputs::embedded_ruby())
+        .map_err(|error| error.to_string())
 }
 
 pub fn run_direct_ruby(
@@ -187,6 +196,10 @@ pub fn run_direct_ruby(
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
     let work_directory = root.join(".supercov/work").join(&request.run_id);
+    // Whether the tests were measured. A run that failed before that has no
+    // evidence worth keeping; one that failed after has evidence that cost the
+    // suite its wall clock.
+    let measured = std::cell::Cell::new(false);
     let result = (|| {
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
@@ -200,10 +213,21 @@ pub fn run_direct_ruby(
         }
 
         let adapter_started = Instant::now();
-        let project: PreparedRubyProject = prepare_ruby_project(&root)?;
+        let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(&root, &ambient)
+            .map_err(|error| error.to_string())?;
+        let project: PreparedRubyProject = prepare_ruby_project(&root, roots.as_ref())?;
+        let source_roots = crate::source_discovery::configured_source_roots(
+            &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
+        );
+        let mut integrity_inputs = ruby_integrity_inputs(&project.files, &request.command);
+        crate::source_discovery::fold_roots_into_configuration(
+            &mut integrity_inputs.execution_configuration,
+            source_roots.as_deref(),
+        );
         let integrity = create_explicit_run_integrity(
             &root,
-            &ruby_integrity_inputs(&project.files, &request.command),
+            &integrity_inputs,
             &FrontendIntegrityInputs::embedded_ruby(),
         )
         .map_err(|error| error.to_string())?;
@@ -281,6 +305,7 @@ pub fn run_direct_ruby(
             copy_tree(&ruby_directory, &debug_directory)?;
         }
         let publication_started = Instant::now();
+        measured.set(true);
         let run: RubyFrontendRun = build_ruby_frontend_run(
             &project.manifest,
             &evidence_directory,
@@ -326,6 +351,7 @@ pub fn run_direct_ruby(
             timings: Some(timings),
             merged: None,
             parents: None,
+            source_roots: source_roots.clone(),
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
@@ -342,6 +368,17 @@ pub fn run_direct_ruby(
             metadata,
         })
     })();
+    let result = result.map_err(|error| {
+        if !measured.get() {
+            return error;
+        }
+        note_kept_evidence(
+            &root,
+            &work_directory.join("ruby/evidence"),
+            &request.run_id,
+            error,
+        )
+    });
     if result.is_err() {
         let _ = remove_stored_tree_deferred(&root, &work_directory);
     }

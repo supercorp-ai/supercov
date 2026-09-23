@@ -184,14 +184,16 @@ attribution.
 
 | Runner | Attribution | Current requirement |
 | --- | --- | --- |
-| pytest | Exact test, worker, retry, and setup/call/teardown phase identity | CPython 3.12 or newer; run with `npx supercov -- pytest` or `python -m pytest` |
+| pytest | Exact test, worker, retry, and setup/call/teardown phase identity | CPython 3.9 or newer; run with `npx supercov -- pytest` or `python -m pytest` |
 | pytest-xdist | Exact per worker | Workers inherit the run through the environment |
 | pytest-rerunfailures | Exact per attempt; flaky tests are reported as such | |
 | `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test |
 
 Your project runs in place with its own interpreter and virtual environment.
-Supercov adds its monitoring and runner hooks through the process environment;
-you do not need to rewrite tests or configure a different build.
+Supercov adds its runner hooks through the process environment and places a
+probe for every obligation into each measured module as it is imported --
+nothing on disk changes, and tracebacks keep their line numbers. You do not
+need to rewrite tests or configure a different build.
 
 Coverage includes statements, functions, boolean decisions, loops,
 comprehensions, short-circuit operators, `match` cases and exception paths.
@@ -202,9 +204,11 @@ assertion checks.
 
 Interpreters launched with `-I`, `-E` or `-S` ignore the required startup hook
 and are not measured. Code compiled from strings at runtime has no source
-obligations. Completed observations can survive a hard kill, but a corrupt or
-exhausted evidence channel fails the run rather than reporting partial data as
-complete.
+obligations. A measured module imported before Supercov starts, or compiled
+past the import system, runs without probes; the run names it as a limitation
+rather than reporting it uncovered. What a test executed survives the process
+being killed -- `os._exit`, SIGTERM or SIGKILL -- but a corrupt or exhausted
+evidence channel fails the run rather than reporting partial data as complete.
 
 ```sh
 npx supercov -- pytest
@@ -218,11 +222,23 @@ npx supercov -- python -m unittest
 | Runner | Attribution | Current requirement |
 | --- | --- | --- |
 | RSpec | Exact example and before/example/after phase identity | Ruby 3.4 or newer for full measurement; run with `npx supercov -- rspec` or `bundle exec rspec` |
-| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
+| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; a test's coverage is a lower bound (see below); skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
 | test-unit | Exact test and setup/test/teardown identity; omissions and pendings recorded | `ruby -Itest ...`, `rake test` |
 | parallel_tests, Rails process workers | Exact per worker process | Workers inherit the run through `RUBYOPT`; verified on a Rails app with bootsnap, Zeitwerk and two forked workers |
 | Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
 | Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
+
+Ruby reports a line the first time it executes and never again, which is what
+makes collecting coverage cheap enough to leave on. So a test is credited with
+the lines it was first to reach, and a later test running the same lines is
+credited with none of them: what a test is credited with is really its own, and
+what it is not credited with is not evidence it did not run the code.
+
+Totals are unaffected — every line is credited to exactly one test. What this
+changes is per-test reporting: `supercov runs <id> test <name>` gives its
+numbers as "at least", and `tests affected` reports a test whose own record
+cannot settle the question as **undetermined** rather than unaffected, so
+`--names` includes it in the set to run.
 
 Your project runs in place with its own interpreter and bundle. Supercov loads
 through `RUBYOPT`; application files on disk and their backtrace line numbers
@@ -261,6 +277,31 @@ npx supercov -- ruby -Itest test/shapes_test.rb
 npx supercov -- bin/rails test
 ```
 
+## Crediting a test with what it reached
+
+Most runners attribute exactly at no cost: Supercov runs each Rust test in its
+own process, Python's workers are processes, and JavaScript keeps a coverage
+map per test. Two cases cannot, because probes are a store into one array the
+whole process shares and two tests running at once cannot both be credited
+with what they reached:
+
+| | Left as written | `--exact-attribution` |
+| --- | --- | --- |
+| A Go test calling `t.Parallel()` | counted run-wide | announced after it resumes, with `-parallel=1` |
+| A JUnit suite with parallel execution enabled | counted run-wide | run in order |
+
+```sh supercov
+npx supercov --exact-attribution -- go test ./...
+```
+
+By default your command runs as you wrote it, and the run says what it could
+not credit. `--exact-attribution` buys that back by running the suite in order,
+which costs whatever its parallelism was worth — on sixteen I/O-bound JUnit
+tests across fifteen cores, 3.6x. Either way the coverage totals are the same;
+what changes is whether a line can be traced to the test that ran it.
+
+`supercov runs latest` reports which you got, under `Attribution`.
+
 ## Go
 
 | Runner | Attribution | Current requirement |
@@ -287,8 +328,19 @@ coverage never counts — a failed run cannot say which of it came from the test
 that failed.
 
 An `Example` with an `Output` comment and a `Fuzz` target's seed corpus are
-measured the same way. `go test` runs both, so what they reach is real
-coverage, but neither takes a `*testing.T` for a result to be named by.
+measured the same way: `go test` runs both, and what they reach is real
+coverage no test can claim.
+
+Such a test is still recorded as having run, with its outcome, and credited
+with no coverage. `supercov runs <id> test <name>` says that rather than
+reporting zeroes, coverage percentages leave it out, and `tests affected` lists
+it as **undetermined**: nothing can say a change missed it, so `--names`
+includes it in the set to run. A package where every test calls `t.Parallel()`
+is published like any other.
+
+A file Supercov cannot parse is a hole, not the end of the run. It is named on
+the line that reports the result and recorded in the run, and a run is refused
+only when nothing is left to measure.
 
 Supercov also writes evidence as the suite runs, not only at the end. Go offers
 no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`

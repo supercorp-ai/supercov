@@ -21,6 +21,16 @@ Measure code quality with npx supercov.
 
 See [Understanding quality](https://supercov.com/docs/quality).
 
+For security surface with the same key, ask:
+
+```text supercov-prompt
+Find security issues with npx supercov security and show me what it found.
+```
+
+Supercov asks twelve security checks of every file and shows each finding
+with the line and the code on it. See
+[Security surface](https://supercov.com/docs/security).
+
 When it finishes, review the test change and coverage comparison in your
 conversation. Ask separately if you want a commit or pull request.
 
@@ -119,7 +129,7 @@ if anything is missing.
 - for Rust, the Rust 1.95 toolchain;
 - for Go, Go 1.22 or newer;
 - for Java and Kotlin, JDK 17 or newer, with Maven or Gradle;
-- for Python, CPython 3.12 or newer with pytest or unittest;
+- for Python, CPython 3.9 or newer with pytest or unittest;
 - for Ruby, Ruby 3.4 or newer with RSpec, Minitest, test-unit or Cucumber (3.3 measures lines, methods and simple branches only).
 
 The CLI is a native binary. `npx supercov` picks the build for your operating

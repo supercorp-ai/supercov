@@ -265,6 +265,7 @@ pub(crate) fn run_doctests(
                     source: "supercov-owned-process-per-test".into(),
                 },
                 role: "test".into(),
+                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
                 phases: recorded.phases,
                 runtime: vec![recorded.snapshot],
                 browser: Vec::new(),

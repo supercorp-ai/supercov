@@ -108,10 +108,15 @@ pub fn command(args: &[String]) -> ExitCode {
                 }
             } else if names || files {
                 let key = if names { "name" } else { "file" };
-                let mut lines = data["affected"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
+                // Both buckets. This output feeds a runner, so it has to be
+                // the set that is safe to run rather than the set that is
+                // proven affected: a test whose coverage nothing could
+                // attribute is exactly the one a narrower list would drop, and
+                // dropping it is how a change to code it exercised goes
+                // untested while the command exits 0.
+                let mut lines = ["affected", "undetermined"]
+                    .iter()
+                    .flat_map(|bucket| data[*bucket].as_array().into_iter().flatten())
                     .filter_map(|t| t[key].as_str())
                     .collect::<Vec<_>>();
                 lines.sort_unstable();
@@ -169,8 +174,10 @@ fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
     if !run_wide.is_empty() {
         let reason = format!("{} (every test)", run_wide.join("; "));
         let mut all = data["affected"].as_array().cloned().unwrap_or_default();
-        for test in data["unaffected"].as_array().cloned().unwrap_or_default() {
-            all.push(test);
+        for bucket in ["undetermined", "unaffected"] {
+            for test in data[bucket].as_array().cloned().unwrap_or_default() {
+                all.push(test);
+            }
         }
         for test in &mut all {
             let reasons = test["reasons"].as_array_mut().unwrap();
@@ -180,8 +187,10 @@ fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
             (a["file"].as_str(), a["name"].as_str()).cmp(&(b["file"].as_str(), b["name"].as_str()))
         });
         data["summary"]["affected"] = json!(all.len());
+        data["summary"]["undetermined"] = json!(0);
         data["summary"]["unaffected"] = json!(0);
         data["affected"] = json!(all);
+        data["undetermined"] = json!([]);
         data["unaffected"] = json!([]);
     }
     let source_set_changed = comparison
@@ -205,22 +214,37 @@ fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
 fn render(data: &Value) -> String {
     let mut out = String::new();
     let affected = data["affected"].as_array().cloned().unwrap_or_default();
+    let undetermined = data["undetermined"].as_array().cloned().unwrap_or_default();
     let total = data["summary"]["tests"].as_u64().unwrap_or(0);
     out.push_str(&format!(
-        "Run {}: {} of {} tests affected by changes since the run\n",
+        "Run {}: {} of {} tests affected by changes since the run{}\n",
         data["run"].as_str().unwrap_or(""),
         affected.len(),
-        total
-    ));
-    for test in &affected {
-        out.push_str(&format!(
-            "\n  {} › {}\n",
-            test["file"].as_str().unwrap_or(""),
-            test["name"].as_str().unwrap_or("")
-        ));
-        for reason in test["reasons"].as_array().into_iter().flatten() {
-            out.push_str(&format!("    {}\n", reason.as_str().unwrap_or("")));
+        total,
+        if undetermined.is_empty() {
+            String::new()
+        } else {
+            format!(", {} undetermined", undetermined.len())
         }
+    ));
+    fn entries(out: &mut String, tests: &[Value]) {
+        for test in tests {
+            out.push_str(&format!(
+                "\n  {} › {}\n",
+                test["file"].as_str().unwrap_or(""),
+                test["name"].as_str().unwrap_or("")
+            ));
+            for reason in test["reasons"].as_array().into_iter().flatten() {
+                out.push_str(&format!("    {}\n", reason.as_str().unwrap_or("")));
+            }
+        }
+    }
+    entries(&mut out, &affected);
+    if !undetermined.is_empty() {
+        out.push_str(
+            "\nUndetermined — what these ran was not fully recorded, so nothing can say the\nchange missed them. It is inside what the run covered, so it could have reached\nthem. Run them.\n",
+        );
+        entries(&mut out, &undetermined);
     }
     let files = data["changedFiles"].as_array().cloned().unwrap_or_default();
     if files.is_empty() {

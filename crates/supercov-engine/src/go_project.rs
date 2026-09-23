@@ -217,7 +217,7 @@ const LANGUAGE: &str = "go";
 /// this puts the file in the manifest, so it reaches the declaration's
 /// structural limitations and `supercov runs latest` can still name it long
 /// after the build log is gone.
-fn unparseable_limitation(file: &str, reason: &str) -> serde_json::Value {
+pub(crate) fn unparseable_limitation(file: &str, reason: &str) -> serde_json::Value {
     serde_json::json!({
         "id": crate::go_instrumenter::stable_obligation_id(LANGUAGE, file, "unparseable", 0, 0),
         "kind": "file-does-not-parse",
@@ -233,8 +233,15 @@ fn unparseable_limitation(file: &str, reason: &str) -> serde_json::Value {
     })
 }
 
-pub fn prepare_go_project(root: &Path) -> Result<PreparedGoProject, String> {
-    let files = discover_go_files(root)?;
+pub fn prepare_go_project(
+    root: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+) -> Result<PreparedGoProject, String> {
+    let mut files = discover_go_files(root)?;
+    if let Some(roots) = roots {
+        roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
+        roots.refuse_if_empty(files.sources.len(), "Go")?;
+    }
     if files.sources.is_empty() && files.tests.is_empty() {
         return Err(
             "no Go source files were found under the project root; Supercov measures .go files outside vendor, testdata and tooling directories"
@@ -290,6 +297,19 @@ pub fn prepare_go_project(root: &Path) -> Result<PreparedGoProject, String> {
                 unparseable.push((relative.clone(), error.to_string()));
             }
         }
+    }
+    // Only when roots shaped what is measured: without them this frontend
+    // records no scope, and its default output stays exactly as it was.
+    if let Some(roots) = roots {
+        let kept = files.sources.clone();
+        manifest.scope = Some(
+            serde_json::to_value(
+                roots
+                    .scope(&kept, &files.excluded)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
+        );
     }
     Ok(PreparedGoProject {
         root: root.to_owned(),
@@ -367,6 +387,68 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    fn explicit_roots(root: &Path, roots: &[&str]) -> crate::source_discovery::ExplicitSourceRoots {
+        let roots = roots
+            .iter()
+            .map(|root| (*root).to_owned())
+            .collect::<Vec<_>>();
+        crate::source_discovery::ExplicitSourceRoots::resolve(root, &roots).unwrap()
+    }
+
+    #[test]
+    fn explicit_roots_narrow_go_to_the_code_they_name() {
+        // `extra`, not `third_party`: Go already leaves third_party, vendor and
+        // testdata out by default, and a test passing for that reason would
+        // prove nothing about roots. Go had no scope to record at all, so honouring the variable there has
+        // to leave a trace of what it did, or it is as invisible as ignoring it.
+        let root = fixture("explicit-roots");
+        write(&root, "go.mod", "module example.com/app\n");
+        write(
+            &root,
+            "app.go",
+            "package main\n\nfunc f(a int) int {\n\treturn a\n}\n",
+        );
+        write(
+            &root,
+            "extra/dep.go",
+            "package extra\n\nfunc G() int {\n\treturn 1\n}\n",
+        );
+
+        let project = prepare_go_project(&root, Some(&explicit_roots(&root, &["app.go"]))).unwrap();
+        assert_eq!(project.files.sources, ["app.go"], "{:?}", project.files);
+        assert!(
+            project
+                .files
+                .excluded
+                .contains(&("extra/dep.go".into(), "outside explicit source roots")),
+            "{:?}",
+            project.files.excluded
+        );
+        let scope: crate::source_discovery::SourceScope = serde_json::from_value(
+            project
+                .manifest
+                .scope
+                .clone()
+                .expect("explicit roots leave a scope"),
+        )
+        .unwrap();
+        assert_eq!(
+            scope.mode,
+            crate::source_discovery::SourceScopeMode::Explicit
+        );
+        assert_eq!(scope.roots, ["app.go"]);
+
+        // Unset, Go records no scope, exactly as before.
+        assert!(
+            prepare_go_project(&root, None)
+                .unwrap()
+                .manifest
+                .scope
+                .is_none()
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn a_test_file_is_the_one_the_toolchain_says_it_is() {
         // Go settles this: `_test.go` and nothing else. No directory-name
@@ -434,7 +516,7 @@ mod tests {
         );
         write(&root, "broken.go", "package main\n\nfunc f( {\n");
 
-        let project = prepare_go_project(&root).unwrap();
+        let project = prepare_go_project(&root, None).unwrap();
         assert_eq!(project.unparseable.len(), 1);
         assert_eq!(project.unparseable[0].0, "broken.go");
         // And the hole it leaves is declared, not merely printed: a
@@ -467,7 +549,7 @@ mod tests {
         // measure has to say so instead of reporting success.
         let root = fixture("empty");
         write(&root, "go.mod", "module example.com/app\n");
-        assert!(prepare_go_project(&root).is_err());
+        assert!(prepare_go_project(&root, None).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

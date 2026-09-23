@@ -97,10 +97,17 @@ fn parameter_name(node: Node, source: &str) -> Option<String> {
 }
 
 /// Instrument one `_test.go` file so every test announces itself.
+///
+/// `serialised` says the run was asked for exact attribution and the command
+/// carries `-parallel=1`, so a test that calls `t.Parallel()` is the only test
+/// running while its probes fire. It can then be announced like any other, and
+/// the run credits it with what it reached. Without that, announcing it would
+/// bind whatever ran beside it to its name.
 pub fn instrument_test_file(
     source: &str,
     alias: &str,
     evidence_path: &str,
+    serialised: bool,
 ) -> Result<GoTestFile, GoInstrumenterError> {
     let tree = parse(source)?;
     let mut file = GoTestFile {
@@ -146,12 +153,33 @@ pub fn instrument_test_file(
         }
         if !is_test_function(&name) {
             if is_checkpoint_only_function(&name, child, source) {
-                needs_runtime = true;
                 file.unattributed.push(name.clone());
+                // A Fuzz target takes a *testing.F, which reports an outcome
+                // the same way a *testing.T does. An Example takes nothing at
+                // all, so the only honest status for it is that it ran: `go
+                // test` fails the run when an Example's output does not match,
+                // and the run's own exit code carries that.
+                let record = match parameter_name(child, source) {
+                    Some(parameter)
+                        if parameter_type(child, source).as_deref() == Some("*testing.F") =>
+                    {
+                        format!(
+                            "\n\tdefer {HARNESS_UNATTRIBUTED_FUZZ}({parameter}, \"{name}\")()\n"
+                        )
+                    }
+                    _ => format!(
+                        "\n\tdefer func() {{ {alias}.Ran(\"{name}\", \"unknown\"); {alias}.Checkpoint() }}()\n"
+                    ),
+                };
+                // Only a file that names the runtime needs its import, and
+                // the Fuzz form names nothing but the generated helper: an
+                // import it never mentions does not fail to measure, it fails
+                // to compile, and Supercov breaks the suite it was measuring.
+                needs_runtime |= record.contains(&format!("{alias}."));
                 file.edits.push(GoEdit {
                     at: body.start_byte() + 1,
                     rank: 100,
-                    text: format!("\n\tdefer {alias}.Checkpoint()\n"),
+                    text: record,
                 });
             }
             continue;
@@ -162,7 +190,15 @@ pub fn instrument_test_file(
             continue;
         }
         file.tests.push(name.clone());
-        if calls_parallel(body, source) {
+        // Serialised, and the test pauses itself: the announcement waits until
+        // `t.Parallel()` has returned, which is when this test is the one
+        // running.
+        let announce_at = if serialised && calls_parallel(body, source) {
+            own_parallel_call_end(body, source).unwrap_or(body.start_byte() + 1)
+        } else {
+            body.start_byte() + 1
+        };
+        if calls_parallel(body, source) && !serialised {
             // Announcing it would bind whatever runs next to this test, and
             // what runs next includes the other parallel tests. Its coverage
             // still counts run-wide; it simply belongs to no test, which is
@@ -174,11 +210,28 @@ pub fn instrument_test_file(
             // in the probe array until the process ends -- which, where the
             // end-of-run write is never reached, means it is never recorded.
             file.unattributed.push(name.clone());
-            needs_runtime = true;
+            // Named, with its real outcome, and credited with nothing. Leaving
+            // it out of the evidence entirely was what made a suite of
+            // parallel tests publish zero tests: `runs <id> test <name>`
+            // answered "Test not found" for a test that had just passed, and
+            // affected-test selection returned an empty set for a change those
+            // tests exercised.
+            let record = match parameter_name(child, source) {
+                Some(parameter) => {
+                    format!("\n\tdefer {HARNESS_UNATTRIBUTED}({parameter}, \"{name}\")()\n")
+                }
+                // `func TestX(*testing.T)` names nothing to read an outcome
+                // from, and is reported as having passed unless the run says
+                // otherwise -- the same rule the announced path uses.
+                None => format!(
+                    "\n\tdefer func() {{ {alias}.Ran(\"{name}\", \"passed\"); {alias}.Checkpoint() }}()\n"
+                ),
+            };
+            needs_runtime |= record.contains(&format!("{alias}."));
             file.edits.push(GoEdit {
                 at: body.start_byte() + 1,
                 rank: 100,
-                text: format!("\n\tdefer {alias}.Checkpoint()\n"),
+                text: record,
             });
             continue;
         }
@@ -198,7 +251,7 @@ pub fn instrument_test_file(
             needs_runtime = true;
         }
         file.edits.push(GoEdit {
-            at: body.start_byte() + 1,
+            at: announce_at,
             rank: 100,
             text: announcement,
         });
@@ -209,6 +262,55 @@ pub fn instrument_test_file(
         file.edits.push(import);
     }
     Ok(file)
+}
+
+/// Where a test's own `t.Parallel()` call ends, if it makes one directly.
+///
+/// `t.Parallel()` does not return until the serial phase is over and this test
+/// is the one being run, so a statement after it runs with the test actually
+/// running. That is the only place an announcement can go when the run is
+/// serialised: at the top of the body it would fire while every other parallel
+/// test was also entering and pausing, all of them open at once, and the
+/// runtime would rightly give up on attributing any of them.
+///
+/// Only a call the test makes itself counts. `t.Parallel()` inside a subtest
+/// closure pauses the subtest, not this function, so there is nothing to wait
+/// for here.
+fn own_parallel_call_end(body: Node, source: &str) -> Option<usize> {
+    // A block holds its statements in a `statement_list`, not directly, so the
+    // statements are one level further down than a block's own children.
+    let statements = {
+        let mut cursor = body.walk();
+        body.children(&mut cursor)
+            .find(|child| child.kind() == "statement_list")
+            .unwrap_or(body)
+    };
+    let mut cursor = statements.walk();
+    for statement in statements.children(&mut cursor).filter(Node::is_named) {
+        // The grammar wraps a call standing alone as a statement in an
+        // `expression_statement`; it is never a statement's child on its own.
+        let call = match statement.kind() {
+            "expression_statement" => match statement.named_child(0) {
+                Some(inner) if inner.kind() == "call_expression" => inner,
+                // Some other expression standing alone -- a channel receive,
+                // say -- which is not the call being looked for; the next
+                // statement might be.
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if call
+            .child_by_field_name("function")
+            .is_some_and(|function| {
+                source[function.byte_range()]
+                    .trim_end()
+                    .ends_with(".Parallel")
+            })
+        {
+            return Some(statement.end_byte());
+        }
+    }
+    None
 }
 
 /// Whether a test hands itself to Go's parallel scheduler.
@@ -279,6 +381,13 @@ pub fn probe_array_file(package: &str, alias: &str, import: &str, probe_count: u
 /// The package-local function every instrumented test defers to.
 pub const HARNESS_ENTER: &str = "__supercovTest";
 
+/// The package-local function a test that cannot be attributed defers to.
+pub const HARNESS_UNATTRIBUTED: &str = "__supercovUnattributed";
+
+/// The same for a Fuzz target, which reports its outcome through a
+/// `*testing.F` rather than a `*testing.T`.
+pub const HARNESS_UNATTRIBUTED_FUZZ: &str = "__supercovUnattributedFuzz";
+
 /// The generated `TestMain` for a package that has none, plus the probe count
 /// every instrumented file in the package refers to.
 pub fn synthesized_harness(
@@ -314,6 +423,15 @@ pub fn synthesized_harness(
     out.push_str(&format!(
         "func {HARNESS_ENTER}(t *testing.T, name string) func() {{\n\tdone := {alias}.EnterTest(name)\n\treturn func() {{\n\t\tif t.Skipped() {{\n\t\t\t{alias}.Outcome(\"skipped\")\n\t\t}} else if t.Failed() {{\n\t\t\t{alias}.Outcome(\"failed\")\n\t\t}}\n\t\tdone()\n\t}}\n}}\n\n"
     ));
+    // Named and credited with nothing. The outcome is read here for the same
+    // reason the announced path reads it here: so the runtime never imports
+    // `testing` and never reaches a product binary.
+    out.push_str(&format!(
+        "func {HARNESS_UNATTRIBUTED}(t *testing.T, name string) func() {{\n\treturn func() {{\n\t\tstatus := \"passed\"\n\t\tif t.Skipped() {{\n\t\t\tstatus = \"skipped\"\n\t\t}} else if t.Failed() {{\n\t\t\tstatus = \"failed\"\n\t\t}}\n\t\t{alias}.Ran(name, status)\n\t\t{alias}.Checkpoint()\n\t}}\n}}\n\n"
+    ));
+    out.push_str(&format!(
+        "func {HARNESS_UNATTRIBUTED_FUZZ}(f *testing.F, name string) func() {{\n\treturn func() {{\n\t\tstatus := \"passed\"\n\t\tif f.Skipped() {{\n\t\t\tstatus = \"skipped\"\n\t\t}} else if f.Failed() {{\n\t\t\tstatus = \"failed\"\n\t\t}}\n\t\t{alias}.Ran(name, status)\n\t\t{alias}.Checkpoint()\n\t}}\n}}\n\n"
+    ));
     if declares_test_main {
         // The author's TestMain arms the runtime; this keeps the widths
         // referenced even in a package where nothing else names them.
@@ -332,7 +450,8 @@ mod tests {
     use crate::go_instrumenter::rewrite;
 
     fn instrumented(source: &str) -> (GoTestFile, String) {
-        let file = instrument_test_file(source, "__supercov", "evidence.bin").expect("instrument");
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", false).expect("instrument");
         let out = rewrite(source, &file.edits);
         parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
         (file, out)
@@ -410,6 +529,139 @@ mod tests {
     }
 
     #[test]
+    fn a_serialised_parallel_test_is_announced_after_it_resumes() {
+        // `t.Parallel()` does not return until the serial phase is over, so an
+        // announcement above it fires while every other parallel test is also
+        // entering and pausing. All of them would be open at once and the
+        // runtime would give up attributing any of them -- which is how asking
+        // for exact attribution produced a run with no tests in it at all.
+        let file = instrument_test_file(
+            "package p\n\nimport \"testing\"\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tdoWork()\n}\n",
+            "__supercov",
+            "evidence.bin",
+            true,
+        )
+        .expect("instrument");
+        let out = rewrite(
+            "package p\n\nimport \"testing\"\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tdoWork()\n}\n",
+            &file.edits,
+        );
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        let parallel = out.find("t.Parallel()").expect("the call");
+        let announced = out
+            .find("__supercovTest(t, \"TestParallel\")")
+            .expect("announced");
+        assert!(
+            parallel < announced,
+            "the announcement has to wait for the test to resume:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_serialised_run_leaves_a_serial_test_where_it_was() {
+        // `serialised` only moves the announcement for a test that pauses
+        // itself. A serial test in the same run has no `t.Parallel()` to wait
+        // for, and putting its announcement anywhere but the top of the body
+        // would leave whatever ran first uncredited.
+        //
+        // Measured rather than guessed: the decision that reads `serialised &&
+        // calls_parallel(..)` had no witness for the second operand until this
+        // existed, so nothing showed the two apart.
+        let source =
+            "package p\n\nimport \"testing\"\n\nfunc TestSerial(t *testing.T) {\n\tdoWork()\n}\n";
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", true).expect("instrument");
+        let out = rewrite(source, &file.edits);
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        let announced = out
+            .find("__supercovTest(t, \"TestSerial\")")
+            .expect("announced");
+        let work = out.find("doWork()").expect("body");
+        assert!(
+            announced < work,
+            "a serial test is announced before anything it calls:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_test_file_is_read_past_whatever_else_it_declares() {
+        // A `_test.go` holds more than functions -- fixtures, tables, helper
+        // types -- and the scan has to walk past all of it rather than stop.
+        let (file, out) = instrumented(concat!(
+            "package p\n\nimport \"testing\"\n\n",
+            "type fixture struct{ n int }\n\n",
+            "var cases = []fixture{{1}, {2}}\n\n",
+            "const limit = 3\n\n",
+            "func TestOne(t *testing.T) {\n\tdoWork()\n}\n",
+        ));
+        assert_eq!(file.tests, ["TestOne"]);
+        assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+    }
+
+    #[test]
+    fn a_parallel_call_is_found_wherever_the_test_makes_it() {
+        // `t.Parallel()` first is the shape every other test here uses, and it
+        // is not the shape most suites are written in: a test sets something
+        // up and then hands itself to the scheduler. The scan has to walk past
+        // whatever came before, which is a path nothing exercised -- the
+        // measurement showed the statement loop only ever matching on its
+        // first look.
+        let source = concat!(
+            "package p\n\nimport \"testing\"\n\n",
+            "func TestLater(t *testing.T) {\n",
+            "\tsetUp()\n",
+            "\tname := \"x\"\n",
+            "\t<-ready\n",
+            "\tt.Parallel()\n",
+            "\tdoWork(name)\n}\n",
+        );
+        let file =
+            instrument_test_file(source, "__supercov", "evidence.bin", true).expect("instrument");
+        let out = rewrite(source, &file.edits);
+        parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        let parallel = out.find("t.Parallel()").expect("the call");
+        let announced = out
+            .find("__supercovTest(t, \"TestLater\")")
+            .expect("announced");
+        assert!(
+            parallel < announced,
+            "the announcement still waits for the call, wherever it is:\n{out}"
+        );
+        // And it waits for that call rather than landing after the setup it
+        // happened to follow.
+        let work = out.find("doWork(name)").expect("body");
+        assert!(announced < work, "{out}");
+    }
+
+    #[test]
+    fn a_function_with_no_body_is_walked_past() {
+        // Go declares a function with no body when the implementation is in
+        // assembly. It is not a test, it has nothing to instrument, and the
+        // scan has to keep going rather than reach for a body that is not
+        // there.
+        let (file, out) = instrumented(concat!(
+            "package p\n\nimport \"testing\"\n\n",
+            "func fastSum(a, b int) int\n\n",
+            "func TestOne(t *testing.T) {\n\tdoWork()\n}\n",
+        ));
+        assert_eq!(file.tests, ["TestOne"]);
+        assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+    }
+
+    #[test]
+    fn a_test_file_with_nothing_in_it_is_read_without_complaint() {
+        // The loop over a file's declarations has to survive having none.
+        let file = instrument_test_file("package p\n", "__supercov", "evidence.bin", false)
+            .expect("instrument");
+        assert!(file.tests.is_empty());
+        assert!(file.edits.is_empty(), "{file:?}");
+        assert!(!file.declares_test_main);
+    }
+
+    #[test]
     fn a_parallel_test_is_named_rather_than_attributed_by_guesswork() {
         // Go runs these alongside each other. Binding probes to whichever was
         // most recently announced would produce per-test numbers that look
@@ -420,10 +672,85 @@ mod tests {
         assert_eq!(file.tests, ["TestSerial", "TestParallel"]);
         assert_eq!(file.unattributed, ["TestParallel"]);
         assert!(out.contains("__supercovTest(t, \"TestSerial\")"), "{out}");
+        // It is named, and it claims nothing. Those are different edits: the
+        // announcement binds whatever runs next to the test, and what runs
+        // next includes the other parallel tests. This one records that the
+        // test ran and how it ended, and credits it with no coverage at all.
+        //
+        // Leaving the name out entirely was the other extreme, and it read
+        // downstream as a test that never ran: a package of nothing but
+        // parallel tests published zero tests, so asking for one by name
+        // answered "Test not found" for a test that had just passed.
         assert!(
-            !out.contains("\"TestParallel\""),
+            out.contains("__supercovUnattributed(t, \"TestParallel\")"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("__supercovTest(t, \"TestParallel\")"),
             "a parallel test must not claim what ran beside it:\n{out}"
         );
+    }
+
+    #[test]
+    fn a_file_that_names_only_the_generated_helper_gains_no_import() {
+        // Go rejects an import nothing mentions, so an import added for a file
+        // that reaches the runtime only through a package-local helper does
+        // not fail to measure -- it fails to compile, and Supercov breaks the
+        // suite it was asked to measure. A Fuzz target is exactly that shape.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc FuzzWork(f *testing.F) {\n\tf.Add(1)\n\tf.Fuzz(func(t *testing.T, n int) {\n\t\tdoWork(n)\n\t})\n}\n",
+        );
+        assert_eq!(file.unattributed, ["FuzzWork"]);
+        assert!(
+            out.contains("__supercovUnattributedFuzz(f, \"FuzzWork\")"),
+            "{out}"
+        );
+        assert!(
+            !out.contains(RUNTIME_IMPORT),
+            "the file names only the generated helper:\n{out}"
+        );
+
+        // An Example has no receiver to read an outcome from, so it names the
+        // runtime directly and does need the import.
+        let (_, out) =
+            instrumented("package p\n\nfunc ExampleWork() {\n\tdoWork()\n\t// Output: 1\n}\n");
+        assert!(out.contains("__supercov.Ran(\"ExampleWork\""), "{out}");
+        assert!(out.contains(RUNTIME_IMPORT), "{out}");
+    }
+
+    #[test]
+    fn a_test_whose_subtests_run_in_parallel_cannot_claim_them_either() {
+        // `t.Run(name, func(t *testing.T) { t.Parallel() })` is how a Go suite
+        // usually reaches for parallelism, and it is the same problem one
+        // level down: Go resumes the parallel subtests after the parent
+        // returns, so what they reach arrives with no announcement standing
+        // and cannot be credited to the parent that started them.
+        //
+        // The parent is therefore checkpointed rather than announced. It costs
+        // the parent its own attribution -- the serial part of its body is
+        // swept in with the rest -- which is the honest reading: nothing can
+        // say which of the two it came from.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestGroup(t *testing.T) {\n\tsetUp()\n\tfor _, c := range cases {\n\t\tt.Run(c.name, func(t *testing.T) {\n\t\t\tt.Parallel()\n\t\t\tdoWork(c)\n\t\t})\n\t}\n}\n",
+        );
+        assert_eq!(file.tests, ["TestGroup"]);
+        assert_eq!(file.unattributed, ["TestGroup"]);
+        assert!(
+            !out.contains("__supercovTest(t, \"TestGroup\")"),
+            "a parent cannot claim what its parallel subtests reached:\n{out}"
+        );
+        assert!(
+            out.contains("__supercovUnattributed(t, \"TestGroup\")"),
+            "{out}"
+        );
+
+        // Where the subtests are serial there is nothing to run beside them,
+        // and the parent is named for all of it as before.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestGroup(t *testing.T) {\n\tt.Run(\"one\", func(t *testing.T) {\n\t\tdoWork()\n\t})\n}\n",
+        );
+        assert!(file.unattributed.is_empty(), "{file:?}");
+        assert!(out.contains("__supercovTest(t, \"TestGroup\")"), "{out}");
     }
 
     #[test]
@@ -440,7 +767,26 @@ mod tests {
         let (file, out) = instrumented(
             "package p\n\nimport \"testing\"\n\nfunc ExampleWork() {\n\tdoWork()\n\t// Output: 1\n}\n\nfunc FuzzWork(f *testing.F) {\n\tdoWork()\n}\n\nfunc Examples(t *testing.T) {\n\tdoWork()\n}\n\nfunc ExampleHelper(x int) {\n\tdoWork()\n}\n",
         );
-        assert_eq!(out.matches("Checkpoint()").count(), 2, "{out}");
+        // Both are swept before they return, and both are named for having
+        // run. The Example sweeps inline because it has no receiver to read an
+        // outcome from; the Fuzz target goes through the generated helper,
+        // which sweeps in turn -- so counting the word here would count one.
+        assert!(
+            out.contains("Ran(\"ExampleWork\", \"unknown\"); __supercov.Checkpoint()"),
+            "{out}"
+        );
+        let generated =
+            synthesized_harness("p", "__supercov", "example.com/rt", 0, &[], "e.bin", true);
+        assert!(
+            generated.matches("__supercov.Checkpoint()").count() == 2,
+            "both generated helpers sweep before returning:\n{generated}"
+        );
+        // A Fuzz target takes a *testing.F, which reports an outcome the same
+        // way a *testing.T does, so its status is read rather than guessed.
+        assert!(
+            out.contains("__supercovUnattributedFuzz(f, \"FuzzWork\")"),
+            "{out}"
+        );
         assert!(
             file.unattributed.contains(&"ExampleWork".to_owned()),
             "{file:?}"
@@ -486,6 +832,23 @@ mod tests {
             out.contains(RUNTIME_IMPORT),
             "naming the runtime directly requires its import:\n{out}"
         );
+    }
+
+    #[test]
+    fn a_test_file_using_go_1_26_new_is_still_instrumented() {
+        // A source file that could not be parsed was dropped and the run went
+        // on; a test file that could not be parsed took the whole run down
+        // with it, exit 1. Both came from the same construct, and neither is
+        // the author's mistake -- `new` has taken a value since Go 1.26.
+        let (file, out) = instrumented(
+            "package p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\twant := new(\"hello\")\n\tif *greet() != *want {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n",
+        );
+        assert_eq!(file.tests, ["TestOne"]);
+        assert!(out.contains("__supercovTest(t, \"TestOne\")"), "{out}");
+        // And what is written back is the author's own file, not the stand-in
+        // the parse read.
+        assert!(out.contains("new(\"hello\")"), "{out}");
+        assert!(!out.contains("nEw"), "{out}");
     }
 
     #[test]

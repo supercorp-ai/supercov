@@ -54,10 +54,28 @@ path = "src/main.rs"
 base64.workspace = true
 flate2.workspace = true
 ignore = "0.4"
-ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 supercov-contracts.workspace = true
 supercov-engine.workspace = true
 time.workspace = true
+
+# HTTPS for `supercov quality`, with the platform's own TLS where it has one.
+#
+# rustls needs a crypto provider, and every provider it has compiles C. On
+# `aarch64-pc-windows-msvc` that C is built by clang, because MSVC's own
+# compiler cannot assemble what `ring` ships -- so a Windows build needs LLVM
+# on PATH, ahead of whatever else put a clang there. Installing Ruby is enough
+# to break that: `ruby/setup-ruby` puts an MSYS2 clang first, which targets
+# mingw and fails the moment it is asked for MSVC.
+#
+# Windows already has a TLS stack. Using schannel there costs no C compiler, no
+# LLVM and no PATH order, and leaves `cargo install supercov` working on a
+# machine that has never heard of clang. Everywhere else keeps rustls, which is
+# what makes the static musl builds possible.
+[target.'cfg(not(windows))'.dependencies]
+ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
+
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "3.4", default-features = false, features = ["native-tls", "json"] }

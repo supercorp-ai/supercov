@@ -72,6 +72,11 @@ pub struct OwnedTestEvidence {
     /// Which runner announced it. Empty where the frontend has only one, in
     /// which case that one is the answer.
     pub runner: String,
+    /// Whether what this test reached could be credited to it. False for a Go
+    /// test that called `t.Parallel()`, an Example or a Fuzz target: the test
+    /// ran and its coverage is in the run-wide totals, and nothing can say
+    /// which of those totals were its.
+    pub unattributed: bool,
     /// Probe id to the bitmask it was observed with.
     pub probes: BTreeMap<u32, u32>,
     pub vectors: Vec<PackedVector>,
@@ -132,6 +137,10 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
         let name = cursor.text(length, "test name")?;
         let status_length = cursor.u64("test status")? as usize;
         let status = cursor.text(status_length, "test status")?;
+        // Whether the probes below are this test's own. An empty probe list
+        // means "reached nothing" when they are and "nothing can say what it
+        // reached" when they are not, and the two must never be conflated.
+        let unattributed = cursor.u64("test attribution")? != 0;
         let runner_length = cursor.u64("test runner")? as usize;
         let runner = cursor.text(runner_length, "test runner")?;
         let hits = cursor.u64("test probes")? as usize;
@@ -153,6 +162,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
             name,
             status,
             runner,
+            unattributed,
             probes,
             vectors,
         });
@@ -211,6 +221,10 @@ pub struct OwnedTestOutcome {
     /// Which runner announced it, as the frontend declares that runner. Empty
     /// where the frontend has only one.
     pub runner: String,
+    /// Whether what this test reached could be credited to it. False for a Go
+    /// test that called `t.Parallel()`, an Example or a Fuzz target: it ran,
+    /// and its coverage is in the run-wide record rather than in its own.
+    pub attributed: bool,
 }
 
 /// How a language's runner attributes what it records.
@@ -602,9 +616,6 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         test_exit_code,
         coverage_model,
     } = inputs;
-    if outcomes.is_empty() {
-        return Err(OwnedEvidenceError::NoTests);
-    }
     // The runner every result claims must be one the declaration names: a
     // result attributed to a runner nobody declared is a result nothing can
     // say the precision of, and the reader refuses it rather than guess.
@@ -630,6 +641,11 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
         .iter()
         .map(|outcome| {
             let test = recorded.get(&outcome.name).copied().unwrap_or(&empty);
+            // A test nothing could be credited to takes no hits at all, and
+            // says so. Handing it the record's probes would be worse than
+            // wrong: the runtime gives an unattributed record none, so the
+            // result would read as a test that reached nothing.
+            let test = if outcome.attributed { test } else { &empty };
             let test_id = format!("{}::{}", outcome.package, outcome.name);
             let phase = test_phase(&test_id);
             let provenance = TestProvenance {
@@ -673,6 +689,12 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 flaky: false,
                 provenance: provenance.clone(),
                 role: "test".into(),
+                attribution: if outcome.attributed {
+                    crate::coverage_report::ATTRIBUTION_EXACT
+                } else {
+                    crate::coverage_report::ATTRIBUTION_RUN_WIDE
+                }
+                .into(),
                 // Every event a probe produces belongs to the test body: the
                 // runtime binds coverage at the test boundary and knows
                 // nothing of setup or teardown. One declared phase says
@@ -709,6 +731,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
     let claimed = evidence
         .tests
         .iter()
+        .filter(|test| !test.unattributed)
         .flat_map(|test| test.probes.keys().copied())
         .collect::<BTreeSet<_>>();
     let unclaimed = evidence
@@ -737,6 +760,9 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             name: "background".into(),
             status: "unknown".into(),
             runner: String::new(),
+            // This record is where unattributed coverage goes; it is not
+            // itself a test whose coverage went elsewhere.
+            unattributed: false,
             probes: unclaimed,
             vectors: Vec::new(),
         };
@@ -765,6 +791,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 source: source.clone(),
             },
             role: "background".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: vec![CoveragePhase {
                 id: phase.clone(),
                 kind: "background".into(),
@@ -786,6 +813,16 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             browser: Vec::new(),
             server: Vec::new(),
         });
+    }
+
+    // Nothing to publish only when neither a test nor the run as a whole
+    // reached anything. An empty list of outcomes on its own is not that: a Go
+    // package whose every test calls `t.Parallel()` announces no test by
+    // design, and refusing it there discarded a fully measured package --
+    // lines, branches and MC/DC alike -- over the fact that the evidence had
+    // no owner. The background record above is the owner it has.
+    if raw_results.is_empty() {
+        return Err(OwnedEvidenceError::NoTests);
     }
 
     // A declaration naming a runner that produced nothing claims something the
@@ -883,6 +920,10 @@ mod tests {
 
     #[test]
     fn a_run_with_no_tests_is_an_error_not_an_empty_report() {
+        // Nothing announced itself and nothing was reached: there is no run
+        // here, and an empty report would claim a floor it never established.
+        // What makes this an error is the second half, not the first -- see
+        // the test below.
         let evidence = OwnedEvidence::default();
         let manifest = CoverageManifest {
             decisions: Vec::new(),
@@ -907,6 +948,67 @@ mod tests {
             })
             .err(),
             Some(OwnedEvidenceError::NoTests)
+        );
+    }
+
+    #[test]
+    fn a_run_nothing_could_be_attributed_to_is_still_a_run() {
+        // A Go package where every test calls `t.Parallel()` announces no test
+        // by design: probes are a store into one shared array, so what a test
+        // reaches while others run beside it cannot be credited to it. The
+        // coverage is real and has no owner, and refusing the run over that
+        // discarded a fully measured package -- lines, branches and MC/DC
+        // alike -- which is how an idiomatic Go suite came to publish nothing
+        // at all.
+        let evidence = OwnedEvidence {
+            global: vec![1],
+            ..OwnedEvidence::default()
+        };
+        let manifest = CoverageManifest {
+            decisions: Vec::new(),
+            points: vec![crate::coverage_report::PointMeta {
+                id: "go:statement:one".into(),
+                kind: crate::coverage_analysis::PointKind::Statement,
+                file: "lib.go".into(),
+                line: 1,
+                column: 1,
+                source: "return 1".into(),
+                label: None,
+            }],
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            unmeasured: Vec::new(),
+            scope: None,
+        };
+        let probes = BTreeMap::from([(
+            0_u64,
+            GoProbe {
+                id: 0,
+                target: GoProbeTarget::Statement {
+                    id: "go:statement:one".into(),
+                },
+                at: 0,
+            },
+        )]);
+        let run = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &probes,
+            evidence: &evidence,
+            outcomes: &[],
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 0,
+            coverage_model: go_coverage_model(),
+        })
+        .expect("a measured package publishes even when no test can claim it");
+        assert_eq!(run.tests, 1, "the one record is what nobody could claim");
+        assert_eq!(run.request.raw_results[0].role, "background");
+        assert_eq!(
+            run.request.raw_results[0].status.as_deref(),
+            Some("passed"),
+            "it counts as coverage because the run passed"
         );
     }
 
@@ -967,6 +1069,145 @@ mod tests {
     }
 
     #[test]
+    fn a_test_nothing_can_credit_is_named_without_being_handed_the_run() {
+        // This is the whole of the fix in one place. A test that called
+        // `t.Parallel()` is announced by name and with its real outcome, and a
+        // record for it exists -- but the probes in that record are a store
+        // into one shared array, so they are whatever ran beside it. Handing
+        // them over would read as a measurement of this test, which is the
+        // failure the run-wide label exists to prevent: it must take no hits
+        // at all and say why, while the test beside it keeps its own.
+        let manifest = CoverageManifest {
+            decisions: Vec::new(),
+            points: vec![
+                crate::coverage_report::PointMeta {
+                    id: "go:statement:one".into(),
+                    kind: crate::coverage_analysis::PointKind::Statement,
+                    file: "lib.go".into(),
+                    line: 1,
+                    column: 1,
+                    source: "return 1".into(),
+                    label: None,
+                },
+                crate::coverage_report::PointMeta {
+                    id: "go:statement:two".into(),
+                    kind: crate::coverage_analysis::PointKind::Statement,
+                    file: "lib.go".into(),
+                    line: 2,
+                    column: 1,
+                    source: "return 2".into(),
+                    label: None,
+                },
+            ],
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            unmeasured: Vec::new(),
+            scope: None,
+        };
+        let probes = BTreeMap::from([
+            (
+                0_u64,
+                GoProbe {
+                    id: 0,
+                    target: GoProbeTarget::Statement {
+                        id: "go:statement:one".into(),
+                    },
+                    at: 0,
+                },
+            ),
+            (
+                1_u64,
+                GoProbe {
+                    id: 1,
+                    target: GoProbeTarget::Statement {
+                        id: "go:statement:two".into(),
+                    },
+                    at: 0,
+                },
+            ),
+        ]);
+        // Both records hold probes. Only one of them owns what it holds.
+        let evidence = OwnedEvidence {
+            global: vec![1, 1],
+            tests: vec![
+                OwnedTestEvidence {
+                    name: "TestSerial".into(),
+                    status: "passed".into(),
+                    runner: String::new(),
+                    unattributed: false,
+                    probes: BTreeMap::from([(0, 1)]),
+                    vectors: Vec::new(),
+                },
+                OwnedTestEvidence {
+                    name: "TestParallel".into(),
+                    status: "passed".into(),
+                    runner: String::new(),
+                    unattributed: true,
+                    probes: BTreeMap::from([(0, 1), (1, 1)]),
+                    vectors: Vec::new(),
+                },
+            ],
+            ..OwnedEvidence::default()
+        };
+        let outcome = |name: &str, attributed| OwnedTestOutcome {
+            name: name.into(),
+            runner: String::new(),
+            package: "example.com/p".into(),
+            file: Some("p/x_test.go".into()),
+            status: "passed".into(),
+            attributed,
+        };
+        let run = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &probes,
+            evidence: &evidence,
+            outcomes: &[outcome("TestSerial", true), outcome("TestParallel", false)],
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 0,
+            coverage_model: go_coverage_model(),
+        })
+        .expect("run");
+
+        let result = |name: &str| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|result| result.test == name)
+                .unwrap_or_else(|| panic!("{name} is missing from the run"))
+        };
+        let serial = result("TestSerial");
+        assert_eq!(
+            serial.attribution,
+            crate::coverage_report::ATTRIBUTION_EXACT
+        );
+        assert_eq!(
+            serial.runtime[0].hits,
+            ["go:statement:one"],
+            "a test that ran alone keeps what it reached"
+        );
+
+        let parallel = result("TestParallel");
+        assert_eq!(
+            parallel.attribution,
+            crate::coverage_report::ATTRIBUTION_RUN_WIDE,
+            "it ran, and what it reached belongs to the run rather than to it"
+        );
+        assert_eq!(
+            parallel.status.as_deref(),
+            Some("passed"),
+            "unattributed is not unknown: the runner said how it ended"
+        );
+        assert!(
+            parallel.runtime[0].hits.is_empty(),
+            "it was handed the record's probes and they are not its own: {:?}",
+            parallel.runtime[0].hits
+        );
+    }
+
+    #[test]
     fn a_test_the_runner_saw_but_that_recorded_nothing_still_appears() {
         // Dropping it would make the suite look smaller than it is, and a test
         // that reached no measured line is a fact worth seeing.
@@ -990,6 +1231,7 @@ mod tests {
                 package: "example.com/p".into(),
                 file: Some("p/x_test.go".into()),
                 status: "passed".into(),
+                attributed: true,
             }],
             run_id: "run",
             generated_at: "now",

@@ -612,11 +612,12 @@ fn read_evidence_file(
                 if let Some(file) = file.filter(|path| !path.is_empty()) {
                     evidence.test_files.entry(key.clone()).or_insert(file);
                 }
-                evidence
-                    .outcomes
-                    .entry(key)
-                    .or_default()
-                    .push((phase, outcome, xfail));
+                fold_outcome(
+                    evidence.outcomes.entry(key).or_default(),
+                    phase,
+                    outcome,
+                    xfail,
+                );
             }
             Record::Hit { ctx, id } => {
                 if let Some(before) = before_assertion.get_mut(&ctx) {
@@ -948,6 +949,37 @@ fn snapshot(
     })
 }
 
+/// One phase, however many times its runner reported it, as on the Python
+/// path: a phase id is derived from an identity with no room for a repeat, so
+/// a second report of one phase duplicated an id and the run was refused
+/// whole. No Ruby runner reports twice today -- RSpec identifies an example by
+/// position, Minitest and test-unit by class and method, Cucumber by line --
+/// but losing a whole run is too much to leave resting on that.
+fn fold_outcome(
+    outcomes: &mut Vec<(String, String, bool)>,
+    phase: String,
+    outcome: String,
+    xfail: bool,
+) {
+    let Some(reported) = outcomes.iter_mut().find(|(name, _, _)| *name == phase) else {
+        outcomes.push((phase, outcome, xfail));
+        return;
+    };
+    if outcome_severity(&outcome) > outcome_severity(&reported.1) {
+        reported.1 = outcome;
+    }
+    reported.2 |= xfail;
+}
+
+/// The order `attempt_status` reads outcomes in, as one value.
+fn outcome_severity(outcome: &str) -> u8 {
+    match outcome {
+        "failed" | "rerun" | "error" => 2,
+        "skipped" => 1,
+        _ => 0,
+    }
+}
+
 fn attempt_status(outcomes: &[(String, String, bool)]) -> String {
     if outcomes
         .iter()
@@ -1219,6 +1251,14 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
+            // What a Ruby test is recorded as reaching is its own and is not
+            // all of it. The runtime asks Ruby's Coverage for one-shot lines,
+            // which report a line the first time it executes in the process
+            // and never again -- so the first test to reach a line is credited
+            // with it and every later test that runs the same line is recorded
+            // as having reached nothing there. Cheap to collect, and it makes
+            // a test's hits a lower bound rather than a description.
+            attribution: crate::coverage_report::ATTRIBUTION_PARTIAL.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1278,6 +1318,14 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
+            // What a Ruby test is recorded as reaching is its own and is not
+            // all of it. The runtime asks Ruby's Coverage for one-shot lines,
+            // which report a line the first time it executes in the process
+            // and never again -- so the first test to reach a line is credited
+            // with it and every later test that runs the same line is recorded
+            // as having reached nothing there. Cheap to collect, and it makes
+            // a test's hits a lower bound rather than a description.
+            attribution: crate::coverage_report::ATTRIBUTION_PARTIAL.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1313,6 +1361,7 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "background".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: vec![CoveragePhase {
                 id: phase.clone(),
                 kind: "background".into(),
@@ -1427,11 +1476,29 @@ pub fn build_ruby_frontend_run(
                         action: AttributionPrecision::Unavailable,
                         assertion: AttributionPrecision::Exact,
                     },
-                    limitations: vec![FrontendLimitation {
-                        id: format!("ruby-{runner}-action-linkage"),
-                        scopes: vec![FrontendLimitationScope::Action],
-                        reason: format!("{runner} exposes no general action lifecycle"),
-                    }],
+                    limitations: vec![
+                        FrontendLimitation {
+                            id: format!("ruby-{runner}-action-linkage"),
+                            scopes: vec![FrontendLimitationScope::Action],
+                            reason: format!("{runner} exposes no general action lifecycle"),
+                        },
+                        // Declared because it was not, and the declaration is
+                        // what a reader checks a number against. Ruby's
+                        // Coverage reports a line the first time it executes
+                        // in the process and never again, which is what makes
+                        // collecting it cheap: the first test to reach a line
+                        // is credited with it and every later test that runs
+                        // the same line is recorded against none of it. What a
+                        // test is credited with is its own; what it is not
+                        // credited with is not evidence it did not run.
+                        FrontendLimitation {
+                            id: format!("ruby-{runner}-first-sighting-lines"),
+                            scopes: vec![FrontendLimitationScope::Test],
+                            reason:
+                                "Ruby records a line for the first test that reaches it, so a test's coverage is a lower bound and the run's is its upper one"
+                                    .into(),
+                        },
+                    ],
                 })
                 .collect(),
             structural_limitations,
@@ -1737,6 +1804,52 @@ mod tests {
             Some("MTest#test_x"),
             "an adapter that cannot name a file keeps the identity fallback"
         );
+    }
+
+    #[test]
+    fn a_phase_a_runner_reported_more_than_once_is_one_phase() {
+        // The Python path lost a suite's whole run to a repeated phase id
+        // (#40). No Ruby runner reports a phase twice today, but the reader is
+        // the same shape, and a run is too much to lose to it.
+        let source = "def f(a)\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap();
+        let again = |outcome: &str| {
+            serde_json::json!({"t":"outcome","worker":"main","test":"MTest#test_x","retry":0,
+                               "phase":"call","outcome":outcome,"xfail":false,"runner":"minitest"})
+        };
+        let records = [
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["test.rb"]}),
+            serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"MTest#test_x","retry":0,"phase":"call"}),
+            serde_json::json!({"t":"hit","ctx":1,"id":statement.id}),
+            again("passed"),
+            again("failed"),
+            again("passed"),
+            serde_json::json!({"t":"exit","at":9}),
+        ];
+        let directory = temporary("repeated-phase");
+        fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            1,
+            &RubyAssertionInventory::empty(),
+        )
+        .unwrap();
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        let test = &run.request.raw_results[0];
+        assert_eq!(test.phases.len(), 1, "{:?}", test.phases);
+        assert_eq!(test.status.as_deref(), Some("failed"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

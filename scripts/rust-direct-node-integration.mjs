@@ -27,7 +27,19 @@ function rust(command, request) {
     input: JSON.stringify(request),
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  return JSON.parse(result.stdout.trim().split('\n').at(-1));
+  const value = JSON.parse(result.stdout.trim().split('\n').at(-1));
+  // What the wrapped command printed, kept off the value's own fields so that
+  // comparing it or printing it as JSON is unchanged. Without it a suite that
+  // failed under Supercov reported only its exit code: a flaky browser test
+  // and a broken one looked the same, and telling them apart took a rerun.
+  Object.defineProperty(value, 'output', { value: tail(`${result.stdout}${result.stderr}`) });
+  return value;
+}
+
+// The end of what a command printed, where the failure is, bounded so an
+// assertion message stays readable.
+function tail(text, lines = 200) {
+  return text.trimEnd().split('\n').slice(-lines).join('\n');
 }
 
 try {
@@ -54,7 +66,7 @@ try {
     runId: 'rust-direct-node',
     startedAt: '2026-08-25T00:00:00.000Z',
   });
-  assert.equal(result.exitCode, 0);
+  assert.equal(result.exitCode, 0, result.output);
   assert.equal(readFileSync(resolve(project, 'src/permission.mjs'), 'utf8'), original);
   assert.equal(existsSync(resolve(result.workspace, '.supercov/evidence')), false);
 
@@ -123,7 +135,7 @@ try {
     runId: 'rust-direct-commonjs-node',
     startedAt: '2026-08-25T00:00:01.000Z',
   });
-  assert.equal(commonjs.exitCode, 0);
+  assert.equal(commonjs.exitCode, 0, commonjs.output);
   assert.equal(readFileSync(resolve(commonjsProject, 'src/permission.cjs'), 'utf8'), commonjsSource);
   const commonjsSummary = rust('__query-stored-run', {
     root: commonjsProject,

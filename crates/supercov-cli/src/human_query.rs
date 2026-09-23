@@ -267,6 +267,58 @@ fn render_files(
     output
 }
 
+/// What a dimension's percentage leaves out, where it leaves anything out.
+///
+/// Silence would read as "these numbers describe every test here", and for a
+/// Go suite that mixes parallel tests with serial ones they describe only some.
+fn unattributed_note(entry: &IndexedDimensionCoverage) -> String {
+    let unattributed = entry.tests.saturating_sub(entry.attributed);
+    if unattributed == 0 {
+        String::new()
+    } else {
+        format!(" ({unattributed} not attributable)")
+    }
+}
+
+/// How completely the run could credit each test with what it reached.
+///
+/// Here whether or not anything is wrong, the way `Instrumentation` is: a
+/// reader who only ever sees "Exact for every test" has still learned that the
+/// question exists, and will recognise the other answer when a suite starts
+/// running its tests at once.
+fn attribution_line(counts: &supercov_engine::coverage_query::TestAttributionCounts) -> String {
+    let total = counts.total();
+    if total == 0 {
+        return "No test recorded coverage".into();
+    }
+    if counts.exact == total {
+        return format!("Exact for {} test(s)", count(total));
+    }
+    let mut parts = Vec::new();
+    if counts.exact > 0 {
+        parts.push(format!("{} exact", count(counts.exact)));
+    }
+    if counts.partial > 0 {
+        // Ruby records a line for the first test that reaches it, so a later
+        // test running the same line is credited with none of it.
+        parts.push(format!("{} a lower bound", count(counts.partial)));
+    }
+    if counts.run_wide > 0 {
+        parts.push(format!("{} counted run-wide", count(counts.run_wide)));
+    }
+    let detail = parts.join(", ");
+    // The offer belongs only where it would change the answer. Running the
+    // suite in order is what buys back a run-wide credit; it buys nothing for
+    // a lower bound, which is how the language reports coverage at all.
+    if counts.run_wide > 0 {
+        format!(
+            "{detail} — `--exact-attribution` credits them individually, running your suite in order"
+        )
+    } else {
+        detail
+    }
+}
+
 fn render_dimension(
     values: &[IndexedDimensionCoverage],
     request: &IndexedQueryRequest,
@@ -282,14 +334,25 @@ fn render_dimension(
                 .as_deref()
                 .or(entry.runner.as_deref())
                 .unwrap_or("unknown");
+            let setups = if entry.setups == 0 {
+                String::new()
+            } else {
+                format!(" + {} setup scope(s)", entry.setups)
+            };
+            // A percentage here describes the tests that have coverage of
+            // their own. Where none of them do, there is no percentage to
+            // print: the tests ran and reached real code, and what they
+            // reached is in the run's totals rather than in theirs.
+            if entry.tests > 0 && entry.attributed == 0 {
+                return format!(
+                    "{name}  {} test(s){setups}  coverage not attributable; counted run-wide",
+                    entry.tests
+                );
+            }
             format!(
-                "{name}  {} test(s){}  lines {}  branches {}  MC/DC {}",
+                "{name}  {} test(s){}{setups}  lines {}  branches {}  MC/DC {}",
                 entry.tests,
-                if entry.setups == 0 {
-                    String::new()
-                } else {
-                    format!(" + {} setup scope(s)", entry.setups)
-                },
+                unattributed_note(entry),
                 percentage(entry.summary.lines.percentage),
                 percentage(entry.summary.branches.percentage),
                 percentage(entry.summary.condition_coverage_pct),
@@ -534,13 +597,22 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             if data.coverage_by_kind.iter().any(|kind| kind.tests > 0) {
                 lines.extend([String::new(), "By test kind".into()]);
                 for kind in data.coverage_by_kind.iter().filter(|kind| kind.tests > 0) {
+                    if kind.attributed == 0 {
+                        lines.push(format!(
+                            "  {:<12} {:>4} test(s)  coverage not attributable; counted run-wide",
+                            kind.kind.as_deref().unwrap_or("unknown"),
+                            kind.tests,
+                        ));
+                        continue;
+                    }
                     lines.push(format!(
-                        "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}",
+                        "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}{}",
                         kind.kind.as_deref().unwrap_or("unknown"),
                         kind.tests,
                         percentage(kind.summary.lines.percentage),
                         percentage(kind.summary.branches.percentage),
                         percentage(kind.summary.condition_coverage_pct),
+                        unattributed_note(kind),
                     ));
                 }
                 if let Some(defaults) = data
@@ -585,6 +657,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 String::new(),
                 "Measurement".into(),
                 format!("  Instrumentation  {measurement}"),
+                format!("  Attribution      {}", attribution_line(&data.test_attribution)),
                 "  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.".into(),
             ]);
             if let Some(workspace) = &data.workspace {
@@ -1189,13 +1262,37 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                                 )
                             }
                         ),
-                        format!(
-                            "{} lines, {} hits, {} decisions, {} phases",
-                            test.totals.lines,
-                            test.totals.hits,
-                            test.totals.decisions,
-                            test.totals.phases
-                        ),
+                        // Zero here means two different things, and only one
+                        // of them is "this test reached nothing". A Go test
+                        // that called t.Parallel() stores into the same probe
+                        // array as the tests beside it, so what it reached was
+                        // recorded against the run: reporting that as a test
+                        // covering nothing would be a wrong number, and
+                        // reporting nothing at all is what used to answer
+                        // "Test not found" for a test that had just passed.
+                        if test.attribution == "run-wide" {
+                            "coverage not attributable to this test; it ran alongside others and what it reached is recorded run-wide".into()
+                        } else if test.attribution == "partial" {
+                            // The numbers are real and they are not all of it.
+                            // Ruby credits a line to the first test that runs
+                            // it, so a later test that runs the same line is
+                            // recorded against none of it.
+                            format!(
+                                "at least {} lines, {} hits, {} decisions, {} phases (a line already recorded for an earlier test is not recorded again)",
+                                test.totals.lines,
+                                test.totals.hits,
+                                test.totals.decisions,
+                                test.totals.phases
+                            )
+                        } else {
+                            format!(
+                                "{} lines, {} hits, {} decisions, {} phases",
+                                test.totals.lines,
+                                test.totals.hits,
+                                test.totals.decisions,
+                                test.totals.phases
+                            )
+                        },
                     ];
                     lines.extend(
                         test.lines
@@ -1580,6 +1677,48 @@ mod tests {
         assert_eq!(
             branch_need("zero iterations"),
             "zero-iteration outcome not observed"
+        );
+    }
+
+    #[test]
+    fn the_attribution_line_offers_only_what_would_help() {
+        use supercov_engine::coverage_query::TestAttributionCounts;
+
+        let counts = |exact, partial, run_wide| TestAttributionCounts {
+            exact,
+            partial,
+            run_wide,
+        };
+
+        // The ordinary answer, printed on every run so the question is
+        // familiar before it matters.
+        assert_eq!(attribution_line(&counts(16, 0, 0)), "Exact for 16 test(s)");
+
+        // Where running the suite in order would buy the credit back, say so.
+        let offered = attribution_line(&counts(0, 0, 2));
+        assert!(offered.contains("2 counted run-wide"), "{offered}");
+        assert!(offered.contains("--exact-attribution"), "{offered}");
+
+        // Where it would not, do not: Ruby credits a line to the first test
+        // that reaches it, and running in order changes nothing about that.
+        // An offer that cannot be taken is worse than silence.
+        let lower_bound = attribution_line(&counts(0, 3, 0));
+        assert!(lower_bound.contains("3 a lower bound"), "{lower_bound}");
+        assert!(
+            !lower_bound.contains("--exact-attribution"),
+            "nothing here is bought by running in order: {lower_bound}"
+        );
+
+        // A mixed run names each part rather than rounding to the worst.
+        let mixed = attribution_line(&counts(5, 0, 2));
+        assert!(mixed.contains("5 exact"), "{mixed}");
+        assert!(mixed.contains("2 counted run-wide"), "{mixed}");
+
+        // And a run with no tests says that, rather than claiming exactness
+        // over nothing -- which is the shape every floor is satisfied by.
+        assert_eq!(
+            attribution_line(&counts(0, 0, 0)),
+            "No test recorded coverage"
         );
     }
 }

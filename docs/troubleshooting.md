@@ -41,6 +41,20 @@ npx supercov runs latest scope
 Do not broaden the roots to dependencies or generated output merely to remove a
 warning. The goal is an honest boundary around code the repository owns.
 
+## Too much is measured
+
+Vendored or generated code beside your own is measured like the rest of the
+repository. Name the directories or files that hold your own code; this works
+for every language:
+
+```sh supercov
+SUPERCOV_SOURCE_ROOTS=src npx supercov -- pytest
+SUPERCOV_SOURCE_ROOTS=app.py,core.py npx supercov -- python -m unittest
+```
+
+Everything outside the roots is left out, and `npx supercov runs latest scope`
+lists what was.
+
 ## The tests pass but coverage is missing
 
 First check runner and source scope:

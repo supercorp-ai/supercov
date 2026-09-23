@@ -1,26 +1,5 @@
 [
   {
-    "id": "hardcoded_secret",
-    "task": "Does this change add a credential, token, key or password as a literal value in source, rather than reading it from configuration or the environment?",
-    "present": "A credential is written into the source.",
-    "absent": "Credentials come from configuration or the environment, or none are involved.",
-    "evidence": "caught at 0.99 on a constructed positive, 0.03 on the matched safe change; fired on 0 of 50 real pull requests"
-  },
-  {
-    "id": "injection_risk",
-    "task": "Does this change build a query, command or markup by concatenating or interpolating a value that came from outside the program, rather than passing it as a parameter or escaping it?",
-    "present": "Untrusted input is interpolated into a query, command or markup.",
-    "absent": "Values are parameterised or escaped, or none come from outside.",
-    "evidence": "caught at 0.98, 0.03 on the matched safe change; fired on 4 of 50 real pull requests"
-  },
-  {
-    "id": "touches_auth",
-    "task": "Does this change alter how the system decides who a caller is or what they may do?",
-    "present": "It changes authentication or authorisation.",
-    "absent": "It leaves identity and permission decisions alone.",
-    "evidence": "caught at 0.97, 0.05 on the matched safe change; fired on 10 of 50 real pull requests"
-  },
-  {
     "id": "weakens_tests",
     "task": "Does this change make an existing test check less than it did, by removing an assertion, skipping a case, or loosening what a value must equal?",
     "present": "An existing test now checks less.",

@@ -254,6 +254,7 @@ fn javascript_archive_entries(
                 source: "engine".into(),
             },
             role: "setup".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: vec![],
             runtime: vec![],
             browser: vec![],
@@ -461,8 +462,24 @@ fn node_options(preload: &Path) -> String {
 pub fn current_javascript_integrity(
     root: &Path,
     command: &[String],
+    source_roots: Option<&[String]>,
 ) -> Result<RunIntegrity, String> {
-    let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+    let mut environment = std::env::vars().collect::<BTreeMap<_, _>>();
+    // The roots the run was measured under, not this shell's. A run recorded
+    // with the variable and queried from a shell without it discovered a
+    // different scope and read as stale -- or, where automatic discovery found
+    // nothing, stopped being checked at all.
+    match source_roots.filter(|roots| !roots.is_empty()) {
+        Some(roots) => {
+            environment.insert(
+                crate::source_discovery::SOURCE_ROOTS_VARIABLE.into(),
+                roots.join(","),
+            );
+        }
+        None => {
+            environment.remove(crate::source_discovery::SOURCE_ROOTS_VARIABLE);
+        }
+    }
     let project = discover_coverage_project(root, &environment, command)
         .map_err(|error| error.to_string())?;
     javascript_integrity_for_project(root, &project)
@@ -522,6 +539,7 @@ pub fn run_direct_javascript(
         .map_err(|error| error.to_string())?;
     }
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+    let source_roots = crate::source_discovery::configured_source_roots(&environment);
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
     let integrity = javascript_integrity_for_project(&root, &project)?;
@@ -971,6 +989,7 @@ pub fn run_direct_javascript(
         timings: Some(timings),
         merged: None,
         parents: None,
+        source_roots: source_roots.clone(),
     };
     let run_directory =
         publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;

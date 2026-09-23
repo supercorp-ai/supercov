@@ -115,9 +115,14 @@ fn build() -> (Inputs, AssertionMap, State) {
             name: "test".into(),
         },
         passed: true,
-        files: ran,
+        files: ran.clone(),
+        attribution: "exact".into(),
     });
-    state.executions = Some(Executions { tests, probed });
+    state.executions = Some(Executions {
+        tests,
+        covered: ran,
+        probed,
+    });
     (inputs, map, state)
 }
 

@@ -57,7 +57,7 @@ function replaceLockfile(text, from, to) {
 }
 
 /** Cargo.lock, where our crates sit in `[[package]]` blocks beside everyone else's. */
-function replaceCargoLock(text, from, to) {
+export function replaceCargoLock(text, from, to) {
   let count = 0;
   let mine = false;
   const lines = text.split("\n").map((line) => {
@@ -70,10 +70,33 @@ function replaceCargoLock(text, from, to) {
   return { text: lines.join("\n"), count };
 }
 
+/**
+ * Cargo.toml, where three versions are Supercov's own: the workspace's, and
+ * the two workspace crates it pins by path. Every other quoted version in the
+ * file belongs to somebody else, including any that happens to equal this
+ * release's own -- `tree-sitter-kotlin-ng` sat at 1.1.0 when Supercov did, and
+ * bumping it would have pinned a version of it that does not exist.
+ */
+export function replaceCargoToml(text, from, to) {
+  let count = 0;
+  const lines = text.split("\n").map((line) => {
+    if (line === `version = "${from}"`) {
+      count += 1;
+      return `version = "${to}"`;
+    }
+    if (!CRATES.some((crate) => line.startsWith(`${crate} = { version = "=${from}"`))) {
+      return line;
+    }
+    count += 1;
+    return line.replace(`"=${from}"`, `"=${to}"`);
+  });
+  return { text: lines.join("\n"), count };
+}
+
 const FILES = [
   { name: "package.json", expected: 9, replace: replaceEveryQuoted },
   { name: "package-lock.json", expected: 18, replace: replaceLockfile },
-  { name: "Cargo.toml", expected: 3, replace: replaceEveryQuoted },
+  { name: "Cargo.toml", expected: 3, replace: replaceCargoToml },
   { name: "Cargo.lock", expected: 3, replace: replaceCargoLock },
 ];
 

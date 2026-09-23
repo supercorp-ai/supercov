@@ -284,6 +284,7 @@ pub(crate) fn run_nextest(
                 source: "supercov-owned-process-per-test".into(),
             },
             role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: evidence.phases,
             runtime: vec![evidence.snapshot],
             browser: Vec::new(),

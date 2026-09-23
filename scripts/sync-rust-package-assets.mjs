@@ -10,6 +10,7 @@ const mappings = [
   ["docs/agent-loop.md", "crates/supercov-cli/assets/docs/agent-loop.md"],
   ["docs/assertions.md", "crates/supercov-cli/assets/docs/assertions.md"],
   ["docs/quality.md", "crates/supercov-cli/assets/docs/quality.md"],
+  ["docs/security.md", "crates/supercov-cli/assets/docs/security.md"],
   ["docs/assertion-evidence.md", "crates/supercov-cli/assets/docs/assertion-evidence.md"],
   ["docs/assertion-maps.md", "crates/supercov-cli/assets/docs/assertion-maps.md"],
   ["docs/assertion-agent.md", "crates/supercov-cli/assets/docs/assertion-agent.md"],
@@ -84,6 +85,7 @@ const mappings = [
     "supercov_pytest.py",
     "supercov_runtime.py",
     "supercov_unittest.py",
+    "supercov_probes.py",
   ]),
   // Nested rather than flat: a Go package is a directory and a JVM class is
   // its package path, so the layout is part of what makes these compile.

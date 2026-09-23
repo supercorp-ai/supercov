@@ -6,10 +6,12 @@
 //! they already live in the content-addressed response cache, which a snapshot
 //! points into by request hash.
 //!
-//! Layout under the scanned root:
+//! Layout under the scanned root, one lane per instrument (`quality` for the
+//! code-property catalog, `security` for the security surface catalog), so a
+//! security snapshot can never be read as a quality one:
 //!
 //! ```text
-//! .supercov/quality/
+//! .supercov/<lane>/
 //!   <request-sha256>.json          legacy response cache, still read
 //!   requests/<request-sha256>.json response cache
 //!   snapshots/latest               the id of the most recent completed scan
@@ -26,22 +28,23 @@ use std::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub fn root(project_root: &Path) -> PathBuf {
-    project_root.join(".supercov").join("quality")
+pub fn root(project_root: &Path, lane: &str) -> PathBuf {
+    project_root.join(".supercov").join(lane)
 }
 
 /// Where a response is cached now. The flat directory above it is the earlier
 /// location; [`legacy_response`] still reads from there.
-pub fn responses(project_root: &Path) -> PathBuf {
-    root(project_root).join("requests")
+pub fn responses(project_root: &Path, lane: &str) -> PathBuf {
+    root(project_root, lane).join("requests")
 }
 
+/// Only the quality lane ever had the flat layout.
 pub fn legacy_response(project_root: &Path, hash: &str) -> PathBuf {
-    root(project_root).join(format!("{hash}.json"))
+    root(project_root, "quality").join(format!("{hash}.json"))
 }
 
-pub fn snapshots(project_root: &Path) -> PathBuf {
-    root(project_root).join("snapshots")
+pub fn snapshots(project_root: &Path, lane: &str) -> PathBuf {
+    root(project_root, lane).join("snapshots")
 }
 
 /// `q_` and sixteen hex characters, following the shape of a public run id:
@@ -100,6 +103,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// than overwritten.
 pub fn write(
     project_root: &Path,
+    lane: &str,
     id: &str,
     manifest: &Value,
     files: &Value,
@@ -107,10 +111,10 @@ pub fn write(
     if !is_snapshot_id(id) {
         return Err(format!("not a snapshot id: {id}"));
     }
-    let directory = snapshots(project_root).join(id);
-    fs::create_dir_all(snapshots(project_root)).map_err(|e| e.to_string())?;
+    let directory = snapshots(project_root, lane).join(id);
+    fs::create_dir_all(snapshots(project_root, lane)).map_err(|e| e.to_string())?;
     fs::create_dir(&directory).map_err(|e| match e.kind() {
-        std::io::ErrorKind::AlreadyExists => format!("quality snapshot {id} already exists"),
+        std::io::ErrorKind::AlreadyExists => format!("{lane} snapshot {id} already exists"),
         _ => e.to_string(),
     })?;
     for (name, document) in [("manifest.json", manifest), ("files.json", files)] {
@@ -118,7 +122,7 @@ pub fn write(
         write_atomic(&directory.join(name), &bytes)?;
     }
     // Last, so `latest` never names a snapshot that is still being written.
-    write_atomic(&snapshots(project_root).join("latest"), id.as_bytes())?;
+    write_atomic(&snapshots(project_root, lane).join("latest"), id.as_bytes())?;
     Ok(directory)
 }
 
@@ -128,14 +132,14 @@ fn document(path: &Path, what: &str) -> Result<Value, String> {
 }
 
 /// The manifest and the per-file record of one snapshot.
-pub fn read(project_root: &Path, id: &str) -> Result<(Value, Value), String> {
+pub fn read(project_root: &Path, lane: &str, id: &str) -> Result<(Value, Value), String> {
     if !is_snapshot_id(id) {
         return Err(format!("not a snapshot id: {id}"));
     }
-    let directory = snapshots(project_root).join(id);
+    let directory = snapshots(project_root, lane).join(id);
     if !directory.is_dir() {
         return Err(format!(
-            "no quality snapshot {id} here; list them with: supercov quality snapshots"
+            "no {lane} snapshot {id} here; list them with: supercov {lane} snapshots"
         ));
     }
     Ok((
@@ -145,12 +149,12 @@ pub fn read(project_root: &Path, id: &str) -> Result<(Value, Value), String> {
 }
 
 /// Every snapshot with its manifest, most recent first.
-pub fn list(project_root: &Path) -> Result<Vec<(String, Value)>, String> {
-    let directory = snapshots(project_root);
+pub fn list(project_root: &Path, lane: &str) -> Result<Vec<(String, Value)>, String> {
+    let directory = snapshots(project_root, lane);
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("cannot read quality snapshots: {e}")),
+        Err(e) => return Err(format!("cannot read {lane} snapshots: {e}")),
     };
     let mut found = Vec::new();
     for entry in entries {
@@ -179,29 +183,30 @@ pub fn list(project_root: &Path) -> Result<Vec<(String, Value)>, String> {
 /// concurrent scans resolve to whichever finished last; otherwise the newest
 /// surviving snapshot stands in, which keeps browsing working after a snapshot
 /// is deleted by hand.
-pub fn resolve(project_root: &Path, selector: Option<&str>) -> Result<String, String> {
+pub fn resolve(project_root: &Path, lane: &str, selector: Option<&str>) -> Result<String, String> {
     if let Some(selector) = selector.filter(|s| *s != "latest") {
         if !is_snapshot_id(selector) {
             return Err(format!(
-                "not a snapshot id: {selector}; list them with: supercov quality snapshots"
+                "not a snapshot id: {selector}; list them with: supercov {lane} snapshots"
             ));
         }
         return Ok(selector.to_owned());
     }
-    let pointer = fs::read_to_string(snapshots(project_root).join("latest"))
+    let pointer = fs::read_to_string(snapshots(project_root, lane).join("latest"))
         .ok()
         .map(|id| id.trim().to_owned())
         .filter(|id| is_snapshot_id(id))
-        .filter(|id| snapshots(project_root).join(id).is_dir());
+        .filter(|id| snapshots(project_root, lane).join(id).is_dir());
     match pointer {
         Some(id) => Ok(id),
-        None => list(project_root)?
+        None => list(project_root, lane)?
             .into_iter()
             .next()
             .map(|(id, _)| id)
             .ok_or_else(|| {
-                "no quality snapshot here yet; assess some source first: supercov quality <path>"
-                    .to_owned()
+                format!(
+                    "no {lane} snapshot here yet; assess some source first: supercov {lane} <path>"
+                )
             }),
     }
 }

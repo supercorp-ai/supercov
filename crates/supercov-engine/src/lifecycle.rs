@@ -607,6 +607,8 @@ pub fn publish_run(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunPublicationFault {
     FinalRename,
+    /// The query index cannot be written at publication.
+    QueryIndexWrite,
 }
 
 pub(crate) fn publish_run_with_fault(
@@ -648,11 +650,42 @@ pub(crate) fn publish_run_with_fault(
     let mut json = serde_json::to_vec_pretty(metadata).map_err(LifecycleError::Metadata)?;
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
-    if let Err(reason) = crate::assertion_store::prepare_publication(root, &staging, metadata) {
+    // Everything publication derives from the evidence -- the assertion map's
+    // record of what each test ran, the summary `runs latest` shows, the query
+    // index -- comes from one analysis of it, made here. Each used to analyse
+    // the archive on its own: once here, twice more in the first query after
+    // the run, and on a 3,900-test Python suite each analysis took 5 to 8
+    // seconds. Evidence that will not analyse is published as before; the
+    // first query then reports why.
+    let staged = crate::run_store::StoredRun {
+        id: metadata.id.clone(),
+        directory: staging.clone(),
+        evidence_path: staging.join("evidence.raw.gz"),
+        metadata_path: staging.join("run.json"),
+        query_index_path: staging.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+        metadata: metadata.clone(),
+    };
+    let analysed = if metadata.merged == Some(true) {
+        None
+    } else {
+        crate::run_store::analyze_stored_run(&staged).ok()
+    };
+    if let Err(reason) =
+        crate::assertion_store::prepare_publication(root, &staging, metadata, analysed.as_ref())
+    {
         let _ = remove_stored_tree_deferred(root, &staging);
         return Err(LifecycleError::InvalidState(format!(
             "assertion map publication: {reason}"
         )));
+    }
+    if let Some(report) = &analysed {
+        // Disposable, like every query index: one that failed to write is
+        // rebuilt by the first query.
+        if fault == Some(RunPublicationFault::QueryIndexWrite)
+            || crate::run_store::write_query_index_from(&staged, report).is_err()
+        {
+            let _ = fs::remove_file(&staged.query_index_path);
+        }
     }
     sync_directory(&staging)?;
     let runs = destination.parent().expect("runs parent");
@@ -747,6 +780,68 @@ fn child_directories(path: &Path) -> Result<Vec<String>, LifecycleError> {
     Ok(names)
 }
 
+/// Where a run's evidence is kept when Supercov could not publish it.
+const FAILED_EVIDENCE: &str = ".supercov/failed-evidence";
+
+/// Keep what a run measured when Supercov itself is what failed.
+///
+/// A suite pays for its measurement in wall clock, and the one that lost a run
+/// to a phase reported twice had spent two and three-quarter hours on it. The
+/// work directory goes when a run does not publish, and it held the only copy
+/// of the evidence: nothing was left to diagnose the failure with, and nothing
+/// to recover. The evidence is kept outside the work tree, where neither the
+/// recovery sweep nor the next run reclaims it, and the failure says where.
+///
+/// Best effort by design: a run has already failed by the time this is called,
+/// and being unable to keep the evidence must not replace the failure that
+/// matters with one about copying it.
+pub fn keep_failed_evidence(root: &Path, evidence: &Path, id: &str) -> Option<PathBuf> {
+    if !evidence.is_dir() {
+        return None;
+    }
+    let kept = root.join(FAILED_EVIDENCE).join(id);
+    fs::create_dir_all(&kept).ok()?;
+    let mut files = 0;
+    if copy_evidence(evidence, &kept, &mut files).is_err() || files == 0 {
+        // Nothing worth keeping, or nothing that could be: leave no empty
+        // directory behind to puzzle over.
+        let _ = fs::remove_dir_all(&kept);
+        return None;
+    }
+    Some(kept)
+}
+
+/// Say where a failed run's evidence was kept, on the failure itself.
+///
+/// The user is looking at a Supercov bug at this point; the one thing they can
+/// do about it is send the evidence, and they only will if the failure says
+/// where it is. Returns the error unchanged when there was nothing to keep.
+pub fn note_kept_evidence(root: &Path, evidence: &Path, id: &str, error: String) -> String {
+    let Some(kept) = keep_failed_evidence(root, evidence, id) else {
+        return error;
+    };
+    format!(
+        "{error}\n[supercov] the tests were measured and the run could not be published; \
+their evidence is kept at {} -- this is a Supercov bug, and that directory is what diagnoses it",
+        kept.display()
+    )
+}
+
+fn copy_evidence(source: &Path, destination: &Path, files: &mut usize) -> std::io::Result<()> {
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            fs::create_dir_all(&target)?;
+            copy_evidence(&entry.path(), &target, files)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+            *files += 1;
+        }
+    }
+    Ok(())
+}
+
 pub fn recover_abandoned_runs(
     root: &Path,
     updated_at: &str,
@@ -807,6 +902,11 @@ pub struct CleanupResult {
     pub removed_runs: Vec<String>,
     pub removed_workspaces: Vec<String>,
     pub removed_evidence: Vec<String>,
+    /// Evidence kept from runs Supercov itself failed to publish. Retention
+    /// leaves it alone -- it is the only copy, and the automatic path taking it
+    /// is what made a lost run unrecoverable -- but `clean` is the user asking
+    /// for the project's storage back, so it goes then, and the summary says so.
+    pub removed_failed_evidence: Vec<String>,
     pub removed_build_cache: bool,
 }
 
@@ -851,6 +951,7 @@ pub fn cleanup_storage_locked(
         removed_runs: Vec::new(),
         removed_workspaces: Vec::new(),
         removed_evidence: Vec::new(),
+        removed_failed_evidence: Vec::new(),
         removed_build_cache: false,
     };
     for id in ids {
@@ -876,6 +977,19 @@ pub fn cleanup_storage_locked(
             result.removed_runs.push(id.clone());
             if !options.dry_run {
                 remove_stored_tree_deferred(root, &runs_root.join(&id))?;
+            }
+        }
+    }
+    // Only a full `clean` reclaims kept evidence. `--keep N` is a trim, and the
+    // evidence of a run Supercov failed to publish is the last thing a user
+    // trimming their history means to lose; a retention pass would take it
+    // within one run of keeping it.
+    if remove_build_cache && options.keep == 0 && active.is_empty() {
+        let kept_root = root.join(FAILED_EVIDENCE);
+        for id in child_directories(&kept_root)? {
+            result.removed_failed_evidence.push(id.clone());
+            if !options.dry_run {
+                remove_stored_tree_deferred(root, &kept_root.join(&id))?;
             }
         }
     }
@@ -947,6 +1061,13 @@ mod tests {
         root
     }
 
+    fn kept_evidence(root: &Path, id: &str) -> PathBuf {
+        let evidence = root.join(".supercov/work").join(id).join("python/evidence");
+        fs::create_dir_all(&evidence).unwrap();
+        fs::write(evidence.join("main.jsonl"), "what the run saw").unwrap();
+        keep_failed_evidence(root, &evidence, id).expect("the evidence")
+    }
+
     fn state(root: &Path, id: &str, status: RunStateStatus, pid: u32) -> RunState {
         RunState {
             id: id.into(),
@@ -1000,6 +1121,7 @@ mod tests {
             timings: None,
             merged: None,
             parents: None,
+            source_roots: None,
         }
     }
 
@@ -1060,6 +1182,130 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    /// Evidence that analyses -- the analysable fixture run -- to publish as
+    /// `id`, from outside the project's runs.
+    fn analysable_evidence(root: &Path, id: &str) -> (PathBuf, RunMetadata) {
+        let source = project();
+        let directory = crate::run_store::create_analyzable_test_run(&source, "source");
+        let evidence = root.join(format!("{id}.evidence.gz"));
+        fs::copy(directory.join("evidence.raw.gz"), &evidence).unwrap();
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(directory.join("run.json")).unwrap()).unwrap();
+        metadata.id = id.into();
+        fs::remove_dir_all(source).unwrap();
+        (evidence, metadata)
+    }
+
+    /// The published run as a query reads it.
+    fn stored(root: &Path, id: &str) -> crate::run_store::StoredRun {
+        let directory = root.join(".supercov/runs").join(id);
+        crate::run_store::StoredRun {
+            id: id.into(),
+            evidence_path: directory.join("evidence.raw.gz"),
+            metadata_path: directory.join("run.json"),
+            query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+            metadata: serde_json::from_slice(&fs::read(directory.join("run.json")).unwrap())
+                .unwrap(),
+            directory,
+        }
+    }
+
+    #[test]
+    fn publication_writes_the_query_index_a_first_query_would_have_built() {
+        // Written beside staged evidence and renamed with it, the index must be
+        // the one the first query builds from the published evidence -- the
+        // same bytes, valid under the published run's identity.
+        let root = project();
+        let id = "2026-01-01T00-00-00-100Z";
+        let (evidence, metadata) = analysable_evidence(&root, id);
+        let published = publish_run(&root, &metadata, &evidence).unwrap();
+        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
+        assert!(index.is_file(), "publication wrote the index");
+        let run = stored(&root, id);
+        assert!(
+            crate::run_store::open_existing_query_index(&run)
+                .unwrap()
+                .is_some(),
+            "and it is valid for the published run"
+        );
+        let written = fs::read(&index).unwrap();
+        fs::remove_file(&index).unwrap();
+        crate::run_store::open_or_rebuild_query_index(&run).unwrap();
+        assert_eq!(
+            fs::read(&index).unwrap(),
+            written,
+            "a query rebuilds the same bytes"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn evidence_that_will_not_analyse_is_published_as_it_was_before() {
+        // Publication used to tolerate evidence it could not analyse and leave
+        // the first query to report why. It still publishes it, writes neither
+        // index nor summary, and the first query fails as it did.
+        let root = project();
+        let id = "2026-01-01T00-00-00-200Z";
+        let (evidence, bytes) = evidence(&root);
+        let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
+        assert!(published.join("run.json").is_file());
+        assert!(published.join("assertions.json").is_file());
+        assert!(
+            !published
+                .join(crate::run_store::RUST_QUERY_INDEX_FILE)
+                .exists()
+        );
+        assert!(!published.join("assertions.summary.cache.json").exists());
+        let run = stored(&root, id);
+        let Err(query) = crate::run_store::open_or_rebuild_query_index(&run) else {
+            panic!("the first query cannot analyse it either");
+        };
+        let direct = crate::run_store::analyze_stored_run(&run).expect_err("unanalysable");
+        assert_eq!(
+            query.to_string(),
+            direct.to_string(),
+            "and says why in the same words"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_merged_run_is_indexed_by_its_first_query() {
+        // Publication does not analyse a merged run; its first query does.
+        let root = project();
+        let id = "2026-01-01T00-00-00-300Z";
+        let (evidence, mut metadata) = analysable_evidence(&root, id);
+        metadata.merged = Some(true);
+        let published = publish_run(&root, &metadata, &evidence).unwrap();
+        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
+        assert!(!index.exists());
+        crate::run_store::open_or_rebuild_query_index(&stored(&root, id)).unwrap();
+        assert!(index.is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_index_that_could_not_be_written_is_built_by_the_first_query() {
+        // A failed index write loses nothing: publication succeeds without a
+        // partial file, and the first query builds the index as it used to.
+        let root = project();
+        let id = "2026-01-01T00-00-00-400Z";
+        let (evidence, metadata) = analysable_evidence(&root, id);
+        let published = publish_run_with_fault(
+            &root,
+            &metadata,
+            &evidence,
+            Some(RunPublicationFault::QueryIndexWrite),
+        )
+        .unwrap();
+        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
+        assert!(!index.exists(), "no partial index is left");
+        assert!(published.join("run.json").is_file());
+        crate::run_store::open_or_rebuild_query_index(&stored(&root, id)).unwrap();
+        assert!(index.is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1301,6 +1547,160 @@ mod tests {
         assert!(!cargo_container.exists());
         assert!(!root.join(".supercov/cache").exists());
         sweep_trash(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // What a failed run measured is the only record of hours of test time, and
+    // it lived in the work tree that failing removes. #40 lost a run to a phase
+    // reported twice after two and three-quarter hours, with nothing left to
+    // diagnose it from.
+    #[test]
+    fn evidence_a_failed_run_measured_outlives_the_work_tree() {
+        let root = project();
+        let work = root.join(".supercov/work/run_kept");
+        let evidence = work.join("python/evidence");
+        fs::create_dir_all(evidence.join("worker-1")).unwrap();
+        fs::write(evidence.join("main.jsonl"), "what the run saw").unwrap();
+        fs::write(evidence.join("worker-1/mcdc.json"), "{}").unwrap();
+
+        let kept = keep_failed_evidence(&root, &evidence, "run_kept").expect("the evidence");
+        remove_stored_tree_deferred(&root, &work).unwrap();
+        sweep_trash(&root).unwrap();
+
+        assert!(!evidence.exists(), "the work tree still went");
+        assert_eq!(
+            fs::read_to_string(kept.join("main.jsonl")).unwrap(),
+            "what the run saw",
+        );
+        // Nested workers are evidence too: a run measured by several of them
+        // cannot be diagnosed from one.
+        assert_eq!(
+            fs::read_to_string(kept.join("worker-1/mcdc.json")).unwrap(),
+            "{}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nothing_to_keep_leaves_no_directory_to_puzzle_over() {
+        let root = project();
+        // A run that failed before it measured anything: the frontend never
+        // reached the point of writing evidence, or wrote none.
+        let missing = root.join(".supercov/work/run_early/python/evidence");
+        assert!(keep_failed_evidence(&root, &missing, "run_early").is_none());
+        fs::create_dir_all(&missing).unwrap();
+        assert!(keep_failed_evidence(&root, &missing, "run_early").is_none());
+        assert!(
+            !root.join(".supercov/failed-evidence/run_early").exists(),
+            "an empty directory is worse than none: it reads as evidence",
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // The failure is the only thing the user reads. Keeping the evidence and
+    // not saying where is the same as not keeping it.
+    #[test]
+    fn the_failure_says_where_the_evidence_was_kept() {
+        let root = project();
+        let evidence = root.join(".supercov/work/run_told/python/evidence");
+        fs::create_dir_all(&evidence).unwrap();
+        fs::write(evidence.join("main.jsonl"), "what the run saw").unwrap();
+
+        let told = note_kept_evidence(&root, &evidence, "run_told", "boom".into());
+        // Taken from the keeper rather than spelled out here: a path written as
+        // one string renders every separator the same way, which is not what a
+        // Windows path built join by join looks like, so asserting on the
+        // spelling tested this test instead of the message. Keeping is
+        // idempotent, so asking again names the directory already kept.
+        let kept = keep_failed_evidence(&root, &evidence, "run_told").expect("the evidence");
+        assert_eq!(kept, root.join(FAILED_EVIDENCE).join("run_told"));
+        assert!(
+            told.starts_with("boom\n"),
+            "the failure itself came second: {told}"
+        );
+        assert!(told.contains(&kept.display().to_string()), "{told}");
+
+        // Nothing kept, nothing to say: the failure that matters is not buried
+        // under one about copying it.
+        let nothing = root.join(".supercov/work/run_empty/python/evidence");
+        assert_eq!(
+            note_kept_evidence(&root, &nothing, "run_empty", "boom".into()),
+            "boom",
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_trim_leaves_kept_evidence_alone() {
+        let root = project();
+        let kept = kept_evidence(&root, "run_trimmed");
+
+        // `--keep N` is the user trimming history, not asking for a reset, and
+        // a retention pass runs on its own: either taking the evidence would
+        // undo the keeping within one run.
+        clean_storage(
+            &root,
+            CleanupOptions {
+                keep: 20,
+                dry_run: false,
+            },
+            "now",
+        )
+        .unwrap();
+        let retention = cleanup_storage_locked(
+            &root,
+            CleanupOptions {
+                keep: 0,
+                dry_run: false,
+            },
+            false,
+        )
+        .unwrap();
+        sweep_trash(&root).unwrap();
+
+        assert!(retention.removed_failed_evidence.is_empty());
+        assert!(kept.join("main.jsonl").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleaning_everything_reclaims_kept_evidence_and_says_which() {
+        let root = project();
+        let kept = kept_evidence(&root, "run_cleaned");
+
+        let preview = clean_storage(
+            &root,
+            CleanupOptions {
+                keep: 0,
+                dry_run: true,
+            },
+            "now",
+        )
+        .unwrap();
+        assert_eq!(
+            preview.removed_failed_evidence,
+            vec!["run_cleaned".to_string()]
+        );
+        assert!(kept.join("main.jsonl").exists(), "a preview removed it");
+
+        let result = clean_storage(
+            &root,
+            CleanupOptions {
+                keep: 0,
+                dry_run: false,
+            },
+            "now",
+        )
+        .unwrap();
+        sweep_trash(&root).unwrap();
+
+        // Removing it is irreversible and it is not a run, so the summary has
+        // to name it rather than fold it into the run count.
+        assert_eq!(
+            result.removed_failed_evidence,
+            vec!["run_cleaned".to_string()]
+        );
+        assert!(!kept.exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

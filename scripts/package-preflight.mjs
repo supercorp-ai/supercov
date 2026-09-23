@@ -30,6 +30,7 @@ assert.deepEqual(manifest.files, [
   "docs/agent-loop.md",
   "docs/assertions.md",
   "docs/quality.md",
+  "docs/security.md",
   "docs/assertion-evidence.md",
   "docs/assertion-maps.md",
   "docs/assertion-agent.md",
@@ -183,6 +184,24 @@ const engineManifest = readFileSync(
 assert.match(
   engineManifest,
   /\[features\]\s*default = \[\]\s*oracle-harnesses = \[\]/,
+);
+
+// SHA-256 verifies every page of a query index on open, and sha2's portable
+// path runs at roughly a fifth of the Armv8 crypto extensions' rate. The
+// feature that selects them must stay scoped to aarch64 and off Windows: it
+// also pulls in `sha2-asm`, whose build script compiles GNU `.S` sources that
+// `cl.exe` cannot, so widening this silently breaks both Windows targets --
+// on their runners, long after the change.
+assert.match(
+  engineManifest,
+  /\[target\.'cfg\(all\(target_arch = "aarch64", not\(target_os = "windows"\)\)\)'\.dependencies\]\s*sha2 = \{ workspace = true, features = \["asm"\] \}/,
+  "the Armv8 SHA-256 backend must stay enabled, and stay scoped to aarch64 off Windows",
+);
+const workspaceManifest = readFileSync(resolve(repository, "Cargo.toml"), "utf8");
+assert.match(
+  workspaceManifest,
+  /^sha2 = "0\.10"$/m,
+  "sha2 must carry no features at the workspace root, where they would reach every target",
 );
 
 for (const [subpath, path] of Object.entries(manifest.exports)) {

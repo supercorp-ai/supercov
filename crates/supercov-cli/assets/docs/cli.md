@@ -28,6 +28,8 @@ npx supercov --help
 | See only files with findings | `npx supercov quality gaps` |
 | Review what a change introduced | `npx supercov quality patch` |
 | Remove saved assessments | `npx supercov quality clean` |
+| Find security surface with Jev | `npx supercov security` |
+| Review what a change introduced, security only | `npx supercov security patch` |
 | Read bundled guides | `npx supercov docs` |
 
 ## Assess source quality
@@ -40,6 +42,10 @@ supercov quality file src/a.ts   # one file, every check
 supercov quality scope           # which files are assessed, and why
 supercov quality snapshots       # saved assessments
 supercov quality diff <older> <newer>
+supercov security                # twelve security checks, every file
+supercov security gaps           # only files something fired on
+supercov security patch --base origin/main
+supercov security --run latest   # flagged files no test exercises
 ```
 
 With no argument the subject is the repository you are standing in. Every
@@ -406,6 +412,11 @@ npx supercov quality clean --dry-run
 npx supercov quality clean --keep 5
 npx supercov quality clean
 ```
+If Supercov itself fails to publish a run the tests already paid for, it keeps
+that run's raw evidence in `.supercov/failed-evidence/<run id>` and says so in
+the error. Report the failure with that directory: it is what diagnoses it. Only
+a full `clean` reclaims it -- `--keep N` leaves it alone -- and the summary says
+when it goes.
 
 ## Read bundled documentation
 
@@ -422,7 +433,7 @@ terminal or offline environment after the package has been downloaded.
 
 | Variable | Use |
 | --- | --- |
-| `SUPERCOV_SOURCE_ROOTS` | Set comma-separated first-party source roots when automatic discovery is ambiguous |
+| `SUPERCOV_SOURCE_ROOTS` | Comma-separated directories or files that hold your own code, in any language; everything else is left out |
 | `SUPERCOV_TEST_KIND` | Label the wrapped command as a test level such as `unit` or `e2e` |
 
 Examples:

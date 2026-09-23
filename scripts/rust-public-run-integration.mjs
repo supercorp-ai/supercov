@@ -70,7 +70,7 @@ try {
   assert.equal(missing.stderr, 'Usage: supercov -- <test command>\n');
   const help = run(['--help']);
   assert.equal(help.status, 0, help.stderr);
-  assert.match(help.stdout, /Measure your FULL test command/u);
+  assert.match(help.stdout, /Measure your full test command/u);
   assert.match(help.stdout, /npx supercov -- npm test/u);
   const agentGuide = run(['docs', 'agent-loop']);
   assert.equal(agentGuide.status, 0, agentGuide.stderr);
@@ -94,7 +94,7 @@ try {
   );
   assert.match(
     successful.stderr,
-    /\[supercov\] timings initialization=\d+(?:\.\d)?ms workspace=\d+(?:\.\d)?ms setup=\d+(?:\.\d)?ms build=\d+(?:\.\d)?ms tests=\d+(?:\.\d)?ms evidence=\d+(?:\.\d)?ms total=\d+(?:\.\d)?ms/,
+    /\[supercov\] timings initialization=\d+(?:\.\d)?ms workspace=\d+(?:\.\d)?ms setup=\d+(?:\.\d)?ms build=\d+(?:\.\d)?ms tests=\d+(?:\.\d)?ms evidence=\d+(?:\.\d)?ms publication=\d+(?:\.\d)?ms total=\d+(?:\.\d)?ms/,
   );
   const [successfulId] = publishedRuns();
   assert.match(successfulId, /^run_[a-f0-9]{16}$/);

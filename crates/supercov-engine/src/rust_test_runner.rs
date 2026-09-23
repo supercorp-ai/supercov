@@ -1717,6 +1717,7 @@ pub fn run_prepared_rust_tests(
                 source: "supercov-owned-process-per-test".into(),
             },
             role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
             phases: evidence.phases,
             runtime: vec![evidence.snapshot],
             browser: Vec::new(),
@@ -2176,7 +2177,7 @@ mod tests {
             "pub fn never_built(value: i32) -> i32 {\n    if value > 0 { 1 } else { 0 }\n}\n",
         )
         .unwrap();
-        let project = prepare_rust_project(&root).unwrap();
+        let project = prepare_rust_project(&root, None).unwrap();
         // Discovery still reaches it: the module tree is what rustc resolves.
         assert!(
             project
@@ -2276,7 +2277,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        let project = prepare_rust_project(&root).unwrap();
+        let project = prepare_rust_project(&root, None).unwrap();
         let run = run_prepared_rust_tests(
             &project,
             &["cargo".into(), "test".into(), "--lib".into()],
@@ -2363,7 +2364,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        let project = prepare_rust_project(&root).unwrap();
+        let project = prepare_rust_project(&root, None).unwrap();
         let names = |run: &str, command: &[&str]| {
             let run = run_prepared_rust_tests(
                 &project,
@@ -2466,7 +2467,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        let project = prepare_rust_project(&root).unwrap();
+        let project = prepare_rust_project(&root, None).unwrap();
         let run = run_prepared_rust_tests(
             &project,
             &["cargo".into(), "test".into(), "--lib".into()],
@@ -2568,7 +2569,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        let project = prepare_rust_project(&root).unwrap();
+        let project = prepare_rust_project(&root, None).unwrap();
         // Doctests need the CLI binary standing in for rustdoc, which this
         // test binary cannot do; scripts/rust-public-cargo-integration.mjs
         // covers them end to end. `--lib` keeps this run to the libtests.

@@ -7,6 +7,7 @@
 //! user's command unchanged, and publishes the joined evidence.
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     fs,
     io::Write,
@@ -22,8 +23,8 @@ use crate::{
     frontend_protocol::validate_frontend_report_request,
     integrity::{FrontendIntegrityInputs, create_explicit_run_integrity},
     lifecycle::{
-        ProjectLock, finalize_published_run, publish_run, recover_abandoned_runs,
-        remove_stored_tree_deferred,
+        ProjectLock, finalize_published_run, note_kept_evidence, publish_run,
+        recover_abandoned_runs, remove_stored_tree_deferred,
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
@@ -58,7 +59,7 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
-fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 4] {
+fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 5] {
     [
         (
             "sitecustomize.py",
@@ -75,6 +76,10 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 4] {
         (
             "supercov_unittest.py",
             include_bytes!("../runtime-assets/python/supercov_unittest.py"),
+        ),
+        (
+            "supercov_probes.py",
+            include_bytes!("../runtime-assets/python/supercov_probes.py"),
         ),
     ]
 }
@@ -141,17 +146,14 @@ fn environment(
     };
     let python_path = prepend_path_list(take("PYTHONPATH"), runtime_directory);
     let pytest_plugins = append_list(take("PYTEST_PLUGINS"), "supercov_pytest", ",");
-    // pytest calls its assertion-pass hook only from modules rewritten with
-    // this option on; the plugin gives those rewrites a cache name of their
-    // own. First in the list, so an explicit `-o` on the command line wins.
-    let pytest_addopts = {
-        let mut value = OsString::from("-o enable_assertion_pass_hook=true");
-        if let Some(existing) = take("PYTEST_ADDOPTS").filter(|existing| !existing.is_empty()) {
-            value.push(" ");
-            value.push(existing);
-        }
-        value
-    };
+    // Supercov no longer turns on pytest's assertion-pass hook. Assertion
+    // sites come from line events on the lines the plan names, and the hook
+    // made pytest build a failure explanation for every passing assertion --
+    // 30 microseconds each on two integers, 140 on a nested dict, more than
+    // everything else the runtime does put together. A user's own
+    // `PYTEST_ADDOPTS` passes through untouched; if it enables the hook, the
+    // plugin still records what the hook reports.
+    let pytest_addopts = take("PYTEST_ADDOPTS").unwrap_or_default();
     for key in [
         "SUPERCOV_PYTHON_PLAN",
         "SUPERCOV_PYTHON_EVIDENCE_DIR",
@@ -185,15 +187,44 @@ fn environment(
 pub fn current_python_integrity(
     root: &Path,
     command: &[String],
+    source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
     let root = canonicalize_simplified(root).map_err(|error| error.to_string())?;
-    let files = crate::python_project::discover_python_files(&root)?;
-    create_explicit_run_integrity(
-        &root,
-        &python_integrity_inputs(&files, command),
-        &FrontendIntegrityInputs::embedded_python(),
-    )
-    .map_err(|error| error.to_string())
+    let mut files = crate::python_project::discover_python_files(&root)?;
+    // The roots the run was measured under, not this shell's: the run
+    // digested the files they kept, and nothing else would match it.
+    if let Some(configured) = source_roots.filter(|roots| !roots.is_empty()) {
+        crate::source_discovery::ExplicitSourceRoots::resolve(&root, configured)
+            .map_err(|error| error.to_string())?
+            .narrow(&mut files.sources, &mut files.excluded, String::as_str);
+    }
+    let mut inputs = python_integrity_inputs(&files, command);
+    crate::source_discovery::fold_roots_into_configuration(
+        &mut inputs.execution_configuration,
+        source_roots,
+    );
+    create_explicit_run_integrity(&root, &inputs, &FrontendIntegrityInputs::embedded_python())
+        .map_err(|error| error.to_string())
+}
+
+/// The lines of each test file that hold an inventoried assertion site, for
+/// the plan. Sorted and deduplicated: a line with two sites is one line to
+/// arm, and the report keeps telling the two apart by column.
+fn assertion_sites(
+    inventory: &[crate::assertion_map::InventorySite],
+) -> BTreeMap<String, Vec<usize>> {
+    let mut sites = BTreeMap::<String, Vec<usize>>::new();
+    for site in inventory {
+        sites
+            .entry(site.at.file.clone())
+            .or_default()
+            .push(site.at.line);
+    }
+    for lines in sites.values_mut() {
+        lines.sort_unstable();
+        lines.dedup();
+    }
+    sites
 }
 
 pub fn run_direct_python(
@@ -211,6 +242,10 @@ pub fn run_direct_python(
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
     let work_directory = root.join(".supercov/work").join(&request.run_id);
+    // Whether the tests were measured. A run that failed before that has no
+    // evidence worth keeping; one that failed after has evidence that cost the
+    // suite its wall clock.
+    let measured = std::cell::Cell::new(false);
     let result = (|| {
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
@@ -224,10 +259,21 @@ pub fn run_direct_python(
         }
 
         let adapter_started = Instant::now();
-        let project: PreparedPythonProject = prepare_python_project(&root)?;
+        let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        let roots = crate::source_discovery::ExplicitSourceRoots::from_environment(&root, &ambient)
+            .map_err(|error| error.to_string())?;
+        let project: PreparedPythonProject = prepare_python_project(&root, roots.as_ref())?;
+        let source_roots = crate::source_discovery::configured_source_roots(
+            &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
+        );
+        let mut integrity_inputs = python_integrity_inputs(&project.files, &request.command);
+        crate::source_discovery::fold_roots_into_configuration(
+            &mut integrity_inputs.execution_configuration,
+            source_roots.as_deref(),
+        );
         let integrity = create_explicit_run_integrity(
             &root,
-            &python_integrity_inputs(&project.files, &request.command),
+            &integrity_inputs,
             &FrontendIntegrityInputs::embedded_python(),
         )
         .map_err(|error| error.to_string())?;
@@ -242,15 +288,19 @@ pub fn run_direct_python(
         let plan_path = python_directory.join("plan.json");
         write_runtime(&runtime_directory)?;
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
+        let plan = crate::python_instrumenter::PythonProbePlan {
+            assertion_sites: assertion_sites(&assertion_inputs.assertions),
+            ..project.plan.clone()
+        };
         fs::write(
             &plan_path,
-            serde_json::to_vec(&project.plan).map_err(|error| error.to_string())?,
+            serde_json::to_vec(&plan).map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("{}: {error}", plan_path.display()))?;
         writeln!(
             diagnostics,
-            "[supercov] detected Python; measuring {} source file(s) in place through CPython monitoring",
-            project.plan.files.len()
+            "[supercov] detected Python; measuring {} source file(s) in place through probes compiled at import",
+            project.plan.files.len(),
         )
         .map_err(|error| error.to_string())?;
         for (file, reason) in &project.unparseable {
@@ -297,6 +347,7 @@ pub fn run_direct_python(
         let verbose = std::env::var("SUPERCOV_VERBOSE")
             .or_else(|_| std::env::var("SUPERCOV_DEBUG"))
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+        measured.set(true);
         let run: PythonFrontendRun = build_python_frontend_run(
             &project.manifest,
             &evidence_directory,
@@ -314,6 +365,13 @@ pub fn run_direct_python(
         let serialized_ms = elapsed_ms(publication_started) - joined_ms;
         let entries = crate::assertion_inputs::append(entries, &assertion_inputs)?;
         let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
+        // The joined evidence is in the archive now, and publication reads it
+        // from there. Held to the end for three counts, it was the largest
+        // thing alive while publication analysed the archive: 1.4 GB on a
+        // 3,900-test run, on top of the analysis's own.
+        let (tests, interpreters, python_versions) =
+            (run.tests, run.interpreters, run.python_versions.clone());
+        drop(run);
         if verbose {
             writeln!(
                 diagnostics,
@@ -357,6 +415,7 @@ pub fn run_direct_python(
             timings: Some(timings),
             merged: None,
             parents: None,
+            source_roots: source_roots.clone(),
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
@@ -365,14 +424,25 @@ pub fn run_direct_python(
             run_id: request.run_id.clone(),
             run_directory,
             exit_code: execution.exit_code,
-            tests: run.tests,
+            tests,
             source_files: project.plan.files.len(),
-            interpreters: run.interpreters,
-            python_versions: run.python_versions,
+            interpreters,
+            python_versions,
             recovered_runs,
             metadata,
         })
     })();
+    let result = result.map_err(|error| {
+        if !measured.get() {
+            return error;
+        }
+        note_kept_evidence(
+            &root,
+            &work_directory.join("python/evidence"),
+            &request.run_id,
+            error,
+        )
+    });
     if result.is_err() {
         let _ = remove_stored_tree_deferred(&root, &work_directory);
     }
@@ -381,5 +451,138 @@ pub fn run_direct_python(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    // The plan names each test file's assertion lines from the inventory, so
+    // the runtime can record a site from the line event that runs it and
+    // pytest's assertion-pass hook -- a failure explanation built for every
+    // passing assertion -- stays off.
+    #[test]
+    fn the_plan_names_each_test_files_assertion_lines_once_and_sorted() {
+        use crate::assertion_map::{Anchor, InventorySite};
+        let site = |file: &str, line: usize, column: usize| InventorySite {
+            at: Anchor {
+                file: file.into(),
+                line,
+                column,
+                text: String::new(),
+            },
+            operation: "assert".into(),
+        };
+        let inventory = vec![
+            site("tests/test_b.py", 9, 4),
+            site("tests/test_a.py", 12, 4),
+            // Two sites on one line are one line to arm.
+            site("tests/test_a.py", 12, 30),
+            site("tests/test_a.py", 3, 4),
+        ];
+        let sites = assertion_sites(&inventory);
+        assert_eq!(
+            sites,
+            BTreeMap::from([
+                ("tests/test_a.py".to_string(), vec![3, 12]),
+                ("tests/test_b.py".to_string(), vec![9]),
+            ])
+        );
+
+        // Serialized under the key the runtime reads, and absent -- not an
+        // empty object -- when there is nothing to arm.
+        let plan = crate::python_instrumenter::PythonProbePlan {
+            version: 1,
+            root: "/p".into(),
+            files: BTreeMap::new(),
+            assertion_sites: sites,
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            json.contains("\"assertionSites\":{\"tests/test_a.py\":[3,12]"),
+            "{json}"
+        );
+        let empty = crate::python_instrumenter::PythonProbePlan {
+            assertion_sites: BTreeMap::new(),
+            ..plan
+        };
+        assert!(
+            !serde_json::to_string(&empty)
+                .unwrap()
+                .contains("assertionSites")
+        );
+    }
+    use super::*;
+    use crate::source_discovery::{ExplicitSourceRoots, fold_roots_into_configuration};
+
+    fn fixture(name: &str) -> PathBuf {
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-run-{}-{}-{name}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        for (file, contents) in [
+            ("a.py", "def f(x):\n    return x if x else 0\n"),
+            ("vendor/pkg/b.py", "def g():\n    return 1\n"),
+            ("test/test_a.py", "from a import f\n"),
+        ] {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        canonicalize_simplified(&root).unwrap()
+    }
+
+    #[test]
+    fn a_rooted_run_is_current_whatever_shell_asks() {
+        // A run recorded under roots digested only the files they kept, while
+        // the query that later judged it rediscovered every file: the two could
+        // never agree, and each rooted run read as stale the moment it was
+        // written. The query has to replay the roots the run recorded, because
+        // the shell it runs in is usually not the one the run came from.
+        let root = fixture("current");
+        let configured = vec!["a.py".to_owned()];
+        let command = vec!["python".to_owned(), "-m".to_owned(), "unittest".to_owned()];
+
+        let roots = ExplicitSourceRoots::resolve(&root, &configured).unwrap();
+        let project = crate::python_project::prepare_python_project(&root, Some(&roots)).unwrap();
+        let mut inputs = python_integrity_inputs(&project.files, &command);
+        fold_roots_into_configuration(&mut inputs.execution_configuration, Some(&configured));
+        let recorded = create_explicit_run_integrity(
+            &root,
+            &inputs,
+            &FrontendIntegrityInputs::embedded_python(),
+        )
+        .unwrap();
+
+        let replayed = current_python_integrity(&root, &command, Some(&configured)).unwrap();
+        assert_eq!(recorded.fingerprint, replayed.fingerprint);
+
+        // Judged without the roots, it is a different run -- which is what the
+        // query used to do.
+        let ignoring = current_python_integrity(&root, &command, None).unwrap();
+        assert_ne!(recorded.fingerprint, ignoring.fingerprint);
+
+        // A change the roots left out is not a change to this run; one they
+        // kept is.
+        fs::write(root.join("vendor/pkg/b.py"), "def g():\n    return 2\n").unwrap();
+        assert_eq!(
+            current_python_integrity(&root, &command, Some(&configured))
+                .unwrap()
+                .fingerprint,
+            recorded.fingerprint,
+            "a vendored file changing does not make a rooted run stale"
+        );
+        fs::write(root.join("a.py"), "def f(x):\n    return 1\n").unwrap();
+        assert_ne!(
+            current_python_integrity(&root, &command, Some(&configured))
+                .unwrap()
+                .fingerprint,
+            recorded.fingerprint,
+            "a first-party file changing does"
+        );
+        fs::remove_dir_all(root).ok();
     }
 }

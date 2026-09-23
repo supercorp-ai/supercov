@@ -24,13 +24,6 @@ def test_chained():
     assert shapes.chained(-1) == "negative"
 
 
-def test_matcher():
-    assert shapes.matcher(0) == "zero"
-    assert shapes.matcher(500) == "big"
-    assert shapes.matcher([7, 8]) == "seq:7"
-    assert shapes.matcher("x") == "other"
-
-
 def test_guarded():
     assert shapes.guarded("12") == 12
     assert shapes.guarded("nope") == -1

@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `supercov security`: twelve security checks asked of every file with [Jev](https://typesafe.ai), from secrets in source and injection to mass assignment and weakened configuration, each mapped to its CWE classes. Nothing is averaged: a file is clean or names what fired, with the line and the code on it where the model confirms one, and the line where the outside value enters. On fifteen held-out repositories of the RealVuln corpus it scores F1 0.47 (precision 54%, recall 41%) for about two cents a repository, where Semgrep scores 0.14. Injection, secrets, paths, redirects and mass assignment are found at 70 to 90% recall; authorisation stays file-level.
+- `security patch` reports what a change introduced; `quality patch` asks the twelve checks too. `security --run latest` shows which flagged files no test executes.
+
+## 1.2.0
+
+**Changed**
+
+- Python suites run nearly four times faster under Supercov. On h11's 3,900 tests, pytest's own session takes 3.4 to 3.9 seconds where 1.1.1 took 12.8 to 14.1, against 2.0 to 2.3 without Supercov, on CPython 3.13 and 3.14 alike; the whole command takes 18 to 22 seconds rather than 32 to 36.
+- Python is measured by probes compiled into each measured module as it is imported, replacing the `sys.monitoring` observer, which is removed rather than kept behind a switch. Nothing on disk changes, and tracebacks keep their line numbers.
+- CPython 3.9, 3.10 and 3.11 are measured. 3.12 was the floor.
+- Decisions the observer left out of the denominator without saying so are measured: on h11, 704 branches and 172 conditions rather than 692 and 160. A Python project's branch and condition totals can rise for that reason alone.
+- A process that ends mid-test -- `os._exit`, SIGTERM, SIGKILL, a killed xdist worker -- keeps what it executed.
+- Running under `-X no_debug_ranges` no longer removes lines from the measurement.
+
+**Fixed**
+
+- A Python suite using `pytest-subtests` published no result. Each subtest is reported under its test's `call` phase, so one phase arrived several times and the run was refused. A phase reported more than once is now one phase, and a failing subtest still fails its test. Thanks to [@maik-intellicoach](https://github.com/maik-intellicoach), whose 6,872-test run lost 2 hours 43 minutes to it. (#40)
+- When Supercov itself fails a run, what the run measured is kept in `.supercov/failed-evidence/<run id>` and the failure names that path, instead of being deleted with the work directory. Reported by [@maik-intellicoach](https://github.com/maik-intellicoach). (#40)
+- A thread started by a measured test is freed when it ends, rather than when the cycle collector next runs.
+- A `match` case with an or-pattern whose first alternative fails is no longer also reported as not selected.
+- Opening a run's index verifies its pages about five times faster on Arm macOS and Linux, where the CPU's SHA-256 instructions were going unused, and an index stores each list of tests once however many lines name it: a real 206 MB index came out a quarter smaller.
+
+## 1.1.1
+
+**Fixed**
+
+- `SUPERCOV_SOURCE_ROOTS` narrows what is measured in every language. It was read on the JavaScript path alone while the reference described it without one, so a Python project that set it measured everything anyway: a vendored tree beside a flat layout came out at 660 files instead of about fifteen. If you already set it on a Python, Ruby, Go, Rust or JVM project, this release measures the roots you named and nothing else, and your numbers will change accordingly. A root is a directory or a single file, since a flat layout keeps its own modules at the root, and `supercov runs latest scope` lists what was kept and what was left out. (#35)
+- Roots that name nothing to measure are refused, with the name quoted, rather than published as a run over zero files. (#35)
+- A Python suite whose threads outlive its tests no longer ends with a `FileExistsError` from the collector. (#35)
+- `supercov runs latest` costs what it shows rather than what it could show. A summary of a 300-file project took 21 seconds and 4 GB of memory, and 81 seconds where files are as long as generated bindings; it now takes 8 and 9 seconds. What it prints is unchanged. (#35)
+- `go run github.com/supercorp-ai/supercov/cmd/supercov@latest` asks GitHub again when it answers with a gateway timeout, rate-limits the request or drops the connection, instead of ending the install outright. It says so while it waits.
+
+## 1.1.0
+
+**Added**
+
+- `--exact-attribution` credits every test with what it reached, by running the suite in order: `-parallel=1` in Go, and JUnit's parallel execution turned off in the workspace copy. Without it a suite that runs its tests at once is measured as its author runs it, and what overlapped is recorded against the run rather than against a test.
+- A measurement says how its tests were attributed, so coverage that belongs to no single test is visible rather than implied.
+
+**Fixed**
+
+- A Go package whose tests all call `t.Parallel()` published no run at all and exited 1. Probes are a store into one shared array, so what a test reaches while others run beside it cannot be credited to it — but the coverage is real and the package was fully measured. The run is published, and each parallel test is named, carries its real outcome, and is credited with nothing. (#30)
+- Go 1.26's `new(value)` failed to parse, and a single unparseable file silently zeroed the whole measurement: 0 files measured, exit 0. The value form is read, and a file Supercov cannot parse is reported rather than taking the run down with it. (#31)
+- A Ruby test's coverage is read as the lower bound it is. `Coverage.start(oneshot_lines: true)` reports a line once per process, so a line some earlier test reached first is missing from this one's record. It is marked partial rather than presented as the whole of what the test ran.
+- Cleaning old runs kept the largest run IDs rather than the newest runs.
+
+**Changed**
+
+- `supercov` with no arguments lists the supported languages, each with its own install and start command.
+- A source-discovery scope is reported in the language that was measured.
+
 ## 1.0.1
 
 **Changed**
