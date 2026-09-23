@@ -1000,14 +1000,15 @@ class Runtime:
             unmatched = self.worker == "main" and bool(self.path_cache) and not self.under_root
         for slot in slots:
             # Everything a slot held is in the transport now. A daemon thread
-            # can still write into it after this point, so it stays mapped;
-            # the file goes, and a zeroed layout tag tells the reader not to
-            # count what it finds where a mapped file cannot be removed
-            # (Windows).
+            # can still write into it after this point, so it stays mapped,
+            # and a zeroed layout tag tells the reader not to count what it
+            # finds. The file stays too: a process that outlives the test
+            # command -- multiprocessing's resource tracker -- closes while the
+            # reader is listing the evidence, and a slot removed between the
+            # listing and the read failed the whole run.
             try:
                 slot[8:16] = b"\0" * 8
                 os.close(slot.descriptor)
-                os.unlink(slot.path)
             except (OSError, ValueError):
                 pass
         if unmatched:
