@@ -365,6 +365,13 @@ pub fn run_direct_python(
         let serialized_ms = elapsed_ms(publication_started) - joined_ms;
         let entries = crate::assertion_inputs::append(entries, &assertion_inputs)?;
         let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
+        // The joined evidence is in the archive now, and publication reads it
+        // from there. Held to the end for three counts, it was the largest
+        // thing alive while publication analysed the archive: 1.4 GB on a
+        // 3,900-test run, on top of the analysis's own.
+        let (tests, interpreters, python_versions) =
+            (run.tests, run.interpreters, run.python_versions.clone());
+        drop(run);
         if verbose {
             writeln!(
                 diagnostics,
@@ -417,10 +424,10 @@ pub fn run_direct_python(
             run_id: request.run_id.clone(),
             run_directory,
             exit_code: execution.exit_code,
-            tests: run.tests,
+            tests,
             source_files: project.plan.files.len(),
-            interpreters: run.interpreters,
-            python_versions: run.python_versions,
+            interpreters,
+            python_versions,
             recovered_runs,
             metadata,
         })

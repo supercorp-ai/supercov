@@ -963,7 +963,7 @@ fn assess_with(
         .tests
         .iter()
         .filter(|t| t.role == "test")
-        .map(|t| (&t.id, t))
+        .map(|t| (t.id.as_str(), t))
         .collect::<BTreeMap<_, _>>();
     let measured_statements = view
         .points
@@ -980,7 +980,7 @@ fn assess_with(
         .view
         .tests
         .iter()
-        .map(|t| (&t.id, t))
+        .map(|t| (t.id.as_str(), t))
         .collect::<BTreeMap<_, _>>();
     let mut by_file = BTreeMap::<&str, Vec<(usize, &crate::coverage_report::PointResult)>>::new();
     let mut by_line = BTreeMap::<(String, usize), Vec<&crate::coverage_report::PointResult>>::new();
@@ -1035,7 +1035,7 @@ fn assess_with(
     // for every assertion/phase pair. This is evidence lookup, not inference.
     let mut phases_by_location = BTreeMap::new();
     for p in &view.phases {
-        if !tests.contains_key(&p.test) {
+        if !tests.contains_key(p.test.as_str()) {
             continue;
         }
         if let Some(location) = phase_location(&p.phase, inputs) {
@@ -1135,7 +1135,10 @@ fn assess_with(
                     })
                     .collect::<Vec<_>>();
                 let status = match matches.as_slice() {
-                    [test] if witnesses.contains(&test.id) && tests.contains_key(&test.id) => {
+                    [test]
+                        if witnesses.contains(test.id.as_str())
+                            && tests.contains_key(test.id.as_str()) =>
+                    {
                         resolved.insert(test.id.clone());
                         "observed"
                     }
@@ -1193,7 +1196,7 @@ fn assess_with(
                     .iter()
                     .filter(|p| p.covered)
                     .flat_map(|p| p.tests.iter())
-                    .filter(|test| applicable.contains(*test))
+                    .filter(|test| applicable.contains(test.as_str()))
                     .collect::<BTreeSet<_>>();
                 let credited = claimed && eligible && !matching_tests.is_empty();
                 let mut reasons = Vec::new();
@@ -1243,10 +1246,11 @@ fn assess_with(
                                 .filter(|p| p.covered)
                                 .collect::<Vec<_>>();
                             if !executed.is_empty() {
-                                let setup = executed
-                                    .iter()
-                                    .flat_map(|p| &p.tests)
-                                    .any(|id| all_tests.get(id).is_some_and(|t| t.role == "setup"));
+                                let setup = executed.iter().flat_map(|p| &p.tests).any(|id| {
+                                    all_tests
+                                        .get(id.as_str())
+                                        .is_some_and(|t| t.role == "setup")
+                                });
                                 reason(if setup {"shared_setup_execution"} else {"execution_outside_passing_tests"},
                                     if setup {"Execution was recorded in a separate setup scope. Shared setup is not automatically credited to consuming tests."} else {"Execution was recorded outside passing tests (for example module initialization, background work or a failed test). It cannot establish same-test execution."}.into());
                             }
@@ -1256,11 +1260,11 @@ fn assess_with(
                                     .into(),
                             );
                         } else if !applicable.is_empty() && matching_tests.is_empty() {
-                            if matched
-                                .iter()
-                                .flat_map(|p| &p.tests)
-                                .any(|id| all_tests.get(id).is_some_and(|t| t.role == "setup"))
-                            {
+                            if matched.iter().flat_map(|p| &p.tests).any(|id| {
+                                all_tests
+                                    .get(id.as_str())
+                                    .is_some_and(|t| t.role == "setup")
+                            }) {
                                 reason("shared_setup_execution", "Execution was recorded in a separate setup scope. Shared setup is not automatically credited to consuming tests.".into());
                             }
                             reason("no_same_test_execution", "No execution evidence attributed to a selected passing test for this assertion.".into());
@@ -1279,7 +1283,7 @@ fn assess_with(
                     claimed_points.insert(point.meta.id.clone());
                     if eligible
                         && point.covered
-                        && point.tests.iter().any(|t| applicable.contains(t))
+                        && point.tests.iter().any(|t| applicable.contains(t.as_str()))
                     {
                         credited_points.insert(point.meta.id.clone());
                         point_flows
@@ -1429,8 +1433,8 @@ fn assess_with(
         let at = column.map(|column| Anchor { file: p.meta.file.clone(), line: p.meta.line, column, text: p.meta.source.clone() });
         let all = all_points.get(&p.meta.id);
         json!({"id":p.meta.id,"file":p.meta.file,"line":p.meta.line,"at":at,"covered":p.covered,"tests":p.tests,"declared":claimed_points.contains(&p.meta.id),"asserted":credited_points.contains(&p.meta.id),"flows":point_flows.get(&p.meta.id).cloned().unwrap_or_default(),
-            "executionEvidence":{"anyExecution":all.is_some_and(|p| p.covered),"passingTests":p.tests.iter().filter(|id| tests.contains_key(id)).collect::<Vec<_>>(),
-                "outsidePassingTests":all.into_iter().flat_map(|p| &p.tests).filter(|id| !tests.contains_key(id)).collect::<Vec<_>>()}})
+            "executionEvidence":{"anyExecution":all.is_some_and(|p| p.covered),"passingTests":p.tests.iter().filter(|id| tests.contains_key(id.as_str())).collect::<Vec<_>>(),
+                "outsidePassingTests":all.into_iter().flat_map(|p| &p.tests).filter(|id| !tests.contains_key(id.as_str())).collect::<Vec<_>>()}})
     }).collect::<Vec<_>>()
     };
     json!({"basis":"agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",

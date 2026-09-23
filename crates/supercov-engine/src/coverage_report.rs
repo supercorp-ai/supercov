@@ -18,6 +18,7 @@ use crate::coverage_analysis::{
     McdcVector, PointCoverage, PointKind, analyze_core, find_witnesses_for_conditions,
 };
 use crate::evidence_archive::{EvidenceArchiveEntry, read_archive};
+use crate::interned::{Id, Interner};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -320,8 +321,8 @@ pub struct CoverageConfidence {
     pub setup_only: bool,
     pub background_only: bool,
     pub asserted: bool,
-    pub tests: Vec<String>,
-    pub asserted_tests: Vec<String>,
+    pub tests: Vec<Id>,
+    pub asserted_tests: Vec<Id>,
     pub runners: Vec<String>,
     pub kinds: Vec<String>,
     pub e2e: bool,
@@ -331,11 +332,11 @@ pub struct CoverageConfidence {
 #[serde(rename_all = "camelCase")]
 pub struct VectorObservation {
     pub vector: McdcVector,
-    pub tests: Vec<String>,
+    pub tests: Vec<Id>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub phases: Vec<String>,
+    pub phases: Vec<Id>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub explicit_phases: Vec<String>,
+    pub explicit_phases: Vec<Id>,
     pub confidence: CoverageConfidence,
 }
 
@@ -349,7 +350,7 @@ pub struct ConditionResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witness: Option<[McdcVector; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub witness_tests: Option<[Vec<String>; 2]>,
+    pub witness_tests: Option<[Vec<Id>; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -361,7 +362,7 @@ pub struct DecisionResult {
     pub vectors: Vec<McdcVector>,
     pub vector_observations: Vec<VectorObservation>,
     pub conditions: Vec<ConditionResult>,
-    pub tests: Vec<String>,
+    pub tests: Vec<Id>,
     pub confidence: CoverageConfidence,
 }
 
@@ -372,8 +373,8 @@ pub struct PointResult {
     pub covered: bool,
     #[serde(skip)]
     pub measured: bool,
-    pub tests: Vec<String>,
-    pub phases: Vec<String>,
+    pub tests: Vec<Id>,
+    pub phases: Vec<Id>,
     pub confidence: CoverageConfidence,
 }
 
@@ -383,8 +384,8 @@ pub struct AlternativeResult {
     pub id: String,
     pub label: String,
     pub covered: bool,
-    pub tests: Vec<String>,
-    pub phases: Vec<String>,
+    pub tests: Vec<Id>,
+    pub phases: Vec<Id>,
     pub confidence: CoverageConfidence,
 }
 
@@ -398,7 +399,7 @@ pub struct BranchResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct SourceLine {
-    pub file: String,
+    pub file: Id,
     pub line: usize,
 }
 
@@ -407,9 +408,9 @@ pub struct SourceLine {
 struct LineAggregate {
     covered: bool,
     measured: bool,
-    tests: BTreeSet<String>,
-    phases: BTreeSet<String>,
-    explicit_phases: BTreeSet<String>,
+    tests: BTreeSet<Id>,
+    phases: BTreeSet<Id>,
+    explicit_phases: BTreeSet<Id>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -424,12 +425,12 @@ pub struct LineResult {
     /// publishing, and the limitation records already say why.
     #[serde(skip)]
     pub measured: bool,
-    pub tests: Vec<String>,
+    pub tests: Vec<Id>,
     pub runners: Vec<String>,
     pub kinds: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusive_kind: Option<String>,
-    pub phases: Vec<String>,
+    pub phases: Vec<Id>,
     pub confidence: CoverageConfidence,
 }
 
@@ -457,7 +458,7 @@ pub struct TestCoverageResult {
     /// `exact`, or `run-wide` when the test ran but nothing can say what it
     /// reached. An empty `hits` means "reached nothing" only under `exact`.
     pub attribution: String,
-    pub hits: Vec<String>,
+    pub hits: Vec<Id>,
     pub decisions: Vec<TestDecisionResult>,
     pub lines: Vec<SourceLine>,
 }
@@ -477,8 +478,8 @@ pub struct TestFileResult {
 pub struct PhaseResult {
     #[serde(flatten)]
     pub phase: CoveragePhase,
-    pub test: String,
-    pub hits: Vec<String>,
+    pub test: Id,
+    pub hits: Vec<Id>,
     pub decisions: Vec<TestDecisionResult>,
     pub lines: Vec<SourceLine>,
     pub browser_events: usize,
@@ -837,9 +838,9 @@ impl OrderedVectors {
 #[derive(Clone)]
 struct MutableObservation {
     vector: McdcVector,
-    tests: BTreeSet<String>,
-    phases: BTreeSet<String>,
-    explicit_phases: BTreeSet<String>,
+    tests: BTreeSet<Id>,
+    phases: BTreeSet<Id>,
+    explicit_phases: BTreeSet<Id>,
 }
 
 #[derive(Clone)]
@@ -855,15 +856,15 @@ struct MutableTest {
     provenance: TestProvenance,
     role: String,
     attribution: String,
-    hits: BTreeSet<String>,
+    hits: BTreeSet<Id>,
     decisions: BTreeMap<String, OrderedVectors>,
 }
 
 #[derive(Clone)]
 struct MutablePhase {
     phase: CoveragePhase,
-    test: String,
-    hits: BTreeSet<String>,
+    test: Id,
+    hits: BTreeSet<Id>,
     decisions: BTreeMap<String, OrderedVectors>,
     browser_events: usize,
     server_events: usize,
@@ -1127,9 +1128,9 @@ fn summary_for_results(
     lines: &[LineResult],
     test_ids: Option<&BTreeSet<String>>,
 ) -> Result<CoverageSummary, ReportError> {
-    let includes = |tests: &[String], covered: bool| {
+    let includes = |tests: &[Id], covered: bool| {
         test_ids.map_or(covered, |selected| {
-            tests.iter().any(|test| selected.contains(test))
+            tests.iter().any(|test| selected.contains(test.as_str()))
         })
     };
     let input = CoverageCoreInput {
@@ -1205,11 +1206,11 @@ pub fn blocking_limitation(limitation: &Value) -> bool {
 /// and copying every test's runner and kind to keep the distinct few -- was
 /// most of what analysing a 3,900-test run allocated.
 fn confidence_for(
-    test_ids: &BTreeSet<String>,
-    phase_ids: &BTreeSet<String>,
-    explicit_phase_ids: &BTreeSet<String>,
-    tests: &HashMap<String, MutableTest>,
-    phases: &HashMap<String, MutablePhase>,
+    test_ids: &BTreeSet<Id>,
+    phase_ids: &BTreeSet<Id>,
+    explicit_phase_ids: &BTreeSet<Id>,
+    tests: &HashMap<Id, MutableTest>,
+    phases: &HashMap<Id, MutablePhase>,
 ) -> CoverageConfidence {
     let provenances = test_ids
         .iter()
@@ -1268,9 +1269,9 @@ fn confidence_for(
 /// drop them. On a 3,900-test run that was a fifth of the analysis.
 /// The analysis loop's writes, allocating a key or value only when it is new:
 /// per test and per event the key is nearly always there already.
-fn insert_absent(set: &mut BTreeSet<String>, value: &str) {
+fn insert_absent(set: &mut BTreeSet<Id>, value: &str, ids: &mut Interner) {
     if !set.contains(value) {
-        set.insert(value.to_owned());
+        set.insert(ids.id(value));
     }
 }
 
@@ -1313,8 +1314,8 @@ fn correlate_event<'a>(
 /// that come out are the same.
 #[derive(Default)]
 struct References {
-    names: Vec<String>,
-    numbers: HashMap<String, u32>,
+    names: Vec<Id>,
+    numbers: HashMap<Id, u32>,
     last: Option<u32>,
     by_obligation: HashMap<String, Vec<u32>>,
 }
@@ -1322,7 +1323,7 @@ struct References {
 impl References {
     /// The number standing for a test or phase id. The same id usually
     /// arrives many times in a row, so the last one is checked first.
-    fn number(&mut self, name: &str) -> u32 {
+    fn number(&mut self, name: &str, ids: &mut Interner) -> u32 {
         if let Some(number) = self.last
             && self.names[number as usize] == name
         {
@@ -1332,8 +1333,9 @@ impl References {
             Some(number) => *number,
             None => {
                 let number = self.names.len() as u32;
-                self.names.push(name.to_owned());
-                self.numbers.insert(name.to_owned(), number);
+                let id = ids.id(name);
+                self.names.push(id.clone());
+                self.numbers.insert(id, number);
                 number
             }
         };
@@ -1341,15 +1343,15 @@ impl References {
         number
     }
 
-    fn add(&mut self, obligation: &str, name: &str) {
-        let number = self.number(name);
+    fn add(&mut self, obligation: &str, name: &str, ids: &mut Interner) {
+        let number = self.number(name, ids);
         let reached = hash_slot(&mut self.by_obligation, obligation);
         if reached.last() != Some(&number) {
             reached.push(number);
         }
     }
 
-    fn into_sets(self) -> HashMap<String, BTreeSet<String>> {
+    fn into_sets(self) -> HashMap<String, BTreeSet<Id>> {
         let mut order = (0..self.names.len()).collect::<Vec<_>>();
         order.sort_unstable_by(|left, right| self.names[*left].cmp(&self.names[*right]));
         let mut rank = vec![0_usize; self.names.len()];
@@ -1372,15 +1374,15 @@ impl References {
     }
 }
 
-fn add_reference(map: &mut HashMap<String, BTreeSet<String>>, id: &str, value: &str) {
+fn add_reference(map: &mut HashMap<String, BTreeSet<Id>>, id: &str, value: &Id) {
     match map.get_mut(id) {
         Some(values) => {
             if !values.contains(value) {
-                values.insert(value.to_owned());
+                values.insert(value.clone());
             }
         }
         None => {
-            map.insert(id.to_owned(), BTreeSet::from([value.to_owned()]));
+            map.insert(id.to_owned(), BTreeSet::from([value.clone()]));
         }
     }
 }
@@ -1395,6 +1397,7 @@ pub fn create_coverage_view(
         &raw_results.iter().collect::<Vec<_>>(),
         generated_at,
         &javascript_coverage_model(),
+        &mut Interner::default(),
     )
 }
 
@@ -1403,6 +1406,7 @@ fn create_coverage_view_with_model(
     raw_results: &[&RawTestResult],
     generated_at: &str,
     coverage_model: &CoverageModelDeclaration,
+    ids: &mut Interner,
 ) -> Result<CoverageView, ReportError> {
     let mut decision_metadata = manifest.decisions.clone();
     let decision_indexes = decision_metadata
@@ -1430,22 +1434,22 @@ fn create_coverage_view_with_model(
         .collect::<BTreeSet<_>>();
     let mut vectors_by_decision = HashMap::<String, Vec<MutableObservation>>::new();
     let mut vector_indexes = HashMap::<String, HashMap<String, usize>>::new();
-    let mut tests_by_decision = HashMap::<String, BTreeSet<String>>::new();
+    let mut tests_by_decision = HashMap::<String, BTreeSet<Id>>::new();
     let mut tests_by_hit = References::default();
-    let mut tests_by_id = HashMap::<String, MutableTest>::new();
-    let mut test_order = Vec::<String>::new();
-    let mut phases_by_id = HashMap::<String, MutablePhase>::new();
+    let mut tests_by_id = HashMap::<Id, MutableTest>::new();
+    let mut test_order = Vec::<Id>::new();
+    let mut phases_by_id = HashMap::<Id, MutablePhase>::new();
     let mut phases_by_hit = References::default();
     let mut explicit_phases_by_hit = References::default();
 
     for raw in raw_results {
-        let id = raw_test_id(raw).to_owned();
+        let id = ids.id(raw_test_id(raw));
         if !tests_by_id.contains_key(&id) {
             test_order.push(id.clone());
             tests_by_id.insert(
                 id.clone(),
                 MutableTest {
-                    id: id.clone(),
+                    id: id.to_string(),
                     name: raw.test.clone(),
                     file: raw.test_file.clone(),
                     title: raw.title.clone(),
@@ -1473,7 +1477,7 @@ fn create_coverage_view_with_model(
         ordered_phases.sort_by_key(|phase| phase.started_at_ms);
         for phase in &ordered_phases {
             phases_by_id.insert(
-                phase.id.clone(),
+                ids.id(&phase.id),
                 MutablePhase {
                     phase: phase.clone(),
                     test: id.clone(),
@@ -1532,7 +1536,7 @@ fn create_coverage_view_with_model(
                         });
                         observations.len() - 1
                     });
-                    insert_absent(&mut observations[observation_index].tests, &id);
+                    insert_absent(&mut observations[observation_index].tests, &id, ids);
                     tree_slot(
                         &mut tests_by_id.get_mut(&id).expect("registered test").decisions,
                         &decision.meta.id,
@@ -1545,10 +1549,8 @@ fn create_coverage_view_with_model(
             }
             let test_hits = &mut tests_by_id.get_mut(&id).expect("registered test").hits;
             for hit in &snapshot.hits {
-                tests_by_hit.add(hit, &id);
-                if !test_hits.contains(hit) {
-                    test_hits.insert(hit.clone());
-                }
+                tests_by_hit.add(hit, &id, ids);
+                insert_absent(test_hits, hit, ids);
             }
             for event in &snapshot.events {
                 let explicit = event.phase_id.is_some();
@@ -1579,10 +1581,10 @@ fn create_coverage_view_with_model(
                     phase.inferred_events += 1;
                 }
                 if event.event_type == "hit" {
-                    insert_absent(&mut phase.hits, &event.id);
-                    phases_by_hit.add(&event.id, phase_id);
+                    insert_absent(&mut phase.hits, &event.id, ids);
+                    phases_by_hit.add(&event.id, phase_id, ids);
                     if explicit {
-                        explicit_phases_by_hit.add(&event.id, phase_id);
+                        explicit_phases_by_hit.add(&event.id, phase_id, ids);
                     }
                 } else if event.event_type == "decision" {
                     let vector = event
@@ -1598,9 +1600,9 @@ fn create_coverage_view_with_model(
                             .get_mut(&event.id)
                             .and_then(|observations| observations.get_mut(index))
                     {
-                        insert_absent(&mut observation.phases, phase_id);
+                        insert_absent(&mut observation.phases, phase_id, ids);
                         if explicit {
-                            insert_absent(&mut observation.explicit_phases, phase_id);
+                            insert_absent(&mut observation.explicit_phases, phase_id, ids);
                         }
                     }
                 } else {
@@ -1661,12 +1663,12 @@ fn create_coverage_view_with_model(
                     .id
                     .as_ref()
                     .ok_or_else(|| ReportError::InvalidServerRecord("missing hit id".into()))?;
-                tests_by_hit.add(hit, &id);
+                tests_by_hit.add(hit, &id, ids);
                 tests_by_id
                     .get_mut(&id)
                     .expect("registered test")
                     .hits
-                    .insert(hit.clone());
+                    .insert(ids.id(hit));
                 (hit.clone(), None)
             } else {
                 return Err(ReportError::InvalidServerRecord(record.record_type.clone()));
@@ -1686,7 +1688,7 @@ fn create_coverage_view_with_model(
             let explicit = event.phase_id.is_some();
             let phase_id = correlate(&event);
             let Some(phase_id) = phase_id else { continue };
-            let Some(phase) = phases_by_id.get_mut(&phase_id) else {
+            let Some(phase) = phases_by_id.get_mut(phase_id.as_str()) else {
                 continue;
             };
             phase.server_events += 1;
@@ -1698,10 +1700,10 @@ fn create_coverage_view_with_model(
                 phase.inferred_server_events += 1;
             }
             if event.event_type == "hit" {
-                phase.hits.insert(event.id.clone());
-                phases_by_hit.add(&event.id, &phase_id);
+                insert_absent(&mut phase.hits, &event.id, ids);
+                phases_by_hit.add(&event.id, &phase_id, ids);
                 if explicit {
-                    explicit_phases_by_hit.add(&event.id, &phase_id);
+                    explicit_phases_by_hit.add(&event.id, &phase_id, ids);
                 }
             } else if let Some(vector) = &event.vector {
                 phase
@@ -1717,9 +1719,9 @@ fn create_coverage_view_with_model(
                         .get_mut(&event.id)
                         .and_then(|observations| observations.get_mut(index))
                 {
-                    observation.phases.insert(phase_id.clone());
+                    insert_absent(&mut observation.phases, &phase_id, ids);
                     if explicit {
-                        observation.explicit_phases.insert(phase_id.clone());
+                        insert_absent(&mut observation.explicit_phases, &phase_id, ids);
                     }
                 }
             }
@@ -1895,7 +1897,7 @@ fn create_coverage_view_with_model(
     for point in &points {
         let aggregate = line_aggregates
             .entry(SourceLine {
-                file: point.meta.file.clone(),
+                file: ids.id(&point.meta.file),
                 line: point.meta.line,
             })
             .or_default();
@@ -1937,7 +1939,7 @@ fn create_coverage_view_with_model(
                 .map(|provenance| provenance.kind.clone())
                 .collect::<BTreeSet<_>>();
             LineResult {
-                file: location.file,
+                file: location.file.to_string(),
                 line: location.line,
                 covered,
                 measured,
@@ -1964,7 +1966,7 @@ fn create_coverage_view_with_model(
             (
                 point.id.clone(),
                 SourceLine {
-                    file: point.file.clone(),
+                    file: ids.id(&point.file),
                     line: point.line,
                 },
             )
@@ -1978,7 +1980,7 @@ fn create_coverage_view_with_model(
             let lines = test
                 .hits
                 .iter()
-                .filter_map(|hit| point_locations.get(hit).cloned())
+                .filter_map(|hit| point_locations.get(hit.as_str()).cloned())
                 .collect::<BTreeSet<_>>();
             TestCoverageResult {
                 id: test.id.clone(),
@@ -2051,7 +2053,7 @@ fn create_coverage_view_with_model(
             let lines = phase
                 .hits
                 .iter()
-                .filter_map(|hit| point_locations.get(hit).cloned())
+                .filter_map(|hit| point_locations.get(hit.as_str()).cloned())
                 .collect::<BTreeSet<_>>();
             PhaseResult {
                 phase: phase.phase,
@@ -2237,23 +2239,28 @@ pub fn analyze_coverage_results(
             reason: reason.into(),
         }
     })?;
+    // One copy of each id for all three views.
+    let mut ids = Interner::default();
     let view = create_coverage_view_with_model(
         &request.manifest,
         &request.raw_results.iter().collect::<Vec<_>>(),
         &request.generated_at,
         coverage_model,
+        &mut ids,
     )?;
     let passed = create_coverage_view_with_model(
         &request.manifest,
         &passing_coverage_results(&request.raw_results),
         &request.generated_at,
         coverage_model,
+        &mut ids,
     )?;
     let failed = create_coverage_view_with_model(
         &request.manifest,
         &failed_coverage_results(&request.raw_results),
         &request.generated_at,
         coverage_model,
+        &mut ids,
     )?;
     let execution = match request.test_exit_code {
         ExitCodeInput::Missing => None,
@@ -2562,6 +2569,10 @@ pub fn analyze_coverage_archive(
         integrity: request.integrity.clone(),
         test_exit_code: request.test_exit_code.clone(),
     };
+    // Everything is parsed out of the archive's bytes -- 385 MB on a
+    // 3,900-test run -- and nothing reads them again, so they need not stay
+    // resident while the views are built beside what was parsed from them.
+    drop(entries);
     let mut report = crate::frontend_protocol::analyze_frontend_results(&frontend, &normalized)
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
     report.view.transport = Some(transport.clone());
@@ -2583,6 +2594,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_report_holds_one_copy_of_each_id_across_its_views() {
+        // What made analysis fit in memory: the full and the passing view name
+        // the same tests, and must share one copy of each name rather than
+        // hold one per mention. A change that copies ids again fails here
+        // before it shows up as gigabytes.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-shared-ids-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let directory = crate::run_store::create_analyzable_test_run(&root, "shared");
+        let run = crate::run_store::discover_runs(&root)
+            .unwrap()
+            .runs
+            .remove(0);
+        let report = crate::run_store::analyze_stored_run(&run).unwrap();
+        let _ = directory;
+        let mentions = report
+            .view
+            .points
+            .iter()
+            .chain(&report.filters.passed.points)
+            .flat_map(|point| point.tests.iter().chain(&point.confidence.tests))
+            .chain(report.view.lines.iter().flat_map(|line| &line.tests))
+            .collect::<Vec<_>>();
+        assert!(
+            mentions.len() >= 4,
+            "the fixture names its test in several places"
+        );
+        let first = mentions[0];
+        for mention in &mentions {
+            assert_eq!(*mention, first);
+            assert!(
+                mention.same_allocation(first),
+                "every mention shares one copy"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn references_numbered_as_they_arrive_come_out_as_the_sets_inserted_directly() {
         // Out of order, repeated, interleaved across obligations, and sharing
         // long prefixes, as test and phase ids do.
@@ -2597,13 +2652,22 @@ mod tests {
             ("py:statement:c", "python-phase:10"),
             ("py:statement:b", "h11/tests/test_x.py::test_b[2-50]"),
         ];
+        let mut ids = Interner::default();
         let mut numbered = References::default();
         let mut direct = HashMap::<String, BTreeSet<String>>::new();
         for (obligation, name) in arrivals {
-            numbered.add(obligation, name);
-            add_reference(&mut direct, obligation, name);
+            numbered.add(obligation, name, &mut ids);
+            direct
+                .entry(obligation.to_owned())
+                .or_default()
+                .insert(name.to_owned());
         }
-        assert_eq!(numbered.into_sets(), direct);
+        let numbered = numbered
+            .into_sets()
+            .into_iter()
+            .map(|(obligation, names)| (obligation, names.into_iter().map(String::from).collect()))
+            .collect::<HashMap<_, BTreeSet<String>>>();
+        assert_eq!(numbered, direct);
     }
 
     static ARCHIVE_ID: AtomicU64 = AtomicU64::new(0);
