@@ -2092,17 +2092,33 @@ fn javascript_number(value: f64) -> String {
     }
 }
 
-fn format_run_timings(timings: &supercov_engine::run_store::RunTimings, total_ms: f64) -> String {
-    format!(
-        "initialization={}ms workspace={}ms setup={}ms build={}ms tests={}ms evidence={}ms total={}ms",
+/// `run_ms` is the engine's own clock, which stops before the run is published;
+/// `command_ms`, when the run was published, is the whole command. What lies
+/// between is publication -- analysing the evidence once for the assertion map,
+/// the summary and the query index -- and it is reported, so that the total is
+/// what the command cost rather than what it cost before publishing.
+fn format_run_timings(
+    timings: &supercov_engine::run_store::RunTimings,
+    run_ms: f64,
+    command_ms: Option<f64>,
+) -> String {
+    let phases = format!(
+        "initialization={}ms workspace={}ms setup={}ms build={}ms tests={}ms evidence={}ms",
         javascript_number(timings.initialization_ms),
         javascript_number(timings.workspace_preparation_ms),
         javascript_number(timings.adapter_setup_ms),
         javascript_number(timings.instrumented_build_ms),
         javascript_number(timings.test_command_ms),
         javascript_number(timings.evidence_publication_ms),
-        javascript_number(total_ms),
-    )
+    );
+    match command_ms {
+        Some(command_ms) => format!(
+            "{phases} publication={}ms total={}ms",
+            javascript_number((command_ms - run_ms).max(0.0)),
+            javascript_number(command_ms.max(run_ms)),
+        ),
+        None => format!("{phases} total={}ms", javascript_number(run_ms)),
+    }
 }
 
 /// What the caller asked for beyond the command itself.
@@ -2124,6 +2140,8 @@ fn process_exit_code(code: i32) -> ExitCode {
 }
 
 fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
+    let command_started = Instant::now();
+    let command_ms = || command_started.elapsed().as_secs_f64() * 1000.0;
     if command.is_empty() {
         eprintln!("Usage: supercov -- <test command>");
         return ExitCode::from(2);
@@ -2225,7 +2243,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2287,7 +2309,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2322,7 +2348,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2359,7 +2389,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2396,7 +2430,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2429,7 +2467,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             if let Some(timings) = &result.metadata.timings {
                 eprintln!(
                     "[supercov] timings {}",
-                    format_run_timings(timings, result.metadata.duration_ms)
+                    format_run_timings(timings, result.metadata.duration_ms, Some(command_ms()))
                 );
             }
             process_exit_code(result.exit_code)
@@ -2442,7 +2480,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         }) => {
             eprintln!(
                 "[supercov] timings {}",
-                format_run_timings(&timings, total_ms)
+                format_run_timings(&timings, total_ms, None)
             );
             process_exit_code(exit_code)
         }
@@ -4343,6 +4381,35 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_timings_line_reports_publication_and_the_whole_command() {
+        let timings = supercov_engine::run_store::RunTimings {
+            initialization_ms: 1.0,
+            workspace_preparation_ms: 2.0,
+            adapter_setup_ms: 3.0,
+            instrumented_build_ms: 4.0,
+            test_command_ms: 5.0,
+            evidence_publication_ms: 6.0,
+        };
+        // Published: the command ran 30 ms, 21 of them before the engine's
+        // clock stopped, so publication took the other 9 and total is 30.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, Some(30.0)),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms publication=9ms total=30ms"
+        );
+        // A clock that reads a hair under the engine's never reports negative
+        // publication or a total below what the engine measured.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, Some(20.9)),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms publication=0ms total=21ms"
+        );
+        // Interrupted: nothing was published, and the line says only that.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, None),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms total=21ms"
+        );
+    }
 
     #[test]
     fn shell_reports_the_public_engine() {

@@ -17,7 +17,9 @@ use supercov_contracts::EVIDENCE_ARCHIVE_SCHEMA_VERSION;
 use crate::query_index::{QUERY_INDEX_SCHEMA_VERSION, QueryIndexIdentity};
 use crate::{
     coverage_index::{CoverageIndex, CoverageIndexError, coverage_index_sections},
-    coverage_report::{ArchiveReportRequest, ExitCodeInput, ReportError, analyze_coverage_archive},
+    coverage_report::{
+        ArchiveReportRequest, CoverageReport, ExitCodeInput, ReportError, analyze_coverage_archive,
+    },
     evidence_archive::read_archive_schema_version,
     query_index::{QueryIndex, QueryIndexError, write_query_index},
 };
@@ -827,6 +829,31 @@ pub fn open_existing_query_index(run: &StoredRun) -> Result<Option<QueryIndex>, 
     }
 }
 
+/// A run's coverage, analysed from its evidence archive as its query index is.
+pub fn analyze_stored_run(run: &StoredRun) -> Result<CoverageReport, RunIndexError> {
+    Ok(analyze_coverage_archive(&ArchiveReportRequest {
+        archive_path: run.evidence_path.clone(),
+        run_id: run.id.clone(),
+        generated_at: run.metadata.started_at.clone(),
+        integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
+        test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
+    })?)
+}
+
+/// Write a run's query index from coverage already analysed from its evidence,
+/// so the first query opens it instead of analysing the archive again. The
+/// identity is the evidence's digest, not its path, so an index written beside
+/// staged evidence stays valid once the directory is renamed into place.
+pub(crate) fn write_query_index_from(
+    run: &StoredRun,
+    report: &CoverageReport,
+) -> Result<(), RunIndexError> {
+    let identity = query_index_identity(run)?;
+    let sections = coverage_index_sections(report)?;
+    write_query_index(&sections, &identity, &run.query_index_path)?;
+    Ok(())
+}
+
 /// Open a valid disposable index or atomically reconstruct it from evidence.
 ///
 /// `evidence.raw.gz` remains authoritative. Any stale, truncated, linked or
@@ -839,13 +866,7 @@ pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunInd
         return Ok(index);
     }
 
-    let report = analyze_coverage_archive(&ArchiveReportRequest {
-        archive_path: run.evidence_path.clone(),
-        run_id: run.id.clone(),
-        generated_at: run.metadata.started_at.clone(),
-        integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
-        test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
-    })?;
+    let report = analyze_stored_run(run)?;
     let sections = coverage_index_sections(&report)?;
     if query_index_identity(run)? != identity {
         return Err(RunIndexError::EvidenceChanged);

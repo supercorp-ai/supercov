@@ -607,6 +607,8 @@ pub fn publish_run(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunPublicationFault {
     FinalRename,
+    /// The query index cannot be written at publication.
+    QueryIndexWrite,
 }
 
 pub(crate) fn publish_run_with_fault(
@@ -648,11 +650,42 @@ pub(crate) fn publish_run_with_fault(
     let mut json = serde_json::to_vec_pretty(metadata).map_err(LifecycleError::Metadata)?;
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
-    if let Err(reason) = crate::assertion_store::prepare_publication(root, &staging, metadata) {
+    // Everything publication derives from the evidence -- the assertion map's
+    // record of what each test ran, the summary `runs latest` shows, the query
+    // index -- comes from one analysis of it, made here. Each used to analyse
+    // the archive on its own: once here, twice more in the first query after
+    // the run, and on a 3,900-test Python suite each analysis took 5 to 8
+    // seconds. Evidence that will not analyse is published as before; the
+    // first query then reports why.
+    let staged = crate::run_store::StoredRun {
+        id: metadata.id.clone(),
+        directory: staging.clone(),
+        evidence_path: staging.join("evidence.raw.gz"),
+        metadata_path: staging.join("run.json"),
+        query_index_path: staging.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+        metadata: metadata.clone(),
+    };
+    let analysed = if metadata.merged == Some(true) {
+        None
+    } else {
+        crate::run_store::analyze_stored_run(&staged).ok()
+    };
+    if let Err(reason) =
+        crate::assertion_store::prepare_publication(root, &staging, metadata, analysed.as_ref())
+    {
         let _ = remove_stored_tree_deferred(root, &staging);
         return Err(LifecycleError::InvalidState(format!(
             "assertion map publication: {reason}"
         )));
+    }
+    if let Some(report) = &analysed {
+        // Disposable, like every query index: one that failed to write is
+        // rebuilt by the first query.
+        if fault == Some(RunPublicationFault::QueryIndexWrite)
+            || crate::run_store::write_query_index_from(&staged, report).is_err()
+        {
+            let _ = fs::remove_file(&staged.query_index_path);
+        }
     }
     sync_directory(&staging)?;
     let runs = destination.parent().expect("runs parent");
@@ -1149,6 +1182,130 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    /// Evidence that analyses -- the analysable fixture run -- to publish as
+    /// `id`, from outside the project's runs.
+    fn analysable_evidence(root: &Path, id: &str) -> (PathBuf, RunMetadata) {
+        let source = project();
+        let directory = crate::run_store::create_analyzable_test_run(&source, "source");
+        let evidence = root.join(format!("{id}.evidence.gz"));
+        fs::copy(directory.join("evidence.raw.gz"), &evidence).unwrap();
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(directory.join("run.json")).unwrap()).unwrap();
+        metadata.id = id.into();
+        fs::remove_dir_all(source).unwrap();
+        (evidence, metadata)
+    }
+
+    /// The published run as a query reads it.
+    fn stored(root: &Path, id: &str) -> crate::run_store::StoredRun {
+        let directory = root.join(".supercov/runs").join(id);
+        crate::run_store::StoredRun {
+            id: id.into(),
+            evidence_path: directory.join("evidence.raw.gz"),
+            metadata_path: directory.join("run.json"),
+            query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+            metadata: serde_json::from_slice(&fs::read(directory.join("run.json")).unwrap())
+                .unwrap(),
+            directory,
+        }
+    }
+
+    #[test]
+    fn publication_writes_the_query_index_a_first_query_would_have_built() {
+        // Written beside staged evidence and renamed with it, the index must be
+        // the one the first query builds from the published evidence -- the
+        // same bytes, valid under the published run's identity.
+        let root = project();
+        let id = "2026-01-01T00-00-00-100Z";
+        let (evidence, metadata) = analysable_evidence(&root, id);
+        let published = publish_run(&root, &metadata, &evidence).unwrap();
+        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
+        assert!(index.is_file(), "publication wrote the index");
+        let run = stored(&root, id);
+        assert!(
+            crate::run_store::open_existing_query_index(&run)
+                .unwrap()
+                .is_some(),
+            "and it is valid for the published run"
+        );
+        let written = fs::read(&index).unwrap();
+        fs::remove_file(&index).unwrap();
+        crate::run_store::open_or_rebuild_query_index(&run).unwrap();
+        assert_eq!(
+            fs::read(&index).unwrap(),
+            written,
+            "a query rebuilds the same bytes"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn evidence_that_will_not_analyse_is_published_as_it_was_before() {
+        // Publication used to tolerate evidence it could not analyse and leave
+        // the first query to report why. It still publishes it, writes neither
+        // index nor summary, and the first query fails as it did.
+        let root = project();
+        let id = "2026-01-01T00-00-00-200Z";
+        let (evidence, bytes) = evidence(&root);
+        let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
+        assert!(published.join("run.json").is_file());
+        assert!(published.join("assertions.json").is_file());
+        assert!(
+            !published
+                .join(crate::run_store::RUST_QUERY_INDEX_FILE)
+                .exists()
+        );
+        assert!(!published.join("assertions.summary.cache.json").exists());
+        let run = stored(&root, id);
+        let Err(query) = crate::run_store::open_or_rebuild_query_index(&run) else {
+            panic!("the first query cannot analyse it either");
+        };
+        let direct = crate::run_store::analyze_stored_run(&run).expect_err("unanalysable");
+        assert_eq!(
+            query.to_string(),
+            direct.to_string(),
+            "and says why in the same words"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_merged_run_is_indexed_by_its_first_query() {
+        // Publication does not analyse a merged run; its first query does.
+        let root = project();
+        let id = "2026-01-01T00-00-00-300Z";
+        let (evidence, mut metadata) = analysable_evidence(&root, id);
+        metadata.merged = Some(true);
+        let published = publish_run(&root, &metadata, &evidence).unwrap();
+        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
+        assert!(!index.exists());
+        crate::run_store::open_or_rebuild_query_index(&stored(&root, id)).unwrap();
+        assert!(index.is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_index_that_could_not_be_written_is_built_by_the_first_query() {
+        // A failed index write loses nothing: publication succeeds without a
+        // partial file, and the first query builds the index as it used to.
+        let root = project();
+        let id = "2026-01-01T00-00-00-400Z";
+        let (evidence, metadata) = analysable_evidence(&root, id);
+        let published = publish_run_with_fault(
+            &root,
+            &metadata,
+            &evidence,
+            Some(RunPublicationFault::QueryIndexWrite),
+        )
+        .unwrap();
+        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
+        assert!(!index.exists(), "no partial index is left");
+        assert!(published.join("run.json").is_file());
+        crate::run_store::open_or_rebuild_query_index(&stored(&root, id)).unwrap();
+        assert!(index.is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
