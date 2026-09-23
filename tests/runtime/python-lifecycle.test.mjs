@@ -152,13 +152,15 @@ test("close still writes the exit marker", { skip }, () => {
   assert.equal(run(CLOSE).exitMarker, true);
 });
 
-test("close takes back its slots, so a late write is never counted", { skip }, () => {
+test("close marks its slots closed and leaves them in place, so a late write is never counted", { skip }, () => {
   // A daemon thread still holding its context's array writes into pages the
-  // reader would otherwise read as that test's. Close removes the slot or,
-  // where a live mapping keeps the file (Windows), zeroes the tag the reader
-  // requires.
+  // reader would otherwise read as that test's, so close zeroes the tag the
+  // reader requires. It does not remove the file: a process that outlives the
+  // test command closes while the reader is listing the evidence, and a slot
+  // removed between the listing and the read failed the whole run.
   const leftover = run(CLOSE).slotLeftover;
-  assert.ok(leftover === null || /^0+$/.test(leftover), `slot tag left as ${leftover}`);
+  assert.notEqual(leftover, null, "the slot file is still there");
+  assert.match(leftover, /^0+$/, `slot tag left as ${leftover}`);
 });
 
 test("close stops the detector instead of observing and discarding", { skip }, () => {

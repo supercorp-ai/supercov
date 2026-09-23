@@ -410,8 +410,9 @@ fn read_evidence_directory(
         if name.starts_with(SLOT_LAYOUT_NAME) && name.ends_with(".partial") {
             continue;
         }
-        let metadata = fs::symlink_metadata(entry.path())
-            .map_err(|error| PythonEvidenceError::Io(error.to_string()))?;
+        let Some(metadata) = entry_metadata(&name, &entry.path())? else {
+            continue;
+        };
         if !metadata.file_type().is_file() {
             return Err(PythonEvidenceError::UnsafeEntry(name));
         }
@@ -446,7 +447,11 @@ fn read_evidence_directory(
             .remove(&name)
             .unwrap_or_default()
             .into_iter()
-            .map(|(slot, path)| map_evidence(&path).map(|contents| (slot, contents)))
+            .filter_map(|(slot, path)| match map_slot(&path) {
+                Ok(Some(contents)) => Some(Ok((slot, contents))),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            })
             .collect::<Result<Vec<_>, _>>()?;
         read_evidence_file(
             &name,
@@ -464,6 +469,35 @@ fn read_evidence_directory(
         });
     }
     Ok(evidence)
+}
+
+/// An evidence entry's metadata, or None for a slot gone since the listing.
+///
+/// A process that outlived the test command -- multiprocessing's resource
+/// tracker is one -- can close between the listing and this read. It harvested
+/// its slot into its transport first, so a slot that is gone holds nothing to
+/// miss. Anything else missing is still an error.
+fn entry_metadata(name: &str, path: &Path) -> Result<Option<fs::Metadata>, PythonEvidenceError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && name.ends_with(".slot") => {
+            Ok(None)
+        }
+        Err(error) => Err(PythonEvidenceError::Io(error.to_string())),
+    }
+}
+
+/// A slot, or None when it is gone by the time it is opened: taken back by a
+/// process that closed after the directory was listed, and so already
+/// harvested into its transport.
+fn map_slot(path: &Path) -> Result<Option<Mmap>, PythonEvidenceError> {
+    match File::open(path) {
+        Ok(file) => unsafe { MmapOptions::new().map(&file) }
+            .map(Some)
+            .map_err(|error| PythonEvidenceError::Io(error.to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(PythonEvidenceError::Io(error.to_string())),
+    }
 }
 
 fn map_evidence(path: &Path) -> Result<Mmap, PythonEvidenceError> {
@@ -2094,6 +2128,32 @@ mod tests {
             call.vectors["d"],
             BTreeSet::from([(vec![Some(false), Some(true)], true)])
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_slot_gone_since_the_listing_is_skipped_and_nothing_else_is() {
+        // Between listing the evidence and reading it, a process that outlived
+        // the test command can close. A slot it took back is skipped at either
+        // step; a transport, or anything else, that goes missing is still an
+        // error rather than evidence quietly lost.
+        let directory = temporary("py-slot-vanished");
+        let gone = directory.join("main.1.token.0.slot");
+        assert!(
+            entry_metadata("main.1.token.0.slot", &gone)
+                .unwrap()
+                .is_none()
+        );
+        assert!(map_slot(&gone).unwrap().is_none());
+        assert!(entry_metadata("main.1.token.mmap", &directory.join("main.1.token.mmap")).is_err());
+        assert!(entry_metadata("layout.json", &directory.join("layout.json")).is_err());
+        fs::write(&gone, slot_bytes(1, Some(SLOT_DIGEST), &[16])).unwrap();
+        assert!(
+            entry_metadata("main.1.token.0.slot", &gone)
+                .unwrap()
+                .is_some()
+        );
+        assert!(map_slot(&gone).unwrap().is_some());
         fs::remove_dir_all(directory).unwrap();
     }
 
