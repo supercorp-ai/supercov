@@ -177,7 +177,7 @@ prototype the project does not ship? Judge it in the context of the whole tree."
         })
         .collect();
     json!({
-        "model": super::MODEL,
+        "model": super::model(),
         "state": { "repository": repository, "tree": tree, "manifests": manifests },
         "questions": questions,
     })
@@ -185,7 +185,7 @@ prototype the project does not ship? Judge it in the context of the whole tree."
 
 pub fn file_request(path: &str, source: &str) -> Value {
     json!({
-        "model": super::MODEL,
+        "model": super::model(),
         "state": { "file": { "path": path, "source": source } },
         "questions": file_questions(),
     })
@@ -200,7 +200,7 @@ pub fn file_request(path: &str, source: &str) -> Value {
 /// is reported as a different kind of answer, never silently substituted.
 pub fn patch_request(patch: &str) -> Value {
     json!({
-        "model": super::MODEL,
+        "model": super::model(),
         "state": { "diff": patch },
         "questions": change_questions(),
     })
@@ -214,7 +214,7 @@ pub fn patch_request(patch: &str) -> Value {
 /// without. The shape that was validated is the shape that ships.
 pub fn change_request(before: &str, after: &str) -> Value {
     json!({
-        "model": super::MODEL,
+        "model": super::model(),
         "state": { "before": before, "after": after },
         "questions": change_questions(),
     })

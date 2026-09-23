@@ -28,6 +28,32 @@ mod store;
 
 const MODEL: &str = "jev-1.13.0";
 const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+
+/// Where to send assessments. `SUPERCOV_QUALITY_ENDPOINT` overrides it, so a
+/// gateway that speaks the same request and response schema can serve Jev.
+fn endpoint() -> String {
+    env("SUPERCOV_QUALITY_ENDPOINT").unwrap_or_else(|| ENDPOINT.to_owned())
+}
+
+/// The model slug to ask for. A gateway names the same model differently, so
+/// `SUPERCOV_QUALITY_MODEL` overrides it.
+pub fn model() -> String {
+    env("SUPERCOV_QUALITY_MODEL").unwrap_or_else(|| MODEL.to_owned())
+}
+
+/// The slug a reply must carry. It is the requested one unless
+/// `SUPERCOV_QUALITY_RESPONSE_MODEL` says otherwise, which a gateway needs when
+/// it resolves an alias to a dated build.
+fn response_model() -> String {
+    env("SUPERCOV_QUALITY_RESPONSE_MODEL").unwrap_or_else(model)
+}
+
+fn env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
 // Jev 1.13.0 documents 32k tokens for state plus the longest question and 64k
 // for state plus every question. This budget targets the tighter limit and
 // leaves room for the estimate below to be wrong. Source is never truncated;
@@ -822,9 +848,10 @@ fn distribution(values: &BTreeMap<String, f64>, keys: BTreeSet<String>) -> bool 
 }
 
 fn validate(response: &ApiResponse, request: &Value) -> Result<(), String> {
-    if response.model != MODEL {
+    let expected = response_model();
+    if response.model != expected {
         return Err(format!(
-            "expected model {MODEL}, received {}",
+            "expected model {expected}, received {}",
             response.model
         ));
     }
@@ -1069,7 +1096,7 @@ fn resolve(
         .filter(|s| !s.trim().is_empty())
         .ok_or("set TYPESAFE_API_KEY for uncached assessments, or use --dry-run")?;
     let started = Instant::now();
-    let response = evaluate(agent, ENDPOINT, key, request)?;
+    let response = evaluate(agent, &endpoint(), key, request)?;
     let entry = CacheEntry {
         request_hash: hash.to_owned(),
         response,
@@ -1577,7 +1604,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
     if options.dry_run {
         return Ok((
             json!({
-                "catalog_version": catalog::CATALOG_VERSION, "model": MODEL,
+                "catalog_version": catalog::CATALOG_VERSION, "model": model(),
                 "requests": subjects.iter().map(|s| &s.request).collect::<Vec<_>>(),
             }),
             false,
@@ -1636,7 +1663,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         // numbers are not comparable.
         "instrument": "catalog",
         "catalog_version": catalog::CATALOG_VERSION,
-        "model": MODEL, "scope": "file",
+        "model": model(), "scope": "file",
         "paths": options.paths.iter()
             .map(|path| path.display().to_string().replace('\\', "/"))
             .collect::<Vec<_>>(),
@@ -1779,7 +1806,7 @@ fn run_patch(
     Ok((
         json!({
             "catalog_version": catalog::CATALOG_VERSION,
-            "model": MODEL,
+            "model": model(),
             "catalog": catalog::described(),
             "scope": scope.summary(),
             "range": range.id(),
