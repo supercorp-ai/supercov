@@ -484,7 +484,7 @@ fn write_archive_version(
         let gzip = GzBuilder::new()
             .mtime(0)
             .operating_system(255)
-            .write(buffered, Compression::default());
+            .write(buffered, Compression::fast());
         let (gzip, uncompressed_bytes) = write_framed_with_magic(&entries, gzip, magic)?;
         let buffered = gzip.finish()?;
         let faulting = buffered
@@ -526,10 +526,12 @@ fn read_exact_or_truncated<R: Read>(
 
 fn read_framed_entries<R: Read>(
     reader: &mut R,
+    retain: impl Fn(&str) -> bool,
 ) -> Result<Vec<EvidenceArchiveEntry>, EvidenceArchiveError> {
     let mut entries = Vec::new();
     let mut seen = BTreeSet::new();
     let mut previous: Option<String> = None;
+    let mut discarded = Vec::new();
     loop {
         let mut encoded_size = [0; 4];
         let first = reader.read(&mut encoded_size[..1])?;
@@ -577,37 +579,59 @@ fn read_framed_entries<R: Read>(
         }
         let payload_size =
             usize::try_from(header.bytes).map_err(|_| EvidenceArchiveError::SizeOverflow)?;
-        let mut contents = vec![0; payload_size];
-        read_exact_or_truncated(reader, &mut contents, "payload")?;
         previous = Some(header.path.clone());
-        entries.push(EvidenceArchiveEntry {
-            path: header.path,
-            contents,
-        });
+        if retain(&header.path) {
+            let mut contents = vec![0; payload_size];
+            read_exact_or_truncated(reader, &mut contents, "payload")?;
+            entries.push(EvidenceArchiveEntry {
+                path: header.path,
+                contents,
+            });
+        } else {
+            // A bounded, reused buffer avoids retaining a whole test trace.
+            // 256 KiB also lets the decoder process long matches efficiently;
+            // io::copy's 8 KiB buffer was slower than retaining every payload.
+            let capacity = payload_size.min(256 * 1024);
+            if discarded.len() < capacity {
+                discarded.resize(capacity, 0);
+            }
+            let mut remaining = payload_size;
+            while remaining != 0 {
+                let length = remaining.min(discarded.len());
+                read_exact_or_truncated(reader, &mut discarded[..length], "payload")?;
+                remaining -= length;
+            }
+        }
     }
     if !seen.contains("manifest.json") {
         return Err(EvidenceArchiveError::MissingManifest);
+    }
+    if !seen.contains("frontend.json") {
+        return Err(EvidenceArchiveError::MissingFrontend);
+    }
+    if !seen.contains("coverage-model.json") {
+        return Err(EvidenceArchiveError::MissingCoverageModel);
     }
     Ok(entries)
 }
 
 pub fn read_archive(path: &Path) -> Result<Vec<EvidenceArchiveEntry>, EvidenceArchiveError> {
+    read_archive_selected(path, |_| true)
+}
+
+/// Retain only the requested payloads while validating the entire archive,
+/// including skipped payload lengths, framing, the gzip checksum and trailer.
+/// Assertion manifests need a few small entries, not every test's trace.
+pub(crate) fn read_archive_selected(
+    path: &Path,
+    retain: impl Fn(&str) -> bool,
+) -> Result<Vec<EvidenceArchiveEntry>, EvidenceArchiveError> {
     let input = BufReader::new(File::open(path)?);
     let mut decoder = GzDecoder::new(input);
     let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
     read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
     schema_version_from_magic(&magic)?;
-    let entries = read_framed_entries(&mut decoder)?;
-    let paths = entries
-        .iter()
-        .map(|entry| entry.path.as_str())
-        .collect::<BTreeSet<_>>();
-    if !paths.contains("frontend.json") {
-        return Err(EvidenceArchiveError::MissingFrontend);
-    }
-    if !paths.contains("coverage-model.json") {
-        return Err(EvidenceArchiveError::MissingCoverageModel);
-    }
+    let entries = read_framed_entries(&mut decoder, retain)?;
     let mut input = decoder.into_inner();
     let mut trailing = [0; 1];
     if input.read(&mut trailing)? != 0 {
@@ -727,6 +751,46 @@ mod tests {
     }
 
     #[test]
+    fn selecting_payloads_still_validates_skipped_entries_and_gzip_trailer() {
+        let root = temporary_directory("archive-selected");
+        let mut entries = identity_entries();
+        entries.push(entry("z-large-trace.jsonl", &vec![b'x'; 1_000_000]));
+        let framed = frame(&entries);
+        let path = write_compressed(&root, &framed);
+        assert_eq!(
+            read_archive_selected(&path, |name| name == "manifest.json").unwrap(),
+            vec![entry("manifest.json", b"{}")]
+        );
+        assert!(read_archive_selected(&path, |_| false).unwrap().is_empty());
+        let compressed = fs::read(&path).unwrap();
+        let mut corrupt = compressed.clone();
+        let crc = corrupt.len() - 8;
+        corrupt[crc] ^= 1;
+        fs::write(&path, corrupt).unwrap();
+        assert!(read_archive_selected(&path, |_| false).is_err());
+        for end in compressed.len() - 8..compressed.len() {
+            fs::write(&path, &compressed[..end]).unwrap();
+            assert!(read_archive_selected(&path, |_| false).is_err());
+        }
+        let second_member = [compressed.as_slice(), gzip(b"hidden").as_slice()].concat();
+        fs::write(&path, second_member).unwrap();
+        assert!(matches!(
+            read_archive_selected(&path, |_| false),
+            Err(EvidenceArchiveError::TrailingCompressedData)
+        ));
+        let mut duplicate = entries.clone();
+        duplicate.push(entries.last().unwrap().clone());
+        assert!(
+            read_archive_selected(&write_compressed(&root, &frame(&duplicate)), |_| false).is_err()
+        );
+        entries.swap(0, 1);
+        assert!(
+            read_archive_selected(&write_compressed(&root, &frame(&entries)), |_| false).is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn injected_enospc_removes_partial_archive_and_preserves_no_destination() {
         let root = temporary_directory("archive-enospc");
         let destination = root.join("evidence.raw.gz");
@@ -791,6 +855,10 @@ mod tests {
         for (label, bytes) in cases {
             let path = write_compressed(&root, &bytes);
             assert!(read_archive(&path).is_err(), "{label}");
+            assert!(
+                read_archive_selected(&path, |_| false).is_err(),
+                "skipped {label}"
+            );
         }
 
         let duplicate = frame(&[
@@ -948,6 +1016,10 @@ mod tests {
                 read_archive(&path).is_err(),
                 "accepted truncation at byte {end}"
             );
+            assert!(
+                read_archive_selected(&path, |_| false).is_err(),
+                "skipped truncation at byte {end}"
+            );
         }
         let complete = write_compressed(&root, &framed);
         assert_eq!(read_archive(&complete).unwrap(), entries);
@@ -971,6 +1043,11 @@ mod tests {
             assert!(
                 read_archive(&write_compressed(&root, &frame(&incomplete))).is_err(),
                 "accepted archive without {missing}"
+            );
+            assert!(
+                read_archive_selected(&write_compressed(&root, &frame(&incomplete)), |_| false)
+                    .is_err(),
+                "skipped missing {missing}"
             );
         }
         fs::remove_dir_all(root).unwrap();

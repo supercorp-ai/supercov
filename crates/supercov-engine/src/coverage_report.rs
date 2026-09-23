@@ -1212,25 +1212,30 @@ fn confidence_for(
     tests: &HashMap<Id, MutableTest>,
     phases: &HashMap<Id, MutablePhase>,
 ) -> CoverageConfidence {
-    let provenances = test_ids
-        .iter()
-        .filter_map(|id| tests.get(id).map(|test| &test.provenance))
-        .collect::<Vec<_>>();
-    let roles = test_ids
-        .iter()
-        .filter_map(|id| tests.get(id).map(|test| test.role.as_str()))
-        .collect::<Vec<_>>();
-    let phase_kinds = phase_ids
-        .iter()
-        .filter_map(|id| phases.get(id).map(|phase| phase.phase.kind.as_str()))
-        .collect::<Vec<_>>();
-    let only = |phase_kind: &str, role: &str| {
-        if phase_kinds.is_empty() {
-            !roles.is_empty() && roles.iter().all(|value| *value == role)
-        } else {
-            phase_kinds.iter().all(|value| *value == phase_kind)
+    let mut has_test = false;
+    let mut setup_roles = true;
+    let mut background_roles = true;
+    let mut runners = BTreeSet::new();
+    let mut kinds = BTreeSet::new();
+    for id in test_ids {
+        if let Some(test) = tests.get(id) {
+            has_test = true;
+            setup_roles &= test.role == "setup";
+            background_roles &= test.role == "background";
+            runners.insert(test.provenance.runner.as_str());
+            kinds.insert(test.provenance.kind.as_str());
         }
-    };
+    }
+    let mut has_phase = false;
+    let mut setup_phases = true;
+    let mut background_phases = true;
+    for id in phase_ids {
+        if let Some(phase) = phases.get(id) {
+            has_phase = true;
+            setup_phases &= phase.phase.kind == "setup";
+            background_phases &= phase.phase.kind == "background";
+        }
+    }
     let has_action = explicit_phase_ids.iter().any(|id| {
         phases
             .get(id)
@@ -1243,18 +1248,18 @@ fn confidence_for(
     } else {
         "executed"
     };
-    let runners = provenances
-        .iter()
-        .map(|provenance| provenance.runner.as_str())
-        .collect::<BTreeSet<_>>();
-    let kinds = provenances
-        .iter()
-        .map(|provenance| provenance.kind.as_str())
-        .collect::<BTreeSet<_>>();
     CoverageConfidence {
         level: level.into(),
-        setup_only: only("setup", "setup"),
-        background_only: only("background", "background"),
+        setup_only: if has_phase {
+            setup_phases
+        } else {
+            has_test && setup_roles
+        },
+        background_only: if has_phase {
+            background_phases
+        } else {
+            has_test && background_roles
+        },
         asserted: false,
         tests: sorted(test_ids),
         asserted_tests: vec![],
@@ -1975,30 +1980,31 @@ fn create_coverage_view_with_model(
     let tests = test_order
         .into_iter()
         .map(|id| {
-            let test = tests_by_id.get(&id).expect("test order references test");
+            let test = tests_by_id.remove(&id).expect("test order references test");
+            let outcome = test_outcome(&test);
             let lines = test
                 .hits
                 .iter()
                 .filter_map(|hit| point_locations.get(hit.as_str()).cloned())
                 .collect::<BTreeSet<_>>();
             TestCoverageResult {
-                id: test.id.clone(),
-                name: test.name.clone(),
-                file: test.file.clone(),
-                title: test.title.clone(),
-                retries: sorted(&test.retries),
-                attempts: test.attempts.values().cloned().collect(),
-                outcome: test_outcome(test),
-                provenance: test.provenance.clone(),
-                role: test.role.clone(),
-                attribution: test.attribution.clone(),
-                hits: sorted(&test.hits),
+                id: test.id,
+                name: test.name,
+                file: test.file,
+                title: test.title,
+                retries: test.retries.into_iter().collect(),
+                attempts: test.attempts.into_values().collect(),
+                outcome,
+                provenance: test.provenance,
+                role: test.role,
+                attribution: test.attribution,
+                hits: test.hits.into_iter().collect(),
                 decisions: test
                     .decisions
-                    .iter()
+                    .into_iter()
                     .map(|(id, vectors)| TestDecisionResult {
-                        id: id.clone(),
-                        vectors: vectors.values.clone(),
+                        id,
+                        vectors: vectors.values,
                     })
                     .collect(),
                 lines: lines.into_iter().collect(),
@@ -2026,7 +2032,7 @@ fn create_coverage_view_with_model(
         aggregate.0.insert(test.id.clone());
         aggregate.1.insert(test.provenance.runner.clone());
         aggregate.2.insert(test.provenance.kind.clone());
-        aggregate.3.extend(test.lines.clone());
+        aggregate.3.extend(test.lines.iter().cloned());
     }
     let test_files = test_files
         .into_iter()
@@ -2039,7 +2045,7 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
-    let mut phases = phases_by_id.values().cloned().collect::<Vec<_>>();
+    let mut phases = phases_by_id.into_values().collect::<Vec<_>>();
     phases.sort_by(|left, right| {
         left.phase
             .started_at_ms
@@ -2057,7 +2063,7 @@ fn create_coverage_view_with_model(
             PhaseResult {
                 phase: phase.phase,
                 test: phase.test,
-                hits: sorted(&phase.hits),
+                hits: phase.hits.into_iter().collect(),
                 decisions: phase
                     .decisions
                     .into_iter()

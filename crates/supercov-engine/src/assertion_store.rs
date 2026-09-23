@@ -5,7 +5,7 @@ use crate::{
     coverage_report::{
         ArchiveReportRequest, CoverageReport, ExitCodeInput, analyze_coverage_archive,
     },
-    evidence_archive::read_archive,
+    evidence_archive::read_archive_selected,
     lifecycle::atomic_write,
     run_store::{RunFingerprint, RunMetadata, StoredRun, discover_runs},
     source_units::named,
@@ -58,7 +58,10 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
     }
     let bytes = fs::read(&run.evidence_path).map_err(|e| e.to_string())?;
     let evidence_digest = format!("{:x}", Sha256::digest(&bytes));
-    let entries = read_archive(&run.evidence_path).map_err(|e| e.to_string())?;
+    let entries = read_archive_selected(&run.evidence_path, |path| {
+        path == ARCHIVE_PATH || path == "statement-exclusions.json"
+    })
+    .map_err(|e| e.to_string())?;
     let Some(input) = entries.iter().find(|e| e.path == ARCHIVE_PATH) else {
         return Ok(None);
     };
@@ -1459,6 +1462,7 @@ fn assess_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evidence_archive::read_archive;
     fn fingerprint() -> RunFingerprint {
         RunFingerprint {
             algorithm: "sha256".into(),
