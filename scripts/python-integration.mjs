@@ -592,6 +592,7 @@ try {
     .filter((entry) => !entry.startsWith('.supercov') && !entry.startsWith('.git'))
     .filter((entry) => /supercov|_scv_|\.slot$/i.test(basename(entry)) && !/-supercov-probes\d+(-[0-9a-f]+)?\.pyc$/.test(entry));
   assert.deepEqual(stray, [], 'the project holds no Supercov artefacts outside .supercov and pytest\'s cache');
+  assert.equal(run('git', ['check-ignore', '.supercov/runs'], { cwd: project }).stdout.trim(), '.supercov/runs', 'direct Python runs initialize the store ignore file');
 
   // A measured module pytest rewrites itself -- registered with
   // register_assert_rewrite -- is cached by pytest under its own source's
@@ -667,6 +668,12 @@ try {
     if (hasExceptStar) expected['app/grouped.py'] = 1;
     if (detects) expected['app/shapes.py'] = 1;
     assert.deepEqual(limited, expected, 'each declared limitation is named once, on its file');
+    if (detects) {
+      const files = query(declared, ['runs', 'latest', 'files', '--limit', '50'], declaredEnvironment).files;
+      const detail = query(declared, ['runs', 'latest', 'file', 'app/shapes.py'], declaredEnvironment);
+      assert.equal(detail.counts.totalLines, 0, 'the deliberately unobserved file is outside the measured denominator');
+      assert.equal(files.find(file => file.file === 'app/shapes.py').uncoveredLines, 0, 'the list must not turn unmeasured lines into missed coverage');
+    }
   }
 
   console.log(

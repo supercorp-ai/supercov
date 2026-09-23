@@ -163,7 +163,7 @@ jobs:
           SUPERCOV_PYTHON: python
       # Slots are shared pages: close must take them back and a fork must
       # not write into its parent's, on every platform's mmap.
-      - run: node --test tests/runtime/python-lifecycle.test.mjs
+      - run: node --test tests/runtime/python-lifecycle.test.mjs tests/runtime/python-cache.test.mjs
         env:
           SUPERCOV_PYTHON: python
       # A probe's cost is the interpreter's: 3.11 specializes the stores a
@@ -173,6 +173,8 @@ jobs:
         run: npm run benchmark:python
         env:
           SUPERCOV_PYTHON: python
+      - if: matrix.os == 'ubuntu-latest'
+        run: python scripts/python-startup-benchmark.py
 
   ruby:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,') }}

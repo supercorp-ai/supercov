@@ -144,13 +144,10 @@ class _DecisionState:
 
 class Runtime:
     def __init__(self, plan_path: str, evidence_dir: str, run_id: str, worker: str) -> None:
-        with open(plan_path, "r", encoding="utf-8") as stream:
-            plan = json.load(stream)
-        if plan.get("version") != PLAN_VERSION:
-            raise RuntimeError(f"unsupported Supercov Python plan version {plan.get('version')!r}")
         import supercov_probes
 
-        self.root = os.path.realpath(plan["root"])
+        root, index = supercov_probes.load_plan(plan_path, PLAN_VERSION)
+        self.root = os.path.realpath(root)
         self.evidence_dir = evidence_dir
         self.run_id = run_id
         self.worker = worker
@@ -180,12 +177,12 @@ class Runtime:
         self.closed = False
         self.registered_events: tuple = ()
         # The plan, numbered into the slot layout; see supercov_probes.
-        index = supercov_probes.index_plan(plan)
         self.index = index
         self.probe_files = index.files
         self.probe_sites = index.sites
         self.probe_ids = index.ids
-        self.probe_decisions = [_Decision(plan_, logical) for plan_, logical in index.decisions]
+        self.probe_decisions = index.decisions
+        self.loaded_decisions: dict[int, _Decision] = {}
         self.probe_boolops = index.boolop_groups
         self.regions = index.regions
         self.slot_header = supercov_probes.SLOT_HEADER
@@ -193,8 +190,8 @@ class Runtime:
         self.slot_tag = bytes.fromhex(index.digest[:16])
         # Regions in slot order, for the harvest to find a set byte's decision.
         self.region_starts = [start for start, _, _ in index.region_table]
-        self.region_decisions = [(start, width, self.probe_decisions[d]) for start, width, d in index.region_table]
-        self.pow3 = [3**i for i in range(max((decision.width for decision in self.probe_decisions), default=0) + 1)]
+        self.region_decisions = index.region_table
+        self.pow3 = [3**i for i in range(index.max_width + 1)]
         self.live_slots: list = []
         self.free_slots: list = []
         self.next_slot = 0
@@ -566,7 +563,7 @@ class Runtime:
 
     def _wide_vector(self, context: int, d: int, mask: int, outcome: bool) -> None:
         """A vector of a decision too wide for a region: recorded at once."""
-        decision = self.probe_decisions[d]
+        decision = self._decision(d)
         digits = _digits(mask, decision.width)
         key = (context, decision.id, digits)
         if key in self.seen_vectors:
@@ -608,6 +605,11 @@ class Runtime:
         return relative
 
     # -- slots ----------------------------------------------------------------
+
+    def _decision(self, d: int) -> _Decision:
+        if d not in self.loaded_decisions:
+            self.loaded_decisions[d] = _Decision(*self.probe_decisions[d])
+        return self.loaded_decisions[d]
 
     def _write_layout(self) -> None:
         """The slot layout, once per run: every process numbers the same plan
@@ -734,7 +736,8 @@ class Runtime:
                 if index < id_end:
                     hit_ids.append(ids[index - header])
                 else:
-                    start, width, decision = regions[bisect.bisect_right(starts, index) - 1]
+                    start, width, d = regions[bisect.bisect_right(starts, index) - 1]
+                    decision = self._decision(d)
                     offset = index - start
                     if width == 1:
                         outcome = offset == 1

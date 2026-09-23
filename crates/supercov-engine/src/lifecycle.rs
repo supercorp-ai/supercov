@@ -481,6 +481,21 @@ impl ProjectLock {
         let parent = path.parent().expect("lock parent");
         reject_linked_ancestors(root, parent, true)?;
         fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+        // Direct frontends do not create an isolated workspace. Initialize
+        // the store's ignore file here as well, without replacing user rules
+        // or following a pre-existing symlink.
+        let ignore = root.join(".supercov/.gitignore");
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&ignore)
+        {
+            Ok(mut file) => file
+                .write_all(b"*\n")
+                .map_err(|source| io_error(&ignore, source))?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => return Err(io_error(&ignore, source)),
+        }
         let owner = LockOwner {
             run_id: run_id.into(),
             pid: std::process::id(),
@@ -1498,6 +1513,20 @@ mod tests {
                 .exists()
         );
         sweep_trash(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_runs_initialize_store_ignore_without_overwriting_existing_rules() {
+        let root = project();
+        let ignore = root.join(".supercov/.gitignore");
+        let mut lock = ProjectLock::acquire(&root, "first", "start").unwrap();
+        assert_eq!(fs::read_to_string(&ignore).unwrap(), "*\n");
+        lock.release().unwrap();
+        fs::write(&ignore, "custom\n").unwrap();
+        let mut lock = ProjectLock::acquire(&root, "second", "start").unwrap();
+        assert_eq!(fs::read_to_string(&ignore).unwrap(), "custom\n");
+        lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

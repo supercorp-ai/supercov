@@ -651,14 +651,14 @@ fn file_gaps(
     let mut files = BTreeMap::<String, MutableFileGap>::new();
     for line in &view.lines {
         let gap = files.entry(line.file.clone()).or_default();
-        if !includes_selected(&line.tests, selected, line.covered) {
+        if line.measured && !includes_selected(&line.tests, selected, line.covered) {
             gap.uncovered_lines += 1;
             classify(gap, 0, selected, line.covered);
         }
     }
     for point in &view.points {
         let gap = files.entry(point.meta.file.clone()).or_default();
-        if !includes_selected(&point.tests, selected, point.covered) {
+        if point.measured && !includes_selected(&point.tests, selected, point.covered) {
             match point.meta.kind {
                 crate::coverage_analysis::PointKind::Statement => {
                     gap.uncovered_statements += 1;
@@ -3942,6 +3942,37 @@ mod tests {
             }
         }
         report
+    }
+
+    #[test]
+    fn declined_lines_and_points_are_not_reported_as_coverage_gaps() {
+        let mut report = report();
+        for line in &mut report.view.lines {
+            line.measured = false;
+            line.covered = false;
+            line.tests.clear();
+        }
+        for point in &mut report.view.points {
+            point.measured = false;
+            point.covered = false;
+            point.tests.clear();
+        }
+        let selected = BTreeSet::new();
+        for filter in [None, Some(&selected)] {
+            let gaps = file_gaps(&report.view, filter).unwrap();
+            let (_, gap) = &gaps[0];
+            assert_eq!(gap.uncovered_lines, 0);
+            assert_eq!(gap.uncovered_statements, 0);
+            assert_eq!(gap.uncovered_functions, 0);
+            assert_eq!(gap.uncovered_everywhere[0..3], [0, 0, 0]);
+            assert_eq!(gap.measurement_limitations, 1);
+        }
+        // Actual missed obligations must still appear.
+        report.view.lines[0].measured = true;
+        report.view.points[0].measured = true;
+        let gaps = file_gaps(&report.view, None).unwrap();
+        assert_eq!(gaps[0].1.uncovered_lines, 1);
+        assert_eq!(gaps[0].1.uncovered_statements, 1);
     }
 
     #[test]

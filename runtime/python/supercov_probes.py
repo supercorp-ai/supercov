@@ -31,17 +31,21 @@ from __future__ import annotations
 
 import ast
 import builtins
+from collections.abc import Mapping, Sequence
+import contextvars
 import hashlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
 import marshal
 import os
+import py_compile
+import struct
 import sys
 import tempfile
 from typing import Callable
 
-PROBE_VERSION = 2
+PROBE_VERSION = 3
 # A context's hit array is a slot file mapped into memory. Its first bytes
 # name the context for the reader, so obligations are numbered from here.
 SLOT_HEADER = 16
@@ -54,7 +58,13 @@ MAX_REGION_WIDTH = 6
 # alias each instrumented module imports from here. Kept as module attributes
 # so `from supercov_probes import hits_get as <alias>` works in any namespace
 # a planned file is executed in, not only ones the loader controls.
-hits_get: Callable[[], object] = lambda: bytearray()  # noqa: E731 - replaced at install
+class _InactiveHits:
+    def __setitem__(self, index, value):
+        pass
+
+
+_inactive_hits = _InactiveHits()
+hits_get: Callable[[], object] = lambda: _inactive_hits  # noqa: E731 - replaced at install
 value_probe: Callable[[int, object], object] = lambda k, value: value  # noqa: E731
 condition_probe: Callable[[int, int, object, bool], bool] = lambda d, i, value, inv: bool(value)  # noqa: E731
 decision_probe: Callable[[int, object], bool] = lambda d, value: bool(value)  # noqa: E731
@@ -256,8 +266,10 @@ class PlanIndex:
         cursor = SLOT_HEADER + len(self.ids)
         self.regions: list[int] = []
         self.region_table: list[tuple[int, int, int]] = []
+        self.max_width = 0
         for d, (decision, _) in enumerate(self.decisions):
             width = len(decision["conditions"])
+            self.max_width = max(self.max_width, width)
             if width > MAX_REGION_WIDTH:
                 self.regions.append(-1)
                 continue
@@ -302,13 +314,143 @@ class PlanIndex:
             "digest": self.digest,
             "header": SLOT_HEADER,
             "bytes": self.slot_bytes,
-            "ids": self.ids,
+            "ids": list(self.ids),
             "decisions": decisions,
         }
 
 
 def index_plan(plan: dict) -> PlanIndex:
     return PlanIndex(plan)
+
+
+class _Records:
+    """Read prepared records without retaining descriptors across fork/exec."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+    def read(self, offset: int):
+        with open(self.path, "rb") as stream:
+            stream.seek(offset)
+            return marshal.load(stream)
+
+
+class _ProbeFiles(Mapping):
+    def __init__(self, records: _Records, offsets: dict) -> None:
+        self.records, self.offsets, self.loaded = records, offsets, {}
+
+    def __len__(self):
+        return len(self.offsets)
+
+    def __iter__(self):
+        return iter(self.offsets)
+
+    def __contains__(self, key):
+        return key in self.offsets
+
+    def __getitem__(self, key):
+        if key not in self.loaded:
+            probes = FileProbes.__new__(FileProbes)
+            probes.__dict__.update(self.records.read(self.offsets[key]))
+            self.loaded[key] = probes
+        return self.loaded[key]
+
+
+class _PlanItems(Sequence):
+    def __init__(self, records: _Records, offsets: list, count: int, chunk: int) -> None:
+        self.records, self.offsets, self.count, self.chunk, self.loaded = records, offsets, count, chunk, {}
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(self.count))]
+        if index < 0:
+            index += self.count
+        if not 0 <= index < self.count:
+            raise IndexError(index)
+        chunk, item = divmod(index, self.chunk)
+        if chunk not in self.loaded:
+            self.loaded[chunk] = self.records.read(self.offsets[chunk])
+        return self.loaded[chunk][item]
+
+
+def load_plan(path: str, version: int) -> tuple[str, PlanIndex]:
+    """Prepare an immutable run plan once; children load only files they use.
+
+    Marshal holds data, never pickled objects. Publication is atomic, and an
+    unwritable/missing cache simply falls back to preparing the JSON plan.
+    The filename includes plan identity, interpreter and preparation version.
+    """
+    stat = os.stat(path)
+    cache = f"{path}.{sys.implementation.cache_tag}-probes{PROBE_VERSION}-index2-{stat.st_mtime_ns}-{stat.st_size}"
+    try:
+        with open(cache, "rb") as stream:
+            header_offset, = struct.unpack("<Q", stream.read(8))
+            stream.seek(header_offset)
+            header = marshal.load(stream)
+        if header["version"] != version:
+            raise ValueError("cached plan version")
+        records = _Records(cache)
+        index = PlanIndex.__new__(PlanIndex)
+        index.__dict__.update(header["index"])
+        index.files = _ProbeFiles(records, header["files"])
+        for name, (offsets, count, chunk) in header["items"].items():
+            setattr(index, name, _PlanItems(records, offsets, count, chunk))
+        index.sites = {}
+        for relative, attributes in header["sites"].items():
+            sites = SiteProbes.__new__(SiteProbes)
+            sites.__dict__.update(attributes)
+            index.sites[relative] = sites
+        return header["root"], index
+    except (OSError, EOFError, ValueError, TypeError, KeyError, struct.error):
+        pass
+    import json
+    with open(path, encoding="utf-8") as stream:
+        plan = json.load(stream)
+    if plan.get("version") != version:
+        raise RuntimeError(f"unsupported Supercov Python plan version {plan.get('version')!r}")
+    index = index_plan(plan)
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(dir=os.path.dirname(cache), suffix=".partial")
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(b"\0" * 8)
+            files, items = {}, {}
+            for relative, probes in index.files.items():
+                files[relative] = stream.tell()
+                marshal.dump(probes.__dict__, stream)
+            for name, chunk in [("ids", 4096), ("decisions", 64), ("boolop_groups", 64)]:
+                values = getattr(index, name)
+                offsets = []
+                for start in range(0, len(values), chunk):
+                    offsets.append(stream.tell())
+                    marshal.dump(values[start:start + chunk], stream)
+                items[name] = (offsets, len(values), chunk)
+            header_offset = stream.tell()
+            marshal.dump({
+                "version": version, "root": plan["root"], "files": files,
+                "items": items,
+                "sites": {key: value.__dict__ for key, value in index.sites.items()},
+                "index": {key: value for key, value in index.__dict__.items() if key not in {"files", "sites", *items}},
+            }, stream)
+            stream.seek(0)
+            stream.write(struct.pack("<Q", header_offset))
+        # Publish only if absent. A lazy reader keeps offsets, not an open
+        # descriptor: another interpreter must never replace its backing
+        # file after the header was read. If a cache is damaged or the
+        # filesystem cannot link, use the freshly prepared in-memory index.
+        os.link(temporary, cache)
+    except OSError:
+        pass
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    return plan["root"], index
 
 
 # -- the transform -------------------------------------------------------------
@@ -826,9 +968,18 @@ def _import_aliases(tree: ast.Module, names: dict[str, str]) -> None:
     # loading it must still import. Without the runtime the aliases become
     # sinks that accept every probe and record nothing.
     imports = ", ".join(f"{attribute} as {alias}" for attribute, alias in names.items())
+    # Conditions take an inversion flag *after* the value. One generic
+    # last-argument sink changes program behavior when cached code outlives
+    # the runtime. Keep the callable signatures' value positions explicit.
+    fallbacks = {
+        "condition_probe": "lambda d, i, value, inverted: not not value",
+        "decision_probe": "lambda d, value: not not value",
+        "single_probe": "lambda k, value: not not value",
+        "site_probe": "lambda file, line: None",
+    }
     sinks = "\n".join(
-        f"    {alias} = _scv_sink"
-        for alias in names.values()
+        f"    {alias} = {fallbacks.get(attribute, '_scv_sink')}"
+        for attribute, alias in names.items()
     )
     fallback = ast.parse(
         f"try:\n    from supercov_probes import {imports}\nexcept ImportError:\n"
@@ -1005,11 +1156,44 @@ class ProbeFinder(importlib.abc.MetaPathFinder):
 
 _original_compile = builtins.compile
 _probing: Probing | None = None
+_plain_compilation = contextvars.ContextVar("supercov_plain_compilation", default=False)
+_original_py_compile = py_compile.compile
+_original_loader_code = importlib.machinery.SourceFileLoader.get_code
+_original_abc_loader_code = importlib.abc.SourceLoader.get_code
+
+
+def _compile_plain_cache(*args, **kwargs):
+    # py_compile (including compileall) produces portable, ordinary bytecode,
+    # even when an explicit cfile bypasses Python's normal cache location.
+    token = _plain_compilation.set(True)
+    try:
+        return _original_py_compile(*args, **kwargs)
+    finally:
+        _plain_compilation.reset(token)
+
+
+def _loader_code(loader, fullname, original):
+    filename = loader.get_filename(fullname)
+    probes = None if _probing is None else _probing.probes_for(filename) or _probing.sites_for(filename)
+    if probes is not None and not _plain_compilation.get():
+        # Explicit SourceFileLoader/spec_from_file_location bypasses our
+        # finder. Never read or write ordinary .pyc files for these imports.
+        return _probing.compile(loader.get_data(filename), filename, probes)
+    return original(loader, fullname)
+
+
+def _file_loader_code(loader, fullname):
+    return _loader_code(loader, fullname, _original_loader_code)
+
+
+def _abc_loader_code(loader, fullname):
+    return _loader_code(loader, fullname, _original_abc_loader_code)
 
 
 def _compile_probed(source, filename, mode, flags=0, dont_inherit=False, optimize=-1, **keywords):
     if (
         _probing is not None
+        and not _plain_compilation.get()
         and mode == "exec"
         and not (flags & ast.PyCF_ONLY_AST)
         and not keywords
@@ -1044,6 +1228,9 @@ def install(
         sys.meta_path.insert(0, ProbeFinder(probing))
     if builtins.compile is not _compile_probed:
         builtins.compile = _compile_probed
+    py_compile.compile = _compile_plain_cache
+    importlib.machinery.SourceFileLoader.get_code = _file_loader_code
+    importlib.abc.SourceLoader.get_code = _abc_loader_code
     # Modules imported before this point cannot be re-executed; the detector
     # reports any planned file among them.
     return probing
