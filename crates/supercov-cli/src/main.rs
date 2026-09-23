@@ -46,6 +46,7 @@ use time::{OffsetDateTime, macros::format_description};
 
 mod assertions_human;
 mod assertions_query;
+mod html_report;
 mod human_query;
 mod public_query;
 mod quality;
@@ -86,8 +87,10 @@ Check what the tests assert:
 
 Compare, combine, and maintain:
   supercov diff <older> <newer>        compare two runs
+  supercov report [run-id]             open a portable interactive HTML report
   supercov merge <id> <id> [...]       combine compatible runs
-  supercov clean [--keep N]            remove stored runs (all by default)
+  supercov runs clean [--keep N]       remove stored runs (all by default)
+  supercov quality clean [--keep N]    remove saved assessments
 
 Guides:
   supercov docs                        list bundled guides
@@ -110,6 +113,7 @@ const DOC_TOPICS: &[&str] = &[
     "supported-suites",
     "verification",
     "performance",
+    "reports",
     "workspace-isolation",
 ];
 
@@ -334,13 +338,19 @@ fn main() -> ExitCode {
         Some("__build-rust-libtest-companion") => build_rust_libtest_companion(arguments.collect()),
         Some("__build-rust-compiler") => build_rust_compiler(),
         Some("__run-rust-compiler") => run_rust_compiler(),
-        Some("clean") => cleanup_command(arguments.collect()),
         Some("quality") => quality::command(arguments.collect()),
         Some("security") => quality::security_command(arguments.collect()),
         Some("docs") => docs_command(arguments.collect()),
         Some("assertions") => assertions_query::global_command(&arguments.collect::<Vec<_>>()),
-        Some("runs") => public_query_command("runs", arguments.collect()),
+        Some("runs") => {
+            let arguments: Vec<String> = arguments.collect();
+            match arguments.split_first() {
+                Some((first, rest)) if first == "clean" => cleanup_command(rest.to_vec()),
+                _ => public_query_command("runs", arguments),
+            }
+        }
         Some("diff") => public_query_command("diff", arguments.collect()),
+        Some("report") => html_report::report_command(arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
@@ -2669,7 +2679,7 @@ fn cleanup_command(arguments: Vec<String>) -> ExitCode {
         .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
         print!(
-            "Usage: supercov clean [--keep N] [--dry-run]\n\nRemoves all stored runs and Supercov's isolated build cache by default.\nUse --keep N to retain the N newest runs.\n"
+            "Usage: supercov runs clean [--keep N] [--dry-run]\n\nRemoves all stored runs and Supercov's isolated build cache by default.\nUse --keep N to retain the N newest runs.\n\nSaved quality assessments are never removed here; they cost money to\nproduce and are not reproducible. Use supercov quality clean for those.\nGenerated reports in .supercov/reports are left alone too.\n"
         );
         return ExitCode::SUCCESS;
     }

@@ -51,6 +51,8 @@ name = "supercov"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
+flate2.workspace = true
 ignore = "0.4"
 serde.workspace = true
 serde_json.workspace = true

@@ -43,7 +43,7 @@ pub fn legacy_response(project_root: &Path, hash: &str) -> PathBuf {
     root(project_root, "quality").join(format!("{hash}.json"))
 }
 
-fn snapshots(project_root: &Path, lane: &str) -> PathBuf {
+pub fn snapshots(project_root: &Path, lane: &str) -> PathBuf {
     root(project_root, lane).join("snapshots")
 }
 

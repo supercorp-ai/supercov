@@ -185,9 +185,9 @@ See [Speed and storage](performance.md) for practical ways to shorten a loop.
 Preview cleanup, then choose how much history to keep:
 
 ```sh supercov
-npx supercov clean --dry-run
-npx supercov clean --keep 20
-npx supercov clean
+npx supercov runs clean --dry-run
+npx supercov runs clean --keep 20
+npx supercov runs clean
 ```
 
 The final command removes all stored runs and the isolated build cache. Cleanup

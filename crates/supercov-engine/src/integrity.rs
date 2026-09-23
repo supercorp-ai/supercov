@@ -373,6 +373,22 @@ fn digest_files(
     digest_paths(root, paths, false)
 }
 
+/// Digest a set of files the way this module digests any set of files.
+///
+/// This is not a run's source fingerprint and cannot be compared with one. That
+/// fingerprint keys the instrumented build cache, so it deliberately covers
+/// every file the frontend may rewrite and reuse, which is wider than any
+/// caller here is describing.
+///
+/// Exported so a caller outside a run gets the same construction rather than a
+/// second one: two copies of a hash agree until one of them is changed.
+pub fn digest_source_files(
+    root: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<String, IntegrityError> {
+    digest_files(root, paths)
+}
+
 /// Dependency manifests, hashed by what they say rather than by their bytes.
 ///
 /// A manifest carries two unrelated things: what the project depends on, and
@@ -693,6 +709,15 @@ fn git_integrity(root: &Path) -> Option<GitIntegrity> {
         return None;
     }
     Some(GitIntegrity {
+        branch: Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|branch| branch.trim().to_owned())
+            .filter(|branch| !branch.is_empty()),
         revision: revision
             .filter(|output| output.status.success())
             .and_then(|output| String::from_utf8(output.stdout).ok())
@@ -967,6 +992,53 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn git_context_records_branch_and_local_changes_without_guessing_detached_heads() {
+        let root = directory("git-context");
+        assert!(git_integrity(&root).is_none());
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=report-test"]);
+        git(&[
+            "-c",
+            "user.name=Report Test",
+            "-c",
+            "user.email=report@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ]);
+        let clean = git_integrity(&root).unwrap();
+        assert_eq!(clean.branch.as_deref(), Some("report-test"));
+        assert!(!clean.dirty);
+        fs::write(root.join("local.txt"), "uncommitted").unwrap();
+        let dirty = git_integrity(&root).unwrap();
+        assert!(dirty.dirty);
+        assert_eq!(dirty.revision, clean.revision);
+        git(&["checkout", "--detach"]);
+        let detached = git_integrity(&root).unwrap();
+        assert!(detached.branch.is_none());
+        assert_eq!(detached.revision, clean.revision);
+        // Older stored runs remain readable without a branch field.
+        let old: GitIntegrity = serde_json::from_value(serde_json::json!({
+            "revision": clean.revision, "dirty": false
+        }))
+        .unwrap();
+        assert!(old.branch.is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     const PACKAGE: &str = r#"{"name":"g","version":"1.0.0","dependencies":{"a":"^1.2.3"}}"#;

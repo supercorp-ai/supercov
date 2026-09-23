@@ -158,6 +158,7 @@ Usage:
   supercov quality file <path> [snapshot]      one file, every check
   supercov quality scope                       which files are assessed, and why
   supercov quality snapshots                   list saved assessments
+  supercov quality clean [--keep N]            remove saved assessments
   supercov quality show [snapshot]             read a saved assessment
   supercov quality diff <snapshot> <snapshot>  what declined between two
   supercov quality patch [file-or-directory]   what a change introduced
@@ -284,6 +285,12 @@ enum Command {
         json: bool,
         limit: usize,
     },
+    /// Remove saved assessments, newest kept first.
+    Clean {
+        keep: usize,
+        dry_run: bool,
+        json: bool,
+    },
     /// The catalog: twelve named properties, composed here. The default.
     Health(Options),
     /// Ask the same catalog what a change introduced.
@@ -384,9 +391,72 @@ fn parse(arguments: Vec<String>) -> Result<Command, String> {
     match subcommand {
         "scan" => Ok(Command::Health(defaulted(parse_scan(rest())?))),
         "snapshots" | "show" | "gaps" | "scope" | "file" | "diff" => parse_view(subcommand, rest()),
+        "clean" => parse_clean(rest()),
         "patch" => parse_patch(rest()),
         _ => Ok(Command::Health(defaulted(parse_scan(arguments)?))),
     }
+}
+
+fn parse_clean(arguments: Vec<String>) -> Result<Command, String> {
+    let mut keep = None;
+    let mut dry_run = false;
+    let mut json = false;
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--dry-run" => dry_run = true,
+            "--json" => json = true,
+            "--keep" => {
+                let value = arguments
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .ok_or("--keep requires a count of assessments to retain")?;
+                if keep.replace(value).is_some() {
+                    return Err("--keep may only be specified once".into());
+                }
+            }
+            value => return Err(format!("unknown quality clean option: {value}")),
+        }
+    }
+    Ok(Command::Clean {
+        keep: keep.unwrap_or(0),
+        dry_run,
+        json,
+    })
+}
+
+/// Remove saved assessments, keeping the newest.
+///
+/// An assessment costs money and cannot be reproduced from the repository, so
+/// this is never part of cleaning up after a run: it only happens when somebody
+/// asks for it by name. Snapshots are ordered by when they were taken, never by
+/// their identifiers, which carry no order.
+fn clean(root: &Path, lane: &str, keep: usize, dry_run: bool) -> Result<Value, String> {
+    let saved = store::list(root, lane)?;
+    let removed: Vec<String> = saved.iter().skip(keep).map(|(id, _)| id.clone()).collect();
+    if !dry_run {
+        for id in &removed {
+            let directory = store::snapshots(root, lane).join(id);
+            if !store::is_snapshot_id(id) {
+                continue;
+            }
+            fs::remove_dir_all(&directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+        }
+        // The pointer may name something just removed. Dropping it is enough:
+        // resolving a snapshot already falls back to the newest that survives.
+        let pointer = store::snapshots(root, lane).join("latest");
+        if let Ok(named) = fs::read_to_string(&pointer)
+            && removed.iter().any(|id| id == named.trim())
+        {
+            let _ = fs::remove_file(&pointer);
+        }
+    }
+    Ok(json!({
+        "view": format!("{lane}.clean"),
+        "dry_run": dry_run,
+        "kept": saved.len().saturating_sub(removed.len()),
+        "removed": removed,
+    }))
 }
 
 fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
@@ -1358,6 +1428,9 @@ fn catalog_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, St
 struct Subject {
     path: String,
     bytes: u64,
+    /// SHA-256 of the whole file, even when it is assessed in windows, so a
+    /// reader can tell whether a grade describes the source in front of them.
+    sha256: String,
     request: Value,
     /// Set when this subject is not being asked the preferred question, so the
     /// report can say the answer is weaker rather than look the same.
@@ -1376,6 +1449,7 @@ struct Answers {
     classified: BTreeMap<usize, String>,
     path: String,
     bytes: u64,
+    sha256: String,
     /// How many requests this row came from. More than one means the file was
     /// windowed, which the report says.
     windows: usize,
@@ -1504,6 +1578,7 @@ fn ask_smells(
             classified: BTreeMap::new(),
             path: subject.path.clone(),
             bytes: subject.bytes,
+            sha256: subject.sha256.clone(),
             windows: 1,
             note: subject.note.clone(),
             values: None,
@@ -2532,6 +2607,7 @@ fn scored(answers: &Answers, instrument: Instrument) -> Value {
         Some(values) => json!({
             "path": answers.path,
             "bytes": answers.bytes,
+            "sha256": answers.sha256,
             "status": "completed",
             "cached": answers.cached,
             "health": if instrument.scores() { catalog::health(values) } else { None },
@@ -2544,10 +2620,35 @@ fn scored(answers: &Answers, instrument: Instrument) -> Value {
         None => json!({
             "path": answers.path,
             "bytes": answers.bytes,
+            "sha256": answers.sha256,
             "status": "failed",
             "error": answers.error,
         }),
     }
+}
+
+/// Count the published findings, including checks only the line pass found.
+fn finding_counts(files: &[Value]) -> (usize, usize, BTreeMap<String, usize>) {
+    let mut flagged = 0;
+    let mut line_confirmed = 0;
+    let mut by_check = BTreeMap::new();
+    for file in files {
+        let Some(findings) = file["present"].as_array() else {
+            continue;
+        };
+        flagged += usize::from(!findings.is_empty());
+        line_confirmed += usize::from(findings.iter().any(|finding| {
+            finding["lines"]
+                .as_array()
+                .is_some_and(|lines| !lines.is_empty())
+        }));
+        for finding in findings {
+            if let Some(check) = finding["check"].as_str() {
+                *by_check.entry(check.to_owned()).or_default() += 1;
+            }
+        }
+    }
+    (flagged, line_confirmed, by_check)
 }
 
 /// Health for every file, every directory that holds one, and the tree.
@@ -2709,6 +2810,7 @@ fn run_health(
                 skipped_files.push(json!({ "path": relative, "reason": "generated" }));
             }
             Ok(source) => {
+                let sha256 = digest(source.as_bytes());
                 let mut whole = instrument.file_request(&relative, &source);
                 // The graph stage: label every function on the same state,
                 // when the file has a parser and the questions fit. A file
@@ -2758,6 +2860,7 @@ fn run_health(
                         bytes: source.len() as u64,
                         request: whole,
                         path: relative,
+                        sha256,
                         note: None,
                     }),
                     Ok(None) => match catalog_windows(&relative, &source) {
@@ -2768,6 +2871,7 @@ fn run_health(
                                     bytes: text.len() as u64,
                                     request: instrument.file_request(&relative, &text),
                                     path: relative.clone(),
+                                    sha256: sha256.clone(),
                                     note: Some(format!(
                                         "assessed in {count} windows at declaration boundaries; \
                                          a property of the whole file, such as a god class or \
@@ -2844,22 +2948,7 @@ fn run_health(
     let mut weighted: Vec<(u64, f64)> = Vec::new();
     let mut by_directory: BTreeMap<String, Vec<(u64, f64)>> = BTreeMap::new();
     let mut files: Vec<Value> = Vec::new();
-    let mut by_check: BTreeMap<String, usize> = BTreeMap::new();
-    let mut flagged = 0usize;
-    let mut line_confirmed = 0usize;
     for answer in &answers {
-        if let Some(values) = &answer.values {
-            let fired = present_for(values, instrument);
-            flagged += usize::from(!fired.is_empty());
-            line_confirmed += usize::from(
-                fired
-                    .iter()
-                    .any(|(check, _)| answer.lines.iter().any(|l| l["check"] == *check)),
-            );
-            for (check, _) in &fired {
-                *by_check.entry(check.clone()).or_default() += 1;
-            }
-        }
         if instrument.scores()
             && let Some(values) = &answer.values
             && let Some(health) = catalog::health(values)
@@ -2905,6 +2994,7 @@ fn run_health(
         });
     }
     files.extend(unreadable);
+    let (flagged, line_confirmed, by_check) = finding_counts(&files);
     let failed = files.iter().any(|f| f["status"] == "failed");
     let errors = files.iter().filter(|f| f["status"] == "failed").count();
 
@@ -2920,9 +3010,29 @@ fn run_health(
         })
         .collect();
 
+    // The identity of what this assessment read: a digest over exactly the files
+    // it answered for, and nothing else in the tree.
+    //
+    // It is not a run's source fingerprint and must never be compared with one.
+    // That fingerprint keys the instrumented build cache and so covers every
+    // file the frontend may rewrite, which is a wider set; the two disagree on
+    // any real project. Whether an assessment and a run read the same code is
+    // answered per file, by the digests each records.
+    let assessed: Vec<PathBuf> = answers
+        .iter()
+        .filter(|answer| answer.values.is_some())
+        .map(|answer| root.join(&answer.path))
+        .collect();
+    let assessed_files = assessed.len();
+    let assessed_fingerprint = supercov_engine::integrity::digest_source_files(root, assessed).ok();
+
     let (id, created_at) = store::identity()?;
     let mut manifest = json!({
-        "schema_version": 3, "id": id, "created_at": created_at, "parent": Value::Null,
+        "schema_version": 4, "id": id, "created_at": created_at, "parent": Value::Null,
+        // Null when a file moved or became unreadable between the assessment and
+        // this line: absent is honest, a digest over a different set is not.
+        "assessed_files_fingerprint": assessed_fingerprint,
+        "assessed_files": assessed_files,
         "supercov_version": env!("CARGO_PKG_VERSION"),
         // Which instrument produced this. A reader must never mistake a catalog
         // snapshot for a rubric one: they answer different questions and their
@@ -3034,6 +3144,7 @@ fn run_patch(
             bytes: change.after.len() as u64,
             request,
             path: change.path.clone(),
+            sha256: digest(change.after.as_bytes()),
             note,
         });
     }
@@ -3679,6 +3790,24 @@ fn present(view: Value, json: bool) -> Result<bool, String> {
     Ok(false)
 }
 
+/// Saved assessments, newest first, for a reader outside this module.
+///
+/// Returns the manifest and the per-file rows together, because a report needs
+/// both: the manifest says which instrument answered and over what source, and
+/// only the rows can be placed beside a file. Snapshots that cannot be read are
+/// left out rather than failing the caller, matching how they are listed.
+pub fn report_snapshots(root: &Path, lane: &str, limit: usize) -> Vec<(String, Value, Value)> {
+    store::list(root, lane)
+        .unwrap_or_default()
+        .into_iter()
+        .take(limit)
+        .filter_map(|(id, manifest)| {
+            let (_, files) = store::read(root, lane, &id).ok()?;
+            Some((id, manifest, files))
+        })
+        .collect()
+}
+
 pub fn command(arguments: Vec<String>) -> ExitCode {
     dispatch(arguments, Instrument::Catalog)
 }
@@ -3709,6 +3838,11 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
             Command::Snapshots { json, limit } => {
                 present(query::snapshots(&root, lane, limit)?, json)
             }
+            Command::Clean {
+                keep,
+                dry_run,
+                json,
+            } => present(clean(&root, lane, keep, dry_run)?, json),
             Command::Gaps {
                 snapshot,
                 json,

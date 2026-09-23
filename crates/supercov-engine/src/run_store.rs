@@ -49,6 +49,9 @@ pub struct RunFingerprint {
 pub struct GitIntegrity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// Branch at measurement time. Older runs and detached HEADs may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub dirty: bool,
 }
 
@@ -913,6 +916,7 @@ mod tests {
             instrumenter_version: "2.0.0".into(),
             git: Some(GitIntegrity {
                 revision: Some(std::iter::repeat_n('a', 40).collect()),
+                branch: None,
                 dirty: false,
             }),
             fingerprint: RunFingerprint {
