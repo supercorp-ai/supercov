@@ -966,6 +966,19 @@ fn exit_parts(status: ExitStatus) -> (Option<i32>, Option<i32>) {
     (status.code(), None)
 }
 
+/// One diagnostic line in one write. `writeln!` with arguments writes the
+/// pieces between them separately, and the command being supervised shares
+/// this stderr: a child printing at the same moment landed inside the timeout
+/// line, splitting it where the number goes. A single write of a short line to
+/// a pipe cannot be interleaved.
+fn write_line(writer: &mut dyn Write, line: &str) -> std::io::Result<()> {
+    let mut bytes = String::with_capacity(line.len() + 1);
+    bytes.push_str(line);
+    bytes.push('\n');
+    writer.write_all(bytes.as_bytes())?;
+    writer.flush()
+}
+
 fn write_diagnostic(child: &Child, started: Instant, writer: &mut dyn Write) {
     let tree = descendant_process_tree(child.id());
     let diagnostic = format_process_diagnostic(child.id(), started.elapsed(), &tree);
@@ -1168,12 +1181,13 @@ impl ProcessSupervisor {
             }
             if termination.is_none() && timeout_at.is_some_and(|deadline| now >= deadline) {
                 timed_out = true;
-                let _ = writeln!(
-                writer,
-                "[supercov] command exceeded SUPERCOV_COMMAND_TIMEOUT_MS={}; terminating process group",
-                options.timeout.expect("timeout deadline").as_millis()
-            )
-            .and_then(|_| writer.flush());
+                let _ = write_line(
+                    writer,
+                    &format!(
+                        "[supercov] command exceeded SUPERCOV_COMMAND_TIMEOUT_MS={}; terminating process group",
+                        options.timeout.expect("timeout deadline").as_millis()
+                    ),
+                );
                 signal_process_group(child, libc::SIGTERM);
                 termination = Some((now, None));
                 write_diagnostic(child, started, writer);
@@ -1349,12 +1363,13 @@ impl ProcessSupervisor {
             }
             if termination.is_none() && timeout_at.is_some_and(|deadline| now >= deadline) {
                 timed_out = true;
-                let _ = writeln!(
+                let _ = write_line(
                     writer,
-                    "[supercov] command exceeded SUPERCOV_COMMAND_TIMEOUT_MS={}; terminating process group",
-                    options.timeout.expect("timeout deadline").as_millis()
-                )
-                .and_then(|_| writer.flush());
+                    &format!(
+                        "[supercov] command exceeded SUPERCOV_COMMAND_TIMEOUT_MS={}; terminating process group",
+                        options.timeout.expect("timeout deadline").as_millis()
+                    ),
+                );
                 forward_windows_control(child);
                 termination = Some(now);
                 write_diagnostic(child, started, writer);
