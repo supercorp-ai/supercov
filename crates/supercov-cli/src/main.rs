@@ -63,6 +63,8 @@ Score the source with Jev:
   supercov quality file <path>         one file, every check
   supercov quality patch               what a change introduced
   supercov quality --help              every quality query
+  supercov security                    security surface, file by file
+  supercov security patch              what a change introduced, security only
 
 Measure your full test command:
   npx supercov -- npm test
@@ -103,6 +105,7 @@ const DOC_TOPICS: &[&str] = &[
     "cli",
     "coverage-model",
     "quality",
+    "security",
     "evidence",
     "supported-suites",
     "verification",
@@ -333,6 +336,7 @@ fn main() -> ExitCode {
         Some("__run-rust-compiler") => run_rust_compiler(),
         Some("clean") => cleanup_command(arguments.collect()),
         Some("quality") => quality::command(arguments.collect()),
+        Some("security") => quality::security_command(arguments.collect()),
         Some("docs") => docs_command(arguments.collect()),
         Some("assertions") => assertions_query::global_command(&arguments.collect::<Vec<_>>()),
         Some("runs") => public_query_command("runs", arguments.collect()),
@@ -442,6 +446,7 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         "cli" => Some(include_str!("../assets/docs/cli.md")),
         "coverage-model" => Some(include_str!("../assets/docs/coverage-model.md")),
         "quality" => Some(include_str!("../assets/docs/quality.md")),
+        "security" => Some(include_str!("../assets/docs/security.md")),
         "evidence" => Some(include_str!("../assets/docs/evidence.md")),
         "supported-suites" => Some(include_str!("../assets/docs/supported-suites.md")),
         "verification" => Some(include_str!("../assets/docs/verification.md")),
@@ -1913,6 +1918,120 @@ pub(crate) fn load_run_view(
         comparison.map(|c| c.reasons).unwrap_or_default(),
     )
     .map_err(|error| format!("{error:?}"))
+}
+
+/// A flow of a saved run's assertion map with the lines it is credited with,
+/// and the text the agent wrote about it. The text is what makes the credit
+/// mean something: an assertion that checks the injection succeeded and one
+/// that checks the input was rejected credit the same sink line.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct CreditedFlow {
+    pub key: String,
+    pub assertion: String,
+    pub observes: Vec<String>,
+    pub explanation: String,
+    pub nodes: Vec<String>,
+    pub lines: Vec<(String, u64)>,
+}
+
+/// Every credited flow of the run the coverage join uses, so a security
+/// finding can be placed on one of three shelves: code no test executes, code
+/// tests execute but no assertion is credited with, and code an assertion
+/// checks, where the flow's own text says what was checked. Empty when the
+/// run carries no assertion map; that is not an error.
+pub(crate) fn load_credited_flows(selector: Option<&str>) -> Result<Vec<CreditedFlow>, String> {
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+    let report = supercov_engine::assertion_store::report(&root, run)?;
+    let empty = Vec::new();
+    let mut flows = Vec::new();
+    for assertion in report["assertions"].as_array().unwrap_or(&empty) {
+        let text = assertion["at"]["text"].as_str().unwrap_or("").to_owned();
+        let observes: Vec<String> = assertion["observes"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .filter_map(|o| o.as_str().map(str::to_owned))
+            .collect();
+        for flow in assertion["flows"].as_array().unwrap_or(&empty) {
+            let mut lines = Vec::new();
+            let mut nodes = Vec::new();
+            for node in flow["nodeCredit"].as_array().unwrap_or(&empty) {
+                if let Some(t) = node["text"].as_str() {
+                    nodes.push(t.to_owned());
+                }
+                if node["status"] == "credited"
+                    && let (Some(file), Some(line)) = (
+                        node["location"]["file"].as_str(),
+                        node["location"]["line"].as_u64(),
+                    )
+                {
+                    lines.push((file.to_owned(), line));
+                }
+            }
+            if lines.is_empty() {
+                continue;
+            }
+            flows.push(CreditedFlow {
+                key: format!(
+                    "{}/{}",
+                    assertion["id"].as_str().unwrap_or("?"),
+                    flow["id"].as_str().unwrap_or("?")
+                ),
+                assertion: text.clone(),
+                observes: observes.clone(),
+                explanation: flow["explanation"].as_str().unwrap_or("").to_owned(),
+                nodes,
+                lines,
+            });
+        }
+    }
+    Ok(flows)
+}
+
+/// Which lines of which files a saved run's assertions are credited with.
+pub(crate) fn load_asserted_lines(
+    selector: Option<&str>,
+) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<u64>>, String> {
+    let mut lines: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
+        Default::default();
+    for flow in load_credited_flows(selector)? {
+        for (file, line) in flow.lines {
+            lines.entry(file).or_default().insert(line);
+        }
+    }
+    Ok(lines)
+}
+
+/// Which tests executed which lines, from a saved run: every covered
+/// statement with the tests credited for it. This is the run's own account of
+/// what ran together, which no import graph can give: a handler and a helper
+/// reached only through a lookup table are still executed by one test.
+pub(crate) fn load_point_tests(
+    selector: Option<&str>,
+) -> Result<Vec<(String, usize, Vec<String>)>, String> {
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+    let coverage = supercov_engine::assertion_store::coverage(run)?;
+    Ok(coverage
+        .view
+        .points
+        .iter()
+        .filter(|point| point.covered && !point.tests.is_empty())
+        .map(|point| {
+            (
+                point.meta.file.clone(),
+                point.meta.line,
+                point
+                    .tests
+                    .iter()
+                    .map(|test| test.as_str().to_owned())
+                    .collect(),
+            )
+        })
+        .collect())
 }
 
 /// The format names live in the engine module the packaging audit reads, so

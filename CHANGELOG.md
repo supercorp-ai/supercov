@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `supercov security`: twelve security checks asked of every file with [Jev](https://typesafe.ai), from secrets in source and injection to mass assignment and weakened configuration, each mapped to its CWE classes. Nothing is averaged: a file is clean or names what fired, with the line and the code on it where the model confirms one, and the line where the outside value enters. On fifteen held-out repositories of the RealVuln corpus it scores F1 0.47 (precision 54%, recall 41%) for about two cents a repository, where Semgrep scores 0.14. Injection, secrets, paths, redirects and mass assignment are found at 70 to 90% recall; authorisation stays file-level.
+- `security patch` reports what a change introduced; `quality patch` asks the twelve checks too. `security --run latest` shows which flagged files no test executes.
+
 ## 1.2.0
 
 **Changed**

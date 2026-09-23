@@ -21,6 +21,16 @@ Measure code quality with npx supercov.
 
 See [Understanding quality](https://supercov.com/docs/quality).
 
+For security surface with the same key, ask:
+
+```text supercov-prompt
+Find security issues with npx supercov security and show me what it found.
+```
+
+Supercov asks twelve security checks of every file and shows each finding
+with the line and the code on it. See
+[Security surface](https://supercov.com/docs/security).
+
 When it finishes, review the test change and coverage comparison in your
 conversation. Ask separately if you want a commit or pull request.
 
