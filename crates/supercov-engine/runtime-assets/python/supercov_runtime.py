@@ -977,12 +977,15 @@ class Runtime:
                 self.limitation("python-inherited-context-invalid", "SUPERCOV_CONTEXT was not a valid Supercov identity")
         atexit.register(self.close)
         _install_propagation(self)
-        try:
-            import supercov_unittest
+        def install_unittest(module):
+            try:
+                import supercov_unittest
 
-            supercov_unittest.install(self)
-        except Exception as error:  # noqa: BLE001 - the adapter must never break the interpreter
-            self.limitation("python-unittest-adapter-unavailable", f"unittest adapter failed to install: {error!r}")
+                supercov_unittest.install(self)
+            except Exception as error:  # noqa: BLE001 - the adapter must never break the interpreter
+                self.limitation("python-unittest-adapter-unavailable", f"unittest adapter failed to install: {error!r}")
+
+        self.probing.after_import("unittest", install_unittest)
 
     def _stop_observing(self) -> None:
         # The detector's global event off and its callback withdrawn: nothing
@@ -1054,10 +1057,6 @@ class Runtime:
 
 
 def _install_propagation(runtime: Runtime) -> None:
-    import concurrent.futures
-    import multiprocessing.process
-    import subprocess
-
     if not getattr(threading.Thread, "_supercov_patched", False):
         original_start = threading.Thread.start
 
@@ -1084,16 +1083,23 @@ def _install_propagation(runtime: Runtime) -> None:
         threading.Thread.start = start_with_context
         threading.Thread._supercov_patched = True
 
-        original_submit = concurrent.futures.ThreadPoolExecutor.submit
+    def install_executor(module):
+        executor_type = module.ThreadPoolExecutor
+        if getattr(executor_type, "_supercov_patched", False):
+            return
+        original_submit = executor_type.submit
 
         def submit_with_context(executor, function, /, *args, **kwargs):
             context = contextvars.copy_context()
             return original_submit(executor, context.run, function, *args, **kwargs)
 
-        concurrent.futures.ThreadPoolExecutor.submit = submit_with_context
+        executor_type.submit = submit_with_context
+        executor_type._supercov_patched = True
 
-    if not getattr(subprocess.Popen, "_supercov_patched", False):
-        original_init = subprocess.Popen.__init__
+    def install_subprocess(module):
+        if getattr(module.Popen, "_supercov_patched", False):
+            return
+        original_init = module.Popen.__init__
 
         def init_with_context(process, *args, **kwargs):
             additions = runtime.child_environment()
@@ -1121,11 +1127,13 @@ def _install_propagation(runtime: Runtime) -> None:
                         kwargs["env"] = environment
             original_init(process, *args, **kwargs)
 
-        subprocess.Popen.__init__ = init_with_context
-        subprocess.Popen._supercov_patched = True
+        module.Popen.__init__ = init_with_context
+        module.Popen._supercov_patched = True
 
-    process_type = multiprocessing.process.BaseProcess
-    if not getattr(process_type, "_supercov_patched", False):
+    def install_multiprocessing(module):
+        process_type = module.BaseProcess
+        if getattr(process_type, "_supercov_patched", False):
+            return
         original_process_start = process_type.start
         environment_lock = threading.Lock()
 
@@ -1147,6 +1155,10 @@ def _install_propagation(runtime: Runtime) -> None:
 
         process_type.start = process_start_with_context
         process_type._supercov_patched = True
+
+    runtime.probing.after_import("concurrent.futures.thread", install_executor)
+    runtime.probing.after_import("subprocess", install_subprocess)
+    runtime.probing.after_import("multiprocessing.process", install_multiprocessing)
 
 
 # -- module-level singleton --------------------------------------------------

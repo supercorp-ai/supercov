@@ -40,6 +40,15 @@ with tempfile.TemporaryDirectory() as temporary:
     child('''import py_compile, importlib.machinery, importlib.util, marshal, pathlib
 py_compile.compile('compiled.py', doraise=True)
 py_compile.compile('explicit.py', cfile='explicit.pyc', doraise=True)
+import importlib.abc, supercov_probes
+assert isinstance(supercov_probes.ProbeFinder(supercov_probes._probing), importlib.abc.MetaPathFinder)
+class CustomLoader(importlib.abc.SourceLoader):
+    def get_filename(self, name): return str(pathlib.Path('loaded.py').resolve())
+    def get_data(self, path): return pathlib.Path(path).read_bytes()
+    def path_stats(self, path): return dict(mtime=pathlib.Path(path).stat().st_mtime, size=pathlib.Path(path).stat().st_size)
+    def set_data(self, *args, **kwargs): raise AssertionError('probes escaped through a custom SourceLoader')
+custom = {}; exec(CustomLoader().get_code('loaded'), custom)
+assert custom['choose'](True, True) == 'yes'
 code = importlib.machinery.SourceFileLoader('loaded', 'loaded.py').get_code('loaded')
 namespace = {}; exec(code, namespace)
 assert namespace['choose'](True, True) == 'yes'
@@ -91,12 +100,12 @@ with tempfile.TemporaryDirectory() as temporary:
     _, recovered = probes.load_plan(str(path), 1)
     assert recovered.layout() == changed.layout()
     for cache in root.glob('plan.json.*'): cache.unlink()
-    original_mkstemp = probes.tempfile.mkstemp
+    original_mkstemp = tempfile.mkstemp
     def unwritable(*args, **kwargs): raise PermissionError('read-only cache')
-    probes.tempfile.mkstemp = unwritable
+    tempfile.mkstemp = unwritable
     _, uncached = probes.load_plan(str(path), 1)
     assert uncached.layout() == changed.layout()
-    probes.tempfile.mkstemp = original_mkstemp
+    tempfile.mkstemp = original_mkstemp
     code = 'import sys;sys.path.insert(0,sys.argv[1]);import supercov_probes as p;print(p.load_plan(sys.argv[2],1)[1].digest)'
     children = [subprocess.Popen([sys.executable, '-c', code, sys.argv[1], str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(4)]
     for process in children:
@@ -251,4 +260,50 @@ with tempfile.TemporaryDirectory() as cache:
             assert measured['value'] == plain['value']
             assert actual.co_filename == expected.co_filename
             assert measured['f'].__code__.co_filename == plain['f'].__code__.co_filename
+`));
+
+test('optional adapters load on demand and retain context for early and late imports', { skip }, () => run(fixture + `
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary); plan = root / 'plan.json'
+    plan.write_text(json.dumps({'version':1,'root':str(root),'files':{'a.py':file_plan('a')}}))
+    (root / 'adapter_worker.py').write_text('def inspect_context(queue):\\n    import supercov_runtime\\n    queue.put(supercov_runtime.runtime().current_identity())\\n')
+    plain = {k:v for k,v in os.environ.items() if not k.startswith('SUPERCOV_') and k != 'PYTHONPATH'}
+    measured = dict(plain, PYTHONPATH=sys.argv[1], SUPERCOV_PYTHON_PLAN=str(plan), SUPERCOV_RUN_ID='adapters', SUPERCOV_PYTHON_EVIDENCE_DIR=str(root / 'evidence'))
+    child('''import sys
+assert 'subprocess' not in sys.modules
+assert 'multiprocessing.process' not in sys.modules
+assert 'concurrent.futures.thread' not in sys.modules
+assert 'unittest' not in sys.modules
+''', root, measured)
+    driver = '''import json, os, sys
+import supercov_runtime
+runtime = supercov_runtime.runtime() or supercov_runtime.install()
+runtime.switch({'test':'inherited','phase':'call'})
+import concurrent.futures, subprocess, multiprocessing, unittest
+from adapter_worker import inspect_context
+with concurrent.futures.ThreadPoolExecutor(1) as pool:
+    assert pool.submit(runtime.current_identity).result()['test'] == 'inherited'
+code = 'import json,supercov_runtime;print(json.dumps(supercov_runtime.runtime().current_identity()))'
+result = subprocess.run([sys.executable,'-c',code],capture_output=True,text=True)
+assert result.returncode == 0 and result.stderr == '', result.stderr
+assert json.loads(result.stdout)['test'] == 'inherited'
+context = multiprocessing.get_context('spawn')
+queue = context.Queue(); worker = context.Process(target=inspect_context, args=(queue,))
+worker.start()
+assert queue.get(timeout=20)['test'] == 'inherited'
+worker.join(timeout=20)
+assert worker.exitcode == 0, worker.exitcode
+queue.close(); queue.join_thread()
+class Example(unittest.TestCase):
+    def test_case(self): self.assertTrue(True)
+result = unittest.TestResult()
+Example('test_case').run(result)
+assert result.wasSuccessful() and result.testsRun == 1
+assert any(identity['test'].endswith('Example.test_case') for identity in runtime.identities.values())
+'''
+    child(driver, root, measured)
+    # Libraries present before installation must be patched immediately too.
+    before = dict(plain, PYTHONPATH=sys.argv[1])
+    configure = 'import concurrent.futures, concurrent.futures.thread, subprocess, multiprocessing, unittest, os\\nos.environ.update(' + repr({k:v for k,v in measured.items() if k.startswith('SUPERCOV_')}) + ')\\n'
+    child(configure + driver, root, before)
 `));

@@ -32,21 +32,17 @@ from __future__ import annotations
 import __future__
 import ast
 import builtins
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import contextvars
 import hashlib
-import importlib.abc
 import importlib.machinery
 import importlib.util
 import marshal
 import operator
 import os
-import py_compile
 import struct
 import sys
-import tempfile
 from types import CodeType
-from typing import Callable
 
 PROBE_VERSION = 4
 # A context's hit array is a slot file mapped into memory. Its first bytes
@@ -410,6 +406,7 @@ def load_plan(path: str, version: int) -> tuple[str, PlanIndex]:
     except (OSError, EOFError, ValueError, TypeError, KeyError, struct.error):
         pass
     import json
+    import tempfile
     with open(path, encoding="utf-8") as stream:
         plan = json.load(stream)
     if plan.get("version") != version:
@@ -1013,8 +1010,25 @@ class Probing:
         self.relative_for = relative_for
         self.cache_directory = cache_directory
         self.code_objects: set[int] = set()
+        self.import_callbacks: dict[str, Callable] = {}
         # The runtime's `limitation(identifier, reason, file, obligation)`, once installed.
         self.report: Callable[[str, str, str, str], None] = lambda identifier, reason, file, obligation: None
+
+    def after_import(self, name: str, callback: Callable) -> None:
+        """Install optional adapters only when their library is actually used."""
+        def install_adapter(module):
+            try:
+                callback(module)
+            except Exception as error:
+                self.report(
+                    "python-context-adapter-unavailable",
+                    f"{name} adapter failed to install: {error!r}", None, None,
+                )
+
+        self.import_callbacks[name] = install_adapter
+        module = sys.modules.get(name)
+        if module is not None:
+            install_adapter(module)
 
     def probes_for(self, filename: str | None) -> FileProbes | None:
         """A measured file's probes: what the finder swaps a loader for."""
@@ -1100,6 +1114,8 @@ class Probing:
                 self._register(constant)
 
     def _store(self, path: str, payload) -> None:
+        import tempfile
+
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             descriptor, temporary = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
@@ -1151,7 +1167,24 @@ class ProbeLoader:
         exec(code, module.__dict__)
 
 
-class ProbeFinder(importlib.abc.MetaPathFinder):
+class AfterImportLoader:
+    def __init__(self, inner, callback) -> None:
+        self._inner = inner
+        self._callback = callback
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def create_module(self, spec):
+        create = getattr(self._inner, "create_module", None)
+        return None if create is None else create(spec)
+
+    def exec_module(self, module):
+        self._inner.exec_module(module)
+        self._callback(module)
+
+
+class ProbeFinder:
     """First on `sys.meta_path`: the other finders locate, this one probes."""
 
     def __init__(self, probing: Probing) -> None:
@@ -1172,6 +1205,9 @@ class ProbeFinder(importlib.abc.MetaPathFinder):
                 spec.loader = ProbeLoader(spec.loader, self._probing, probes)
                 # Bytecode lives in Supercov's cache, never the project's.
                 spec.cached = None
+            callback = self._probing.import_callbacks.get(fullname)
+            if callback is not None and spec.loader is not None:
+                spec.loader = AfterImportLoader(spec.loader, callback)
             return spec
         return None
 
@@ -1186,9 +1222,9 @@ for _feature in __future__.all_feature_names:
 _original_compile = builtins.compile
 _probing: Probing | None = None
 _plain_compilation = contextvars.ContextVar("supercov_plain_compilation", default=False)
-_original_py_compile = py_compile.compile
+_original_py_compile = None
 _original_loader_code = importlib.machinery.SourceFileLoader.get_code
-_original_abc_loader_code = importlib.abc.SourceLoader.get_code
+_original_abc_loader_code = None
 
 
 def _compile_plain_cache(*args, **kwargs):
@@ -1199,6 +1235,13 @@ def _compile_plain_cache(*args, **kwargs):
         return _original_py_compile(*args, **kwargs)
     finally:
         _plain_compilation.reset(token)
+
+
+def _install_py_compile(module):
+    global _original_py_compile
+    if module.compile is not _compile_plain_cache:
+        _original_py_compile = module.compile
+        module.compile = _compile_plain_cache
 
 
 def _loader_code(loader, fullname, original):
@@ -1217,6 +1260,16 @@ def _file_loader_code(loader, fullname):
 
 def _abc_loader_code(loader, fullname):
     return _loader_code(loader, fullname, _original_abc_loader_code)
+
+
+def _install_abc_loader(module):
+    global _original_abc_loader_code
+    # The finder protocol does not require importing the ABC and its resource
+    # machinery in every helper process. Preserve isinstance checks once used.
+    module.MetaPathFinder.register(ProbeFinder)
+    if module.SourceLoader.get_code is not _abc_loader_code:
+        _original_abc_loader_code = module.SourceLoader.get_code
+        module.SourceLoader.get_code = _abc_loader_code
 
 
 def _compile_probed(source, filename, mode, flags=0, dont_inherit=False, optimize=-1, **keywords):
@@ -1262,9 +1315,9 @@ def install(
         sys.meta_path.insert(0, ProbeFinder(probing))
     if builtins.compile is not _compile_probed:
         builtins.compile = _compile_probed
-    py_compile.compile = _compile_plain_cache
+    probing.after_import("py_compile", _install_py_compile)
     importlib.machinery.SourceFileLoader.get_code = _file_loader_code
-    importlib.abc.SourceLoader.get_code = _abc_loader_code
+    probing.after_import("importlib.abc", _install_abc_loader)
     # Modules imported before this point cannot be re-executed; the detector
     # reports any planned file among them.
     return probing
