@@ -28,7 +28,6 @@ npx supercov --help
 | See only files with findings | `npx supercov quality gaps` |
 | Review what a change introduced | `npx supercov quality patch` |
 | Find security surface with Jev | `npx supercov security` |
-| Read the audit worklist for your agent | `npx supercov security audit` |
 | Review what a change introduced, security only | `npx supercov security patch` |
 | Read bundled guides | `npx supercov docs` |
 
@@ -44,7 +43,6 @@ supercov quality snapshots       # saved assessments
 supercov quality diff <older> <newer>
 supercov security                # twelve security checks, every file
 supercov security gaps           # only files something fired on
-supercov security audit          # the worklist for your agent; audit <id> for one item; audit check
 supercov security patch --base origin/main
 supercov security --run latest   # flagged files no test exercises
 ```

@@ -48,12 +48,11 @@ and which callers it admits is a fact that lives in the wiring, not the
 handler, and no per-line question has been found that decides it: every
 attempt measured on the labelled corpus fired on unguarded handlers the
 application leaves open by design as often as on the ones it should not.
-The audit worklist below carries each entry point with the guards found
-reaching it, which is where that judgment belongs.
+
 
 Measured with this command on fifteen held-out repositories of a
 140-repository labelled corpus, whole repositories, at finding level: F1
-0.47 with 51% precision and 44% recall, where Semgrep scores 0.14, the
+0.47 with 54% precision and 41% recall, where Semgrep scores 0.14, the
 general agentic LLM scanners 0.50 to 0.60, and the two leaders 0.76 and
 0.77, at about two cents per repository against 30 cents to 4 dollars for
 the agentic scanners. Injection, secrets, path, redirect and mass
@@ -94,35 +93,6 @@ in mature projects this stage is where the recall has to come from, because
 a real vulnerability rarely sits in one file. JavaScript, TypeScript and
 Python have parsers for this; other languages get the twelve questions and
 the pattern candidates only.
-
-## Finish the audit with your agent
-
-What a file question cannot decide, a reader of the whole application can:
-who may reach a handler, whether a role should be allowed an operation,
-whether a credential flow is protected. Every assessment writes a worklist
-of those questions with the evidence gathered, ranked with unguarded entry
-points first, to `.supercov/security/audit.json`:
-
-```bash
-npx supercov security audit
-npx supercov docs security-agent
-```
-
-Your coding agent works the list, reading one item at a time with
-`security audit <id>`, which prints the item's own lines, the line that
-registers it, and the definitions of the guards and models it names; it
-writes a verdict per item and runs `security audit check` before the next
-assessment, which names any verdict that would not merge. The next
-assessment keeps every verdict whose file is unchanged, re-opens the rest,
-and reports three tiers: what the model confirmed, what the agent verified,
-what the agent dismissed. `security patch` lists the items a change
-touches, so a review re-opens only those.
-
-On sixteen labelled repositories the worklist puts 77% of the labelled
-weaknesses within reach of whoever works it, against 43% for the model's
-line tier alone. What the agent then finds depends on the agent: measured
-passes landed between the mid-tier agentic scanners and the leaders, at the
-agent's own cost per token. The worklist costs nothing to produce.
 
 ## The twelve checks
 
@@ -203,10 +173,7 @@ npx supercov security file src/server.ts          # one file, every check, with 
 npx supercov security scope                       # which files, and why
 npx supercov security snapshots                   # saved assessments
 npx supercov security diff <older> <newer>        # what appeared
-npx supercov security audit                       # the worklist for your agent
-npx supercov security audit <id>                  # one item with its evidence inline
-npx supercov security audit check                 # validate verdicts before they merge
-npx supercov security patch                       # what a change introduced, and which items it touches
+npx supercov security patch                       # what a change introduced
 npx supercov security --run latest                # flagged and untested
 ```
 

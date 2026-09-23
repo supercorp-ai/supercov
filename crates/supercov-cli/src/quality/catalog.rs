@@ -671,11 +671,6 @@ data does not count.";
                 "It validates, escapes, confines or authorises what it receives.",
                 "It passes what it receives through unchanged in that respect.",
             ));
-            questions.insert(format!("f{i}_guards"), noul(
-                format!("{where_}is it a guard: does it decide who the caller is or what the caller may do, by checking a session, token, credential, role, ownership or permission, and refuse, redirect or raise when the check fails? A decorator, middleware or dependency that does this counts; a function that merely reads the current user without refusing does not."),
-                "It refuses callers who are not authenticated or not permitted.",
-                "It does not decide who may proceed.",
-            ));
             let mut criteria = Map::new();
             for kind in SINK_KINDS {
                 if let Some(c) = checks().iter().find(|c| c.id == *kind) {
