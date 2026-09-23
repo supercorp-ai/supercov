@@ -2594,6 +2594,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_report_holds_one_copy_of_each_id_across_its_views() {
+        // What made analysis fit in memory: the full and the passing view name
+        // the same tests, and must share one copy of each name rather than
+        // hold one per mention. A change that copies ids again fails here
+        // before it shows up as gigabytes.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-shared-ids-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let directory = crate::run_store::create_analyzable_test_run(&root, "shared");
+        let run = crate::run_store::discover_runs(&root)
+            .unwrap()
+            .runs
+            .remove(0);
+        let report = crate::run_store::analyze_stored_run(&run).unwrap();
+        let _ = directory;
+        let mentions = report
+            .view
+            .points
+            .iter()
+            .chain(&report.filters.passed.points)
+            .flat_map(|point| point.tests.iter().chain(&point.confidence.tests))
+            .chain(report.view.lines.iter().flat_map(|line| &line.tests))
+            .collect::<Vec<_>>();
+        assert!(
+            mentions.len() >= 4,
+            "the fixture names its test in several places"
+        );
+        let first = mentions[0];
+        for mention in &mentions {
+            assert_eq!(*mention, first);
+            assert!(
+                mention.same_allocation(first),
+                "every mention shares one copy"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn references_numbered_as_they_arrive_come_out_as_the_sets_inserted_directly() {
         // Out of order, repeated, interleaved across obligations, and sharing
         // long prefixes, as test and phase ids do.

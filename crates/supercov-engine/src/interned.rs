@@ -134,6 +134,14 @@ impl PartialEq<Id> for &str {
     }
 }
 
+#[cfg(test)]
+impl Id {
+    /// Whether two ids hold one copy of their text, which is the point of them.
+    pub(crate) fn same_allocation(&self, other: &Id) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 /// One `Id` per distinct text, for the life of one analysis.
 #[derive(Default)]
 pub struct Interner {
@@ -154,6 +162,80 @@ impl Interner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Texts a report holds, including the awkward ones: shared prefixes,
+    /// case, the empty string, escapes JSON must write, and text outside ASCII.
+    const TEXTS: [&str; 14] = [
+        "",
+        "a",
+        "A",
+        "ab",
+        "a/b",
+        "h11/tests/test_x.py::test_b[2-50]",
+        "h11/tests/test_x.py::test_b[10-50]",
+        "h11/tests/test_x.py::test_b",
+        "python-phase:9",
+        "python-phase:10",
+        "quote \" and backslash \\",
+        "tab\tnewline\ncontrol\u{1}",
+        "unicodé ✓ 名前",
+        "z",
+    ];
+
+    #[test]
+    fn ids_order_hash_and_serialize_exactly_as_their_strings() {
+        use std::collections::{BTreeSet, HashSet};
+        let mut interner = Interner::default();
+        let ids = TEXTS
+            .iter()
+            .map(|text| interner.id(text))
+            .collect::<Vec<_>>();
+        // Ordering: every pair compares as its strings do, so a set of ids
+        // iterates in the order a set of strings did.
+        for (left, left_text) in ids.iter().zip(TEXTS) {
+            for (right, right_text) in ids.iter().zip(TEXTS) {
+                assert_eq!(
+                    left.cmp(right),
+                    left_text.cmp(right_text),
+                    "{left_text:?} vs {right_text:?}"
+                );
+            }
+        }
+        let by_id = ids.iter().cloned().collect::<BTreeSet<_>>();
+        let by_text = TEXTS
+            .iter()
+            .map(|text| text.to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            by_id.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+            by_text.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        // Lookup by text, in hashed and ordered sets alike.
+        let hashed = ids.iter().cloned().collect::<HashSet<_>>();
+        for text in TEXTS {
+            assert!(hashed.contains(text), "{text:?}");
+            assert!(by_id.contains(text), "{text:?}");
+        }
+        assert!(!hashed.contains("absent"));
+        // Serialization, alone and in a list, is the string's own.
+        for (id, text) in ids.iter().zip(TEXTS) {
+            assert_eq!(
+                serde_json::to_string(id).unwrap(),
+                serde_json::to_string(text).unwrap()
+            );
+            assert_eq!(id.to_string(), text);
+            assert_eq!(format!("{id:?}"), format!("{text:?}"));
+            let owned = String::from(text);
+            assert_eq!(*id, text);
+            assert_eq!(*id, owned);
+            assert_eq!(owned, *id);
+            assert_eq!(text, *id);
+        }
+        assert_eq!(
+            serde_json::to_string(&ids).unwrap(),
+            serde_json::to_string(&TEXTS).unwrap()
+        );
+    }
 
     #[test]
     fn an_id_is_the_text_it_holds_everywhere_it_is_seen() {
