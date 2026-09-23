@@ -307,3 +307,49 @@ assert any(identity['test'].endswith('Example.test_case') for identity in runtim
     configure = 'import concurrent.futures, concurrent.futures.thread, subprocess, multiprocessing, unittest, os\\nos.environ.update(' + repr({k:v for k,v in measured.items() if k.startswith('SUPERCOV_')}) + ')\\n'
     child(configure + driver, root, before)
 `));
+
+
+test('condition probes preserve truth side effects, short circuiting and errors', { skip }, () => run(fixture + `
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    (root / 'compound.py').write_text(source)
+    (root / 'single.py').write_text(source.replace('a and b', 'a'))
+    single = file_plan('single')
+    single['decisions'][0]['span'] = [[2,7],[2,8]]
+    single['decisions'][0]['conditions'] = single['decisions'][0]['conditions'][:1]
+    plan = root / 'plan.json'
+    plan.write_text(json.dumps({'version':1,'root':str(root),'files':{'compound.py':file_plan('compound'),'single.py':single}}))
+    plain = {k:v for k,v in os.environ.items() if not k.startswith('SUPERCOV_') and k != 'PYTHONPATH'}
+    env = dict(plain, PYTHONPATH=sys.argv[1], SUPERCOV_PYTHON_PLAN=str(plan), SUPERCOV_RUN_ID='truth', SUPERCOV_PYTHON_EVIDENCE_DIR=str(root / 'evidence'))
+    code = '''import compound, single
+calls = []
+class Truth:
+    def __init__(self, name, value): self.name, self.value = name, value
+    def __bool__(self): calls.append(self.name); return self.value
+class Length:
+    def __init__(self, name, value): self.name, self.value = name, value
+    def __len__(self): calls.append(self.name); return int(self.value)
+class Raising:
+    def __bool__(self): calls.append('raise'); raise ValueError('truth failed')
+for choose in (compound.choose, single.choose):
+    for kind in (Truth, Length):
+        for a,b in ((False,False),(False,True),(True,False),(True,True)):
+            calls.clear()
+            result = choose(kind('a',a),kind('b',b))
+            expected = a and b if choose is compound.choose else a
+            assert result == ('yes' if expected else 'no')
+            assert calls == (['a','b'] if choose is compound.choose and a else ['a']), calls
+    calls.clear()
+    try: choose(Raising(), True)
+    except ValueError as error: assert str(error) == 'truth failed'
+    else: raise AssertionError('truth exception was swallowed')
+    assert calls == ['raise']
+    calls.clear()
+    try: choose(Truth('invalid', 1), True)
+    except TypeError: pass
+    else: raise AssertionError('invalid __bool__ return was accepted')
+    assert calls == ['invalid']
+'''
+    child(code, root, plain)
+    child(code, root, env)
+`));

@@ -119,6 +119,39 @@ class _Hits(mmap.mmap):
     __slots__ = ("context", "states", "path", "descriptor")
 
 
+class _LazyHits:
+    """Reserve a phase's identity without mapping an empty evidence file.
+
+    The first probe resolves the reservation and replaces it in its current
+    ContextVar, so subsequent probes still write straight into the mmap.
+    Contexts copied before that first probe share the reservation, including
+    the resolved slot, and keep it alive until their work finishes.
+    """
+
+    __slots__ = ("runtime", "context", "resolved")
+
+    def __init__(self, runtime, context):
+        self.runtime, self.context, self.resolved = runtime, context, None
+
+    def _get(self):
+        if self.resolved is None:
+            with self.runtime.lock:
+                if self.resolved is None:
+                    self.resolved = self.runtime._allocate_hits(self.context)
+        if self.runtime.hits_var.get() is self:
+            self.runtime.hits_var.set(self.resolved)
+        return self.resolved
+
+    def __getitem__(self, key):
+        return self._get()[key]
+
+    def __setitem__(self, key, value):
+        self._get()[key] = value
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+
 class _Sink(bytearray):
     """Where probes write once the runtime has closed, or when no slot could
     be mapped: nothing it holds is recorded."""
@@ -439,6 +472,8 @@ class Runtime:
                 self.identities[context] = stored
                 self._record({"t": "phase", "ctx": context, "at": _now_ms(), **stored})
             leaving = self.hits_var.get()
+            if isinstance(leaving, _LazyHits):
+                leaving = leaving.resolved
             if isinstance(leaving, _Hits):
                 self._harvest(leaving)
             self.hits_var.set(self._new_hits(context))
@@ -472,6 +507,8 @@ class Runtime:
             # What the phase observed so far goes out ahead of the marker:
             # the reader credits the assertion with the records before it.
             array = self.hits_var.get()
+            if isinstance(array, _LazyHits):
+                array = array.resolved
             if isinstance(array, _Hits) and array.context == context:
                 self._harvest(array)
             self._record({"t": "assert", "ctx": context})
@@ -656,6 +693,9 @@ class Runtime:
         return sink
 
     def _new_hits(self, context: int):
+        return _LazyHits(self, context)
+
+    def _allocate_hits(self, context: int):
         if self.closed:
             return self._sink(context)
         try:
@@ -702,6 +742,9 @@ class Runtime:
         if self.closed or self.hits_var is None:
             return
         current = self.hits_var.get()
+        # A fresh Context() in the child also needs a child-owned default,
+        # even if the parent's background reservation was already resolved.
+        self.background_hits.resolved = None
         try:
             self.hits_var.set(self._new_hits(current.context))
         except Exception:  # noqa: BLE001 - never break the child
@@ -778,7 +821,7 @@ class Runtime:
 
     def _single_probe(self, start: int, value) -> bool:
         """A one-condition decision: its truth is its vector, one byte each."""
-        truth = bool(value)
+        truth = not not value
         self.hits_var.get()[start + truth] = 1
         return truth
 
@@ -791,7 +834,7 @@ class Runtime:
         recorded value is the condition as written, `not` included; the
         source's own `not` then applies to what is returned, once.
         """
-        truth = bool(value)
+        truth = not not value
         states = self.hits_var.get().states
         state = states[d]
         if state is None:
@@ -807,7 +850,7 @@ class Runtime:
 
     def _decision_probe(self, d: int, value) -> bool:
         """A multi-condition decision's test evaluated: its vector is a byte."""
-        outcome = bool(value)
+        outcome = not not value
         hits = self.hits_var.get()
         state = hits.states[d]
         if state is None:
@@ -938,9 +981,10 @@ class Runtime:
                 return
             self._open_output()
             self._write_layout()
-            # The background's slot is the default, so a thread started past
-            # the propagation patch still has somewhere to write.
-            self.hits_var = contextvars.ContextVar("supercov_hits", default=self._new_hits(0))
+            # A background reservation is the default, so even a fresh context
+            # can allocate its slot on the first measured hit.
+            self.background_hits = self._new_hits(0)
+            self.hits_var = contextvars.ContextVar("supercov_hits", default=self.background_hits)
         self._install_probes()
         # A measured module imported before this point -- by a `.pth` file,
         # say -- ran without probes and will not be imported again. Named on

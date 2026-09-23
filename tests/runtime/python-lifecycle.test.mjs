@@ -186,3 +186,64 @@ test("finished threads free their phase's slot, and slots are reused", { skip },
   assert.equal(outcome.threadsAlive, 0, "a finished thread is freed without the cycle collector");
   assert.ok(outcome.slots <= 3, `${outcome.slots} slots for 50 phases`);
 });
+
+
+test("empty phases reserve identities without creating slots", { skip }, () => {
+  const result = run(`${SETUP}
+for index in range(100):
+    runtime.switch({"test": f"empty{index}", "phase": "call"})
+    runtime.assertion()
+    runtime.switch(None)
+runtime.close()
+print(json.dumps({"slots": runtime.next_slot}))
+`);
+  assert.equal(result.slots, 0);
+});
+
+test("a context copied before its first hit is harvested before the assertion", { skip }, () => {
+  const result = run(`${SETUP}
+import contextvars
+runtime.switch({"test": "copied", "phase": "call"})
+copied = contextvars.copy_context()
+copied.run(lambda: runtime.hits_var.get().__setitem__(HIT, 1))
+# The original context still holds the shared reservation, not its mmap.
+runtime.assertion()
+with open(runtime.output_path, "rb") as stream:
+    written = stream.read()
+print(json.dumps({"hit": written.find(b'"t":"hits"'), "assertion": written.find(b'"t":"assert"')}))
+`);
+  assert.ok(result.hit >= 0 && result.hit < result.assertion, JSON.stringify(result));
+});
+
+test("an unresolved reservation touched after close never opens evidence", { skip }, () => {
+  const result = run(`${SETUP}
+late = runtime.hits_var.get()
+runtime.close()
+late[HIT] = 1
+print(json.dumps({"slots": runtime.next_slot, "output": runtime.output, "hit": late[HIT]}))
+`);
+  assert.deepEqual(result, { slots: 0, output: null, hit: 1 });
+});
+
+test("a fresh background context after fork cannot write the parent's slot", { skip: skip || process.platform === "win32" }, () => {
+  const result = run(`${SETUP}
+import contextvars
+parent = runtime.hits_var.get()
+parent[HIT] = 0
+parent_path = parent.path
+reader, writer = os.pipe()
+pid = os.fork()
+if pid == 0:
+    def touch():
+        child = runtime.hits_var.get()
+        child[HIT] = 1
+        return {"separate": child.path != parent_path}
+    os.write(writer, json.dumps(contextvars.Context().run(touch)).encode())
+    os._exit(0)
+os.waitpid(pid, 0)
+result = json.loads(os.read(reader, 4096))
+result["parentSawChild"] = parent[HIT] == 1
+print(json.dumps(result))
+`);
+  assert.deepEqual(result, { separate: true, parentSawChild: false });
+});
