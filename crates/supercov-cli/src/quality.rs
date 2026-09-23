@@ -2627,6 +2627,30 @@ fn scored(answers: &Answers, instrument: Instrument) -> Value {
     }
 }
 
+/// Count the published findings, including checks only the line pass found.
+fn finding_counts(files: &[Value]) -> (usize, usize, BTreeMap<String, usize>) {
+    let mut flagged = 0;
+    let mut line_confirmed = 0;
+    let mut by_check = BTreeMap::new();
+    for file in files {
+        let Some(findings) = file["present"].as_array() else {
+            continue;
+        };
+        flagged += usize::from(!findings.is_empty());
+        line_confirmed += usize::from(findings.iter().any(|finding| {
+            finding["lines"]
+                .as_array()
+                .is_some_and(|lines| !lines.is_empty())
+        }));
+        for finding in findings {
+            if let Some(check) = finding["check"].as_str() {
+                *by_check.entry(check.to_owned()).or_default() += 1;
+            }
+        }
+    }
+    (flagged, line_confirmed, by_check)
+}
+
 /// Health for every file, every directory that holds one, and the tree.
 /// Ask the model about the files no convention could settle.
 ///
@@ -2924,22 +2948,7 @@ fn run_health(
     let mut weighted: Vec<(u64, f64)> = Vec::new();
     let mut by_directory: BTreeMap<String, Vec<(u64, f64)>> = BTreeMap::new();
     let mut files: Vec<Value> = Vec::new();
-    let mut by_check: BTreeMap<String, usize> = BTreeMap::new();
-    let mut flagged = 0usize;
-    let mut line_confirmed = 0usize;
     for answer in &answers {
-        if let Some(values) = &answer.values {
-            let fired = present_for(values, instrument);
-            flagged += usize::from(!fired.is_empty());
-            line_confirmed += usize::from(
-                fired
-                    .iter()
-                    .any(|(check, _)| answer.lines.iter().any(|l| l["check"] == *check)),
-            );
-            for (check, _) in &fired {
-                *by_check.entry(check.clone()).or_default() += 1;
-            }
-        }
         if instrument.scores()
             && let Some(values) = &answer.values
             && let Some(health) = catalog::health(values)
@@ -2985,6 +2994,7 @@ fn run_health(
         });
     }
     files.extend(unreadable);
+    let (flagged, line_confirmed, by_check) = finding_counts(&files);
     let failed = files.iter().any(|f| f["status"] == "failed");
     let errors = files.iter().filter(|f| f["status"] == "failed").count();
 
@@ -3786,13 +3796,13 @@ fn present(view: Value, json: bool) -> Result<bool, String> {
 /// both: the manifest says which instrument answered and over what source, and
 /// only the rows can be placed beside a file. Snapshots that cannot be read are
 /// left out rather than failing the caller, matching how they are listed.
-pub fn report_snapshots(root: &Path, limit: usize) -> Vec<(String, Value, Value)> {
-    store::list(root, "quality")
+pub fn report_snapshots(root: &Path, lane: &str, limit: usize) -> Vec<(String, Value, Value)> {
+    store::list(root, lane)
         .unwrap_or_default()
         .into_iter()
         .take(limit)
         .filter_map(|(id, manifest)| {
-            let (_, files) = store::read(root, "quality", &id).ok()?;
+            let (_, files) = store::read(root, lane, &id).ok()?;
             Some((id, manifest, files))
         })
         .collect()

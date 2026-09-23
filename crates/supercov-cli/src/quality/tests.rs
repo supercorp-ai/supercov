@@ -2229,6 +2229,7 @@ fn a_security_answer_is_never_scored_and_sorts_by_what_fired() {
 
         classified: BTreeMap::new(),
         path: "src/b.ts".into(),
+        sha256: "test-source".into(),
         bytes: 10,
         windows: 1,
         note: None,
@@ -2332,4 +2333,51 @@ fn an_assessment_takes_a_run_to_cross_with() {
     assert_eq!(options.run.as_deref(), Some("latest"));
     assert!(parse_scan(vec!["--run".into()]).is_err());
     assert!(parse_scan(vec!["--run".into(), "a".into(), "--run".into(), "b".into()]).is_err());
+}
+
+#[test]
+fn cleaning_an_assessment_lane_preserves_the_other_lane() {
+    let temp = Temp::new();
+    let (id, _) = store::identity().unwrap();
+    for lane in ["quality", "security"] {
+        store::write(
+            &temp.0,
+            lane,
+            &id,
+            &json!({"created_at": "2026-09-23T00:00:00Z"}),
+            &json!({"files": []}),
+        )
+        .unwrap();
+    }
+    let preview = clean(&temp.0, "security", 0, true).unwrap();
+    assert_eq!(preview["view"], "security.clean");
+    assert_eq!(store::list(&temp.0, "security").unwrap().len(), 1);
+    clean(&temp.0, "security", 0, false).unwrap();
+    assert!(store::list(&temp.0, "security").unwrap().is_empty());
+    assert_eq!(store::list(&temp.0, "quality").unwrap().len(), 1);
+}
+
+#[test]
+fn security_totals_include_a_check_only_the_line_pass_found() {
+    let answer = Answers {
+        path: "src/log.ts".into(),
+        bytes: 10,
+        sha256: "source".into(),
+        windows: 1,
+        lines: vec![
+            json!({"line": 5, "check": "sensitive_data_exposure", "value": 0.9, "text": "log(token)"}),
+        ],
+        labels: Vec::new(),
+        classified: BTreeMap::new(),
+        note: None,
+        values: Some(values(&[("sensitive_data_exposure", 0.1)])),
+        cached: false,
+        error: None,
+    };
+    assert!(present_for(answer.values.as_ref().unwrap(), Instrument::Security).is_empty());
+    let record = scored(&answer, Instrument::Security);
+    let (flagged, confirmed, checks) = finding_counts(&[record]);
+    assert_eq!(flagged, 1);
+    assert_eq!(confirmed, 1);
+    assert_eq!(checks.get("sensitive_data_exposure"), Some(&1));
 }

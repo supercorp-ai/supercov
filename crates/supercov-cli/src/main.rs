@@ -2679,7 +2679,7 @@ fn cleanup_command(arguments: Vec<String>) -> ExitCode {
         .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
         print!(
-            "Usage: supercov runs clean [--keep N] [--dry-run]\n\nRemoves all stored runs and Supercov's isolated build cache by default.\nUse --keep N to retain the N newest runs.\n\nSaved quality assessments are never removed here; they cost money to\nproduce and are not reproducible. Use supercov quality clean for those.\n"
+            "Usage: supercov runs clean [--keep N] [--dry-run]\n\nRemoves all stored runs and Supercov's isolated build cache by default.\nUse --keep N to retain the N newest runs.\n\nSaved quality assessments are never removed here; they cost money to\nproduce and are not reproducible. Use supercov quality clean for those.\nGenerated reports in .supercov/reports are left alone too.\n"
         );
         return ExitCode::SUCCESS;
     }

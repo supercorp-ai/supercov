@@ -110,9 +110,10 @@ npx supercov report
 
 The report opens in your browser with up to ten recent runs in a visual history.
 Selecting a run compares it with the previous snapshot automatically. It has no
-server, external assets, account, or file picker. You can attach
-`supercov-report.html` directly to a pull request; a reviewer downloads that one
-file and double-clicks it.
+server, external assets, account, or file picker. It is written to
+`.supercov/reports/`, where the store's own `.gitignore` keeps it out of git.
+You can attach that one file directly to a pull request; a reviewer downloads
+it and double-clicks it.
 
 Use whichever complete test command the repository already trusts:
 

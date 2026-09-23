@@ -30,24 +30,30 @@ const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const PAYLOAD_MARKER: &str = "SUPERCOV_REPORT_PAYLOAD";
 const REPORT_TEMPLATE: &str = include_str!("../assets/report.html");
+/// Where a report lands when no `--output` is given, relative to the project
+/// root. Inside the store, so the store's own `.gitignore` covers it.
+const REPORT_DIRECTORY: &str = ".supercov/reports";
+const DEFAULT_REPORT_NAME: &str = "supercov-report.html";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReportOptions {
     selector: String,
     comparison: Option<String>,
-    output: PathBuf,
+    /// An explicit destination. `None` means the store's reports directory.
+    output: Option<PathBuf>,
     open: bool,
     runs: usize,
 }
 
 fn help() -> &'static str {
-    "Usage: supercov report [run-id] [options]\n\nGenerates one private, self-contained interactive HTML file from stored runs.\nNo server or network connection is required.\n\nOptions:\n  --compare <run-id>   choose the initial comparison run\n  --runs <n>           include up to n runs (default: 10, maximum: 20)\n  --output <path>      write to this path (default: supercov-report.html)\n  --no-open            do not open the report in the default browser\n  -h, --help           show this help\n"
+    "Usage: supercov report [run-id] [options]\n\nGenerates one private, self-contained interactive HTML file from stored runs.\nNo server or network connection is required.\n\nOptions:\n  --compare <run-id>   choose the initial comparison run\n  --runs <n>           include up to n runs (default: 10, maximum: 20)\n  --output <path>      write to this path, relative to the working directory
+                       (default: .supercov/reports/supercov-report.html in the project)\n  --no-open            do not open the report in the default browser\n  -h, --help           show this help\n"
 }
 
 fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
     let mut selector = None;
     let mut comparison = None;
-    let mut output = PathBuf::from("supercov-report.html");
+    let mut output: Option<PathBuf> = None;
     let mut open = true;
     let mut runs = DEFAULT_RUNS;
     let mut index = 0;
@@ -64,11 +70,11 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
             }
             "--output" | "-o" => {
                 index += 1;
-                output = PathBuf::from(
+                output = Some(PathBuf::from(
                     arguments
                         .get(index)
                         .ok_or_else(|| "--output requires a path".to_owned())?,
-                );
+                ));
             }
             "--runs" => {
                 index += 1;
@@ -88,7 +94,10 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
         }
         index += 1;
     }
-    if output.as_os_str().is_empty() {
+    if output
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
         return Err("--output requires a non-empty path".into());
     }
     Ok(ReportOptions {
@@ -115,6 +124,7 @@ struct ReportBundle {
     /// them: an assessment belongs to source, not to a test command, and one
     /// may pair with no run at all.
     qualities: Vec<ReportQuality>,
+    securities: Vec<ReportQuality>,
     /// Runs and assessments on one axis, newest first.
     timeline: Vec<TimelineItem>,
 }
@@ -135,6 +145,7 @@ struct TimelineItem {
     kind: &'static str,
     run_id: Option<String>,
     quality_id: Option<String>,
+    security_id: Option<String>,
 }
 
 /// A saved quality assessment, as a report reads it.
@@ -161,6 +172,7 @@ struct ReportQuality {
     scope: serde_json::Value,
     limitation: serde_json::Value,
     files: serde_json::Value,
+    paths: serde_json::Value,
     /// Carried only when no run in this report already carries the same source,
     /// so an assessment can be read beside its code with no run at all.
     sources: BTreeMap<String, ReportSource>,
@@ -171,6 +183,7 @@ struct ReportQuality {
 #[serde(rename_all = "camelCase")]
 struct ReportRun {
     id: String,
+    git: Option<supercov_engine::run_store::GitIntegrity>,
     started_at: String,
     duration_ms: f64,
     command: Vec<String>,
@@ -187,6 +200,7 @@ struct ReportRun {
     summary: serde_json::Value,
     files: Vec<IndexedFileGap>,
     file_details: BTreeMap<String, serde_json::Value>,
+    file_totals: BTreeMap<String, BTreeMap<String, usize>>,
     decisions: serde_json::Value,
     assertions: Option<serde_json::Value>,
     tests: Vec<ReportTest>,
@@ -414,9 +428,34 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
         );
     }
 
+    let mut file_totals: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for hit in index
+        .hit_metadata(CoverageViewId::All)
+        .map_err(|error| format!("could not read file totals for run {}: {error}", run.id))?
+    {
+        let kind = match hit.obligation.as_str() {
+            "statement" => "statements",
+            "function" => "functions",
+            "branch" => "branches",
+            _ => continue,
+        };
+        *file_totals
+            .entry(hit.file)
+            .or_default()
+            .entry(kind.into())
+            .or_default() += 1;
+    }
+
     let decisions = index
         .decision_details(CoverageViewId::All)
         .map_err(|error| format!("could not read decisions for run {}: {error}", run.id))?;
+    for decision in &decisions {
+        *file_totals
+            .entry(decision.meta.file.clone())
+            .or_default()
+            .entry("branches".into())
+            .or_default() += 2;
+    }
     let tests = index
         .test_details(CoverageViewId::All)
         .map_err(|error| format!("could not read tests for run {}: {error}", run.id))?
@@ -480,6 +519,7 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
 
     Ok(ReportRun {
         id: run.id.clone(),
+        git: run.metadata.integrity.git.clone(),
         started_at: run.metadata.started_at.clone(),
         duration_ms: run.metadata.duration_ms,
         command: run.metadata.command.clone(),
@@ -492,6 +532,7 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
         summary: serde_json::to_value(summary).map_err(|error| error.to_string())?,
         files,
         file_details,
+        file_totals,
         decisions: serde_json::to_value(decisions).map_err(|error| error.to_string())?,
         assertions: build_assertions(root, run),
         tests,
@@ -537,9 +578,172 @@ fn build_assertions(root: &Path, run: &StoredRun) -> Option<serde_json::Value> {
             "inheritance": report["inheritance"],
             "validationErrors": report["validationErrors"],
             "scope": "whole run with matching current source; independent of structural query filters",
+            "files": assertion_files(&report),
+            "statements": assertion_statements(&report),
+            "spans": statement_spans(&report),
+            "sites": assertion_sites(&report, run),
         }),
         Err(error) => serde_json::json!({"available": false, "error": error}),
     })
+}
+
+/// Measured, declared and credited statements per source file.
+///
+/// The run-level percentage says how much of the run an assertion map explains;
+/// this says where. It is folded from the same statement rows the query path
+/// pages, so a file's numbers add up to the run's.
+fn assertion_files(report: &serde_json::Value) -> serde_json::Value {
+    let mut files = BTreeMap::<String, (usize, usize, usize)>::new();
+    for statement in report["statements"].as_array().unwrap_or(&Vec::new()) {
+        let Some(file) = statement["file"].as_str() else {
+            continue;
+        };
+        let entry = files.entry(file.to_string()).or_default();
+        entry.0 += 1;
+        if statement["declared"] == true {
+            entry.1 += 1;
+        }
+        if statement["asserted"] == true {
+            entry.2 += 1;
+        }
+    }
+    files
+        .into_iter()
+        .map(|(file, (total, declared, asserted))| {
+            (
+                file,
+                serde_json::json!({"total": total, "declared": declared, "asserted": asserted}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+/// The statements an assertion map claims, with whether each earned credit.
+///
+/// Credit is per statement, not per line: a line holding a guard and its
+/// consequence can have one claimed and the other not, and the engine's
+/// line-level figure deliberately refuses such a line. The source view draws
+/// statements, so it gets them. Unclaimed statements are left out; the file
+/// totals above already count them.
+fn assertion_statements(report: &serde_json::Value) -> serde_json::Value {
+    report["statements"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter(|statement| statement["declared"] == true || statement["asserted"] == true)
+        .map(|statement| {
+            serde_json::json!({
+                "file": statement["file"],
+                "line": statement["line"],
+                "column": statement["at"]["column"],
+                "text": statement["at"]["text"],
+                "asserted": statement["asserted"],
+                "flows": statement["flows"],
+            })
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// Statements that continue past their first line, with their coverage.
+///
+/// Line coverage is recorded on the line a statement starts. A call whose
+/// arguments run on for three more lines, or a block and its closing brace,
+/// executed with that first line, and the source view should say so instead of
+/// marking those lines as if they were comments. Only the multi-line ones are
+/// carried; a single-line statement adds nothing the line record lacks.
+fn statement_spans(report: &serde_json::Value) -> serde_json::Value {
+    report["statements"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|statement| {
+            let text = statement["at"]["text"].as_str()?;
+            let extra = text.matches('\n').count();
+            if extra == 0 {
+                return None;
+            }
+            let line = statement["line"].as_u64()?;
+            Some(serde_json::json!({
+                "file": statement["file"],
+                "line": line,
+                "end": line + extra as u64,
+                "covered": statement["covered"],
+            }))
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// Where each assertion sits, what it claims to observe, and each flow's own
+/// explanation and selected tests, so a credited line can show the reasoning
+/// behind it without carrying the whole map.
+///
+/// The explanation is authored text and lives only in the map file; the
+/// engine's rows carry the flow's evaluation, so the two are joined here.
+fn assertion_sites(report: &serde_json::Value, run: &StoredRun) -> serde_json::Value {
+    let map = std::fs::read(
+        run.directory
+            .join(supercov_engine::assertion_store::MAP_FILE),
+    )
+    .ok()
+    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    .unwrap_or(serde_json::Value::Null);
+    let explanations = map["assertions"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .flat_map(|assertion| {
+            let id = assertion["id"].as_str().unwrap_or_default().to_string();
+            assertion["flows"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |flow| {
+                    (
+                        format!("{id}/{}", flow["id"].as_str().unwrap_or_default()),
+                        flow["explanation"].clone(),
+                    )
+                })
+        })
+        .collect::<BTreeMap<_, _>>();
+    report["assertions"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .map(|assertion| {
+            let id = assertion["id"].as_str().unwrap_or_default();
+            let flows = assertion["flows"]
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .map(|flow| {
+                    let flow_id = flow["id"].as_str().unwrap_or_default();
+                    serde_json::json!({
+                        "id": flow_id,
+                        "eligible": flow["eligible"],
+                        "explanation": explanations.get(&format!("{id}/{flow_id}")).cloned().unwrap_or(serde_json::Value::Null),
+                        "tests": flow["selectors"].as_array().unwrap_or(&Vec::new()).iter().map(|selector| serde_json::json!({
+                            "file": selector["file"],
+                            "name": selector["name"],
+                            "status": selector["status"],
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "id": id,
+                "file": assertion["at"]["file"],
+                "line": assertion["at"]["line"],
+                "text": assertion["at"]["text"],
+                "observes": assertion["observes"],
+                "flows": flows,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into()
 }
 
 /// Source for assessed files, included only when it is still what was assessed.
@@ -597,8 +801,8 @@ fn collect_quality_sources(
 }
 
 /// Read saved assessments into the shape a report carries.
-fn build_qualities(root: &Path, limit: usize) -> Vec<ReportQuality> {
-    crate::quality::report_snapshots(root, limit)
+fn build_assessments(root: &Path, lane: &str, limit: usize) -> Vec<ReportQuality> {
+    crate::quality::report_snapshots(root, lane, limit)
         .into_iter()
         .map(|(id, manifest, files)| {
             let text = |key: &str| {
@@ -638,6 +842,10 @@ fn build_qualities(root: &Path, limit: usize) -> Vec<ReportQuality> {
                     .get("limitation")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null),
+                paths: files
+                    .get("paths")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
                 sources: BTreeMap::new(),
                 omitted_sources: Vec::new(),
                 files: files
@@ -723,6 +931,7 @@ fn build_timeline(runs: &[ReportRun], qualities: &[ReportQuality]) -> Vec<Timeli
                 kind: if partner.is_some() { "paired" } else { "run" },
                 run_id: Some(run.id.clone()),
                 quality_id: partner.map(|quality| quality.id.clone()),
+                security_id: None,
             }
         })
         .collect();
@@ -736,10 +945,70 @@ fn build_timeline(runs: &[ReportRun], qualities: &[ReportQuality]) -> Vec<Timeli
                 kind: "quality",
                 run_id: None,
                 quality_id: Some(quality.id.clone()),
+                security_id: None,
             }),
     );
     items.sort_by(|left, right| right.at.cmp(&left.at).then_with(|| right.id.cmp(&left.id)));
     items
+}
+
+/// Exact assessed scope and source bytes. Missing digests cannot prove equality.
+fn assessment_source(assessment: &ReportQuality) -> Option<BTreeMap<String, String>> {
+    let files = assessment.files.as_array()?;
+    if files.is_empty() {
+        return None;
+    }
+    files
+        .iter()
+        .map(|file| {
+            Some((
+                file.get("path")?.as_str()?.to_owned(),
+                file.get("sha256")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// The newest security assessment represents each identical source snapshot.
+/// Older audits remain in the bundle and on disk, without extra timeline rows.
+fn attach_security(
+    root: &Path,
+    runs: &[ReportRun],
+    securities: &mut [ReportQuality],
+    timeline: &mut Vec<TimelineItem>,
+) {
+    let mut seen_sources = BTreeSet::new();
+    for security in securities {
+        let superseded =
+            assessment_source(security).is_some_and(|source| !seen_sources.insert(source));
+        let mut paired = false;
+        for item in timeline.iter_mut() {
+            if item.security_id.is_none()
+                && let Some(run) = runs
+                    .iter()
+                    .find(|run| Some(&run.id) == item.run_id.as_ref())
+                && reads_the_same_source(run, security)
+            {
+                item.security_id = Some(security.id.clone());
+                paired = true;
+            }
+        }
+        // Retain source for assessed files a paired coverage run did not measure, too.
+        let (sources, omitted) = collect_quality_sources(root, &security.files);
+        security.sources = sources;
+        security.omitted_sources = omitted;
+        if !paired && !superseded {
+            timeline.push(TimelineItem {
+                id: security.id.clone(),
+                at: security.created_at.clone(),
+                kind: "security",
+                run_id: None,
+                quality_id: None,
+                security_id: Some(security.id.clone()),
+            });
+        }
+    }
+    timeline.sort_by(|left, right| right.at.cmp(&left.at).then_with(|| right.id.cmp(&left.id)));
 }
 
 fn render_html(bundle: &ReportBundle) -> Result<Vec<u8>, String> {
@@ -885,11 +1154,13 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
         }
         eprint!("\r{}\r", " ".repeat(96));
         let _ = std::io::stderr().flush();
-        let mut qualities = build_qualities(&root, DEFAULT_SNAPSHOTS);
-        let timeline = build_timeline(&runs, &qualities);
+        let mut qualities = build_assessments(&root, "quality", DEFAULT_SNAPSHOTS);
+        let mut securities = build_assessments(&root, "security", DEFAULT_SNAPSHOTS);
+        let mut timeline = build_timeline(&runs, &qualities);
+        attach_security(&root, &runs, &mut securities, &mut timeline);
         attach_quality_sources(&root, &mut qualities, &timeline);
         if timeline.is_empty() {
-            return Err("no local coverage runs and no saved quality assessments to report".into());
+            return Err("no local coverage runs and no saved assessments to report".into());
         }
         // The chosen run when there is one, so an explicit selector still
         // decides; otherwise the newest thing there is.
@@ -904,6 +1175,7 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
             comparison_run_id,
             runs,
             qualities,
+            securities,
             timeline,
         };
         let html = render_html(&bundle)?;
@@ -913,10 +1185,16 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
                 html.len() as f64 / 1024.0 / 1024.0
             ));
         }
-        let output = if options.output.is_absolute() {
-            options.output.clone()
-        } else {
-            root.join(&options.output)
+        // The default lives inside the store, which carries its own
+        // `.gitignore`, so a report cannot be committed by accident. An
+        // explicit path is the user's and resolves against where they ran
+        // the command, like any other CLI path.
+        let output = match &options.output {
+            None => root.join(REPORT_DIRECTORY).join(DEFAULT_REPORT_NAME),
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => std::env::current_dir()
+                .map_err(|error| format!("could not read the working directory: {error}"))?
+                .join(path),
         };
         write_atomic(&output, &html)?;
         Ok((output, html.len()))
@@ -968,8 +1246,14 @@ mod tests {
         assert_eq!(options.selector, "run_123");
         assert_eq!(options.comparison.as_deref(), Some("run_122"));
         assert_eq!(options.runs, 4);
-        assert_eq!(options.output, PathBuf::from("artifacts/coverage.html"));
+        assert_eq!(
+            options.output.as_deref(),
+            Some(Path::new("artifacts/coverage.html"))
+        );
         assert!(!options.open);
+        // No --output means the store's reports directory, decided at write
+        // time against the project root rather than here.
+        assert_eq!(parse_options(&[]).unwrap().output, None);
     }
 
     #[test]
