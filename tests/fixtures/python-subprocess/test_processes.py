@@ -7,6 +7,10 @@ import time
 import unittest
 
 
+def printed(value):
+    return (value + os.linesep).encode()
+
+
 class Processes(unittest.TestCase):
     def call(self, args, **kwargs):
         result = subprocess.run([sys.executable, *args], capture_output=True, **kwargs)
@@ -19,10 +23,10 @@ class Processes(unittest.TestCase):
 
         for name, module in [("one", entry_one), ("two", entry_two)]:
             self.assertEqual(module.value(), name)
-            self.assertEqual(self.call([f"app/entry_{name}.py"]), (name + "\n").encode())
+            self.assertEqual(self.call([f"app/entry_{name}.py"]), printed(name))
 
     def test_module_entry(self):
-        self.assertEqual(self.call(["-m", "app.module_entry"]), b"module\n")
+        self.assertEqual(self.call(["-m", "app.module_entry"]), printed("module"))
 
     def test_empty_helper(self):
         self.assertEqual(self.call(["-c", "pass"]), b"")
@@ -38,7 +42,7 @@ class Processes(unittest.TestCase):
     def test_nested_child(self):
         inner = "print('grandchild')"
         outer = f"import subprocess,sys;subprocess.run([sys.executable,'-c',{inner!r}],check=True)"
-        self.assertEqual(self.call(["-c", outer]), b"grandchild\n")
+        self.assertEqual(self.call(["-c", outer]), printed("grandchild"))
 
     def test_isolated_environment(self):
         environment = {key: value for key, value in os.environ.items() if not key.startswith("SUPERCOV_") and key != "PYTHONPATH"}
@@ -56,7 +60,7 @@ class Processes(unittest.TestCase):
         try:
             for key in removed:
                 del os.environ[key]
-            self.assertEqual(self.call(["-c", "print('isolated')"]), b"isolated\n")
+            self.assertEqual(self.call(["-c", "print('isolated')"]), printed("isolated"))
         finally:
             os.environ.update(removed)
 
@@ -70,7 +74,7 @@ class Processes(unittest.TestCase):
         code = "from app.module_entry import value; print(value())"
         if expected:
             code += ";import supercov_runtime as s;assert 'test_bytes_environment' in s.runtime().current_identity()['test']"
-        self.assertEqual(self.call(["-c", code], env=environment), b"module\n")
+        self.assertEqual(self.call(["-c", code], env=environment), printed("module"))
 
     def test_timeout_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -86,11 +90,17 @@ class Processes(unittest.TestCase):
                 self.assertTrue(ready.exists(), "child did not initialize")
                 with self.assertRaises(subprocess.TimeoutExpired) as caught:
                     child.communicate(timeout=0.05)
-                self.assertEqual(caught.exception.stdout, b"partial stdout\n")
+                # Windows reader threads retain the bytes until EOF, so
+                # TimeoutExpired has no output; the final communicate below
+                # must still recover it. POSIX includes partial bytes now.
+                if os.name == "nt":
+                    self.assertIsNone(caught.exception.stdout)
+                else:
+                    self.assertEqual(caught.exception.stdout, printed("partial stdout"))
             finally:
                 child.kill()
                 out, err = child.communicate()
-            self.assertEqual(out, b"partial stdout\n")
+            self.assertEqual(out, printed("partial stdout"))
             self.assertEqual(err, b"")
 
     @unittest.skipUnless(os.name == "posix", "POSIX descriptor identity across exec")
@@ -106,7 +116,7 @@ else: assert (actual.st_dev,actual.st_ino)!=(expected.st_dev,expected.st_ino)
 print('closed')
 """
             launch = f"import os,sys;fd=os.open({str(path)!r},os.O_RDONLY);os.set_inheritable(fd,False);os.execve(sys.executable,[sys.executable,'-c',{check!r},str(fd),{str(path)!r}],os.environ)"
-            self.assertEqual(self.call(["-c", launch]), b"closed\n")
+            self.assertEqual(self.call(["-c", launch]), printed("closed"))
 
 
 if __name__ == "__main__":
