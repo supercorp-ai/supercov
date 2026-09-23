@@ -20,11 +20,105 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+mod candidates;
 mod catalog;
 mod changes;
 mod query;
 mod scope;
 mod store;
+
+/// Which catalog a command asks, and where its answers live. Two lanes, one
+/// plumbing: discovery, budget, cache, snapshots and views are shared, and what
+/// differs is the questions, whether the answers compose into a number, and
+/// the directory under `.supercov/`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Instrument {
+    /// Twelve code properties, composed into health. `supercov quality`.
+    Catalog,
+    /// Twelve security surface checks, never composed: a file is clean or it
+    /// names what fired. `supercov security`.
+    Security,
+}
+
+impl Instrument {
+    fn lane(self) -> &'static str {
+        match self {
+            Self::Catalog => "quality",
+            Self::Security => "security",
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog",
+            Self::Security => "security",
+        }
+    }
+    fn version(self) -> &'static str {
+        match self {
+            Self::Catalog => catalog::CATALOG_VERSION,
+            Self::Security => catalog::security::VERSION,
+        }
+    }
+    /// Whether the answers compose into a health number. Security answers
+    /// never do: nothing in the probe supported averaging them.
+    fn scores(self) -> bool {
+        self == Self::Catalog
+    }
+    fn file_request(self, path: &str, source: &str) -> Value {
+        match self {
+            Self::Catalog => catalog::file_request(path, source),
+            Self::Security => catalog::security::file_request(path, source),
+        }
+    }
+    fn change_request(self, before: &str, after: &str) -> Value {
+        match self {
+            Self::Catalog => catalog::change_request(before, after),
+            Self::Security => catalog::security::change_request(before, after),
+        }
+    }
+    fn patch_request(self, patch: &str) -> Value {
+        match self {
+            Self::Catalog => catalog::patch_request(patch),
+            Self::Security => catalog::security::patch_request(patch),
+        }
+    }
+    fn described(self) -> Value {
+        match self {
+            Self::Catalog => catalog::described(),
+            Self::Security => catalog::security::described(),
+        }
+    }
+    /// Every check an answer to this instrument's request may carry. A quality
+    /// change is asked the security questions too, so the quality lane collects
+    /// all three catalogs; a file is only ever asked its own.
+    fn ids(self) -> Vec<String> {
+        let own: Vec<String> = match self {
+            Self::Catalog => catalog::properties()
+                .iter()
+                .chain(catalog::risks())
+                .map(|c| c.id.clone())
+                .collect(),
+            Self::Security => Vec::new(),
+        };
+        own.into_iter()
+            .chain(catalog::security::checks().iter().map(|c| c.id.clone()))
+            .collect()
+    }
+    fn policy(self) -> Value {
+        match self {
+            Self::Catalog => json!({"present_at": catalog::PRESENT_AT,
+                "composition": "health is the mean of the catalog answers, computed by this CLI",
+                "aggregation": "directory and repository health weight files by size",
+                "cutoffs": "none; no threshold in this project has survived calibration",
+                "fail_on_finding": false}),
+            Self::Security => json!({"present_at": catalog::PRESENT_AT,
+                "composition": "none; a file is clean or it names what fired, and nothing is averaged",
+                "aggregation": "files flagged, counted by check",
+                "cutoffs": "none; a finding is shown with its value and its evidence",
+                "fail_on_finding": false}),
+        }
+    }
+}
 
 const MODEL: &str = "jev-1.13.0";
 const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
@@ -106,6 +200,44 @@ Cache: .supercov/quality/requests/ (exact request hash; --refresh to reassess).
 Snapshots: .supercov/quality/snapshots/.
 ";
 
+const HELP_SECURITY: &str = "Security surface powered by Jev.
+
+Usage:
+  supercov security [file-or-directory ...]    assess code, saving a snapshot
+  supercov security gaps [snapshot]            only files something fired on
+  supercov security file <path> [snapshot]     one file, every check
+  supercov security scope                      which files are assessed, and why
+  supercov security audit [<id>|check]         the worklist for your agent; one item with its evidence; validate verdicts
+  supercov security snapshots                  list saved assessments
+  supercov security show [snapshot]            read a saved assessment
+  supercov security diff <snapshot> <snapshot> what appeared between two
+  supercov security patch [file-or-directory]  what a change introduced
+
+Change range (security patch), as for quality patch:
+  --unstaged          Working tree against the index
+  --staged            Index against HEAD: what a commit would contain
+  --base <ref>        Working tree against the merge base with a branch or tag
+
+Options shared with quality:
+  --run <id|latest>   Cross the findings with a saved coverage run, to see which
+                      flagged files no test exercises
+  --annotate github   (patch) Print GitHub workflow annotations; posts nothing
+  --all               Include test files, generated output and anything outside
+                      a source root
+  --json              Print the report or view as JSON
+  --dry-run           Print exact request bodies as JSON; no API call, no writes
+  --refresh           Bypass cached responses
+  --limit <n>         Rows to show, 0 for all of them (default 20)
+
+Twelve named security surfaces are asked of each file as yes/no questions: a
+query built from a caller's value, a path taken from a request, a handler with
+no visible authorisation check, and so on, each mapped to the CWE classes it
+stands for. Nothing is averaged. A file is clean or it names what fired, with
+the value and what is known about that check's accuracy.
+
+Cache: .supercov/security/requests/. Snapshots: .supercov/security/snapshots/.
+";
+
 #[derive(Default, Debug)]
 struct Options {
     paths: Vec<PathBuf>,
@@ -115,6 +247,8 @@ struct Options {
     dry_run: bool,
     refresh: bool,
     context: Option<PathBuf>,
+    /// A saved coverage run to cross the findings with.
+    run: Option<String>,
 }
 
 /// What the user asked for: a new assessment, or a reading of a saved one.
@@ -128,6 +262,14 @@ enum Command {
     Scope {
         json: bool,
         limit: usize,
+    },
+    /// The audit worklist the last security assessment wrote, for an agent.
+    Audit {
+        json: bool,
+        limit: usize,
+        /// None for the worklist; `check` to validate the verdicts; an item
+        /// id for that item with its evidence inline.
+        target: Option<String>,
     },
     /// Only the files something fired on, mirroring `runs gaps`.
     Gaps {
@@ -250,7 +392,9 @@ fn parse(arguments: Vec<String>) -> Result<Command, String> {
     let rest = || arguments[1..].to_vec();
     match subcommand {
         "scan" => Ok(Command::Health(defaulted(parse_scan(rest())?))),
-        "snapshots" | "show" | "gaps" | "scope" | "file" | "diff" => parse_view(subcommand, rest()),
+        "snapshots" | "show" | "gaps" | "scope" | "file" | "diff" | "audit" => {
+            parse_view(subcommand, rest())
+        }
         "patch" => parse_patch(rest()),
         _ => Ok(Command::Health(defaulted(parse_scan(arguments)?))),
     }
@@ -295,6 +439,11 @@ fn parse_view(kind: &str, arguments: Vec<String>) -> Result<Command, String> {
     Ok(match kind {
         "snapshots" => Command::Snapshots { json, limit },
         "scope" => Command::Scope { json, limit },
+        "audit" => Command::Audit {
+            json,
+            limit,
+            target: positional.next(),
+        },
         "gaps" => Command::Gaps {
             snapshot: positional.next(),
             json,
@@ -343,6 +492,15 @@ fn parse_scan(args: Vec<String>) -> Result<Options, String> {
             "--dry-run" => options.dry_run = true,
             "--refresh" => options.refresh = true,
             "--all" => options.all = true,
+            "--run" => {
+                let selector = args
+                    .next()
+                    .filter(|s| !s.starts_with('-'))
+                    .ok_or("--run requires a run id or `latest`")?;
+                if options.run.replace(selector).is_some() {
+                    return Err("--run may only be specified once".into());
+                }
+            }
             "--context" => {
                 let path = args
                     .next()
@@ -697,7 +855,22 @@ fn ignored_directory(name: &str) -> bool {
     )
 }
 
+/// Which files an instrument reads. The complexity catalog reads source; the
+/// security catalog also reads templates and configuration, because that is
+/// where cross-site scripting and secrets are labelled in every corpus.
+fn is_assessable(path: &Path, instrument: Instrument) -> bool {
+    is_source(path) || (instrument == Instrument::Security && candidates::is_security_extra(path))
+}
+
 fn discover(root: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    discover_for(root, paths, Instrument::Catalog)
+}
+
+fn discover_for(
+    root: &Path,
+    paths: &[PathBuf],
+    instrument: Instrument,
+) -> Result<Vec<PathBuf>, String> {
     let mut files = BTreeSet::new();
     for path in paths {
         let input = root.join(path);
@@ -729,7 +902,7 @@ fn discover(root: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
             }
         }
         if metadata.is_file() {
-            if !is_source(&canonical) {
+            if !is_assessable(&canonical, instrument) {
                 return Err(format!("unsupported source extension: {}", path.display()));
             }
             files.insert(canonical);
@@ -745,7 +918,9 @@ fn discover(root: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
                 .build();
             for entry in walker {
                 let entry = entry.map_err(|e| e.to_string())?;
-                if entry.file_type().is_some_and(|t| t.is_file()) && is_source(entry.path()) {
+                if entry.file_type().is_some_and(|t| t.is_file())
+                    && is_assessable(entry.path(), instrument)
+                {
                     files.insert(entry.into_path());
                 }
             }
@@ -1049,13 +1224,14 @@ fn save(path: &Path, entry: &CacheEntry) -> Result<(), String> {
 /// before, otherwise from the provider.
 fn resolve(
     project_root: &Path,
+    lane: &str,
     agent: &ureq::Agent,
     key: Option<&str>,
     refresh: bool,
     request: &Value,
     hash: &str,
 ) -> Result<(CacheEntry, bool, Option<String>), String> {
-    let cache_path = store::responses(project_root).join(format!("{hash}.json"));
+    let cache_path = store::responses(project_root, lane).join(format!("{hash}.json"));
     if !refresh {
         // The flat directory is where responses were cached before snapshots
         // existed. An answer saved there still answers this exact request.
@@ -1107,6 +1283,7 @@ type Slot = (usize, Option<usize>);
 /// Answer every prepared request, a few at a time.
 fn answer_all(
     root: &Path,
+    lane: &str,
     agent: &ureq::Agent,
     key: Option<&str>,
     refresh: bool,
@@ -1126,11 +1303,11 @@ fn answer_all(
                         return;
                     };
                     let hash = digest(bytes);
-                    let answered = resolve(root, agent, key, refresh, request, &hash)
+                    let answered = resolve(root, lane, agent, key, refresh, request, &hash)
                         .map(|(entry, hit, warning)| (hash, entry, hit, warning));
                     if progress {
                         let count = finished.fetch_add(1, Ordering::Relaxed) + 1;
-                        eprintln!("[supercov] quality: {count}/{}", pending.len());
+                        eprintln!("[supercov] {lane}: {count}/{}", pending.len());
                     }
                     answers
                         .lock()
@@ -1205,6 +1382,18 @@ struct Subject {
 
 /// Every answer for one subject, or why it has none.
 struct Answers {
+    /// Pass two: candidate lines the model confirmed, as `{line, check, value, text}`.
+    lines: Vec<Value>,
+    /// Lines the model neither confirmed nor cleared: value at 0.3 or above
+    /// but under the cut, or dismissed by triage. The audit worklist's raw
+    /// material; never a finding.
+    uncertain: Vec<Value>,
+    /// The graph stage's labels for this file's functions, in declaration
+    /// order: `{takes_outside, reaches_sink, sanitises, sink_kind}`.
+    labels: Vec<FunctionLabel>,
+    /// Lines pass one already classified, when the first chunk of nodes rode
+    /// on its request: node index to check.
+    classified: BTreeMap<usize, String>,
     path: String,
     bytes: u64,
     /// How many requests this row came from. More than one means the file was
@@ -1214,6 +1403,61 @@ struct Answers {
     values: Option<BTreeMap<String, f64>>,
     cached: bool,
     error: Option<String>,
+}
+
+/// What the graph stage knows about one function after pass one.
+#[derive(Debug, Clone, Default)]
+struct FunctionLabel {
+    takes_outside: f64,
+    reaches_sink: f64,
+    sanitises: f64,
+    sink_kind: String,
+    /// Whether the function is a guard: it decides who the caller is or what
+    /// they may do and refuses otherwise. The fact the authorisation stage
+    /// composes across files.
+    guards: f64,
+}
+
+fn classifications(response: &ApiResponse) -> BTreeMap<usize, String> {
+    response
+        .answers
+        .keys()
+        .filter_map(|key| {
+            key.strip_prefix('n')
+                .and_then(|n| n.parse::<usize>().ok())
+                .map(|i| (i, key.clone()))
+        })
+        .filter_map(|(i, key)| {
+            let (check, confidence) = choice_with_confidence(response, &key)?;
+            (check != "none" && confidence >= CLASSIFY_CONFIDENCE).then_some((i, check))
+        })
+        .collect()
+}
+
+fn choice(response: &ApiResponse, id: &str) -> Option<String> {
+    match response.answers.get(id) {
+        Some(Answer::Choice { choice, .. }) => Some(choice.clone()),
+        _ => None,
+    }
+}
+
+/// The function labels an answer carries, read back by index until a key is
+/// missing. A request that carried no function questions yields none.
+fn function_labels(response: &ApiResponse) -> Vec<FunctionLabel> {
+    let mut labels = Vec::new();
+    let mut i = 0;
+    while let Some(takes_outside) = noul(response, &format!("f{i}_takes_outside")) {
+        labels.push(FunctionLabel {
+            takes_outside,
+            reaches_sink: noul(response, &format!("f{i}_reaches_sink")).unwrap_or(0.0),
+            sanitises: noul(response, &format!("f{i}_sanitises")).unwrap_or(1.0),
+            sink_kind: choice(response, &format!("f{i}_sink_kind"))
+                .unwrap_or_else(|| "none".into()),
+            guards: noul(response, &format!("f{i}_guards")).unwrap_or(0.0),
+        });
+        i += 1;
+    }
+    labels
 }
 
 /// Refuse before doing any work when there is no credential.
@@ -1257,6 +1501,7 @@ type Asked = (Vec<Answers>, Usage, Usage);
 
 fn ask_smells(
     root: &Path,
+    instrument: Instrument,
     key: Option<&str>,
     refresh: bool,
     subjects: Vec<Subject>,
@@ -1279,6 +1524,10 @@ fn ask_smells(
             pending.push(((index, None), subject.request.clone(), bytes));
         }
         out.push(Answers {
+            lines: Vec::new(),
+            uncertain: Vec::new(),
+            labels: Vec::new(),
+            classified: BTreeMap::new(),
             path: subject.path.clone(),
             bytes: subject.bytes,
             windows: 1,
@@ -1291,12 +1540,21 @@ fn ask_smells(
     if progress && key.is_some() {
         let (tokens, usd) = estimated_cost(&pending);
         eprintln!(
-            "[supercov] quality: {} requests, about {tokens} input tokens \
+            "[supercov] {}: {} requests, about {tokens} input tokens \
              (${usd:.4}) if none is cached",
+            instrument.lane(),
             pending.len()
         );
     }
-    let answered = answer_all(root, &agent, key, refresh, &pending, progress);
+    let answered = answer_all(
+        root,
+        instrument.lane(),
+        &agent,
+        key,
+        refresh,
+        &pending,
+        progress,
+    );
     // Counted apart, because a cached answer costs nothing and reporting it as
     // spend would tell a reader their bill was 34 requests when it was none.
     let mut usage = Usage {
@@ -1313,18 +1571,21 @@ fn ask_smells(
                 let counted = if hit { &mut reused } else { &mut usage };
                 counted.input_tokens += entry.response.usage.input_tokens;
                 counted.output_tokens += entry.response.usage.output_tokens;
-                // Both catalogs, because a change is asked the risk questions
-                // too and collecting only the complexity ones silently threw
-                // every risk answer away. A file is only ever asked the
-                // complexity questions, so nothing extra appears there and
-                // health stays the mean of the same twelve.
+                // Every catalog the instrument's request may carry, because a
+                // change is asked the risk and security questions too and
+                // collecting only the complexity ones once silently threw
+                // every risk answer away. A file is only ever asked its own
+                // catalog, so nothing extra appears there and health stays the
+                // mean of the same twelve.
                 out[index].values = Some(
-                    catalog::properties()
-                        .iter()
-                        .chain(catalog::risks())
-                        .filter_map(|c| Some((c.id.clone(), noul(&entry.response, &c.id)?)))
+                    instrument
+                        .ids()
+                        .into_iter()
+                        .filter_map(|id| Some((id.clone(), noul(&entry.response, &id)?)))
                         .collect(),
                 );
+                out[index].labels = function_labels(&entry.response);
+                out[index].classified = classifications(&entry.response);
                 out[index].cached = hit;
                 out[index].error = warning;
             }
@@ -1374,18 +1635,978 @@ fn combine_windows(answered: Vec<Answers>) -> Vec<Answers> {
         .collect()
 }
 
-fn scored(answers: &Answers) -> Value {
+/// Which checks fired: the shared cut for the complexity catalog, each
+/// check's own fitted cut for security.
+fn present_for(values: &BTreeMap<String, f64>, instrument: Instrument) -> Vec<(String, f64)> {
+    match instrument {
+        Instrument::Catalog => catalog::present(values),
+        Instrument::Security => catalog::security::present(values),
+    }
+}
+
+/// The line tier: the file questions gate, then a Choice per node over
+/// only the checks that fired (four options, not thirteen, so a hundred
+/// nodes fit beside the file), then confirmation. On fifteen held-out
+/// repositories: F1 0.47 at $0.33, against 0.46 at $0.66 for a thirteen-way
+/// Choice on every node of every file.
+fn enumerate_lines() -> bool {
+    true
+}
+
+fn narrow_nodes() -> bool {
+    true
+}
+
+/// A file question at or above this sends the check into the narrowing
+/// tier. Lower than the 0.6 that flags a file, because the exhaustive tier
+/// found lines in files whose file question had not fired.
+const LOCALISE_AT: f64 = 0.3;
+
+/// What the line pass sends as state for a file: the whole file when it
+/// fits the request budget, otherwise each of its catalog windows. A request
+/// speaks in the view's own line numbers; everything stored is absolute.
+/// Before this, a file over the budget had every line request skipped, and
+/// the largest file of a repository is where its handlers live.
+struct View {
+    text: String,
+    /// The absolute line number of the view's first line, less one.
+    offset: usize,
+    nodes: Vec<candidates::Node>,
+    structure: candidates::Structure,
+}
+
+fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View> {
+    let structure = candidates::structure(Path::new(path), source);
+    if matches!(
+        within_budget(&catalog::security::file_request(path, source)),
+        Ok(Some(_))
+    ) {
+        return vec![View {
+            text: source.to_string(),
+            offset: 0,
+            nodes: nodes.to_vec(),
+            structure,
+        }];
+    }
+    let Ok(windows) = line_windows(path, source) else {
+        return Vec::new();
+    };
+    windows
+        .into_iter()
+        .map(|(window, text)| {
+            let offset = window.start_line - 1;
+            View {
+                text,
+                offset,
+                nodes: candidates::spread(
+                    nodes
+                        .iter()
+                        .filter(|n| n.line >= window.start_line && n.line <= window.end_line)
+                        .map(|n| candidates::Node {
+                            line: n.line - offset,
+                            text: n.text.clone(),
+                        })
+                        .collect(),
+                ),
+                structure: candidates::Structure {
+                    functions: structure
+                        .functions
+                        .iter()
+                        .filter(|f| f.end >= window.start_line && f.start <= window.end_line)
+                        .map(|f| candidates::FunctionSpan {
+                            name: f.name.clone(),
+                            start: f.start.max(window.start_line) - offset,
+                            end: f.end.min(window.end_line) - offset,
+                        })
+                        .collect(),
+                    imports: structure.imports.clone(),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Windows for the line pass of a file too large to send whole: the same
+/// declaration boundaries as the catalog's, merged while the merged text
+/// stays under half the request budget, so thirty classification Choices fit
+/// beside the state. A catalog window fills the budget on its own; on a
+/// 2,342-line Express file that left room for four Choices per request, and
+/// seventy-five requests for one file. A single declaration over the half
+/// budget is cut every two hundred lines.
+fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, String> {
+    let starts = line_starts(source);
+    let (_, declared) = candidates(path, source, &starts).ok_or(
+        "file is over the request budget and has no parsed top-level declarations to window on",
+    )?;
+    let half = MAX_REQUEST_TOKENS * BYTES_PER_TOKEN / 2;
+    let bytes = |window: &Window| window_source(source, &starts, window).len();
+    let mut cut: Vec<Window> = Vec::new();
+    for window in declared {
+        if bytes(&window) <= half || window.end_line - window.start_line < 200 {
+            cut.push(window);
+            continue;
+        }
+        let mut start = window.start_line;
+        while start <= window.end_line {
+            let end = (start + 199).min(window.end_line);
+            cut.push(Window {
+                index: 0,
+                of: 0,
+                start_line: start,
+                end_line: end,
+                declarations: window.declarations.clone(),
+            });
+            start = end + 1;
+        }
+    }
+    let mut planned: Vec<Window> = Vec::new();
+    for candidate in cut {
+        let merged = planned.last().map(|open| Window {
+            index: 0,
+            of: 0,
+            start_line: open.start_line,
+            end_line: candidate.end_line,
+            declarations: [open.declarations.clone(), candidate.declarations.clone()].concat(),
+        });
+        match merged {
+            Some(merged) if bytes(&merged) <= half => {
+                *planned.last_mut().expect("a window to merge into") = merged;
+            }
+            _ => planned.push(candidate),
+        }
+    }
+    let total = planned.len();
+    Ok(planned
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut window)| {
+            window.index = i + 1;
+            window.of = total;
+            let text = window_source(source, &starts, &window).to_string();
+            (window, text)
+        })
+        .collect())
+}
+
+fn ask_lines(
+    root: &Path,
+    key: Option<&str>,
+    refresh: bool,
+    answers: &mut [Answers],
+) -> (usize, Usage, Usage) {
+    let zero = || Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+    };
+    let (mut usage, mut reused) = (zero(), zero());
+    let agent = client();
+    // Round one: the parser lists every node, the model says which check, if
+    // any, each shows. Whatever pass one already classified on its own
+    // request is kept; the rest is asked in chunks sized to the budget, per
+    // view. Files no parser knows keep their pattern candidates and skip to
+    // round two.
+    let mut views_by_index: BTreeMap<usize, Vec<View>> = BTreeMap::new();
+    let mut pairs: BTreeMap<usize, Vec<candidates::Candidate>> = BTreeMap::new();
+    // Each pending request names its job: which file and which view.
+    let mut jobs: Vec<(usize, usize)> = Vec::new();
+    let mut pending = Vec::new();
+    for (index, answer) in answers.iter().enumerate() {
+        if answer.values.is_none() {
+            continue;
+        }
+        let Ok(source) = read_text(&root.join(&answer.path)) else {
+            continue;
+        };
+        let path = Path::new(&answer.path);
+        match candidates::nodes(path, &source) {
+            Some(nodes) if !nodes.is_empty() => {
+                let fired: Vec<String> = answer
+                    .values
+                    .iter()
+                    .flatten()
+                    .filter(|(check, value)| {
+                        **value >= LOCALISE_AT && check.as_str() != "missing_authorization"
+                    })
+                    .map(|(check, _)| check.clone())
+                    .collect();
+                if narrow_nodes() && fired.is_empty() {
+                    continue;
+                }
+                let among = narrow_nodes().then_some(fired.as_slice());
+                for (i, check) in &answer.classified {
+                    if let Some(node) = nodes.get(*i) {
+                        pairs.entry(index).or_default().push(candidates::Candidate {
+                            line: node.line,
+                            check: check.clone(),
+                            text: node.text.clone(),
+                        });
+                    }
+                }
+                let asked = pass_one_asked(&answer.path, &nodes, answer);
+                let views = line_views(&answer.path, &source, &nodes);
+                for (v, view) in views.iter().enumerate() {
+                    // Pass one answers every node it was given, so the first
+                    // key it did not carry is where the remaining chunks
+                    // start. A windowed file was never given any.
+                    let mut offset = if views.len() == 1 { asked } else { 0 };
+                    while offset < view.nodes.len() {
+                        let left = view.nodes.len() - offset;
+                        let mut took = 0;
+                        // A window sized to fit the twelve questions does
+                        // not fit thirty Choices on top; the chunk shrinks
+                        // until it does.
+                        for take in [left, 120, 60, 30, 15, 8, 4] {
+                            if take > left {
+                                continue;
+                            }
+                            let request = catalog::security::classify_request(
+                                &answer.path,
+                                &view.text,
+                                &view.nodes[offset..offset + take],
+                                offset,
+                                among,
+                            );
+                            if let Ok(Some(bytes)) = within_budget(&request) {
+                                jobs.push((index, v));
+                                pending.push(((index, Some(jobs.len() - 1)), request, bytes));
+                                took = take;
+                                break;
+                            }
+                        }
+                        if took == 0 {
+                            break;
+                        }
+                        offset += took;
+                    }
+                }
+                views_by_index.insert(index, views);
+            }
+            Some(_) => continue,
+            None => {
+                let found = candidates::candidates(path, &source);
+                if !found.is_empty() {
+                    pairs.insert(index, found);
+                    views_by_index.insert(index, line_views(&answer.path, &source, &[]));
+                }
+            }
+        }
+    }
+    if !pending.is_empty() {
+        let answered = answer_all(
+            root,
+            "security",
+            &agent,
+            key,
+            refresh,
+            &pending,
+            pending.len() > 4,
+        );
+        for ((index, slot), result) in answered {
+            let entry = match result {
+                Ok((_, entry, hit, _)) => {
+                    let counted = if hit { &mut reused } else { &mut usage };
+                    counted.input_tokens += entry.response.usage.input_tokens;
+                    entry
+                }
+                Err(_) => continue,
+            };
+            let Some(view) = slot
+                .and_then(|k| jobs.get(k))
+                .and_then(|(_, v)| views_by_index.get(&index).and_then(|views| views.get(*v)))
+            else {
+                continue;
+            };
+            let classified = classifications(&entry.response);
+            for (i, check) in classified {
+                if let Some(node) = view.nodes.get(i) {
+                    pairs.entry(index).or_default().push(candidates::Candidate {
+                        line: node.line + view.offset,
+                        check,
+                        text: node.text.clone(),
+                    });
+                }
+            }
+        }
+    }
+    // Round two: the check's own question and the triage question on every
+    // classified line. Authorisation stays file-level: at a line it confirmed
+    // 21% of labelled handlers and was the most frequent fire on clean files,
+    // and leaving it out of this tier moved precision from 56% to 60% for
+    // four points of recall. Chunked to the budget: a file with forty
+    // classified lines and a source Choice for each does not fit one
+    // request, and a request that does not fit is split, never dropped.
+    // Before this, every line finding of a file that large was lost without
+    // a word.
+    let mut jobs: Vec<(usize, usize, Vec<candidates::Candidate>)> = Vec::new();
+    let mut pending = Vec::new();
+    for (index, found) in &mut pairs {
+        found.retain(|c| c.check != "missing_authorization");
+        found.sort();
+        found.dedup();
+        found.truncate(candidates::MAX_CANDIDATES);
+        if found.is_empty() {
+            continue;
+        }
+        let Some(views) = views_by_index.get(index) else {
+            continue;
+        };
+        for (v, view) in views.iter().enumerate() {
+            let last = view.offset + view.text.lines().count();
+            let mine: Vec<candidates::Candidate> = found
+                .iter()
+                .filter(|c| c.line > view.offset && c.line <= last)
+                .cloned()
+                .collect();
+            if mine.is_empty() {
+                continue;
+            }
+            let local: Vec<candidates::Candidate> = mine
+                .iter()
+                .map(|c| candidates::Candidate {
+                    line: c.line - view.offset,
+                    check: c.check.clone(),
+                    text: c.text.clone(),
+                })
+                .collect();
+            let mut offset = 0;
+            while offset < local.len() {
+                let left = local.len() - offset;
+                let mut took = 0;
+                for take in [left, 16, 8, 4, 2, 1] {
+                    if take > left {
+                        continue;
+                    }
+                    let request = catalog::security::confirm_request(
+                        &answers[*index].path,
+                        &view.text,
+                        &local[offset..offset + take],
+                        &view.structure,
+                    );
+                    if let Ok(Some(bytes)) = within_budget(&request) {
+                        jobs.push((*index, v, mine[offset..offset + take].to_vec()));
+                        pending.push(((*index, Some(jobs.len() - 1)), request, bytes));
+                        took = take;
+                        break;
+                    }
+                }
+                if took == 0 {
+                    took = 1;
+                }
+                offset += took;
+            }
+        }
+    }
+    if pending.is_empty() {
+        return (0, usage, reused);
+    }
+    let answered = answer_all(
+        root,
+        "security",
+        &agent,
+        key,
+        refresh,
+        &pending,
+        pending.len() > 4,
+    );
+    let mut confirmed = 0usize;
+    let mut lines_by_index: BTreeMap<usize, Vec<Value>> = BTreeMap::new();
+    for ((index, slot), result) in answered {
+        let entry = match result {
+            Ok((_, entry, hit, _)) => {
+                let counted = if hit { &mut reused } else { &mut usage };
+                counted.input_tokens += entry.response.usage.input_tokens;
+                entry
+            }
+            Err(_) => continue,
+        };
+        let Some((_, v, chunk)) = slot.and_then(|k| jobs.get(k)) else {
+            continue;
+        };
+        let offset = views_by_index
+            .get(&index)
+            .and_then(|views| views.get(*v))
+            .map(|view| view.offset)
+            .unwrap_or(0);
+        let lines = lines_by_index.entry(index).or_default();
+        for (i, candidate) in chunk.iter().enumerate() {
+            let Some(value) = noul(&entry.response, &format!("c{i}")) else {
+                break;
+            };
+            let dismissed = noul(&entry.response, &format!("t{i}")).unwrap_or(0.0);
+            if value >= 0.3
+                && !(value >= catalog::security::cut_for(&candidate.check)
+                    && dismissed < catalog::security::DISMISS_AT)
+            {
+                answers[index]
+                    .uncertain
+                    .push(json!({ "line": candidate.line,
+                    "check": candidate.check, "value": value, "dismissed": dismissed,
+                    "text": candidate.text }));
+            }
+            if value >= catalog::security::cut_for(&candidate.check)
+                && dismissed < catalog::security::DISMISS_AT
+            {
+                let mut line = json!({ "line": candidate.line, "check": candidate.check,
+                    "value": value, "text": candidate.text });
+                if let Some(chosen) = choice(&entry.response, &format!("s{i}"))
+                    && let Some(number) =
+                        chosen.strip_prefix('L').and_then(|n| n.parse::<u64>().ok())
+                {
+                    line["enters_at"] = json!(number + offset as u64);
+                }
+                lines.push(line);
+            }
+        }
+    }
+    // One finding per check per ten lines: three `eval` calls in a row are
+    // one thing to fix, and are counted as one. The strongest line of the
+    // window is the one shown, so a handler's `def` line at 0.62 does not
+    // stand in for the `pickle.loads` at 0.96 eleven lines below it.
+    let mut kept_by_index: BTreeMap<usize, Vec<Value>> = BTreeMap::new();
+    for (index, mut lines) in lines_by_index {
+        lines.sort_by(|a, b| {
+            b["value"]
+                .as_f64()
+                .partial_cmp(&a["value"].as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a["line"].as_u64().cmp(&b["line"].as_u64()))
+        });
+        let mut kept: Vec<Value> = Vec::new();
+        for line in lines {
+            let near = kept.iter().any(|k| {
+                k["check"] == line["check"]
+                    && k["line"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .abs_diff(line["line"].as_u64().unwrap_or(0))
+                        <= 10
+            });
+            if !near {
+                kept.push(line);
+            }
+        }
+        kept.sort_by(|a, b| a["line"].as_u64().cmp(&b["line"].as_u64()));
+        if !kept.is_empty() {
+            kept_by_index.insert(index, kept);
+        }
+    }
+    for (index, kept) in kept_by_index {
+        confirmed += 1;
+        answers[index].lines = kept;
+    }
+    (confirmed, usage, reused)
+}
+
+/// How many nodes pass one's request carried for this file: the largest
+/// classified index plus one when any were classified, otherwise what the
+/// same sizing would have chosen. Recomputed rather than stored, because the
+/// choice is deterministic on the same file.
+fn pass_one_asked(path: &str, nodes: &[candidates::Node], answer: &Answers) -> usize {
+    if let Some(max) = answer.classified.keys().max() {
+        // Every node asked was answered, so the keys reach at least this far;
+        // the chunk sizes are the same three, so the smallest that covers it.
+        return [nodes.len(), 60, 30]
+            .into_iter()
+            .filter(|take| *take > *max && *take <= nodes.len())
+            .min()
+            .unwrap_or(nodes.len());
+    }
+    let _ = path;
+    0
+}
+
+/// A Choice below this confidence is read as `none`.
+const CLASSIFY_CONFIDENCE: f64 = 0.3;
+
+fn choice_with_confidence(response: &ApiResponse, id: &str) -> Option<(String, f64)> {
+    match response.answers.get(id) {
+        Some(Answer::Choice {
+            choice, confidence, ..
+        }) => Some((choice.clone(), *confidence)),
+        _ => None,
+    }
+}
+
+/// How many functions of one file are labelled. Beyond this a file is a
+/// module of helpers, and the largest are not the ones that matter most; the
+/// first by declaration order are kept, which for a route file is the routes.
+const MAX_LABELLED_FUNCTIONS: usize = 24;
+
+/// The graph stage. Every labelled function that takes outside data is
+/// followed through the file's resolved imports to every labelled function
+/// that reaches a sink without sanitising, where the caller's body names the
+/// callee; each such pair is one candidate path, confirmed with both bodies in
+/// state and one question. Host code does the walking; the model only ever
+/// judges one function, or one pair.
+fn confirm_paths(
+    root: &Path,
+    key: Option<&str>,
+    refresh: bool,
+    answers: &[Answers],
+    structures: &BTreeMap<String, (candidates::Structure, String)>,
+) -> (Vec<Value>, Usage, Usage) {
+    let cut = catalog::PRESENT_AT;
+    let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
+    let body = |source: &str, f: &candidates::FunctionSpan| -> String {
+        source
+            .lines()
+            .skip(f.start.saturating_sub(1))
+            .take(f.end.saturating_sub(f.start) + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .take(40_000)
+            .collect()
+    };
+    let mut pending = Vec::new();
+    let mut candidates_found: Vec<Value> = Vec::new();
+    for (file, (structure, source)) in structures {
+        let Some(answer) = by_path.get(file.as_str()) else {
+            continue;
+        };
+        if answer.labels.is_empty() {
+            continue;
+        }
+        for import in &structure.imports {
+            let Some(target) = candidates::resolve_import(root, file, &import.specifier) else {
+                continue;
+            };
+            let Some((callee_structure, callee_source)) = structures.get(&target) else {
+                continue;
+            };
+            let Some(callee_answer) = by_path.get(target.as_str()) else {
+                continue;
+            };
+            for (i, caller) in structure
+                .functions
+                .iter()
+                .enumerate()
+                .take(answer.labels.len())
+            {
+                if answer.labels[i].takes_outside < cut {
+                    continue;
+                }
+                let caller_body = body(source, caller);
+                for (j, callee) in callee_structure
+                    .functions
+                    .iter()
+                    .enumerate()
+                    .take(callee_answer.labels.len())
+                {
+                    let label = &callee_answer.labels[j];
+                    let named = import.exported == "*"
+                        || import.exported == "default"
+                        || callee.name == import.exported
+                        || callee.name == import.local;
+                    if !named
+                        || label.reaches_sink < cut
+                        || label.sanitises >= cut
+                        || label.sink_kind == "none"
+                    {
+                        continue;
+                    }
+                    let direct = format!("{}(", import.local);
+                    let member = format!("{}.{}(", import.local, callee.name);
+                    let Some(offset) = caller_body
+                        .find(&member)
+                        .or_else(|| caller_body.find(&direct))
+                    else {
+                        continue;
+                    };
+                    let call_line = caller.start + caller_body[..offset].matches('\n').count();
+                    let request = catalog::security::path_request(
+                        &catalog::security::PathEnd {
+                            file: file.clone(),
+                            function: caller.name.clone(),
+                            line: caller.start,
+                            source: caller_body.clone(),
+                        },
+                        &catalog::security::PathEnd {
+                            file: target.clone(),
+                            function: callee.name.clone(),
+                            line: callee.start,
+                            source: body(callee_source, callee),
+                        },
+                        &label.sink_kind,
+                    );
+                    if let Ok(Some(bytes)) = within_budget(&request) {
+                        let index = candidates_found.len();
+                        candidates_found.push(json!({
+                            "caller": { "file": file, "function": caller.name, "line": call_line },
+                            "callee": { "file": target, "function": callee.name, "line": callee.start },
+                            "check": label.sink_kind,
+                        }));
+                        pending.push(((index, None), request, bytes));
+                    }
+                }
+            }
+        }
+    }
+    confirm_pending(root, key, refresh, pending, candidates_found)
+}
+
+/// Confirm candidate paths, however they were found: one question each with
+/// both bodies in state, confirmed at the shared cut.
+fn confirm_pending(
+    root: &Path,
+    key: Option<&str>,
+    refresh: bool,
+    pending: Vec<(Slot, Value, Vec<u8>)>,
+    candidates_found: Vec<Value>,
+) -> (Vec<Value>, Usage, Usage) {
+    let cut = catalog::PRESENT_AT;
+    let (mut usage, mut reused) = (
+        Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+        Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+    );
+    if pending.is_empty() {
+        return (Vec::new(), usage, reused);
+    }
+    let agent = client();
+    let answered = answer_all(
+        root,
+        "security",
+        &agent,
+        key,
+        refresh,
+        &pending,
+        pending.len() > 4,
+    );
+    let mut confirmed = Vec::new();
+    for ((index, _), result) in answered {
+        let Ok((_, entry, hit, _)) = result else {
+            continue;
+        };
+        let counted = if hit { &mut reused } else { &mut usage };
+        counted.input_tokens += entry.response.usage.input_tokens;
+        if let Some(value) = noul(&entry.response, "path")
+            && value >= cut
+        {
+            let mut path = candidates_found[index].clone();
+            path["value"] = json!(value);
+            confirmed.push(path);
+        }
+    }
+    confirmed.sort_by(|a, b| {
+        b["value"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .total_cmp(&a["value"].as_f64().unwrap_or(0.0))
+    });
+    (confirmed, usage, reused)
+}
+
+/// Words a line uses to register a function as a request entry point: a
+/// route, view, endpoint, loader or action. The first application code to
+/// run for a request is the only place a missing guard is a finding; a
+/// service function behind it is guarded by its caller. On the first run
+/// the stage asked every function that handles caller data, and 105 of its
+/// 126 findings were service functions and page components.
+const ENTRY_WORDS: &[&str] = &[
+    ".route(",
+    ".get(",
+    ".post(",
+    ".put(",
+    ".delete(",
+    ".patch(",
+    ".all(",
+    "path(",
+    "re_path(",
+    "url(",
+    "@app.",
+    "@router.",
+    "@bp.",
+    "@blueprint",
+    "@api_view",
+    "@Get(",
+    "@Post(",
+    "@Put(",
+    "@Delete(",
+    "@Patch(",
+    "add_url_rule",
+    "as_view",
+    "@action",
+];
+
+/// Names a framework calls by convention: Remix and Next route modules.
+const ENTRY_NAMES: &[&str] = &["loader", "action", "GET", "POST", "PUT", "DELETE", "PATCH"];
+
+fn run_paths(
+    root: &Path,
+    key: Option<&str>,
+    refresh: bool,
+    answers: &[Answers],
+    structures: &BTreeMap<String, (candidates::Structure, String)>,
+    points: &[(String, usize, Vec<String>)],
+    already: &[Value],
+) -> (Vec<Value>, Usage, Usage) {
+    let cut = catalog::PRESENT_AT;
+    let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
+    // test -> file -> executed lines
+    let mut by_test: BTreeMap<&str, BTreeMap<&str, BTreeSet<usize>>> = BTreeMap::new();
+    for (file, line, tests) in points {
+        for test in tests {
+            by_test
+                .entry(test.as_str())
+                .or_default()
+                .entry(file.as_str())
+                .or_default()
+                .insert(*line);
+        }
+    }
+    let body = |source: &str, f: &candidates::FunctionSpan| -> String {
+        source
+            .lines()
+            .skip(f.start.saturating_sub(1))
+            .take(f.end.saturating_sub(f.start) + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .take(40_000)
+            .collect()
+    };
+    let known: BTreeSet<(String, String)> = already
+        .iter()
+        .filter_map(|p| {
+            Some((
+                format!(
+                    "{}#{}",
+                    p["caller"]["file"].as_str()?,
+                    p["caller"]["function"].as_str()?
+                ),
+                format!(
+                    "{}#{}",
+                    p["callee"]["file"].as_str()?,
+                    p["callee"]["function"].as_str()?
+                ),
+            ))
+        })
+        .collect();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut pending = Vec::new();
+    let mut candidates_found: Vec<Value> = Vec::new();
+    for (callee_file, (callee_structure, callee_source)) in structures {
+        let Some(callee_answer) = by_path.get(callee_file.as_str()) else {
+            continue;
+        };
+        for (j, callee) in callee_structure
+            .functions
+            .iter()
+            .enumerate()
+            .take(callee_answer.labels.len())
+        {
+            let label = &callee_answer.labels[j];
+            if label.reaches_sink < cut || label.sanitises >= cut || label.sink_kind == "none" {
+                continue;
+            }
+            // Tests that executed a line of this function.
+            let tests: Vec<&str> = by_test
+                .iter()
+                .filter(|(_, files)| {
+                    files.get(callee_file.as_str()).is_some_and(|lines| {
+                        lines.range(callee.start..=callee.end).next().is_some()
+                    })
+                })
+                .map(|(t, _)| *t)
+                .collect();
+            let mut callers = 0;
+            for test in tests {
+                for (caller_file, lines) in &by_test[test] {
+                    if *caller_file == callee_file.as_str() {
+                        continue;
+                    }
+                    let Some((caller_structure, caller_source)) = structures.get(*caller_file)
+                    else {
+                        continue;
+                    };
+                    let Some(caller_answer) = by_path.get(caller_file) else {
+                        continue;
+                    };
+                    for (i, caller) in caller_structure
+                        .functions
+                        .iter()
+                        .enumerate()
+                        .take(caller_answer.labels.len())
+                    {
+                        if caller_answer.labels[i].takes_outside < cut
+                            || lines.range(caller.start..=caller.end).next().is_none()
+                        {
+                            continue;
+                        }
+                        let pair = (
+                            format!("{caller_file}#{}", caller.name),
+                            format!("{callee_file}#{}", callee.name),
+                        );
+                        if known.contains(&pair) || !seen.insert(pair) || callers >= 3 {
+                            continue;
+                        }
+                        callers += 1;
+                        let request = catalog::security::path_request(
+                            &catalog::security::PathEnd {
+                                file: (*caller_file).to_owned(),
+                                function: caller.name.clone(),
+                                line: caller.start,
+                                source: body(caller_source, caller),
+                            },
+                            &catalog::security::PathEnd {
+                                file: callee_file.clone(),
+                                function: callee.name.clone(),
+                                line: callee.start,
+                                source: body(callee_source, callee),
+                            },
+                            &label.sink_kind,
+                        );
+                        if let Ok(Some(bytes)) = within_budget(&request) {
+                            let index = candidates_found.len();
+                            candidates_found.push(json!({
+                                "caller": { "file": caller_file, "function": caller.name, "line": caller.start },
+                                "callee": { "file": callee_file, "function": callee.name, "line": callee.start },
+                                "check": label.sink_kind, "via": "run", "test": test,
+                            }));
+                            pending.push(((index, None), request, bytes));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    confirm_pending(root, key, refresh, pending, candidates_found)
+}
+
+/// Guards a run observed. For every function that takes outside data, the
+/// tests that executed it; for each of those tests, whether any function the
+/// model labelled as validating or authorising executed under the same test,
+/// in any file. A handler that ran under tests where no guard ran is the
+/// evidence a per-file question cannot have: not that a guard is absent from
+/// the file, but that nothing guard-shaped ran in front of it. No trace, no
+/// framework knowledge; labels and co-execution only.
+fn run_guards(
+    answers: &[Answers],
+    structures: &BTreeMap<String, (candidates::Structure, String)>,
+    points: &[(String, usize, Vec<String>)],
+) -> BTreeMap<String, Vec<Value>> {
+    let cut = catalog::PRESENT_AT;
+    let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
+    let mut by_test: BTreeMap<&str, BTreeMap<&str, BTreeSet<usize>>> = BTreeMap::new();
+    for (file, line, tests) in points {
+        for test in tests {
+            by_test
+                .entry(test.as_str())
+                .or_default()
+                .entry(file.as_str())
+                .or_default()
+                .insert(*line);
+        }
+    }
+    // Guard functions: every labelled function that sanitises or authorises.
+    let mut guards: Vec<(&str, &candidates::FunctionSpan)> = Vec::new();
+    for (file, (structure, _)) in structures {
+        let Some(answer) = by_path.get(file.as_str()) else {
+            continue;
+        };
+        for (i, f) in structure
+            .functions
+            .iter()
+            .enumerate()
+            .take(answer.labels.len())
+        {
+            if answer.labels[i].sanitises >= cut {
+                guards.push((file.as_str(), f));
+            }
+        }
+    }
+    let guard_ran = |files: &BTreeMap<&str, BTreeSet<usize>>| -> Option<String> {
+        guards.iter().find_map(|(file, f)| {
+            files
+                .get(*file)
+                .filter(|lines| lines.range(f.start..=f.end).next().is_some())
+                .map(|_| format!("{}:{} {}", file, f.start, f.name))
+        })
+    };
+    let mut out: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for (file, (structure, _)) in structures {
+        let Some(answer) = by_path.get(file.as_str()) else {
+            continue;
+        };
+        for (i, handler) in structure
+            .functions
+            .iter()
+            .enumerate()
+            .take(answer.labels.len())
+        {
+            if answer.labels[i].takes_outside < cut {
+                continue;
+            }
+            let mut guarded = Vec::new();
+            let mut unguarded = Vec::new();
+            for (test, files) in &by_test {
+                let ran = files
+                    .get(file.as_str())
+                    .is_some_and(|lines| lines.range(handler.start..=handler.end).next().is_some());
+                if !ran {
+                    continue;
+                }
+                match guard_ran(files) {
+                    Some(guard) => guarded.push(json!({ "test": test, "guard": guard })),
+                    None => unguarded.push(json!(test)),
+                }
+            }
+            if guarded.is_empty() && unguarded.is_empty() {
+                continue;
+            }
+            out.entry(file.clone()).or_default().push(json!({
+                "function": handler.name, "line": handler.start,
+                "tests_with_a_guard": guarded.len(), "tests_without": unguarded.len(),
+                "guard_example": guarded.first().map(|g| g["guard"].clone()),
+                "unguarded_tests": unguarded.iter().take(3).collect::<Vec<_>>(),
+            }));
+        }
+    }
+    out
+}
+
+fn scored(answers: &Answers, instrument: Instrument) -> Value {
+    let present: Vec<Value> = match &answers.values {
+        Some(values) => {
+            let mut fired = present_for(values, instrument);
+            // A line the second round confirmed for a check pass one did not
+            // fire on is still a finding; it carries the line's value.
+            for line in &answers.lines {
+                if let (Some(check), Some(value)) = (line["check"].as_str(), line["value"].as_f64())
+                    && !fired.iter().any(|(id, _)| id == check)
+                {
+                    fired.push((check.to_owned(), value));
+                }
+            }
+            fired
+                .into_iter()
+                .map(|(id, value)| {
+                    // The lines pass two confirmed for this check, if any:
+                    // that is the tier a reader sees.
+                    let lines: Vec<&Value> =
+                        answers.lines.iter().filter(|l| l["check"] == id).collect();
+                    json!({ "check": id, "value": value,
+                        "tier": if lines.is_empty() { "file" } else { "line" },
+                        "lines": lines })
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
     match &answers.values {
         Some(values) => json!({
             "path": answers.path,
             "bytes": answers.bytes,
             "status": "completed",
             "cached": answers.cached,
-            "health": catalog::health(values),
-            "present": catalog::present(values)
-                .into_iter()
-                .map(|(id, value)| json!({ "check": id, "value": value }))
-                .collect::<Vec<_>>(),
+            "health": if instrument.scores() { catalog::health(values) } else { None },
+            "present": present,
             "checks": values,
             "windows": answers.windows,
             "basis": answers.note.clone().unwrap_or_else(|| "both versions".into()),
@@ -1446,7 +2667,10 @@ fn resolve_ambiguity(
     let bytes = within_budget(&request).ok()??;
     let agent = client();
     let hash = digest(&bytes);
-    let (entry, _, _) = resolve(root, &agent, Some(key), refresh, &request, &hash).ok()?;
+    // Scope is a property of the tree, not of an instrument, so both lanes
+    // share one cached answer under the quality lane.
+    let (entry, _, _) =
+        resolve(root, "quality", &agent, Some(key), refresh, &request, &hash).ok()?;
     let mut ships = 0usize;
     for (index, path) in asking.iter().enumerate() {
         let Some(value) = noul(&entry.response, &format!("f{index}")) else {
@@ -1469,14 +2693,35 @@ fn resolve_ambiguity(
     }))
 }
 
-fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Value, bool), String> {
+fn run_health(
+    root: &Path,
+    options: &Options,
+    key: Option<&str>,
+    instrument: Instrument,
+) -> Result<(Value, bool), String> {
     if !options.dry_run {
         require_key(key)?;
     }
-    let found = discover(root, &options.paths)?;
+    let found = discover_for(root, &options.paths, instrument)?;
     let configured = scope::configured_roots();
     let mut scope = scope::classify(root, &found, configured.as_deref());
     let resolved = if options.dry_run {
+        None
+    } else if instrument == Instrument::Security {
+        // Security reads every source file the conventions did not exclude.
+        // The model's reading of what ships is a fine scope for a health
+        // number and a bad one for weaknesses: a directory it reads as not
+        // part of the product (`bad/` in a vulnerable-by-design app, an
+        // examples tree, a script) is deployed as often as not, and leaving
+        // it out cost 53 of 57 labelled weaknesses on one repository.
+        for entry in scope
+            .entries
+            .iter_mut()
+            .filter(|e| e.status == scope::Status::Ambiguous)
+        {
+            entry.status = scope::Status::Included;
+            entry.reason = "security reads every file the conventions do not exclude".into();
+        }
         None
     } else {
         resolve_ambiguity(root, &mut scope, &found, key, options.refresh)
@@ -1523,6 +2768,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         .collect();
     let mut subjects = Vec::new();
     let mut unreadable = Vec::new();
+    let mut structures: BTreeMap<String, (candidates::Structure, String)> = BTreeMap::new();
     for path in &paths {
         let relative = path
             .strip_prefix(root)
@@ -1534,7 +2780,50 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
                 skipped_files.push(json!({ "path": relative, "reason": "generated" }));
             }
             Ok(source) => {
-                let whole = catalog::file_request(&relative, &source);
+                let mut whole = instrument.file_request(&relative, &source);
+                // The graph stage: label every function on the same state,
+                // when the file has a parser and the questions fit. A file
+                // that does not fit with them is asked without them.
+                if instrument == Instrument::Security {
+                    let structure = candidates::structure(Path::new(&relative), &source);
+                    if !structure.functions.is_empty() {
+                        let mut functions = structure.functions.clone();
+                        functions.truncate(MAX_LABELLED_FUNCTIONS);
+                        let mut labelled = whole.clone();
+                        if let Some(questions) = labelled["questions"].as_object_mut() {
+                            questions.extend(catalog::security::function_questions(&functions));
+                        }
+                        if matches!(within_budget(&labelled), Ok(Some(_))) {
+                            whole = labelled;
+                            structures.insert(relative.clone(), (structure, source.clone()));
+                        }
+                    }
+                    // The first chunk of line classifications rides here too,
+                    // as many as fit: the state is already being sent. Only
+                    // when the line tier enumerates; the narrowing tier asks
+                    // per function after the file questions have answered.
+                    if enumerate_lines()
+                        && !narrow_nodes()
+                        && let Some(nodes) = candidates::nodes(Path::new(&relative), &source)
+                    {
+                        for take in [nodes.len(), 60, 30] {
+                            if take == 0 || take > nodes.len() {
+                                continue;
+                            }
+                            let mut with = whole.clone();
+                            if let Some(questions) = with["questions"].as_object_mut() {
+                                questions.extend(catalog::security::classify_questions(
+                                    &nodes[..take],
+                                    0,
+                                ));
+                            }
+                            if matches!(within_budget(&with), Ok(Some(_))) {
+                                whole = with;
+                                break;
+                            }
+                        }
+                    }
+                }
                 match within_budget(&whole) {
                     Ok(Some(_)) => subjects.push(Subject {
                         bytes: source.len() as u64,
@@ -1548,7 +2837,7 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
                             for (window, text) in windows {
                                 subjects.push(Subject {
                                     bytes: text.len() as u64,
-                                    request: catalog::file_request(&relative, &text),
+                                    request: instrument.file_request(&relative, &text),
                                     path: relative.clone(),
                                     note: Some(format!(
                                         "assessed in {count} windows at declaration boundaries; \
@@ -1577,21 +2866,84 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
     if options.dry_run {
         return Ok((
             json!({
-                "catalog_version": catalog::CATALOG_VERSION, "model": MODEL,
+                "instrument": instrument.name(),
+                "catalog_version": instrument.version(), "model": MODEL,
                 "requests": subjects.iter().map(|s| &s.request).collect::<Vec<_>>(),
             }),
             false,
         ));
     }
     let count = subjects.len();
-    let (answered, usage, reused) = ask_smells(root, key, options.refresh, subjects, count > 4);
-    let answers = combine_windows(answered);
+    let (answered, usage, reused) =
+        ask_smells(root, instrument, key, options.refresh, subjects, count > 4);
+    let mut answers = combine_windows(answered);
+    // Pass two, security only: for every file something fired on, ask one
+    // question per candidate line. A finding both passes agree on is shown
+    // with its line; on the held-out half of RealVuln that tier fires on 9%
+    // of unlabelled files against pass one's 23%, at 58% recall with a line.
+    let (mut usage, mut reused) = (usage, reused);
+    let mut paths_found: Vec<Value> = Vec::new();
+    let mut handlers_by_file: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    if instrument == Instrument::Security {
+        let (_, more, cached) = ask_lines(root, key, options.refresh, &mut answers);
+        usage.input_tokens += more.input_tokens;
+        reused.input_tokens += cached.input_tokens;
+        let (paths, more, cached) =
+            confirm_paths(root, key, options.refresh, &answers, &structures);
+        usage.input_tokens += more.input_tokens;
+        reused.input_tokens += cached.input_tokens;
+        paths_found = paths;
+        if let Some(selector) = options.run.as_deref()
+            && let Ok(points) = crate::load_point_tests((selector != "latest").then_some(selector))
+        {
+            let (paths, more, cached) = run_paths(
+                root,
+                key,
+                options.refresh,
+                &answers,
+                &structures,
+                &points,
+                &paths_found,
+            );
+            usage.input_tokens += more.input_tokens;
+            reused.input_tokens += cached.input_tokens;
+            paths_found.extend(paths);
+            handlers_by_file = run_guards(&answers, &structures, &points);
+        }
+    }
 
+    // The audit worklist: what the model could not settle and the host can
+    // point an agent at, written beside the snapshots and merged with the
+    // verdicts an earlier audit left.
+    let audit = if instrument == Instrument::Security && !options.dry_run {
+        let items = audit_worklist(root, &answers, &structures, &found);
+        let mut written = write_audit(root, items);
+        merge_verdicts(root, &mut answers, &mut written);
+        Some(written)
+    } else {
+        None
+    };
     let mut weighted: Vec<(u64, f64)> = Vec::new();
     let mut by_directory: BTreeMap<String, Vec<(u64, f64)>> = BTreeMap::new();
     let mut files: Vec<Value> = Vec::new();
+    let mut by_check: BTreeMap<String, usize> = BTreeMap::new();
+    let mut flagged = 0usize;
+    let mut line_confirmed = 0usize;
     for answer in &answers {
-        if let Some(values) = &answer.values
+        if let Some(values) = &answer.values {
+            let fired = present_for(values, instrument);
+            flagged += usize::from(!fired.is_empty());
+            line_confirmed += usize::from(
+                fired
+                    .iter()
+                    .any(|(check, _)| answer.lines.iter().any(|l| l["check"] == *check)),
+            );
+            for (check, _) in &fired {
+                *by_check.entry(check.clone()).or_default() += 1;
+            }
+        }
+        if instrument.scores()
+            && let Some(values) = &answer.values
             && let Some(health) = catalog::health(values)
         {
             weighted.push((answer.bytes, health));
@@ -1605,12 +2957,35 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
                 directory = current.parent();
             }
         }
-        files.push(scored(answer));
+        let mut record = scored(answer, instrument);
+        if let Some(handlers) = handlers_by_file.get(&answer.path) {
+            record["handlers"] = json!(handlers);
+        }
+        files.push(record);
     }
-    files.sort_by(|a, b| {
-        let key = |v: &Value| v["health"].as_f64().unwrap_or(f64::MAX);
-        key(a).total_cmp(&key(b))
-    });
+    if instrument.scores() {
+        files.sort_by(|a, b| {
+            let key = |v: &Value| v["health"].as_f64().unwrap_or(f64::MAX);
+            key(a).total_cmp(&key(b))
+        });
+    } else {
+        // Most findings first, then the strongest, then the path: the order a
+        // reader would triage in, since there is no number to sort by.
+        files.sort_by(|a, b| {
+            let fires = |v: &Value| v["present"].as_array().map_or(0, Vec::len);
+            let strongest = |v: &Value| {
+                v["present"]
+                    .as_array()
+                    .and_then(|p| p.first())
+                    .and_then(|p| p["value"].as_f64())
+                    .unwrap_or(0.0)
+            };
+            fires(b)
+                .cmp(&fires(a))
+                .then_with(|| strongest(b).total_cmp(&strongest(a)))
+                .then_with(|| a["path"].as_str().cmp(&b["path"].as_str()))
+        });
+    }
     files.extend(unreadable);
     let failed = files.iter().any(|f| f["status"] == "failed");
     let errors = files.iter().filter(|f| f["status"] == "failed").count();
@@ -1634,31 +3009,29 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
         // Which instrument produced this. A reader must never mistake a catalog
         // snapshot for a rubric one: they answer different questions and their
         // numbers are not comparable.
-        "instrument": "catalog",
-        "catalog_version": catalog::CATALOG_VERSION,
+        "instrument": instrument.name(),
+        "catalog_version": instrument.version(),
         "model": MODEL, "scope": "file",
         "paths": options.paths.iter()
             .map(|path| path.display().to_string().replace('\\', "/"))
             .collect::<Vec<_>>(),
         "counts": {"files": files.len(), "scored": weighted.len(), "errors": errors,
+            "assessed": files.len() - errors, "flagged": flagged, "line_confirmed": line_confirmed,
             "directories": directories.len(), "skipped": skipped_files.len()},
+        "by_check": by_check,
         "scope": scope.summary(),
         "scope_resolved": resolved,
         "limitation": scope.limitation(),
         "skipped": skipped_files,
-        "catalog": catalog::described(),
-        "health": catalog::aggregate(&weighted),
+        "catalog": instrument.described(),
+        "health": if instrument.scores() { catalog::aggregate(&weighted) } else { None },
         "bytes": weighted.iter().map(|(b, _)| b).sum::<u64>(),
-        "policy": {"present_at": catalog::PRESENT_AT,
-            "composition": "health is the mean of the catalog answers, computed by this CLI",
-            "aggregation": "directory and repository health weight files by size",
-            "cutoffs": "none; no threshold in this project has survived calibration",
-            "fail_on_finding": false},
+        "policy": instrument.policy(),
         "usage_this_run": usage,
         "usage_from_cache": reused,
     });
-    let recorded = json!({ "files": files, "directories": directories });
-    let saved = store::write(root, &id, &manifest, &recorded);
+    let recorded = json!({ "files": files, "directories": directories, "paths": paths_found });
+    let saved = store::write(root, instrument.lane(), &id, &manifest, &recorded);
     let mut report = manifest.take();
     if let Err(error) = &saved {
         report["snapshot_warning"] = json!(format!(
@@ -1667,8 +3040,1178 @@ fn run_health(root: &Path, options: &Options, key: Option<&str>) -> Result<(Valu
     }
     report["directories"] = recorded["directories"].clone();
     report["files"] = recorded["files"].clone();
+    report["paths"] = recorded["paths"].clone();
     report["files_scored"] = json!(weighted.len());
+    if let Some(audit) = audit {
+        report["audit"] = audit;
+    }
     Ok((report, failed))
+}
+
+/// Words a registration or guard line uses that name a role, permission or
+/// privilege: what the roles list on an audit item is built from.
+const ROLE_WORDS: &[&str] = &[
+    "role",
+    "permission",
+    "perm",
+    "scope",
+    "admin",
+    "staff",
+    "superuser",
+    "owner",
+    "clinician",
+    "patient",
+    "manager",
+    "member",
+    "editor",
+    "viewer",
+    "guest",
+    "moderator",
+    "customer",
+    "merchant",
+    "vendor",
+    "tenant",
+    "is_",
+    "can_",
+    "required",
+    "allowed",
+];
+
+/// Names a function has when it is a guard by convention. Narrow on
+/// purpose: a wide list read every login handler and token helper as a
+/// guard and kept them off the worklist.
+const GUARD_WORDS: &[&str] = &[
+    "require_",
+    "required",
+    "guard",
+    "authenticate",
+    "authorize",
+    "authorise",
+    "is_authenticated",
+    "login_required",
+    "permission",
+    "ensure",
+    "protect",
+    "check_auth",
+    "verify_token",
+    "jwt_required",
+    "auth_middleware",
+    "middleware",
+    "can_",
+    "is_admin",
+    "is_staff",
+    "has_role",
+    "token_valid",
+    "validate_token",
+    "check_token",
+    "authoriz",
+    "authenticat",
+    "current_user",
+    "get_user_from",
+];
+
+const CREDENTIAL_WORDS: &[&str] = &[
+    "login", "signin", "sign_in", "register", "signup", "sign_up", "reset", "forgot", "password",
+    "otp", "mfa", "2fa", "totp", "verify", "confirm", "invite", "magic",
+];
+
+const LOG_WORDS: &[&str] = &[
+    "console.log(",
+    "console.error(",
+    "console.warn(",
+    "console.info(",
+    "logger.",
+    "logging.",
+    "log.info(",
+    "log.error(",
+    "log.warn(",
+    "print(",
+];
+
+const REQUEST_WORDS: &[&str] = &[
+    "req.", "request.", "params", "body", "query", "headers", "form", "payload", "input",
+];
+
+const WRITE_WORDS: &[&str] = &[
+    ".save(",
+    ".delete(",
+    ".update(",
+    ".create(",
+    "commit(",
+    "insert",
+    "UPDATE ",
+    "DELETE ",
+    "INSERT ",
+    ".remove(",
+    "unlink(",
+    "writeFile",
+    "findOneAndUpdate",
+    "updateOne",
+    "deleteOne",
+    ".add(",
+];
+
+const CONFIG_WORDS: &[&str] = &[
+    "httpOnly",
+    "httponly",
+    "HTTPONLY",
+    "sameSite",
+    "samesite",
+    "SAMESITE",
+    "secure:",
+    "SECURE",
+    "session(",
+    "cookieParser",
+    "cookie:",
+    "csrf",
+    "CSRF",
+    "cors(",
+    "CORS_",
+    "Access-Control-Allow",
+    "DEBUG",
+    "debug:",
+    "ALLOWED_HOSTS",
+    "helmet",
+    "X-Frame",
+    "Content-Security-Policy",
+    "trust proxy",
+    "SESSION_",
+    "JWT_",
+    "verify=False",
+    "rejectUnauthorized",
+    "check_hostname",
+    "ssl_context",
+];
+
+const SENSITIVE_FIELD_WORDS: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "ssn",
+    "social_security",
+    "card",
+    "iban",
+    "salary",
+    "diagnos",
+    "medical",
+    "date_of_birth",
+    "dob",
+    "birth",
+    "phone",
+    "address",
+    "national_id",
+    "passport",
+    "tax",
+    "bank",
+];
+
+/// At most this many items on a worklist. An agent reads every one.
+const MAX_AUDIT_ITEMS: usize = 120;
+
+/// The audit worklist: every registered entry point with the context an
+/// agent needs to decide who may reach it (guards found, roles and
+/// permission names the repository defines, models it touches, what the
+/// model said about the file), credential endpoints for the checks no
+/// question asks (rate limiting, enumeration), logging lines carrying
+/// request values, and every line the model left uncertain. Ranked with
+/// unguarded entry points first. Nothing here is a finding; each is a
+/// question with its evidence gathered, for an agent to answer.
+fn audit_worklist(
+    root: &Path,
+    answers: &[Answers],
+    structures: &BTreeMap<String, (candidates::Structure, String)>,
+    found: &[PathBuf],
+) -> Vec<Value> {
+    // Every parsed file's structure and source, computing what pass one did
+    // not keep.
+    let mut all: BTreeMap<String, (candidates::Structure, String)> = structures.clone();
+    for answer in answers {
+        if all.contains_key(&answer.path) || answer.values.is_none() {
+            continue;
+        }
+        if let Ok(source) = read_text(&root.join(&answer.path)) {
+            let structure = candidates::structure(Path::new(&answer.path), &source);
+            all.insert(answer.path.clone(), (structure, source));
+        }
+    }
+    let by_path: BTreeMap<&str, &Answers> = answers.iter().map(|a| (a.path.as_str(), a)).collect();
+    // Definitions by name, guards, roles, models: repository-wide.
+    let mut defined: BTreeMap<&str, Vec<(&str, usize, usize)>> = BTreeMap::new();
+    let mut guards: BTreeSet<String> = BTreeSet::new();
+    let mut roles: BTreeSet<String> = BTreeSet::new();
+    let mut models: BTreeSet<String> = BTreeSet::new();
+    let mut registrations: Vec<(&str, usize, &str)> = Vec::new();
+    // Where credentials are verified: a passport strategy, an authenticate
+    // helper. Not registered as routes, but every credential label that is
+    // not on a route sits in one.
+    let mut strategies: Vec<(String, usize, String)> = Vec::new();
+    for (path, (structure, source)) in &all {
+        let labels = by_path
+            .get(path.as_str())
+            .map(|a| a.labels.as_slice())
+            .unwrap_or(&[]);
+        let modelish = path.contains("model") || path.contains("schema") || path.contains("entit");
+        for (i, f) in structure.functions.iter().enumerate() {
+            defined
+                .entry(f.name.as_str())
+                .or_default()
+                .push((path.as_str(), f.start, f.end));
+            let lower = f.name.to_lowercase();
+            if labels
+                .get(i)
+                .is_some_and(|l| l.guards >= catalog::PRESENT_AT)
+                || GUARD_WORDS.iter().any(|w| lower.contains(w))
+            {
+                guards.insert(f.name.clone());
+            }
+            if modelish && f.name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                models.insert(f.name.clone());
+            }
+            // Members of a Role/Roles/UserRole class are the roles themselves.
+            let lname = f.name.to_lowercase();
+            if (lname == "role"
+                || lname == "roles"
+                || lname.ends_with("role")
+                || lname.ends_with("roles"))
+                && f.end > f.start
+            {
+                for member in class_fields(source, f.start, f.end) {
+                    if roles.len() < 60 {
+                        roles.insert(member);
+                    }
+                }
+            }
+        }
+        for (n, line) in source.lines().enumerate() {
+            let t = line.trim();
+            if t.starts_with("//") || t.starts_with('#') || t.starts_with('*') {
+                continue;
+            }
+            if is_registration(t) {
+                registrations.push((path.as_str(), n + 1, t));
+            }
+            if (t.contains("passport.use(")
+                || t.contains("Strategy(")
+                || t.contains("authenticate_user(")
+                || t.contains("def authenticate(")
+                || t.contains("check_password("))
+                && !t.starts_with("import")
+            {
+                strategies.push((path.clone(), n + 1, t.to_owned()));
+            }
+            let lower = t.to_lowercase();
+            if ROLE_WORDS.iter().any(|w| lower.contains(w)) {
+                for word in identifiers(t) {
+                    let wl = word.to_lowercase();
+                    let upper_member = word.len() > 3
+                        && word
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                        && (t.contains("Role.") || t.contains("role") || t.contains("ROLE"));
+                    if (ROLE_WORDS.iter().any(|w| wl.contains(w)) || upper_member)
+                        && word.len() > 3
+                        && roles.len() < 60
+                    {
+                        roles.insert(word);
+                    }
+                }
+            }
+        }
+    }
+    // An OpenAPI spec registers handlers by operationId and is often outside
+    // the assessed scope (a specs directory reads as tests); its lines are
+    // registrations all the same.
+    let assessed: BTreeSet<&str> = answers.iter().map(|a| a.path.as_str()).collect();
+    let mut spec_lines: Vec<(String, usize, String)> = Vec::new();
+    for path in found {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if assessed.contains(relative.as_str()) || !matches!(ext, "yml" | "yaml" | "json") {
+            continue;
+        }
+        if let Ok(text) = read_text(path) {
+            for (n, line) in text.lines().enumerate() {
+                if line.contains("operationId") {
+                    spec_lines.push((relative.clone(), n + 1, line.trim().to_owned()));
+                }
+            }
+        }
+    }
+    for (p, n, t) in &spec_lines {
+        registrations.push((p.as_str(), *n, t.as_str()));
+    }
+    // A function registered as a route is a handler, not a guard, whatever
+    // its label says: it may check things, but nothing runs behind it.
+    for (_, _, text) in &registrations {
+        if text.contains(".use(") || text.contains("before_request") {
+            continue;
+        }
+        // The handler is the last name on the line; middleware before it
+        // stays a guard.
+        if let Some(last) = identifiers(text).last()
+            && guards.contains(last)
+        {
+            guards.remove(last);
+        }
+    }
+    let guard_list: Vec<String> = guards.iter().cloned().collect();
+    let roles_list: Vec<String> = roles.iter().cloned().collect();
+    let mut items: Vec<(u32, Value)> = Vec::new();
+    let mut seen: BTreeSet<(String, usize)> = BTreeSet::new();
+    let file_values = |path: &str| -> Value {
+        by_path
+            .get(path)
+            .and_then(|a| a.values.as_ref())
+            .map(|v| {
+                json!(
+                    v.iter()
+                        .filter(|(_, x)| **x >= 0.3)
+                        .map(|(k, x)| (k.clone(), (x * 100.0).round() / 100.0))
+                        .collect::<BTreeMap<_, _>>()
+                )
+            })
+            .unwrap_or(Value::Null)
+    };
+    let entry_item = |path: &str,
+                      name: &str,
+                      start: usize,
+                      end: usize,
+                      how: &str,
+                      items: &mut Vec<(u32, Value)>,
+                      seen: &mut BTreeSet<(String, usize)>| {
+        // A guard mounted as middleware is not an entry point; a handler
+        // that checks its own token and is registered on a route is.
+        let mounted_only = guards.contains(name)
+            && (how.contains(".use(")
+                || how.contains("before_request")
+                || !how.starts_with("registration"))
+            && !registrations.iter().any(|(_, _, t)| {
+                t.contains(name) && !t.contains(".use(") && !t.contains("before_request")
+            });
+        if mounted_only || !seen.insert((path.to_owned(), start)) {
+            return;
+        }
+        let Some((_, source)) = all.get(path) else {
+            return;
+        };
+        let lines: Vec<&str> = source.lines().collect();
+        let from = start.saturating_sub(6).max(1);
+        let span: String = lines[from - 1..end.min(lines.len())].join("\n");
+        let names = identifiers(&span);
+        let decorators: Vec<String> =
+            identifiers(&lines[from - 1..start.min(lines.len())].join("\n"));
+        let mut found_guards: Vec<String> = names
+            .iter()
+            .filter(|n| guards.contains(*n) && *n != name)
+            .map(|n| {
+                if decorators.contains(n) {
+                    n.clone()
+                } else {
+                    format!("{n} (in body)")
+                }
+            })
+            .collect();
+        // A framework guard the repository does not define (`login_required`,
+        // `jwt_required`, `IsAuthenticated`) counts when it decorates the
+        // handler or sits on its registration line.
+        let above: String = lines[from - 1..start.min(lines.len())].join("\n");
+        for n in identifiers(&above) {
+            let lower = n.to_lowercase();
+            if n != name
+                && !found_guards.contains(&n)
+                && (GUARD_WORDS.iter().any(|w| lower.contains(w))
+                    || lower.contains("permission_classes")
+                    || lower == "isauthenticated"
+                    || lower == "useguards")
+            {
+                found_guards.push(format!("{n} (framework)"));
+            }
+        }
+        for (rpath, rline, text) in &registrations {
+            if text.contains(name)
+                && !text.contains(&format!("function {name}"))
+                && !text.trim_start().starts_with("def ")
+            {
+                for g in identifiers(text) {
+                    if guards.contains(&g) && g != name && !found_guards.contains(&g) {
+                        found_guards.push(format!("{g} (registration {rpath}:{rline})"));
+                    }
+                }
+            }
+        }
+        let touched: Vec<String> = names
+            .iter()
+            .filter(|n| models.contains(*n))
+            .cloned()
+            .collect();
+        let lower = format!("{name} {}", lines[start - 1]).to_lowercase();
+        let credential = CREDENTIAL_WORDS.iter().any(|w| lower.contains(w));
+        let kind = if credential { "credential" } else { "entry" };
+        let rank = match (credential, found_guards.is_empty()) {
+            (false, true) => 0,
+            (true, _) => 1,
+            (false, false) => 2,
+        };
+        let writes = WRITE_WORDS.iter().any(|w| span.contains(w));
+        let mut question = if credential {
+            "This entry point handles a credential or account flow. Is it rate limited or lockout-protected against repeated attempts, does it reveal whether an account exists, and is the token or code it issues or accepts single-use, bound to the caller, and expiring?"
+        } else if found_guards.is_empty() {
+            "No guard was found reaching this entry point. Decide which callers can reach it, whether what it reads, changes or returns needs a check of who the caller is or what they may do, and if so which roles should be admitted."
+        } else {
+            "A guard reaches this entry point. Decide which roles that guard admits, whether every admitted role should be allowed this operation on this record or resource, and whether the record the caller names is checked for ownership or scope."
+        }
+        .to_owned();
+        if writes {
+            question.push_str(" It changes stored state: is the change protected against cross-site request forgery where a browser session reaches it, and is it audited (who did what, when)?");
+        }
+        items.push((
+            rank,
+            json!({
+                "id": format!("{kind}:{path}:{start}"),
+                "kind": kind,
+                "file": path, "line": start, "end_line": end, "function": name,
+                "registered_by": how,
+                "registered_at": how.strip_prefix("registration ").and_then(|s| {
+                    let (p, l) = s.rsplit_once(':')?;
+                    Some(json!({ "file": p, "line": l.parse::<usize>().ok()? }))
+                }),
+                "question": question,
+                "context": {
+                    "guards_reaching": found_guards,
+                    "models_touched": touched,
+                    "file_values": file_values(path),
+                },
+                "basis": digest(source.as_bytes()),
+                "verdict": Value::Null,
+                "questions": [],
+            }),
+        ));
+    };
+    // Entry points: by decorator, by convention, by registration line.
+    for (path, (structure, source)) in &all {
+        let lines: Vec<&str> = source.lines().collect();
+        for f in &structure.functions {
+            let from = f.start.saturating_sub(6).max(1);
+            let above: String = lines[from - 1..f.start.min(lines.len())].join("\n");
+            if ENTRY_NAMES.contains(&f.name.as_str()) {
+                entry_item(
+                    path,
+                    &f.name,
+                    f.start,
+                    f.end,
+                    "framework convention",
+                    &mut items,
+                    &mut seen,
+                );
+            } else if above.lines().any(is_registration) {
+                entry_item(
+                    path,
+                    &f.name,
+                    f.start,
+                    f.end,
+                    "decorator",
+                    &mut items,
+                    &mut seen,
+                );
+            }
+        }
+    }
+    for (rpath, rline, text) in &registrations {
+        let mut attached = false;
+        // `operationId: api_views.users.get_all_users`: an OpenAPI spec
+        // registers a dotted module path and a function.
+        if let Some(pos) = text.find("operationId") {
+            let value: String = text[pos + "operationId".len()..]
+                .trim_start_matches(|c: char| {
+                    c == ':' || c == '"' || c == '\'' || c.is_whitespace()
+                })
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+                .collect();
+            if let Some((module, member)) = value.rsplit_once('.') {
+                let module_path = module.replace('.', "/");
+                if let Some((target, (ts, _))) = all.iter().find(|(p, _)| {
+                    p.ends_with(&format!("{module_path}.py"))
+                        || p.ends_with(&format!("{module_path}.js"))
+                        || p.ends_with(&format!("{module_path}.ts"))
+                }) && let Some(f) = ts.functions.iter().find(|f| f.name == member)
+                {
+                    let (start, end, target) = (f.start, f.end, target.clone());
+                    entry_item(
+                        &target,
+                        member,
+                        start,
+                        end,
+                        &format!("registration {rpath}:{rline}"),
+                        &mut items,
+                        &mut seen,
+                    );
+                    attached = true;
+                }
+            }
+        }
+        // `usersController.create` names a function in the file the
+        // registration file imports as `usersController`.
+        if let Some((structure, _)) = all.get(*rpath) {
+            let mut i = 0;
+            while let Some(dot) = text[i..].find('.') {
+                let dot = i + dot;
+                let left_start = text[..dot]
+                    .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                let right_end = text[dot + 1..]
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map(|p| dot + 1 + p)
+                    .unwrap_or(text.len());
+                let (module, member) = (&text[left_start..dot], &text[dot + 1..right_end]);
+                if !module.is_empty()
+                    && !member.is_empty()
+                    && let Some(import) = structure.imports.iter().find(|imp| imp.local == module)
+                    && let Some(target) = candidates::resolve_import(root, rpath, &import.specifier)
+                    && let Some((ts, _)) = all.get(&target)
+                    && let Some(f) = ts.functions.iter().find(|f| f.name == member)
+                {
+                    let (start, end, target) = (f.start, f.end, target.clone());
+                    entry_item(
+                        &target,
+                        member,
+                        start,
+                        end,
+                        &format!("registration {rpath}:{rline}"),
+                        &mut items,
+                        &mut seen,
+                    );
+                    attached = true;
+                }
+                i = right_end.max(dot + 1);
+            }
+        }
+        for word in identifiers(text) {
+            if let Some(defs) = defined.get(word.as_str()) {
+                // Prefer the definition in this file, else the single one.
+                let pick = defs
+                    .iter()
+                    .find(|(p, _, _)| p == rpath)
+                    .or_else(|| (defs.len() == 1).then(|| &defs[0]));
+                if let Some((p, s, e)) = pick
+                    && !(text.trim_start().starts_with("def ")
+                        || text.contains(&format!("function {word}")))
+                {
+                    entry_item(
+                        p,
+                        &word,
+                        *s,
+                        *e,
+                        &format!("registration {rpath}:{rline}"),
+                        &mut items,
+                        &mut seen,
+                    );
+                    attached = true;
+                }
+            }
+        }
+        let lower = text.to_lowercase();
+        let inline_credential = !attached && CREDENTIAL_WORDS.iter().any(|w| lower.contains(w));
+        if !attached && (rpath.contains("model") || rpath.contains("schema")) {
+            // `Token.objects.get(...)` inside a model method is not a route.
+            continue;
+        }
+        if !attached
+            && (text.contains("=>")
+                || text.contains("function")
+                || text.contains("lambda")
+                || inline_credential)
+        {
+            // An inline handler: the registration line is the item. A
+            // credential flow registered through a framework call
+            // (`passport.authenticate('login')`) is one too.
+            if seen.insert(((*rpath).to_owned(), *rline)) {
+                let source = &all[*rpath].1;
+                let (kind, rank, question) = if inline_credential {
+                    (
+                        "credential",
+                        1,
+                        "A credential or account flow is registered here through a framework call. Is it rate limited or lockout-protected against repeated attempts, does it reveal whether an account exists, and is the session or token it issues single-use, bound to the caller, and expiring?",
+                    )
+                } else {
+                    (
+                        "entry",
+                        0,
+                        "An inline handler is registered here. Decide which callers can reach it and whether what it does needs a check of who the caller is or what they may do.",
+                    )
+                };
+                items.push((rank, json!({
+                    "id": format!("{kind}:{rpath}:{rline}"),
+                    "kind": kind, "file": rpath, "line": rline, "end_line": rline,
+                    "function": Value::Null, "registered_by": "inline registration",
+                    "question": question,
+                    "context": { "registration": text, "guards_reaching": identifiers(text).into_iter().filter(|g| guards.contains(g)).collect::<Vec<_>>(), "file_values": file_values(rpath) },
+                    "basis": digest(source.as_bytes()), "verdict": Value::Null, "questions": [],
+                })));
+            }
+            continue;
+        }
+    }
+    // Lines the model left uncertain.
+    for answer in answers {
+        let Some((_, source)) = all.get(&answer.path) else {
+            continue;
+        };
+        for line in &answer.uncertain {
+            let n = line["line"].as_u64().unwrap_or(0) as usize;
+            if !seen.insert((answer.path.clone(), n)) {
+                continue;
+            }
+            items.push((3, json!({
+                "id": format!("line:{}:{n}", answer.path),
+                "kind": "line", "file": answer.path, "line": n, "end_line": n,
+                "check": line["check"], "text": line["text"],
+                "question": format!("The model put this line at {:.2} for {} and triage at {:.2}. Decide whether it is a weakness worth fixing, and if so at which line the outside value enters.",
+                    line["value"].as_f64().unwrap_or(0.0), line["check"].as_str().unwrap_or(""), line["dismissed"].as_f64().unwrap_or(0.0)),
+                "context": { "file_values": file_values(&answer.path) },
+                "basis": digest(source.as_bytes()), "verdict": Value::Null, "questions": [],
+            })));
+        }
+    }
+    for (path, line, text) in &strategies {
+        if !seen.insert((path.clone(), *line)) {
+            continue;
+        }
+        let source = &all[path.as_str()].1;
+        items.push((1, json!({
+            "id": format!("credential:{path}:{line}"),
+            "kind": "credential", "file": path, "line": line, "end_line": line + 30,
+            "function": Value::Null, "registered_by": "credential verification",
+            "text": text.chars().take(160).collect::<String>(),
+            "question": "Credentials are verified here. Decide whether failures are counted and limited, whether success and failure are logged with who and when, whether the comparison leaks timing or which part failed, and whether a token or session issued here is bound to the caller and expires.",
+            "context": { "file_values": file_values(path) },
+            "basis": digest(source.as_bytes()), "verdict": Value::Null, "questions": [],
+        })));
+    }
+    // Security-relevant settings: cookie and session options, CSRF and CORS
+    // configuration, debug switches, in files that configure the app.
+    let mut configured = 0;
+    for (path, (_, source)) in &all {
+        let lower = path.to_lowercase();
+        let configish = [
+            "settings",
+            "config",
+            "server",
+            "app.",
+            "main.",
+            "index.",
+            "middleware",
+            ".env",
+            "security",
+        ]
+        .iter()
+        .any(|w| lower.contains(w));
+        if !configish {
+            continue;
+        }
+        for (n, line) in source.lines().enumerate() {
+            if configured >= 25 {
+                break;
+            }
+            let t = line.trim();
+            if t.starts_with("//") || t.starts_with('#') {
+                continue;
+            }
+            if CONFIG_WORDS.iter().any(|w| t.contains(w)) && seen.insert((path.clone(), n + 1)) {
+                configured += 1;
+                items.push((2, json!({
+                    "id": format!("config:{path}:{}", n + 1),
+                    "kind": "config", "file": path, "line": n + 1, "end_line": n + 1,
+                    "text": t.chars().take(160).collect::<String>(),
+                    "question": "A security-relevant setting is configured here. Decide whether it weakens a protection in the deployed configuration: a session or cookie without Secure, HttpOnly or SameSite, CSRF protection absent or disabled for browser-reachable state changes, CORS open to any origin with credentials, debug or verbose errors on, a permissive host or origin list.",
+                    "context": { "file_values": file_values(path) },
+                    "basis": digest(source.as_bytes()), "verdict": Value::Null, "questions": [],
+                })));
+            }
+        }
+    }
+    // Models holding credentials or personal data: one item per class.
+    for (path, (structure, source)) in &all {
+        let lower = path.to_lowercase();
+        if !(lower.contains("model")
+            || lower.contains("schema")
+            || lower.contains("entit")
+            || lower.contains("prisma"))
+        {
+            continue;
+        }
+        let lines: Vec<&str> = source.lines().collect();
+        for f in &structure.functions {
+            if !f.name.chars().next().is_some_and(|c| c.is_uppercase()) || f.end <= f.start {
+                continue;
+            }
+            let body: String = lines[f.start - 1..f.end.min(lines.len())]
+                .join("\n")
+                .to_lowercase();
+            let fields: Vec<&str> = SENSITIVE_FIELD_WORDS
+                .iter()
+                .copied()
+                .filter(|w| body.contains(w))
+                .collect();
+            if fields.is_empty() || !seen.insert((path.clone(), f.start)) {
+                continue;
+            }
+            items.push((2, json!({
+                "id": format!("model:{path}:{}", f.start),
+                "kind": "model", "file": path, "line": f.start, "end_line": f.end, "function": f.name,
+                "question": format!("Model `{}` holds fields that look like credentials or personal data ({}). Decide whether any credential is stored in clear or reversibly, whether personal fields are returned wholesale in any response or log, and whether a caller can set a privilege field on creation or update.", f.name, fields.join(", ")),
+                "context": { "sensitive_fields": fields, "file_values": file_values(path) },
+                "basis": digest(source.as_bytes()), "verdict": Value::Null, "questions": [],
+            })));
+        }
+    }
+    // Logging lines that carry request values.
+    let mut logged = 0;
+    for (path, (_, source)) in &all {
+        for (n, line) in source.lines().enumerate() {
+            if logged >= 20 {
+                break;
+            }
+            let t = line.trim();
+            if LOG_WORDS.iter().any(|w| t.contains(w))
+                && REQUEST_WORDS.iter().any(|w| t.contains(w))
+                && seen.insert((path.clone(), n + 1))
+            {
+                logged += 1;
+                items.push((4, json!({
+                    "id": format!("logging:{path}:{}", n + 1),
+                    "kind": "logging", "file": path, "line": n + 1, "end_line": n + 1,
+                    "text": t.chars().take(160).collect::<String>(),
+                    "question": "A request-derived value is written to a log here. Decide whether it can carry newlines or control characters into the log (log injection) or private data (a credential, token, or personal detail) into a log store.",
+                    "context": {},
+                    "basis": digest(source.as_bytes()), "verdict": Value::Null, "questions": [],
+                })));
+            }
+        }
+    }
+    items.sort_by_key(|(rank, _)| *rank);
+    let mut out: Vec<Value> = items
+        .into_iter()
+        .take(MAX_AUDIT_ITEMS)
+        .map(|(_, v)| v)
+        .collect();
+    if !out.is_empty() {
+        out[0]["repository"] = json!({ "guards_defined": guard_list, "roles_and_permissions": roles_list, "models": models.iter().cloned().collect::<Vec<_>>() });
+    }
+    out
+}
+
+/// Whether a line registers a route: one of the registration words, and for
+/// the HTTP-verb words a route literal beside it, so `User.query.get(id)`
+/// and `dict.get(key)` are not registrations.
+fn is_registration(line: &str) -> bool {
+    let t = line.trim();
+    if t.starts_with("//") || t.starts_with('#') || t.starts_with('*') {
+        return false;
+    }
+    if t.contains("operationId:") || t.contains("\"operationId\"") {
+        return true;
+    }
+    let verbs = [".get(", ".post(", ".put(", ".delete(", ".patch(", ".all("];
+    let paths = ["path(", "url(", "re_path("];
+    let quoted = t.contains('\'') || t.contains('"') || t.contains('`');
+    let slashed = ["'/", "\"/", "`/", "'*", "\"*"]
+        .iter()
+        .any(|q| t.contains(q));
+    ENTRY_WORDS.iter().any(|w| {
+        t.contains(w)
+            && if verbs.contains(w) {
+                slashed
+            } else if paths.contains(w) {
+                quoted
+            } else {
+                true
+            }
+    })
+}
+
+/// Field names declared in a class body: `name = db.Column(...)`,
+/// `name: string`, `name = models.CharField(...)`.
+fn class_fields(source: &str, start: usize, end: usize) -> Vec<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out = Vec::new();
+    for line in lines.iter().take(end.min(lines.len())).skip(start) {
+        let t = line.trim_start();
+        if t.starts_with("def ")
+            || t.starts_with("async ")
+            || t.starts_with('@')
+            || t.starts_with("//")
+            || t.starts_with('#')
+            || t.starts_with("static ")
+        {
+            continue;
+        }
+        let name: String = t
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let rest = t[name.len()..].trim_start();
+        if !name.is_empty()
+            && !name.chars().next().is_some_and(|c| c.is_ascii_digit())
+            && (rest.starts_with('=') || rest.starts_with(':') || rest.starts_with('?'))
+            && !rest.starts_with("==")
+            && ![
+                "self",
+                "this",
+                "return",
+                "if",
+                "else",
+                "for",
+                "while",
+                "class",
+                "const",
+                "let",
+                "var",
+                "export",
+                "import",
+                "__tablename__",
+                "id",
+            ]
+            .contains(&name.as_str())
+            && !out.contains(&name)
+            && out.len() < 25
+        {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Identifiers in a piece of text, in order of first appearance.
+fn identifiers(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars().chain(std::iter::once(' ')) {
+        if ch.is_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            if !current.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && !out.contains(&current)
+            {
+                out.push(current.clone());
+            }
+            current.clear();
+        }
+    }
+    out
+}
+
+/// Write the worklist beside the snapshots, keeping every verdict an earlier
+/// audit left on an item whose file has not changed. Returns what the
+/// report says about it.
+fn write_audit(root: &Path, items: Vec<Value>) -> Value {
+    let path = store::root(root, "security").join("audit.json");
+    let previous: BTreeMap<String, Value> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["items"].as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            let id = item["id"].as_str()?.to_owned();
+            Some((id, item))
+        })
+        .collect();
+    let mut kept = 0usize;
+    let mut stale = 0usize;
+    let items: Vec<Value> = items
+        .into_iter()
+        .map(|mut item| {
+            if let Some(old) = item["id"].as_str().and_then(|id| previous.get(id))
+                && !old["verdict"].is_null()
+            {
+                if old["basis"] == item["basis"] {
+                    item["verdict"] = old["verdict"].clone();
+                    item["questions"] = old["questions"].clone();
+                    kept += 1;
+                } else {
+                    item["stale_verdict"] = old["verdict"].clone();
+                    stale += 1;
+                }
+            }
+            item
+        })
+        .collect();
+    let open = items.iter().filter(|i| i["verdict"].is_null()).count();
+    let with_questions = items
+        .iter()
+        .filter(|i| i["questions"].as_array().is_some_and(|q| !q.is_empty()))
+        .count();
+    let total = items.len();
+    let document = json!({
+        "version": 1,
+        "written": chrono_now(),
+        "instructions": "Each item is a question with its evidence gathered, not a finding. Read `supercov docs security-agent`. Fill `verdict` with {\"finding\": true|false, \"check\": <check id>, \"cwe\": \"CWE-n\", \"line\": n, \"evidence\": <the lines that decide it>, \"reason\": <one or two sentences>}; keep what you could not settle in `questions`. Do not edit `basis`.",
+        "items": items,
+    });
+    let _ = fs::create_dir_all(path.parent().unwrap_or(root));
+    let written = fs::write(
+        &path,
+        serde_json::to_string_pretty(&document).unwrap_or_default(),
+    );
+    json!({
+        "path": path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/"),
+        "items": total, "open": open, "verdicts_kept": kept, "verdicts_stale": stale,
+        "with_questions": with_questions,
+        "written": written.is_ok(),
+    })
+}
+
+/// The worklist as a view: open items first, then the verdicts.
+fn audit_view(root: &Path, limit: usize) -> Result<Value, String> {
+    let path = store::root(root, "security").join("audit.json");
+    let text = fs::read_to_string(&path).map_err(|_| {
+        "no audit worklist yet: run `supercov security` first, which writes one beside its snapshots"
+            .to_owned()
+    })?;
+    let document: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let items = document["items"].as_array().cloned().unwrap_or_default();
+    let open: Vec<Value> = items
+        .iter()
+        .filter(|i| i["verdict"].is_null())
+        .cloned()
+        .collect();
+    let decided: Vec<Value> = items
+        .iter()
+        .filter(|i| !i["verdict"].is_null())
+        .cloned()
+        .collect();
+    let findings = decided
+        .iter()
+        .filter(|i| i["verdict"]["finding"] == true)
+        .count();
+    let shown = if limit == 0 { usize::MAX } else { limit };
+    Ok(json!({
+        "view": "audit",
+        "path": path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/"),
+        "instructions": document["instructions"],
+        "repository": items.first().map(|i| i["repository"].clone()).unwrap_or(Value::Null),
+        "items": items.len(), "open": open.len(), "decided": decided.len(), "findings": findings,
+        "worklist": open.iter().take(shown).cloned().collect::<Vec<_>>(),
+        "verdicts": decided.iter().take(shown).cloned().collect::<Vec<_>>(),
+    }))
+}
+
+/// An agent's verdicts become the report's third tier. A finding is a line
+/// on its file at the value 1.0, marked as the agent's, with the evidence as
+/// its text. A dismissal removes the model's line findings of the same check
+/// within ten lines, and is counted.
+fn merge_verdicts(root: &Path, answers: &mut [Answers], audit: &mut Value) {
+    let path = store::root(root, "security").join("audit.json");
+    let Some(items) = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["items"].as_array().cloned())
+    else {
+        return;
+    };
+    let (mut added, mut dismissed) = (0usize, 0usize);
+    for item in items {
+        let verdict = &item["verdict"];
+        if verdict.is_null() {
+            continue;
+        }
+        let Some(file) = item["file"].as_str() else {
+            continue;
+        };
+        let Some(index) = answers.iter().position(|a| a.path == file) else {
+            continue;
+        };
+        let line = verdict["line"]
+            .as_u64()
+            .or(item["line"].as_u64())
+            .unwrap_or(0);
+        let check = verdict["check"]
+            .as_str()
+            .or(item["check"].as_str())
+            .unwrap_or("missing_authorization")
+            .to_owned();
+        if verdict["finding"] == true {
+            answers[index].lines.push(json!({
+                "line": line, "check": check, "value": 1.0,
+                "text": verdict["evidence"].as_str().unwrap_or(""),
+                "by": "agent", "cwe": verdict["cwe"], "reason": verdict["reason"],
+                "registered_at": item["registered_at"],
+            }));
+            added += 1;
+        } else {
+            let before = answers[index].lines.len();
+            answers[index].lines.retain(|l| {
+                !(l["check"] == check
+                    && l["line"].as_u64().unwrap_or(0).abs_diff(line) <= 10
+                    && l["by"] != "agent")
+            });
+            dismissed += before - answers[index].lines.len();
+        }
+    }
+    audit["agent_findings"] = json!(added);
+    audit["agent_dismissed_lines"] = json!(dismissed);
+}
+
+/// One item with its evidence inline: the item's own lines, the definition
+/// of every guard named on it, and the models it touches, so the common
+/// case is decided without opening a file.
+fn audit_item(root: &Path, id: &str) -> Result<Value, String> {
+    let path = store::root(root, "security").join("audit.json");
+    let text = fs::read_to_string(&path)
+        .map_err(|_| "no audit worklist yet: run `supercov security` first".to_owned())?;
+    let document: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let items = document["items"].as_array().cloned().unwrap_or_default();
+    let Some(item) = items.iter().find(|i| i["id"] == id).cloned() else {
+        return Err(format!(
+            "no item {id} on the worklist; `security audit` lists them"
+        ));
+    };
+    let excerpt = |file: &str, start: usize, end: usize| -> Value {
+        match read_text(&root.join(file)) {
+            Ok(source) => {
+                let lines: Vec<&str> = source.lines().collect();
+                let s = start.max(1).min(lines.len().max(1));
+                let e = end.min(lines.len()).max(s);
+                Value::String(
+                    lines[s - 1..e]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, l)| format!("{}: {}", s + i, l))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
+            Err(e) => Value::String(format!("unreadable: {e}")),
+        }
+    };
+    let file = item["file"].as_str().unwrap_or("");
+    let start = item["line"].as_u64().unwrap_or(1) as usize;
+    let end = item["end_line"].as_u64().unwrap_or(start as u64) as usize;
+    let mut view = json!({
+        "view": "audit-item",
+        "item": item,
+        "source": excerpt(file, start.saturating_sub(6).max(1), end.max(start)),
+    });
+    // Definitions the item names: guards and models, found by name in the
+    // repository's parsed files.
+    let mut named: Vec<String> = Vec::new();
+    for key in ["guards_reaching", "models_touched"] {
+        if let Some(list) = item["context"][key].as_array() {
+            named.extend(
+                list.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.split(' ').next().unwrap_or(s).to_owned()),
+            );
+        }
+    }
+    if let Some(reg) = item["registered_at"].as_object()
+        && let (Some(f), Some(l)) = (reg["file"].as_str(), reg["line"].as_u64())
+    {
+        view["registration"] =
+            json!({ "file": f, "line": l, "source": excerpt(f, l as usize, l as usize) });
+    }
+    if !named.is_empty()
+        && let Ok(found) = discover_for(root, &here(), Instrument::Security)
+    {
+        let mut definitions = Vec::new();
+        for p in found {
+            let relative = p
+                .strip_prefix(root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let Ok(source) = read_text(&p) else { continue };
+            let structure = candidates::structure(Path::new(&relative), &source);
+            for f in &structure.functions {
+                if named.contains(&f.name) && definitions.len() < 12 {
+                    definitions.push(json!({ "name": f.name, "file": relative, "line": f.start,
+                        "source": excerpt(&relative, f.start, f.end.min(f.start + 39)) }));
+                }
+            }
+        }
+        view["definitions"] = json!(definitions);
+    }
+    Ok(view)
+}
+
+/// Validate the verdicts before they merge: shape, check id, line within
+/// the file, evidence present, and whether the file changed under them.
+fn audit_check(root: &Path) -> Result<Value, String> {
+    let path = store::root(root, "security").join("audit.json");
+    let text = fs::read_to_string(&path)
+        .map_err(|_| "no audit worklist yet: run `supercov security` first".to_owned())?;
+    let document: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let items = document["items"].as_array().cloned().unwrap_or_default();
+    let ids: Vec<String> = Instrument::Security.ids();
+    let mut problems = Vec::new();
+    let (mut decided, mut findings) = (0usize, 0usize);
+    for item in &items {
+        let id = item["id"].as_str().unwrap_or("?");
+        let file = item["file"].as_str().unwrap_or("");
+        if let Ok(source) = read_text(&root.join(file))
+            && digest(source.as_bytes()) != item["basis"]
+        {
+            problems.push(json!({ "item": id, "problem": "the file changed since the worklist was written; run `supercov security` to refresh the item" }));
+        }
+        let v = &item["verdict"];
+        if v.is_null() {
+            continue;
+        }
+        decided += 1;
+        match v["finding"] {
+            Value::Bool(true) => findings += 1,
+            Value::Bool(false) => {}
+            _ => problems
+                .push(json!({ "item": id, "problem": "verdict.finding must be true or false" })),
+        }
+        if let Some(check) = v["check"].as_str() {
+            if !ids.iter().any(|i| i == check) {
+                problems.push(json!({ "item": id, "problem": format!("verdict.check `{check}` is not one of the twelve check ids") }));
+            }
+        } else if v["finding"] == true {
+            problems.push(json!({ "item": id, "problem": "a finding needs verdict.check" }));
+        }
+        if v["finding"] == true && v["cwe"].as_str().is_none_or(|c| !c.starts_with("CWE-")) {
+            problems
+                .push(json!({ "item": id, "problem": "a finding needs verdict.cwe like CWE-862" }));
+        }
+        if let Some(line) = v["line"].as_u64() {
+            let count = read_text(&root.join(file))
+                .map(|s| s.lines().count() as u64)
+                .unwrap_or(u64::MAX);
+            if line == 0 || line > count {
+                problems.push(json!({ "item": id, "problem": format!("verdict.line {line} is outside {file}") }));
+            }
+        } else if v["finding"] == true {
+            problems.push(json!({ "item": id, "problem": "a finding needs verdict.line" }));
+        }
+        if v["evidence"].as_str().is_none_or(|e| e.trim().len() < 12) {
+            problems.push(json!({ "item": id, "problem": "verdict.evidence should name the lines that decide it" }));
+        }
+    }
+    Ok(json!({
+        "view": "audit-check",
+        "items": items.len(), "decided": decided, "findings": findings,
+        "open": items.len() - decided,
+        "problems": problems,
+    }))
+}
+
+fn chrono_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs}")
 }
 
 /// What a change introduced, file by file.
@@ -1679,6 +4222,7 @@ fn run_patch(
     refresh: bool,
     all: bool,
     key: Option<&str>,
+    instrument: Instrument,
 ) -> Result<(Value, bool), String> {
     require_key(key)?;
     let collected = changes::collect(root, range, paths)?;
@@ -1728,11 +4272,11 @@ fn run_patch(
         }
         // Both whole versions are the validated question. When they do not fit,
         // the patch alone is asked instead and the report says so.
-        let whole = catalog::change_request(&change.before, &change.after);
+        let whole = instrument.change_request(&change.before, &change.after);
         let (request, note) = match within_budget(&whole) {
             Ok(Some(_)) => (whole, None),
             _ if !change.patch.is_empty() => (
-                catalog::patch_request(&change.patch),
+                instrument.patch_request(&change.patch),
                 Some("unified diff only: both versions exceed the request budget".to_owned()),
             ),
             _ => (whole, None),
@@ -1749,15 +4293,15 @@ fn run_patch(
         .filter_map(|c| changes::first_added_line(&c.patch).map(|l| (c.path.clone(), l)))
         .collect();
     let count = subjects.len();
-    let (answers, usage, reused) = ask_smells(root, key, refresh, subjects, count > 4);
+    let (answers, usage, reused) = ask_smells(root, instrument, key, refresh, subjects, count > 4);
     let mut introduced = 0usize;
     let files: Vec<Value> = answers
         .iter()
         .map(|answer| {
-            let mut value = scored(answer);
+            let mut value = scored(answer, instrument);
             value["line"] = json!(anchors.get(&answer.path));
             if let Some(values) = &answer.values {
-                let fired = catalog::present(values);
+                let fired = present_for(values, instrument);
                 introduced += fired.len();
                 // Health is a property of a file, not of a change; what a review
                 // reports is which properties appeared.
@@ -1776,12 +4320,35 @@ fn run_patch(
             .then_with(|| a["path"].as_str().cmp(&b["path"].as_str()))
     });
     let failed = ordered.iter().any(|f| f["status"] == "failed");
+    // The audit items a change touches: each needs its verdict re-checked
+    // by the agent, and nothing else on the worklist does.
+    let touched_audit: Vec<Value> = if instrument == Instrument::Security {
+        let changed: BTreeSet<&str> = collected.iter().map(|c| c.path.as_str()).collect();
+        fs::read_to_string(store::root(root, "security").join("audit.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v["items"].as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item["file"].as_str().is_some_and(|f| changed.contains(f)))
+            .map(|item| {
+                json!({ "id": item["id"], "file": item["file"], "line": item["line"],
+                "kind": item["kind"], "decided": !item["verdict"].is_null(),
+                "stale": read_text(&root.join(item["file"].as_str().unwrap_or("")))
+                    .map(|s| digest(s.as_bytes()) != item["basis"]).unwrap_or(true) })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok((
         json!({
-            "catalog_version": catalog::CATALOG_VERSION,
+            "instrument": instrument.name(),
+            "catalog_version": instrument.version(),
             "model": MODEL,
-            "catalog": catalog::described(),
+            "catalog": instrument.described(),
             "scope": scope.summary(),
+            "audit_items_touched": touched_audit,
             "range": range.id(),
             "range_description": range.describe(),
             "head": changes::head(root),
@@ -1875,6 +4442,22 @@ fn human_quality(report: &Value) -> String {
             resolved["does_not"].as_u64().unwrap_or(0)
         ));
     }
+    if let Some(audit) = report["audit"].as_object() {
+        out.push_str(&format!(
+            "  Audit worklist: {} items for your agent, {} open{}{}, at {}: `security audit`, and `docs security-agent` for the instructions.\n",
+            audit["items"].as_u64().unwrap_or(0),
+            audit["open"].as_u64().unwrap_or(0),
+            match audit["agent_findings"].as_u64() {
+                Some(n) if n > 0 => format!(", {n} agent findings merged"),
+                _ => String::new(),
+            },
+            match audit["with_questions"].as_u64() {
+                Some(n) if n > 0 => format!(", {n} your agent could not settle"),
+                _ => String::new(),
+            },
+            audit["path"].as_str().unwrap_or("")
+        ));
+    }
     if let Some(limitation) = report["limitation"].as_str() {
         out.push_str(&format!("\n{limitation}\n"));
     }
@@ -1936,6 +4519,202 @@ fn human_quality(report: &Value) -> String {
     out
 }
 
+/// The security report as text: no number, the flagged files first, each with
+/// what fired and, when a run was crossed in, whether tests reach it.
+fn human_security(report: &Value) -> String {
+    let empty = Vec::new();
+    let mut out = String::new();
+    let files = report["files"].as_array().unwrap_or(&empty);
+    let counts = &report["counts"];
+    let assessed = counts["assessed"].as_u64().unwrap_or(0);
+    let flagged = counts["flagged"].as_u64().unwrap_or(0);
+    out.push_str(&format!(
+        "Security: {flagged} of {assessed} files flagged, {} clean{}.\n",
+        assessed.saturating_sub(flagged),
+        match counts["line_confirmed"].as_u64() {
+            Some(n) if flagged > 0 => format!("; {n} confirmed at a line"),
+            _ => String::new(),
+        }
+    ));
+    if let Some(by_check) = report["by_check"].as_object()
+        && !by_check.is_empty()
+    {
+        let mut pairs: Vec<(&String, u64)> = by_check
+            .iter()
+            .map(|(check, n)| (check, n.as_u64().unwrap_or(0)))
+            .collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let named: Vec<String> = pairs.iter().map(|(c, n)| format!("{c} {n}")).collect();
+        out.push_str(&format!("  {}\n", named.join(", ")));
+    }
+    if let Some(run) = report["run"].as_str() {
+        out.push_str(&format!(
+            "  {} flagged files have lines no test in run {run} executed",
+            report["flagged_in_untested_code"].as_u64().unwrap_or(0)
+        ));
+        match report["flagged_executed_unasserted"].as_u64() {
+            Some(n) => out.push_str(&format!(
+                "; {n} are executed by tests that no assertion is credited with.\n"
+            )),
+            None => out.push_str(".\n"),
+        }
+    }
+    if let Some(limitation) = report["limitation"].as_str() {
+        out.push_str(&format!("\n{limitation}\n"));
+    }
+    out.push_str(&format!(
+        "Catalog {}, model {}, snapshot {}.\nEach line is a judgment you can check against the file. \
+         Nothing is averaged; the value is the model's, the evidence is measured.\n\n",
+        report["catalog_version"].as_str().unwrap_or("?"),
+        report["model"].as_str().unwrap_or("?"),
+        report["id"].as_str().unwrap_or("?")
+    ));
+    let shown: Vec<&Value> = files
+        .iter()
+        .filter(|f| f["present"].as_array().is_some_and(|p| !p.is_empty()))
+        .take(10)
+        .collect();
+    if !shown.is_empty() {
+        out.push_str("Flagged:\n");
+    }
+    for file in &shown {
+        out.push_str(&format!("  {}\n", file["path"].as_str().unwrap_or("?")));
+        for finding in file["present"].as_array().unwrap_or(&empty) {
+            out.push_str(&format!(
+                "    {:.2}  {}{}\n",
+                finding["value"].as_f64().unwrap_or(0.0),
+                finding["check"].as_str().unwrap_or("?"),
+                if finding["tier"] == "line" {
+                    ""
+                } else {
+                    "  (file-level only)"
+                }
+            ));
+            for line in finding["lines"].as_array().unwrap_or(&empty).iter().take(3) {
+                out.push_str(&format!(
+                    "          line {}  {:.2}  {}{}\n",
+                    line["line"].as_u64().unwrap_or(0),
+                    line["value"].as_f64().unwrap_or(0.0),
+                    line["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(70)
+                        .collect::<String>(),
+                    match line["enters_at"].as_u64() {
+                        Some(n) => format!("  (enters at line {n})"),
+                        None => String::new(),
+                    } + &if line["by"] == "agent" {
+                        match (
+                            line["registered_at"]["file"].as_str(),
+                            line["registered_at"]["line"].as_u64(),
+                        ) {
+                            (Some(f), Some(l)) => format!("  [agent; registered at {f}:{l}]"),
+                            _ => "  [agent]".to_owned(),
+                        }
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+        }
+        if file["flagged_and_untested"] == true {
+            out.push_str(&format!(
+                "    and {} of its measured lines are not covered by the run\n",
+                file["coverage"]["uncovered_lines"].as_u64().unwrap_or(0)
+            ));
+        } else if file["coverage"]["in_run"] == false {
+            out.push_str("    the run did not measure this file\n");
+        }
+        for handler in file["handlers"].as_array().unwrap_or(&empty) {
+            let without = handler["tests_without"].as_u64().unwrap_or(0);
+            let with = handler["tests_with_a_guard"].as_u64().unwrap_or(0);
+            if without > 0 {
+                out.push_str(&format!(
+                    "    {} (line {}) ran under {without} test{} with no guard running{}\n",
+                    handler["function"].as_str().unwrap_or("?"),
+                    handler["line"].as_u64().unwrap_or(0),
+                    if without == 1 { "" } else { "s" },
+                    if with > 0 {
+                        format!(", and under {with} with one")
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+        }
+        if file["flagged_and_unasserted"] == true {
+            out.push_str(
+                "    executed by tests, but no assertion is credited with any line of it\n",
+            );
+        } else if let Some(credited) = file["assertions"]["lines_credited"].as_u64() {
+            out.push_str(&format!(
+                "    {credited} of its lines are credited to assertions\n"
+            ));
+            for finding in file["present"].as_array().unwrap_or(&empty) {
+                for line in finding["lines"].as_array().unwrap_or(&empty) {
+                    match line["asserted"].as_str() {
+                        Some("exercised") => out.push_str(&format!(
+                            "    line {}: proven reachable by a test that asserts it happens: {}\n",
+                            line["line"].as_u64().unwrap_or(0),
+                            line["asserted_by"].as_str().unwrap_or("")
+                        )),
+                        Some("prevented") => out.push_str(&format!(
+                            "    line {}: a test asserts it is prevented: {}\n",
+                            line["line"].as_u64().unwrap_or(0),
+                            line["asserted_by"].as_str().unwrap_or("")
+                        )),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    if flagged as usize > shown.len() {
+        out.push_str(&format!(
+            "  ... and {} more\n",
+            flagged as usize - shown.len()
+        ));
+    }
+    let paths = report["paths"].as_array().unwrap_or(&empty);
+    if !paths.is_empty() {
+        out.push_str(&format!("\nCross-file paths confirmed: {}\n", paths.len()));
+        for path in paths.iter().take(10) {
+            out.push_str(&format!(
+                "  {:.2}  {}{}  {}:{} {} -> {}:{} {}\n",
+                path["value"].as_f64().unwrap_or(0.0),
+                path["check"].as_str().unwrap_or("?"),
+                if path["via"] == "run" {
+                    " (observed in a test)"
+                } else {
+                    ""
+                },
+                path["caller"]["file"].as_str().unwrap_or("?"),
+                path["caller"]["line"].as_u64().unwrap_or(0),
+                path["caller"]["function"].as_str().unwrap_or("?"),
+                path["callee"]["file"].as_str().unwrap_or("?"),
+                path["callee"]["line"].as_u64().unwrap_or(0),
+                path["callee"]["function"].as_str().unwrap_or("?"),
+            ));
+        }
+    }
+    let failed: Vec<&Value> = files.iter().filter(|f| f["status"] == "failed").collect();
+    for file in failed.iter().take(5) {
+        out.push_str(&format!(
+            "  error  {}  ({})\n",
+            file["path"].as_str().unwrap_or("?"),
+            file["error"].as_str().unwrap_or("unknown error")
+        ));
+    }
+    if failed.len() > 5 {
+        out.push_str(&format!("  ... and {} more errors\n", failed.len() - 5));
+    }
+    out.push_str(
+        "\nNarrow with `security gaps`, read one with `security file <path>`,\nor ask what a change introduced with `security patch --base origin/main`.\n",
+    );
+    out
+}
+
 fn human_patch(report: &Value, limit: usize) -> String {
     let empty = Vec::new();
     let mut out = String::new();
@@ -1954,6 +4733,35 @@ fn human_patch(report: &Value, limit: usize) -> String {
         out.push_str(&format!(
             "Nothing introduced across {reviewed} changed files.\n"
         ));
+    }
+    if let Some(touched) = report["audit_items_touched"].as_array()
+        && !touched.is_empty()
+    {
+        let stale = touched
+            .iter()
+            .filter(|t| t["stale"] == true && t["decided"] == true)
+            .count();
+        out.push_str(&format!(
+            "This change touches {} audit items{}; run `supercov security` to refresh them, then `security audit` for your agent.\n",
+            touched.len(),
+            if stale > 0 { format!(", {stale} with verdicts the change invalidates") } else { String::new() }
+        ));
+        for t in touched.iter().take(12) {
+            out.push_str(&format!(
+                "  {:10} {}:{}{}\n",
+                t["kind"].as_str().unwrap_or(""),
+                t["file"].as_str().unwrap_or(""),
+                t["line"].as_u64().unwrap_or(0),
+                if t["stale"] == true && t["decided"] == true {
+                    "  (verdict invalidated)"
+                } else if t["decided"] == true {
+                    "  (verdict stands)"
+                } else {
+                    ""
+                }
+            ));
+        }
+        out.push('\n');
     }
     let files = report["files"].as_array().unwrap_or(&empty);
     let shown = if limit == 0 { files.len() } else { limit };
@@ -2014,10 +4822,62 @@ fn human_patch(report: &Value, limit: usize) -> String {
 /// Coverage is read from a run that already happened. This never starts one,
 /// and nothing about quality is added to a run's own output, because an
 /// assessment costs money and needs a credential.
-fn cross_with_coverage(report: &mut Value, selector: &str) -> Result<(), String> {
+fn cross_with_coverage(
+    report: &mut Value,
+    selector: &str,
+    file_flag: &str,
+    total_key: &str,
+) -> Result<(), String> {
     let selector = (selector != "latest").then_some(selector);
     let view = crate::load_run_view(selector)?;
+    // Assertion credit is the third shelf, and only the security view asks
+    // for it: a change review already says what appeared and where tests do
+    // not go. A run with no assertion map leaves every file on the second.
+    let asserted = (file_flag == "flagged_and_untested")
+        .then(|| crate::load_asserted_lines(selector).unwrap_or_default());
+    // What each credited flow establishes, asked once of the map's text. A
+    // line credited by a flow that asserts prevention is close to handled; a
+    // line credited by one that asserts the operation ran is proven reachable.
+    let verdicts: BTreeMap<(String, u64), (String, String)> = asserted
+        .as_ref()
+        .filter(|a| !a.is_empty())
+        .and_then(|_| crate::load_credited_flows(selector).ok())
+        .filter(|flows| !flows.is_empty())
+        .map(|flows| {
+            let key = std::env::var("TYPESAFE_API_KEY").ok();
+            let request = catalog::security::flow_request(&flows);
+            let mut out = BTreeMap::new();
+            if let Ok(Some(bytes)) = within_budget(&request)
+                && let Ok(root) = std::env::current_dir()
+            {
+                let agent = client();
+                let answered = answer_all(
+                    &root,
+                    "security",
+                    &agent,
+                    key.as_deref(),
+                    false,
+                    &[((0, None), request, bytes)],
+                    false,
+                );
+                if let Some(Ok((_, entry, _, _))) = answered.into_values().next() {
+                    for (i, flow) in flows.iter().enumerate() {
+                        if let Some(verdict) = choice(&entry.response, &format!("w{i}")) {
+                            for (file, line) in &flow.lines {
+                                out.insert(
+                                    (file.clone(), *line),
+                                    (verdict.clone(), flow.assertion.clone()),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        })
+        .unwrap_or_default();
     let mut both = 0usize;
+    let mut unasserted = 0usize;
     let empty = Vec::new();
     let files = report["files"].as_array().cloned().unwrap_or(empty);
     let crossed: Vec<Value> = files
@@ -2039,7 +4899,34 @@ fn cross_with_coverage(report: &mut Value, selector: &str) -> Result<(), String>
                     });
                     if introduced && uncovered > 0 {
                         both += 1;
-                        file["untested_and_changed"] = json!(true);
+                        file[file_flag] = json!(true);
+                    }
+                    if let Some(asserted) = &asserted
+                        && introduced
+                        && measured.measured_lines.len() > uncovered
+                    {
+                        let credited = asserted.get(&path).map_or(0, |lines| lines.len());
+                        file["assertions"] = json!({ "lines_credited": credited });
+                        if credited == 0 {
+                            unasserted += 1;
+                            file["flagged_and_unasserted"] = json!(true);
+                        }
+                        // Per confirmed line: what the crediting assertion establishes.
+                        if let Some(present) = file["present"].as_array_mut() {
+                            for finding in present {
+                                if let Some(lines) = finding["lines"].as_array_mut() {
+                                    for line in lines {
+                                        let number = line["line"].as_u64().unwrap_or(0);
+                                        if let Some((verdict, assertion)) =
+                                            verdicts.get(&(path.clone(), number))
+                                        {
+                                            line["asserted"] = json!(verdict);
+                                            line["asserted_by"] = json!(assertion);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 None => {
@@ -2055,7 +4942,10 @@ fn cross_with_coverage(report: &mut Value, selector: &str) -> Result<(), String>
     report["run"] = json!(view.run);
     report["run_stale"] = json!(view.stale);
     report["files"] = json!(crossed);
-    report["introduced_in_untested_code"] = json!(both);
+    report[total_key] = json!(both);
+    if asserted.is_some() {
+        report["flagged_executed_unasserted"] = json!(unasserted);
+    }
     Ok(())
 }
 
@@ -2108,21 +4998,40 @@ fn present(view: Value, json: bool) -> Result<bool, String> {
 }
 
 pub fn command(arguments: Vec<String>) -> ExitCode {
+    dispatch(arguments, Instrument::Catalog)
+}
+
+/// `supercov security`: the same grammar as `quality`, the security catalog,
+/// its own lane under `.supercov/`, and no number.
+pub fn security_command(arguments: Vec<String>) -> ExitCode {
+    dispatch(arguments, Instrument::Security)
+}
+
+fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
     if arguments.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print!("{HELP}");
+        print!(
+            "{}",
+            match instrument {
+                Instrument::Catalog => HELP,
+                Instrument::Security => HELP_SECURITY,
+            }
+        );
         return ExitCode::SUCCESS;
     }
+    let lane = instrument.lane();
     let result = (|| -> Result<bool, String> {
         let root = std::env::current_dir()
             .and_then(|p| p.canonicalize())
             .map_err(|e| e.to_string())?;
         match parse(arguments)? {
-            Command::Snapshots { json, limit } => present(query::snapshots(&root, limit)?, json),
+            Command::Snapshots { json, limit } => {
+                present(query::snapshots(&root, lane, limit)?, json)
+            }
             Command::Gaps {
                 snapshot,
                 json,
                 limit,
-            } => present(query::gaps(&root, snapshot.as_deref(), limit)?, json),
+            } => present(query::gaps(&root, lane, snapshot.as_deref(), limit)?, json),
             Command::Scope { json, limit } => {
                 let found = discover(&root, &here())?;
                 let configured = scope::configured_roots();
@@ -2145,32 +5054,56 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
                     json,
                 )
             }
+            Command::Audit {
+                json,
+                limit,
+                target,
+            } => match target.as_deref() {
+                None => present(audit_view(&root, limit)?, json),
+                Some("check") => {
+                    let view = audit_check(&root)?;
+                    let problems = view["problems"].as_array().map_or(0, Vec::len);
+                    present(view, json)?;
+                    Ok(problems == 0)
+                }
+                Some(id) => present(audit_item(&root, id)?, json),
+            },
             Command::Show {
                 snapshot,
                 json,
                 limit,
-            } => present(query::show(&root, snapshot.as_deref(), limit)?, json),
+            } => present(query::show(&root, lane, snapshot.as_deref(), limit)?, json),
             Command::File {
                 path,
                 snapshot,
                 json,
-            } => present(query::file(&root, &path, snapshot.as_deref())?, json),
+            } => present(query::file(&root, lane, &path, snapshot.as_deref())?, json),
             Command::Diff {
                 from,
                 to,
                 json,
                 limit,
-            } => present(query::diff(&root, &from, &to, limit)?, json),
+            } => present(query::diff(&root, lane, &from, &to, limit)?, json),
             Command::Health(options) => {
                 let key = std::env::var("TYPESAFE_API_KEY").ok();
-                let (report, failed) = run_health(&root, &options, key.as_deref())?;
+                let (mut report, failed) = run_health(&root, &options, key.as_deref(), instrument)?;
+                if let Some(selector) = options.run.as_deref().filter(|_| !options.dry_run) {
+                    cross_with_coverage(
+                        &mut report,
+                        selector,
+                        "flagged_and_untested",
+                        "flagged_in_untested_code",
+                    )?;
+                }
                 if options.json || options.dry_run {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
                     );
-                } else {
+                } else if instrument.scores() {
                     print!("{}", human_quality(&report));
+                } else {
+                    print!("{}", human_security(&report));
                 }
                 Ok(failed)
             }
@@ -2186,13 +5119,27 @@ pub fn command(arguments: Vec<String>) -> ExitCode {
             } => {
                 let key = std::env::var("TYPESAFE_API_KEY").ok();
                 if !changes::is_repository(&root) {
-                    return Err("quality patch needs a Git repository; run it inside one".into());
+                    return Err(format!(
+                        "{lane} patch needs a Git repository; run it inside one"
+                    ));
                 }
                 let range = range.unwrap_or_else(|| changes::automatic(&root));
-                let (mut report, failed) =
-                    run_patch(&root, &range, &paths, refresh, all, key.as_deref())?;
+                let (mut report, failed) = run_patch(
+                    &root,
+                    &range,
+                    &paths,
+                    refresh,
+                    all,
+                    key.as_deref(),
+                    instrument,
+                )?;
                 if let Some(selector) = run.as_deref() {
-                    cross_with_coverage(&mut report, selector)?;
+                    cross_with_coverage(
+                        &mut report,
+                        selector,
+                        "untested_and_changed",
+                        "introduced_in_untested_code",
+                    )?;
                 }
                 if json {
                     println!(

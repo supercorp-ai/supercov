@@ -21,6 +21,16 @@ Measure code quality with npx supercov.
 
 See [Understanding quality](https://supercov.com/docs/quality).
 
+For security surface with the same key, ask:
+
+```text supercov-prompt
+Read npx supercov docs security-agent. Run npx supercov security, work the audit worklist, and show me the findings.
+```
+
+Supercov finds what one file shows on its own, cheaply and for every file,
+and writes a worklist of what it cannot settle from one file for your agent
+to finish. See [Security surface](https://supercov.com/docs/security).
+
 When it finishes, review the test change and coverage comparison in your
 conversation. Ask separately if you want a commit or pull request.
 
