@@ -4383,6 +4383,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_timings_line_reports_publication_and_the_whole_command() {
+        let timings = supercov_engine::run_store::RunTimings {
+            initialization_ms: 1.0,
+            workspace_preparation_ms: 2.0,
+            adapter_setup_ms: 3.0,
+            instrumented_build_ms: 4.0,
+            test_command_ms: 5.0,
+            evidence_publication_ms: 6.0,
+        };
+        // Published: the command ran 30 ms, 21 of them before the engine's
+        // clock stopped, so publication took the other 9 and total is 30.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, Some(30.0)),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms publication=9ms total=30ms"
+        );
+        // A clock that reads a hair under the engine's never reports negative
+        // publication or a total below what the engine measured.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, Some(20.9)),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms publication=0ms total=21ms"
+        );
+        // Interrupted: nothing was published, and the line says only that.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, None),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms total=21ms"
+        );
+    }
+
+    #[test]
     fn shell_reports_the_public_engine() {
         assert!(HELP.contains("Code quality and coverage for coding agents"));
         assert!(HELP.contains("full test command"));

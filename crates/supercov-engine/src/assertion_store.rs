@@ -1588,6 +1588,75 @@ mod tests {
     }
     use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
 
+    /// Publication writes the summary `runs latest` shows from the coverage it
+    /// analysed; a query that computes it from the evidence must arrive at the
+    /// same cache, byte for byte.
+    #[test]
+    fn the_summary_written_at_publication_is_the_one_a_query_computes() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-summary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("src/app.js"),
+            "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/app.test.js"),
+            "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n",
+        )
+        .unwrap();
+        let inputs = crate::assertion_inputs::capture(
+            &root,
+            "python",
+            ["src/app.js".into(), "tests/app.test.js".into()],
+        )
+        .unwrap();
+        let directory = crate::run_store::create_analyzable_test_run(&root, "first");
+        let path = directory.join("evidence.raw.gz");
+        let entries =
+            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let archive = write_archive(entries, &path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence.files = archive.files;
+        metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let run = discover_runs(&root).unwrap().runs.remove(0);
+        let analysed = crate::run_store::analyze_stored_run(&run).unwrap();
+        // The one analysis publication makes is the one the assertion store
+        // made for itself, but for the run's integrity record, which neither
+        // the summary nor the execution record reads.
+        let mut own = coverage(&run).unwrap();
+        for (view, published) in [
+            (&mut own.view, &analysed.view),
+            (&mut own.filters.passed, &analysed.filters.passed),
+            (&mut own.filters.failed, &analysed.filters.failed),
+        ] {
+            assert!(view.integrity.is_none() && published.integrity.is_some());
+            view.integrity = published.integrity.clone();
+        }
+        assert_eq!(own, analysed);
+        prepare_publication(&root, &directory, &metadata, Some(&analysed)).unwrap();
+        let cache = directory.join(SUMMARY_CACHE_FILE);
+        let written = fs::read(&cache).expect("publication wrote the summary");
+        let summary = report_summary(&root, &run).unwrap();
+        fs::remove_file(&cache).unwrap();
+        let computed = report_summary(&root, &run).unwrap();
+        assert_eq!(fs::read(&cache).unwrap(), written, "the same cache");
+        assert_eq!(summary, computed, "and the same summary");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Publish one run over a two-function file whose test ran one of them,
     /// then ask which tests each edit affects.
     #[test]
