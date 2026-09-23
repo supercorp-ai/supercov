@@ -146,3 +146,109 @@ assert result.returncode == 0, result.stderr
 assert result.stdout == result.stderr == b''
 ''', root, env)
 `));
+
+test('imports and dynamic compile preserve caller future flags on cold and warm caches', { skip }, () => run(fixture + `
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    annotated = 'def f(value: int) -> bool: return True\\n'
+    # Exercise planned imports, explicit loaders, and planned/unplanned compile.
+    for name in ['ordinary', 'explicit', 'dynamic']:
+        (root / (name + '.py')).write_text(annotated)
+    (root / 'future.py').write_text('from __future__ import annotations\\n' + annotated)
+    driver = r'''import __future__, ast, json, pathlib
+import ordinary, future
+from importlib.machinery import SourceFileLoader
+explicit = {}; exec(SourceFileLoader('explicit', 'explicit.py').get_code('explicit'), explicit)
+values = [ordinary.f.__annotations__, future.f.__annotations__, explicit['f'].__annotations__]
+source = pathlib.Path('dynamic.py').read_text()
+for filename in ['<dynamic>', str(pathlib.Path('dynamic.py').resolve())]:
+    for prefix in ['', 'from __future__ import annotations\\n']:
+        for flags, dont_inherit in [(0, False), (0, True), (__future__.annotations.compiler_flag, True)]:
+            caller = prefix + 'code = compile(source, filename, "exec", flags, dont_inherit)'
+            ns = dict(source=source, filename=filename, flags=flags, dont_inherit=dont_inherit)
+            exec(compile(caller, '<caller>', 'exec', dont_inherit=True), ns)
+            result = {}; exec(ns['code'], result)
+            values.append(result['f'].__annotations__)
+    # AST inputs and compile's eval mode must retain normal behavior too.
+    result = {}; exec(compile(ast.parse(source), filename, 'exec'), result)
+    values.append(result['f'].__annotations__)
+assert eval(compile('1 + 2', '<eval>', 'eval')) == 3
+# A second future flag catches implementations that only handle annotations.
+ns = {}; exec(compile('from __future__ import barry_as_FLUFL\\nresult = eval(compile("1 <> 2", "<eval>", "eval"))', '<barry>', 'exec'), ns)
+assert ns['result'] is True
+print(json.dumps(values, default=repr, sort_keys=True))
+'''
+    # Escape sequences above are part of the child program, not this launcher.
+    plain = {k:v for k,v in os.environ.items() if not k.startswith('SUPERCOV_') and k != 'PYTHONPATH'}
+    plan = root / 'plan.json'
+    plan.write_text(json.dumps({'version':1,'root':str(root),'files':{name + '.py':{} for name in ['ordinary','future','explicit','dynamic']}}))
+    env = dict(plain, PYTHONPATH=sys.argv[1], SUPERCOV_PYTHON_PLAN=str(plan), SUPERCOV_RUN_ID='annotations', SUPERCOV_PYTHON_EVIDENCE_DIR=str(root / 'evidence'))
+    expected = child(driver, root, plain)
+    for _ in range(2): assert child(driver, root, env) == expected
+`));
+
+test('compiled caches replay per-obligation limitations and recover from malformed entries', { skip }, () => run(fixture + `
+if sys.version_info < (3,11): sys.exit(0)
+source = 'try:\\n    raise ExceptionGroup("g", [ValueError()])\\nexcept* ValueError:\\n    pass\\nexcept* TypeError:\\n    pass\\n'
+plan = {'tries': [{'body': [[2,4],[2,46]], 'handlers': [{'selected':h+':selected','missed':h+':missed','bare':False} for h in ['value','type']], 'success':'try:success','raised':'try:raised'}]}
+fp = probes.FileProbes('sample.py', plan, probes.SLOT_HEADER); fp._finish()
+with tempfile.TemporaryDirectory() as cache:
+    reports = []
+    def compile_once():
+        reports.clear()
+        probing = probes.Probing({}, lambda path: None, cache)
+        probing.report = lambda *item: reports.append(item)
+        return probing.compile(source, 'sample.py', fp)
+    cold = compile_once(); expected = list(reports)
+    assert [item[3] for item in expected] == ['value', 'type'], expected
+    # Verify an actual cache hit, not an accidental successful recompilation.
+    original = probes.instrument
+    probes.instrument = lambda *args: (_ for _ in ()).throw(AssertionError('warm cache transformed source'))
+    warm = compile_once()
+    assert cold.co_code == warm.co_code and reports == expected
+    probes.instrument = original
+    import marshal
+    for invalid in [b'truncated', marshal.dumps((None, [])), marshal.dumps((cold, [('bad',)]))]:
+        for path in pathlib.Path(cache).glob('*.pyc'): path.write_bytes(invalid)
+        compile_once()
+        assert reports == expected
+`));
+
+test('shared compiled caches respect child interpreter optimization levels', { skip }, () => run(fixture + `
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    (root / 'optimized.py').write_text('"module doc"\\nflag = __debug__\\ndef f():\\n    assert False\\n    return 1\\n')
+    plan = root / 'plan.json'
+    plan.write_text(json.dumps({'version':1,'root':str(root),'files':{'optimized.py':{}}}))
+    plain = {k:v for k,v in os.environ.items() if not k.startswith('SUPERCOV_') and k != 'PYTHONPATH'}
+    env = dict(plain, PYTHONPATH=sys.argv[1], SUPERCOV_PYTHON_PLAN=str(plan), SUPERCOV_RUN_ID='optimization', SUPERCOV_PYTHON_EVIDENCE_DIR=str(root / 'evidence'))
+    driver = '''import json, optimized
+try: result = optimized.f()
+except AssertionError: result = 'assertion'
+print(json.dumps([optimized.flag, optimized.__doc__, result]))
+'''
+    for options in [[], ['-O'], ['-OO'], [], ['-OO'], ['-O']]:
+        command = [sys.executable, *options, '-c', driver]
+        baseline = subprocess.run(command, cwd=root, env=plain, capture_output=True)
+        measured = subprocess.run(command, cwd=root, env=env, capture_output=True)
+        assert baseline.returncode == measured.returncode == 0, (baseline.stderr, measured.stderr)
+        assert (measured.stdout, measured.stderr) == (baseline.stdout, baseline.stderr), (options, baseline.stdout, measured.stdout)
+`));
+
+test('compiled cache preserves source encoding and traceback filenames', { skip }, () => run(fixture + `
+with tempfile.TemporaryDirectory() as cache:
+    probing = probes.Probing({}, lambda path: None, cache)
+    sites = probes.SiteProbes('sample.py', [])
+    source = '# coding: latin-1\\nvalue = "é"\\ndef f(): return value\\n'
+    # The bytes have the same digest input as UTF-8-encoded str, but their
+    # encoding cookie changes what Python evaluates. Relative and absolute
+    # loader paths must also retain their respective traceback filenames.
+    for value in [source, source.encode('utf-8'), source]:
+        for filename in ['sample.py', str(pathlib.Path(cache) / 'sample.py'), 'sample.py']:
+            expected = probes._original_compile(value, filename, 'exec', dont_inherit=True)
+            actual = probing.compile(value, filename, sites)
+            plain = {}; measured = {}; exec(expected, plain); exec(actual, measured)
+            assert measured['value'] == plain['value']
+            assert actual.co_filename == expected.co_filename
+            assert measured['f'].__code__.co_filename == plain['f'].__code__.co_filename
+`));

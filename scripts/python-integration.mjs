@@ -688,6 +688,20 @@ try {
     if (hasExceptStar) expected['app/grouped.py'] = 2;
     if (detects) expected['app/shapes.py'] = 1;
     assert.deepEqual(limited, expected, 'each declared limitation is named once, on its file');
+    // The next run reuses compiled modules. Its denominator and limitation
+    // records must be identical even though no AST transformation runs.
+    successfulSupercov(
+      declared,
+      ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests/test_declared.py'],
+      declaredEnvironment,
+    );
+    const warmLimited = Object.fromEntries(
+      query(declared, ['runs', 'latest', 'files', '--limit', '50'], declaredEnvironment)
+        .files.filter((file) => file.measurementLimitations > 0)
+        .map((file) => [file.file, file.measurementLimitations]),
+    );
+    assert.deepEqual(warmLimited, expected, 'cached modules retain every measurement limitation');
+    assert.equal(query(declared, ['runs', 'latest'], declaredEnvironment).measurement.complete, false);
     if (detects) {
       const files = query(declared, ['runs', 'latest', 'files', '--limit', '50'], declaredEnvironment).files;
       const detail = query(declared, ['runs', 'latest', 'file', 'app/shapes.py'], declaredEnvironment);

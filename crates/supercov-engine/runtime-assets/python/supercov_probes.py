@@ -29,6 +29,7 @@ Stdlib only, CPython 3.9 or newer.
 
 from __future__ import annotations
 
+import __future__
 import ast
 import builtins
 from collections.abc import Mapping, Sequence
@@ -38,14 +39,16 @@ import importlib.abc
 import importlib.machinery
 import importlib.util
 import marshal
+import operator
 import os
 import py_compile
 import struct
 import sys
 import tempfile
+from types import CodeType
 from typing import Callable
 
-PROBE_VERSION = 3
+PROBE_VERSION = 4
 # A context's hit array is a slot file mapped into memory. Its first bytes
 # name the context for the reader, so obligations are numbered from here.
 SLOT_HEADER = 16
@@ -925,7 +928,7 @@ def instrument_sites(tree: ast.Module, sites: SiteProbes, alias: str) -> None:
     walk(tree.body)
 
 
-def instrument(tree: ast.Module, probes) -> ast.Module:
+def instrument(tree: ast.Module, probes, report=None) -> ast.Module:
     """Insert the plan's probes into a parsed module, in place."""
     if isinstance(probes, SiteProbes):
         alias = choose_alias(tree, "s")
@@ -945,9 +948,9 @@ def instrument(tree: ast.Module, probes) -> ast.Module:
     inserter = _Inserter(probes, names)
     inserter.visit(tree)
     _import_aliases(tree, names)
-    if inserter.limitations and _probing is not None:
+    if report is not None:
         for limitation in inserter.limitations:
-            _probing.report(*limitation)
+            report(*limitation)
     return tree
 
 
@@ -1028,20 +1031,27 @@ class Probing:
         relative = self.relative_for(filename)
         return None if relative is None else self.sites.get(relative)
 
-    def compile(self, source: bytes | str | ast.AST, filename: str, probes, *, flags: int = 0, dont_inherit: bool = False, optimize: int = -1):
+    def compile(self, source: bytes | str | ast.AST, filename: str, probes, *, flags: int = 0, optimize: int = -1):
         """Probed code for `source`, from the cache when it has been seen.
 
-        The key is the source, the file's numbered obligations and the
-        interpreter's cache tag: a file that changed, a plan that renumbered,
-        or a different interpreter each compile afresh.
+        The key includes the source type, filename, effective compiler flags,
+        numbered obligations and interpreter tag. Cached code must preserve
+        encoding, traceback filenames, futures and optimization semantics.
         """
+        # -1 means this interpreter's optimization level, which can differ
+        # between parent and child processes sharing the same cache.
+        optimize = operator.index(optimize)
+        if optimize == -1:
+            optimize = sys.flags.optimize
         cached_path = None
         if self.cache_directory is not None and isinstance(source, (bytes, str)):
             text = source if isinstance(source, bytes) else source.encode("utf-8")
             key = hashlib.sha256(
                 b"\0".join(
                     [
+                        b"bytes" if isinstance(source, bytes) else b"str",
                         text,
+                        filename.encode("utf-8", "surrogatepass"),
                         probes.digest.encode("ascii"),
                         sys.implementation.cache_tag.encode("ascii"),
                         str((flags, optimize)).encode("ascii"),
@@ -1051,19 +1061,34 @@ class Probing:
             cached_path = os.path.join(self.cache_directory, f"{key}.pyc")
             try:
                 with open(cached_path, "rb") as stream:
-                    code = marshal.load(stream)
+                    code, limitations = marshal.load(stream)
+                if not isinstance(code, CodeType) or not isinstance(limitations, (tuple, list)):
+                    raise ValueError("invalid compiled probe cache")
+                if any(
+                    not isinstance(item, (tuple, list)) or len(item) != 4
+                    or any(not isinstance(value, str) for value in item)
+                    for item in limitations
+                ):
+                    raise ValueError("invalid cached limitations")
                 self._register(code)
+                for limitation in limitations:
+                    self.report(*limitation)
                 return code
             except (OSError, EOFError, ValueError, TypeError):
                 pass
         tree = source if isinstance(source, ast.AST) else _original_compile(
-            source, filename, "exec", flags | ast.PyCF_ONLY_AST, dont_inherit, optimize
+            source, filename, "exec", flags | ast.PyCF_ONLY_AST, True, optimize
         )
-        instrument(tree, probes)
-        code = _original_compile(tree, filename, "exec", flags, dont_inherit, optimize)
+        limitations = []
+        instrument(tree, probes, lambda *item: limitations.append(item))
+        # Importers supply their own future flags; never inherit this module's
+        # annotations future. The compile wrapper resolves its caller's flags.
+        code = _original_compile(tree, filename, "exec", flags, True, optimize)
         self._register(code)
         if cached_path is not None:
-            self._store(cached_path, code)
+            self._store(cached_path, (code, limitations))
+        for limitation in limitations:
+            self.report(*limitation)
         return code
 
     def _register(self, code) -> None:
@@ -1074,12 +1099,12 @@ class Probing:
             if hasattr(constant, "co_code"):
                 self._register(constant)
 
-    def _store(self, path: str, code) -> None:
+    def _store(self, path: str, payload) -> None:
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             descriptor, temporary = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
             with os.fdopen(descriptor, "wb") as stream:
-                marshal.dump(code, stream)
+                marshal.dump(payload, stream)
             os.replace(temporary, path)
         except OSError:
             pass
@@ -1154,6 +1179,10 @@ class ProbeFinder(importlib.abc.MetaPathFinder):
         pass
 
 
+_FUTURE_FLAGS = 0
+for _feature in __future__.all_feature_names:
+    _FUTURE_FLAGS |= getattr(__future__, _feature).compiler_flag
+
 _original_compile = builtins.compile
 _probing: Probing | None = None
 _plain_compilation = contextvars.ContextVar("supercov_plain_compilation", default=False)
@@ -1191,6 +1220,11 @@ def _abc_loader_code(loader, fullname):
 
 
 def _compile_probed(source, filename, mode, flags=0, dont_inherit=False, optimize=-1, **keywords):
+    # builtin compile inherits from its immediate caller. Our wrapper must
+    # explicitly carry that caller's futures across the extra Python frame.
+    flags = operator.index(flags)
+    if not operator.index(dont_inherit):
+        flags |= sys._getframe(1).f_code.co_flags & _FUTURE_FLAGS
     if (
         _probing is not None
         and not _plain_compilation.get()
@@ -1202,9 +1236,9 @@ def _compile_probed(source, filename, mode, flags=0, dont_inherit=False, optimiz
         probes = _probing.probes_for(name) or _probing.sites_for(name)
         if probes is not None:
             return _probing.compile(
-                source, filename, probes, flags=flags, dont_inherit=dont_inherit, optimize=optimize
+                source, filename, probes, flags=flags, optimize=optimize
             )
-    return _original_compile(source, filename, mode, flags, dont_inherit, optimize, **keywords)
+    return _original_compile(source, filename, mode, flags, True, optimize, **keywords)
 
 
 def install(
