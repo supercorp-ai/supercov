@@ -16,6 +16,8 @@ Scoring needs a [TypeSafe AI](https://typesafe.ai) API key, and your coding agen
 
 Supported languages: [JavaScript](https://supercov.com/docs/javascript) · [TypeScript](https://supercov.com/docs/javascript) · [Rust](https://supercov.com/docs/rust) · [Python](https://supercov.com/docs/python) · [Ruby](https://supercov.com/docs/ruby) · [Go](https://supercov.com/docs/go) · [Java](https://supercov.com/docs/java) · [Kotlin](https://supercov.com/docs/kotlin).
 
+In Claude Code you can also [install it as a plugin](#give-supercov-a-job).
+
 Supported by [Supercorp](https://supercorp.ai).
 
 [Agent workflow](https://supercov.com/docs/agent-loop): ask your coding agent
@@ -176,6 +178,15 @@ Or install the agent skill, and your agent reaches for Supercov on its own when 
 ```
 
 For Codex, Cursor and other agents that read skills: `npx skills add supercorp-ai/supercov`.
+
+The Claude Code plugin also adds four commands you can type:
+
+| Command | What it does |
+| --- | --- |
+| `/supercov:coverage [test command]` | Writes one test for code no test reaches, and reports coverage before and after |
+| `/supercov:security [patch]` | Scans the repository, or a change, for security vulnerabilities |
+| `/supercov:quality [patch]` | Ranks files by code smells, or checks what a change introduced |
+| `/supercov:review [--base ref]` | Checks a branch or uncommitted change for security and quality problems |
 
 ### Write the first useful test
 
