@@ -552,6 +552,7 @@ fn reconstruct_unit(
             hits: hits.into_iter().collect(),
             events: runtime_events,
             logicals: Vec::new(),
+            phase_id: None,
         },
         observations: events.len(),
     })

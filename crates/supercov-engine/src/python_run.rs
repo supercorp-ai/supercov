@@ -23,7 +23,7 @@ use crate::{
     frontend_protocol::validate_frontend_report_request,
     integrity::{FrontendIntegrityInputs, create_explicit_run_integrity},
     lifecycle::{
-        ProjectLock, finalize_published_run, note_kept_evidence, publish_run,
+        ProjectLock, finalize_published_run, note_kept_evidence, publish_analysed_run, publish_run,
         recover_abandoned_runs, remove_stored_tree_deferred,
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
@@ -59,7 +59,7 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
-fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 5] {
+fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 6] {
     [
         (
             "sitecustomize.py",
@@ -80,6 +80,10 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 5] {
         (
             "supercov_probes.py",
             include_bytes!("../runtime-assets/python/supercov_probes.py"),
+        ),
+        (
+            "supercov_instrument.py",
+            include_bytes!("../runtime-assets/python/supercov_instrument.py"),
         ),
     ]
 }
@@ -371,7 +375,6 @@ pub fn run_direct_python(
         // 3,900-test run, on top of the analysis's own.
         let (tests, interpreters, python_versions) =
             (run.tests, run.interpreters, run.python_versions.clone());
-        drop(run);
         if verbose {
             writeln!(
                 diagnostics,
@@ -417,8 +420,32 @@ pub fn run_direct_python(
             parents: None,
             source_roots: source_roots.clone(),
         };
-        let run_directory =
-            publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
+        // The request was archived above, whole; analysing it here is
+        // analysing the archive, without decompressing and parsing back what
+        // was just written -- on a 3,900-test run, most of a second.
+        let PythonFrontendRun {
+            declaration,
+            request: archived,
+            ..
+        } = run;
+        let report_request = crate::coverage_report::CoverageReportRequest {
+            run_id: metadata.id.clone(),
+            generated_at: metadata.started_at.clone(),
+            integrity: serde_json::to_value(&metadata.integrity).ok(),
+            test_exit_code: crate::coverage_report::ExitCodeInput::Present(metadata.test_exit_code),
+            ..archived
+        };
+        let analysed = crate::coverage_report::analyze_frontend_request(
+            &declaration,
+            &report_request,
+            crate::coverage_report::TransportStats::none(),
+        );
+        drop(report_request);
+        let run_directory = match analysed {
+            Ok(report) => publish_analysed_run(&root, &metadata, &archive_path, report),
+            Err(_) => publish_run(&root, &metadata, &archive_path),
+        }
+        .map_err(|error| error.to_string())?;
         finalize_published_run(&root, &request.run_id).map_err(|error| error.to_string())?;
         Ok(DirectPythonRunResult {
             run_id: request.run_id.clone(),

@@ -616,7 +616,20 @@ pub fn publish_run(
     metadata: &RunMetadata,
     evidence_source: &Path,
 ) -> Result<PathBuf, LifecycleError> {
-    publish_run_with_fault(root, metadata, evidence_source, None)
+    publish_run_with_fault(root, metadata, evidence_source, None, None)
+}
+
+/// `publish_run` for a frontend that analysed the request it archived
+/// before letting it go, so publication need not read the archive back.
+/// The report must be the one the archive analyses to; a frontend that
+/// cannot say so publishes with `publish_run`.
+pub fn publish_analysed_run(
+    root: &Path,
+    metadata: &RunMetadata,
+    evidence_source: &Path,
+    report: crate::coverage_report::CoverageReport,
+) -> Result<PathBuf, LifecycleError> {
+    publish_run_with_fault(root, metadata, evidence_source, Some(report), None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,6 +643,7 @@ pub(crate) fn publish_run_with_fault(
     root: &Path,
     metadata: &RunMetadata,
     evidence_source: &Path,
+    analysed: Option<crate::coverage_report::CoverageReport>,
     fault: Option<RunPublicationFault>,
 ) -> Result<PathBuf, LifecycleError> {
     checked_id(&metadata.id)?;
@@ -682,6 +696,8 @@ pub(crate) fn publish_run_with_fault(
     };
     let analysed = if metadata.merged == Some(true) {
         None
+    } else if analysed.is_some() {
+        analysed
     } else {
         crate::run_store::analyze_stored_run(&staged).ok()
     };
@@ -1312,6 +1328,7 @@ mod tests {
             &root,
             &metadata,
             &evidence,
+            None,
             Some(RunPublicationFault::QueryIndexWrite),
         )
         .unwrap();
@@ -1352,6 +1369,7 @@ mod tests {
             &root,
             &metadata(id, bytes),
             &evidence,
+            None,
             Some(RunPublicationFault::FinalRename),
         )
         .unwrap_err();

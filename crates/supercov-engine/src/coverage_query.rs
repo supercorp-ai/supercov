@@ -3347,6 +3347,7 @@ mod tests {
                 hits: Vec::new(),
                 events: Vec::new(),
                 logicals: Vec::new(),
+                phase_id: None,
             }],
             browser: Vec::new(),
             server: Vec::new(),

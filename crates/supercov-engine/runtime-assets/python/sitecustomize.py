@@ -7,7 +7,6 @@ so its behaviour is preserved.
 """
 
 import importlib.machinery
-import importlib.util
 import os
 import sys
 
@@ -29,7 +28,13 @@ try:
     ]
     _spec = importlib.machinery.PathFinder.find_spec("sitecustomize", _remaining)
     if _spec is not None and _spec.loader is not None:
-        _module = importlib.util.module_from_spec(_spec)
+        try:
+            # What `importlib.util.module_from_spec` is; importing that module
+            # pulls in contextlib, a millisecond of every interpreter's start.
+            from importlib._bootstrap import module_from_spec as _module_from_spec
+        except ImportError:  # pragma: no cover
+            from importlib.util import module_from_spec as _module_from_spec
+        _module = _module_from_spec(_spec)
         _spec.loader.exec_module(_module)
 except Exception as error:  # noqa: BLE001
     sys.stderr.write(f"[supercov] chained sitecustomize failed: {error!r}\n")

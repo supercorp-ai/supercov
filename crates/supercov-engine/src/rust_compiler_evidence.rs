@@ -150,6 +150,7 @@ impl SnapshotBuilder {
             hits: self.hits.into_iter().collect(),
             events: self.events,
             logicals: Vec::new(),
+            phase_id: None,
         }
     }
 }

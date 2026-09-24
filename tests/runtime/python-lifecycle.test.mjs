@@ -79,10 +79,25 @@ if monitoring is not None:
 with open(output_path, "rb") as stream:
     written = stream.read()
 leftover = None
+shared = None
 if os.path.exists(slot_path):
-    with open(slot_path, "rb") as stream:
-        leftover = stream.read(16)[8:16].hex()
+    if slot_path.endswith(rt.SHARED_SLOT_SUFFIX):
+        # macOS: the file names a shared memory object. Close removes the
+        # object, so the reader finds nothing under the name to count.
+        import _posixshmem
+        with open(slot_path) as stream:
+            name = stream.read().split()[0]
+        try:
+            os.close(_posixshmem.shm_open(name, os.O_RDONLY, 0))
+            shared = "still there"
+        except FileNotFoundError:
+            shared = "removed"
+        leftover = array[8:16].hex()
+    else:
+        with open(slot_path, "rb") as stream:
+            leftover = stream.read(16)[8:16].hex()
 print(json.dumps({
+    "sharedSlot": shared,
     "late": late,
     "lateWritten": b'"t":"late"' in written,
     "exitMarker": b'"t":"exit"' in written,
@@ -158,9 +173,12 @@ test("close marks its slots closed and leaves them in place, so a late write is 
   // reader requires. It does not remove the file: a process that outlives the
   // test command closes while the reader is listing the evidence, and a slot
   // removed between the listing and the read failed the whole run.
-  const leftover = run(CLOSE).slotLeftover;
+  const { slotLeftover: leftover, sharedSlot } = run(CLOSE);
   assert.notEqual(leftover, null, "the slot file is still there");
   assert.match(leftover, /^0+$/, `slot tag left as ${leftover}`);
+  // A shared memory slot (macOS) goes with its process's close: its name is
+  // left, and the reader skips a name with nothing behind it.
+  if (sharedSlot !== null) assert.equal(sharedSlot, "removed");
 });
 
 test("close stops the detector instead of observing and discarding", { skip }, () => {
@@ -210,7 +228,7 @@ copied.run(lambda: runtime.hits_var.get().__setitem__(HIT, 1))
 runtime.assertion()
 with open(runtime.output_path, "rb") as stream:
     written = stream.read()
-print(json.dumps({"hit": written.find(b'"t":"hits"'), "assertion": written.find(b'"t":"assert"')}))
+print(json.dumps({"hit": written.find(b'"t":"runs"'), "assertion": written.find(b'"t":"assert"')}))
 `);
   assert.ok(result.hit >= 0 && result.hit < result.assertion, JSON.stringify(result));
 });
@@ -265,7 +283,7 @@ for backend in [lambda fd, size: rt.mmap.mmap(fd, size), lambda fd, size: rt._Fi
         target._write_payload(json.dumps({"t": "probe", "i": i, "data": "x" * 60}).encode())
     path = target.output_path
     capacity, dropped, cursor = target.output_capacity, target.dropped_records, target.output_cursor
-    target._close_output(flush=True)
+    target._close_output()
     with open(path, "rb") as stream: data = stream.read()
     outputs.append((data[start:], data[16:32], capacity, dropped, cursor))
 print(json.dumps({"equal": outputs[0] == outputs[1], "grown": outputs[0][2], "dropped": outputs[0][3]}))

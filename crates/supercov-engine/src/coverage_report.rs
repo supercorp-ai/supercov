@@ -136,6 +136,13 @@ pub struct RuntimeSnapshot {
     pub events: Vec<RuntimeEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logicals: Vec<LogicalSnapshot>,
+    /// Every hit and decision vector of this snapshot is an explicit event of
+    /// this phase. A frontend that observes a whole phase at once -- Python
+    /// reads a phase's slot -- names the phase here instead of writing an
+    /// event per observation, which on a 3,900-test run was three quarters
+    /// of the evidence. The analysis reads it exactly as those events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1539,8 +1546,12 @@ fn create_coverage_view_with_model(
             })
         };
 
-        let snapshots = raw.runtime.iter().chain(&raw.browser);
-        for snapshot in snapshots {
+        let snapshots = raw
+            .runtime
+            .iter()
+            .map(|snapshot| (snapshot, false))
+            .chain(raw.browser.iter().map(|snapshot| (snapshot, true)));
+        for (snapshot, browser) in snapshots {
             for decision in &snapshot.decisions {
                 let Some(index) = decision_indexes.get(&decision.meta.id).copied() else {
                     if manifest_files.contains(&decision.meta.file) {
@@ -1643,6 +1654,50 @@ fn create_coverage_view_with_model(
                     }
                 } else {
                     return Err(ReportError::InvalidEvent(event.event_type.clone()));
+                }
+            }
+            // A snapshot that names its phase: each hit and each decision
+            // vector is an explicit event of it, counted and related exactly
+            // as the event the frontend no longer writes would have been.
+            if let Some(phase_id) = snapshot.phase_id.as_deref()
+                && let Some(phase) = phases_by_id.get_mut(phase_id)
+            {
+                let observed = snapshot.hits.len()
+                    + snapshot
+                        .decisions
+                        .iter()
+                        .map(|decision| decision.vectors.len())
+                        .sum::<usize>();
+                if browser {
+                    phase.browser_events += observed;
+                    phase.explicit_browser_events += observed;
+                } else {
+                    phase.server_events += observed;
+                    phase.explicit_server_events += observed;
+                }
+                phase.explicit_events += observed;
+                for hit in &snapshot.hits {
+                    let hit = hit_ids.number(hit, ids);
+                    phase.hits.insert(hit);
+                    phases_by_hit.add(hit, phase_id, ids);
+                    explicit_phases_by_hit.add(hit, phase_id, ids);
+                }
+                for decision in &snapshot.decisions {
+                    let id = &decision.meta.id;
+                    for vector in &decision.vectors {
+                        tree_slot(&mut phase.decisions, id).insert(vector);
+                        if let Some(index) = vector_indexes
+                            .get(id)
+                            .and_then(|indexes| indexes.get(&vector_key(vector)))
+                            .copied()
+                            && let Some(observation) = vectors_by_decision
+                                .get_mut(id)
+                                .and_then(|observations| observations.get_mut(index))
+                        {
+                            insert_absent(&mut observation.phases, phase_id, ids);
+                            insert_absent(&mut observation.explicit_phases, phase_id, ids);
+                        }
+                    }
                 }
             }
         }
@@ -2611,12 +2666,41 @@ pub fn analyze_coverage_archive(
     // 3,900-test run -- and nothing reads them again, so they need not stay
     // resident while the views are built beside what was parsed from them.
     drop(entries);
-    let mut report = crate::frontend_protocol::analyze_frontend_results(&frontend, &normalized)
+    analyze_frontend_request(&frontend, &normalized, transport)
+}
+
+/// The analysis of a frontend run, from its request as an archive holds it:
+/// what `analyze_coverage_archive` does once it has parsed the archive, and
+/// what a run that still holds the request it archived calls instead of
+/// reading the archive back.
+pub fn analyze_frontend_request(
+    frontend: &FrontendRunDeclaration,
+    normalized: &CoverageReportRequest,
+    transport: TransportStats,
+) -> Result<CoverageReport, ReportError> {
+    let mut report = crate::frontend_protocol::analyze_frontend_results(frontend, normalized)
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
     report.view.transport = Some(transport.clone());
     report.filters.passed.transport = Some(transport.clone());
     report.filters.failed.transport = Some(transport);
     Ok(report)
+}
+
+impl TransportStats {
+    /// An archive with no launch-observer or server evidence: every frontend
+    /// but JavaScript's.
+    pub fn none() -> Self {
+        Self {
+            processes: 0,
+            child_launches: 0,
+            remote_launches: 0,
+            workspace_capabilities: 0,
+            scoped_server_records: 0,
+            background_server_records: 0,
+            corrupt_records: 0,
+            corrupt_files: 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2761,6 +2845,7 @@ mod tests {
                 hits: hits.iter().map(|hit| (*hit).into()).collect(),
                 events: vec![],
                 logicals: vec![],
+                phase_id: None,
             }],
             browser: vec![],
             server: vec![],
