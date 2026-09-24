@@ -729,14 +729,20 @@ pub(crate) fn publish_run_with_fault(
     } else {
         crate::run_store::analyze_stored_run(&staged).ok()
     };
-    let archived_inputs = match archived.inputs {
-        Some(manifest) => Some(
+    let archived_inputs = match archived
+        .inputs
+        .map(|manifest| {
             crate::assertion_store::archived_manifest(manifest, hex_digest(&evidence_sha256))
-                .map_err(|reason| {
-                    LifecycleError::InvalidState(format!("assertion map publication: {reason}"))
-                })?,
-        ),
-        None => None,
+        })
+        .transpose()
+    {
+        Ok(inputs) => inputs,
+        Err(reason) => {
+            let _ = remove_stored_tree_deferred(root, &staging);
+            return Err(LifecycleError::InvalidState(format!(
+                "assertion map publication: {reason}"
+            )));
+        }
     };
     // The assertion map and the query index both read the analysis and
     // write their own files, so they are written side by side.
