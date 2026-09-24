@@ -89,21 +89,32 @@ def _now_ms() -> int:
 # thousands of interpreters pays that per process. Most strings a record holds
 # are printable ASCII without a quote or backslash, whose JSON is themselves
 # in quotes; anything else goes through `_json`, json's C half, loaded then.
-_json_encode = None
+_JSON_ESCAPES = {'"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f"}
 
 
 def _json_string(text: str) -> str:
+    """`text` as `json.dumps` spells it, ASCII only."""
     if text.isascii() and text.isprintable() and '"' not in text and "\\" not in text:
         return '"' + text + '"'
-    global _json_encode
-    if _json_encode is None:
-        try:
-            from _json import encode_basestring_ascii as _json_encode
-        except ImportError:  # pragma: no cover - CPython builds _json everywhere
-            import json
-
-            _json_encode = json.dumps
-    return _json_encode(text)
+    # Rarer strings -- an argv holding a newline, say -- a character at a
+    # time: importing `_json` for them cost an interpreter a quarter of a
+    # millisecond, which a suite launching thousands pays thousands of times.
+    out = ['"']
+    for character in text:
+        escaped = _JSON_ESCAPES.get(character)
+        if escaped is not None:
+            out.append(escaped)
+        elif " " <= character <= "~":
+            out.append(character)
+        else:
+            code = ord(character)
+            if code > 0xFFFF:
+                code -= 0x10000
+                out.append("\\u%04x\\u%04x" % (0xD800 | (code >> 10), 0xDC00 | (code & 0x3FF)))
+            else:
+                out.append("\\u%04x" % code)
+    out.append('"')
+    return "".join(out)
 
 
 def _json_text(value) -> str:
@@ -143,8 +154,55 @@ class _ParseContext:
         raise ValueError(f"not JSON: {name}")
 
 
+def _flat_object(text: str):
+    """A flat JSON object of plain strings and integers -- what
+    `child_environment` writes for an identity -- or None for anything else,
+    which `_json_load` hands to the JSON scanner."""
+    if "\\" in text or not text.startswith("{") or not text.endswith("}"):
+        return None
+    result: dict = {}
+    if text == "{}":
+        return result
+    index, end = 1, len(text)
+    while True:
+        if text[index : index + 1] != '"':
+            return None
+        close = text.find('"', index + 1)
+        if close < 0:
+            return None
+        key, index = text[index + 1 : close], close + 1
+        if text[index : index + 1] != ":":
+            return None
+        index += 1
+        if text[index : index + 1] == '"':
+            close = text.find('"', index + 1)
+            if close < 0:
+                return None
+            value, index = text[index + 1 : close], close + 1
+        else:
+            start = index
+            if text[index : index + 1] == "-":
+                index += 1
+            while index < end and "0" <= text[index] <= "9":
+                index += 1
+            if index == start or text[start:index] == "-":
+                return None
+            value = int(text[start:index])
+        result[key] = value
+        separator = text[index : index + 1]
+        index += 1
+        if separator == "}" and index == end:
+            return result
+        if separator != ",":
+            return None
+
+
 def _json_load(text: str):
-    """Parse JSON with `_json`'s C scanner, which is all `json.loads` is."""
+    """Parse JSON with `_json`'s C scanner, which is all `json.loads` is,
+    unless it is the flat object an identity is written as."""
+    flat = _flat_object(text)
+    if flat is not None:
+        return flat
     try:
         from _json import make_scanner
     except ImportError:  # pragma: no cover
