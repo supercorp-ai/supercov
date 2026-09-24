@@ -2156,15 +2156,24 @@ fn assessing_without_a_key_stops_before_it_does_anything() {
     // It used to discover this once per file, deep inside the sender, and every
     // file failed separately: the result was an empty report claiming a score
     // over zero files and an exit code of success.
-    let error = require_key(None).unwrap_err();
+    let error = require_key(None, Instrument::Catalog).unwrap_err();
     assert!(error.contains("TYPESAFE_API_KEY"), "{error}");
     assert!(
         error.contains("typesafe.ai"),
         "the message says where to get one"
     );
     assert!(error.contains("--dry-run"), "and what works without one");
-    assert!(require_key(Some("   ")).is_err(), "a blank key is no key");
-    assert!(require_key(Some("apikey_x")).is_ok());
+    assert!(error.starts_with("quality needs"), "{error}");
+    let security = require_key(None, Instrument::Security).unwrap_err();
+    assert!(
+        security.starts_with("security needs"),
+        "a security scan names itself, not quality: {security}"
+    );
+    assert!(
+        require_key(Some("   "), Instrument::Catalog).is_err(),
+        "a blank key is no key"
+    );
+    assert!(require_key(Some("apikey_x"), Instrument::Security).is_ok());
 
     // A key is never an option, because one on the command line lands in shell
     // history and in the process list.
