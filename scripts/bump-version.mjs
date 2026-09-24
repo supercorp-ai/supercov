@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Move Supercov's own version across the four files that carry it.
+// Move Supercov's own version across the five files that carry it.
 //
 // Nothing here bumps by substring. A dependency pin can share the release's
 // prefix -- `ra_ap_syntax` is pinned at 0.0.349, which starts with 0.0.34 -- and
@@ -98,6 +98,7 @@ const FILES = [
   { name: "package-lock.json", expected: 18, replace: replaceLockfile },
   { name: "Cargo.toml", expected: 3, replace: replaceCargoToml },
   { name: "Cargo.lock", expected: 3, replace: replaceCargoLock },
+  { name: "plugins/supercov/.claude-plugin/plugin.json", expected: 1, replace: replaceEveryQuoted },
 ];
 
 export function bump(from, to, root = resolve(import.meta.dirname, "..")) {
