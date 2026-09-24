@@ -1878,7 +1878,7 @@ pub fn build_python_frontend_run(
                         assertion: AttributionPrecision::Exact,
                     },
                     limitations: vec![FrontendLimitation {
-                        id: "python-action-linkage".into(),
+                        id: format!("python-{runner}-action-linkage"),
                         scopes: vec![FrontendLimitationScope::Action],
                         reason: format!("{runner} exposes no general action lifecycle"),
                     }],
@@ -2540,6 +2540,46 @@ mod tests {
         assert!(corrupted.contains("checksum does not match"), "{corrupted}");
         let unknown = read("checksum-v3", TRANSPORT_VERSION + 1, None).unwrap_err();
         assert!(unknown.contains("version"), "{unknown}");
+    }
+
+    #[test]
+    fn mixed_pytest_and_unittest_runs_have_distinct_runner_limitations() {
+        let obligations = build_python_obligations("m.py", "def f():\n    return 1\n").unwrap();
+        let directory = temporary("mixed-runners");
+        let mut records = vec![json!({"t":"process","v":1,"run":"run-1","pid":1,
+            "worker":"main","python":"3.11.11","executable":"python","argv":["pytest"]})];
+        for (index, runner) in [PYTEST_RUNNER, UNITTEST_RUNNER].iter().enumerate() {
+            let test = format!("tests/test_m.py::test_{runner}");
+            records.push(
+                json!({"t":"phase","ctx":index+1,"at":index+5,"worker":"main",
+                "test":test,"retry":0,"phase":"call"}),
+            );
+            records.push(json!({"t":"hit","ctx":index+1,"id":obligations.plan.statements[0].id}));
+            records.push(json!({"t":"outcome","worker":"main","test":test,"retry":0,
+                "phase":"call","outcome":"passed","xfail":false,"runner":runner}));
+        }
+        write_transport(&directory.join("main.1.mmap"), &records, 0);
+        let run = build_python_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            &PythonAssertionInventory::empty(),
+        )
+        .unwrap();
+        assert_eq!(run.tests, 2);
+        assert_eq!(run.declaration.runners.len(), 2);
+        validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+        for runner in &run.declaration.runners {
+            assert_eq!(runner.limitations.len(), 1);
+            assert_eq!(runner.attribution.action, AttributionPrecision::Unavailable);
+            assert_eq!(
+                runner.limitations[0].scopes,
+                [FrontendLimitationScope::Action]
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
