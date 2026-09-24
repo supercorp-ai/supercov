@@ -369,7 +369,7 @@ pub fn run_direct_rust_compiler(
                 &root,
                 &metadata,
                 &archive_path,
-                None,
+                crate::lifecycle::Archived::default(),
                 Some(RunPublicationFault::FinalRename),
             ),
             _ => publish_run(&root, &metadata, &archive_path),

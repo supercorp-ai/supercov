@@ -18,7 +18,7 @@ use crate::coverage_analysis::{
     McdcVector, PointCoverage, PointKind, analyze_core, find_witnesses_for_conditions,
 };
 use crate::evidence_archive::{EvidenceArchiveEntry, read_archive};
-use crate::interned::{Id, Interner};
+use crate::interned::{FastMap, Id, Interner};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -415,9 +415,10 @@ pub struct SourceLine {
 struct LineAggregate {
     covered: bool,
     measured: bool,
-    tests: BTreeSet<Id>,
-    phases: BTreeSet<Id>,
-    explicit_phases: BTreeSet<Id>,
+    /// Numbers of the relation each is drawn from, in no order.
+    tests: Vec<u32>,
+    phases: Vec<u32>,
+    explicit_phases: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -863,7 +864,9 @@ struct MutableTest {
     provenance: TestProvenance,
     role: String,
     attribution: String,
-    hits: BTreeSet<usize>,
+    /// Hit numbers as they arrive, repeats included: sorted and made unique
+    /// once, when the view is written.
+    hits: Vec<usize>,
     decisions: BTreeMap<String, OrderedVectors>,
 }
 
@@ -871,7 +874,7 @@ struct MutableTest {
 struct MutablePhase {
     phase: CoveragePhase,
     test: Id,
-    hits: BTreeSet<usize>,
+    hits: Vec<usize>,
     decisions: BTreeMap<String, OrderedVectors>,
     browser_events: usize,
     server_events: usize,
@@ -1216,8 +1219,8 @@ fn confidence_for(
     test_ids: &BTreeSet<Id>,
     phase_ids: &BTreeSet<Id>,
     explicit_phase_ids: &BTreeSet<Id>,
-    tests: &HashMap<Id, MutableTest>,
-    phases: &HashMap<Id, MutablePhase>,
+    tests: &FastMap<Id, MutableTest>,
+    phases: &FastMap<Id, MutablePhase>,
 ) -> CoverageConfidence {
     let mut has_test = false;
     let mut setup_roles = true;
@@ -1321,7 +1324,7 @@ fn correlate_event<'a>(
 #[derive(Default)]
 struct HitIds {
     names: Vec<Id>,
-    numbers: HashMap<String, usize>,
+    numbers: FastMap<String, usize>,
 }
 
 impl HitIds {
@@ -1335,6 +1338,29 @@ impl HitIds {
         number
     }
 
+    /// Each hit number's position in id order: hits sort by these numbers
+    /// instead of by comparing their text, per test and per phase.
+    fn ranks(&self) -> Vec<u32> {
+        let mut order = (0..self.names.len()).collect::<Vec<_>>();
+        order.sort_unstable_by(|left, right| self.names[*left].cmp(&self.names[*right]));
+        let mut rank = vec![0_u32; self.names.len()];
+        for (position, number) in order.into_iter().enumerate() {
+            rank[number] = position as u32;
+        }
+        rank
+    }
+
+    /// `sorted`, by precomputed rank.
+    fn sorted_by(&self, mut numbers: Vec<usize>, rank: &[u32]) -> Vec<Id> {
+        numbers.sort_unstable_by_key(|number| rank[*number]);
+        numbers.dedup();
+        numbers
+            .into_iter()
+            .map(|number| self.names[number].clone())
+            .collect()
+    }
+
+    #[cfg(test)]
     fn sorted(&self, numbers: BTreeSet<usize>) -> Vec<Id> {
         let mut names = numbers
             .into_iter()
@@ -1350,7 +1376,7 @@ impl HitIds {
 #[derive(Default)]
 struct References {
     names: Vec<Id>,
-    numbers: HashMap<Id, u32>,
+    numbers: FastMap<Id, u32>,
     last: Option<u32>,
     by_obligation: Vec<Vec<u32>>,
 }
@@ -1389,28 +1415,152 @@ impl References {
         }
     }
 
-    fn into_sets(self, hits: &HitIds) -> HashMap<String, BTreeSet<Id>> {
+    fn into_relation(self, hits: &HitIds) -> Relation {
         let mut order = (0..self.names.len()).collect::<Vec<_>>();
         order.sort_unstable_by(|left, right| self.names[*left].cmp(&self.names[*right]));
-        let mut rank = vec![0_usize; self.names.len()];
+        let mut rank = vec![0_u32; self.names.len()];
         for (position, number) in order.into_iter().enumerate() {
-            rank[number] = position;
+            rank[number] = position as u32;
         }
-        let names = &self.names;
-        self.by_obligation
-            .into_iter()
-            .enumerate()
-            .filter(|(_, reached)| !reached.is_empty())
-            .map(|(obligation, mut reached)| {
-                reached.sort_unstable_by_key(|number| rank[*number as usize]);
-                reached.dedup();
-                let set = reached
-                    .into_iter()
-                    .map(|number| names[number as usize].clone())
-                    .collect::<BTreeSet<_>>();
-                (hits.names[obligation].to_string(), set)
-            })
-            .collect()
+        let mut relation = Relation {
+            names: self.names,
+            rank,
+            by_hit: HashMap::new(),
+            none: Reached::default(),
+        };
+        for (obligation, reached) in self.by_obligation.into_iter().enumerate() {
+            if !reached.is_empty() {
+                let reached = relation.reached(reached);
+                relation
+                    .by_hit
+                    .insert(hits.names[obligation].to_string(), reached);
+            }
+        }
+        relation
+    }
+}
+
+/// A `References` restored for the report: what reached each obligation,
+/// and the table its numbers index.
+struct Relation {
+    names: Vec<Id>,
+    /// Each number's position in id order.
+    rank: Vec<u32>,
+    by_hit: HashMap<String, Reached>,
+    none: Reached,
+}
+
+impl Relation {
+    /// What reached obligation `id`: nothing, for one no test reached.
+    fn of(&self, id: &str) -> &Reached {
+        self.by_hit.get(id).unwrap_or(&self.none)
+    }
+
+    /// Numbers of this relation as the ids they stand for, in id order and
+    /// once each: the set the report writes.
+    fn reached(&self, mut numbers: Vec<u32>) -> Reached {
+        numbers.sort_unstable_by_key(|number| self.rank[*number as usize]);
+        numbers.dedup();
+        Reached {
+            names: numbers
+                .iter()
+                .map(|number| self.names[*number as usize].clone())
+                .collect(),
+            numbers,
+        }
+    }
+}
+
+/// Which tests or phases reached one obligation: their ids in id order, and
+/// beside each the number its relation gave it.
+#[derive(Default)]
+struct Reached {
+    names: Vec<Id>,
+    numbers: Vec<u32>,
+}
+
+/// What confidence reads of one test.
+struct TestTraits<'t> {
+    setup: bool,
+    background: bool,
+    runner: &'t str,
+    kind: &'t str,
+}
+
+impl<'t> TestTraits<'t> {
+    fn of(test: &'t MutableTest) -> Self {
+        Self {
+            setup: test.role == "setup",
+            background: test.role == "background",
+            runner: &test.provenance.runner,
+            kind: &test.provenance.kind,
+        }
+    }
+}
+
+/// `confidence_for` over numbered relations: the same verdict, read from
+/// per-number tables.
+fn confidence_from(
+    tests: &Reached,
+    phases: &Reached,
+    explicit: &Reached,
+    test_traits: &[Option<TestTraits<'_>>],
+    phase_kinds: &[Option<&str>],
+    explicit_kinds: &[Option<&str>],
+) -> CoverageConfidence {
+    let mut has_test = false;
+    let mut setup_roles = true;
+    let mut background_roles = true;
+    let mut runners = BTreeSet::new();
+    let mut kinds = BTreeSet::new();
+    for number in &tests.numbers {
+        if let Some(test) = &test_traits[*number as usize] {
+            has_test = true;
+            setup_roles &= test.setup;
+            background_roles &= test.background;
+            runners.insert(test.runner);
+            kinds.insert(test.kind);
+        }
+    }
+    let mut has_phase = false;
+    let mut setup_phases = true;
+    let mut background_phases = true;
+    for number in &phases.numbers {
+        if let Some(kind) = phase_kinds[*number as usize] {
+            has_phase = true;
+            setup_phases &= kind == "setup";
+            background_phases &= kind == "background";
+        }
+    }
+    let has_action = explicit
+        .numbers
+        .iter()
+        .any(|number| explicit_kinds[*number as usize] == Some("action"));
+    let level = if tests.names.is_empty() {
+        "unexecuted"
+    } else if has_action {
+        "action"
+    } else {
+        "executed"
+    };
+    CoverageConfidence {
+        level: level.into(),
+        setup_only: if has_phase {
+            setup_phases
+        } else {
+            has_test && setup_roles
+        },
+        background_only: if has_phase {
+            background_phases
+        } else {
+            has_test && background_roles
+        },
+        asserted: false,
+        tests: tests.names.clone(),
+        asserted_tests: vec![],
+        runners: runners.into_iter().map(str::to_owned).collect(),
+        e2e: kinds.contains("e2e"),
+        kinds: kinds.into_iter().map(str::to_owned).collect(),
     }
 }
 
@@ -1477,9 +1627,9 @@ fn create_coverage_view_with_model(
     let mut tests_by_decision = HashMap::<String, BTreeSet<Id>>::new();
     let mut tests_by_hit = References::default();
     let mut hit_ids = HitIds::default();
-    let mut tests_by_id = HashMap::<Id, MutableTest>::new();
+    let mut tests_by_id = FastMap::<Id, MutableTest>::default();
     let mut test_order = Vec::<Id>::new();
-    let mut phases_by_id = HashMap::<Id, MutablePhase>::new();
+    let mut phases_by_id = FastMap::<Id, MutablePhase>::default();
     let mut phases_by_hit = References::default();
     let mut explicit_phases_by_hit = References::default();
 
@@ -1501,7 +1651,7 @@ fn create_coverage_view_with_model(
                     provenance: raw.provenance.clone(),
                     role: raw.role.clone(),
                     attribution: raw.attribution.clone(),
-                    hits: BTreeSet::new(),
+                    hits: Vec::new(),
                     decisions: BTreeMap::new(),
                 },
             );
@@ -1522,7 +1672,7 @@ fn create_coverage_view_with_model(
                 MutablePhase {
                     phase: phase.clone(),
                     test: id.clone(),
-                    hits: BTreeSet::new(),
+                    hits: Vec::new(),
                     decisions: BTreeMap::new(),
                     browser_events: 0,
                     server_events: 0,
@@ -1596,7 +1746,7 @@ fn create_coverage_view_with_model(
             for hit in &snapshot.hits {
                 let hit = hit_ids.number(hit, ids);
                 tests_by_hit.add(hit, &id, ids);
-                test_hits.insert(hit);
+                test_hits.push(hit);
             }
             for event in &snapshot.events {
                 let explicit = event.phase_id.is_some();
@@ -1628,7 +1778,7 @@ fn create_coverage_view_with_model(
                 }
                 if event.event_type == "hit" {
                     let hit = hit_ids.number(&event.id, ids);
-                    phase.hits.insert(hit);
+                    phase.hits.push(hit);
                     phases_by_hit.add(hit, phase_id, ids);
                     if explicit {
                         explicit_phases_by_hit.add(hit, phase_id, ids);
@@ -1678,7 +1828,7 @@ fn create_coverage_view_with_model(
                 phase.explicit_events += observed;
                 for hit in &snapshot.hits {
                     let hit = hit_ids.number(hit, ids);
-                    phase.hits.insert(hit);
+                    phase.hits.push(hit);
                     phases_by_hit.add(hit, phase_id, ids);
                     explicit_phases_by_hit.add(hit, phase_id, ids);
                 }
@@ -1760,7 +1910,7 @@ fn create_coverage_view_with_model(
                     .get_mut(&id)
                     .expect("registered test")
                     .hits
-                    .insert(number);
+                    .push(number);
                 (hit.clone(), None)
             } else {
                 return Err(ReportError::InvalidServerRecord(record.record_type.clone()));
@@ -1793,7 +1943,7 @@ fn create_coverage_view_with_model(
             }
             if event.event_type == "hit" {
                 let hit = hit_ids.number(&event.id, ids);
-                phase.hits.insert(hit);
+                phase.hits.push(hit);
                 phases_by_hit.add(hit, &phase_id, ids);
                 if explicit {
                     explicit_phases_by_hit.add(hit, &phase_id, ids);
@@ -1831,9 +1981,9 @@ fn create_coverage_view_with_model(
             .then(left.line.cmp(&right.line))
             .then(left.column.cmp(&right.column))
     });
-    let tests_by_hit = tests_by_hit.into_sets(&hit_ids);
-    let phases_by_hit = phases_by_hit.into_sets(&hit_ids);
-    let explicit_phases_by_hit = explicit_phases_by_hit.into_sets(&hit_ids);
+    let tests_by_hit = tests_by_hit.into_relation(&hit_ids);
+    let phases_by_hit = phases_by_hit.into_relation(&hit_ids);
+    let explicit_phases_by_hit = explicit_phases_by_hit.into_relation(&hit_ids);
     let mut decisions = Vec::with_capacity(decision_metadata.len());
     for meta in decision_metadata {
         let mutable = vectors_by_decision.remove(&meta.id).unwrap_or_default();
@@ -1915,25 +2065,53 @@ fn create_coverage_view_with_model(
         });
     }
 
-    let no_references = BTreeSet::new();
     let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+    // What confidence asks of each test and phase a relation numbers, looked
+    // up once per number rather than once per mention: a run's points and
+    // lines mention tests millions of times, and each lookup hashed an id.
+    let test_traits = tests_by_hit
+        .names
+        .iter()
+        .map(|name| tests_by_id.get(name).map(TestTraits::of))
+        .collect::<Vec<_>>();
+    let phase_kind = |relation: &Relation| {
+        relation
+            .names
+            .iter()
+            .map(|name| {
+                phases_by_id
+                    .get(name)
+                    .map(|phase| phase.phase.kind.as_str())
+            })
+            .collect::<Vec<_>>()
+    };
+    let phase_kinds = phase_kind(&phases_by_hit);
+    let explicit_kinds = phase_kind(&explicit_phases_by_hit);
+    let confidence = |tests: &Reached, phases: &Reached, explicit: &Reached| {
+        confidence_from(
+            tests,
+            phases,
+            explicit,
+            &test_traits,
+            &phase_kinds,
+            &explicit_kinds,
+        )
+    };
     let points = manifest
         .points
         .iter()
         .cloned()
         .map(|meta| {
-            let tests = tests_by_hit.get(&meta.id).unwrap_or(&no_references);
-            let phases = phases_by_hit.get(&meta.id).unwrap_or(&no_references);
-            let explicit = explicit_phases_by_hit
-                .get(&meta.id)
-                .unwrap_or(&no_references);
+            let tests = tests_by_hit.of(&meta.id);
+            let phases = phases_by_hit.of(&meta.id);
+            let explicit = explicit_phases_by_hit.of(&meta.id);
             PointResult {
                 measured: !declined.contains(&meta.id),
-                covered: tests_by_hit.contains_key(&meta.id),
-                confidence: confidence_for(tests, phases, explicit, &tests_by_id, &phases_by_id),
+                covered: tests_by_hit.by_hit.contains_key(&meta.id),
+                confidence: confidence(tests, phases, explicit),
                 meta,
-                tests: sorted(tests),
-                phases: sorted(phases),
+                tests: tests.names.clone(),
+                phases: phases.names.clone(),
             }
         })
         .collect::<Vec<_>>();
@@ -1947,24 +2125,16 @@ fn create_coverage_view_with_model(
                 .alternatives
                 .iter()
                 .map(|alternative| {
-                    let tests = tests_by_hit.get(&alternative.id).unwrap_or(&no_references);
-                    let phases = phases_by_hit.get(&alternative.id).unwrap_or(&no_references);
-                    let explicit = explicit_phases_by_hit
-                        .get(&alternative.id)
-                        .unwrap_or(&no_references);
+                    let tests = tests_by_hit.of(&alternative.id);
+                    let phases = phases_by_hit.of(&alternative.id);
+                    let explicit = explicit_phases_by_hit.of(&alternative.id);
                     AlternativeResult {
                         id: alternative.id.clone(),
                         label: alternative.label.clone(),
-                        covered: tests_by_hit.contains_key(&alternative.id),
-                        tests: sorted(tests),
-                        phases: sorted(phases),
-                        confidence: confidence_for(
-                            tests,
-                            phases,
-                            explicit,
-                            &tests_by_id,
-                            &phases_by_id,
-                        ),
+                        covered: tests_by_hit.by_hit.contains_key(&alternative.id),
+                        tests: tests.names.clone(),
+                        phases: phases.names.clone(),
+                        confidence: confidence(tests, phases, explicit),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1984,7 +2154,8 @@ fn create_coverage_view_with_model(
     // Lines are folded from every point, declined ones included, so a file
     // Supercov could not measure still has addressable lines to report a
     // limitation against. Only what was measured decides the line's state and
-    // whether it counts.
+    // whether it counts. A line gathers its points' test and phase numbers,
+    // which sort and deduplicate as numbers.
     let mut line_aggregates = BTreeMap::<SourceLine, LineAggregate>::new();
     for point in &points {
         let aggregate = line_aggregates
@@ -1998,15 +2169,15 @@ fn create_coverage_view_with_model(
         }
         aggregate.measured = true;
         aggregate.covered |= point.covered;
-        aggregate.tests.extend(point.tests.clone());
-        aggregate.phases.extend(point.phases.clone());
-        aggregate.explicit_phases.extend(
-            explicit_phases_by_hit
-                .get(&point.meta.id)
-                .into_iter()
-                .flatten()
-                .cloned(),
-        );
+        aggregate
+            .tests
+            .extend(&tests_by_hit.of(&point.meta.id).numbers);
+        aggregate
+            .phases
+            .extend(&phases_by_hit.of(&point.meta.id).numbers);
+        aggregate
+            .explicit_phases
+            .extend(&explicit_phases_by_hit.of(&point.meta.id).numbers);
     }
     let lines = line_aggregates
         .into_iter()
@@ -2014,67 +2185,85 @@ fn create_coverage_view_with_model(
             let LineAggregate {
                 covered,
                 measured,
-                tests: test_ids,
-                phases: phase_ids,
-                explicit_phases: explicit_ids,
+                tests,
+                phases,
+                explicit_phases,
             } = aggregate;
-            let provenances = test_ids
+            let tests = tests_by_hit.reached(tests);
+            let phases = phases_by_hit.reached(phases);
+            let explicit = explicit_phases_by_hit.reached(explicit_phases);
+            let traits = tests
+                .numbers
                 .iter()
-                .filter_map(|id| tests_by_id.get(id).map(|test| &test.provenance))
+                .filter_map(|number| test_traits[*number as usize].as_ref())
                 .collect::<Vec<_>>();
-            let runners = provenances
+            let runners = traits
                 .iter()
-                .map(|provenance| provenance.runner.clone())
+                .map(|traits| traits.runner)
                 .collect::<BTreeSet<_>>();
-            let kinds = provenances
+            let kinds = traits
                 .iter()
-                .map(|provenance| provenance.kind.clone())
+                .map(|traits| traits.kind)
                 .collect::<BTreeSet<_>>();
             LineResult {
                 file: location.file.to_string(),
                 line: location.line,
                 covered,
                 measured,
-                tests: sorted(&test_ids),
-                runners: sorted(&runners),
-                exclusive_kind: (kinds.len() == 1).then(|| kinds.first().unwrap().clone()),
-                phases: sorted(&phase_ids),
-                confidence: confidence_for(
-                    &test_ids,
-                    &phase_ids,
-                    &explicit_ids,
-                    &tests_by_id,
-                    &phases_by_id,
-                ),
-                kinds: sorted(&kinds),
+                confidence: confidence(&tests, &phases, &explicit),
+                tests: tests.names,
+                runners: runners.iter().map(|runner| (*runner).to_owned()).collect(),
+                exclusive_kind: (kinds.len() == 1).then(|| (*kinds.first().unwrap()).to_owned()),
+                phases: phases.names,
+                kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
             }
         })
         .collect::<Vec<_>>();
+    drop(test_traits);
 
-    let point_locations = manifest
+    // Where each hit sits, by hit number, as (file rank, line): a test's or
+    // phase's lines sort and deduplicate as numbers, in the order the
+    // `SourceLine`s they stand for sort in.
+    let hit_ranks = hit_ids.ranks();
+    let mut point_files = manifest
         .points
         .iter()
-        .map(|point| {
-            (
-                point.id.clone(),
-                SourceLine {
-                    file: ids.id(&point.file),
-                    line: point.line,
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
+        .map(|point| ids.id(&point.file))
+        .collect::<Vec<_>>();
+    point_files.sort_unstable();
+    point_files.dedup();
+    let mut hit_locations = vec![None; hit_ids.names.len()];
+    for point in &manifest.points {
+        if let Some(number) = hit_ids.numbers.get(point.id.as_str()) {
+            let file = point_files
+                .binary_search_by(|file| file.as_str().cmp(&point.file))
+                .expect("every point file is listed") as u32;
+            hit_locations[*number] = Some((file, point.line));
+        }
+    }
+    let lines_of = |hits: &[usize]| {
+        let mut located = hits
+            .iter()
+            .filter_map(|hit| hit_locations[*hit])
+            .collect::<Vec<_>>();
+        located.sort_unstable();
+        located.dedup();
+        located
+            .into_iter()
+            .map(|(file, line)| SourceLine {
+                file: point_files[file as usize].clone(),
+                line,
+            })
+            .collect::<Vec<_>>()
+    };
     test_order.sort_by(|left, right| tests_by_id[left].name.cmp(&tests_by_id[right].name));
     let tests = test_order
         .into_iter()
         .map(|id| {
             let test = tests_by_id.remove(&id).expect("test order references test");
             let outcome = test_outcome(&test);
-            let hits = hit_ids.sorted(test.hits);
-            let lines = hits
-                .iter()
-                .filter_map(|hit| point_locations.get(hit.as_str()).cloned())
-                .collect::<BTreeSet<_>>();
+            let lines = lines_of(&test.hits);
+            let hits = hit_ids.sorted_by(test.hits, &hit_ranks);
             TestCoverageResult {
                 id: test.id,
                 name: test.name,
@@ -2095,7 +2284,7 @@ fn create_coverage_view_with_model(
                         vectors: vectors.values,
                     })
                     .collect(),
-                lines: lines.into_iter().collect(),
+                lines,
             }
         })
         .collect::<Vec<_>>();
@@ -2143,11 +2332,8 @@ fn create_coverage_view_with_model(
     let phases = phases
         .into_iter()
         .map(|phase| {
-            let hits = hit_ids.sorted(phase.hits);
-            let lines = hits
-                .iter()
-                .filter_map(|hit| point_locations.get(hit.as_str()).cloned())
-                .collect::<BTreeSet<_>>();
+            let lines = lines_of(&phase.hits);
+            let hits = hit_ids.sorted_by(phase.hits, &hit_ranks);
             PhaseResult {
                 phase: phase.phase,
                 test: phase.test,
@@ -2160,7 +2346,7 @@ fn create_coverage_view_with_model(
                         vectors: vectors.values,
                     })
                     .collect(),
-                lines: lines.into_iter().collect(),
+                lines,
                 browser_events: phase.browser_events,
                 server_events: phase.server_events,
                 explicit_events: phase.explicit_events,
@@ -2332,29 +2518,37 @@ pub fn analyze_coverage_results(
             reason: reason.into(),
         }
     })?;
-    // One copy of each id for all three views.
-    let mut ids = Interner::default();
-    let view = create_coverage_view_with_model(
-        &request.manifest,
-        &request.raw_results.iter().collect::<Vec<_>>(),
-        &request.generated_at,
-        coverage_model,
-        &mut ids,
-    )?;
-    let passed = create_coverage_view_with_model(
-        &request.manifest,
-        &passing_coverage_results(&request.raw_results),
-        &request.generated_at,
-        coverage_model,
-        &mut ids,
-    )?;
-    let failed = create_coverage_view_with_model(
-        &request.manifest,
-        &failed_coverage_results(&request.raw_results),
-        &request.generated_at,
-        coverage_model,
-        &mut ids,
-    )?;
+    // The three views are built side by side: each reads the same evidence
+    // and nothing the others write. Each holds one copy of each id it names.
+    // They do not share copies: two threads cloning the same ids contend on
+    // their counts, which made each view twice as slow as building it alone.
+    let all = request.raw_results.iter().collect::<Vec<_>>();
+    let passing = passing_coverage_results(&request.raw_results);
+    let failing = failed_coverage_results(&request.raw_results);
+    let build = |results: &[&RawTestResult]| {
+        create_coverage_view_with_model(
+            &request.manifest,
+            results,
+            &request.generated_at,
+            coverage_model,
+            &mut Interner::default(),
+        )
+    };
+    let (view, passed, failed) = std::thread::scope(|scope| {
+        let passed = scope.spawn(|| build(&passing));
+        let failed = scope.spawn(|| build(&failing));
+        let view = build(&all);
+        (
+            view,
+            passed
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            failed
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        )
+    });
+    let (view, passed, failed) = (view?, passed?, failed?);
     let execution = match request.test_exit_code {
         ExitCodeInput::Missing => None,
         ExitCodeInput::Present(test_exit_code) => Some(ExecutionResult {
@@ -2716,11 +2910,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_report_holds_one_copy_of_each_id_across_its_views() {
-        // What made analysis fit in memory: the full and the passing view name
-        // the same tests, and must share one copy of each name rather than
-        // hold one per mention. A change that copies ids again fails here
-        // before it shows up as gigabytes.
+    fn a_view_holds_one_copy_of_each_id_it_names() {
+        // What made analysis fit in memory: a view names each test at every
+        // point, line and confidence it reached, and must share one copy of
+        // the name rather than hold one per mention. A change that copies ids
+        // again fails here before it shows up as gigabytes. The full and the
+        // passing view are built side by side, each with its own copy.
         let root = std::env::temp_dir().join(format!(
             "supercov-shared-ids-{}-{}",
             std::process::id(),
@@ -2736,25 +2931,25 @@ mod tests {
             .remove(0);
         let report = crate::run_store::analyze_stored_run(&run).unwrap();
         let _ = directory;
-        let mentions = report
-            .view
-            .points
-            .iter()
-            .chain(&report.filters.passed.points)
-            .flat_map(|point| point.tests.iter().chain(&point.confidence.tests))
-            .chain(report.view.lines.iter().flat_map(|line| &line.tests))
-            .collect::<Vec<_>>();
-        assert!(
-            mentions.len() >= 4,
-            "the fixture names its test in several places"
-        );
-        let first = mentions[0];
-        for mention in &mentions {
-            assert_eq!(*mention, first);
+        for view in [&report.view, &report.filters.passed] {
+            let mentions = view
+                .points
+                .iter()
+                .flat_map(|point| point.tests.iter().chain(&point.confidence.tests))
+                .chain(view.lines.iter().flat_map(|line| &line.tests))
+                .collect::<Vec<_>>();
             assert!(
-                mention.same_allocation(first),
-                "every mention shares one copy"
+                mentions.len() >= 2,
+                "the fixture names its test in several places"
             );
+            let first = mentions[0];
+            for mention in &mentions {
+                assert_eq!(*mention, first);
+                assert!(
+                    mention.same_allocation(first),
+                    "every mention shares one copy"
+                );
+            }
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -2789,9 +2984,24 @@ mod tests {
                 .insert(name.to_owned());
         }
         let numbered = numbered
-            .into_sets(&hits)
+            .into_relation(&hits)
+            .by_hit
             .into_iter()
-            .map(|(obligation, names)| (obligation, names.into_iter().map(String::from).collect()))
+            .map(|(obligation, reached)| {
+                let names = reached
+                    .names
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>();
+                let mut sorted_names = names.clone();
+                sorted_names.sort();
+                sorted_names.dedup();
+                assert_eq!(
+                    names, sorted_names,
+                    "a relation lists its ids once, in order"
+                );
+                (obligation, names.into_iter().collect())
+            })
             .collect::<HashMap<_, BTreeSet<String>>>();
         assert_eq!(numbered, direct);
         assert_eq!(

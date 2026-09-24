@@ -86,16 +86,7 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
         }
         _ => return Err("Unsupported assertion input schema".into()),
     };
-    if manifest.files.iter().any(|(p, f)| {
-        !local_path(p) || f.sha256.len() != 64 || !f.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-    }) || manifest.assertions.iter().any(|s| {
-        !manifest.files.contains_key(&s.at.file)
-            || s.at.line == 0
-            || s.at.column == 0
-            || s.at.text.is_empty()
-    }) {
-        return Err("Invalid assertion input manifest".into());
-    }
+    validate_manifest(&manifest)?;
     if fs::read(&run.evidence_path).map_err(|e| e.to_string())? != bytes {
         return Err("Run archive changed during read".into());
     }
@@ -110,6 +101,36 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
             .transpose()?
             .unwrap_or_default(),
     }))
+}
+
+fn validate_manifest(manifest: &InputManifest) -> Result<(), String> {
+    if manifest.files.iter().any(|(p, f)| {
+        !local_path(p) || f.sha256.len() != 64 || !f.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    }) || manifest.assertions.iter().any(|s| {
+        !manifest.files.contains_key(&s.at.file)
+            || s.at.line == 0
+            || s.at.column == 0
+            || s.at.text.is_empty()
+    }) {
+        return Err("Invalid assertion input manifest".into());
+    }
+    Ok(())
+}
+
+/// The manifest a run archived, from the inputs the frontend archived it
+/// from and the digest publication took of the archive: what reading the
+/// archive back would give, without decompressing it to find one entry.
+pub(crate) fn archived_manifest(
+    manifest: InputManifest,
+    evidence_digest: String,
+) -> Result<RunManifest, String> {
+    validate_manifest(&manifest)?;
+    Ok(RunManifest {
+        manifest,
+        evidence_digest,
+        legacy_digest: None,
+        statement_exclusions: Vec::new(),
+    })
 }
 pub fn load(run: &StoredRun, input: &RunManifest) -> Result<(AssertionMap, State), String> {
     let read = |file: &str| {
@@ -143,11 +164,24 @@ fn write_json(
 /// `analysed` is the run's coverage when the caller has already analysed its
 /// evidence -- publication does so once for everything it derives. Without it
 /// the archive is analysed here.
+#[cfg(test)]
 pub(crate) fn prepare_publication(
     root: &Path,
     directory: &Path,
     metadata: &RunMetadata,
     analysed: Option<&CoverageReport>,
+) -> Result<(), String> {
+    prepare_publication_with(root, directory, metadata, analysed, None)
+}
+
+/// `prepare_publication`, with the run's archived manifest when the caller
+/// holds it (see `archived_manifest`).
+pub(crate) fn prepare_publication_with(
+    root: &Path,
+    directory: &Path,
+    metadata: &RunMetadata,
+    analysed: Option<&CoverageReport>,
+    archived: Option<RunManifest>,
 ) -> Result<(), String> {
     if metadata.merged == Some(true) {
         return Ok(());
@@ -160,8 +194,12 @@ pub(crate) fn prepare_publication(
         query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
         metadata: metadata.clone(),
     };
-    let Some(input) = load_optional_manifest(&run)? else {
-        return Ok(());
+    let input = match archived {
+        Some(input) => input,
+        None => match load_optional_manifest(&run)? {
+            Some(input) => input,
+            None => return Ok(()),
+        },
     };
     // Refuse replacement even if this helper is accidentally called twice.
     if directory.join(MAP_FILE).exists() || directory.join(STATE_FILE).exists() {
@@ -1671,6 +1709,29 @@ mod tests {
         }
         assert_eq!(own, analysed);
         prepare_publication(&root, &directory, &metadata, Some(&analysed)).unwrap();
+        // A frontend that archived the inputs hands them over instead of the
+        // store reading them back; what it writes is the same.
+        let files = [MAP_FILE, STATE_FILE, SUMMARY_CACHE_FILE];
+        let from_archive = files.map(|file| fs::read(directory.join(file)).unwrap());
+        for file in files {
+            fs::remove_file(directory.join(file)).unwrap();
+        }
+        let digest = format!("{:x}", Sha256::digest(fs::read(&path).unwrap()));
+        prepare_publication_with(
+            &root,
+            &directory,
+            &metadata,
+            Some(&analysed),
+            Some(archived_manifest(inputs.manifest(), digest).unwrap()),
+        )
+        .unwrap();
+        for (file, expected) in files.iter().zip(&from_archive) {
+            assert_eq!(
+                &fs::read(directory.join(file)).unwrap(),
+                expected,
+                "{file} is the one the archive gives"
+            );
+        }
         let cache = directory.join(SUMMARY_CACHE_FILE);
         let written = fs::read(&cache).expect("publication wrote the summary");
         let summary = report_summary(&root, &run).unwrap();

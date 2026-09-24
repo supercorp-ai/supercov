@@ -12,12 +12,68 @@
 
 use std::{
     borrow::Borrow,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
-    hash::{Hash, Hasher},
+    hash::{BuildHasherDefault, Hash, Hasher},
     ops::Deref,
     sync::Arc,
 };
+
+/// The hash an analysis's own maps of ids use: Fx, the multiply-rotate hash
+/// rustc uses for its tables. The standard SipHash resists keys chosen to
+/// collide, which costs a run's millions of lookups of its own ids -- test,
+/// phase and obligation names it made itself -- and buys them nothing.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl FxHasher {
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
+    }
+}
+
+impl Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            self.add(u64::from_le_bytes(chunk.try_into().expect("eight bytes")));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut word = [0_u8; 8];
+            word[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(word) ^ ((rest.len() as u64) << 56));
+        }
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.add(u64::from(value));
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.add(u64::from(value));
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.add(value);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.add(value as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+pub type FastHash = BuildHasherDefault<FxHasher>;
+pub type FastMap<K, V> = HashMap<K, V, FastHash>;
+pub type FastSet<T> = HashSet<T, FastHash>;
 
 use serde::{Serialize, Serializer};
 
@@ -142,10 +198,10 @@ impl Id {
     }
 }
 
-/// One `Id` per distinct text, for the life of one analysis.
+/// One `Id` per distinct text, for the life of one view.
 #[derive(Default)]
 pub struct Interner {
-    ids: HashSet<Id>,
+    ids: FastSet<Id>,
 }
 
 impl Interner {

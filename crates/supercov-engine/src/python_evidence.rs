@@ -1073,22 +1073,24 @@ fn read_evidence_file(
                 .hits
                 .insert(id);
             }
+            // An empty record names no phase evidence: it must not make one.
+            Record::Hits { ids, .. } if ids.is_empty() => {}
+            Record::Decs { v, .. } if v.is_empty() => {}
             Record::Hits { ctx, ids } => {
-                for id in ids {
-                    if let Some(before) = before_assertion.get_mut(&ctx) {
-                        before.hits.insert(id.clone());
-                    }
-                    observations(
-                        evidence,
-                        &contexts,
-                        process_worker.as_deref(),
-                        ctx,
-                        name,
-                        line_number,
-                    )?
-                    .hits
-                    .insert(id);
+                if let Some(before) = before_assertion.get_mut(&ctx) {
+                    before.hits.extend(ids.iter().cloned());
                 }
+                // One lookup of the phase for the record, not one per hit.
+                observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .hits
+                .extend(ids);
             }
             Record::Dec { ctx, id, v, o } => {
                 if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
@@ -1126,6 +1128,15 @@ fn read_evidence_file(
                 .insert((values, o == 1));
             }
             Record::Decs { ctx, v: vectors } => {
+                let mut before = before_assertion.get_mut(&ctx);
+                let observed = observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?;
                 for (id, v, o) in vectors {
                     if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
                         return Err(invalid("decision vector digits must be 0, 1 or 2"));
@@ -1141,25 +1152,18 @@ fn read_evidence_file(
                             _ => Some(true),
                         })
                         .collect::<Vec<_>>();
-                    if let Some(before) = before_assertion.get_mut(&ctx) {
+                    if let Some(before) = before.as_mut() {
                         before
                             .vectors
                             .entry(id.clone())
                             .or_default()
                             .insert((values.clone(), o == 1));
                     }
-                    observations(
-                        evidence,
-                        &contexts,
-                        process_worker.as_deref(),
-                        ctx,
-                        name,
-                        line_number,
-                    )?
-                    .vectors
-                    .entry(id)
-                    .or_default()
-                    .insert((values, o == 1));
+                    observed
+                        .vectors
+                        .entry(id)
+                        .or_default()
+                        .insert((values, o == 1));
                 }
             }
             Record::Assert { ctx } => {

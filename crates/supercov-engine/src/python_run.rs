@@ -23,7 +23,7 @@ use crate::{
     frontend_protocol::validate_frontend_report_request,
     integrity::{FrontendIntegrityInputs, create_explicit_run_integrity},
     lifecycle::{
-        ProjectLock, finalize_published_run, note_kept_evidence, publish_analysed_run, publish_run,
+        Archived, ProjectLock, finalize_published_run, note_kept_evidence, publish_archived_run,
         recover_abandoned_runs, remove_stored_tree_deferred,
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
@@ -441,10 +441,15 @@ pub fn run_direct_python(
             crate::coverage_report::TransportStats::none(),
         );
         drop(report_request);
-        let run_directory = match analysed {
-            Ok(report) => publish_analysed_run(&root, &metadata, &archive_path, report),
-            Err(_) => publish_run(&root, &metadata, &archive_path),
-        }
+        let run_directory = publish_archived_run(
+            &root,
+            &metadata,
+            &archive_path,
+            Archived {
+                report: analysed.ok(),
+                inputs: Some(assertion_inputs.manifest()),
+            },
+        )
         .map_err(|error| error.to_string())?;
         finalize_published_run(&root, &request.run_id).map_err(|error| error.to_string())?;
         Ok(DirectPythonRunResult {

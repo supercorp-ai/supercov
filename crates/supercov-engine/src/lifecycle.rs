@@ -610,26 +610,43 @@ fn file_sha256(path: &Path) -> Result<[u8; 32], LifecycleError> {
     Ok(hash.finalize().into())
 }
 
+fn hex_digest(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
+}
+
 /// Publish immutable run evidence and its initial assertion map/state together.
 pub fn publish_run(
     root: &Path,
     metadata: &RunMetadata,
     evidence_source: &Path,
 ) -> Result<PathBuf, LifecycleError> {
-    publish_run_with_fault(root, metadata, evidence_source, None, None)
+    publish_run_with_fault(root, metadata, evidence_source, Archived::default(), None)
 }
 
-/// `publish_run` for a frontend that analysed the request it archived
-/// before letting it go, so publication need not read the archive back.
-/// The report must be the one the archive analyses to; a frontend that
-/// cannot say so publishes with `publish_run`.
-pub fn publish_analysed_run(
+/// What a frontend that still holds the run it archived hands publication,
+/// so it need not read the archive back: the analysis of the archived
+/// request, and the assertion inputs archived beside it. Each must be what
+/// the archive gives; a frontend that cannot say so leaves it out.
+#[derive(Default)]
+pub struct Archived {
+    pub report: Option<crate::coverage_report::CoverageReport>,
+    pub inputs: Option<crate::assertion_map::InputManifest>,
+}
+
+/// `publish_run` for a frontend that holds what it archived; see `Archived`.
+pub fn publish_archived_run(
     root: &Path,
     metadata: &RunMetadata,
     evidence_source: &Path,
-    report: crate::coverage_report::CoverageReport,
+    archived: Archived,
 ) -> Result<PathBuf, LifecycleError> {
-    publish_run_with_fault(root, metadata, evidence_source, Some(report), None)
+    publish_run_with_fault(root, metadata, evidence_source, archived, None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -643,7 +660,7 @@ pub(crate) fn publish_run_with_fault(
     root: &Path,
     metadata: &RunMetadata,
     evidence_source: &Path,
-    analysed: Option<crate::coverage_report::CoverageReport>,
+    archived: Archived,
     fault: Option<RunPublicationFault>,
 ) -> Result<PathBuf, LifecycleError> {
     checked_id(&metadata.id)?;
@@ -696,14 +713,27 @@ pub(crate) fn publish_run_with_fault(
     };
     let analysed = if metadata.merged == Some(true) {
         None
-    } else if analysed.is_some() {
-        analysed
+    } else if archived.report.is_some() {
+        archived.report
     } else {
         crate::run_store::analyze_stored_run(&staged).ok()
     };
-    if let Err(reason) =
-        crate::assertion_store::prepare_publication(root, &staging, metadata, analysed.as_ref())
-    {
+    let archived_inputs = match archived.inputs {
+        Some(manifest) => Some(
+            crate::assertion_store::archived_manifest(manifest, hex_digest(&evidence_sha256))
+                .map_err(|reason| {
+                    LifecycleError::InvalidState(format!("assertion map publication: {reason}"))
+                })?,
+        ),
+        None => None,
+    };
+    if let Err(reason) = crate::assertion_store::prepare_publication_with(
+        root,
+        &staging,
+        metadata,
+        analysed.as_ref(),
+        archived_inputs,
+    ) {
         let _ = remove_stored_tree_deferred(root, &staging);
         return Err(LifecycleError::InvalidState(format!(
             "assertion map publication: {reason}"
@@ -1328,7 +1358,7 @@ mod tests {
             &root,
             &metadata,
             &evidence,
-            None,
+            Archived::default(),
             Some(RunPublicationFault::QueryIndexWrite),
         )
         .unwrap();
@@ -1369,7 +1399,7 @@ mod tests {
             &root,
             &metadata(id, bytes),
             &evidence,
-            None,
+            Archived::default(),
             Some(RunPublicationFault::FinalRename),
         )
         .unwrap_err();
