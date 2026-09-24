@@ -5,8 +5,8 @@ twelve named checks, asked file by file, each mapped to the weakness classes it
 stands for. There is no score. A file is clean, or it names what fired.
 
 Judgments come from [Jev](https://typesafe.ai), the same way `supercov quality`
-gets them. Set `TYPESAFE_API_KEY` as described in [quality](quality.md); reading
-a saved assessment never needs a key.
+gets them. Set `TYPESAFE_API_KEY`, and optionally another provider, as described
+in [quality](quality.md); reading a saved assessment never needs a key.
 
 ## Start with the repository
 

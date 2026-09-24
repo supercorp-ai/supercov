@@ -120,8 +120,65 @@ impl Instrument {
     }
 }
 
+/// The model the catalogs were calibrated against, asked unless
+/// `TYPESAFE_DEFAULT_MODEL` names another.
 const MODEL: &str = "jev-1.13.0";
-const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+const BASE_URL: &str = "https://api.typesafe.ai";
+
+/// The model every request names. `TYPESAFE_DEFAULT_MODEL` is the variable
+/// TypeSafe's own SDKs read, so a gateway that names Jev differently works the
+/// way it already does for them.
+fn model() -> &'static str {
+    static MODEL_IN_USE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MODEL_IN_USE.get_or_init(|| setting("TYPESAFE_DEFAULT_MODEL").unwrap_or_else(|| MODEL.into()))
+}
+
+/// Where requests go: `TYPESAFE_BASE_URL`, read as TypeSafe's SDKs read it,
+/// with the API path appended.
+fn endpoint() -> Result<&'static str, String> {
+    static ENDPOINT: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    ENDPOINT
+        .get_or_init(|| endpoint_for(setting("TYPESAFE_BASE_URL").as_deref()))
+        .as_ref()
+        .map(String::as_str)
+        .map_err(Clone::clone)
+}
+
+/// The key travels with every request, so it only ever goes over TLS, or in
+/// the clear to this machine.
+fn endpoint_for(base: Option<&str>) -> Result<String, String> {
+    let base = base.unwrap_or(BASE_URL).trim_end_matches('/');
+    let local = matches!(host(base), "localhost" | "127.0.0.1" | "[::1]");
+    if base.starts_with("https://") || (base.starts_with("http://") && local) {
+        Ok(format!("{base}/v1/systemone"))
+    } else {
+        Err(format!(
+            "TYPESAFE_BASE_URL must be an https:// URL (http:// only for localhost), not {base}"
+        ))
+    }
+}
+
+/// The host of a URL, which is what a person needs to see to know where their
+/// requests and key are going.
+fn host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    match authority.find(']') {
+        Some(end) if authority.starts_with('[') => &authority[..=end],
+        _ => authority.split(':').next().unwrap_or(authority),
+    }
+}
+
+/// An environment variable, where blank means unset as it does for the SDKs.
+fn setting(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
 // Jev 1.13.0 documents 32k tokens for state plus the longest question and 64k
 // for state plus every question. This budget targets the tighter limit and
 // leaves room for the estimate below to be wrong. Source is never truncated;
@@ -186,6 +243,12 @@ Reading options:
   --json              Print the view as JSON
   --limit <n>         Rows to show, 0 for all of them (default 20)
 
+Environment:
+  TYPESAFE_API_KEY        API key; assessing needs one, reading never does
+  TYPESAFE_BASE_URL       Another host serving the same API, such as
+                          https://openrouter.ai/api (default https://api.typesafe.ai)
+  TYPESAFE_DEFAULT_MODEL  The model to ask for (default jev-1.13.0)
+
 Twelve named properties are asked of each file as yes/no questions, and the
 arithmetic that turns twelve answers into one number is done here rather than by
 the model, so every part of a score is a claim you can check against the file.
@@ -228,6 +291,12 @@ Options shared with quality:
   --dry-run           Print exact request bodies as JSON; no API call, no writes
   --refresh           Bypass cached responses
   --limit <n>         Rows to show, 0 for all of them (default 20)
+
+Environment:
+  TYPESAFE_API_KEY        API key; assessing needs one, reading never does
+  TYPESAFE_BASE_URL       Another host serving the same API, such as
+                          https://openrouter.ai/api (default https://api.typesafe.ai)
+  TYPESAFE_DEFAULT_MODEL  The model to ask for (default jev-1.13.0)
 
 Twelve named security surfaces are asked of each file as yes/no questions: a
 query built from a caller's value, a path taken from a request, a handler with
@@ -1051,7 +1120,10 @@ fn distribution(values: &BTreeMap<String, f64>, keys: BTreeSet<String>) -> bool 
 }
 
 fn validate(response: &ApiResponse, request: &Value) -> Result<(), String> {
-    if response.model != MODEL {
+    // The calibrated model must answer as itself. A model someone chose is
+    // often an alias a gateway resolves to a dated build, and the snapshot
+    // records what was asked, so there is nothing to compare it with.
+    if request["model"] == MODEL && response.model != MODEL {
         return Err(format!(
             "expected model {MODEL}, received {}",
             response.model
@@ -1116,7 +1188,7 @@ fn validate(response: &ApiResponse, request: &Value) -> Result<(), String> {
             }
         };
         if !valid {
-            return Err(format!("invalid TypeSafe answer for {id}"));
+            return Err(format!("invalid answer for {id}"));
         }
     }
     Ok(())
@@ -1192,6 +1264,7 @@ fn evaluate(
     key: &str,
     request: &Value,
 ) -> Result<ApiResponse, String> {
+    let host = host(endpoint);
     for attempt in 0..4 {
         wait_out_any_pause();
         let mut response = agent
@@ -1199,8 +1272,7 @@ fn evaluate(
             .header("Authorization", format!("Bearer {key}"))
             .send_json(request)
             .map_err(|_| {
-                "TypeSafe transport failed (connection, TLS or timeout); retry the command"
-                    .to_string()
+                format!("{host} transport failed (connection, TLS or timeout); retry the command")
             })?;
         let status = response.status().as_u16();
         if (status == 429 || (500..600).contains(&status)) && attempt < 3 {
@@ -1215,7 +1287,7 @@ fn evaluate(
             let delay = asked.unwrap_or(1 << attempt).min(MAX_BACKOFF_SECONDS);
             if asked.is_some_and(|seconds| seconds > MAX_BACKOFF_SECONDS) {
                 return Err(format!(
-                    "TypeSafe HTTP {status} and asked for {} seconds, longer than this command \
+                    "{host} HTTP {status} and asked for {} seconds, longer than this command \
                      will wait; try again later or with fewer paths",
                     asked.unwrap_or_default()
                 ));
@@ -1225,7 +1297,7 @@ fn evaluate(
         }
         if !(200..300).contains(&status) {
             return Err(format!(
-                "TypeSafe HTTP {status} (check credentials, quota or request size)"
+                "{host} HTTP {status} (check credentials, quota or request size)"
             ));
         }
         let mut bytes = Vec::new();
@@ -1234,12 +1306,12 @@ fn evaluate(
             .as_reader()
             .take(MAX_RESPONSE_BYTES + 1)
             .read_to_end(&mut bytes)
-            .map_err(|_| "failed to read TypeSafe response".to_string())?;
+            .map_err(|_| format!("failed to read the response from {host}"))?;
         if bytes.len() as u64 > MAX_RESPONSE_BYTES {
-            return Err("TypeSafe response exceeds size limit".into());
+            return Err(format!("{host} response exceeds size limit"));
         }
         let parsed: ApiResponse = serde_json::from_slice(&bytes)
-            .map_err(|_| "TypeSafe returned an invalid response schema".to_string())?;
+            .map_err(|_| format!("{host} returned an invalid response schema"))?;
         validate(&parsed, request)?;
         return Ok(parsed);
     }
@@ -1299,7 +1371,7 @@ fn resolve(
         .filter(|s| !s.trim().is_empty())
         .ok_or("set TYPESAFE_API_KEY for uncached assessments, or use --dry-run")?;
     let started = Instant::now();
-    let response = evaluate(agent, ENDPOINT, key, request)?;
+    let response = evaluate(agent, endpoint()?, key, request)?;
     let entry = CacheEntry {
         request_hash: hash.to_owned(),
         response,
@@ -1589,10 +1661,12 @@ fn ask_smells(
     if progress && key.is_some() {
         let (tokens, usd) = estimated_cost(&pending);
         eprintln!(
-            "[supercov] {}: {} requests, about {tokens} input tokens \
+            "[supercov] {}: {} requests to {} ({}), about {tokens} input tokens \
              (${usd:.4}) if none is cached",
             instrument.lane(),
-            pending.len()
+            pending.len(),
+            endpoint().map_or("?", host),
+            model()
         );
     }
     let answered = answer_all(
@@ -2731,6 +2805,7 @@ fn run_health(
 ) -> Result<(Value, bool), String> {
     if !options.dry_run {
         require_key(key)?;
+        endpoint()?;
     }
     let found = discover_for(root, &options.paths, instrument)?;
     let configured = scope::configured_roots();
@@ -2900,7 +2975,8 @@ fn run_health(
         return Ok((
             json!({
                 "instrument": instrument.name(),
-                "catalog_version": instrument.version(), "model": MODEL,
+                "catalog_version": instrument.version(), "model": model(),
+                "endpoint": endpoint()?,
                 "requests": subjects.iter().map(|s| &s.request).collect::<Vec<_>>(),
             }),
             false,
@@ -3039,7 +3115,7 @@ fn run_health(
         // numbers are not comparable.
         "instrument": instrument.name(),
         "catalog_version": instrument.version(),
-        "model": MODEL, "scope": "file",
+        "model": model(), "scope": "file",
         "paths": options.paths.iter()
             .map(|path| path.display().to_string().replace('\\', "/"))
             .collect::<Vec<_>>(),
@@ -3084,6 +3160,7 @@ fn run_patch(
     instrument: Instrument,
 ) -> Result<(Value, bool), String> {
     require_key(key)?;
+    endpoint()?;
     let collected = changes::collect(root, range, paths)?;
     let configured = scope::configured_roots();
     let changed: Vec<PathBuf> = collected.iter().map(|c| root.join(&c.path)).collect();
@@ -3184,7 +3261,7 @@ fn run_patch(
         json!({
             "instrument": instrument.name(),
             "catalog_version": instrument.version(),
-            "model": MODEL,
+            "model": model(),
             "catalog": instrument.described(),
             "scope": scope.summary(),
             "range": range.id(),

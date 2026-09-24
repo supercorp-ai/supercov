@@ -193,7 +193,7 @@ prototype the project does not ship? Judge it in the context of the whole tree."
         })
         .collect();
     json!({
-        "model": super::MODEL,
+        "model": super::model(),
         "state": { "repository": repository, "tree": tree, "manifests": manifests },
         "questions": questions,
     })
@@ -201,7 +201,7 @@ prototype the project does not ship? Judge it in the context of the whole tree."
 
 pub fn file_request(path: &str, source: &str) -> Value {
     json!({
-        "model": super::MODEL,
+        "model": super::model(),
         "state": { "file": { "path": path, "source": source } },
         "questions": file_questions(),
     })
@@ -216,7 +216,7 @@ pub fn file_request(path: &str, source: &str) -> Value {
 /// is reported as a different kind of answer, never silently substituted.
 pub fn patch_request(patch: &str) -> Value {
     json!({
-        "model": super::MODEL,
+        "model": super::model(),
         "state": { "diff": patch },
         "questions": change_questions(),
     })
@@ -230,7 +230,7 @@ pub fn patch_request(patch: &str) -> Value {
 /// without. The shape that was validated is the shape that ships.
 pub fn change_request(before: &str, after: &str) -> Value {
     json!({
-        "model": super::MODEL,
+        "model": super::model(),
         "state": { "before": before, "after": after },
         "questions": change_questions(),
     })
@@ -502,7 +502,7 @@ data does not count.";
         among: Option<&[String]>,
     ) -> Value {
         json!({
-            "model": super::super::MODEL,
+            "model": super::super::model(),
             "state": { "file": { "path": path, "source": source } },
             "questions": classify_among(nodes, offset, among),
         })
@@ -543,7 +543,7 @@ data does not count.";
             ));
         }
         json!({
-            "model": super::super::MODEL,
+            "model": super::super::model(),
             "state": { "file": { "path": path, "source": source } },
             "questions": questions,
         })
@@ -622,7 +622,7 @@ data does not count.";
                 },
             }));
         }
-        json!({ "model": super::super::MODEL, "state": { "flows": state }, "questions": questions })
+        json!({ "model": super::super::model(), "state": { "flows": state }, "questions": questions })
     }
 
     /// A report dismissed at or above this by the triage question is not shown.
@@ -718,7 +718,7 @@ before it arrives, does not count.",
             caller.file, callee.function, callee.file
         );
         json!({
-            "model": super::super::MODEL,
+            "model": super::super::model(),
             "state": {
                 "caller": { "file": caller.file, "function": caller.function, "starts_at_line": caller.line, "source": caller.source },
                 "callee": { "file": callee.file, "function": callee.function, "starts_at_line": callee.line, "source": callee.source },
@@ -765,7 +765,7 @@ before it arrives, does not count.",
 
     pub fn file_request(path: &str, source: &str) -> Value {
         json!({
-            "model": super::super::MODEL,
+            "model": super::super::model(),
             "state": { "file": { "path": path, "source": source } },
             "questions": file_questions(),
         })
@@ -773,7 +773,7 @@ before it arrives, does not count.",
 
     pub fn change_request(before: &str, after: &str) -> Value {
         json!({
-            "model": super::super::MODEL,
+            "model": super::super::model(),
             "state": { "before": before, "after": after },
             "questions": change_questions(),
         })
@@ -783,7 +783,7 @@ before it arrives, does not count.",
     /// different kind of answer, the way the complexity catalog does it.
     pub fn patch_request(patch: &str) -> Value {
         json!({
-            "model": super::super::MODEL,
+            "model": super::super::model(),
             "state": { "diff": patch },
             "questions": change_questions(),
         })
@@ -843,7 +843,7 @@ before it arrives, does not count.",
         #[test]
         fn file_request_carries_the_source_once_and_one_noul_per_check() {
             let request = file_request("src/a.ts", "export const a = 1");
-            assert_eq!(request["model"], super::super::super::MODEL);
+            assert_eq!(request["model"], super::super::super::model());
             assert_eq!(request["state"]["file"]["path"], "src/a.ts");
             let questions = request["questions"].as_object().unwrap();
             assert_eq!(questions.len(), 12);
