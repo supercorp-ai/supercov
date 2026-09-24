@@ -233,6 +233,24 @@ print(json.dumps({"hit": written.find(b'"t":"runs"'), "assertion": written.find(
   assert.ok(result.hit >= 0 && result.hit < result.assertion, JSON.stringify(result));
 });
 
+test("records spell strings as json.dumps does and read an inherited identity back", { skip }, () => {
+  const result = run(`${SETUP}
+import random
+random.seed(7)
+alphabet = ["a", "Z", " ", "~", '"', "\\\\", "\\n", "\\t", "\\x00", "\\x1f", "\\x7f", "é", "€", "\\U0001f600", "\\ud800", ":", ",", "{", "}", "-", "1"]
+mismatches = []
+for _ in range(5000):
+    text = "".join(random.choice(alphabet) for _ in range(random.randint(0, 12)))
+    if rt._json_string(text) != json.dumps(text):
+        mismatches.append(text)
+    identity = {"phase": "call", "retry": random.randint(0, 3), "test": text, "worker": "main"}
+    if rt._json_load(rt._json_text(identity)) != identity:
+        mismatches.append(identity)
+print(json.dumps({"mismatches": len(mismatches)}))
+`);
+  assert.equal(result.mismatches, 0);
+});
+
 test("an unresolved reservation touched after close never opens evidence", { skip }, () => {
   const result = run(`${SETUP}
 late = runtime.hits_var.get()
