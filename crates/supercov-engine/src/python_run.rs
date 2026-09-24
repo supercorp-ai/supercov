@@ -23,7 +23,7 @@ use crate::{
     frontend_protocol::validate_frontend_report_request,
     integrity::{FrontendIntegrityInputs, create_explicit_run_integrity},
     lifecycle::{
-        ProjectLock, finalize_published_run, note_kept_evidence, publish_run,
+        Archived, ProjectLock, finalize_published_run, note_kept_evidence, publish_archived_run,
         recover_abandoned_runs, remove_stored_tree_deferred,
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
@@ -59,7 +59,7 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
-fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 5] {
+fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 6] {
     [
         (
             "sitecustomize.py",
@@ -80,6 +80,10 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 5] {
         (
             "supercov_probes.py",
             include_bytes!("../runtime-assets/python/supercov_probes.py"),
+        ),
+        (
+            "supercov_instrument.py",
+            include_bytes!("../runtime-assets/python/supercov_instrument.py"),
         ),
     ]
 }
@@ -348,7 +352,7 @@ pub fn run_direct_python(
             .or_else(|_| std::env::var("SUPERCOV_DEBUG"))
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
         measured.set(true);
-        let run: PythonFrontendRun = build_python_frontend_run(
+        let mut run: PythonFrontendRun = build_python_frontend_run(
             &project.manifest,
             &evidence_directory,
             &request.run_id,
@@ -361,15 +365,44 @@ pub fn run_direct_python(
             .map_err(|error| error.to_string())?;
         let joined_ms = elapsed_ms(publication_started);
         let archive_path = work_directory.join("evidence.raw.gz");
-        let entries = run.archive_entries().map_err(|error| error.to_string())?;
-        let serialized_ms = elapsed_ms(publication_started) - joined_ms;
-        let entries = crate::assertion_inputs::append(entries, &assertion_inputs)?;
-        let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
+        // Analysed as the archive will analyse -- the request it archives,
+        // with the run's integrity record, which the archive does not hold
+        // -- while it is written: neither waits on the other.
+        run.request.integrity = serde_json::to_value(&integrity).ok();
+        let (archived, analysed) = std::thread::scope(|scope| {
+            let analysis = scope.spawn(|| {
+                crate::coverage_report::analyze_frontend_request(
+                    &run.declaration,
+                    &run.request,
+                    crate::coverage_report::TransportStats::none(),
+                )
+            });
+            let archived = (|| {
+                let entries = run.archive_entries().map_err(|error| error.to_string())?;
+                let serialized_ms = elapsed_ms(publication_started) - joined_ms;
+                let entries = crate::assertion_inputs::append(entries, &assertion_inputs)?;
+                let raw =
+                    write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
+                let archive_ms = elapsed_ms(publication_started) - joined_ms - serialized_ms;
+                Ok::<_, String>((raw, serialized_ms, archive_ms))
+            })();
+            let analysed = analysis
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (archived, analysed)
+        });
+        let analysis_ms = elapsed_ms(publication_started) - joined_ms;
+        let (raw, serialized_ms, archive_ms) = archived?;
+        // The joined evidence is in the archive now, and publication reads it
+        // from there. Held to the end for three counts, it was the largest
+        // thing alive while publication analysed the archive: 1.4 GB on a
+        // 3,900-test run, on top of the analysis's own.
+        let (tests, interpreters, python_versions) =
+            (run.tests, run.interpreters, run.python_versions.clone());
         if verbose {
             writeln!(
                 diagnostics,
-                "[supercov] python evidence: join={joined_ms}ms serialize={serialized_ms}ms archive={}ms",
-                elapsed_ms(publication_started) - joined_ms - serialized_ms
+                "[supercov] python evidence: join={joined_ms}ms serialize={serialized_ms}ms archive={archive_ms}ms analysis={analysis_ms}ms (beside the archive)"
             )
             .map_err(|error| error.to_string())?;
         }
@@ -410,17 +443,26 @@ pub fn run_direct_python(
             parents: None,
             source_roots: source_roots.clone(),
         };
-        let run_directory =
-            publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
+        drop(run);
+        let run_directory = publish_archived_run(
+            &root,
+            &metadata,
+            &archive_path,
+            Archived {
+                report: analysed.ok(),
+                inputs: Some(assertion_inputs.manifest()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
         finalize_published_run(&root, &request.run_id).map_err(|error| error.to_string())?;
         Ok(DirectPythonRunResult {
             run_id: request.run_id.clone(),
             run_directory,
             exit_code: execution.exit_code,
-            tests: run.tests,
+            tests,
             source_files: project.plan.files.len(),
-            interpreters: run.interpreters,
-            python_versions: run.python_versions,
+            interpreters,
+            python_versions,
             recovered_runs,
             metadata,
         })

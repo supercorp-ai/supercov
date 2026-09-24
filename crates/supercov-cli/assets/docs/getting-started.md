@@ -21,6 +21,16 @@ Measure code quality with npx supercov.
 
 See [Understanding quality](https://supercov.com/docs/quality).
 
+For security surface with the same key, ask:
+
+```text supercov-prompt
+Find security issues with npx supercov security and show me what it found.
+```
+
+Supercov asks twelve security checks of every file and shows each finding
+with the line and the code on it. See
+[Security surface](https://supercov.com/docs/security).
+
 When it finishes, review the test change and coverage comparison in your
 conversation. Ask separately if you want a commit or pull request.
 
@@ -88,7 +98,16 @@ npx supercov runs latest line app/checkout/session.ts:64
 outcomes and MC/DC witnesses. `line` shows the obligations and tests associated
 with one source line.
 
-### 4. Add a test and prove the gain
+#For a human review, create one interactive file from the same stored evidence:
+
+```sh
+npx supercov report
+```
+
+It opens locally with run comparison, prioritized gaps, source context, test
+attribution, and scope. No test rerun or server is required.
+
+## 4. Add a test and prove the gain
 
 The agent writes one focused test with a meaningful assertion. It then reruns
 the same complete command and compares the two runs:
@@ -152,9 +171,9 @@ Supercov does not rewrite your source, tests, imports, runner configuration,
 dependencies, or ordinary build output.
 
 ```sh supercov
-npx supercov clean --dry-run   # preview what would be removed
-npx supercov clean --keep 20   # keep the 20 newest runs
-npx supercov clean             # remove all runs and the build cache
+npx supercov runs clean --dry-run   # preview what would be removed
+npx supercov runs clean --keep 20   # keep the 20 newest runs
+npx supercov runs clean             # remove all runs and the build cache
 ```
 
 If the first run does not look right, go to [Troubleshooting](troubleshooting.md)

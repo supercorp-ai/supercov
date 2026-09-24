@@ -165,14 +165,6 @@ fn temporary_path(destination: &Path, sequence: u64) -> Result<PathBuf, QueryInd
     Ok(destination.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), sequence)))
 }
 
-fn sync_parent(path: &Path) {
-    if let Some(parent) = path.parent()
-        && let Ok(directory) = File::open(parent)
-    {
-        let _ = directory.sync_all();
-    }
-}
-
 fn layout_sections(
     sections: &[QueryIndexSection],
 ) -> Result<(Vec<SectionDescriptor>, u64), QueryIndexError> {
@@ -303,10 +295,12 @@ pub fn write_query_index(
         }
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&make_header(identity, &descriptors, total_bytes))?;
-        file.sync_all()?;
+        // Not synced: an index is disposable, and a reader verifies every
+        // page against its digest, so one a machine crash left torn is
+        // rebuilt from the evidence like a missing one. Syncing 90 MB cost
+        // each publication of a 3,900-test run 50 ms.
         drop(file);
         fs::rename(&temporary, destination)?;
-        sync_parent(destination);
         Ok(())
     })();
     if result.is_err() {

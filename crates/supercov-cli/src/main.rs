@@ -46,6 +46,7 @@ use time::{OffsetDateTime, macros::format_description};
 
 mod assertions_human;
 mod assertions_query;
+mod html_report;
 mod human_query;
 mod public_query;
 mod quality;
@@ -63,6 +64,8 @@ Score the source with Jev:
   supercov quality file <path>         one file, every check
   supercov quality patch               what a change introduced
   supercov quality --help              every quality query
+  supercov security                    security surface, file by file
+  supercov security patch              what a change introduced, security only
 
 Measure your full test command:
   npx supercov -- npm test
@@ -84,8 +87,10 @@ Check what the tests assert:
 
 Compare, combine, and maintain:
   supercov diff <older> <newer>        compare two runs
+  supercov report [run-id]             open a portable interactive HTML report
   supercov merge <id> <id> [...]       combine compatible runs
-  supercov clean [--keep N]            remove stored runs (all by default)
+  supercov runs clean [--keep N]       remove stored runs (all by default)
+  supercov quality clean [--keep N]    remove saved assessments
 
 Guides:
   supercov docs                        list bundled guides
@@ -103,10 +108,12 @@ const DOC_TOPICS: &[&str] = &[
     "cli",
     "coverage-model",
     "quality",
+    "security",
     "evidence",
     "supported-suites",
     "verification",
     "performance",
+    "reports",
     "workspace-isolation",
 ];
 
@@ -331,12 +338,19 @@ fn main() -> ExitCode {
         Some("__build-rust-libtest-companion") => build_rust_libtest_companion(arguments.collect()),
         Some("__build-rust-compiler") => build_rust_compiler(),
         Some("__run-rust-compiler") => run_rust_compiler(),
-        Some("clean") => cleanup_command(arguments.collect()),
         Some("quality") => quality::command(arguments.collect()),
+        Some("security") => quality::security_command(arguments.collect()),
         Some("docs") => docs_command(arguments.collect()),
         Some("assertions") => assertions_query::global_command(&arguments.collect::<Vec<_>>()),
-        Some("runs") => public_query_command("runs", arguments.collect()),
+        Some("runs") => {
+            let arguments: Vec<String> = arguments.collect();
+            match arguments.split_first() {
+                Some((first, rest)) if first == "clean" => cleanup_command(rest.to_vec()),
+                _ => public_query_command("runs", arguments),
+            }
+        }
         Some("diff") => public_query_command("diff", arguments.collect()),
+        Some("report") => html_report::report_command(arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
@@ -442,6 +456,7 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         "cli" => Some(include_str!("../assets/docs/cli.md")),
         "coverage-model" => Some(include_str!("../assets/docs/coverage-model.md")),
         "quality" => Some(include_str!("../assets/docs/quality.md")),
+        "security" => Some(include_str!("../assets/docs/security.md")),
         "evidence" => Some(include_str!("../assets/docs/evidence.md")),
         "supported-suites" => Some(include_str!("../assets/docs/supported-suites.md")),
         "verification" => Some(include_str!("../assets/docs/verification.md")),
@@ -1915,6 +1930,120 @@ pub(crate) fn load_run_view(
     .map_err(|error| format!("{error:?}"))
 }
 
+/// A flow of a saved run's assertion map with the lines it is credited with,
+/// and the text the agent wrote about it. The text is what makes the credit
+/// mean something: an assertion that checks the injection succeeded and one
+/// that checks the input was rejected credit the same sink line.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct CreditedFlow {
+    pub key: String,
+    pub assertion: String,
+    pub observes: Vec<String>,
+    pub explanation: String,
+    pub nodes: Vec<String>,
+    pub lines: Vec<(String, u64)>,
+}
+
+/// Every credited flow of the run the coverage join uses, so a security
+/// finding can be placed on one of three shelves: code no test executes, code
+/// tests execute but no assertion is credited with, and code an assertion
+/// checks, where the flow's own text says what was checked. Empty when the
+/// run carries no assertion map; that is not an error.
+pub(crate) fn load_credited_flows(selector: Option<&str>) -> Result<Vec<CreditedFlow>, String> {
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+    let report = supercov_engine::assertion_store::report(&root, run)?;
+    let empty = Vec::new();
+    let mut flows = Vec::new();
+    for assertion in report["assertions"].as_array().unwrap_or(&empty) {
+        let text = assertion["at"]["text"].as_str().unwrap_or("").to_owned();
+        let observes: Vec<String> = assertion["observes"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .filter_map(|o| o.as_str().map(str::to_owned))
+            .collect();
+        for flow in assertion["flows"].as_array().unwrap_or(&empty) {
+            let mut lines = Vec::new();
+            let mut nodes = Vec::new();
+            for node in flow["nodeCredit"].as_array().unwrap_or(&empty) {
+                if let Some(t) = node["text"].as_str() {
+                    nodes.push(t.to_owned());
+                }
+                if node["status"] == "credited"
+                    && let (Some(file), Some(line)) = (
+                        node["location"]["file"].as_str(),
+                        node["location"]["line"].as_u64(),
+                    )
+                {
+                    lines.push((file.to_owned(), line));
+                }
+            }
+            if lines.is_empty() {
+                continue;
+            }
+            flows.push(CreditedFlow {
+                key: format!(
+                    "{}/{}",
+                    assertion["id"].as_str().unwrap_or("?"),
+                    flow["id"].as_str().unwrap_or("?")
+                ),
+                assertion: text.clone(),
+                observes: observes.clone(),
+                explanation: flow["explanation"].as_str().unwrap_or("").to_owned(),
+                nodes,
+                lines,
+            });
+        }
+    }
+    Ok(flows)
+}
+
+/// Which lines of which files a saved run's assertions are credited with.
+pub(crate) fn load_asserted_lines(
+    selector: Option<&str>,
+) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<u64>>, String> {
+    let mut lines: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
+        Default::default();
+    for flow in load_credited_flows(selector)? {
+        for (file, line) in flow.lines {
+            lines.entry(file).or_default().insert(line);
+        }
+    }
+    Ok(lines)
+}
+
+/// Which tests executed which lines, from a saved run: every covered
+/// statement with the tests credited for it. This is the run's own account of
+/// what ran together, which no import graph can give: a handler and a helper
+/// reached only through a lookup table are still executed by one test.
+pub(crate) fn load_point_tests(
+    selector: Option<&str>,
+) -> Result<Vec<(String, usize, Vec<String>)>, String> {
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+    let coverage = supercov_engine::assertion_store::coverage(run)?;
+    Ok(coverage
+        .view
+        .points
+        .iter()
+        .filter(|point| point.covered && !point.tests.is_empty())
+        .map(|point| {
+            (
+                point.meta.file.clone(),
+                point.meta.line,
+                point
+                    .tests
+                    .iter()
+                    .map(|test| test.as_str().to_owned())
+                    .collect(),
+            )
+        })
+        .collect())
+}
+
 /// The format names live in the engine module the packaging audit reads, so
 /// this file never spells them: Supercov emits those formats and must never
 /// look like it invokes the tools they are named after.
@@ -2092,17 +2221,33 @@ fn javascript_number(value: f64) -> String {
     }
 }
 
-fn format_run_timings(timings: &supercov_engine::run_store::RunTimings, total_ms: f64) -> String {
-    format!(
-        "initialization={}ms workspace={}ms setup={}ms build={}ms tests={}ms evidence={}ms total={}ms",
+/// `run_ms` is the engine's own clock, which stops before the run is published;
+/// `command_ms`, when the run was published, is the whole command. What lies
+/// between is publication -- analysing the evidence once for the assertion map,
+/// the summary and the query index -- and it is reported, so that the total is
+/// what the command cost rather than what it cost before publishing.
+fn format_run_timings(
+    timings: &supercov_engine::run_store::RunTimings,
+    run_ms: f64,
+    command_ms: Option<f64>,
+) -> String {
+    let phases = format!(
+        "initialization={}ms workspace={}ms setup={}ms build={}ms tests={}ms evidence={}ms",
         javascript_number(timings.initialization_ms),
         javascript_number(timings.workspace_preparation_ms),
         javascript_number(timings.adapter_setup_ms),
         javascript_number(timings.instrumented_build_ms),
         javascript_number(timings.test_command_ms),
         javascript_number(timings.evidence_publication_ms),
-        javascript_number(total_ms),
-    )
+    );
+    match command_ms {
+        Some(command_ms) => format!(
+            "{phases} publication={}ms total={}ms",
+            javascript_number((command_ms - run_ms).max(0.0)),
+            javascript_number(command_ms.max(run_ms)),
+        ),
+        None => format!("{phases} total={}ms", javascript_number(run_ms)),
+    }
 }
 
 /// What the caller asked for beyond the command itself.
@@ -2124,6 +2269,8 @@ fn process_exit_code(code: i32) -> ExitCode {
 }
 
 fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
+    let command_started = Instant::now();
+    let command_ms = || command_started.elapsed().as_secs_f64() * 1000.0;
     if command.is_empty() {
         eprintln!("Usage: supercov -- <test command>");
         return ExitCode::from(2);
@@ -2225,7 +2372,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2287,7 +2438,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2322,7 +2477,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2359,7 +2518,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2396,7 +2559,11 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                 if let Some(timings) = &result.metadata.timings {
                     eprintln!(
                         "[supercov] timings {}",
-                        format_run_timings(timings, result.metadata.duration_ms)
+                        format_run_timings(
+                            timings,
+                            result.metadata.duration_ms,
+                            Some(command_ms())
+                        )
                     );
                 }
                 process_exit_code(result.exit_code)
@@ -2429,7 +2596,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             if let Some(timings) = &result.metadata.timings {
                 eprintln!(
                     "[supercov] timings {}",
-                    format_run_timings(timings, result.metadata.duration_ms)
+                    format_run_timings(timings, result.metadata.duration_ms, Some(command_ms()))
                 );
             }
             process_exit_code(result.exit_code)
@@ -2442,7 +2609,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         }) => {
             eprintln!(
                 "[supercov] timings {}",
-                format_run_timings(&timings, total_ms)
+                format_run_timings(&timings, total_ms, None)
             );
             process_exit_code(exit_code)
         }
@@ -2512,7 +2679,7 @@ fn cleanup_command(arguments: Vec<String>) -> ExitCode {
         .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
         print!(
-            "Usage: supercov clean [--keep N] [--dry-run]\n\nRemoves all stored runs and Supercov's isolated build cache by default.\nUse --keep N to retain the N newest runs.\n"
+            "Usage: supercov runs clean [--keep N] [--dry-run]\n\nRemoves all stored runs and Supercov's isolated build cache by default.\nUse --keep N to retain the N newest runs.\n\nSaved quality assessments are never removed here; they cost money to\nproduce and are not reproducible. Use supercov quality clean for those.\nGenerated reports in .supercov/reports are left alone too.\n"
         );
         return ExitCode::SUCCESS;
     }
@@ -4343,6 +4510,35 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_timings_line_reports_publication_and_the_whole_command() {
+        let timings = supercov_engine::run_store::RunTimings {
+            initialization_ms: 1.0,
+            workspace_preparation_ms: 2.0,
+            adapter_setup_ms: 3.0,
+            instrumented_build_ms: 4.0,
+            test_command_ms: 5.0,
+            evidence_publication_ms: 6.0,
+        };
+        // Published: the command ran 30 ms, 21 of them before the engine's
+        // clock stopped, so publication took the other 9 and total is 30.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, Some(30.0)),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms publication=9ms total=30ms"
+        );
+        // A clock that reads a hair under the engine's never reports negative
+        // publication or a total below what the engine measured.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, Some(20.9)),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms publication=0ms total=21ms"
+        );
+        // Interrupted: nothing was published, and the line says only that.
+        assert_eq!(
+            format_run_timings(&timings, 21.0, None),
+            "initialization=1ms workspace=2ms setup=3ms build=4ms tests=5ms evidence=6ms total=21ms"
+        );
+    }
 
     #[test]
     fn shell_reports_the_public_engine() {

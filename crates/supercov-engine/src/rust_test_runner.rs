@@ -1194,6 +1194,7 @@ pub(crate) fn snapshot(
             hits: hits.into_iter().collect(),
             events,
             logicals: Vec::new(),
+            phase_id: None,
         },
         phases,
     })

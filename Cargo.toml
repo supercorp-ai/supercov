@@ -21,7 +21,7 @@ cargo-config2 = "0.1.45"
 nextest-metadata = "0.15.0"
 object = { version = "0.39.1", default-features = false, features = ["std", "read"] }
 crc32fast = "1"
-flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 getrandom = "0.3"
 junction = "2.0.0"
 libc = "0.2"

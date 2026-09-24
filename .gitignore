@@ -5,6 +5,7 @@ coverage
 dist
 playwright-report
 test-results
+supercov-report.html
 *.tgz
 /target/
 target/exactness-ratchet/

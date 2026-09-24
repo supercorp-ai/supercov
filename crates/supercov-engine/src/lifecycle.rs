@@ -481,6 +481,21 @@ impl ProjectLock {
         let parent = path.parent().expect("lock parent");
         reject_linked_ancestors(root, parent, true)?;
         fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+        // Direct frontends do not create an isolated workspace. Initialize
+        // the store's ignore file here as well, without replacing user rules
+        // or following a pre-existing symlink.
+        let ignore = root.join(".supercov/.gitignore");
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&ignore)
+        {
+            Ok(mut file) => file
+                .write_all(b"*\n")
+                .map_err(|source| io_error(&ignore, source))?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => return Err(io_error(&ignore, source)),
+        }
         let owner = LockOwner {
             run_id: run_id.into(),
             pid: std::process::id(),
@@ -562,6 +577,17 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<u64, Lifecycle
     if !metadata.file_type().is_file() {
         return Err(LifecycleError::UnsafePath(source.into()));
     }
+    // A clone where the filesystem can make one (APFS, Btrfs, XFS): the
+    // archive's blocks are shared, not copied -- 150 MB on a large run --
+    // and the clone is the source as it was at that instant.
+    if reflink_copy::reflink(source, destination).is_ok() {
+        File::open(destination)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| io_error(destination, error))?;
+        return fs::symlink_metadata(destination)
+            .map(|metadata| metadata.len())
+            .map_err(|error| io_error(destination, error));
+    }
     let mut input = File::open(source).map_err(|error| io_error(source, error))?;
     let mut output = OpenOptions::new()
         .write(true)
@@ -595,24 +621,57 @@ fn file_sha256(path: &Path) -> Result<[u8; 32], LifecycleError> {
     Ok(hash.finalize().into())
 }
 
+fn hex_digest(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
+}
+
 /// Publish immutable run evidence and its initial assertion map/state together.
 pub fn publish_run(
     root: &Path,
     metadata: &RunMetadata,
     evidence_source: &Path,
 ) -> Result<PathBuf, LifecycleError> {
-    publish_run_with_fault(root, metadata, evidence_source, None)
+    publish_run_with_fault(root, metadata, evidence_source, Archived::default(), None)
+}
+
+/// What a frontend that still holds the run it archived hands publication,
+/// so it need not read the archive back: the analysis of the archived
+/// request, and the assertion inputs archived beside it. Each must be what
+/// the archive gives; a frontend that cannot say so leaves it out.
+#[derive(Default)]
+pub struct Archived {
+    pub report: Option<crate::coverage_report::CoverageReport>,
+    pub inputs: Option<crate::assertion_map::InputManifest>,
+}
+
+/// `publish_run` for a frontend that holds what it archived; see `Archived`.
+pub fn publish_archived_run(
+    root: &Path,
+    metadata: &RunMetadata,
+    evidence_source: &Path,
+    archived: Archived,
+) -> Result<PathBuf, LifecycleError> {
+    publish_run_with_fault(root, metadata, evidence_source, archived, None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunPublicationFault {
     FinalRename,
+    /// The query index cannot be written at publication.
+    QueryIndexWrite,
 }
 
 pub(crate) fn publish_run_with_fault(
     root: &Path,
     metadata: &RunMetadata,
     evidence_source: &Path,
+    archived: Archived,
     fault: Option<RunPublicationFault>,
 ) -> Result<PathBuf, LifecycleError> {
     checked_id(&metadata.id)?;
@@ -639,16 +698,87 @@ pub(crate) fn publish_run_with_fault(
             actual: copied,
         });
     }
-    if file_sha256(evidence_source)? != evidence_sha256
-        || file_sha256(&staging.join("evidence.raw.gz"))? != evidence_sha256
-    {
+    // What is published is the copy: it must be the evidence as hashed
+    // before it was taken.
+    if file_sha256(&staging.join("evidence.raw.gz"))? != evidence_sha256 {
         remove_stored_tree_deferred(root, &staging)?;
         return Err(LifecycleError::EvidenceChanged);
     }
     let mut json = serde_json::to_vec_pretty(metadata).map_err(LifecycleError::Metadata)?;
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
-    if let Err(reason) = crate::assertion_store::prepare_publication(root, &staging, metadata) {
+    // Everything publication derives from the evidence -- the assertion map's
+    // record of what each test ran, the summary `runs latest` shows, the query
+    // index -- comes from one analysis of it, made here. Each used to analyse
+    // the archive on its own: once here, twice more in the first query after
+    // the run, and on a 3,900-test Python suite each analysis took 5 to 8
+    // seconds. Evidence that will not analyse is published as before; the
+    // first query then reports why.
+    let staged = crate::run_store::StoredRun {
+        id: metadata.id.clone(),
+        directory: staging.clone(),
+        evidence_path: staging.join("evidence.raw.gz"),
+        metadata_path: staging.join("run.json"),
+        query_index_path: staging.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+        metadata: metadata.clone(),
+    };
+    let analysed = if metadata.merged == Some(true) {
+        None
+    } else if archived.report.is_some() {
+        archived.report
+    } else {
+        crate::run_store::analyze_stored_run(&staged).ok()
+    };
+    let archived_inputs = match archived
+        .inputs
+        .map(|manifest| {
+            crate::assertion_store::archived_manifest(manifest, hex_digest(&evidence_sha256))
+        })
+        .transpose()
+    {
+        Ok(inputs) => inputs,
+        Err(reason) => {
+            let _ = remove_stored_tree_deferred(root, &staging);
+            return Err(LifecycleError::InvalidState(format!(
+                "assertion map publication: {reason}"
+            )));
+        }
+    };
+    // The assertion map and the query index both read the analysis and
+    // write their own files, so they are written side by side.
+    let prepared = std::thread::scope(|scope| {
+        let index = analysed.as_ref().map(|report| {
+            scope.spawn(|| {
+                // Disposable, like every query index: one that failed to
+                // write is rebuilt by the first query.
+                if fault == Some(RunPublicationFault::QueryIndexWrite)
+                    || crate::run_store::write_query_index_from(&staged, report).is_err()
+                {
+                    let _ = fs::remove_file(&staged.query_index_path);
+                }
+            })
+        });
+        let prepared = crate::assertion_store::prepare_publication_with(
+            root,
+            &staging,
+            metadata,
+            analysed.as_ref(),
+            archived_inputs,
+        );
+        if let Some(index) = index {
+            index
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        }
+        prepared
+    });
+    // Everything publication derives from the analysis is written. It is
+    // gigabytes of small allocations on a large run, and freeing them is
+    // nobody's wait.
+    if let Some(report) = analysed {
+        std::thread::spawn(move || drop(report));
+    }
+    if let Err(reason) = prepared {
         let _ = remove_stored_tree_deferred(root, &staging);
         return Err(LifecycleError::InvalidState(format!(
             "assertion map publication: {reason}"
@@ -1151,6 +1281,131 @@ mod tests {
         fs::remove_dir_all(outside).unwrap();
     }
 
+    /// Evidence that analyses -- the analysable fixture run -- to publish as
+    /// `id`, from outside the project's runs.
+    fn analysable_evidence(root: &Path, id: &str) -> (PathBuf, RunMetadata) {
+        let source = project();
+        let directory = crate::run_store::create_analyzable_test_run(&source, "source");
+        let evidence = root.join(format!("{id}.evidence.gz"));
+        fs::copy(directory.join("evidence.raw.gz"), &evidence).unwrap();
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(directory.join("run.json")).unwrap()).unwrap();
+        metadata.id = id.into();
+        fs::remove_dir_all(source).unwrap();
+        (evidence, metadata)
+    }
+
+    /// The published run as a query reads it.
+    fn stored(root: &Path, id: &str) -> crate::run_store::StoredRun {
+        let directory = root.join(".supercov/runs").join(id);
+        crate::run_store::StoredRun {
+            id: id.into(),
+            evidence_path: directory.join("evidence.raw.gz"),
+            metadata_path: directory.join("run.json"),
+            query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+            metadata: serde_json::from_slice(&fs::read(directory.join("run.json")).unwrap())
+                .unwrap(),
+            directory,
+        }
+    }
+
+    #[test]
+    fn publication_writes_the_query_index_a_first_query_would_have_built() {
+        // Written beside staged evidence and renamed with it, the index must be
+        // the one the first query builds from the published evidence -- the
+        // same bytes, valid under the published run's identity.
+        let root = project();
+        let id = "2026-01-01T00-00-00-100Z";
+        let (evidence, metadata) = analysable_evidence(&root, id);
+        let published = publish_run(&root, &metadata, &evidence).unwrap();
+        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
+        assert!(index.is_file(), "publication wrote the index");
+        let run = stored(&root, id);
+        assert!(
+            crate::run_store::open_existing_query_index(&run)
+                .unwrap()
+                .is_some(),
+            "and it is valid for the published run"
+        );
+        let written = fs::read(&index).unwrap();
+        fs::remove_file(&index).unwrap();
+        crate::run_store::open_or_rebuild_query_index(&run).unwrap();
+        assert_eq!(
+            fs::read(&index).unwrap(),
+            written,
+            "a query rebuilds the same bytes"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn evidence_that_will_not_analyse_is_published_as_it_was_before() {
+        // Publication used to tolerate evidence it could not analyse and leave
+        // the first query to report why. It still publishes it, writes neither
+        // index nor summary, and the first query fails as it did.
+        let root = project();
+        let id = "2026-01-01T00-00-00-200Z";
+        let (evidence, bytes) = evidence(&root);
+        let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
+        assert!(published.join("run.json").is_file());
+        assert!(published.join("assertions.json").is_file());
+        assert!(
+            !published
+                .join(crate::run_store::RUST_QUERY_INDEX_FILE)
+                .exists()
+        );
+        assert!(!published.join("assertions.summary.cache.json").exists());
+        let run = stored(&root, id);
+        let Err(query) = crate::run_store::open_or_rebuild_query_index(&run) else {
+            panic!("the first query cannot analyse it either");
+        };
+        let direct = crate::run_store::analyze_stored_run(&run).expect_err("unanalysable");
+        assert_eq!(
+            query.to_string(),
+            direct.to_string(),
+            "and says why in the same words"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_merged_run_is_indexed_by_its_first_query() {
+        // Publication does not analyse a merged run; its first query does.
+        let root = project();
+        let id = "2026-01-01T00-00-00-300Z";
+        let (evidence, mut metadata) = analysable_evidence(&root, id);
+        metadata.merged = Some(true);
+        let published = publish_run(&root, &metadata, &evidence).unwrap();
+        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
+        assert!(!index.exists());
+        crate::run_store::open_or_rebuild_query_index(&stored(&root, id)).unwrap();
+        assert!(index.is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_index_that_could_not_be_written_is_built_by_the_first_query() {
+        // A failed index write loses nothing: publication succeeds without a
+        // partial file, and the first query builds the index as it used to.
+        let root = project();
+        let id = "2026-01-01T00-00-00-400Z";
+        let (evidence, metadata) = analysable_evidence(&root, id);
+        let published = publish_run_with_fault(
+            &root,
+            &metadata,
+            &evidence,
+            Archived::default(),
+            Some(RunPublicationFault::QueryIndexWrite),
+        )
+        .unwrap();
+        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
+        assert!(!index.exists(), "no partial index is left");
+        assert!(published.join("run.json").is_file());
+        crate::run_store::open_or_rebuild_query_index(&stored(&root, id)).unwrap();
+        assert!(index.is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn publishes_both_required_files_with_one_visible_rename() {
         let root = project();
@@ -1180,6 +1435,7 @@ mod tests {
             &root,
             &metadata(id, bytes),
             &evidence,
+            Archived::default(),
             Some(RunPublicationFault::FinalRename),
         )
         .unwrap_err();
@@ -1341,6 +1597,20 @@ mod tests {
                 .exists()
         );
         sweep_trash(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_runs_initialize_store_ignore_without_overwriting_existing_rules() {
+        let root = project();
+        let ignore = root.join(".supercov/.gitignore");
+        let mut lock = ProjectLock::acquire(&root, "first", "start").unwrap();
+        assert_eq!(fs::read_to_string(&ignore).unwrap(), "*\n");
+        lock.release().unwrap();
+        fs::write(&ignore, "custom\n").unwrap();
+        let mut lock = ProjectLock::acquire(&root, "second", "start").unwrap();
+        assert_eq!(fs::read_to_string(&ignore).unwrap(), "custom\n");
+        lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

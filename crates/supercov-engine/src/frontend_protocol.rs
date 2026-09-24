@@ -276,6 +276,9 @@ fn require_exact_identities(
                 phase_reference(phase)?;
             }
         }
+        if let Some(phase) = &snapshot.phase_id {
+            phase_reference(phase)?;
+        }
     }
     for record in &raw.server {
         if let Some(phase) = &record.phase_id {
@@ -457,6 +460,7 @@ mod tests {
                         environment: "fixture".into(),
                     }],
                     logicals: vec![],
+                    phase_id: None,
                 }],
                 browser: vec![],
                 server: vec![],

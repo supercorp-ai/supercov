@@ -27,9 +27,9 @@ struct Snapshot {
     files: Vec<Value>,
 }
 
-fn open(root: &Path, snapshot: Option<&str>) -> Result<Snapshot, String> {
-    let id = store::resolve(root, snapshot)?;
-    let (manifest, record) = store::read(root, &id)?;
+fn open(root: &Path, lane: &str, snapshot: Option<&str>) -> Result<Snapshot, String> {
+    let id = store::resolve(root, lane, snapshot)?;
+    let (manifest, record) = store::read(root, lane, &id)?;
     Ok(Snapshot {
         id,
         manifest,
@@ -46,8 +46,13 @@ fn instrument(manifest: &Value) -> &str {
     manifest["instrument"].as_str().unwrap_or("rubric")
 }
 
+/// Both catalogs write findings a reader can narrow to; only the rubric did not.
 fn is_catalog(snapshot: &Snapshot) -> bool {
-    instrument(&snapshot.manifest) == "catalog"
+    matches!(instrument(&snapshot.manifest), "catalog" | "security")
+}
+
+fn is_security(snapshot: &Snapshot) -> bool {
+    instrument(&snapshot.manifest) == "security"
 }
 
 /// A catalog snapshot read back: the tree, then the weakest files.
@@ -64,8 +69,10 @@ fn show_catalog(snapshot: &Snapshot, limit: usize) -> Value {
         .collect();
     let (total, shown) = limited(rows, limit);
     json!({
-        "view": "quality", "instrument": "catalog", "snapshot": snapshot.id,
+        "view": if is_security(snapshot) { "security" } else { "quality" },
+        "instrument": instrument(&snapshot.manifest), "snapshot": snapshot.id,
         "created_at": snapshot.manifest["created_at"],
+        "by_check": snapshot.manifest["by_check"],
         "catalog_version": snapshot.manifest["catalog_version"],
         "model": snapshot.manifest["model"],
         "health": snapshot.manifest["health"],
@@ -79,8 +86,13 @@ fn show_catalog(snapshot: &Snapshot, limit: usize) -> Value {
 /// Only the files something fired on, the way `runs gaps` shows only files with
 /// uncovered behaviour. The whole point of a default command is that the next
 /// question narrows it.
-pub fn gaps(root: &Path, snapshot: Option<&str>, limit: usize) -> Result<Value, String> {
-    let snapshot = open(root, snapshot)?;
+pub fn gaps(
+    root: &Path,
+    lane: &str,
+    snapshot: Option<&str>,
+    limit: usize,
+) -> Result<Value, String> {
+    let snapshot = open(root, lane, snapshot)?;
     if !is_catalog(&snapshot) {
         return Err(format!(
             "snapshot {} was written by the rubric, which has no findings to narrow to; \
@@ -102,7 +114,7 @@ pub fn gaps(root: &Path, snapshot: Option<&str>, limit: usize) -> Result<Value, 
     let quiet = snapshot.files.len() - rows.len();
     let (total, shown) = limited(rows, limit);
     Ok(json!({
-        "view": "gaps", "instrument": "catalog", "snapshot": snapshot.id,
+        "view": "gaps", "instrument": instrument(&snapshot.manifest), "snapshot": snapshot.id,
         "catalog_version": snapshot.manifest["catalog_version"],
         "clean": quiet, "total": total, "shown": shown.len(), "files": shown,
     }))
@@ -147,7 +159,7 @@ fn file_catalog(snapshot: &Snapshot, path: &str) -> Result<Value, String> {
             .total_cmp(&a["value"].as_f64().unwrap_or(0.0))
     });
     Ok(json!({
-        "view": "file", "instrument": "catalog", "snapshot": snapshot.id,
+        "view": "file", "instrument": instrument(&snapshot.manifest), "snapshot": snapshot.id,
         "path": path, "health": file["health"], "bytes": file["bytes"],
         "status": file["status"], "checks": checks,
     }))
@@ -160,8 +172,8 @@ fn file_catalog(snapshot: &Snapshot, path: &str) -> Result<Value, String> {
 /// appeared. Comparing across catalog versions or models is refused: the
 /// questions would differ, and the difference would be read as a change in the
 /// code.
-pub fn diff(root: &Path, from: &str, to: &str, limit: usize) -> Result<Value, String> {
-    let (before, after) = (open(root, Some(from))?, open(root, Some(to))?);
+pub fn diff(root: &Path, lane: &str, from: &str, to: &str, limit: usize) -> Result<Value, String> {
+    let (before, after) = (open(root, lane, Some(from))?, open(root, lane, Some(to))?);
     if before.id == after.id {
         return Err(format!("{} is the same snapshot twice", before.id));
     }
@@ -276,8 +288,8 @@ pub fn diff(root: &Path, from: &str, to: &str, limit: usize) -> Result<Value, St
     }))
 }
 
-pub fn snapshots(root: &Path, limit: usize) -> Result<Value, String> {
-    let rows: Vec<Value> = store::list(root)?
+pub fn snapshots(root: &Path, lane: &str, limit: usize) -> Result<Value, String> {
+    let rows: Vec<Value> = store::list(root, lane)?
         .into_iter()
         .map(|(id, manifest)| {
             json!({
@@ -295,15 +307,23 @@ pub fn snapshots(root: &Path, limit: usize) -> Result<Value, String> {
         })
         .collect();
     let (total, shown) = limited(rows, limit);
-    Ok(json!({"view": "snapshots", "total": total, "shown": shown.len(), "snapshots": shown}))
+    Ok(
+        json!({"view": "snapshots", "lane": lane, "total": total, "shown": shown.len(),
+        "snapshots": shown}),
+    )
 }
 
-pub fn show(root: &Path, snapshot: Option<&str>, limit: usize) -> Result<Value, String> {
-    Ok(show_catalog(&open(root, snapshot)?, limit))
+pub fn show(
+    root: &Path,
+    lane: &str,
+    snapshot: Option<&str>,
+    limit: usize,
+) -> Result<Value, String> {
+    Ok(show_catalog(&open(root, lane, snapshot)?, limit))
 }
 
-pub fn file(root: &Path, path: &str, snapshot: Option<&str>) -> Result<Value, String> {
-    file_catalog(&open(root, snapshot)?, path)
+pub fn file(root: &Path, lane: &str, path: &str, snapshot: Option<&str>) -> Result<Value, String> {
+    file_catalog(&open(root, lane, snapshot)?, path)
 }
 
 /// One text rendering for every view, chosen by the tag the view carries.
@@ -365,6 +385,62 @@ fn render_quality(view: &Value) -> String {
     out
 }
 
+/// A saved security assessment: no number, flagged files first.
+fn render_security(view: &Value) -> String {
+    let empty = Vec::new();
+    let mut out = String::new();
+    let counts = &view["counts"];
+    let assessed = counts["assessed"].as_u64().unwrap_or(0);
+    let flagged = counts["flagged"].as_u64().unwrap_or(0);
+    out.push_str(&format!(
+        "Security: {flagged} of {assessed} files flagged, {} clean.\n",
+        assessed.saturating_sub(flagged)
+    ));
+    if let Some(by_check) = view["by_check"].as_object()
+        && !by_check.is_empty()
+    {
+        let mut pairs: Vec<(&String, u64)> = by_check
+            .iter()
+            .map(|(c, n)| (c, n.as_u64().unwrap_or(0)))
+            .collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let named: Vec<String> = pairs.iter().map(|(c, n)| format!("{c} {n}")).collect();
+        out.push_str(&format!("  {}\n", named.join(", ")));
+    }
+    out.push_str(&format!(
+        "Catalog {}, model {}, snapshot {}.\n\n",
+        view["catalog_version"].as_str().unwrap_or("?"),
+        view["model"].as_str().unwrap_or("?"),
+        view["snapshot"].as_str().unwrap_or("?")
+    ));
+    let files = view["files"].as_array().unwrap_or(&empty);
+    let mut listed = 0usize;
+    for file in files {
+        let fired = file["present"].as_array().unwrap_or(&empty);
+        if fired.is_empty() {
+            continue;
+        }
+        if listed == 0 {
+            out.push_str("Flagged:\n");
+        }
+        listed += 1;
+        out.push_str(&format!("  {}\n", file["path"].as_str().unwrap_or("?")));
+        for finding in fired {
+            out.push_str(&format!(
+                "    {:.2}  {}\n",
+                finding["value"].as_f64().unwrap_or(0.0),
+                finding["check"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+    let total = view["total"].as_u64().unwrap_or(0) as usize;
+    if total > files.len() {
+        out.push_str(&format!("  ... and {} more files\n", total - files.len()));
+    }
+    out.push_str("\nNarrow with `security gaps`, or read one with `security file <path>`.\n");
+    out
+}
+
 fn render_gaps(view: &Value) -> String {
     let empty = Vec::new();
     let files = view["files"].as_array().unwrap_or(&empty);
@@ -393,12 +469,17 @@ fn render_gaps(view: &Value) -> String {
 fn render_file_catalog(view: &Value) -> String {
     let empty = Vec::new();
     let mut out = String::new();
-    out.push_str(&format!(
-        "{}  quality {} ({:.1}/10)\n\n",
-        view["path"].as_str().unwrap_or("?"),
-        band(view["health"].as_f64()),
-        view["health"].as_f64().unwrap_or(0.0)
-    ));
+    match view["health"].as_f64() {
+        Some(health) => out.push_str(&format!(
+            "{}  quality {} ({health:.1}/10)\n\n",
+            view["path"].as_str().unwrap_or("?"),
+            band(Some(health))
+        )),
+        None => out.push_str(&format!(
+            "{}  security surface\n\n",
+            view["path"].as_str().unwrap_or("?")
+        )),
+    }
     for check in view["checks"].as_array().unwrap_or(&empty) {
         let present = check["present"].as_bool().unwrap_or(false);
         out.push_str(&format!(
@@ -549,6 +630,7 @@ pub fn render(view: &Value) -> String {
         "quality-diff" => render_quality_diff(view),
         "scope" => render_scope(view),
         "quality" => render_quality(view),
+        "security" => render_security(view),
         "gaps" => render_gaps(view),
         "file" => render_file_catalog(view),
         "snapshots" => render_snapshots(view),
@@ -558,12 +640,14 @@ pub fn render(view: &Value) -> String {
 
 fn render_snapshots(view: &Value) -> String {
     let rows = view["snapshots"].as_array().map_or(&[][..], Vec::as_slice);
+    let lane = view["lane"].as_str().unwrap_or("quality");
     if rows.is_empty() {
-        return "No quality snapshots here yet. Assess some source: supercov quality <path>\n"
-            .to_owned();
+        return format!(
+            "No {lane} snapshots here yet. Assess some source: supercov {lane} <path>\n"
+        );
     }
     let mut text = format!(
-        "{} quality snapshots, most recent first (showing {}).\n",
+        "{} {lane} snapshots, most recent first (showing {}).\n",
         view["total"], view["shown"]
     );
     for row in rows {

@@ -116,6 +116,7 @@ fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
     let (first, _) = store::identity().unwrap();
     store::write(
         &temp.0,
+        "quality",
         &first,
         &json!({"created_at": "2026-09-17T00-00-00-000000Z"}),
         &files,
@@ -123,24 +124,37 @@ fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
     .unwrap();
     // An id is never reused, and an existing one is refused rather than revised.
     assert!(
-        store::write(&temp.0, &first, &json!({"created_at": "later"}), &files)
-            .unwrap_err()
-            .contains("already exists")
+        store::write(
+            &temp.0,
+            "quality",
+            &first,
+            &json!({"created_at": "later"}),
+            &files
+        )
+        .unwrap_err()
+        .contains("already exists")
     );
     let (second, _) = store::identity().unwrap();
     assert_ne!(first, second);
     store::write(
         &temp.0,
+        "quality",
         &second,
         &json!({"created_at": "2026-09-17T01-00-00-000000Z"}),
         &files,
     )
     .unwrap();
 
-    assert_eq!(store::resolve(&temp.0, None).unwrap(), second);
-    assert_eq!(store::resolve(&temp.0, Some("latest")).unwrap(), second);
-    assert_eq!(store::resolve(&temp.0, Some(&first)).unwrap(), first);
-    let listed = store::list(&temp.0).unwrap();
+    assert_eq!(store::resolve(&temp.0, "quality", None).unwrap(), second);
+    assert_eq!(
+        store::resolve(&temp.0, "quality", Some("latest")).unwrap(),
+        second
+    );
+    assert_eq!(
+        store::resolve(&temp.0, "quality", Some(&first)).unwrap(),
+        first
+    );
+    let listed = store::list(&temp.0, "quality").unwrap();
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].0, second, "most recent first");
 
@@ -152,16 +166,21 @@ fn snapshots_are_immutable_and_only_a_snapshot_id_opens_one() {
         "run_0123456789abcdef",
         "",
     ] {
-        assert!(store::resolve(&temp.0, Some(selector)).is_err());
-        assert!(store::read(&temp.0, selector).is_err());
+        assert!(store::resolve(&temp.0, "quality", Some(selector)).is_err());
+        assert!(store::read(&temp.0, "quality", selector).is_err());
     }
     // A pointer at a snapshot that is gone falls back to the newest kept one.
-    fs::remove_dir_all(store::root(&temp.0).join("snapshots").join(&second)).unwrap();
-    assert_eq!(store::resolve(&temp.0, None).unwrap(), first);
+    fs::remove_dir_all(
+        store::root(&temp.0, "quality")
+            .join("snapshots")
+            .join(&second),
+    )
+    .unwrap();
+    assert_eq!(store::resolve(&temp.0, "quality", None).unwrap(), first);
     // And with nothing left, browsing says so instead of inventing a snapshot.
-    fs::remove_dir_all(store::root(&temp.0).join("snapshots")).unwrap();
+    fs::remove_dir_all(store::root(&temp.0, "quality").join("snapshots")).unwrap();
     assert!(
-        store::resolve(&temp.0, None)
+        store::resolve(&temp.0, "quality", None)
             .unwrap_err()
             .contains("no quality snapshot here yet")
     );
@@ -264,19 +283,28 @@ fn a_change_request_sends_exactly_the_two_versions() {
     assert_eq!(state.len(), 2);
     assert_eq!(state["before"], "old");
     assert_eq!(state["after"], "new");
-    // Twelve complexity properties plus the seven risks, which exist only in
-    // the change form because every one of them is about what a change did.
+    // Twelve complexity properties, the three risks that exist only in the
+    // change form, and the twelve security surfaces in their differential form.
     assert_eq!(
         request["questions"].as_object().unwrap().len(),
-        catalog::properties().len() + catalog::risks().len()
+        catalog::properties().len() + catalog::risks().len() + catalog::security::checks().len()
     );
 }
 
 #[test]
 fn risk_checks_are_asked_of_a_change_and_never_of_a_file() {
     let risks: BTreeSet<&str> = catalog::risks().iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(risks.len(), 6);
-    assert!(risks.contains("hardcoded_secret") && risks.contains("injection_risk"));
+    assert_eq!(risks.len(), 3);
+    assert!(risks.contains("weakens_tests") && risks.contains("data_migration"));
+    // Moved 2026-09-20: the three security risks became the twelve-check
+    // security surface catalog, asked of a change in the same differential
+    // form as the complexity catalog.
+    for moved in ["hardcoded_secret", "injection_risk", "touches_auth"] {
+        assert!(
+            !risks.contains(moved),
+            "{moved} moved to the security catalog"
+        );
+    }
     // Removed 2026-09-18: it fired on 20 of 50 real pull requests with a median
     // of 0.45, and had no ground truth to justify that rate.
     assert!(
@@ -301,8 +329,12 @@ fn risk_checks_are_asked_of_a_change_and_never_of_a_file() {
     // A risk question already asks about the change, so it does not carry the
     // complexity form's "where `before` did not" clause.
     let task = |q: &Value| q["instructions"]["task"].as_str().unwrap().to_owned();
-    assert!(!task(&change["hardcoded_secret"]).contains("where `before` did not"));
+    assert!(!task(&change["weakens_tests"]).contains("where `before` did not"));
     assert!(task(&change["deep_nesting"]).contains("where `before` did not"));
+    // The security catalog is asked of a change in the differential form too,
+    // and of a file only through `supercov security`, never through quality.
+    assert!(task(&change["injection_sink"]).contains("where `before` did not"));
+    assert!(!file.contains_key("injection_sink"));
     // Everything a report carries about a check covers both catalogs.
     let described = catalog::described();
     let named: BTreeSet<&str> = described
@@ -600,8 +632,15 @@ fn a_band_says_only_what_the_resolution_supports() {
 
 fn windowed(path: &str, checks: &[(&str, f64)]) -> Answers {
     Answers {
+        lines: Vec::new(),
+        labels: Vec::new(),
+
+        classified: BTreeMap::new(),
         path: path.to_owned(),
         bytes: 100,
+        // Every window of one file carries that file's digest, which is what
+        // lets the folded row say which source it describes.
+        sha256: "0".repeat(64),
         windows: 1,
         note: Some("windowed".into()),
         values: Some(checks.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()),
@@ -1352,7 +1391,7 @@ fn catalog_snapshot(root: &Path, id: &str, health: f64, files: Vec<Value>) {
         "instrument": "catalog", "catalog_version": catalog::CATALOG_VERSION,
         "model": MODEL, "scope": "file", "health": health,
     });
-    store::write(root, id, &manifest, &json!({ "files": files })).unwrap();
+    store::write(root, "quality", id, &manifest, &json!({ "files": files })).unwrap();
 }
 
 fn assessed_file(path: &str, health: f64, bytes: u64, present: &[&str]) -> Value {
@@ -1387,7 +1426,14 @@ fn a_diff_reports_what_declined_and_which_properties_appeared() {
             assessed_file("src/new.ts", 8.0, 50, &[]),
         ],
     );
-    let view = query::diff(&temp.0, "q_00000000000000b1", "q_00000000000000a1", 20).unwrap();
+    let view = query::diff(
+        &temp.0,
+        "quality",
+        "q_00000000000000b1",
+        "q_00000000000000a1",
+        20,
+    )
+    .unwrap();
     let counts = &view["counts"];
     assert_eq!(counts["declined"], 1);
     assert_eq!(counts["improved"], 0);
@@ -1427,7 +1473,14 @@ fn a_diff_says_when_a_movement_cannot_be_the_code() {
         5.8,
         vec![assessed_file("src/a.ts", 5.8, 100, &[])],
     );
-    let view = query::diff(&temp.0, "q_0000000000000501", "q_0000000000000502", 20).unwrap();
+    let view = query::diff(
+        &temp.0,
+        "quality",
+        "q_0000000000000501",
+        "q_0000000000000502",
+        20,
+    )
+    .unwrap();
     assert_eq!(view["counts"]["declined"], 1);
     assert_eq!(view["declined"][0]["same_source"], true);
 
@@ -1456,16 +1509,31 @@ fn a_diff_refuses_to_compare_two_different_questions() {
     });
     store::write(
         &temp.0,
+        "quality",
         "q_0000000000000001",
         &manifest,
         &json!({ "files": [assessed_file("src/a.ts", 6.0, 100, &[])] }),
     )
     .unwrap();
-    let error = query::diff(&temp.0, "q_0000000000000001", "q_00000000000000c1", 20).unwrap_err();
+    let error = query::diff(
+        &temp.0,
+        "quality",
+        "q_0000000000000001",
+        "q_00000000000000c1",
+        20,
+    )
+    .unwrap_err();
     assert!(error.contains("catalog_version"), "{error}");
 
     // The same snapshot twice is a mistake, not a comparison.
-    let same = query::diff(&temp.0, "q_00000000000000c1", "q_00000000000000c1", 20).unwrap_err();
+    let same = query::diff(
+        &temp.0,
+        "quality",
+        "q_00000000000000c1",
+        "q_00000000000000c1",
+        20,
+    )
+    .unwrap_err();
     assert!(same.contains("same snapshot twice"), "{same}");
 }
 
@@ -1481,13 +1549,21 @@ fn a_diff_will_not_read_a_snapshot_the_catalog_did_not_write() {
     // A snapshot with no instrument marker predates the catalog.
     store::write(
         &temp.0,
+        "quality",
         "q_000000000000001e",
         &json!({ "schema_version": 3, "id": "q_000000000000001e",
                  "created_at": "2026-09-01T00:00:00.000Z", "model": MODEL }),
         &json!({ "files": [] }),
     )
     .unwrap();
-    let error = query::diff(&temp.0, "q_000000000000001e", "q_00000000000000ca", 20).unwrap_err();
+    let error = query::diff(
+        &temp.0,
+        "quality",
+        "q_000000000000001e",
+        "q_00000000000000ca",
+        20,
+    )
+    .unwrap_err();
     assert!(error.contains("not written by the catalog"), "{error}");
 }
 
@@ -1966,7 +2042,7 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
         },
         elapsed_ms: 1,
     };
-    let path = store::responses(&temp.0).join(format!("{hash}.json"));
+    let path = store::responses(&temp.0, "quality").join(format!("{hash}.json"));
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     save(&path, &entry).unwrap();
 
@@ -1986,7 +2062,7 @@ fn the_cache_follows_the_content_so_a_branch_switch_costs_nothing() {
     assert_ne!(edited_hash, hash);
     assert!(
         cached(
-            &store::responses(&temp.0).join(format!("{edited_hash}.json")),
+            &store::responses(&temp.0, "quality").join(format!("{edited_hash}.json")),
             &edited_hash,
             &edited
         )
@@ -2104,4 +2180,204 @@ fn a_band_matches_the_number_printed_beside_it() {
     assert_eq!(band(Some(4.94)), "weak");
     assert_eq!(band(Some(7.95)), "good");
     assert_eq!(band(Some(7.94)), "fair");
+}
+
+// ---- security lane ----------------------------------------------------------
+
+#[test]
+fn security_asks_its_own_twelve_of_a_file_and_nothing_from_the_complexity_catalog() {
+    let temp = Temp::new();
+    temp.write("src/a.ts", "export const a = 1\n");
+    let options = Options {
+        paths: vec![PathBuf::from("src/a.ts")],
+        dry_run: true,
+        ..Options::default()
+    };
+    let (report, _) = run_health(&temp.0, &options, None, Instrument::Security).unwrap();
+    assert_eq!(report["instrument"], "security");
+    assert_eq!(report["catalog_version"], catalog::security::VERSION);
+    let requests = report["requests"].as_array().unwrap();
+    assert_eq!(requests.len(), 1);
+    let asked: BTreeSet<&str> = requests[0]["questions"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let security: BTreeSet<&str> = catalog::security::checks()
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(asked, security);
+    assert!(!asked.contains("deep_nesting") && !asked.contains("weakens_tests"));
+    // And the quality lane asks a file none of the security questions.
+    let (report, _) = run_health(&temp.0, &options, None, Instrument::Catalog).unwrap();
+    let asked: BTreeSet<&str> = report["requests"][0]["questions"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(asked.is_disjoint(&security));
+}
+
+#[test]
+fn a_security_answer_is_never_scored_and_sorts_by_what_fired() {
+    let flagged = Answers {
+        lines: Vec::new(),
+        labels: Vec::new(),
+
+        classified: BTreeMap::new(),
+        path: "src/b.ts".into(),
+        sha256: "test-source".into(),
+        bytes: 10,
+        windows: 1,
+        note: None,
+        values: Some(values(&[
+            ("injection_sink", 0.9),
+            ("secret_in_source", 0.7),
+            ("weak_cryptography", 0.1),
+        ])),
+        cached: false,
+        error: None,
+    };
+    let value = scored(&flagged, Instrument::Security);
+    assert!(
+        value["health"].is_null(),
+        "security answers are never composed into a number"
+    );
+    let present: Vec<&str> = value["present"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["check"].as_str().unwrap())
+        .collect();
+    assert_eq!(present, ["injection_sink", "secret_in_source"]);
+    // The same answers under the quality instrument would have a health.
+    assert!(scored(&flagged, Instrument::Catalog)["health"].is_number());
+}
+
+#[test]
+fn the_security_report_names_what_fired_and_where_tests_never_went() {
+    let report = json!({
+        "counts": {"assessed": 3, "flagged": 1},
+        "by_check": {"injection_sink": 1},
+        "catalog_version": "security-v3", "model": "jev-1.13.0", "id": "q_0123456789abcdef",
+        "run": "run_1", "flagged_in_untested_code": 1, "flagged_executed_unasserted": 1,
+        "files": [
+            {"path": "src/routes.ts", "status": "completed",
+             "present": [{"check": "injection_sink", "value": 0.93, "tier": "line",
+                          "lines": [{"line": 42, "check": "injection_sink", "value": 0.91, "text": "db.query(`select ${id}`)"}]}],
+             "flagged_and_untested": true, "flagged_and_unasserted": true,
+             "assertions": {"lines_credited": 0},
+             "coverage": {"in_run": true, "uncovered_lines": 12}},
+            {"path": "src/clean.ts", "status": "completed", "present": []},
+            {"path": "src/broken.ts", "status": "failed", "error": "unreadable"}
+        ]
+    });
+    let text = human_security(&report);
+    assert!(text.starts_with("Security: 1 of 3 files flagged, 2 clean.\n"));
+    assert!(text.contains("injection_sink 1"));
+    assert!(text.contains("1 flagged files have lines no test in run run_1 executed; 1 are executed by tests that no assertion is credited with."));
+    assert!(text.contains("executed by tests, but no assertion is credited"));
+    assert!(
+        text.contains(
+            "  src/routes.ts\n    0.93  injection_sink\n          line 42  0.91  db.query(`select ${id}`)\n    and 12 of its measured lines"
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("file-level only"),
+        "a line-confirmed finding carries no caveat"
+    );
+    assert!(
+        !text.contains("src/clean.ts"),
+        "a clean file is counted, not listed"
+    );
+    assert!(text.contains("error  src/broken.ts"));
+    assert!(
+        !text.contains("/10"),
+        "no number is ever printed for security"
+    );
+}
+
+#[test]
+fn security_snapshots_live_in_their_own_lane_and_read_back_as_security() {
+    let temp = Temp::new();
+    let (id, _) = store::identity().unwrap();
+    let manifest = json!({
+        "created_at": "2026-09-20T00-00-00-000000Z", "instrument": "security",
+        "catalog_version": "security-v3", "model": "jev-1.13.0",
+        "counts": {"assessed": 1, "flagged": 1}, "by_check": {"secret_in_source": 1},
+    });
+    let files = json!({"files": [{"path": "src/k.ts", "status": "completed",
+        "present": [{"check": "secret_in_source", "value": 0.99}], "checks": {"secret_in_source": 0.99}}]});
+    store::write(&temp.0, "security", &id, &manifest, &files).unwrap();
+    // Nothing in the quality lane, so quality cannot read it as its own.
+    assert!(query::show(&temp.0, "quality", None, 20).is_err());
+    let view = query::show(&temp.0, "security", None, 20).unwrap();
+    assert_eq!(view["view"], "security");
+    assert_eq!(view["instrument"], "security");
+    let text = query::render(&view);
+    assert!(text.starts_with("Security: 1 of 1 files flagged, 0 clean.\n"));
+    assert!(text.contains("0.99  secret_in_source"));
+    let file = query::file(&temp.0, "security", "src/k.ts", None).unwrap();
+    assert!(query::render(&file).starts_with("src/k.ts  security surface\n"));
+    let gaps = query::gaps(&temp.0, "security", None, 20).unwrap();
+    assert_eq!(gaps["total"], 1);
+}
+
+#[test]
+fn an_assessment_takes_a_run_to_cross_with() {
+    let options = parse_scan(vec!["--run".into(), "latest".into(), "src".into()]).unwrap();
+    assert_eq!(options.run.as_deref(), Some("latest"));
+    assert!(parse_scan(vec!["--run".into()]).is_err());
+    assert!(parse_scan(vec!["--run".into(), "a".into(), "--run".into(), "b".into()]).is_err());
+}
+
+#[test]
+fn cleaning_an_assessment_lane_preserves_the_other_lane() {
+    let temp = Temp::new();
+    let (id, _) = store::identity().unwrap();
+    for lane in ["quality", "security"] {
+        store::write(
+            &temp.0,
+            lane,
+            &id,
+            &json!({"created_at": "2026-09-23T00:00:00Z"}),
+            &json!({"files": []}),
+        )
+        .unwrap();
+    }
+    let preview = clean(&temp.0, "security", 0, true).unwrap();
+    assert_eq!(preview["view"], "security.clean");
+    assert_eq!(store::list(&temp.0, "security").unwrap().len(), 1);
+    clean(&temp.0, "security", 0, false).unwrap();
+    assert!(store::list(&temp.0, "security").unwrap().is_empty());
+    assert_eq!(store::list(&temp.0, "quality").unwrap().len(), 1);
+}
+
+#[test]
+fn security_totals_include_a_check_only_the_line_pass_found() {
+    let answer = Answers {
+        path: "src/log.ts".into(),
+        bytes: 10,
+        sha256: "source".into(),
+        windows: 1,
+        lines: vec![
+            json!({"line": 5, "check": "sensitive_data_exposure", "value": 0.9, "text": "log(token)"}),
+        ],
+        labels: Vec::new(),
+        classified: BTreeMap::new(),
+        note: None,
+        values: Some(values(&[("sensitive_data_exposure", 0.1)])),
+        cached: false,
+        error: None,
+    };
+    assert!(present_for(answer.values.as_ref().unwrap(), Instrument::Security).is_empty());
+    let record = scored(&answer, Instrument::Security);
+    let (flagged, confirmed, checks) = finding_counts(&[record]);
+    assert_eq!(flagged, 1);
+    assert_eq!(confirmed, 1);
+    assert_eq!(checks.get("sensitive_data_exposure"), Some(&1));
 }

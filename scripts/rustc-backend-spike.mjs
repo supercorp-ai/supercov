@@ -944,7 +944,7 @@ async function verifyGeneratedPackageIsolation({
         .digest('hex'),
       readOnlySourceDigest,
     );
-    run(supercov, ['clean'], {cwd: readOnlyProject});
+    run(supercov, ['runs', 'clean'], {cwd: readOnlyProject});
     assert(!existsSync(fallbackContainer));
     assert(!existsSync(locatorPath));
   }

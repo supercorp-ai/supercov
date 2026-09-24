@@ -75,9 +75,9 @@ staging state. Completed runs remain immutable.
 Preview cleanup before removing anything:
 
 ```sh supercov
-npx supercov clean --dry-run
-npx supercov clean --keep 20
-npx supercov clean
+npx supercov runs clean --dry-run
+npx supercov runs clean --keep 20
+npx supercov runs clean
 ```
 
 The final command removes all runs and the isolated build cache. `--keep 20`

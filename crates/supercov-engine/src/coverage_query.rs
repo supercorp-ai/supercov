@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
+use crate::interned::Id;
 use crate::{
     agent_json::pagination,
     coverage_analysis::{CoverageSummary, is_independence_pair},
@@ -1267,7 +1268,7 @@ pub struct CoverageDecisionCondition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witness: Option<[crate::coverage_analysis::McdcVector; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub witness_tests: Option<[Vec<String>; 2]>,
+    pub witness_tests: Option<[Vec<Id>; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1287,7 +1288,7 @@ pub struct CoverageSelectedDecision {
     pub vectors: Vec<crate::coverage_analysis::McdcVector>,
     pub vector_observations: Vec<crate::coverage_report::VectorObservation>,
     pub conditions: Vec<CoverageDecisionCondition>,
-    pub tests: Vec<String>,
+    pub tests: Vec<Id>,
     pub confidence: CoverageConfidence,
     pub totals: CoverageDecisionTotals,
 }
@@ -1348,7 +1349,9 @@ fn selected_decision(
         .vector_observations
         .into_iter()
         .filter_map(|mut observation| {
-            observation.tests.retain(|test| selected.contains(test));
+            observation
+                .tests
+                .retain(|test| selected.contains(test.as_str()));
             (!observation.tests.is_empty()).then_some(observation)
         })
         .collect::<Vec<_>>();
@@ -1395,7 +1398,7 @@ fn selected_decision(
         tests: decision
             .tests
             .into_iter()
-            .filter(|test| selected.contains(test))
+            .filter(|test| selected.contains(test.as_str()))
             .collect(),
         confidence: decision.confidence,
     }
@@ -1705,16 +1708,16 @@ pub struct CoverageFileDetailOptions<'a> {
     pub limit: usize,
 }
 
-fn other_coverage(
-    test_ids: &[String],
+fn other_coverage<T: AsRef<str>>(
+    test_ids: &[T],
     selected: Option<&BTreeSet<String>>,
     tests: &HashMap<String, IndexedTestSummary>,
 ) -> CoverageOtherCoverage {
     let covered = selected.map_or_else(Vec::new, |selected| {
         test_ids
             .iter()
-            .filter(|id| !selected.contains(*id))
-            .filter_map(|id| tests.get(id))
+            .filter(|id| !selected.contains(id.as_ref()))
+            .filter_map(|id| tests.get(id.as_ref()))
             .collect::<Vec<_>>()
     });
     CoverageOtherCoverage {
@@ -2916,7 +2919,7 @@ fn deduplicate_options(options: impl IntoIterator<Item = Vec<String>>) -> Vec<Ve
 }
 
 fn evidence_choices(
-    ids: &[String],
+    ids: &[Id],
     tests: &HashMap<&str, &crate::coverage_report::TestCoverageResult>,
     candidates: &BTreeSet<String>,
     tests_by_file: &BTreeMap<String, Vec<String>>,
@@ -2938,8 +2941,8 @@ fn evidence_choices(
                         .map(|candidate| vec![candidate.clone()]),
                 );
             }
-        } else if candidates.contains(id) {
-            choices.push(vec![id.clone()]);
+        } else if candidates.contains(id.as_str()) {
+            choices.push(vec![id.to_string()]);
         }
     }
     deduplicate_options(choices)
@@ -2976,7 +2979,7 @@ fn build_obligations(view: &CoverageView, candidates: &BTreeSet<String>) -> Obli
             _ => {}
         }
     }
-    let choices = |ids: &[String]| evidence_choices(ids, &tests, candidates, &tests_by_file);
+    let choices = |ids: &[Id]| evidence_choices(ids, &tests, candidates, &tests_by_file);
     let mut obligations = Vec::new();
     let mut unique_lines = BTreeMap::new();
     for line in &view.lines {
@@ -3344,6 +3347,7 @@ mod tests {
                 hits: Vec::new(),
                 events: Vec::new(),
                 logicals: Vec::new(),
+                phase_id: None,
             }],
             browser: Vec::new(),
             server: Vec::new(),

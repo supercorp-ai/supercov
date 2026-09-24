@@ -17,7 +17,7 @@ supercov runs <run-id> test <id|name> [selectors]
 supercov runs <run-id> minimize [selectors]
 supercov diff <older-run> <newer-run> [--json]
 supercov merge <run-id> <run-id> [...]
-supercov clean [--keep N] [--dry-run]
+supercov runs clean [--keep N] [--dry-run]
 ```
 
 `latest` resolves to the newest published run. Paginated resources default to

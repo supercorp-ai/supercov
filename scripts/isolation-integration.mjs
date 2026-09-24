@@ -456,13 +456,13 @@ const projectAfterSuccess = snapshot(root);
 
 const cleaned = spawnSync(
   process.execPath,
-  [launcher, "clean", "--keep", "20"],
+  [launcher, "runs", "clean", "--keep", "20"],
   { cwd: root, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },
 );
 if (cleaned.status !== 0)
   throw new Error(`isolated cache cleanup failed:\n${cleaned.stderr}\n${cleaned.stdout}`);
 if (existsSync(expectedCache))
-  throw new Error("supercov clean left the isolated build cache behind");
+  throw new Error("supercov runs clean left the isolated build cache behind");
 
 console.log(
   `[isolation] SIGKILL preserved the prior cache generation, killed the complete active JavaScript test tree, and recovered both abandoned transactions; unchanged source reused its instrumented build, SIGTERM remained cooperative, clean removed all cache data, and only the wrapped command's own outputs reached the project`,

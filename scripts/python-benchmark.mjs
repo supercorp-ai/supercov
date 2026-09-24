@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -94,12 +95,49 @@ try {
     SUPERCOV_RUST_BINARY: resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`),
     SUPERCOV_VERBOSE: '1',
   };
-  const plain = run(venvPython, ['-m', 'pytest', '-q'], { cwd: project, env: environment });
-  const measured = run(
-    process.execPath,
-    [resolve(repository, 'bin/supercov.js'), '--', venvPython, '-m', 'pytest', '-q'],
-    { cwd: project, env: environment },
-  );
+  // Three of each, alternating, and the fastest of each compared. A shared CI
+  // machine stalls now and then; one run against one run let a single stall
+  // decide the verdict -- the same 3.9 job measured 4.36x and then 3.09x --
+  // while the fastest run is the one the machine disturbed least.
+  const phaseMs = (result) => {
+    const phase = result.stderr.match(/timings .*?tests=([0-9.]+)ms/);
+    assert(phase, `no phase timings in:\n${result.stderr}`);
+    return Number(phase[1]);
+  };
+  const plains = [];
+  const measureds = [];
+  // Every attempt starts cold, as the single run did: bytecode an earlier
+  // attempt cached -- pytest's and the probed modules' -- would make the later
+  // ones measure a warm run instead.
+  // `.supercov` is left out of the walk: the previous run's trash sweeper
+  // may still be deleting from it, and a directory it removes between the
+  // listing and the descent failed the benchmark.
+  const cold = () => {
+    const walk = (directory) => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name === '.supercov') continue;
+        const path = resolve(directory, entry.name);
+        if (entry.name === '__pycache__') rmSync(path, { recursive: true, force: true });
+        else walk(path);
+      }
+    };
+    walk(project);
+    rmSync(resolve(project, '.supercov/cache'), { recursive: true, force: true });
+  };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    cold();
+    plains.push(run(venvPython, ['-m', 'pytest', '-q'], { cwd: project, env: environment }));
+    cold();
+    measureds.push(
+      run(
+        process.execPath,
+        [resolve(repository, 'bin/supercov.js'), '--', venvPython, '-m', 'pytest', '-q'],
+        { cwd: project, env: environment },
+      ),
+    );
+  }
+  const plain = plains.reduce((best, result) => (result.elapsedMs < best.elapsedMs ? result : best));
+  const measured = measureds.reduce((best, result) => (phaseMs(result) < phaseMs(best) ? result : best));
   assert.match(measured.stderr, new RegExp(`${testCount} test\\(s\\)`));
   const timings = measured.stderr.match(
     /python evidence: join=([0-9.]+)ms serialize=([0-9.]+)ms archive=([0-9.]+)ms/,
@@ -115,9 +153,7 @@ try {
   // below, and swings by an order of magnitude between a debug and a release
   // build -- folding it in would make this say more about the build than the
   // runtime.
-  const phase = measured.stderr.match(/timings .*?tests=([0-9.]+)ms/);
-  assert(phase, `no phase timings in:\n${measured.stderr}`);
-  const testsMs = Number(phase[1]);
+  const testsMs = phaseMs(measured);
   const ratio = Math.round((testsMs / plain.elapsedMs) * 100) / 100;
   const nsPerLine = Math.round(((testsMs - plain.elapsedMs) * 1e6) / lineEvents);
   console.log(JSON.stringify({

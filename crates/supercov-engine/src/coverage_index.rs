@@ -16,6 +16,7 @@ use crate::{
     coverage_report::{
         CoverageModel, CoverageReport, CoverageView, TransportStats, coverage_summary_for_tests,
     },
+    interned::Id,
     query_index::{QueryIndex, QueryIndexError, QueryIndexSection},
 };
 
@@ -159,8 +160,11 @@ fn usize_u32(value: usize) -> Result<u32, CoverageIndexError> {
 
 #[derive(Default)]
 struct StringTable {
-    ids: HashMap<String, u32>,
+    ids: crate::interned::FastMap<String, u32>,
     strings: Vec<String>,
+    // Keep each allocation alive: its address can then identify repeated Id
+    // references without hashing the same long test name for every line.
+    shared_ids: crate::interned::FastMap<usize, (Id, u32)>,
 }
 
 #[derive(Default)]
@@ -169,7 +173,7 @@ struct StringRelations {
     /// Where each distinct run already sits. Readers reach a run only through
     /// the (offset, count) pair the record stores, so two records naming the
     /// same run can share one copy of it and nothing downstream can tell.
-    interned: HashMap<Vec<u32>, (u64, u64)>,
+    interned: crate::interned::FastMap<Vec<u32>, (u64, u64)>,
 }
 
 impl StringRelations {
@@ -183,13 +187,29 @@ impl StringRelations {
     /// million entries -- for a number of distinct runs far smaller.
     fn push(
         &mut self,
-        values: impl IntoIterator<Item = String>,
+        values: impl IntoIterator<Item = impl AsRef<str>>,
         strings: &mut StringTable,
     ) -> Result<(u64, u64), CoverageIndexError> {
         let mut run = Vec::new();
         for value in values {
-            run.push(strings.intern(&value)?);
+            run.push(strings.intern(value.as_ref())?);
         }
+        self.push_run(run)
+    }
+
+    fn push_ids(
+        &mut self,
+        values: &[Id],
+        strings: &mut StringTable,
+    ) -> Result<(u64, u64), CoverageIndexError> {
+        let mut run = Vec::with_capacity(values.len());
+        for value in values {
+            run.push(strings.intern_shared(value)?);
+        }
+        self.push_run(run)
+    }
+
+    fn push_run(&mut self, run: Vec<u32>) -> Result<(u64, u64), CoverageIndexError> {
         if let Some(found) = self.interned.get(&run) {
             return Ok(*found);
         }
@@ -215,6 +235,18 @@ impl StringRelations {
 }
 
 impl StringTable {
+    fn intern_shared(&mut self, value: &Id) -> Result<u32, CoverageIndexError> {
+        let allocation = value.as_str().as_ptr() as usize;
+        if let Some((_, id)) = self.shared_ids.get(&allocation) {
+            return Ok(*id);
+        }
+        // Different allocations of identical text still use the same string
+        // table entry, including IDs built outside the report's interner.
+        let id = self.intern(value.as_str())?;
+        self.shared_ids.insert(allocation, (value.clone(), id));
+        Ok(id)
+    }
+
     fn intern(&mut self, value: &str) -> Result<u32, CoverageIndexError> {
         if let Some(id) = self.ids.get(value) {
             return Ok(*id);
@@ -620,16 +652,20 @@ fn limitation_kind(value: &serde_json::Value) -> Option<(&str, &str)> {
     Some((value.get("file")?.as_str()?, value.get("kind")?.as_str()?))
 }
 
-fn includes_selected(tests: &[String], selected: Option<&BTreeSet<String>>, covered: bool) -> bool {
+fn includes_selected<T: AsRef<str>>(
+    tests: &[T],
+    selected: Option<&Selected>,
+    covered: bool,
+) -> bool {
     selected.map_or(covered, |selected| {
-        tests.iter().any(|test| selected.contains(test))
+        tests.iter().any(|test| selected.contains(test.as_ref()))
     })
 }
 
 fn classify(
     gap: &mut MutableFileGap,
     dimension: usize,
-    selected: Option<&BTreeSet<String>>,
+    selected: Option<&Selected>,
     covered_overall: bool,
 ) {
     if selected.is_some() && covered_overall {
@@ -639,21 +675,32 @@ fn classify(
     }
 }
 
+/// A file's gap, its name copied only the first time the file is met.
+fn gap_for<'m>(
+    files: &'m mut BTreeMap<String, MutableFileGap>,
+    file: &str,
+) -> &'m mut MutableFileGap {
+    if !files.contains_key(file) {
+        files.insert(file.to_owned(), MutableFileGap::default());
+    }
+    files.get_mut(file).expect("gap was inserted")
+}
+
 fn file_gaps(
     view: &CoverageView,
-    selected: Option<&BTreeSet<String>>,
+    selected: Option<&Selected>,
 ) -> Result<Vec<(String, MutableFileGap)>, CoverageIndexError> {
     let mut files = BTreeMap::<String, MutableFileGap>::new();
     for line in &view.lines {
-        let gap = files.entry(line.file.clone()).or_default();
-        if !includes_selected(&line.tests, selected, line.covered) {
+        let gap = gap_for(&mut files, &line.file);
+        if line.measured && !includes_selected(&line.tests, selected, line.covered) {
             gap.uncovered_lines += 1;
             classify(gap, 0, selected, line.covered);
         }
     }
     for point in &view.points {
-        let gap = files.entry(point.meta.file.clone()).or_default();
-        if !includes_selected(&point.tests, selected, point.covered) {
+        let gap = gap_for(&mut files, &point.meta.file);
+        if point.measured && !includes_selected(&point.tests, selected, point.covered) {
             match point.meta.kind {
                 crate::coverage_analysis::PointKind::Statement => {
                     gap.uncovered_statements += 1;
@@ -667,7 +714,7 @@ fn file_gaps(
         }
     }
     for branch in &view.branches {
-        let gap = files.entry(branch.meta.file.clone()).or_default();
+        let gap = gap_for(&mut files, &branch.meta.file);
         for alternative in &branch.alternatives {
             if !includes_selected(&alternative.tests, selected, alternative.covered) {
                 gap.missing_branches += 1;
@@ -676,7 +723,7 @@ fn file_gaps(
         }
     }
     for decision in &view.decisions {
-        let gap = files.entry(decision.meta.file.clone()).or_default();
+        let gap = gap_for(&mut files, &decision.meta.file);
         let selected_vectors = decision
             .vector_observations
             .iter()
@@ -759,7 +806,12 @@ fn file_gap_record(
     Ok(record)
 }
 
-fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, BTreeSet<String>)> {
+/// The tests a projection selects. Hashed: every line, point, branch and
+/// vector of the view asks whether any of its tests is selected, once per
+/// projection, and a tree of long test names answered each by comparing them.
+type Selected = crate::interned::FastSet<String>;
+
+fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, Selected)> {
     let kinds = view
         .tests
         .iter()
@@ -796,7 +848,7 @@ fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, BTre
                             .is_none_or(|value| test.provenance.runner == *value)
                 })
                 .map(|test| test.id.clone())
-                .collect::<BTreeSet<_>>();
+                .collect::<Selected>();
             (!selected.is_empty()).then_some((kind, runner, selected))
         })
         .collect()
@@ -805,7 +857,7 @@ fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, BTre
 fn decision_gap_record(
     view_id: CoverageViewId,
     decision: &crate::coverage_report::DecisionResult,
-    selected: Option<&BTreeSet<String>>,
+    selected: Option<&Selected>,
     kind: Option<&str>,
     runner: Option<&str>,
     strings: &mut StringTable,
@@ -1014,7 +1066,7 @@ fn scope_projection<'a>(
 fn projection_record(
     view_id: CoverageViewId,
     view: &CoverageView,
-    selected: Option<&BTreeSet<String>>,
+    selected: Option<&Selected>,
     kind: Option<&str>,
     runner: Option<&str>,
     strings: &mut StringTable,
@@ -1059,7 +1111,7 @@ fn projection_record(
     let summary = selected.map_or_else(
         || Ok(view.summary.clone()),
         |ids| {
-            coverage_summary_for_tests(view, ids)
+            coverage_summary_for_tests(view, &ids.iter().cloned().collect())
                 .map_err(|_| CoverageIndexError::InvalidRecord("projection summary"))
         },
     )?;
@@ -1109,7 +1161,7 @@ fn projection_record(
     let phases = view
         .phases
         .iter()
-        .filter(|phase| selected.is_none_or(|selected| selected.contains(&phase.test)));
+        .filter(|phase| selected.is_none_or(|selected| selected.contains(phase.test.as_str())));
     let mut attribution = [0_usize; 4];
     for phase in phases {
         attribution[0] += phase.explicit_browser_events;
@@ -1432,18 +1484,21 @@ fn confidence_record(
         | (u8::from(confidence.background_only) << 1)
         | (u8::from(confidence.asserted) << 2)
         | (u8::from(confidence.e2e) << 3);
-    for (index, values) in [
-        confidence.tests.clone(),
-        confidence.asserted_tests.clone(),
-        confidence.runners.clone(),
-        confidence.kinds.clone(),
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, values) in [&confidence.tests, &confidence.asserted_tests]
+        .into_iter()
+        .enumerate()
     {
-        let (offset, count) = relations.push(values, strings)?;
+        let (offset, count) = relations.push_ids(values, strings)?;
         put_u64(&mut record, 8 + index * 16, offset);
         put_u64(&mut record, 16 + index * 16, count);
+    }
+    for (index, values) in [&confidence.runners, &confidence.kinds]
+        .into_iter()
+        .enumerate()
+    {
+        let (offset, count) = relations.push(values, strings)?;
+        put_u64(&mut record, 40 + index * 16, offset);
+        put_u64(&mut record, 48 + index * 16, count);
     }
     Ok(record)
 }
@@ -1463,10 +1518,10 @@ fn line_record(
     record[2] = u8::from(!line.measured);
     put_u32(&mut record, 4, strings.intern(&line.file)?);
     put_u64(&mut record, 8, usize_u64(line.line)?);
-    let (tests_offset, tests_count) = relations.push(line.tests.clone(), strings)?;
+    let (tests_offset, tests_count) = relations.push_ids(&line.tests, strings)?;
     put_u64(&mut record, 16, tests_offset);
     put_u64(&mut record, 24, tests_count);
-    let (phases_offset, phases_count) = relations.push(line.phases.clone(), strings)?;
+    let (phases_offset, phases_count) = relations.push_ids(&line.phases, strings)?;
     put_u64(&mut record, 32, phases_offset);
     put_u64(&mut record, 40, phases_count);
     put_u64(&mut record, 48, usize_u64(confidence_index)?);
@@ -1579,7 +1634,7 @@ struct AnchorInput<'a> {
     column: usize,
     covered: bool,
     conditions: Option<(usize, usize)>,
-    tests: &'a [String],
+    tests: &'a [Id],
 }
 
 fn anchor_record(
@@ -1599,7 +1654,7 @@ fn anchor_record(
         put_u64(&mut record, 32, usize_u64(total)?);
         put_u64(&mut record, 40, usize_u64(covered)?);
     }
-    let (tests_offset, tests_count) = relations.push(input.tests.iter().cloned(), strings)?;
+    let (tests_offset, tests_count) = relations.push_ids(input.tests, strings)?;
     put_u64(&mut record, 48, tests_offset);
     put_u64(&mut record, 56, tests_count);
     Ok(record)
@@ -1708,7 +1763,7 @@ struct HitMetadataInput<'a> {
     label: Option<&'a str>,
     alternative: Option<&'a str>,
     source: &'a str,
-    tests: &'a [String],
+    tests: &'a [Id],
 }
 
 fn hit_metadata_record(
@@ -1735,7 +1790,7 @@ fn hit_metadata_record(
         optional_string_id(input.alternative, strings)?,
     );
     put_u32(&mut record, 44, strings.intern(input.source)?);
-    let (tests_offset, tests_count) = relations.push(input.tests.iter().cloned(), strings)?;
+    let (tests_offset, tests_count) = relations.push_ids(input.tests, strings)?;
     put_u64(&mut record, 48, tests_offset);
     put_u64(&mut record, 56, tests_count);
     Ok(record)
@@ -1803,11 +1858,11 @@ fn decision_vector_observation_record(
     put_u64(&mut record, 0, usize_u64(confidence_index)?);
     put_u64(&mut record, 8, usize_u64(vector_index)?);
     for (offset, values) in [
-        (16, observation.tests.clone()),
-        (32, observation.phases.clone()),
-        (48, observation.explicit_phases.clone()),
+        (16, &observation.tests),
+        (32, &observation.phases),
+        (48, &observation.explicit_phases),
     ] {
-        let (relation_offset, relation_count) = relations.push(values, strings)?;
+        let (relation_offset, relation_count) = relations.push_ids(values, strings)?;
         put_u64(&mut record, offset, relation_offset);
         put_u64(&mut record, offset + 8, relation_count);
     }
@@ -1830,12 +1885,10 @@ fn decision_condition_record(
         put_u64(&mut record, 16, usize_u64(first)?);
         put_u64(&mut record, 24, usize_u64(second)?);
     }
-    let witness_tests = condition.witness_tests.clone().unwrap_or_default();
-    for (offset, values) in [
-        (32, witness_tests[0].clone()),
-        (48, witness_tests[1].clone()),
-    ] {
-        let (relation_offset, relation_count) = relations.push(values, strings)?;
+    let empty = [Vec::new(), Vec::new()];
+    let witness_tests = condition.witness_tests.as_ref().unwrap_or(&empty);
+    for (offset, values) in [(32, &witness_tests[0]), (48, &witness_tests[1])] {
+        let (relation_offset, relation_count) = relations.push_ids(values, strings)?;
         put_u64(&mut record, offset, relation_offset);
         put_u64(&mut record, offset + 8, relation_count);
     }
@@ -1860,7 +1913,7 @@ fn decision_detail_record(
     record[1] = u8::from(input.decision.executed) | (u8::from(input.decision.covered) << 1);
     put_u32(&mut record, 4, strings.intern(&input.decision.meta.id)?);
     put_u64(&mut record, 8, usize_u64(input.confidence_index)?);
-    let (tests_offset, tests_count) = relations.push(input.decision.tests.clone(), strings)?;
+    let (tests_offset, tests_count) = relations.push_ids(&input.decision.tests, strings)?;
     put_u64(&mut record, 16, tests_offset);
     put_u64(&mut record, 24, tests_count);
     put_u64(&mut record, 32, usize_u64(input.observations.0)?);
@@ -2665,6 +2718,14 @@ impl<'a> CoverageIndex<'a> {
         }
     }
 
+    fn relation_ids(&self, offset: u64, count: u64) -> Result<Vec<Id>, CoverageIndexError> {
+        Ok(self
+            .relation_strings(offset, count)?
+            .into_iter()
+            .map(Id::from)
+            .collect())
+    }
+
     fn relation_strings(&self, offset: u64, count: u64) -> Result<Vec<String>, CoverageIndexError> {
         let end = offset
             .checked_add(count)
@@ -3068,8 +3129,8 @@ impl<'a> CoverageIndex<'a> {
             background_only: record[1] & 2 != 0,
             asserted: record[1] & 4 != 0,
             e2e: record[1] & 8 != 0,
-            tests: values[0].clone(),
-            asserted_tests: values[1].clone(),
+            tests: values[0].iter().map(Id::from).collect(),
+            asserted_tests: values[1].iter().map(Id::from).collect(),
             runners: values[2].clone(),
             kinds: values[3].clone(),
         })
@@ -3302,7 +3363,7 @@ impl<'a> CoverageIndex<'a> {
                 details[position]
                     .lines
                     .push(crate::coverage_report::SourceLine {
-                        file: self.string(get_u32(record, 8)?)?,
+                        file: self.string(get_u32(record, 8)?)?.into(),
                         line: usize::try_from(get_u64(record, 16)?)
                             .map_err(|_| CoverageIndexError::SizeOverflow)?,
                     });
@@ -3477,9 +3538,9 @@ impl<'a> CoverageIndex<'a> {
         Ok(crate::coverage_report::VectorObservation {
             confidence: self.confidence(get_u64(record, 0)?)?,
             vector: self.test_vector(get_u64(record, 8)?)?,
-            tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
-            phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
-            explicit_phases: self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?,
+            tests: self.relation_ids(get_u64(record, 16)?, get_u64(record, 24)?)?,
+            phases: self.relation_ids(get_u64(record, 32)?, get_u64(record, 40)?)?,
+            explicit_phases: self.relation_ids(get_u64(record, 48)?, get_u64(record, 56)?)?,
         })
     }
 
@@ -3516,7 +3577,10 @@ impl<'a> CoverageIndex<'a> {
             covered: record[0] & 1 != 0,
             assertion_covered: record[0] & 2 != 0,
             witness,
-            witness_tests: has_witness.then_some([first_tests, second_tests]),
+            witness_tests: has_witness.then_some([
+                first_tests.into_iter().map(Id::from).collect(),
+                second_tests.into_iter().map(Id::from).collect(),
+            ]),
         })
     }
 
@@ -3597,7 +3661,7 @@ impl<'a> CoverageIndex<'a> {
                     .collect(),
                 vector_observations: observations,
                 conditions,
-                tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
+                tests: self.relation_ids(get_u64(record, 16)?, get_u64(record, 24)?)?,
                 confidence: self.confidence(get_u64(record, 8)?)?,
             });
         }
@@ -3894,6 +3958,7 @@ mod tests {
                     hits: vec!["point".into()],
                     events: Vec::new(),
                     logicals: Vec::new(),
+                    phase_id: None,
                 }],
                 browser: Vec::new(),
                 server: Vec::new(),
@@ -3918,6 +3983,37 @@ mod tests {
             }
         }
         report
+    }
+
+    #[test]
+    fn declined_lines_and_points_are_not_reported_as_coverage_gaps() {
+        let mut report = report();
+        for line in &mut report.view.lines {
+            line.measured = false;
+            line.covered = false;
+            line.tests.clear();
+        }
+        for point in &mut report.view.points {
+            point.measured = false;
+            point.covered = false;
+            point.tests.clear();
+        }
+        let selected = Selected::default();
+        for filter in [None, Some(&selected)] {
+            let gaps = file_gaps(&report.view, filter).unwrap();
+            let (_, gap) = &gaps[0];
+            assert_eq!(gap.uncovered_lines, 0);
+            assert_eq!(gap.uncovered_statements, 0);
+            assert_eq!(gap.uncovered_functions, 0);
+            assert_eq!(gap.uncovered_everywhere[0..3], [0, 0, 0]);
+            assert_eq!(gap.measurement_limitations, 1);
+        }
+        // Actual missed obligations must still appear.
+        report.view.lines[0].measured = true;
+        report.view.points[0].measured = true;
+        let gaps = file_gaps(&report.view, None).unwrap();
+        assert_eq!(gaps[0].1.uncovered_lines, 1);
+        assert_eq!(gaps[0].1.uncovered_statements, 1);
     }
 
     #[test]
@@ -4001,6 +4097,42 @@ mod tests {
         assert_eq!(read(first), read(second));
         assert_eq!(read(first).len(), 3);
         assert_ne!(read(first), read(other));
+    }
+
+    #[test]
+    fn shared_id_relations_match_text_relations_across_allocations() {
+        let mut shared_strings = StringTable::default();
+        let mut text_strings = StringTable::default();
+        let mut shared_relations = StringRelations::default();
+        let mut text_relations = StringRelations::default();
+        let original: Vec<Id> = ["", "test::a[1]", "test::a[10]", "unicodé ✓"]
+            .into_iter()
+            .map(Id::from)
+            .collect();
+        let copies = original.clone();
+        let separate: Vec<Id> = original.iter().map(|id| Id::from(id.as_str())).collect();
+        for values in [&original[..], &copies, &separate, &separate[1..], &[]] {
+            assert_eq!(
+                shared_relations
+                    .push_ids(values, &mut shared_strings)
+                    .unwrap(),
+                text_relations.push(values, &mut text_strings).unwrap(),
+            );
+        }
+        // The table owns references to cached allocations even after callers
+        // drop theirs, so a later ID cannot reuse an earlier cache address.
+        drop(original);
+        drop(copies);
+        drop(separate);
+        for value in ["new", "test::a[1]", ""] {
+            let id = Id::from(value);
+            assert_eq!(
+                shared_strings.intern_shared(&id).unwrap(),
+                text_strings.intern(value).unwrap(),
+            );
+        }
+        assert_eq!(shared_relations.values, text_relations.values);
+        assert_eq!(shared_strings.strings, text_strings.strings);
     }
 
     #[test]
