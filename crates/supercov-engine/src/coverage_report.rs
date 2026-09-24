@@ -846,9 +846,11 @@ impl OrderedVectors {
 #[derive(Clone)]
 struct MutableObservation {
     vector: McdcVector,
-    tests: BTreeSet<Id>,
-    phases: BTreeSet<Id>,
-    explicit_phases: BTreeSet<Id>,
+    /// Numbers of the view's test, phase and explicit phase relations, as
+    /// they arrive: sorted and made unique when the view is written.
+    tests: Vec<u32>,
+    phases: Vec<u32>,
+    explicit_phases: Vec<u32>,
 }
 
 #[derive(Clone)]
@@ -1211,86 +1213,10 @@ pub fn blocking_limitation(limitation: &Value) -> bool {
         .unwrap_or(true)
 }
 
-/// Borrows its sets: they are already sorted and unique, and every point,
-/// alternative and line of a run asks for one. Rebuilding each from copies --
-/// and copying every test's runner and kind to keep the distinct few -- was
-/// most of what analysing a 3,900-test run allocated.
-fn confidence_for(
-    test_ids: &BTreeSet<Id>,
-    phase_ids: &BTreeSet<Id>,
-    explicit_phase_ids: &BTreeSet<Id>,
-    tests: &FastMap<Id, MutableTest>,
-    phases: &FastMap<Id, MutablePhase>,
-) -> CoverageConfidence {
-    let mut has_test = false;
-    let mut setup_roles = true;
-    let mut background_roles = true;
-    let mut runners = BTreeSet::new();
-    let mut kinds = BTreeSet::new();
-    for id in test_ids {
-        if let Some(test) = tests.get(id) {
-            has_test = true;
-            setup_roles &= test.role == "setup";
-            background_roles &= test.role == "background";
-            runners.insert(test.provenance.runner.as_str());
-            kinds.insert(test.provenance.kind.as_str());
-        }
-    }
-    let mut has_phase = false;
-    let mut setup_phases = true;
-    let mut background_phases = true;
-    for id in phase_ids {
-        if let Some(phase) = phases.get(id) {
-            has_phase = true;
-            setup_phases &= phase.phase.kind == "setup";
-            background_phases &= phase.phase.kind == "background";
-        }
-    }
-    let has_action = explicit_phase_ids.iter().any(|id| {
-        phases
-            .get(id)
-            .is_some_and(|phase| phase.phase.kind == "action")
-    });
-    let level = if test_ids.is_empty() {
-        "unexecuted"
-    } else if has_action {
-        "action"
-    } else {
-        "executed"
-    };
-    CoverageConfidence {
-        level: level.into(),
-        setup_only: if has_phase {
-            setup_phases
-        } else {
-            has_test && setup_roles
-        },
-        background_only: if has_phase {
-            background_phases
-        } else {
-            has_test && background_roles
-        },
-        asserted: false,
-        tests: sorted(test_ids),
-        asserted_tests: vec![],
-        runners: runners.into_iter().map(str::to_owned).collect(),
-        e2e: kinds.contains("e2e"),
-        kinds: kinds.into_iter().map(str::to_owned).collect(),
-    }
-}
-
-/// Called for every hit of every test, and the id and value are nearly always
-/// there already: `entry` would allocate a key, and `insert` a value, only to
-/// drop them. On a 3,900-test run that was a fifth of the analysis.
-/// The analysis loop's writes, allocating a key or value only when it is new:
-/// per test and per event the key is nearly always there already.
-fn insert_absent(set: &mut BTreeSet<Id>, value: &str, ids: &mut Interner) {
-    if !set.contains(value) {
-        set.insert(ids.id(value));
-    }
-}
-
-fn hash_slot<'m, V: Default>(map: &'m mut HashMap<String, V>, key: &str) -> &'m mut V {
+fn hash_slot<'m, V: Default, S: std::hash::BuildHasher>(
+    map: &'m mut HashMap<String, V, S>,
+    key: &str,
+) -> &'m mut V {
     if !map.contains_key(key) {
         map.insert(key.to_owned(), V::default());
     }
@@ -1498,8 +1424,10 @@ impl<'t> TestTraits<'t> {
     }
 }
 
-/// `confidence_for` over numbered relations: the same verdict, read from
-/// per-number tables.
+/// How a point, alternative, line or vector was reached, from the tests
+/// and phases that reached it: read from per-number tables, since a run
+/// mentions its tests millions of times and a lookup per mention hashed an
+/// id each time.
 fn confidence_from(
     tests: &Reached,
     phases: &Reached,
@@ -1564,19 +1492,6 @@ fn confidence_from(
     }
 }
 
-fn add_reference(map: &mut HashMap<String, BTreeSet<Id>>, id: &str, value: &Id) {
-    match map.get_mut(id) {
-        Some(values) => {
-            if !values.contains(value) {
-                values.insert(value.clone());
-            }
-        }
-        None => {
-            map.insert(id.to_owned(), BTreeSet::from([value.clone()]));
-        }
-    }
-}
-
 pub fn create_coverage_view(
     manifest: &CoverageManifest,
     raw_results: &[RawTestResult],
@@ -1622,9 +1537,10 @@ fn create_coverage_view_with_model(
                 .filter_map(|entry| entry.get("file").and_then(Value::as_str).map(str::to_owned)),
         )
         .collect::<BTreeSet<_>>();
-    let mut vectors_by_decision = HashMap::<String, Vec<MutableObservation>>::new();
-    let mut vector_indexes = HashMap::<String, HashMap<String, usize>>::new();
-    let mut tests_by_decision = HashMap::<String, BTreeSet<Id>>::new();
+    let mut vectors_by_decision = FastMap::<String, Vec<MutableObservation>>::default();
+    let mut vector_indexes = FastMap::<String, FastMap<String, usize>>::default();
+    // Numbers of `tests_by_hit`'s tests, as they arrive.
+    let mut tests_by_decision = FastMap::<String, Vec<u32>>::default();
     let mut tests_by_hit = References::default();
     let mut hit_ids = HitIds::default();
     let mut tests_by_id = FastMap::<Id, MutableTest>::default();
@@ -1725,13 +1641,15 @@ fn create_coverage_view_with_model(
                     let observation_index = *indexes.entry(key).or_insert_with(|| {
                         observations.push(MutableObservation {
                             vector: vector.clone(),
-                            tests: BTreeSet::new(),
-                            phases: BTreeSet::new(),
-                            explicit_phases: BTreeSet::new(),
+                            tests: Vec::new(),
+                            phases: Vec::new(),
+                            explicit_phases: Vec::new(),
                         });
                         observations.len() - 1
                     });
-                    insert_absent(&mut observations[observation_index].tests, &id, ids);
+                    observations[observation_index]
+                        .tests
+                        .push(tests_by_hit.number(&id, ids));
                     tree_slot(
                         &mut tests_by_id.get_mut(&id).expect("registered test").decisions,
                         &decision.meta.id,
@@ -1739,7 +1657,8 @@ fn create_coverage_view_with_model(
                     .insert(vector);
                 }
                 if !decision.vectors.is_empty() {
-                    add_reference(&mut tests_by_decision, &decision.meta.id, &id);
+                    hash_slot(&mut tests_by_decision, &decision.meta.id)
+                        .push(tests_by_hit.number(&id, ids));
                 }
             }
             let test_hits = &mut tests_by_id.get_mut(&id).expect("registered test").hits;
@@ -1797,9 +1716,11 @@ fn create_coverage_view_with_model(
                             .get_mut(&event.id)
                             .and_then(|observations| observations.get_mut(index))
                     {
-                        insert_absent(&mut observation.phases, phase_id, ids);
+                        observation.phases.push(phases_by_hit.number(phase_id, ids));
                         if explicit {
-                            insert_absent(&mut observation.explicit_phases, phase_id, ids);
+                            observation
+                                .explicit_phases
+                                .push(explicit_phases_by_hit.number(phase_id, ids));
                         }
                     }
                 } else {
@@ -1844,8 +1765,10 @@ fn create_coverage_view_with_model(
                                 .get_mut(id)
                                 .and_then(|observations| observations.get_mut(index))
                         {
-                            insert_absent(&mut observation.phases, phase_id, ids);
-                            insert_absent(&mut observation.explicit_phases, phase_id, ids);
+                            observation.phases.push(phases_by_hit.number(phase_id, ids));
+                            observation
+                                .explicit_phases
+                                .push(explicit_phases_by_hit.number(phase_id, ids));
                         }
                     }
                 }
@@ -1883,13 +1806,15 @@ fn create_coverage_view_with_model(
                 let index = *indexes.entry(key).or_insert_with(|| {
                     observations.push(MutableObservation {
                         vector: vector.clone(),
-                        tests: BTreeSet::new(),
-                        phases: BTreeSet::new(),
-                        explicit_phases: BTreeSet::new(),
+                        tests: Vec::new(),
+                        phases: Vec::new(),
+                        explicit_phases: Vec::new(),
                     });
                     observations.len() - 1
                 });
-                observations[index].tests.insert(id.clone());
+                observations[index]
+                    .tests
+                    .push(tests_by_hit.number(&id, ids));
                 tests_by_id
                     .get_mut(&id)
                     .expect("registered test")
@@ -1897,7 +1822,7 @@ fn create_coverage_view_with_model(
                     .entry(meta.id.clone())
                     .or_default()
                     .insert(vector);
-                add_reference(&mut tests_by_decision, &meta.id, &id);
+                hash_slot(&mut tests_by_decision, &meta.id).push(tests_by_hit.number(&id, ids));
                 (meta.id.clone(), Some(vector.clone()))
             } else if record.record_type == "hit" {
                 let hit = record
@@ -1962,9 +1887,13 @@ fn create_coverage_view_with_model(
                         .get_mut(&event.id)
                         .and_then(|observations| observations.get_mut(index))
                 {
-                    insert_absent(&mut observation.phases, &phase_id, ids);
+                    observation
+                        .phases
+                        .push(phases_by_hit.number(&phase_id, ids));
                     if explicit {
-                        insert_absent(&mut observation.explicit_phases, &phase_id, ids);
+                        observation
+                            .explicit_phases
+                            .push(explicit_phases_by_hit.number(&phase_id, ids));
                     }
                 }
             }
@@ -1984,24 +1913,56 @@ fn create_coverage_view_with_model(
     let tests_by_hit = tests_by_hit.into_relation(&hit_ids);
     let phases_by_hit = phases_by_hit.into_relation(&hit_ids);
     let explicit_phases_by_hit = explicit_phases_by_hit.into_relation(&hit_ids);
+    let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+    // What confidence asks of each test and phase a relation numbers, looked
+    // up once per number rather than once per mention: a run's points and
+    // lines mention tests millions of times, and each lookup hashed an id.
+    let test_traits = tests_by_hit
+        .names
+        .iter()
+        .map(|name| tests_by_id.get(name).map(TestTraits::of))
+        .collect::<Vec<_>>();
+    let phase_kind = |relation: &Relation| {
+        relation
+            .names
+            .iter()
+            .map(|name| {
+                phases_by_id
+                    .get(name)
+                    .map(|phase| phase.phase.kind.as_str())
+            })
+            .collect::<Vec<_>>()
+    };
+    let phase_kinds = phase_kind(&phases_by_hit);
+    let explicit_kinds = phase_kind(&explicit_phases_by_hit);
+    let confidence = |tests: &Reached, phases: &Reached, explicit: &Reached| {
+        confidence_from(
+            tests,
+            phases,
+            explicit,
+            &test_traits,
+            &phase_kinds,
+            &explicit_kinds,
+        )
+    };
     let mut decisions = Vec::with_capacity(decision_metadata.len());
     for meta in decision_metadata {
         let mutable = vectors_by_decision.remove(&meta.id).unwrap_or_default();
         let mut observations = Vec::with_capacity(mutable.len());
+        let mut observed_phases = Vec::new();
+        let mut observed_explicit = Vec::new();
         for observation in mutable {
-            let confidence = confidence_for(
-                &observation.tests,
-                &observation.phases,
-                &observation.explicit_phases,
-                &tests_by_id,
-                &phases_by_id,
-            );
+            let tests = tests_by_hit.reached(observation.tests);
+            let phases = phases_by_hit.reached(observation.phases);
+            let explicit = explicit_phases_by_hit.reached(observation.explicit_phases);
+            observed_phases.extend(&phases.numbers);
+            observed_explicit.extend(&explicit.numbers);
             observations.push(VectorObservation {
                 vector: observation.vector,
-                tests: sorted(&observation.tests),
-                phases: sorted(&observation.phases),
-                explicit_phases: sorted(&observation.explicit_phases),
-                confidence,
+                confidence: confidence(&tests, &phases, &explicit),
+                tests: tests.names,
+                phases: phases.names,
+                explicit_phases: explicit.names,
             });
         }
         let vectors = observations
@@ -2039,19 +2000,12 @@ fn create_coverage_view_with_model(
                 witness_tests,
             });
         }
-        let decision_tests = tests_by_decision.remove(&meta.id).unwrap_or_default();
-        let confidence = confidence_for(
+        let decision_tests =
+            tests_by_hit.reached(tests_by_decision.remove(&meta.id).unwrap_or_default());
+        let decision_confidence = confidence(
             &decision_tests,
-            &observations
-                .iter()
-                .flat_map(|observation| observation.phases.iter().cloned())
-                .collect(),
-            &observations
-                .iter()
-                .flat_map(|observation| observation.explicit_phases.iter().cloned())
-                .collect(),
-            &tests_by_id,
-            &phases_by_id,
+            &phases_by_hit.reached(observed_phases),
+            &explicit_phases_by_hit.reached(observed_explicit),
         );
         decisions.push(DecisionResult {
             executed: !vectors.is_empty(),
@@ -2060,43 +2014,11 @@ fn create_coverage_view_with_model(
             vectors,
             vector_observations: observations,
             conditions,
-            tests: sorted(&decision_tests),
-            confidence,
+            tests: decision_tests.names,
+            confidence: decision_confidence,
         });
     }
 
-    let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
-    // What confidence asks of each test and phase a relation numbers, looked
-    // up once per number rather than once per mention: a run's points and
-    // lines mention tests millions of times, and each lookup hashed an id.
-    let test_traits = tests_by_hit
-        .names
-        .iter()
-        .map(|name| tests_by_id.get(name).map(TestTraits::of))
-        .collect::<Vec<_>>();
-    let phase_kind = |relation: &Relation| {
-        relation
-            .names
-            .iter()
-            .map(|name| {
-                phases_by_id
-                    .get(name)
-                    .map(|phase| phase.phase.kind.as_str())
-            })
-            .collect::<Vec<_>>()
-    };
-    let phase_kinds = phase_kind(&phases_by_hit);
-    let explicit_kinds = phase_kind(&explicit_phases_by_hit);
-    let confidence = |tests: &Reached, phases: &Reached, explicit: &Reached| {
-        confidence_from(
-            tests,
-            phases,
-            explicit,
-            &test_traits,
-            &phase_kinds,
-            &explicit_kinds,
-        )
-    };
     let points = manifest
         .points
         .iter()
