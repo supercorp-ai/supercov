@@ -569,6 +569,7 @@ pub fn seed_manifest(inputs: &InputManifest, evidence_digest: &str) -> (Assertio
 /// Structural checks only; malformed entries cannot silently earn credit.
 pub fn validate(map: &AssertionMap, inputs: &Inputs) -> Vec<String> {
     let mut errors = Vec::new();
+    let lines = LineIndex::new(&inputs.files);
     if map.schema_version != 2 || inputs.schema_version != 1 {
         errors.push("unsupported schema version".into());
     }
@@ -581,7 +582,7 @@ pub fn validate(map: &AssertionMap, inputs: &Inputs) -> Vec<String> {
         if !sites.insert(&a.at) {
             errors.push(format!("{}: duplicate assertion location", a.id));
         }
-        if a.at.offset(&inputs.files).is_none() {
+        if lines.offset(&a.at).is_none() {
             errors.push(format!("{}: invalid assertion anchor", a.id));
         }
         // Agents can register custom assertions absent from the syntax inventory.
@@ -1377,25 +1378,33 @@ fn target_file(file: &str, old: &FileManifest, new: &Files) -> Option<String> {
     matches.next().is_none().then(|| first.clone())
 }
 pub fn relocate(at: &Anchor, old: &FileManifest, new: &Files) -> Option<Anchor> {
-    let before = old.get(&at.file)?;
+    relocate_indexed(at, old, new, None)
+}
+
+fn relocate_indexed(
+    at: &Anchor,
+    old: &FileManifest,
+    new: &Files,
+    lines: Option<&LineIndex<'_>>,
+) -> Option<Anchor> {
+    old.get(&at.file)?;
     let target = target_file(&at.file, old, new)?;
     let after = &new[&target];
     let mut candidate = at.clone();
     candidate.file.clone_from(&target);
-    if FileFingerprint::of(after).same_bytes(before) && candidate.offset(new).is_some() {
-        return Some(candidate);
-    }
-    // The file changed somewhere. That says nothing about this anchor: read the
-    // recorded position in the new file and see whether it still holds the same
-    // text. If it does, the anchor did not move and there is nothing to find.
+    // Read the recorded position first. Edits elsewhere in the file say nothing
+    // about this anchor: if its complete text is still here, it did not move.
     //
     // Without this, every anchor in a changed file is re-found by searching the
     // whole file, and that search insists the text be unique -- so a statement
     // that appears twice is reported "changed or ambiguous" while sitting
     // untouched at the line it was recorded at. That is a false statement about
     // a specific node, and it is most of the staleness in a real map.
-    if let Some(start) = candidate.offset(new)
-        && after.get(start..start + at.text.len()) == Some(at.text.as_str())
+    // offset checks the anchor's complete text, so a whole-file fingerprint
+    // adds nothing here. Carrying many anchors reuses one line index per file.
+    if lines
+        .map_or_else(|| candidate.offset(new), |index| index.offset(&candidate))
+        .is_some()
     {
         return Some(candidate);
     }
@@ -1587,33 +1596,47 @@ pub fn carry(
     let mut marked: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut exposed: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut consumed = BTreeSet::new();
+    let lines = LineIndex::new(&new.files);
+    let new_sites = new
+        .assertions
+        .iter()
+        .map(|site| &site.at)
+        .collect::<BTreeSet<_>>();
+    let old_sites = old
+        .assertions
+        .iter()
+        .map(|site| &site.at)
+        .collect::<BTreeSet<_>>();
     let exact = map
         .assertions
         .iter()
         .map(|a| {
-            relocate(&a.at, &old.files, &new.files).filter(|at| {
-                new.assertions.iter().any(|s| &s.at == at)
-                    || !old.assertions.iter().any(|s| s.at == a.at)
-            })
+            relocate_indexed(&a.at, &old.files, &new.files, Some(&lines))
+                .filter(|at| new_sites.contains(at) || !old_sites.contains(&a.at))
         })
         .collect::<Vec<_>>();
     let reserved = exact.iter().flatten().collect::<BTreeSet<_>>();
+    let mut candidates = BTreeMap::<&str, Vec<&Anchor>>::new();
+    for site in &new.assertions {
+        if !reserved.contains(&site.at) {
+            candidates.entry(&site.at.file).or_default().push(&site.at);
+        }
+    }
+    let mut unmatched = BTreeMap::<&str, usize>::new();
+    for (other, at) in map.assertions.iter().zip(&exact) {
+        if at.is_none() {
+            *unmatched.entry(&other.at.file).or_default() += 1;
+        }
+    }
     for (index, a) in map.assertions.iter().enumerate() {
         // A sole old/new unmatched site in the same file is a review
         // suggestion. Preserve its explanation but never its reviewed status.
-        let candidates = new
-            .assertions
-            .iter()
-            .filter(|s| s.at.file == a.at.file && !reserved.contains(&s.at))
-            .collect::<Vec<_>>();
-        let unmatched = map
-            .assertions
-            .iter()
-            .zip(&exact)
-            .filter(|(other, at)| other.at.file == a.at.file && at.is_none())
-            .count();
-        let replacement = if exact[index].is_none() && unmatched == 1 && candidates.len() == 1 {
-            Some(&candidates[0].at)
+        let replacement = if exact[index].is_none() && unmatched.get(a.at.file.as_str()) == Some(&1)
+        {
+            match candidates.get(a.at.file.as_str()).map(Vec::as_slice) {
+                Some([at]) => Some(*at),
+                _ => None,
+            }
         } else {
             None
         };
@@ -1775,7 +1798,7 @@ pub fn carry(
                 dirty.insert("assertion changed or replaced; confirm identity and meaning".into());
             }
             for node in &mut f.nodes {
-                if let Some(at) = relocate(&node.at, &old.files, &new.files) {
+                if let Some(at) = relocate_indexed(&node.at, &old.files, &new.files, Some(&lines)) {
                     node.at = at;
                 } else {
                     dirty.insert(format!("node {} changed or ambiguous", node.id));

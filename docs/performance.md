@@ -69,6 +69,48 @@ compare a cold package, browser, build, or VM cache with a warm one. Supercov
 never runs the test command a second time automatically because suites may write
 data, call paid services, or be intentionally non-repeatable.
 
+### Python subprocesses
+
+Interpreter count matters as well as test count. Each child initializes the
+Python runtime before executing user code, so a suite that launches thousands
+of short-lived interpreters can have more overhead than a single-process suite
+with the same number of tests. Tight child-startup deadlines can also expire
+before the child produces its first output.
+
+Supercov prepares the run's probe index once and lets later interpreters load
+file and decision data as needed. The compiled-module cache is separate: it
+avoids compiling unchanged measured source, while the prepared index avoids
+repeatedly parsing and indexing the entire coverage plan.
+
+Optional unittest and concurrency adapters install when their libraries are
+imported, rather than importing those libraries into every helper process.
+Libraries already loaded when measurement starts are patched immediately.
+
+For development, `python3 scripts/python-startup-benchmark.py` measures cold
+initialization and repeated child startup against a synthetic plan. Use
+`--runtime /path/to/checkout/runtime/python` to compare implementations. This
+isolates startup cost; it does not predict a complete suite's slowdown, which
+also includes measured execution, concurrency and evidence publication.
+
+For an end-to-end subprocess workload, build a release binary and run:
+
+```sh
+cargo build --release -p supercov
+python3 scripts/python-subprocess-benchmark.py \
+  --output /tmp/supercov-subprocess-benchmark \
+  --children 1000 --tests 400 \
+  --binary candidate="$PWD/target/release/supercov"
+```
+
+Use a new output directory for each experiment. The fixture defaults to 321
+source files and saves plain/measured timings, CLI phase timings, child latency,
+test outcomes and coverage summaries. Add another `--binary label=/path` to
+compare builds; measured coverage and outcomes must agree. Vary `--calls` for
+hot execution, `--statements` for plan size, `--decision-width` for wider MC/DC
+regions, or `--workers` for concurrent children. `--mode noop` isolates helpers
+that run no measured source; `--mode script` exercises native entry scripts and
+allows the corrected unmeasured-file denominator to differ between versions.
+
 ## Understand disk usage
 
 Each completed run stores compressed evidence and metadata under

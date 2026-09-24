@@ -89,6 +89,11 @@ pub struct FunctionPlan {
     pub name: String,
     /// Whole definition span; disambiguates several lambdas on one line.
     pub span: PlanSpan,
+    /// The first statement of the body that executes, which runs if and only
+    /// if the function was entered: the runtime lets its probe stand for the
+    /// entry too, one store instead of two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +151,14 @@ pub struct DecisionPlan {
     pub conditions: Vec<ConditionPlan>,
     pub outcome_true: String,
     pub outcome_false: String,
+    /// For an `if`, `elif` or `while`: the first statement that executes in
+    /// the branch each outcome takes, when that branch starts with one. It
+    /// runs if and only if the test just took that outcome, so its probe
+    /// stands for a one-condition test's vector as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_true: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_false: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +168,10 @@ pub struct LoopPlan {
     pub iter: PlanSpan,
     pub zero: String,
     pub entered: String,
+    /// The first statement of the body that executes: it runs on every
+    /// iteration and only then, so its probe stands for `entered` too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,6 +446,7 @@ impl<'a> PythonObligationCollector<'a> {
             id,
             name: name.to_owned(),
             span,
+            first: None,
         });
     }
 
@@ -556,6 +574,8 @@ impl<'a> PythonObligationCollector<'a> {
             conditions: leaves,
             outcome_true: format!("{outcome_id}:true"),
             outcome_false: format!("{outcome_id}:false"),
+            when_true: None,
+            when_false: None,
         });
     }
 
@@ -616,6 +636,7 @@ impl<'a> PythonObligationCollector<'a> {
             entered: format!("{id}:entered"),
             id,
             iter: iter_span,
+            first: None,
         });
     }
 
@@ -776,6 +797,43 @@ impl<'a> PythonObligationCollector<'a> {
         });
     }
 
+    /// The id of the first statement of `body` that executes: what the
+    /// transform's probe before that statement records.
+    fn first_statement(&self, body: &[Stmt]) -> Option<String> {
+        body.iter()
+            .enumerate()
+            .find(|(index, statement)| !is_unobservable_statement(statement, *index == 0))
+            .map(|(_, statement)| stable_id(self.file, "statement", statement.range(), ""))
+    }
+
+    /// Where a false test's branch starts: the next clause, whose first
+    /// statement is a head when it is an `else`; an `elif` starts with its
+    /// test, which is no statement.
+    fn else_head(&self, clauses: &[ruff_python_ast::ElifElseClause]) -> Option<String> {
+        clauses
+            .first()
+            .filter(|clause| clause.test.is_none())
+            .and_then(|clause| self.first_statement(&clause.body))
+    }
+
+    /// Name the statements that stand for the decision just planned for
+    /// `test`: the heads of the branches its outcomes take.
+    fn branch_heads(&mut self, test: &Expr, when_true: Option<String>, when_false: Option<String>) {
+        let Ok(span) = self.locations.span(test.range()) else {
+            return;
+        };
+        if let Some(plan) = self
+            .plan
+            .decisions
+            .iter_mut()
+            .rev()
+            .find(|plan| plan.span == span)
+        {
+            plan.when_true = when_true;
+            plan.when_false = when_false;
+        }
+    }
+
     fn visit_body_statements(&mut self, body: &'a [Stmt]) {
         for (index, statement) in body.iter().enumerate() {
             if is_unobservable_statement(statement, index == 0) {
@@ -796,27 +854,60 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
     fn visit_stmt(&mut self, statement: &'a Stmt) {
         self.statement(statement);
         match statement {
-            Stmt::FunctionDef(function) => self.function(function.range, &function.name),
+            Stmt::FunctionDef(function) => {
+                self.function(function.range, &function.name);
+                let first = self.first_statement(&function.body);
+                if let Some(plan) = self.plan.functions.last_mut()
+                    && plan.id == stable_id(self.file, "function", function.range, &function.name)
+                {
+                    plan.first = first;
+                }
+            }
             Stmt::If(statement) => {
+                let heads = (
+                    self.first_statement(&statement.body),
+                    self.else_head(&statement.elif_else_clauses),
+                );
                 self.decision(&statement.test, "if");
-                for clause in &statement.elif_else_clauses {
+                self.branch_heads(&statement.test, heads.0, heads.1);
+                for (index, clause) in statement.elif_else_clauses.iter().enumerate() {
                     if let Some(test) = &clause.test {
+                        let heads = (
+                            self.first_statement(&clause.body),
+                            self.else_head(&statement.elif_else_clauses[index + 1..]),
+                        );
                         self.decision(test, "elif");
+                        self.branch_heads(test, heads.0, heads.1);
                     }
                 }
             }
             Stmt::While(statement) => {
+                let heads = (
+                    self.first_statement(&statement.body),
+                    self.first_statement(&statement.orelse),
+                );
                 self.decision(&statement.test, "while");
+                self.branch_heads(&statement.test, heads.0, heads.1);
             }
-            Stmt::For(statement) => self.loop_branch(
-                statement.range,
-                &statement.iter,
-                if statement.is_async {
-                    "async-for"
-                } else {
-                    "for"
-                },
-            ),
+            Stmt::For(statement) => {
+                self.loop_branch(
+                    statement.range,
+                    &statement.iter,
+                    if statement.is_async {
+                        "async-for"
+                    } else {
+                        "for"
+                    },
+                );
+                let first = self.first_statement(&statement.body);
+                if let (Some(plan), Ok(span)) = (
+                    self.plan.loops.last_mut(),
+                    self.locations.span(statement.iter.range()),
+                ) && plan.iter == span
+                {
+                    plan.first = first;
+                }
+            }
             Stmt::Match(statement) => self.match_statement(statement),
             Stmt::Try(statement) => self.try_statement(statement),
             Stmt::Assert(statement) => {
@@ -1112,6 +1203,62 @@ mod tests {
             .map(|point| point.line)
             .collect::<Vec<_>>();
         assert_eq!(statements, [2, 3, 6]);
+    }
+
+    #[test]
+    fn each_structure_names_the_statement_that_heads_it() {
+        // The statement whose execution implies an entry, an iteration or a
+        // one-condition outcome: the first that executes in that body.
+        let source = "def f(a):\n    \"\"\"doc\"\"\"\n    global G\n    x = 1\n    if a:\n        y = 2\n    elif a > 1:\n        y = 3\n    else:\n        y = 4\n    while a:\n        a -= 1\n    else:\n        z = 5\n    for item in a:\n        w = item\n    if x:\n        pass\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let statement_on = |line: usize| {
+            let start = obligations
+                .plan
+                .statements
+                .iter()
+                .find(|statement| statement.start[0] == line)
+                .unwrap_or_else(|| panic!("a statement on line {line}"));
+            Some(start.id.clone())
+        };
+        assert_eq!(obligations.plan.functions[0].first, statement_on(4));
+        let decision = |line: usize| {
+            obligations
+                .plan
+                .decisions
+                .iter()
+                .find(|decision| decision.span.start[0] == line)
+                .unwrap()
+        };
+        // `if a` falls to an `elif`, whose test is no statement.
+        assert_eq!(
+            (
+                decision(5).when_true.clone(),
+                decision(5).when_false.clone()
+            ),
+            (statement_on(6), None)
+        );
+        assert_eq!(
+            (
+                decision(7).when_true.clone(),
+                decision(7).when_false.clone()
+            ),
+            (statement_on(8), statement_on(10))
+        );
+        assert_eq!(
+            (
+                decision(11).when_true.clone(),
+                decision(11).when_false.clone()
+            ),
+            (statement_on(12), statement_on(14))
+        );
+        assert_eq!(
+            (
+                decision(17).when_true.clone(),
+                decision(17).when_false.clone()
+            ),
+            (statement_on(18), None)
+        );
+        assert_eq!(obligations.plan.loops[0].first, statement_on(16));
     }
 
     #[test]

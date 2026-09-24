@@ -5,7 +5,7 @@ use crate::{
     coverage_report::{
         ArchiveReportRequest, CoverageReport, ExitCodeInput, analyze_coverage_archive,
     },
-    evidence_archive::read_archive,
+    evidence_archive::read_archive_selected,
     lifecycle::atomic_write,
     run_store::{RunFingerprint, RunMetadata, StoredRun, discover_runs},
     source_units::named,
@@ -23,6 +23,22 @@ pub const STATE_FILE: &str = "assertions.state.json";
 const REPORT_CACHE_FILE: &str = "assertions.report.cache.json";
 /// Kept apart from the full report so a summary can never be read back as one.
 const SUMMARY_CACHE_FILE: &str = "assertions.summary.cache.json";
+/// The run's archived assertion inputs, written beside the archive at
+/// publication so a later run inheriting its map need not decompress a
+/// whole archive for one entry. Used only while the archive's digest is the
+/// one it records.
+const INPUTS_CACHE_FILE: &str = "assertions.inputs.cache.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InputsCache {
+    evidence_digest: String,
+    manifest: InputManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_digest: Option<String>,
+    #[serde(default)]
+    statement_exclusions: Vec<Value>,
+}
 pub struct RunManifest {
     pub manifest: InputManifest,
     pub evidence_digest: String,
@@ -58,7 +74,23 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
     }
     let bytes = fs::read(&run.evidence_path).map_err(|e| e.to_string())?;
     let evidence_digest = format!("{:x}", Sha256::digest(&bytes));
-    let entries = read_archive(&run.evidence_path).map_err(|e| e.to_string())?;
+    if let Some(cached) = fs::read(run.directory.join(INPUTS_CACHE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<InputsCache>(&bytes).ok())
+        .filter(|cached| cached.evidence_digest == evidence_digest)
+        .filter(|cached| validate_manifest(&cached.manifest).is_ok())
+    {
+        return Ok(Some(RunManifest {
+            manifest: cached.manifest,
+            evidence_digest,
+            legacy_digest: cached.legacy_digest,
+            statement_exclusions: cached.statement_exclusions,
+        }));
+    }
+    let entries = read_archive_selected(&run.evidence_path, |path| {
+        path == ARCHIVE_PATH || path == "statement-exclusions.json"
+    })
+    .map_err(|e| e.to_string())?;
     let Some(input) = entries.iter().find(|e| e.path == ARCHIVE_PATH) else {
         return Ok(None);
     };
@@ -83,16 +115,7 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
         }
         _ => return Err("Unsupported assertion input schema".into()),
     };
-    if manifest.files.iter().any(|(p, f)| {
-        !local_path(p) || f.sha256.len() != 64 || !f.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-    }) || manifest.assertions.iter().any(|s| {
-        !manifest.files.contains_key(&s.at.file)
-            || s.at.line == 0
-            || s.at.column == 0
-            || s.at.text.is_empty()
-    }) {
-        return Err("Invalid assertion input manifest".into());
-    }
+    validate_manifest(&manifest)?;
     if fs::read(&run.evidence_path).map_err(|e| e.to_string())? != bytes {
         return Err("Run archive changed during read".into());
     }
@@ -107,6 +130,36 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
             .transpose()?
             .unwrap_or_default(),
     }))
+}
+
+fn validate_manifest(manifest: &InputManifest) -> Result<(), String> {
+    if manifest.files.iter().any(|(p, f)| {
+        !local_path(p) || f.sha256.len() != 64 || !f.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    }) || manifest.assertions.iter().any(|s| {
+        !manifest.files.contains_key(&s.at.file)
+            || s.at.line == 0
+            || s.at.column == 0
+            || s.at.text.is_empty()
+    }) {
+        return Err("Invalid assertion input manifest".into());
+    }
+    Ok(())
+}
+
+/// The manifest a run archived, from the inputs the frontend archived it
+/// from and the digest publication took of the archive: what reading the
+/// archive back would give, without decompressing it to find one entry.
+pub(crate) fn archived_manifest(
+    manifest: InputManifest,
+    evidence_digest: String,
+) -> Result<RunManifest, String> {
+    validate_manifest(&manifest)?;
+    Ok(RunManifest {
+        manifest,
+        evidence_digest,
+        legacy_digest: None,
+        statement_exclusions: Vec::new(),
+    })
 }
 pub fn load(run: &StoredRun, input: &RunManifest) -> Result<(AssertionMap, State), String> {
     let read = |file: &str| {
@@ -140,11 +193,24 @@ fn write_json(
 /// `analysed` is the run's coverage when the caller has already analysed its
 /// evidence -- publication does so once for everything it derives. Without it
 /// the archive is analysed here.
+#[cfg(test)]
 pub(crate) fn prepare_publication(
     root: &Path,
     directory: &Path,
     metadata: &RunMetadata,
     analysed: Option<&CoverageReport>,
+) -> Result<(), String> {
+    prepare_publication_with(root, directory, metadata, analysed, None)
+}
+
+/// `prepare_publication`, with the run's archived manifest when the caller
+/// holds it (see `archived_manifest`).
+pub(crate) fn prepare_publication_with(
+    root: &Path,
+    directory: &Path,
+    metadata: &RunMetadata,
+    analysed: Option<&CoverageReport>,
+    archived: Option<RunManifest>,
 ) -> Result<(), String> {
     if metadata.merged == Some(true) {
         return Ok(());
@@ -157,8 +223,12 @@ pub(crate) fn prepare_publication(
         query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
         metadata: metadata.clone(),
     };
-    let Some(input) = load_optional_manifest(&run)? else {
-        return Ok(());
+    let input = match archived {
+        Some(input) => input,
+        None => match load_optional_manifest(&run)? {
+            Some(input) => input,
+            None => return Ok(()),
+        },
     };
     // Refuse replacement even if this helper is accidentally called twice.
     if directory.join(MAP_FILE).exists() || directory.join(STATE_FILE).exists() {
@@ -308,14 +378,14 @@ pub(crate) fn prepare_publication(
             current.as_ref().ok().map(|inputs| &inputs.files),
         )
     });
-    if let Err(reason) = current {
-        invalidate(&mut state, &map, &reason);
+    if let Err(reason) = &current {
+        invalidate(&mut state, &map, reason);
         add_change(
             &mut state,
             None,
             None,
             None,
-            reason,
+            reason.clone(),
             BTreeSet::new(),
             BTreeSet::new(),
         );
@@ -323,11 +393,30 @@ pub(crate) fn prepare_publication(
     state.inheritance = Some(inheritance);
     write_json(root, &run, MAP_FILE, &map)?;
     write_json(root, &run, STATE_FILE, &state)?;
+    // A cache: a run that cannot write it is read from its archive instead.
+    let _ = write_json(
+        root,
+        &run,
+        INPUTS_CACHE_FILE,
+        &InputsCache {
+            evidence_digest: input.evidence_digest.clone(),
+            manifest: input.manifest.clone(),
+            legacy_digest: input.legacy_digest.clone(),
+            statement_exclusions: input.statement_exclusions.clone(),
+        },
+    );
     // The summary `runs latest` shows, from the coverage already in hand. It is
     // a cache: failing to write it costs the first query the analysis, nothing
     // more, so it never fails the publication.
-    if let Some(report) = analysed {
-        let _ = report_with_detail_using(root, &run, None, false, Some(report));
+    if let (Some(report), Ok(inputs)) = (analysed, current) {
+        // These inputs were already validated for this publication. Reopening
+        // them would decompress and validate the whole archive a second time.
+        // Queries still load current sources before accepting this cache.
+        let input = RunInputs {
+            inputs,
+            stored: input,
+        };
+        let _ = report_with_inputs(root, &run, None, false, Some(report), &input);
     }
     Ok(())
 }
@@ -341,8 +430,12 @@ pub fn executions(
     manifest: &InputManifest,
     sources: Option<&Files>,
 ) -> Option<Executions> {
-    let mut located: std::collections::HashMap<&str, (&str, usize)> =
-        std::collections::HashMap::new();
+    // Each point's file, by index into `files`, and unit. Hits are looked up
+    // millions of times on a large run, so the lookup hashes with Fx and a
+    // test's hits are grouped by file index before any name is copied.
+    let mut located: crate::interned::FastMap<&str, (usize, usize)> = Default::default();
+    let mut files: Vec<&str> = Vec::new();
+    let mut file_indexes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut probed: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     for point in &coverage.view.points {
         let meta = &point.meta;
@@ -364,7 +457,11 @@ pub fn executions(
             meta.column + 1
         };
         let unit = code.unit_at(meta.line, column);
-        located.insert(meta.id.as_str(), (meta.file.as_str(), unit));
+        let file = *file_indexes.entry(meta.file.as_str()).or_insert_with(|| {
+            files.push(meta.file.as_str());
+            files.len() - 1
+        });
+        located.insert(meta.id.as_str(), (file, unit));
         if code.units[unit].is_code() {
             probed.entry(meta.file.clone()).or_default().insert(unit);
         }
@@ -373,14 +470,25 @@ pub fn executions(
     // per-test loop because the record that holds what no test could be
     // credited with has no test file, and the loop below skips it -- which is
     // exactly the record a parallel suite's coverage lives in.
-    let mut covered: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    let mut covered_by_file = vec![Vec::new(); files.len()];
     for test in &coverage.view.tests {
         for hit in &test.hits {
             if let Some((file, unit)) = located.get(hit.as_str()) {
-                covered.entry((*file).to_owned()).or_default().insert(*unit);
+                covered_by_file[*file].push(*unit);
             }
         }
     }
+    let covered = files
+        .iter()
+        .zip(covered_by_file)
+        .filter(|(_, units)| !units.is_empty())
+        .map(|(file, units)| {
+            (
+                (*file).to_owned(),
+                units.into_iter().collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut tests: BTreeMap<TestSelector, Execution> = BTreeMap::new();
     for test in &coverage.view.tests {
@@ -406,14 +514,18 @@ pub fn executions(
         } else if !crate::coverage_report::coverage_is_complete(&test.attribution) {
             record.attribution = test.attribution.clone();
         }
-        for hit in &test.hits {
-            if let Some((file, unit)) = located.get(hit.as_str()) {
-                record
-                    .files
-                    .entry((*file).to_owned())
-                    .or_default()
-                    .push(*unit);
-            }
+        let mut reached = test
+            .hits
+            .iter()
+            .filter_map(|hit| located.get(hit.as_str()).copied())
+            .collect::<Vec<_>>();
+        reached.sort_unstable();
+        for group in reached.chunk_by(|left, right| left.0 == right.0) {
+            record
+                .files
+                .entry(files[group[0].0].to_owned())
+                .or_default()
+                .extend(group.iter().map(|(_, unit)| *unit));
         }
     }
     let mut tests = tests.into_values().collect::<Vec<_>>();
@@ -811,7 +923,18 @@ fn report_with_detail_using(
     analysed: Option<&CoverageReport>,
 ) -> Result<Value, String> {
     let input = load_inputs(root, run)?;
-    let (map, state) = load(run, &input)?;
+    report_with_inputs(root, run, id, detail, analysed, &input)
+}
+
+fn report_with_inputs(
+    root: &Path,
+    run: &StoredRun,
+    id: Option<&str>,
+    detail: bool,
+    analysed: Option<&CoverageReport>,
+    input: &RunInputs,
+) -> Result<Value, String> {
+    let (map, state) = load(run, input)?;
     let cache_key = digest(&(
         env!("SUPERCOV_ENGINE_SOURCE_SHA256"),
         &run.id,
@@ -1024,6 +1147,7 @@ fn assess_with(
     let mut invalid_flows = 0;
     let mut current_flows = 0;
     let mut credit_flows = 0;
+    let mut assertions_without_current_explanation = 0;
     let mut line_assertions = BTreeMap::<(String, usize), BTreeSet<String>>::new();
     // Duplicate identities invalidate all credit; stale anchors only invalidate
     // their own flow, so an agent can repair a large map incrementally.
@@ -1332,6 +1456,15 @@ fn assess_with(
         } else {
             "No passing occurrence recorded. The assertion may be in an untaken branch or its execution attribution may be missing; inspect the selected tests."
         };
+        // Keep the exact anchor lookup typed. Scanning and serializing the
+        // entire inventory for each JSON row made publication quadratic in
+        // assertion count, including for maps with no authored flows.
+        if inventory.contains_key(&a.at)
+            && !witnesses.is_empty()
+            && !flows.iter().any(|f| f["eligible"] == true)
+        {
+            assertions_without_current_explanation += 1;
+        }
         rows.push(json!({"observation":observation,"id":a.id,"at":a.at,"questions":a.questions,"inMap":in_map,"observes":a.observes,"operations":inventory.get(&a.at).cloned().unwrap_or_default(),"observedPassingTests":witnesses,"flows":flows}));
     }
     // Only lines carrying a measured statement can ever be asserted: credit is
@@ -1371,7 +1504,7 @@ fn assess_with(
     let missing_inventory = inputs
         .assertions
         .iter()
-        .filter(|s| !map.assertions.iter().any(|a| a.at == s.at))
+        .filter(|s| !mapped_anchors.contains(&s.at))
         .count();
     let (status, reason) = if !passed || !identities_valid {
         ("unavailable", "Run failed or map identities are invalid")
@@ -1392,18 +1525,6 @@ fn assess_with(
             "No current flow with matching passing assertion evidence",
         )
     };
-    let assertions_without_current_explanation = rows
-        .iter()
-        .filter(|a| {
-            inventory.keys().any(|at| json!(at) == a["at"])
-                && a["observedPassingTests"]
-                    .as_array()
-                    .is_some_and(|v| !v.is_empty())
-                && a["flows"]
-                    .as_array()
-                    .is_none_or(|v| !v.iter().any(|f| f["eligible"] == true))
-        })
-        .count();
     let total = denominator.len();
     // Each measured statement is located once. The detail list and the
     // summary's count of statements that cannot be located read these same
@@ -1459,6 +1580,7 @@ fn assess_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evidence_archive::read_archive;
     fn fingerprint() -> RunFingerprint {
         RunFingerprint {
             algorithm: "sha256".into(),
@@ -1651,6 +1773,29 @@ mod tests {
         }
         assert_eq!(own, analysed);
         prepare_publication(&root, &directory, &metadata, Some(&analysed)).unwrap();
+        // A frontend that archived the inputs hands them over instead of the
+        // store reading them back; what it writes is the same.
+        let files = [MAP_FILE, STATE_FILE, SUMMARY_CACHE_FILE];
+        let from_archive = files.map(|file| fs::read(directory.join(file)).unwrap());
+        for file in files {
+            fs::remove_file(directory.join(file)).unwrap();
+        }
+        let digest = format!("{:x}", Sha256::digest(fs::read(&path).unwrap()));
+        prepare_publication_with(
+            &root,
+            &directory,
+            &metadata,
+            Some(&analysed),
+            Some(archived_manifest(inputs.manifest(), digest).unwrap()),
+        )
+        .unwrap();
+        for (file, expected) in files.iter().zip(&from_archive) {
+            assert_eq!(
+                &fs::read(directory.join(file)).unwrap(),
+                expected,
+                "{file} is the one the archive gives"
+            );
+        }
         let cache = directory.join(SUMMARY_CACHE_FILE);
         let written = fs::read(&cache).expect("publication wrote the summary");
         let summary = report_summary(&root, &run).unwrap();
@@ -1658,6 +1803,11 @@ mod tests {
         let computed = report_summary(&root, &run).unwrap();
         assert_eq!(fs::read(&cache).unwrap(), written, "the same cache");
         assert_eq!(summary, computed, "and the same summary");
+        fs::write(root.join("src/app.js"), "function work() { return 3; }\n").unwrap();
+        assert!(
+            report_summary(&root, &run).is_err(),
+            "a warmed summary must not bypass current-source validation"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

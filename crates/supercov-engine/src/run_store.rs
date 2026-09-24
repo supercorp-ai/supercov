@@ -260,6 +260,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
             ],
             events: vec![],
             logicals: vec![],
+            phase_id: None,
         }],
         browser: vec![],
         server: vec![],
@@ -283,6 +284,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
             hits: vec![],
             events: vec![],
             logicals: vec![],
+            phase_id: None,
         }];
         vec![unclaimed, parallel]
     } else {

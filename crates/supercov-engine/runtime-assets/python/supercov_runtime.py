@@ -26,15 +26,12 @@ Supported interpreters: CPython 3.9 and newer.
 from __future__ import annotations
 
 import atexit
-import bisect
 import contextvars
+import _thread
 import itertools
-import json
 import mmap
 import os
-import struct
 import sys
-import threading
 import time
 import zlib
 
@@ -57,6 +54,7 @@ TRANSPORT_VERSION = 2
 TRANSPORT_HEADER_SIZE = 64
 TRANSPORT_RECORD_HEADER_SIZE = 16
 TRANSPORT_INITIAL_CAPACITY = 1024 * 1024
+TRANSPORT_MAP_AFTER_BYTES = 64 * 1024
 TRANSPORT_MAX_CAPACITY = 512 * 1024 * 1024
 TRANSPORT_MAX_RECORD_SIZE = 4 * 1024 * 1024
 MAX_OPEN_EVALUATIONS = 64
@@ -65,7 +63,18 @@ MAX_OPEN_EVALUATIONS = 64
 # a slot its process closed, whose bytes the reader must not count.
 LAYOUT_NAME = "layout.json"
 SLOT_SUFFIX = ".slot"
-# Records of one harvest are chunked under the transport's record bound.
+# On macOS a slot is a POSIX shared memory object, named in a small file with
+# this suffix beside the transport. CPython's mmap asks macOS for F_FULLFSYNC
+# on the file it maps, which flushes the drive's cache: 3.7 ms per slot, which
+# was the largest single cost of starting a measured interpreter. A shared
+# memory object has no drive behind it and is mapped in microseconds, and the
+# kernel keeps it, like the file's pages, whatever happens to the process.
+SHARED_SLOT_SUFFIX = ".shm"
+# Imported with the first slot: an interpreter that never runs measured code
+# never maps one.
+_posixshmem = None if sys.platform == "darwin" else False
+# Records of one harvest are chunked under the transport's record bound: a
+# run is two numbers.
 HARVEST_CHUNK = 40000
 
 _monitoring = getattr(sys, "monitoring", None)  # 3.12+: only the unprobed-module detector uses it
@@ -73,6 +82,140 @@ _monitoring = getattr(sys, "monitoring", None)  # 3.12+: only the unprobed-modul
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+# Records are JSON, written without the `json` package: importing it costs a
+# child interpreter milliseconds (it pulls in `re`), and a suite that launches
+# thousands of interpreters pays that per process. Most strings a record holds
+# are printable ASCII without a quote or backslash, whose JSON is themselves
+# in quotes; anything else goes through `_json`, json's C half, loaded then.
+_JSON_ESCAPES = {'"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f"}
+
+
+def _json_string(text: str) -> str:
+    """`text` as `json.dumps` spells it, ASCII only."""
+    if text.isascii() and text.isprintable() and '"' not in text and "\\" not in text:
+        return '"' + text + '"'
+    # Rarer strings -- an argv holding a newline, say -- a character at a
+    # time: importing `_json` for them cost an interpreter a quarter of a
+    # millisecond, which a suite launching thousands pays thousands of times.
+    out = ['"']
+    for character in text:
+        escaped = _JSON_ESCAPES.get(character)
+        if escaped is not None:
+            out.append(escaped)
+        elif " " <= character <= "~":
+            out.append(character)
+        else:
+            code = ord(character)
+            if code > 0xFFFF:
+                code -= 0x10000
+                out.append("\\u%04x\\u%04x" % (0xD800 | (code >> 10), 0xDC00 | (code & 0x3FF)))
+            else:
+                out.append("\\u%04x" % code)
+    out.append('"')
+    return "".join(out)
+
+
+def _json_text(value) -> str:
+    """`value` as compact ASCII JSON: the str, int, bool, None, list and dict
+    shapes a record is made of."""
+    kind = type(value)
+    if kind is str:
+        return _json_string(value)
+    if kind is int:
+        return str(value)
+    if kind is bool:
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if kind is dict:
+        return "{" + ",".join(_json_string(str(key)) + ":" + _json_text(item) for key, item in value.items()) + "}"
+    if kind is list or kind is tuple:
+        return "[" + ",".join(map(_json_text, value)) + "]"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return _json_string(str(value))
+    if isinstance(value, int):
+        return str(int(value))
+    raise TypeError(f"a Supercov record cannot hold {kind.__name__}")
+
+
+class _ParseContext:
+    strict = True
+    object_hook = None
+    object_pairs_hook = None
+    parse_float = float
+    parse_int = int
+
+    @staticmethod
+    def parse_constant(name):
+        raise ValueError(f"not JSON: {name}")
+
+
+def _flat_object(text: str):
+    """A flat JSON object of plain strings and integers -- what
+    `child_environment` writes for an identity -- or None for anything else,
+    which `_json_load` hands to the JSON scanner."""
+    if "\\" in text or not text.startswith("{") or not text.endswith("}"):
+        return None
+    result: dict = {}
+    if text == "{}":
+        return result
+    index, end = 1, len(text)
+    while True:
+        if text[index : index + 1] != '"':
+            return None
+        close = text.find('"', index + 1)
+        if close < 0:
+            return None
+        key, index = text[index + 1 : close], close + 1
+        if text[index : index + 1] != ":":
+            return None
+        index += 1
+        if text[index : index + 1] == '"':
+            close = text.find('"', index + 1)
+            if close < 0:
+                return None
+            value, index = text[index + 1 : close], close + 1
+        else:
+            start = index
+            if text[index : index + 1] == "-":
+                index += 1
+            while index < end and "0" <= text[index] <= "9":
+                index += 1
+            if index == start or text[start:index] == "-":
+                return None
+            value = int(text[start:index])
+        result[key] = value
+        separator = text[index : index + 1]
+        index += 1
+        if separator == "}" and index == end:
+            return result
+        if separator != ",":
+            return None
+
+
+def _json_load(text: str):
+    """Parse JSON with `_json`'s C scanner, which is all `json.loads` is,
+    unless it is the flat object an identity is written as."""
+    flat = _flat_object(text)
+    if flat is not None:
+        return flat
+    try:
+        from _json import make_scanner
+    except ImportError:  # pragma: no cover
+        import json
+
+        return json.loads(text)
+    try:
+        value, end = make_scanner(_ParseContext())(text, 0)
+    except StopIteration:
+        raise ValueError("not JSON") from None
+    if end != len(text):
+        raise ValueError("trailing data after JSON")
+    return value
 
 
 def _digits(mask: int, width: int) -> str:
@@ -108,6 +251,56 @@ class _Decision:
                 into.append(logical["shortCircuit"])
 
 
+class _FileOutput:
+    """Write transport frames directly on macOS, without a second mapping.
+
+    The hot hit slots still use shared mmap pages. Transport records are
+    already batched and serialized under the runtime lock, so positioned
+    writes retain the same payload-before-commit protocol. This avoids
+    CPython's macOS-only F_FULLFSYNC on every mmap creation/remapping; it
+    does not buffer evidence in Python or change the on-disk format.
+    Busy processes switch to mmap after 64 KiB to amortize its setup cost
+    instead of paying for positioned writes for every subsequent frame.
+    The Runtime owns the descriptor, including across fork and close.
+    """
+
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+        self.map_failed = False
+
+    def write_at(self, offset, data):
+        while data:
+            written = os.pwrite(self.descriptor, data, offset)
+            if written <= 0:
+                raise OSError("Python evidence transport write made no progress")
+            offset += written
+            data = data[written:]
+
+    def flush(self):
+        # Positioned writes are in the kernel's page cache once `pwrite`
+        # returns, which is all a killed process needs; a slot's shared pages
+        # are never synced either. An fsync bought durability across a
+        # machine crash that nothing after one could use, at a cost to every
+        # interpreter.
+        pass
+
+    def close(self):
+        pass
+
+
+def _open_transport(descriptor, capacity):
+    if sys.platform == "darwin":
+        return _FileOutput(descriptor)
+    return mmap.mmap(descriptor, capacity, access=mmap.ACCESS_WRITE)
+
+
+def _transport_write(output, offset, data):
+    if isinstance(output, _FileOutput):
+        output.write_at(offset, data)
+    else:
+        output[offset:offset + len(data)] = data
+
+
 class _Hits(mmap.mmap):
     """A slot: one small file mapped for the probes, handed to one context
     at a time.
@@ -116,7 +309,40 @@ class _Hits(mmap.mmap):
     its multi-condition decisions, and the file it maps.
     """
 
-    __slots__ = ("context", "states", "path", "descriptor")
+    __slots__ = ("context", "states", "path", "descriptor", "shared")
+
+
+class _LazyHits:
+    """Reserve a phase's identity without mapping an empty evidence file.
+
+    The first probe resolves the reservation and replaces it in its current
+    ContextVar, so subsequent probes still write straight into the mmap.
+    Contexts copied before that first probe share the reservation, including
+    the resolved slot, and keep it alive until their work finishes.
+    """
+
+    __slots__ = ("runtime", "context", "resolved")
+
+    def __init__(self, runtime, context):
+        self.runtime, self.context, self.resolved = runtime, context, None
+
+    def _get(self):
+        if self.resolved is None:
+            with self.runtime.lock:
+                if self.resolved is None:
+                    self.resolved = self.runtime._allocate_hits(self.context)
+        if self.runtime.hits_var.get() is self:
+            self.runtime.hits_var.set(self.resolved)
+        return self.resolved
+
+    def __getitem__(self, key):
+        return self._get()[key]
+
+    def __setitem__(self, key, value):
+        self._get()[key] = value
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
 
 
 class _Sink(bytearray):
@@ -144,19 +370,17 @@ class _DecisionState:
 
 class Runtime:
     def __init__(self, plan_path: str, evidence_dir: str, run_id: str, worker: str) -> None:
-        with open(plan_path, "r", encoding="utf-8") as stream:
-            plan = json.load(stream)
-        if plan.get("version") != PLAN_VERSION:
-            raise RuntimeError(f"unsupported Supercov Python plan version {plan.get('version')!r}")
         import supercov_probes
 
-        self.root = os.path.realpath(plan["root"])
+        root, index = supercov_probes.load_plan(plan_path, PLAN_VERSION)
+        self.root = os.path.realpath(root)
         self.evidence_dir = evidence_dir
         self.run_id = run_id
         self.worker = worker
         self.tool_id = None
-        self.lock = threading.RLock()
+        self.lock = _thread.RLock()
         self.path_cache: dict[str, str | None] = {}
+        self.real_directories: dict[str, str] = {}
         self.under_root = False
         self.context = contextvars.ContextVar("supercov_python_context", default=0)
         self.identities: dict[int, dict] = {}
@@ -164,6 +388,8 @@ class Runtime:
         self.asserted: set[int] = set()
         # (context, file, line) of every assertion site a test has reached.
         self.asserted_sites: set[tuple[int, str, int]] = set()
+        # (context, file, line) of every site probe already handled.
+        self.probed_sites: set[tuple[int, str, int]] = set()
         self.seen_hits: set = set()
         self.seen_vectors: set = set()
         self._id_json: dict = {}
@@ -176,25 +402,27 @@ class Runtime:
         self.output_cursor = TRANSPORT_HEADER_SIZE
         self.output_pid = None
         self.output_token = f"{time.time_ns():x}-{id(self) & 0xFFFF:x}"
+        # Tells this interpreter's shared memory slots from those of an
+        # earlier process that had the same pid.
+        self.shared_token = f"{time.time_ns() & 0xFFFFFF:x}"
         self.dropped_records = 0
         self.closed = False
         self.registered_events: tuple = ()
         # The plan, numbered into the slot layout; see supercov_probes.
-        index = supercov_probes.index_plan(plan)
         self.index = index
         self.probe_files = index.files
         self.probe_sites = index.sites
         self.probe_ids = index.ids
-        self.probe_decisions = [_Decision(plan_, logical) for plan_, logical in index.decisions]
+        self.probe_decisions = index.decisions
+        self.loaded_decisions: dict[int, _Decision] = {}
         self.probe_boolops = index.boolop_groups
         self.regions = index.regions
         self.slot_header = supercov_probes.SLOT_HEADER
         self.slot_bytes = index.slot_bytes
+        # What a harvest stores over a run of set bytes.
+        self.slot_zeros = memoryview(bytes(index.slot_bytes))
         self.slot_tag = bytes.fromhex(index.digest[:16])
-        # Regions in slot order, for the harvest to find a set byte's decision.
-        self.region_starts = [start for start, _, _ in index.region_table]
-        self.region_decisions = [(start, width, self.probe_decisions[d]) for start, width, d in index.region_table]
-        self.pow3 = [3**i for i in range(max((decision.width for decision in self.probe_decisions), default=0) + 1)]
+        self.pow3 = [3**i for i in range(index.max_width + 1)]
         self.live_slots: list = []
         self.free_slots: list = []
         self.next_slot = 0
@@ -226,7 +454,7 @@ class Runtime:
         descriptor = os.open(self.output_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             os.ftruncate(descriptor, TRANSPORT_INITIAL_CAPACITY)
-            output = mmap.mmap(descriptor, TRANSPORT_INITIAL_CAPACITY, access=mmap.ACCESS_WRITE)
+            output = _open_transport(descriptor, TRANSPORT_INITIAL_CAPACITY)
         except Exception:
             os.close(descriptor)
             raise
@@ -236,19 +464,18 @@ class Runtime:
         self.output_cursor = TRANSPORT_HEADER_SIZE
         self.output_pid = pid
         self.dropped_records = 0
-        output[:TRANSPORT_HEADER_SIZE] = b"\0" * TRANSPORT_HEADER_SIZE
-        struct.pack_into(
-            "<8sIIQQQ",
+        # "<8sIIQQQ24x": magic, version, header size, capacity, dropped, pid.
+        _transport_write(
             output,
             0,
-            TRANSPORT_MAGIC,
-            TRANSPORT_VERSION,
-            TRANSPORT_HEADER_SIZE,
-            self.output_capacity,
-            0,
-            pid,
+            TRANSPORT_MAGIC
+            + TRANSPORT_VERSION.to_bytes(4, "little")
+            + TRANSPORT_HEADER_SIZE.to_bytes(4, "little")
+            + self.output_capacity.to_bytes(8, "little")
+            + bytes(8)
+            + pid.to_bytes(8, "little")
+            + bytes(24),
         )
-        output.flush()
         self._write_record(
             {
                 "t": "process",
@@ -270,7 +497,7 @@ class Runtime:
             # hit can reference that context.
             self._write_record({"t": "phase", "ctx": context, "at": _now_ms(), **identity})
 
-    def _close_output(self, flush: bool) -> None:
+    def _close_output(self) -> None:
         output = self.output
         descriptor = self.output_descriptor
         self.output = None
@@ -280,8 +507,10 @@ class Runtime:
         self.output_cursor = TRANSPORT_HEADER_SIZE
         self.output_pid = None
         if output is not None:
-            if flush:
-                output.flush()
+            # No sync: what a mapping or a positioned write stored is in the
+            # page cache, where the reader finds it however this process ends
+            # (see `_FileOutput.flush`). msync on Linux wrote the transport
+            # to disk twice per interpreter.
             output.close()
         if descriptor is not None:
             os.close(descriptor)
@@ -293,7 +522,7 @@ class Runtime:
         # append through the parent's transport: rotate to a child-owned file
         # on the first post-fork record instead.
         if self.output is not None or self.output_descriptor is not None:
-            self._close_output(flush=False)
+            self._close_output()
         self._open_output()
 
     @staticmethod
@@ -310,24 +539,25 @@ class Runtime:
             capacity = min(capacity * 2, TRANSPORT_MAX_CAPACITY)
         if capacity < required:
             return False
-        self.output.flush()
+        was_file = isinstance(self.output, _FileOutput)
         self.output.close()
         os.ftruncate(self.output_descriptor, capacity)
-        self.output = mmap.mmap(self.output_descriptor, capacity, access=mmap.ACCESS_WRITE)
+        self.output = (_open_transport(self.output_descriptor, capacity) if was_file
+                       else mmap.mmap(self.output_descriptor, capacity, access=mmap.ACCESS_WRITE))
         self.output_capacity = capacity
-        struct.pack_into("<Q", self.output, 16, capacity)
+        _transport_write(self.output, 16, capacity.to_bytes(8, "little"))
         return True
 
     def _write_record(self, record: dict) -> None:
-        self._write_payload(json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        self._write_payload(_json_text(record).encode("ascii"))
 
-    def _json_id(self, identifier: str) -> bytes:
-        # The JSON spelling of an obligation or decision id, once. Every test
-        # that reaches it writes it again, and encoding a dict for each was a
-        # microsecond of a five-microsecond record.
-        encoded = self._id_json.get(identifier)
+    def _json_id(self, text: str) -> bytes:
+        # The JSON spelling of a string the records repeat -- an obligation,
+        # a test id, a phase name -- once. The hot records are templates
+        # these fill in; encoding a dict for each was most of their cost.
+        encoded = self._id_json.get(text)
         if encoded is None:
-            encoded = self._id_json[identifier] = json.dumps(identifier).encode("utf-8")
+            encoded = self._id_json[text] = _json_string(str(text)).encode("ascii")
         return encoded
 
     def _write_hit(self, context: int, obligation: str) -> None:
@@ -353,21 +583,38 @@ class Runtime:
             self._drop_record()
             return
         output = self.output
+        if isinstance(output, _FileOutput) and not output.map_failed and next_cursor > TRANSPORT_MAP_AFTER_BYTES:
+            try:
+                self.output = mmap.mmap(self.output_descriptor, self.output_capacity, access=mmap.ACCESS_WRITE)
+                output = self.output
+            except (OSError, ValueError):
+                # Mapping is optional: keep writing valid evidence if the
+                # process cannot reserve another contiguous address range.
+                output.map_failed = True
         cursor = self.output_cursor
-        output[cursor + TRANSPORT_RECORD_HEADER_SIZE : end] = payload
-        if next_cursor > end:
-            output[end:next_cursor] = b"\0" * (next_cursor - end)
-        struct.pack_into("<II", output, cursor + 4, len(payload), self._checksum(payload))
-        # The single-byte commit is deliberately last. A killed process can
-        # leave bytes in an uncommitted frame, which the Rust reader ignores;
-        # it cannot expose a committed record with a missing payload.
-        output[cursor] = 1
+        if isinstance(output, _FileOutput):
+            frame = (
+                bytes(4) + len(payload).to_bytes(4, "little") + self._checksum(payload).to_bytes(4, "little") + bytes(4) + payload
+            )
+            output.write_at(cursor, frame + b"\0" * (next_cursor - end))
+            # Commit only after every byte was accepted by the kernel. A
+            # short write is retried; an interrupted frame remains uncommitted.
+            output.write_at(cursor, b"\x01")
+        else:
+            output[cursor + TRANSPORT_RECORD_HEADER_SIZE : end] = payload
+            if next_cursor > end:
+                output[end:next_cursor] = b"\0" * (next_cursor - end)
+            output[cursor + 4 : cursor + 12] = len(payload).to_bytes(4, "little") + self._checksum(payload).to_bytes(4, "little")
+            # The single-byte commit is deliberately last. A killed process can
+            # leave bytes in an uncommitted frame, which the Rust reader ignores;
+            # it cannot expose a committed record with a missing payload.
+            output[cursor] = 1
         self.output_cursor = next_cursor
 
     def _drop_record(self) -> None:
         self.dropped_records += 1
         if self.output is not None:
-            struct.pack_into("<Q", self.output, 24, self.dropped_records)
+            _transport_write(self.output, 24, self.dropped_records.to_bytes(8, "little"))
 
     def _record(self, record: dict) -> None:
         with self.lock:
@@ -384,10 +631,18 @@ class Runtime:
             self._ensure_process_output()
             self._write_record(record)
 
+    def _record_payload(self, payload: bytes) -> None:
+        """`_record` for a record already spelled as JSON bytes."""
+        with self.lock:
+            if self.closed:
+                return
+            self._ensure_process_output()
+            self._write_payload(payload)
+
     def flush(self) -> None:
-        # mmap writes are visible through the kernel page cache immediately;
-        # forcing every test phase through msync would add latency without
-        # improving SIGKILL survival. `close` flushes once on an ordinary exit.
+        # Both positioned writes and shared mmap writes reach the kernel page
+        # cache immediately; syncing adds latency without improving SIGKILL
+        # survival, so nothing is synced, at a phase or at close.
         return
 
     def limitation(self, identifier: str, reason: str, file: str | None = None, obligation: str | None = None) -> None:
@@ -440,8 +695,14 @@ class Runtime:
                     "phase": identity["phase"],
                 }
                 self.identities[context] = stored
-                self._record({"t": "phase", "ctx": context, "at": _now_ms(), **stored})
+                text = self._json_id
+                self._record_payload(
+                    b'{"at":%d,"ctx":%d,"phase":%s,"retry":%d,"t":"phase","test":%s,"worker":%s}'
+                    % (_now_ms(), context, text(stored["phase"]), stored["retry"], text(stored["test"]), text(stored["worker"]))
+                )
             leaving = self.hits_var.get()
+            if isinstance(leaving, _LazyHits):
+                leaving = leaving.resolved
             if isinstance(leaving, _Hits):
                 self._harvest(leaving)
             self.hits_var.set(self._new_hits(context))
@@ -475,9 +736,11 @@ class Runtime:
             # What the phase observed so far goes out ahead of the marker:
             # the reader credits the assertion with the records before it.
             array = self.hits_var.get()
+            if isinstance(array, _LazyHits):
+                array = array.resolved
             if isinstance(array, _Hits) and array.context == context:
                 self._harvest(array)
-            self._record({"t": "assert", "ctx": context})
+            self._record_payload(b'{"ctx":%d,"t":"assert"}' % context)
         return True
 
     def child_environment(self) -> dict:
@@ -486,7 +749,7 @@ class Runtime:
         identity = self.current_identity()
         if identity is None:
             return {}
-        return {CONTEXT_ENV: json.dumps(identity, separators=(",", ":"), sort_keys=True)}
+        return {CONTEXT_ENV: _json_text({key: identity[key] for key in sorted(identity)})}
 
     def outcome(self, worker: str, test: str, retry: int, phase: str, outcome: str, xfail: bool, runner: str = "pytest", file: "str | None" = None) -> None:
         """`file` is where the runner says the test is defined.
@@ -496,20 +759,20 @@ class Runtime:
         path. An adapter that cannot name the file leaves it None and the
         report falls back to deriving one from the identity.
         """
-        with self.lock:
-            entry = {
-                "t": "outcome",
-                "worker": worker,
-                "test": test,
-                "retry": int(retry),
-                "phase": phase,
-                "outcome": outcome,
-                "xfail": bool(xfail),
-                "runner": runner,
-            }
-            if file:
-                entry["file"] = file
-            self._record(entry)
+        text = self._json_id
+        self._record_payload(
+            b'{%s"outcome":%s,"phase":%s,"retry":%d,"runner":%s,"t":"outcome","test":%s,"worker":%s,"xfail":%s}'
+            % (
+                b'"file":%s,' % text(file) if file else b"",
+                text(outcome),
+                text(phase),
+                int(retry),
+                text(runner),
+                text(test),
+                text(worker),
+                b"true" if xfail else b"false",
+            )
+        )
 
     def assertion_site(self, file: "str | None", line: "int | None") -> None:
         """Where in the test an assertion ran, so a map can tell sites apart.
@@ -543,7 +806,7 @@ class Runtime:
             if identity is None or identity.get("phase") != "call":
                 return
             self.asserted_sites.add(key)
-            self._record({"t": "asite", "ctx": context, "f": file, "l": int(line)})
+            self._record_payload(b'{"ctx":%d,"f":%s,"l":%d,"t":"asite"}' % (context, self._json_id(file), int(line)))
 
     # -- observation --------------------------------------------------------
 
@@ -566,7 +829,7 @@ class Runtime:
 
     def _wide_vector(self, context: int, d: int, mask: int, outcome: bool) -> None:
         """A vector of a decision too wide for a region: recorded at once."""
-        decision = self.probe_decisions[d]
+        decision = self._decision(d)
         digits = _digits(mask, decision.width)
         key = (context, decision.id, digits)
         if key in self.seen_vectors:
@@ -595,7 +858,7 @@ class Runtime:
                 candidates.append(os.path.join(os.getcwd(), filename))
             for candidate in candidates:
                 try:
-                    real = os.path.realpath(candidate)
+                    real = self._realpath(candidate)
                 except OSError:
                     continue
                 if real == self.root or real.startswith(self.root + os.sep):
@@ -607,7 +870,27 @@ class Runtime:
         self.path_cache[filename] = relative
         return relative
 
+    def _realpath(self, path: str) -> str:
+        """`os.path.realpath`, resolving each directory once.
+
+        realpath checks every component of every path it is given, and the
+        start-up scan hands it the file of every module already imported:
+        a thousand `lstat` calls for a few dozen directories. Only the file
+        itself is checked per call, and resolved again if it is a link.
+        """
+        directory, name = os.path.split(os.path.abspath(path))
+        real = self.real_directories.get(directory)
+        if real is None:
+            real = self.real_directories[directory] = os.path.realpath(directory)
+        joined = os.path.join(real, name)
+        return os.path.realpath(joined) if os.path.islink(joined) else joined
+
     # -- slots ----------------------------------------------------------------
+
+    def _decision(self, d: int) -> _Decision:
+        if d not in self.loaded_decisions:
+            self.loaded_decisions[d] = _Decision(*self.probe_decisions[d])
+        return self.loaded_decisions[d]
 
     def _write_layout(self) -> None:
         """The slot layout, once per run: every process numbers the same plan
@@ -616,6 +899,8 @@ class Runtime:
         if os.path.exists(path):
             return
         partial = f"{path}.{os.getpid()}.{self.output_token}.partial"
+        import json
+
         with open(partial, "w", encoding="utf-8") as stream:
             json.dump(self.index.layout(), stream, separators=(",", ":"))
         try:
@@ -633,8 +918,20 @@ class Runtime:
         # A slot is named after its process's transport, which the reader
         # reads first: the phases a slot's context stands for are declared there.
         self._ensure_process_output()
-        path = f"{self.output_path[: -len('.mmap')]}.{self.next_slot}{SLOT_SUFFIX}"
+        stem = f"{self.output_path[: -len('.mmap')]}.{self.next_slot}"
         self.next_slot += 1
+        global _posixshmem
+        if _posixshmem is None:
+            try:
+                import _posixshmem
+            except ImportError:
+                _posixshmem = False
+        if _posixshmem:
+            try:
+                return self._create_shared_slot(stem)
+            except OSError:
+                pass
+        path = stem + SLOT_SUFFIX
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
         try:
             os.ftruncate(descriptor, self.slot_bytes)
@@ -645,6 +942,34 @@ class Runtime:
         slot[8:16] = self.slot_tag
         slot.path = path
         slot.descriptor = descriptor
+        slot.shared = None
+        return slot
+
+    def _create_shared_slot(self, stem: str) -> _Hits:
+        """A slot in a shared memory object, named in `<stem>.shm` first: a
+        process killed before the object exists leaves a name the reader
+        finds nothing under, never an object nothing names. macOS allows
+        31 bytes of name."""
+        name = "/scv%x.%s.%d" % (os.getpid(), self.shared_token, self.next_slot)
+        path = stem + SHARED_SLOT_SUFFIX
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            # The size too: macOS rounds a shared memory object up to a page.
+            os.write(descriptor, b"%s %d" % (name.encode("ascii"), self.slot_bytes))
+        finally:
+            os.close(descriptor)
+        descriptor = _posixshmem.shm_open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.ftruncate(descriptor, self.slot_bytes)
+            slot = _Hits(descriptor, self.slot_bytes, access=mmap.ACCESS_WRITE)
+        except Exception:
+            os.close(descriptor)
+            _posixshmem.shm_unlink(name)
+            raise
+        slot[8:16] = self.slot_tag
+        slot.path = path
+        slot.descriptor = descriptor
+        slot.shared = name
         return slot
 
     def _sink(self, context: int) -> _Sink:
@@ -654,6 +979,9 @@ class Runtime:
         return sink
 
     def _new_hits(self, context: int):
+        return _LazyHits(self, context)
+
+    def _allocate_hits(self, context: int):
         if self.closed:
             return self._sink(context)
         try:
@@ -666,7 +994,7 @@ class Runtime:
             return self._sink(context)
         slot.context = context
         slot.states = [None] * len(self.probe_decisions)
-        struct.pack_into("<Q", slot, 0, context)
+        slot[0:8] = context.to_bytes(8, "little")
         self.live_slots.append(slot)
         return slot
 
@@ -694,74 +1022,60 @@ class Runtime:
         # child starts its own transport and gives the forking context a slot
         # of its own. A lock some other parent thread held cannot be released
         # in a child that has no such thread.
-        self.lock = threading.RLock()
+        self.lock = _thread.RLock()
         self.live_slots = []
         self.free_slots = []
         if self.closed or self.hits_var is None:
             return
         current = self.hits_var.get()
+        # A fresh Context() in the child also needs a child-owned default,
+        # even if the parent's background reservation was already resolved.
+        self.background_hits.resolved = None
         try:
             self.hits_var.set(self._new_hits(current.context))
         except Exception:  # noqa: BLE001 - never break the child
             pass
 
     def _harvest(self, slot: _Hits) -> None:
-        """Turn a slot's set bytes into records, clearing them as they are read.
+        """Hand what a slot holds to the transport, clearing it as it goes.
 
-        `find` walks the slot in C. Hits go out as one `hits` record per
-        harvest and vectors as one `decs` record, each chunked under the
-        transport's record bound: a record per first hit was most of a
-        parser suite's remaining overhead.
+        A record names the slot's set bytes as runs -- first byte, length --
+        and the reader turns each byte into its obligation or vector through
+        the layout, exactly as it reads a slot a killed process left behind.
+        `find` walks the slot in C, a run at a time: the statements of a
+        block set neighbouring bytes, so a phase's hundreds of hits are a few
+        dozen runs, and nothing here is paid per hit.
+
+        A run is cleared by one slice store. Every byte in it was set when
+        its end was found, and only a harvest ever writes a zero, so a probe
+        storing into the run meanwhile stores what the run already recorded.
         """
         if STUB == "harvest":
             return
         began = time.perf_counter() if TIMING else 0.0
-        view = slot
-        header = self.slot_header
-        index = view.find(b"\x01", header)
-        if index == -1:
+        find = slot.find
+        if find(b"\x01", self.slot_header) == -1:
             return
-        context = slot.context
-        ids = self.probe_ids
-        id_end = header + len(ids)
-        starts = self.region_starts
-        regions = self.region_decisions
-        hit_ids: list = []
-        decs: list = []
+        zeros = self.slot_zeros
+        end = self.slot_bytes
+        runs: list = []
         with self.lock:
+            index = find(b"\x01", self.slot_header)
             while index != -1:
-                view[index] = 0
-                if index < id_end:
-                    hit_ids.append(ids[index - header])
-                else:
-                    start, width, decision = regions[bisect.bisect_right(starts, index) - 1]
-                    offset = index - start
-                    if width == 1:
-                        outcome = offset == 1
-                        digits = "2" if outcome else "1"
-                    else:
-                        outcome = bool(offset & 1)
-                        digits = _digits(offset >> 1, width)
-                    key = (context, decision.id, digits)
-                    if key not in self.seen_vectors:
-                        self.seen_vectors.add(key)
-                        decs.append((decision.id, digits, 1 if outcome else 0))
-                        decision.implied(digits, outcome, hit_ids)
-                index = view.find(b"\x01", index + 1)
-            if not self.closed:
+                stop = find(b"\x00", index)
+                if stop == -1:
+                    stop = end
+                slot[index:stop] = zeros[: stop - index]
+                runs.append(index)
+                runs.append(stop - index)
+                index = find(b"\x01", stop)
+            if runs and not self.closed:
                 self._ensure_process_output()
-                prefix = b'{"ctx":%d,"ids":[' % context
-                for start in range(0, len(hit_ids), HARVEST_CHUNK):
-                    chunk = hit_ids[start : start + HARVEST_CHUNK]
-                    seen: set = set()
-                    unique = [identifier for identifier in chunk if not (identifier in seen or seen.add(identifier))]
-                    self._write_payload(prefix + b",".join(self._json_id(identifier) for identifier in unique) + b'],"t":"hits"}')
-                for start in range(0, len(decs), HARVEST_CHUNK):
-                    body = b",".join(
-                        b'[%s,"%s",%d]' % (self._json_id(identifier), digits.encode("ascii"), outcome)
-                        for identifier, digits, outcome in decs[start : start + HARVEST_CHUNK]
+                prefix = b'{"ctx":%d,"r":[' % slot.context
+                for start in range(0, len(runs), HARVEST_CHUNK):
+                    self._write_payload(
+                        prefix + ",".join(map(str, runs[start : start + HARVEST_CHUNK])).encode("ascii") + b'],"t":"runs"}'
                     )
-                    self._write_payload(b'{"ctx":%d,"t":"decs","v":[' % context + body + b"]}")
         if TIMING:
             _timing["harvest"][0] += 1
             _timing["harvest"][1] += time.perf_counter() - began
@@ -775,7 +1089,7 @@ class Runtime:
 
     def _single_probe(self, start: int, value) -> bool:
         """A one-condition decision: its truth is its vector, one byte each."""
-        truth = bool(value)
+        truth = not not value
         self.hits_var.get()[start + truth] = 1
         return truth
 
@@ -788,7 +1102,7 @@ class Runtime:
         recorded value is the condition as written, `not` included; the
         source's own `not` then applies to what is returned, once.
         """
-        truth = bool(value)
+        truth = not not value
         states = self.hits_var.get().states
         state = states[d]
         if state is None:
@@ -804,7 +1118,7 @@ class Runtime:
 
     def _decision_probe(self, d: int, value) -> bool:
         """A multi-condition decision's test evaluated: its vector is a byte."""
-        outcome = bool(value)
+        outcome = not not value
         hits = self.hits_var.get()
         state = hits.states[d]
         if state is None:
@@ -875,8 +1189,15 @@ class Runtime:
             yield item
 
     def _site_probe(self, file: str, line: int) -> None:
+        # A site probe names its file project-relative already. Once a
+        # context has passed a site, both calls below are no-ops for it, and
+        # a test asserting in a loop passes the same site thousands of times.
+        key = (self.context.get(), file, line)
+        if key in self.probed_sites:
+            return
         self.assertion_site(file, line)
         self.assertion()
+        self.probed_sites.add(key)
 
     # -- installation ---------------------------------------------------------
 
@@ -935,9 +1256,10 @@ class Runtime:
                 return
             self._open_output()
             self._write_layout()
-            # The background's slot is the default, so a thread started past
-            # the propagation patch still has somewhere to write.
-            self.hits_var = contextvars.ContextVar("supercov_hits", default=self._new_hits(0))
+            # A background reservation is the default, so even a fresh context
+            # can allocate its slot on the first measured hit.
+            self.background_hits = self._new_hits(0)
+            self.hits_var = contextvars.ContextVar("supercov_hits", default=self.background_hits)
         self._install_probes()
         # A measured module imported before this point -- by a `.pth` file,
         # say -- ran without probes and will not be imported again. Named on
@@ -952,22 +1274,37 @@ class Runtime:
                     "measured code was imported before Supercov installed, so its execution was not observed",
                     relative,
                 )
+        # CPython compiles an entry script in C, bypassing both the import
+        # loader and builtins.compile. Detect this on 3.9–3.11 too, where
+        # sys.monitoring cannot report the missed code object later.
+        entry = sys.argv[0] if sys.argv else ""
+        if entry and not entry.startswith("-"):
+            relative = self._relative_path(entry)
+            if relative is not None and relative in self.probe_files:
+                self.limitation(
+                    "python-probes-unobserved-module",
+                    "CPython compiled the entry script without import probes; its execution was not observed",
+                    relative,
+                )
         if hasattr(os, "register_at_fork"):
             os.register_at_fork(after_in_child=self._after_fork_in_child)
         inherited = os.environ.get(CONTEXT_ENV)
         if inherited:
             try:
-                self.switch(json.loads(inherited))
+                self.switch(_json_load(inherited))
             except (ValueError, KeyError, TypeError):
                 self.limitation("python-inherited-context-invalid", "SUPERCOV_CONTEXT was not a valid Supercov identity")
         atexit.register(self.close)
         _install_propagation(self)
-        try:
-            import supercov_unittest
+        def install_unittest(module):
+            try:
+                import supercov_unittest
 
-            supercov_unittest.install(self)
-        except Exception as error:  # noqa: BLE001 - the adapter must never break the interpreter
-            self.limitation("python-unittest-adapter-unavailable", f"unittest adapter failed to install: {error!r}")
+                supercov_unittest.install(self)
+            except Exception as error:  # noqa: BLE001 - the adapter must never break the interpreter
+                self.limitation("python-unittest-adapter-unavailable", f"unittest adapter failed to install: {error!r}")
+
+        self.probing.after_import("unittest", install_unittest)
 
     def _stop_observing(self) -> None:
         # The detector's global event off and its callback withdrawn: nothing
@@ -993,7 +1330,7 @@ class Runtime:
             # record away, this one included.
             self._record({"t": "exit", "at": _now_ms()})
             self.closed = True
-            self._close_output(flush=True)
+            self._close_output()
             slots = self.live_slots + self.free_slots
             self.live_slots = []
             self.free_slots = []
@@ -1009,14 +1346,20 @@ class Runtime:
             try:
                 slot[8:16] = b"\0" * 8
                 os.close(slot.descriptor)
+                if slot.shared is not None:
+                    # Everything it held is in the transport; the kernel frees
+                    # it once the mapping goes too.
+                    _posixshmem.shm_unlink(slot.shared)
             except (OSError, ValueError):
                 pass
-        if unmatched:
+        if unmatched and TIMING:
             # Every file the interpreter imported lay outside the measured
             # tree. That is what a run reports as zero coverage without a word
             # of explanation -- on Windows the root once carried a `\\?\`
             # prefix its files did not -- so name the root and one file that
-            # missed it.
+            # missed it. This is diagnostic output only: a healthy child may
+            # deliberately run nothing but stdlib code, and its stderr is
+            # part of the program's observable behavior.
             sample = next(
                 (name for name in self.path_cache if not name.startswith("<")),
                 next(iter(self.path_cache)),
@@ -1037,11 +1380,9 @@ class Runtime:
 
 
 def _install_propagation(runtime: Runtime) -> None:
-    import concurrent.futures
-    import multiprocessing.process
-    import subprocess
-
-    if not getattr(threading.Thread, "_supercov_patched", False):
+    def install_threading(threading):
+        if getattr(threading.Thread, "_supercov_patched", False):
+            return
         original_start = threading.Thread.start
 
         def start_with_context(thread, *args, **kwargs):
@@ -1067,32 +1408,59 @@ def _install_propagation(runtime: Runtime) -> None:
         threading.Thread.start = start_with_context
         threading.Thread._supercov_patched = True
 
-        original_submit = concurrent.futures.ThreadPoolExecutor.submit
+    def install_executor(module):
+        executor_type = module.ThreadPoolExecutor
+        if getattr(executor_type, "_supercov_patched", False):
+            return
+        original_submit = executor_type.submit
 
         def submit_with_context(executor, function, /, *args, **kwargs):
             context = contextvars.copy_context()
             return original_submit(executor, context.run, function, *args, **kwargs)
 
-        concurrent.futures.ThreadPoolExecutor.submit = submit_with_context
+        executor_type.submit = submit_with_context
+        executor_type._supercov_patched = True
 
-    if not getattr(subprocess.Popen, "_supercov_patched", False):
-        original_init = subprocess.Popen.__init__
+    def install_subprocess(module):
+        if getattr(module.Popen, "_supercov_patched", False):
+            return
+        original_init = module.Popen.__init__
 
         def init_with_context(process, *args, **kwargs):
             additions = runtime.child_environment()
             if additions:
-                environment = dict(os.environ if kwargs.get("env") is None else kwargs["env"])
-                environment.update(additions)
-                kwargs["env"] = environment
+                # env is Popen's eleventh positional parameter on every
+                # supported CPython. Preserve that calling convention too.
+                supplied = args[10] if len(args) > 10 else kwargs.get("env")
+                environment = dict(os.environ if supplied is None else supplied)
+                # An explicitly isolated environment cannot load this run's
+                # observer. Do not add a stray context variable to it: callers
+                # use env= to define exactly what their child receives.
+                text_plan = environment.get(PLAN_ENV)
+                bytes_plan = environment.get(PLAN_ENV.encode())
+                if text_plan or bytes_plan:
+                    for key, value in additions.items():
+                        environment.pop(key, None)
+                        environment.pop(key.encode(), None)
+                        if bytes_plan and not text_plan:
+                            environment[key.encode()] = value.encode()
+                        else:
+                            environment[key] = value
+                    if len(args) > 10:
+                        args = (*args[:10], environment, *args[11:])
+                    else:
+                        kwargs["env"] = environment
             original_init(process, *args, **kwargs)
 
-        subprocess.Popen.__init__ = init_with_context
-        subprocess.Popen._supercov_patched = True
+        module.Popen.__init__ = init_with_context
+        module.Popen._supercov_patched = True
 
-    process_type = multiprocessing.process.BaseProcess
-    if not getattr(process_type, "_supercov_patched", False):
+    def install_multiprocessing(module):
+        process_type = module.BaseProcess
+        if getattr(process_type, "_supercov_patched", False):
+            return
         original_process_start = process_type.start
-        environment_lock = threading.Lock()
+        environment_lock = _thread.allocate_lock()
 
         def process_start_with_context(process, *args, **kwargs):
             additions = runtime.child_environment()
@@ -1112,6 +1480,14 @@ def _install_propagation(runtime: Runtime) -> None:
 
         process_type.start = process_start_with_context
         process_type._supercov_patched = True
+
+    # Patched when a program first imports it: most interpreters a suite
+    # launches never start a thread, and importing threading here cost each
+    # of them a millisecond.
+    runtime.probing.after_import("threading", install_threading)
+    runtime.probing.after_import("concurrent.futures.thread", install_executor)
+    runtime.probing.after_import("subprocess", install_subprocess)
+    runtime.probing.after_import("multiprocessing.process", install_multiprocessing)
 
 
 # -- module-level singleton --------------------------------------------------

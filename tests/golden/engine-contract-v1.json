@@ -10,6 +10,7 @@
     "exitCode": 0,
     "sourceUnchanged": true,
     "publishedFiles": [
+      "assertions.inputs.cache.json",
       "assertions.json",
       "assertions.state.json",
       "assertions.summary.cache.json",
