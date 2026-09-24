@@ -162,6 +162,9 @@ fn usize_u32(value: usize) -> Result<u32, CoverageIndexError> {
 struct StringTable {
     ids: HashMap<String, u32>,
     strings: Vec<String>,
+    // Keep each allocation alive: its address can then identify repeated Id
+    // references without hashing the same long test name for every line.
+    shared_ids: HashMap<usize, (Id, u32)>,
 }
 
 #[derive(Default)]
@@ -191,6 +194,22 @@ impl StringRelations {
         for value in values {
             run.push(strings.intern(value.as_ref())?);
         }
+        self.push_run(run)
+    }
+
+    fn push_ids(
+        &mut self,
+        values: &[Id],
+        strings: &mut StringTable,
+    ) -> Result<(u64, u64), CoverageIndexError> {
+        let mut run = Vec::with_capacity(values.len());
+        for value in values {
+            run.push(strings.intern_shared(value)?);
+        }
+        self.push_run(run)
+    }
+
+    fn push_run(&mut self, run: Vec<u32>) -> Result<(u64, u64), CoverageIndexError> {
         if let Some(found) = self.interned.get(&run) {
             return Ok(*found);
         }
@@ -216,6 +235,18 @@ impl StringRelations {
 }
 
 impl StringTable {
+    fn intern_shared(&mut self, value: &Id) -> Result<u32, CoverageIndexError> {
+        let allocation = value.as_str().as_ptr() as usize;
+        if let Some((_, id)) = self.shared_ids.get(&allocation) {
+            return Ok(*id);
+        }
+        // Different allocations of identical text still use the same string
+        // table entry, including IDs built outside the report's interner.
+        let id = self.intern(value.as_str())?;
+        self.shared_ids.insert(allocation, (value.clone(), id));
+        Ok(id)
+    }
+
     fn intern(&mut self, value: &str) -> Result<u32, CoverageIndexError> {
         if let Some(id) = self.ids.get(value) {
             return Ok(*id);
@@ -1437,26 +1468,21 @@ fn confidence_record(
         | (u8::from(confidence.background_only) << 1)
         | (u8::from(confidence.asserted) << 2)
         | (u8::from(confidence.e2e) << 3);
-    for (index, values) in [
-        confidence
-            .tests
-            .iter()
-            .map(|id| id.as_str())
-            .collect::<Vec<_>>(),
-        confidence
-            .asserted_tests
-            .iter()
-            .map(|id| id.as_str())
-            .collect(),
-        confidence.runners.iter().map(String::as_str).collect(),
-        confidence.kinds.iter().map(String::as_str).collect(),
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, values) in [&confidence.tests, &confidence.asserted_tests]
+        .into_iter()
+        .enumerate()
     {
-        let (offset, count) = relations.push(values, strings)?;
+        let (offset, count) = relations.push_ids(values, strings)?;
         put_u64(&mut record, 8 + index * 16, offset);
         put_u64(&mut record, 16 + index * 16, count);
+    }
+    for (index, values) in [&confidence.runners, &confidence.kinds]
+        .into_iter()
+        .enumerate()
+    {
+        let (offset, count) = relations.push(values, strings)?;
+        put_u64(&mut record, 40 + index * 16, offset);
+        put_u64(&mut record, 48 + index * 16, count);
     }
     Ok(record)
 }
@@ -1476,10 +1502,10 @@ fn line_record(
     record[2] = u8::from(!line.measured);
     put_u32(&mut record, 4, strings.intern(&line.file)?);
     put_u64(&mut record, 8, usize_u64(line.line)?);
-    let (tests_offset, tests_count) = relations.push(line.tests.clone(), strings)?;
+    let (tests_offset, tests_count) = relations.push_ids(&line.tests, strings)?;
     put_u64(&mut record, 16, tests_offset);
     put_u64(&mut record, 24, tests_count);
-    let (phases_offset, phases_count) = relations.push(line.phases.clone(), strings)?;
+    let (phases_offset, phases_count) = relations.push_ids(&line.phases, strings)?;
     put_u64(&mut record, 32, phases_offset);
     put_u64(&mut record, 40, phases_count);
     put_u64(&mut record, 48, usize_u64(confidence_index)?);
@@ -1612,7 +1638,7 @@ fn anchor_record(
         put_u64(&mut record, 32, usize_u64(total)?);
         put_u64(&mut record, 40, usize_u64(covered)?);
     }
-    let (tests_offset, tests_count) = relations.push(input.tests.iter().cloned(), strings)?;
+    let (tests_offset, tests_count) = relations.push_ids(input.tests, strings)?;
     put_u64(&mut record, 48, tests_offset);
     put_u64(&mut record, 56, tests_count);
     Ok(record)
@@ -1748,7 +1774,7 @@ fn hit_metadata_record(
         optional_string_id(input.alternative, strings)?,
     );
     put_u32(&mut record, 44, strings.intern(input.source)?);
-    let (tests_offset, tests_count) = relations.push(input.tests.iter().cloned(), strings)?;
+    let (tests_offset, tests_count) = relations.push_ids(input.tests, strings)?;
     put_u64(&mut record, 48, tests_offset);
     put_u64(&mut record, 56, tests_count);
     Ok(record)
@@ -1816,11 +1842,11 @@ fn decision_vector_observation_record(
     put_u64(&mut record, 0, usize_u64(confidence_index)?);
     put_u64(&mut record, 8, usize_u64(vector_index)?);
     for (offset, values) in [
-        (16, observation.tests.clone()),
-        (32, observation.phases.clone()),
-        (48, observation.explicit_phases.clone()),
+        (16, &observation.tests),
+        (32, &observation.phases),
+        (48, &observation.explicit_phases),
     ] {
-        let (relation_offset, relation_count) = relations.push(values, strings)?;
+        let (relation_offset, relation_count) = relations.push_ids(values, strings)?;
         put_u64(&mut record, offset, relation_offset);
         put_u64(&mut record, offset + 8, relation_count);
     }
@@ -1843,12 +1869,10 @@ fn decision_condition_record(
         put_u64(&mut record, 16, usize_u64(first)?);
         put_u64(&mut record, 24, usize_u64(second)?);
     }
-    let witness_tests = condition.witness_tests.clone().unwrap_or_default();
-    for (offset, values) in [
-        (32, witness_tests[0].clone()),
-        (48, witness_tests[1].clone()),
-    ] {
-        let (relation_offset, relation_count) = relations.push(values, strings)?;
+    let empty = [Vec::new(), Vec::new()];
+    let witness_tests = condition.witness_tests.as_ref().unwrap_or(&empty);
+    for (offset, values) in [(32, &witness_tests[0]), (48, &witness_tests[1])] {
+        let (relation_offset, relation_count) = relations.push_ids(values, strings)?;
         put_u64(&mut record, offset, relation_offset);
         put_u64(&mut record, offset + 8, relation_count);
     }
@@ -1873,7 +1897,7 @@ fn decision_detail_record(
     record[1] = u8::from(input.decision.executed) | (u8::from(input.decision.covered) << 1);
     put_u32(&mut record, 4, strings.intern(&input.decision.meta.id)?);
     put_u64(&mut record, 8, usize_u64(input.confidence_index)?);
-    let (tests_offset, tests_count) = relations.push(input.decision.tests.clone(), strings)?;
+    let (tests_offset, tests_count) = relations.push_ids(&input.decision.tests, strings)?;
     put_u64(&mut record, 16, tests_offset);
     put_u64(&mut record, 24, tests_count);
     put_u64(&mut record, 32, usize_u64(input.observations.0)?);
@@ -4056,6 +4080,42 @@ mod tests {
         assert_eq!(read(first), read(second));
         assert_eq!(read(first).len(), 3);
         assert_ne!(read(first), read(other));
+    }
+
+    #[test]
+    fn shared_id_relations_match_text_relations_across_allocations() {
+        let mut shared_strings = StringTable::default();
+        let mut text_strings = StringTable::default();
+        let mut shared_relations = StringRelations::default();
+        let mut text_relations = StringRelations::default();
+        let original: Vec<Id> = ["", "test::a[1]", "test::a[10]", "unicodé ✓"]
+            .into_iter()
+            .map(Id::from)
+            .collect();
+        let copies = original.clone();
+        let separate: Vec<Id> = original.iter().map(|id| Id::from(id.as_str())).collect();
+        for values in [&original[..], &copies, &separate, &separate[1..], &[]] {
+            assert_eq!(
+                shared_relations
+                    .push_ids(values, &mut shared_strings)
+                    .unwrap(),
+                text_relations.push(values, &mut text_strings).unwrap(),
+            );
+        }
+        // The table owns references to cached allocations even after callers
+        // drop theirs, so a later ID cannot reuse an earlier cache address.
+        drop(original);
+        drop(copies);
+        drop(separate);
+        for value in ["new", "test::a[1]", ""] {
+            let id = Id::from(value);
+            assert_eq!(
+                shared_strings.intern_shared(&id).unwrap(),
+                text_strings.intern(value).unwrap(),
+            );
+        }
+        assert_eq!(shared_relations.values, text_relations.values);
+        assert_eq!(shared_strings.strings, text_strings.strings);
     }
 
     #[test]
