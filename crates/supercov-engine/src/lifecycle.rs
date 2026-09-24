@@ -577,6 +577,17 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<u64, Lifecycle
     if !metadata.file_type().is_file() {
         return Err(LifecycleError::UnsafePath(source.into()));
     }
+    // A clone where the filesystem can make one (APFS, Btrfs, XFS): the
+    // archive's blocks are shared, not copied -- 150 MB on a large run --
+    // and the clone is the source as it was at that instant.
+    if reflink_copy::reflink(source, destination).is_ok() {
+        File::open(destination)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| io_error(destination, error))?;
+        return fs::symlink_metadata(destination)
+            .map(|metadata| metadata.len())
+            .map_err(|error| io_error(destination, error));
+    }
     let mut input = File::open(source).map_err(|error| io_error(source, error))?;
     let mut output = OpenOptions::new()
         .write(true)
@@ -687,9 +698,9 @@ pub(crate) fn publish_run_with_fault(
             actual: copied,
         });
     }
-    if file_sha256(evidence_source)? != evidence_sha256
-        || file_sha256(&staging.join("evidence.raw.gz"))? != evidence_sha256
-    {
+    // What is published is the copy: it must be the evidence as hashed
+    // before it was taken.
+    if file_sha256(&staging.join("evidence.raw.gz"))? != evidence_sha256 {
         remove_stored_tree_deferred(root, &staging)?;
         return Err(LifecycleError::EvidenceChanged);
     }

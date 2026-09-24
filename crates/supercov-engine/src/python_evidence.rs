@@ -460,26 +460,64 @@ fn read_evidence_directory(
         Some(path) => Some(SlotLayout::read(&path)?),
         None => None,
     };
-    for (name, path) in transports {
-        let contents = map_evidence(&path)?;
-        let slot_contents = slots
-            .remove(&name)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(slot, path)| match map_slot(&path) {
-                Ok(Some(contents)) => Some(Ok((slot, contents))),
+    // Each process's transport and slots are read and parsed on their own --
+    // a subprocess-heavy suite leaves tens of thousands -- and applied to the
+    // run's evidence in the order they are listed, as they were one by one.
+    let work = transports
+        .into_iter()
+        .map(|(name, path)| {
+            let owned = slots.remove(&name).unwrap_or_default();
+            (name, path, owned)
+        })
+        .collect::<Vec<_>>();
+    let parse = |(name, path, owned): &(String, PathBuf, Vec<(String, PathBuf)>)| {
+        let contents = map_evidence(path)?;
+        let slot_contents = owned
+            .iter()
+            .filter_map(|(slot, path)| match map_slot(path) {
+                Ok(Some(contents)) => Some(Ok((slot.clone(), contents))),
                 Ok(None) => None,
                 Err(error) => Some(Err(error)),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        read_evidence_file(
-            &name,
-            &contents,
-            run_id,
-            &mut evidence,
-            &slot_contents,
-            layout.as_ref(),
-        )?;
+        parse_transport(name, &contents, &slot_contents, layout.as_ref())
+    };
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(work.len().div_ceil(64).max(1));
+    let parsed = if threads <= 1 {
+        work.iter().map(parse).collect::<Vec<_>>()
+    } else {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut parsed = std::thread::scope(|scope| {
+            let workers = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut done = Vec::new();
+                        loop {
+                            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(item) = work.get(index) else {
+                                break done;
+                            };
+                            done.push((index, parse(item)));
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .flat_map(|worker| {
+                    worker
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect::<Vec<_>>()
+        });
+        parsed.sort_unstable_by_key(|(index, _)| *index);
+        parsed.into_iter().map(|(_, parsed)| parsed).collect()
+    };
+    for ((name, _, _), parsed) in work.iter().zip(parsed) {
+        apply_transport(name, parsed?, run_id, &mut evidence)?;
     }
     if let Some((_, orphans)) = slots.into_iter().next() {
         return Err(PythonEvidenceError::InvalidTransport {
@@ -943,14 +981,20 @@ fn align_transport(value: usize) -> Option<usize> {
     value.checked_add(7).map(|value| value & !7)
 }
 
-fn read_evidence_file(
+/// A transport's records, in order, with its slots' leftovers after them:
+/// what reading one process's evidence needs nothing else of the run for,
+/// so many are parsed at once.
+struct ParsedTransport {
+    pid: u64,
+    records: Vec<(usize, Record)>,
+}
+
+fn parse_transport(
     name: &str,
-    contents: &Mmap,
-    run_id: &str,
-    evidence: &mut Evidence,
+    contents: &[u8],
     slots: &[(String, Mmap)],
     layout: Option<&SlotLayout>,
-) -> Result<(), PythonEvidenceError> {
+) -> Result<ParsedTransport, PythonEvidenceError> {
     let invalid_transport = |reason: &str| PythonEvidenceError::InvalidTransport {
         file: name.into(),
         reason: reason.into(),
@@ -983,6 +1027,112 @@ fn read_evidence_file(
     let transport_pid = transport_u64(contents, 32)
         .filter(|pid| *pid != 0)
         .ok_or_else(|| invalid_transport("process id is missing"))?;
+    let mut records = Vec::new();
+    let mut cursor = TRANSPORT_HEADER_SIZE;
+    let mut record_index = 0;
+    while cursor + TRANSPORT_RECORD_HEADER_SIZE <= contents.len() {
+        let commit = contents[cursor];
+        if commit == 0 {
+            // Payload bytes can exist after a killed writer, but an absent
+            // commit byte makes that frame and every later zeroed frame inert.
+            break;
+        }
+        record_index += 1;
+        let line_number = record_index;
+        let invalid = |reason: &str| PythonEvidenceError::InvalidRecord {
+            file: name.into(),
+            line: line_number,
+            reason: reason.into(),
+        };
+        if commit != 1
+            || contents[cursor + 1..cursor + 4] != [0, 0, 0]
+            || contents[cursor + 12..cursor + 16] != [0, 0, 0, 0]
+        {
+            return Err(invalid("commit marker or reserved bytes are invalid"));
+        }
+        let length = transport_u32(contents, cursor + 4)
+            .map(|value| value as usize)
+            .ok_or_else(|| invalid("payload length is missing"))?;
+        if length == 0 || length > TRANSPORT_MAX_RECORD_SIZE {
+            return Err(invalid("payload length is outside the transport bound"));
+        }
+        let payload_start = cursor + TRANSPORT_RECORD_HEADER_SIZE;
+        let payload_end = payload_start
+            .checked_add(length)
+            .filter(|end| *end <= contents.len())
+            .ok_or_else(|| invalid("payload extends past the mapped file"))?;
+        let next_cursor = align_transport(payload_end)
+            .filter(|end| *end <= contents.len())
+            .ok_or_else(|| invalid("aligned frame extends past the mapped file"))?;
+        if contents[payload_end..next_cursor]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(invalid("frame padding is not zero"));
+        }
+        let payload = &contents[payload_start..payload_end];
+        let expected_checksum = transport_u32(contents, cursor + 8)
+            .ok_or_else(|| invalid("payload checksum is missing"))?;
+        if transport_checksum(payload, version) != expected_checksum {
+            return Err(invalid("payload checksum does not match"));
+        }
+        let record: Record = serde_json::from_slice(payload).map_err(|error| {
+            PythonEvidenceError::InvalidRecord {
+                file: name.into(),
+                line: line_number,
+                reason: error.to_string(),
+            }
+        })?;
+        if let Record::Runs { ctx, r } = record {
+            let layout =
+                layout.ok_or_else(|| invalid("slot runs arrived without the run's slot layout"))?;
+            for record in layout.runs(ctx, &r).map_err(invalid)? {
+                records.push((line_number, record));
+            }
+        } else {
+            records.push((line_number, record));
+        }
+        cursor = next_cursor;
+    }
+    // What the process's slots still held when it ended: after every record
+    // of its transport, as the harvest it never reached would have been.
+    for (slot, slot_contents) in slots {
+        let layout = layout.ok_or_else(|| PythonEvidenceError::InvalidTransport {
+            file: slot.clone(),
+            reason: "a slot was left without the run's slot layout".into(),
+        })?;
+        for record in layout.records(slot, slot_contents)? {
+            record_index += 1;
+            records.push((record_index, record));
+        }
+    }
+    Ok(ParsedTransport {
+        pid: transport_pid,
+        records,
+    })
+}
+
+#[cfg(test)]
+fn read_evidence_file(
+    name: &str,
+    contents: &Mmap,
+    run_id: &str,
+    evidence: &mut Evidence,
+    slots: &[(String, Mmap)],
+    layout: Option<&SlotLayout>,
+) -> Result<(), PythonEvidenceError> {
+    let parsed = parse_transport(name, contents, slots, layout)?;
+    apply_transport(name, parsed, run_id, evidence)
+}
+
+/// A parsed transport's records applied to the run's evidence, in order.
+fn apply_transport(
+    name: &str,
+    parsed: ParsedTransport,
+    run_id: &str,
+    evidence: &mut Evidence,
+) -> Result<(), PythonEvidenceError> {
+    let transport_pid = parsed.pid;
     let mut contexts = BTreeMap::<u64, Identity>::new();
     // What each call phase recorded so far, kept until its first assertion
     // marker moves it to the phase's assertion identity.
@@ -1284,83 +1434,8 @@ fn read_evidence_file(
         }
         Ok(())
     };
-    let mut cursor = TRANSPORT_HEADER_SIZE;
-    let mut record_index = 0;
-    while cursor + TRANSPORT_RECORD_HEADER_SIZE <= contents.len() {
-        let commit = contents[cursor];
-        if commit == 0 {
-            // Payload bytes can exist after a killed writer, but an absent
-            // commit byte makes that frame and every later zeroed frame inert.
-            break;
-        }
-        record_index += 1;
-        let line_number = record_index;
-        let invalid = |reason: &str| PythonEvidenceError::InvalidRecord {
-            file: name.into(),
-            line: line_number,
-            reason: reason.into(),
-        };
-        if commit != 1
-            || contents[cursor + 1..cursor + 4] != [0, 0, 0]
-            || contents[cursor + 12..cursor + 16] != [0, 0, 0, 0]
-        {
-            return Err(invalid("commit marker or reserved bytes are invalid"));
-        }
-        let length = transport_u32(contents, cursor + 4)
-            .map(|value| value as usize)
-            .ok_or_else(|| invalid("payload length is missing"))?;
-        if length == 0 || length > TRANSPORT_MAX_RECORD_SIZE {
-            return Err(invalid("payload length is outside the transport bound"));
-        }
-        let payload_start = cursor + TRANSPORT_RECORD_HEADER_SIZE;
-        let payload_end = payload_start
-            .checked_add(length)
-            .filter(|end| *end <= contents.len())
-            .ok_or_else(|| invalid("payload extends past the mapped file"))?;
-        let next_cursor = align_transport(payload_end)
-            .filter(|end| *end <= contents.len())
-            .ok_or_else(|| invalid("aligned frame extends past the mapped file"))?;
-        if contents[payload_end..next_cursor]
-            .iter()
-            .any(|byte| *byte != 0)
-        {
-            return Err(invalid("frame padding is not zero"));
-        }
-        let payload = &contents[payload_start..payload_end];
-        let expected_checksum = transport_u32(contents, cursor + 8)
-            .ok_or_else(|| invalid("payload checksum is missing"))?;
-        if transport_checksum(payload, version) != expected_checksum {
-            return Err(invalid("payload checksum does not match"));
-        }
-        let record: Record = serde_json::from_slice(payload).map_err(|error| {
-            PythonEvidenceError::InvalidRecord {
-                file: name.into(),
-                line: line_number,
-                reason: error.to_string(),
-            }
-        })?;
-        if let Record::Runs { ctx, r } = record {
-            let layout =
-                layout.ok_or_else(|| invalid("slot runs arrived without the run's slot layout"))?;
-            for record in layout.runs(ctx, &r).map_err(invalid)? {
-                apply(line_number, record)?;
-            }
-        } else {
-            apply(line_number, record)?;
-        }
-        cursor = next_cursor;
-    }
-    // What the process's slots still held when it ended: after every record
-    // of its transport, as the harvest it never reached would have been.
-    for (slot, slot_contents) in slots {
-        let layout = layout.ok_or_else(|| PythonEvidenceError::InvalidTransport {
-            file: slot.clone(),
-            reason: "a slot was left without the run's slot layout".into(),
-        })?;
-        for record in layout.records(slot, slot_contents)? {
-            record_index += 1;
-            apply(record_index, record)?;
-        }
+    for (line_number, record) in parsed.records {
+        apply(line_number, record)?;
     }
     Ok(())
 }

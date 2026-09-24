@@ -23,6 +23,22 @@ pub const STATE_FILE: &str = "assertions.state.json";
 const REPORT_CACHE_FILE: &str = "assertions.report.cache.json";
 /// Kept apart from the full report so a summary can never be read back as one.
 const SUMMARY_CACHE_FILE: &str = "assertions.summary.cache.json";
+/// The run's archived assertion inputs, written beside the archive at
+/// publication so a later run inheriting its map need not decompress a
+/// whole archive for one entry. Used only while the archive's digest is the
+/// one it records.
+const INPUTS_CACHE_FILE: &str = "assertions.inputs.cache.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InputsCache {
+    evidence_digest: String,
+    manifest: InputManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_digest: Option<String>,
+    #[serde(default)]
+    statement_exclusions: Vec<Value>,
+}
 pub struct RunManifest {
     pub manifest: InputManifest,
     pub evidence_digest: String,
@@ -58,6 +74,19 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
     }
     let bytes = fs::read(&run.evidence_path).map_err(|e| e.to_string())?;
     let evidence_digest = format!("{:x}", Sha256::digest(&bytes));
+    if let Some(cached) = fs::read(run.directory.join(INPUTS_CACHE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<InputsCache>(&bytes).ok())
+        .filter(|cached| cached.evidence_digest == evidence_digest)
+        .filter(|cached| validate_manifest(&cached.manifest).is_ok())
+    {
+        return Ok(Some(RunManifest {
+            manifest: cached.manifest,
+            evidence_digest,
+            legacy_digest: cached.legacy_digest,
+            statement_exclusions: cached.statement_exclusions,
+        }));
+    }
     let entries = read_archive_selected(&run.evidence_path, |path| {
         path == ARCHIVE_PATH || path == "statement-exclusions.json"
     })
@@ -364,6 +393,18 @@ pub(crate) fn prepare_publication_with(
     state.inheritance = Some(inheritance);
     write_json(root, &run, MAP_FILE, &map)?;
     write_json(root, &run, STATE_FILE, &state)?;
+    // A cache: a run that cannot write it is read from its archive instead.
+    let _ = write_json(
+        root,
+        &run,
+        INPUTS_CACHE_FILE,
+        &InputsCache {
+            evidence_digest: input.evidence_digest.clone(),
+            manifest: input.manifest.clone(),
+            legacy_digest: input.legacy_digest.clone(),
+            statement_exclusions: input.statement_exclusions.clone(),
+        },
+    );
     // The summary `runs latest` shows, from the coverage already in hand. It is
     // a cache: failing to write it costs the first query the analysis, nothing
     // more, so it never fails the publication.
@@ -389,8 +430,12 @@ pub fn executions(
     manifest: &InputManifest,
     sources: Option<&Files>,
 ) -> Option<Executions> {
-    let mut located: std::collections::HashMap<&str, (&str, usize)> =
-        std::collections::HashMap::new();
+    // Each point's file, by index into `files`, and unit. Hits are looked up
+    // millions of times on a large run, so the lookup hashes with Fx and a
+    // test's hits are grouped by file index before any name is copied.
+    let mut located: crate::interned::FastMap<&str, (usize, usize)> = Default::default();
+    let mut files: Vec<&str> = Vec::new();
+    let mut file_indexes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut probed: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     for point in &coverage.view.points {
         let meta = &point.meta;
@@ -412,7 +457,11 @@ pub fn executions(
             meta.column + 1
         };
         let unit = code.unit_at(meta.line, column);
-        located.insert(meta.id.as_str(), (meta.file.as_str(), unit));
+        let file = *file_indexes.entry(meta.file.as_str()).or_insert_with(|| {
+            files.push(meta.file.as_str());
+            files.len() - 1
+        });
+        located.insert(meta.id.as_str(), (file, unit));
         if code.units[unit].is_code() {
             probed.entry(meta.file.clone()).or_default().insert(unit);
         }
@@ -421,14 +470,25 @@ pub fn executions(
     // per-test loop because the record that holds what no test could be
     // credited with has no test file, and the loop below skips it -- which is
     // exactly the record a parallel suite's coverage lives in.
-    let mut covered: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    let mut covered_by_file = vec![Vec::new(); files.len()];
     for test in &coverage.view.tests {
         for hit in &test.hits {
             if let Some((file, unit)) = located.get(hit.as_str()) {
-                covered.entry((*file).to_owned()).or_default().insert(*unit);
+                covered_by_file[*file].push(*unit);
             }
         }
     }
+    let covered = files
+        .iter()
+        .zip(covered_by_file)
+        .filter(|(_, units)| !units.is_empty())
+        .map(|(file, units)| {
+            (
+                (*file).to_owned(),
+                units.into_iter().collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut tests: BTreeMap<TestSelector, Execution> = BTreeMap::new();
     for test in &coverage.view.tests {
@@ -454,14 +514,18 @@ pub fn executions(
         } else if !crate::coverage_report::coverage_is_complete(&test.attribution) {
             record.attribution = test.attribution.clone();
         }
-        for hit in &test.hits {
-            if let Some((file, unit)) = located.get(hit.as_str()) {
-                record
-                    .files
-                    .entry((*file).to_owned())
-                    .or_default()
-                    .push(*unit);
-            }
+        let mut reached = test
+            .hits
+            .iter()
+            .filter_map(|hit| located.get(hit.as_str()).copied())
+            .collect::<Vec<_>>();
+        reached.sort_unstable();
+        for group in reached.chunk_by(|left, right| left.0 == right.0) {
+            record
+                .files
+                .entry(files[group[0].0].to_owned())
+                .or_default()
+                .extend(group.iter().map(|(_, unit)| *unit));
         }
     }
     let mut tests = tests.into_values().collect::<Vec<_>>();
