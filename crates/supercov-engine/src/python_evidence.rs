@@ -1112,19 +1112,6 @@ fn parse_transport(
     })
 }
 
-#[cfg(test)]
-fn read_evidence_file(
-    name: &str,
-    contents: &Mmap,
-    run_id: &str,
-    evidence: &mut Evidence,
-    slots: &[(String, Mmap)],
-    layout: Option<&SlotLayout>,
-) -> Result<(), PythonEvidenceError> {
-    let parsed = parse_transport(name, contents, slots, layout)?;
-    apply_transport(name, parsed, run_id, evidence)
-}
-
 /// A parsed transport's records applied to the run's evidence, in order.
 fn apply_transport(
     name: &str,
