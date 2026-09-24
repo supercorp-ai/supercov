@@ -1,33 +1,35 @@
 # Changelog
 
-## Unreleased
+## 2.0.0
+
+**Breaking**
+
+- `supercov clean` is removed. Use `supercov runs clean` for runs and `supercov quality clean` for assessments, with the same `--keep` and `--dry-run`. Cleaning runs never removes an assessment, which costs money and cannot be reproduced from the repository.
+- Evidence written by 2.0.0 cannot be read by 1.x. 2.0.0 reads 1.x evidence.
 
 **Added**
 
-- `supercov security`: twelve security checks asked of every file with [Jev](https://typesafe.ai), from secrets in source and injection to mass assignment and weakened configuration, each mapped to its CWE classes. Nothing is averaged: a file is clean or names what fired, with the line and the code on it where the model confirms one, and the line where the outside value enters. On fifteen held-out repositories of the RealVuln corpus it scores F1 0.47 (precision 54%, recall 41%) for about two cents a repository, where Semgrep scores 0.14. Injection, secrets, paths, redirects and mass assignment are found at 70 to 90% recall; authorisation stays file-level.
-- `security patch` reports what a change introduced; `quality patch` asks the twelve checks too. `security --run latest` shows which flagged files no test executes.
-- `supercov report` writes one self-contained interactive HTML file from stored runs and opens it: whether the run passed, whether its measurement is still current, what changed since the run before, and which line, branch or MC/DC condition to test next, by overview, file and test. It needs no server, network or installed Supercov to open and uploads nothing, so it can be attached to a pull request; `--runs` includes up to 20 runs and a report stays under 24 MB. Source is embedded only while it still matches the run; otherwise the stored snippets are shown and the run is marked stale. See [Portable HTML reports](docs/reports.md).
-- A report carries a run's assertion coverage and saved quality and security assessments beside its coverage, on one timeline: an entry pairs a run and an assessment only when both read the same source, file by file. Quality is shown as a band and a ranking rather than a bar toward a goal it does not have, and each panel offers the command that produces or extends it, including authoring an assertion map.
+- `supercov security`: twelve security checks asked of every file with [Jev](https://typesafe.ai), from secrets and injection to mass assignment and weakened configuration, each mapped to its CWE classes. A file is clean or names what fired, with the line and code where the model confirms one. On fifteen held-out repositories of the RealVuln corpus it scores F1 0.47 (precision 54%, recall 41%) for about two cents a repository, where Semgrep scores 0.14; authorisation stays file-level. See [Security surface](docs/security.md).
+- `security patch` reports what a change introduced, and `quality patch` asks the security checks too. `--run latest` shows which flagged files no test executes.
+- `supercov report` writes one self-contained interactive HTML file from stored runs: whether a run passed and is still current, what changed since the run before, and which line, branch or MC/DC condition to test next. It opens without a server, network or Supercov, so it can be attached to a pull request. It carries assertion coverage and saved quality and security assessments on the same timeline. See [Portable HTML reports](docs/reports.md).
 - `supercov quality` and `supercov security` can use Jev through another provider, such as OpenRouter, with the variables TypeSafe's SDKs read: `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL`. See [Use Jev through another provider](docs/quality.md#use-jev-through-another-provider). Contributed by [@untitaker](https://github.com/untitaker). (#47)
-- A quality snapshot records which source it read: the same source digest a run records, and a SHA-256 per file.
+- A quality snapshot records which source it read: the run's source digest and a SHA-256 per file.
 
 **Changed**
 
-- `supercov clean` is replaced by `supercov runs clean` and `supercov quality clean`, with the same `--keep` and `--dry-run`. Cleaning runs never removes a quality assessment, which costs money and cannot be reproduced from the repository.
-- Subprocess-heavy Python suites run several times faster. Under 1.2.0 a child interpreter took about 930 ms to start on a reproduction of #40's suite; it now takes about 17.6 ms against 13.4 ms without Supercov. The reproduction -- 7,107 tests starting 16,787 interpreters -- runs in 309 s against 226 s without Supercov. On macOS a process's coverage slots live in shared memory instead of mapped files, whose mapping forced a full disk flush each time, and the runtime no longer imports modules a measured interpreter does not use.
-- Python runs finish sooner. On h11's 3,900 tests on CPython 3.11 the whole command takes 4.2 s against 2.3 s without Supercov. A test's slot is recorded as runs of bytes rather than a string per hit, a statement's probe stands for the function entry, loop iteration or one-condition branch it heads, the evidence names each phase once instead of per hit (h11's archive: 70 MB to 32 MB), and publication analyses what it archives without reading it back, across the machine's cores. Every measured obligation, vector and test is the same as before.
-- The first query after a run no longer analyses its evidence again: publication analyses it once and writes the query index, the assertion map and the summary from that one analysis. Analysing a large run takes about a third of the memory it did.
-- Evidence written by this release cannot be read by 1.2.0 or earlier. This release reads theirs.
+- Subprocess-heavy Python suites run several times faster. A child interpreter took about 930 ms to start under 1.2.0 and now takes about 17.6 ms, against 13.4 ms without Supercov: 7,107 tests starting 16,787 interpreters run in 309 s against 226 s. (#40)
+- Python runs finish sooner: h11's 3,900 tests take 4.2 s against 2.3 s without Supercov, and its archive shrinks from 70 MB to 32 MB. Every measured obligation, vector and test is the same as before.
+- Publication analyses a run once and writes the query index, assertion map and summary from that analysis, so the first query no longer analyses it again, in about a third of the memory.
 
 **Fixed**
 
-- A measured child process no longer changes what its test sees. Supercov's descriptors no longer survive into a program the child re-executes, its diagnostics stay out of the child's stderr, and a child's output, exit status and explicitly isolated, positional or bytes environment are what they are without Supercov. Reported by [@maik-intellicoach](https://github.com/maik-intellicoach). (#40)
-- `runs latest files` and `runs latest file <path>` agree on a script that runs only as a child process: a Python entry script is declared unmeasured in both. (#40)
-- Instrumented bytecode no longer reaches ordinary Python caches, where a later run without Supercov could load it. Caches 1.2.0 already wrote should be discarded; see [troubleshooting](docs/troubleshooting.md). (#40)
+- A measured child process no longer changes what its test sees: descriptors, stderr, output, exit status and isolated, positional or bytes environments are what they are without Supercov. Reported by [@maik-intellicoach](https://github.com/maik-intellicoach). (#40)
+- `runs latest files` and `runs latest file <path>` agree on a Python script that runs only as a child process. (#40)
+- Instrumented bytecode no longer reaches ordinary Python caches. Discard caches 1.2.0 wrote; see [troubleshooting](docs/troubleshooting.md). (#40)
 - `.supercov/` ignores itself in git. (#40)
-- A suite mixing pytest and unittest publishes: the two runners' limitations no longer share an id.
+- A suite mixing pytest and unittest publishes.
 - A `match` statement without a catch-all case is measured instead of failing to compile.
-- A process that outlived the test command -- multiprocessing's resource tracker is one -- no longer failed the run with `could not read Python evidence: No such file or directory` by closing while its evidence was read.
+- A process that outlives the test command, such as multiprocessing's resource tracker, no longer fails the run with `could not read Python evidence`.
 - The timings line reports publication as its own phase, and its total is the command's wall time.
 
 ## 1.2.0
