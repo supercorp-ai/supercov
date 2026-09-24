@@ -204,6 +204,9 @@ class _Inserter(ast.NodeTransformer):
             ],
             value=ast.Constant(value=1),
         )
+        # Which byte it stores: a structural probe right before its head's
+        # probe is left out, the head standing for both.
+        node._scv_k = k
         self.inserted += 1
         return _at(node, line, column)
 
@@ -251,9 +254,15 @@ class _Inserter(ast.NodeTransformer):
             self.branch_tests.discard(id(test))
         if node.test is not test:  # type: ignore[attr-defined]
             return node
+        # A branch that starts with its head's probe records the outcome by
+        # that probe alone: the layout says the head implies it.
+        when_true, when_false = self.probes.single_heads.get(self._span(test), (None, None))
         first = node.body[0]  # type: ignore[attr-defined]
-        node.body.insert(0, self._hit(slot + 1, first.lineno, first.col_offset))  # type: ignore[attr-defined]
-        node.orelse.insert(0, self._hit(slot, test.lineno, test.col_offset))  # type: ignore[attr-defined]
+        if when_true is None or getattr(first, "_scv_k", None) != when_true:
+            node.body.insert(0, self._hit(slot + 1, first.lineno, first.col_offset))  # type: ignore[attr-defined]
+        orelse = node.orelse  # type: ignore[attr-defined]
+        if when_false is None or not orelse or getattr(orelse[0], "_scv_k", None) != when_false:
+            orelse.insert(0, self._hit(slot, test.lineno, test.col_offset))
         return node
 
     visit_If = _branches
@@ -275,6 +284,12 @@ class _Inserter(ast.NodeTransformer):
         reset = _at(ast.Assign(targets=[ast.Name(id=flag, ctx=ast.Store())], value=ast.Constant(value=0)), line, column)
         first = node.body[0]  # type: ignore[attr-defined]
         # `flag = hits()[entered] = 1`: the flag and the hit in one statement.
+        # A body that starts with its head's probe stores the head's byte
+        # here instead, and loses that probe: the head implies `entered`.
+        head = self.probes.loop_heads.get(entered)
+        if head is not None and getattr(first, "_scv_k", None) == head:
+            node.body.pop(0)  # type: ignore[attr-defined]
+            entered = head
         mark = _at(
             ast.Assign(
                 targets=[
@@ -446,7 +461,10 @@ class _Inserter(ast.NodeTransformer):
             # `__doc__` is what the file says it is.
             position = 1 if _is_docstring(first) else 0
             anchor = body[position] if position < len(body) else first
-            body.insert(position, self._hit(k, anchor.lineno, anchor.col_offset))
+            # The first statement's probe, right here, stands for the entry.
+            head = self.probes.entry_heads.get(k)
+            if head is None or getattr(anchor, "_scv_k", None) != head:
+                body.insert(position, self._hit(k, anchor.lineno, anchor.col_offset))
         return node
 
     visit_FunctionDef = _function

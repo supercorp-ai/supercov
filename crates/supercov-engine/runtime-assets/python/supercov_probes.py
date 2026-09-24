@@ -61,7 +61,7 @@ def _sha256(data: bytes):
     _sha256 = sha256
     return sha256(data)
 
-PROBE_VERSION = 6
+PROBE_VERSION = 7
 # A context's hit array is a slot file mapped into memory. Its first bytes
 # name the context for the reader, so obligations are numbered from here.
 SLOT_HEADER = 16
@@ -127,10 +127,16 @@ class FileProbes:
         self.loops: dict[tuple[int, int, int, int], tuple[int, int]] = {}
         self.tries: dict[tuple[int, int], tuple[int, list, int]] = {}
         self.matches: dict[tuple[int, int], tuple[list, tuple | None]] = {}
+        # Heads: the statement whose execution implies a structural
+        # obligation -- a function's entry, a loop's `entered`, a one-condition
+        # test's outcome -- and whose probe the transform lets stand for it.
+        statement_numbers: dict[str, int] = {}
+        self.entry_heads: dict[int, int] = {}
+        self.loop_heads: dict[int, int] = {}
         for statement in file_plan.get("statements", ()):
-            self.statements[(statement["start"][0], statement["start"][1])] = self._number(
-                statement["id"]
-            )
+            k = self._number(statement["id"])
+            self.statements[(statement["start"][0], statement["start"][1])] = k
+            statement_numbers[statement["id"]] = k
         for function in file_plan.get("functions", ()):
             (line, column), (end_line, end_column) = function["span"]
             k = self._number(function["id"])
@@ -138,12 +144,16 @@ class FileProbes:
                 self.lambdas[(line, column, end_line, end_column)] = k
             else:
                 self.functions[(line, column)] = k
+                head = statement_numbers.get(function.get("first"))
+                if head is not None:
+                    self.entry_heads[k] = head
         for loop in file_plan.get("loops", ()):
             (line, column), (end_line, end_column) = loop["iter"]
-            self.loops[(line, column, end_line, end_column)] = (
-                self._number(loop["entered"]),
-                self._number(loop["zero"]),
-            )
+            entered = self._number(loop["entered"])
+            self.loops[(line, column, end_line, end_column)] = (entered, self._number(loop["zero"]))
+            head = statement_numbers.get(loop.get("first"))
+            if head is not None:
+                self.loop_heads[entered] = head
         for try_plan in file_plan.get("tries", ()):
             (line, column), _ = try_plan["body"]
             handlers = [
@@ -175,11 +185,16 @@ class FileProbes:
             else:
                 (line, column), (end_line, end_column) = logical["boolop"]
                 standalone.setdefault((line, column, end_line, end_column), []).append(logical)
+        heads_by_decision: dict[int, tuple] = {}
         for decision in file_plan.get("decisions", ()):
             (line, column), (end_line, end_column) = decision["span"]
             d = len(self.decision_plans)
             self.decision_plans.append((decision, logical_by_decision.get(decision["id"], [])))
             self.decisions[(line, column, end_line, end_column)] = d
+            heads_by_decision[d] = (
+                statement_numbers.get(decision.get("whenTrue")),
+                statement_numbers.get(decision.get("whenFalse")),
+            )
             for index, condition in enumerate(decision["conditions"]):
                 (line, column), (end_line, end_column) = condition["span"]
                 self.leaves[(line, column, end_line, end_column)] = (d, index, condition["not"] % 2 == 1)
@@ -193,9 +208,12 @@ class FileProbes:
         # that the harvest turns into the vector and the outcome hit. The
         # region's place in the slot is assigned by `index_plan`.
         self.singles: dict[tuple[int, int, int, int], int] = {}
+        # (true head, false head) by a one-condition test's span.
+        self.single_heads: dict[tuple[int, int, int, int], tuple] = {}
         for span, d in list(self.decisions.items()):
             if len(self.decision_plans[d][0]["conditions"]) == 1:
                 self.singles[span] = d
+                self.single_heads[span] = heads_by_decision[d]
                 del self.decisions[span]
                 leaf = next(key for key, (dd, i, inv) in self.leaves.items() if dd == d)
                 del self.leaves[leaf]
@@ -219,6 +237,9 @@ class FileProbes:
                     sorted(self.singles.items()),
                     sorted(self.leaves.items()),
                     sorted(self.boolops.items()),
+                    sorted(self.entry_heads.items()),
+                    sorted(self.loop_heads.items()),
+                    sorted(self.single_heads.items()),
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -293,11 +314,27 @@ class PlanIndex:
             self.region_table.append((cursor, width, d))
             cursor += 2 if width == 1 else 2 * 3**width
         self.slot_bytes = cursor
+        # Which bytes a byte stands for besides its own: a head's statement
+        # implies the entry, `entered` or outcome it heads.
+        implied: dict[int, list[int]] = {}
         for probes in self.files.values():
             probes.singles = {span: self.regions[d] for span, d in probes.singles.items()}
+            for entry, head in probes.entry_heads.items():
+                implied.setdefault(head, []).append(entry)
+            for entered, head in probes.loop_heads.items():
+                implied.setdefault(head, []).append(entered)
+            for span, (when_true, when_false) in probes.single_heads.items():
+                region = probes.singles[span]
+                if region < 0:
+                    continue
+                if when_true is not None:
+                    implied.setdefault(when_true, []).append(region + 1)
+                if when_false is not None:
+                    implied.setdefault(when_false, []).append(region)
             probes._finish()
+        self.implied = sorted((head, sorted(bytes_)) for head, bytes_ in implied.items())
         self.digest = _sha256(
-            repr((PROBE_VERSION, SLOT_HEADER, self.ids, self.region_table)).encode("utf-8")
+            repr((PROBE_VERSION, SLOT_HEADER, self.ids, self.region_table, self.implied)).encode("utf-8")
         ).hexdigest()
 
     def layout(self) -> dict:
@@ -332,6 +369,7 @@ class PlanIndex:
             "bytes": self.slot_bytes,
             "ids": list(self.ids),
             "decisions": decisions,
+            "implied": [[head, list(bytes_)] for head, bytes_ in self.implied],
         }
 
 
@@ -447,7 +485,7 @@ def load_plan(path: str, version: int) -> tuple[str, PlanIndex]:
                 files[relative] = (start, stream.tell() - start)
             # The region table is read only by the process that writes the
             # slot layout, once per run; every other one skips its bytes.
-            for name, chunk in [("ids", 4096), ("decisions", 64), ("boolop_groups", 64), ("region_table", 1024)]:
+            for name, chunk in [("ids", 4096), ("decisions", 64), ("boolop_groups", 64), ("region_table", 1024), ("implied", 1024)]:
                 values = getattr(index, name)
                 offsets = []
                 for start in range(0, len(values), chunk):

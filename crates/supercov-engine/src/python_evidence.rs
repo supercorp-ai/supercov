@@ -564,7 +564,8 @@ fn materialize_shared_slot(
         .transpose()
 }
 
-#[cfg(unix)]
+/// Only the macOS runtime keeps slots in shared memory.
+#[cfg(target_os = "macos")]
 fn shared_slot_bytes(name: &[u8]) -> Result<Option<Vec<u8>>, PythonEvidenceError> {
     use std::os::fd::FromRawFd;
     let name = std::ffi::CString::new(name)
@@ -598,7 +599,7 @@ fn shared_slot_bytes(name: &[u8]) -> Result<Option<Vec<u8>>, PythonEvidenceError
     Ok(Some(bytes))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "macos"))]
 fn shared_slot_bytes(_name: &[u8]) -> Result<Option<Vec<u8>>, PythonEvidenceError> {
     Ok(None)
 }
@@ -642,6 +643,13 @@ struct SlotLayout {
     bytes: usize,
     ids: Vec<String>,
     decisions: Vec<SlotDecision>,
+    /// A byte that stands for others besides its own: the probe of a
+    /// statement heading a function, loop body or one-condition branch is
+    /// the only store its entry, `entered` or outcome gets.
+    #[serde(default)]
+    implied: Vec<(usize, Vec<usize>)>,
+    #[serde(skip)]
+    implied_by: std::collections::HashMap<usize, Vec<usize>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -728,7 +736,7 @@ impl SlotLayout {
             reason,
         };
         let bytes = fs::read(path).map_err(|error| PythonEvidenceError::Io(error.to_string()))?;
-        let layout: Self =
+        let mut layout: Self =
             serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
         if layout.digest.len() < 16 || !layout.digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(invalid("the layout digest is not hex".into()));
@@ -766,6 +774,30 @@ impl SlotLayout {
         }
         if cursor != layout.bytes || layout.header < 16 {
             return Err(invalid("the regions do not fill the slot".into()));
+        }
+        // A head is a statement's byte; what it implies is an obligation's
+        // byte or a region's, never another head.
+        let id_end = layout.header + layout.ids.len();
+        for (head, implied) in &layout.implied {
+            if *head < layout.header
+                || *head >= id_end
+                || implied
+                    .iter()
+                    .any(|byte| *byte < layout.header || *byte >= layout.bytes || *byte == *head)
+            {
+                return Err(invalid(format!(
+                    "byte {head} implies bytes outside the slot"
+                )));
+            }
+        }
+        layout.implied_by = layout.implied.iter().cloned().collect();
+        if layout
+            .implied_by
+            .values()
+            .flatten()
+            .any(|byte| layout.implied_by.contains_key(byte))
+        {
+            return Err(invalid("an implied byte implies others".into()));
         }
         Ok(layout)
     }
@@ -830,9 +862,19 @@ impl SlotLayout {
         Ok(decoded.into_records(context))
     }
 
-    /// What one set byte stands for: an obligation, or a decision vector and
-    /// what the vector implies.
+    /// What one set byte stands for, with what the layout says it implies.
     fn decode(&self, index: usize, into: &mut Decoded) {
+        self.decode_one(index, into);
+        if let Some(implied) = self.implied_by.get(&index) {
+            for byte in implied {
+                self.decode_one(*byte, into);
+            }
+        }
+    }
+
+    /// What one byte stands for: an obligation, or a decision vector and
+    /// what the vector implies.
+    fn decode_one(&self, index: usize, into: &mut Decoded) {
         let id_end = self.header + self.ids.len();
         if index < id_end {
             into.ids.push(self.ids[index - self.header].clone());
@@ -2297,6 +2339,56 @@ mod tests {
             call.vectors["d"],
             BTreeSet::from([(vec![Some(false), Some(true)], true)])
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_head_byte_is_read_with_the_bytes_it_stands_for() {
+        // Byte 17 (s2) heads what bytes 16 (s1) and 18 + 2*7 + 1 (a vector
+        // of d) stand for: the transform left those stores out because s2's
+        // probe records them, and reading s2 reads them.
+        let directory = temporary("py-slot-implied");
+        write_transport(
+            &directory.join("main.1.token.mmap"),
+            &[
+                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.9.21","executable":"python","argv":["pytest"]}),
+                json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call"}),
+                json!({"t":"runs","ctx":1,"r":[17, 1]}),
+            ],
+            0,
+        );
+        let mut layout = slot_layout();
+        layout["implied"] = json!([[17, [16, 18 + 15]]]);
+        fs::write(
+            directory.join("layout.json"),
+            serde_json::to_vec(&layout).unwrap(),
+        )
+        .unwrap();
+        let evidence = read_evidence_directory(&directory, "run-1").unwrap();
+        let call = call_observations(&evidence);
+        assert_eq!(
+            call.hits.iter().cloned().collect::<Vec<_>>(),
+            ["d:true", "or:evaluated", "s1", "s2"]
+        );
+        assert_eq!(
+            call.vectors["d"],
+            BTreeSet::from([(vec![Some(false), Some(true)], true)])
+        );
+        // A byte may not imply a statement's own head, past the slot, or a
+        // byte that implies others.
+        for implied in [
+            json!([[17, [17]]]),
+            json!([[17, [36]]]),
+            json!([[17, [16]], [16, [18]]]),
+        ] {
+            layout["implied"] = implied;
+            fs::write(
+                directory.join("layout.json"),
+                serde_json::to_vec(&layout).unwrap(),
+            )
+            .unwrap();
+            assert!(read_evidence_directory(&directory, "run-1").is_err());
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 
