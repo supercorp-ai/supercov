@@ -247,3 +247,141 @@ print(json.dumps(result))
 `);
   assert.deepEqual(result, { separate: true, parentSawChild: false });
 });
+
+test("positioned transport writes preserve mmap framing through growth and overflow", { skip: skip || process.platform === "win32" }, () => {
+  const outcome = run(`${SETUP}
+# Force both backends on the same platform and compare every frame byte.
+# Small capacities exercise remapping/resizing and the dropped-record header.
+rt.TRANSPORT_INITIAL_CAPACITY = 256
+rt.TRANSPORT_MAX_CAPACITY = 2048
+rt.TRANSPORT_MAX_RECORD_SIZE = 512
+outputs = []
+for backend in [lambda fd, size: rt.mmap.mmap(fd, size), lambda fd, size: rt._FileOutput(fd)]:
+    rt._open_transport = backend
+    target = rt.Runtime(plan, evidence, "run", "transport")
+    target._open_output()
+    start = target.output_cursor
+    for i in range(40):
+        target._write_payload(json.dumps({"t": "probe", "i": i, "data": "x" * 60}).encode())
+    path = target.output_path
+    capacity, dropped, cursor = target.output_capacity, target.dropped_records, target.output_cursor
+    target._close_output(flush=True)
+    with open(path, "rb") as stream: data = stream.read()
+    outputs.append((data[start:], data[16:32], capacity, dropped, cursor))
+print(json.dumps({"equal": outputs[0] == outputs[1], "grown": outputs[0][2], "dropped": outputs[0][3]}))
+`);
+  assert.equal(outcome.equal, true);
+  assert.equal(outcome.grown, 2048);
+  assert.ok(outcome.dropped > 0);
+});
+
+test("positioned transport retries short writes and commits only a complete frame", { skip: skip || process.platform === "win32" }, () => {
+  const outcome = run(`${SETUP}
+import struct, zlib
+runtime.output.close()
+runtime.output = rt._FileOutput(runtime.output_descriptor)
+original = os.pwrite
+writes = []
+def short_write(fd, data, offset):
+    written = original(fd, data[:7], offset)
+    writes.append((offset, written))
+    return written
+os.pwrite = short_write
+start = runtime.output_cursor
+payload = b'{"t":"probe","value":"more than seven bytes"}'
+runtime._write_payload(payload)
+os.pwrite = original
+with open(runtime.output_path, "rb") as stream:
+    stream.seek(start); data = stream.read(runtime.output_cursor - start)
+length, checksum = struct.unpack_from("<II", data, 4)
+print(json.dumps({"commitLast": writes[-1] == (start, 1), "writes": len(writes),
+                  "committed": data[0], "payload": data[16:16+length] == payload,
+                  "checksum": checksum == zlib.crc32(payload)}))
+`);
+  assert.equal(outcome.commitLast, true);
+  assert.ok(outcome.writes > 3);
+  assert.equal(outcome.committed, 1);
+  assert.equal(outcome.payload, true);
+  assert.equal(outcome.checksum, true);
+});
+
+test("failed positioned writes leave a frame uncommitted and preserve earlier records", { skip: skip || process.platform === "win32" }, () => {
+  const outcome = run(`${SETUP}
+runtime.output.close()
+runtime.output = rt._FileOutput(runtime.output_descriptor)
+start = runtime.output_cursor
+with open(runtime.output_path, "rb") as stream: prefix = stream.read(start)
+original = os.pwrite
+calls = 0
+def stalled_write(fd, data, offset):
+    global calls
+    calls += 1
+    return original(fd, data[:7], offset) if calls == 1 else 0
+os.pwrite = stalled_write
+failed = False
+try:
+    runtime._write_payload(b'{"t":"probe","value":"interrupted"}')
+except OSError:
+    failed = True
+finally:
+    os.pwrite = original
+with open(runtime.output_path, "rb") as stream: data = stream.read()
+print(json.dumps({"failed": failed, "committed": data[start], "prefix": data[:start] == prefix,
+                  "cursor": runtime.output_cursor == start}))
+`);
+  assert.equal(outcome.failed, true);
+  assert.equal(outcome.committed, 0);
+  assert.equal(outcome.prefix, true);
+  assert.equal(outcome.cursor, true);
+});
+
+test("busy file transports switch to mmap without changing existing evidence", { skip: skip || process.platform === "win32" }, () => {
+  const outcome = run(`${SETUP}
+runtime.output.close()
+runtime.output = rt._FileOutput(runtime.output_descriptor)
+start = runtime.output_cursor
+with open(runtime.output_path, "rb") as stream: prefix = stream.read(start)
+rt.TRANSPORT_MAP_AFTER_BYTES = start + 64
+runtime._write_payload(b'{"t":"probe","value":"switch after the previous records were written"}')
+mapped = isinstance(runtime.output, rt.mmap.mmap)
+# A later resize must keep the busy transport mapped.
+runtime._grow_output(runtime.output_capacity + 1)
+still_mapped = isinstance(runtime.output, rt.mmap.mmap)
+with open(runtime.output_path, "rb") as stream: data = stream.read()
+# Capacity is the one header field growth deliberately changes.
+print(json.dumps({"mapped": mapped, "stillMapped": still_mapped,
+                  "prefix": data[:16] == prefix[:16] and data[24:start] == prefix[24:],
+                  "committed": data[start]}))
+`);
+  assert.equal(outcome.mapped, true);
+  assert.equal(outcome.stillMapped, true);
+  assert.equal(outcome.prefix, true);
+  assert.equal(outcome.committed, 1);
+});
+
+test("a failed optional mmap upgrade keeps recording through positioned writes", { skip: skip || process.platform === "win32" }, () => {
+  const outcome = run(`${SETUP}
+runtime.output.close()
+runtime.output = rt._FileOutput(runtime.output_descriptor)
+start = runtime.output_cursor
+rt.TRANSPORT_MAP_AFTER_BYTES = start
+original = rt.mmap.mmap
+calls = 0
+def unavailable(*args, **kwargs):
+    global calls
+    calls += 1
+    raise OSError("no mapping available")
+rt.mmap.mmap = unavailable
+try:
+    runtime._write_payload(b'{"t":"probe","value":1}')
+    second = runtime.output_cursor
+    runtime._write_payload(b'{"t":"probe","value":2}')
+finally:
+    rt.mmap.mmap = original
+with open(runtime.output_path, "rb") as stream: data = stream.read()
+print(json.dumps({"calls": calls, "first": data[start], "second": data[second]}))
+`);
+  assert.equal(outcome.calls, 1);
+  assert.equal(outcome.first, 1);
+  assert.equal(outcome.second, 1);
+});

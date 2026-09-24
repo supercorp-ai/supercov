@@ -44,7 +44,7 @@ import struct
 import sys
 from types import CodeType
 
-PROBE_VERSION = 4
+PROBE_VERSION = 5
 # A context's hit array is a slot file mapped into memory. Its first bytes
 # name the context for the reader, so obligations are numbered from here.
 SLOT_HEADER = 16
@@ -328,10 +328,14 @@ class _Records:
     def __init__(self, path: str) -> None:
         self.path = path
 
-    def read(self, offset: int):
+    def read(self, location: tuple[int, int]):
+        offset, size = location
         with open(self.path, "rb") as stream:
             stream.seek(offset)
-            return marshal.load(stream)
+            data = stream.read(size)
+        if len(data) != size:
+            raise EOFError("truncated prepared probe record")
+        return marshal.loads(data)
 
 
 class _ProbeFiles(Mapping):
@@ -378,17 +382,19 @@ class _PlanItems(Sequence):
 def load_plan(path: str, version: int) -> tuple[str, PlanIndex]:
     """Prepare an immutable run plan once; children load only files they use.
 
+    Each record is read in one bounded operation before decoding: marshal's
+    file reader otherwise calls back into Python for thousands of tiny reads.
     Marshal holds data, never pickled objects. Publication is atomic, and an
     unwritable/missing cache simply falls back to preparing the JSON plan.
     The filename includes plan identity, interpreter and preparation version.
     """
     stat = os.stat(path)
-    cache = f"{path}.{sys.implementation.cache_tag}-probes{PROBE_VERSION}-index2-{stat.st_mtime_ns}-{stat.st_size}"
+    cache = f"{path}.{sys.implementation.cache_tag}-probes{PROBE_VERSION}-index3-{stat.st_mtime_ns}-{stat.st_size}"
     try:
         with open(cache, "rb") as stream:
             header_offset, = struct.unpack("<Q", stream.read(8))
             stream.seek(header_offset)
-            header = marshal.load(stream)
+            header = marshal.loads(stream.read())
         if header["version"] != version:
             raise ValueError("cached plan version")
         records = _Records(cache)
@@ -419,14 +425,16 @@ def load_plan(path: str, version: int) -> tuple[str, PlanIndex]:
             stream.write(b"\0" * 8)
             files, items = {}, {}
             for relative, probes in index.files.items():
-                files[relative] = stream.tell()
+                start = stream.tell()
                 marshal.dump(probes.__dict__, stream)
+                files[relative] = (start, stream.tell() - start)
             for name, chunk in [("ids", 4096), ("decisions", 64), ("boolop_groups", 64)]:
                 values = getattr(index, name)
                 offsets = []
                 for start in range(0, len(values), chunk):
-                    offsets.append(stream.tell())
+                    offset = stream.tell()
                     marshal.dump(values[start:start + chunk], stream)
+                    offsets.append((offset, stream.tell() - offset))
                 items[name] = (offsets, len(values), chunk)
             header_offset = stream.tell()
             marshal.dump({
@@ -813,7 +821,8 @@ class _Inserter(ast.NodeTransformer):
             probes = [missed for _, missed, irrefutable in cases if not irrefutable]
             if no_case is not None:
                 probes.append(no_case[1])
-            anchor = node.cases[-1]
+            # match_case has no source coordinates; its pattern does.
+            anchor = node.cases[-1].pattern
             wildcard = ast.match_case(
                 pattern=ast.MatchAs(pattern=None, name=None),
                 guard=None,
@@ -1075,7 +1084,7 @@ class Probing:
             cached_path = os.path.join(self.cache_directory, f"{key}.pyc")
             try:
                 with open(cached_path, "rb") as stream:
-                    code, limitations = marshal.load(stream)
+                    code, limitations = marshal.loads(stream.read())
                 if not isinstance(code, CodeType) or not isinstance(limitations, (tuple, list)):
                     raise ValueError("invalid compiled probe cache")
                 if any(

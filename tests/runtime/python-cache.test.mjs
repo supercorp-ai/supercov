@@ -353,3 +353,31 @@ for choose in (compound.choose, single.choose):
     child(code, root, plain)
     child(code, root, env)
 `));
+
+test('a match without a catch-all preserves selected, missed and unmatched outcomes', { skip }, () => run(fixture + `
+if sys.version_info < (3, 10): raise SystemExit(0)
+import ast
+source = 'def choose(value, allow=True):\\n    match value:\\n        case 1:\\n            return "one"\\n        case 2 if allow:\\n            return "two"\\n    return "other"\\n'
+index = probes.index_plan({'root': '.', 'files': {'m.py': {'matches': [{
+    'span': [[2,4],[6,24]],
+    'cases': [{'selected':'one','missed':'not-one','irrefutable':False},
+              {'selected':'two','missed':'not-two','irrefutable':False}],
+    'noCase': {'matched':'matched','unmatched':'unmatched'},
+}]}}})
+file = index.files['m.py']
+tree = probes.instrument(ast.parse(source), file)
+namespace = {}
+hits = bytearray(index.slot_bytes)
+probes.hits_get = lambda: hits
+exec(compile(tree, 'm.py', 'exec'), namespace)
+for value, allow, expected, observed in [
+    (1, True, 'one', {'one','matched'}),
+    (2, True, 'two', {'not-one','two','matched'}),
+    (2, False, 'other', {'not-one','not-two','unmatched'}),
+    (3, True, 'other', {'not-one','not-two','unmatched'}),
+]:
+    hits[:] = bytes(len(hits))
+    assert namespace['choose'](value, allow) == expected
+    actual = {name for i,name in enumerate(index.ids) if hits[probes.SLOT_HEADER+i]}
+    assert actual == observed, (value, allow, actual, observed)
+`));

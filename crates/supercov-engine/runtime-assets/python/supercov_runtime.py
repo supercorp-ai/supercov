@@ -57,6 +57,7 @@ TRANSPORT_VERSION = 2
 TRANSPORT_HEADER_SIZE = 64
 TRANSPORT_RECORD_HEADER_SIZE = 16
 TRANSPORT_INITIAL_CAPACITY = 1024 * 1024
+TRANSPORT_MAP_AFTER_BYTES = 64 * 1024
 TRANSPORT_MAX_CAPACITY = 512 * 1024 * 1024
 TRANSPORT_MAX_RECORD_SIZE = 4 * 1024 * 1024
 MAX_OPEN_EVALUATIONS = 64
@@ -106,6 +107,51 @@ class _Decision:
                 into.append(logical["evaluated"])
             elif any(digits[index] != "0" for index in logical["previousLeaves"]):
                 into.append(logical["shortCircuit"])
+
+
+class _FileOutput:
+    """Write transport frames directly on macOS, without a second mapping.
+
+    The hot hit slots still use shared mmap pages. Transport records are
+    already batched and serialized under the runtime lock, so positioned
+    writes retain the same payload-before-commit protocol. This avoids
+    CPython's macOS-only F_FULLFSYNC on every mmap creation/remapping; it
+    does not buffer evidence in Python or change the on-disk format.
+    Busy processes switch to mmap after 64 KiB to amortize its setup cost
+    instead of paying for positioned writes for every subsequent frame.
+    The Runtime owns the descriptor, including across fork and close.
+    """
+
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+        self.map_failed = False
+
+    def write_at(self, offset, data):
+        while data:
+            written = os.pwrite(self.descriptor, data, offset)
+            if written <= 0:
+                raise OSError("Python evidence transport write made no progress")
+            offset += written
+            data = data[written:]
+
+    def flush(self):
+        os.fsync(self.descriptor)
+
+    def close(self):
+        pass
+
+
+def _open_transport(descriptor, capacity):
+    if sys.platform == "darwin":
+        return _FileOutput(descriptor)
+    return mmap.mmap(descriptor, capacity, access=mmap.ACCESS_WRITE)
+
+
+def _transport_write(output, offset, data):
+    if isinstance(output, _FileOutput):
+        output.write_at(offset, data)
+    else:
+        output[offset:offset + len(data)] = data
 
 
 class _Hits(mmap.mmap):
@@ -256,7 +302,7 @@ class Runtime:
         descriptor = os.open(self.output_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             os.ftruncate(descriptor, TRANSPORT_INITIAL_CAPACITY)
-            output = mmap.mmap(descriptor, TRANSPORT_INITIAL_CAPACITY, access=mmap.ACCESS_WRITE)
+            output = _open_transport(descriptor, TRANSPORT_INITIAL_CAPACITY)
         except Exception:
             os.close(descriptor)
             raise
@@ -266,18 +312,15 @@ class Runtime:
         self.output_cursor = TRANSPORT_HEADER_SIZE
         self.output_pid = pid
         self.dropped_records = 0
-        output[:TRANSPORT_HEADER_SIZE] = b"\0" * TRANSPORT_HEADER_SIZE
-        struct.pack_into(
-            "<8sIIQQQ",
-            output,
-            0,
+        _transport_write(output, 0, struct.pack(
+            "<8sIIQQQ24x",
             TRANSPORT_MAGIC,
             TRANSPORT_VERSION,
             TRANSPORT_HEADER_SIZE,
             self.output_capacity,
             0,
             pid,
-        )
+        ))
         output.flush()
         self._write_record(
             {
@@ -340,12 +383,14 @@ class Runtime:
             capacity = min(capacity * 2, TRANSPORT_MAX_CAPACITY)
         if capacity < required:
             return False
+        was_file = isinstance(self.output, _FileOutput)
         self.output.flush()
         self.output.close()
         os.ftruncate(self.output_descriptor, capacity)
-        self.output = mmap.mmap(self.output_descriptor, capacity, access=mmap.ACCESS_WRITE)
+        self.output = (_open_transport(self.output_descriptor, capacity) if was_file
+                       else mmap.mmap(self.output_descriptor, capacity, access=mmap.ACCESS_WRITE))
         self.output_capacity = capacity
-        struct.pack_into("<Q", self.output, 16, capacity)
+        _transport_write(self.output, 16, struct.pack("<Q", capacity))
         return True
 
     def _write_record(self, record: dict) -> None:
@@ -383,21 +428,36 @@ class Runtime:
             self._drop_record()
             return
         output = self.output
+        if isinstance(output, _FileOutput) and not output.map_failed and next_cursor > TRANSPORT_MAP_AFTER_BYTES:
+            try:
+                self.output = mmap.mmap(self.output_descriptor, self.output_capacity, access=mmap.ACCESS_WRITE)
+                output = self.output
+            except (OSError, ValueError):
+                # Mapping is optional: keep writing valid evidence if the
+                # process cannot reserve another contiguous address range.
+                output.map_failed = True
         cursor = self.output_cursor
-        output[cursor + TRANSPORT_RECORD_HEADER_SIZE : end] = payload
-        if next_cursor > end:
-            output[end:next_cursor] = b"\0" * (next_cursor - end)
-        struct.pack_into("<II", output, cursor + 4, len(payload), self._checksum(payload))
-        # The single-byte commit is deliberately last. A killed process can
-        # leave bytes in an uncommitted frame, which the Rust reader ignores;
-        # it cannot expose a committed record with a missing payload.
-        output[cursor] = 1
+        if isinstance(output, _FileOutput):
+            frame = struct.pack("<4xII4x", len(payload), self._checksum(payload)) + payload
+            output.write_at(cursor, frame + b"\0" * (next_cursor - end))
+            # Commit only after every byte was accepted by the kernel. A
+            # short write is retried; an interrupted frame remains uncommitted.
+            output.write_at(cursor, b"\x01")
+        else:
+            output[cursor + TRANSPORT_RECORD_HEADER_SIZE : end] = payload
+            if next_cursor > end:
+                output[end:next_cursor] = b"\0" * (next_cursor - end)
+            struct.pack_into("<II", output, cursor + 4, len(payload), self._checksum(payload))
+            # The single-byte commit is deliberately last. A killed process can
+            # leave bytes in an uncommitted frame, which the Rust reader ignores;
+            # it cannot expose a committed record with a missing payload.
+            output[cursor] = 1
         self.output_cursor = next_cursor
 
     def _drop_record(self) -> None:
         self.dropped_records += 1
         if self.output is not None:
-            struct.pack_into("<Q", self.output, 24, self.dropped_records)
+            _transport_write(self.output, 24, struct.pack("<Q", self.dropped_records))
 
     def _record(self, record: dict) -> None:
         with self.lock:
@@ -415,8 +475,8 @@ class Runtime:
             self._write_record(record)
 
     def flush(self) -> None:
-        # mmap writes are visible through the kernel page cache immediately;
-        # forcing every test phase through msync would add latency without
+        # Both positioned writes and shared mmap writes reach the kernel page
+        # cache immediately; syncing every test phase adds latency without
         # improving SIGKILL survival. `close` flushes once on an ordinary exit.
         return
 
