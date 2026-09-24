@@ -56,7 +56,7 @@ use human_query::render_human;
 use public_query::{PublicQueryInvocation, help_for, parse_public_query};
 use supercov_engine::progress::ProgressLine;
 
-const HELP: &str = r#"Code quality and coverage for coding agents.
+const HELP: &str = r#"Coverage, security and code quality for coding agents.
 
 Score the source with Jev:
   supercov quality                     score this repository
@@ -2207,7 +2207,7 @@ fn public_run_inventory(root: &Path) -> Result<RunInventory, RunStoreError> {
     let mut inventory = discover_runs(root)?;
     // Timestamp-named runs belonged to the pre-release local store contract.
     // They are intentionally not a public compatibility surface: the CLI has
-    // one stable identity shape and `supercov clean` removes old stores.
+    // one stable identity shape and `supercov runs clean` removes old stores.
     inventory.runs.retain(|run| public_run_id(&run.id));
     Ok(inventory)
 }
@@ -4542,7 +4542,7 @@ mod tests {
 
     #[test]
     fn shell_reports_the_public_engine() {
-        assert!(HELP.contains("Code quality and coverage for coding agents"));
+        assert!(HELP.contains("Coverage, security and code quality for coding agents"));
         assert!(HELP.contains("full test command"));
         assert!(HELP.contains("npx supercov -- npm test"));
         assert!(HELP.contains("supercov docs"));

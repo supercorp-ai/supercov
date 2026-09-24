@@ -441,7 +441,7 @@ npx supercov quality clean
 If Supercov itself fails to publish a run the tests already paid for, it keeps
 that run's raw evidence in `.supercov/failed-evidence/<run id>` and says so in
 the error. Report the failure with that directory: it is what diagnoses it. Only
-a full `clean` reclaims it -- `--keep N` leaves it alone -- and the summary says
+a full `runs clean` reclaims it -- `--keep N` leaves it alone -- and the summary says
 when it goes.
 
 ## Read bundled documentation

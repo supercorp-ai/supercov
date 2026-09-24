@@ -1,8 +1,8 @@
-![Code quality and coverage for coding agents](https://raw.githubusercontent.com/supercorp-ai/supercov/main/supercov.jpg)
+![Coverage, security and code quality for coding agents](https://raw.githubusercontent.com/supercorp-ai/supercov/main/supercov.jpg)
 
-**Code quality and coverage for coding agents**
+**Coverage, security and code quality for coding agents**
 
-**Supercov tells your coding agent what to fix and what to test.** It scores your code quality with [Jev](https://typesafe.ai), runs the test command you already use, and turns uncovered paths into small, actionable queries. Your agent picks a target, writes a focused test or a focused refactor, proves what improved, and keeps going.
+**Supercov tells your coding agent what to fix and what to test.** It scores your code quality and flags security risks with [Jev](https://typesafe.ai), runs the test command you already use, and turns uncovered paths into small, actionable queries. Your agent picks a target, writes a focused test or a focused refactor, proves what improved, and keeps going.
 
 Paste this to your coding agent to start:
 
@@ -55,6 +55,18 @@ npx supercov quality patch --annotate github  # workflow annotations, no token
 Jev charges for what it reads and nothing for what it writes, so a megabyte of
 source costs a little over a cent. Answers are cached by content, so a second
 run pays only for what changed. See [Understanding quality](docs/quality.md).
+
+## Find security risks
+
+```bash
+npx supercov security
+npx supercov security patch   # what a change introduced
+```
+
+Twelve security checks asked of every file with the same key, from injection
+and secrets in source to paths and redirects taken from a request. Nothing is
+averaged: a file is clean, or it names what fired, with the line and the code on
+it where Jev confirms one. See [Security surface](docs/security.md).
 
 ## Start with the suite you already have
 

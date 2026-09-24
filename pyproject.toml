@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "supercov-cli"
 dynamic = ["version"]
-description = "Code quality and coverage for coding agents"
+description = "Coverage, security and code quality for coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

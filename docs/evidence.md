@@ -115,8 +115,8 @@ marker-owned Supercov data.
 A suite pays for its measurement in wall clock. If Supercov itself cannot
 publish a run the tests already finished, the run's raw evidence is kept in
 `.supercov/failed-evidence/<run-id>/` rather than going with the work directory,
-and the error names the path. Attach that directory to the bug report. A full
-`clean` reclaims it; `--keep N` does not.
+and the error names the path. Attach that directory to the bug report.
+`runs clean` reclaims it; `--keep N` does not.
 
 ## Understand test kinds
 
