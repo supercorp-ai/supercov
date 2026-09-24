@@ -109,12 +109,19 @@ try {
   // Every attempt starts cold, as the single run did: bytecode an earlier
   // attempt cached -- pytest's and the probed modules' -- would make the later
   // ones measure a warm run instead.
+  // `.supercov` is left out of the walk: the previous run's trash sweeper
+  // may still be deleting from it, and a directory it removes between the
+  // listing and the descent failed the benchmark.
   const cold = () => {
-    for (const entry of readdirSync(project, { recursive: true, withFileTypes: true })) {
-      if (entry.isDirectory() && entry.name === '__pycache__') {
-        rmSync(resolve(entry.parentPath ?? entry.path, entry.name), { recursive: true, force: true });
+    const walk = (directory) => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name === '.supercov') continue;
+        const path = resolve(directory, entry.name);
+        if (entry.name === '__pycache__') rmSync(path, { recursive: true, force: true });
+        else walk(path);
       }
-    }
+    };
+    walk(project);
     rmSync(resolve(project, '.supercov/cache'), { recursive: true, force: true });
   };
   for (let attempt = 0; attempt < 3; attempt += 1) {
