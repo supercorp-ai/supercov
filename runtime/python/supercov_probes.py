@@ -40,6 +40,7 @@ import marshal
 import operator
 import os
 import sys
+import zlib
 from types import CodeType
 
 
@@ -610,22 +611,26 @@ class Probing:
         cached_path = None
         if self.cache_directory is not None and isinstance(source, (bytes, str)):
             text = source if isinstance(source, bytes) else source.encode("utf-8")
-            key = _sha256(
-                b"\0".join(
-                    [
-                        b"bytes" if isinstance(source, bytes) else b"str",
-                        text,
-                        filename.encode("utf-8", "surrogatepass"),
-                        probes.digest.encode("ascii"),
-                        sys.implementation.cache_tag.encode("ascii"),
-                        str((flags, optimize)).encode("ascii"),
-                    ]
-                )
-            ).hexdigest()
-            cached_path = os.path.join(self.cache_directory, f"{key}.pyc")
+            # Named for what compiles it -- file, numbering, interpreter,
+            # flags -- and holding that and the source it was compiled from,
+            # both compared exactly before the code is used. Hashing the
+            # source instead loaded a SHA-256 module into every interpreter.
+            identity = b"\0".join(
+                [
+                    b"bytes" if isinstance(source, bytes) else b"str",
+                    filename.encode("utf-8", "surrogatepass"),
+                    probes.digest.encode("ascii"),
+                    sys.implementation.cache_tag.encode("ascii"),
+                    str((flags, optimize)).encode("ascii"),
+                ]
+            )
+            name = "%08x%08x-%d" % (zlib.crc32(identity), zlib.adler32(identity), len(identity))
+            cached_path = os.path.join(self.cache_directory, f"{name}.pyc")
             try:
                 with open(cached_path, "rb") as stream:
-                    code, limitations = marshal.loads(stream.read())
+                    cached_identity, cached_text, code, limitations = marshal.loads(stream.read())
+                if cached_identity != identity or cached_text != text:
+                    raise ValueError("cached probes compiled from another source")
                 if not isinstance(code, CodeType) or not isinstance(limitations, (tuple, list)):
                     raise ValueError("invalid compiled probe cache")
                 if any(
@@ -650,7 +655,7 @@ class Probing:
         code = _original_compile(tree, filename, "exec", flags, True, optimize)
         self._register(code)
         if cached_path is not None:
-            self._store(cached_path, (code, limitations))
+            self._store(cached_path, (identity, text, code, limitations))
         for limitation in limitations:
             self.report(*limitation)
         return code

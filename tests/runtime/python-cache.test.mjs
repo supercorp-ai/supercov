@@ -223,6 +223,26 @@ with tempfile.TemporaryDirectory() as cache:
         assert reports == expected
 `));
 
+test('a compiled cache entry is used only for the exact source it was compiled from', { skip }, () => run(fixture + `
+# One file, one numbering, one interpreter: the cache entry is found by those,
+# so an edited source lands on the same entry and must never get its code.
+fp = probes.FileProbes('edited.py', {}, probes.SLOT_HEADER); fp._finish()
+with tempfile.TemporaryDirectory() as cache:
+    def compiled(text):
+        namespace = {}
+        exec(probes.Probing({}, lambda path: None, cache).compile(text, 'edited.py', fp), namespace)
+        return namespace['VALUE']
+    first, second = 'VALUE = 1\\n', 'VALUE = 2\\n'
+    assert compiled(first) == 1
+    assert compiled(second) == 2, 'an edited source reused the cached code'
+    original = probes.instrument
+    probes.instrument = lambda *args: (_ for _ in ()).throw(AssertionError('warm cache transformed source'))
+    assert compiled(second) == 2, 'the edit is cached in turn'
+    probes.instrument = original
+    assert compiled(first) == 1
+    assert compiled(first.encode()) == 1, 'bytes and text sources are told apart'
+`));
+
 test('shared compiled caches respect child interpreter optimization levels', { skip }, () => run(fixture + `
 with tempfile.TemporaryDirectory() as temporary:
     root = pathlib.Path(temporary)
