@@ -64,7 +64,8 @@ the exact requests and contacts nothing.
 health, which properties appeared, and which files entered or left the scope.
 
 Assessing needs a TypeSafe AI API key in `TYPESAFE_API_KEY`; reading a saved
-assessment does not. The command prints a cost estimate before sending anything
+assessment does not. `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` use Jev
+through another provider, such as OpenRouter. The command prints a cost estimate before sending anything
 and caches answers by content, so a second run pays only for what changed.
 
 See [Understanding quality](https://supercov.com/docs/quality) for what the

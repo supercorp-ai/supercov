@@ -2381,3 +2381,39 @@ fn security_totals_include_a_check_only_the_line_pass_found() {
     assert_eq!(confirmed, 1);
     assert_eq!(checks.get("sensitive_data_exposure"), Some(&1));
 }
+
+#[test]
+fn base_url_is_read_as_typesafe_sdks_read_it() {
+    let endpoint = |base| endpoint_for(base).unwrap();
+    assert_eq!(endpoint(None), "https://api.typesafe.ai/v1/systemone");
+    assert_eq!(
+        endpoint(Some("https://openrouter.ai/api/")),
+        "https://openrouter.ai/api/v1/systemone"
+    );
+    for local in [
+        "http://localhost:8787",
+        "http://127.0.0.1:8787/api",
+        "http://[::1]:8787",
+    ] {
+        assert_eq!(endpoint(Some(local)), format!("{local}/v1/systemone"));
+    }
+    for refused in [
+        "http://gateway.example.com",
+        "http://localhost.example.com",
+        "http://localhost@gateway.example.com",
+        "gateway.example.com",
+        "ftp://localhost",
+    ] {
+        assert!(endpoint_for(Some(refused)).is_err(), "{refused}");
+    }
+}
+
+#[test]
+fn a_host_is_named_without_credentials_port_or_path() {
+    assert_eq!(
+        host("https://openrouter.ai/api/v1/systemone"),
+        "openrouter.ai"
+    );
+    assert_eq!(host("http://user:secret@127.0.0.1:8787/api"), "127.0.0.1");
+    assert_eq!(host("http://[::1]:8787"), "[::1]");
+}

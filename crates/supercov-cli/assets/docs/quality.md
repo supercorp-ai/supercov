@@ -35,6 +35,27 @@ Set it the way your environment already sets secrets:
 Reading a saved assessment never needs a key, and `--dry-run` prints the exact
 requests without sending them.
 
+## Use Jev through another provider
+
+Supercov reads the same variables as TypeSafe's own SDKs, so a provider that
+serves Jev, such as [OpenRouter](https://openrouter.ai), needs only its URL, its
+name for the model, and its key:
+
+```bash
+export TYPESAFE_BASE_URL=https://openrouter.ai/api
+export TYPESAFE_DEFAULT_MODEL=typesafe/jev-1.13
+export TYPESAFE_API_KEY=sk-or-...
+npx supercov quality
+```
+
+| Variable | What it is | Default |
+| --- | --- | --- |
+| `TYPESAFE_BASE_URL` | where requests go | `https://api.typesafe.ai` |
+| `TYPESAFE_DEFAULT_MODEL` | the model asked for | `jev-1.13.0` |
+
+Snapshots record the model, and `quality diff` compares only snapshots from the
+same one.
+
 ## Start with the repository
 
 ```bash

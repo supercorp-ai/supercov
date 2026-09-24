@@ -35,32 +35,26 @@ Set it the way your environment already sets secrets:
 Reading a saved assessment never needs a key, and `--dry-run` prints the exact
 requests without sending them.
 
-## Reach Jev through a gateway
+## Use Jev through another provider
 
-Jev is also served by gateways that speak the same request and response schema.
-Point Supercov at one with three variables, and use that gateway's key in
-`TYPESAFE_API_KEY`:
-
-| Variable | What it is | Default |
-| --- | --- | --- |
-| `SUPERCOV_QUALITY_ENDPOINT` | where assessments are sent | `https://api.typesafe.ai/v1/systemone` |
-| `SUPERCOV_QUALITY_MODEL` | the model slug asked for | `jev-1.13.0` |
-| `SUPERCOV_QUALITY_RESPONSE_MODEL` | the slug a reply must carry | whatever was asked for |
-
-The third is only needed where a gateway resolves the slug you asked for to a
-dated build of the same model. On OpenRouter:
+Supercov reads the same variables as TypeSafe's own SDKs, so a provider that
+serves Jev, such as [OpenRouter](https://openrouter.ai), needs only its URL, its
+name for the model, and its key:
 
 ```bash
+export TYPESAFE_BASE_URL=https://openrouter.ai/api
+export TYPESAFE_DEFAULT_MODEL=typesafe/jev-1.13
 export TYPESAFE_API_KEY=sk-or-...
-export SUPERCOV_QUALITY_ENDPOINT=https://openrouter.ai/api/v1/systemone
-export SUPERCOV_QUALITY_MODEL=typesafe/jev-1.13
-export SUPERCOV_QUALITY_RESPONSE_MODEL=typesafe/jev-1.13-20260917
 npx supercov quality
 ```
 
-Unset, all three keep Supercov talking to TypeSafe exactly as before. Snapshots
-record the slug that answered, so assessments from different routes stay
-distinguishable.
+| Variable | What it is | Default |
+| --- | --- | --- |
+| `TYPESAFE_BASE_URL` | where requests go | `https://api.typesafe.ai` |
+| `TYPESAFE_DEFAULT_MODEL` | the model asked for | `jev-1.13.0` |
+
+Snapshots record the model, and `quality diff` compares only snapshots from the
+same one.
 
 ## Start with the repository
 
