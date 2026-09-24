@@ -183,7 +183,7 @@ The Claude Code plugin also adds four commands you can type:
 
 | Command | What it does |
 | --- | --- |
-| `/supercov:cover [test command]` | Writes one test for code no test reaches, and reports coverage before and after |
+| `/supercov:coverage [test command]` | Writes one test for code no test reaches, and reports coverage before and after |
 | `/supercov:security [patch]` | Scans the repository, or a change, for security vulnerabilities |
 | `/supercov:quality [patch]` | Ranks files by code smells, or checks what a change introduced |
 | `/supercov:review [--base ref]` | Checks a branch or uncommitted change for security and quality problems |
