@@ -727,26 +727,45 @@ pub(crate) fn publish_run_with_fault(
         ),
         None => None,
     };
-    if let Err(reason) = crate::assertion_store::prepare_publication_with(
-        root,
-        &staging,
-        metadata,
-        analysed.as_ref(),
-        archived_inputs,
-    ) {
+    // The assertion map and the query index both read the analysis and
+    // write their own files, so they are written side by side.
+    let prepared = std::thread::scope(|scope| {
+        let index = analysed.as_ref().map(|report| {
+            scope.spawn(|| {
+                // Disposable, like every query index: one that failed to
+                // write is rebuilt by the first query.
+                if fault == Some(RunPublicationFault::QueryIndexWrite)
+                    || crate::run_store::write_query_index_from(&staged, report).is_err()
+                {
+                    let _ = fs::remove_file(&staged.query_index_path);
+                }
+            })
+        });
+        let prepared = crate::assertion_store::prepare_publication_with(
+            root,
+            &staging,
+            metadata,
+            analysed.as_ref(),
+            archived_inputs,
+        );
+        if let Some(index) = index {
+            index
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        }
+        prepared
+    });
+    // Everything publication derives from the analysis is written. It is
+    // gigabytes of small allocations on a large run, and freeing them is
+    // nobody's wait.
+    if let Some(report) = analysed {
+        std::thread::spawn(move || drop(report));
+    }
+    if let Err(reason) = prepared {
         let _ = remove_stored_tree_deferred(root, &staging);
         return Err(LifecycleError::InvalidState(format!(
             "assertion map publication: {reason}"
         )));
-    }
-    if let Some(report) = &analysed {
-        // Disposable, like every query index: one that failed to write is
-        // rebuilt by the first query.
-        if fault == Some(RunPublicationFault::QueryIndexWrite)
-            || crate::run_store::write_query_index_from(&staged, report).is_err()
-        {
-            let _ = fs::remove_file(&staged.query_index_path);
-        }
     }
     sync_directory(&staging)?;
     let runs = destination.parent().expect("runs parent");
