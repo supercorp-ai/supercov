@@ -168,6 +168,15 @@ exports the editor schema; `assertions validate --file <path>` checks JSON synta
 
 Paste one of these prompts into Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, or any coding agent that can run terminal commands.
 
+Or install the agent skill, and your agent reaches for Supercov on its own when you ask for tests, coverage, refactoring or a security scan. In Claude Code:
+
+```text
+/plugin marketplace add supercorp-ai/supercov
+/plugin install supercov@supercov
+```
+
+For Codex, Cursor and other agents that read skills: `npx skills add supercorp-ai/supercov`.
+
 ### Write the first useful test
 
 ```text
