@@ -311,14 +311,14 @@ pub(crate) fn prepare_publication(
             current.as_ref().ok().map(|inputs| &inputs.files),
         )
     });
-    if let Err(reason) = current {
-        invalidate(&mut state, &map, &reason);
+    if let Err(reason) = &current {
+        invalidate(&mut state, &map, reason);
         add_change(
             &mut state,
             None,
             None,
             None,
-            reason,
+            reason.clone(),
             BTreeSet::new(),
             BTreeSet::new(),
         );
@@ -329,8 +329,15 @@ pub(crate) fn prepare_publication(
     // The summary `runs latest` shows, from the coverage already in hand. It is
     // a cache: failing to write it costs the first query the analysis, nothing
     // more, so it never fails the publication.
-    if let Some(report) = analysed {
-        let _ = report_with_detail_using(root, &run, None, false, Some(report));
+    if let (Some(report), Ok(inputs)) = (analysed, current) {
+        // These inputs were already validated for this publication. Reopening
+        // them would decompress and validate the whole archive a second time.
+        // Queries still load current sources before accepting this cache.
+        let input = RunInputs {
+            inputs,
+            stored: input,
+        };
+        let _ = report_with_inputs(root, &run, None, false, Some(report), &input);
     }
     Ok(())
 }
@@ -814,7 +821,18 @@ fn report_with_detail_using(
     analysed: Option<&CoverageReport>,
 ) -> Result<Value, String> {
     let input = load_inputs(root, run)?;
-    let (map, state) = load(run, &input)?;
+    report_with_inputs(root, run, id, detail, analysed, &input)
+}
+
+fn report_with_inputs(
+    root: &Path,
+    run: &StoredRun,
+    id: Option<&str>,
+    detail: bool,
+    analysed: Option<&CoverageReport>,
+    input: &RunInputs,
+) -> Result<Value, String> {
+    let (map, state) = load(run, input)?;
     let cache_key = digest(&(
         env!("SUPERCOV_ENGINE_SOURCE_SHA256"),
         &run.id,
@@ -1660,6 +1678,11 @@ mod tests {
         let computed = report_summary(&root, &run).unwrap();
         assert_eq!(fs::read(&cache).unwrap(), written, "the same cache");
         assert_eq!(summary, computed, "and the same summary");
+        fs::write(root.join("src/app.js"), "function work() { return 3; }\n").unwrap();
+        assert!(
+            report_summary(&root, &run).is_err(),
+            "a warmed summary must not bypass current-source validation"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

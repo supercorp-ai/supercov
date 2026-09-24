@@ -2,7 +2,7 @@
 //! No type/flow/dependency verifier belongs here.
 use crate::{
     assertion_map::{
-        Anchor, FileFingerprint, Files, InputManifest, Inputs, InventorySite, local_path,
+        Anchor, FileFingerprint, Files, InputManifest, Inputs, InventorySite, LineIndex, local_path,
     },
     evidence_archive::EvidenceArchiveEntry,
     workspace::{canonicalize_simplified, simplified},
@@ -195,10 +195,11 @@ pub fn current_sources(root: &Path, manifest: &InputManifest) -> Result<Inputs, 
         files.insert(file.clone(), source);
     }
     let inputs = manifest.with_sources(files);
+    let lines = LineIndex::new(&inputs.files);
     if inputs
         .assertions
         .iter()
-        .any(|s| s.at.offset(&inputs.files).is_none())
+        .any(|s| lines.offset(&s.at).is_none())
     {
         return Err("Invalid assertion identities in run manifest".into());
     }
