@@ -5,4 +5,4 @@ timeout_seconds: 300
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 
-Scan this project for security vulnerabilities.
+Are there any security issues in this code?

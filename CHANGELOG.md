@@ -4,7 +4,7 @@
 
 **Added**
 
-- An agent skill and Claude Code plugin, so a coding agent uses Supercov on its own when asked for tests, coverage, refactoring or a security scan: `/plugin marketplace add supercorp-ai/supercov`, or `npx skills add supercorp-ai/supercov` for other agents. The skill points agents at `supercov docs`, so it follows the installed version, and a check fails the build when a command it or the guides name stops existing.
+- Agent skills and a Claude Code plugin, so a coding agent uses Supercov on its own when asked for tests, coverage, refactoring or a security scan, and runs the scan when `TYPESAFE_API_KEY` is set instead of asking again: `/plugin marketplace add supercorp-ai/supercov`, or `npx skills add supercorp-ai/supercov` for other agents. The skill points agents at `supercov docs`, so it follows the installed version, and a check fails the build when a command it or the guides name stops existing.
 
 ## 2.0.0
 
