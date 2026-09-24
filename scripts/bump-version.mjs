@@ -12,9 +12,10 @@
 // carries 31 third-party ranges like "^1.0.0" and two crates sit at 1.0.0
 // exactly, so a quoted replacement across those files would rewrite other
 // people's versions. Each file is edited where Supercov's version actually
-// lives -- our own manifests wholesale, the two lockfiles only inside the
-// entries we own -- and every file has a known number of references. Any other
-// count means the world changed and the bump stops rather than guessing.
+// lives -- package.json at its own version and native-package pins, the two
+// lockfiles only inside the entries we own -- and every file has a known number
+// of references. Any other count means the world changed and the bump stops
+// rather than guessing.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -24,11 +25,24 @@ const NATIVE_PACKAGES = 8;
 // Our own crates, as Cargo.lock names them.
 const CRATES = ["supercov", "supercov-contracts", "supercov-engine"];
 
-/** Every quoted occurrence in these files is Supercov's own version. */
-function replaceEveryQuoted(text, from, to) {
-  const quoted = (version) => `${version}"`;
-  const count = text.split(quoted(from)).length - 1;
-  return { text: text.replaceAll(quoted(from), quoted(to)), count };
+const escaped = (version) => version.replaceAll(".", "\\.");
+
+/**
+ * package.json, where Supercov's version is the top-level `version` and the pin
+ * on each native package. It stopped being the only quoted version in the file
+ * at 2.0.0, when the peer range `"vitest": ">=2.0.0"` began to end in the same
+ * characters, so the file is walked line by line like the lockfile.
+ */
+export function replacePackageJson(text, from, to) {
+  const version = new RegExp(`^ {2}"version": "${escaped(from)}",?$`);
+  const pin = new RegExp(`^ {4}"@supercov/cli-[a-z0-9-]+": "${escaped(from)}",?$`);
+  let count = 0;
+  const lines = text.split("\n").map((line) => {
+    if (!version.test(line) && !pin.test(line)) return line;
+    count += 1;
+    return line.replace(`"${from}"`, `"${to}"`);
+  });
+  return { text: lines.join("\n"), count };
 }
 
 /**
@@ -94,7 +108,7 @@ export function replaceCargoToml(text, from, to) {
 }
 
 const FILES = [
-  { name: "package.json", expected: 9, replace: replaceEveryQuoted },
+  { name: "package.json", expected: 1 + NATIVE_PACKAGES, replace: replacePackageJson },
   { name: "package-lock.json", expected: 18, replace: replaceLockfile },
   { name: "Cargo.toml", expected: 3, replace: replaceCargoToml },
   { name: "Cargo.lock", expected: 3, replace: replaceCargoLock },
