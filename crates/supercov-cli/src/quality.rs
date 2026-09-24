@@ -1590,18 +1590,22 @@ fn function_labels(response: &ApiResponse) -> Vec<FunctionLabel> {
 /// The variable is the only way in on purpose. A key on the command line lands
 /// in shell history and in the process list, where anyone on the machine can
 /// read it.
-fn require_key(key: Option<&str>) -> Result<(), String> {
+///
+/// The message names the command that was run: `security` shares this path
+/// with `quality`, and an agent told "quality needs a key" after asking for a
+/// security scan has reason to doubt which command it is looking at.
+fn require_key(key: Option<&str>, instrument: Instrument) -> Result<(), String> {
     if key.is_some_and(|value| !value.trim().is_empty()) {
         return Ok(());
     }
-    Err(
-        "quality needs a TypeSafe AI API key in TYPESAFE_API_KEY.\n\n  \
+    Err(format!(
+        "{} needs a TypeSafe AI API key in TYPESAFE_API_KEY.\n\n  \
          export TYPESAFE_API_KEY=...        # this shell\n  \
          TYPESAFE_API_KEY=... supercov ...  # one command\n\n\
          Get one at https://typesafe.ai. Reading a saved assessment needs no key, \
-         and --dry-run prints the exact requests without sending them."
-            .into(),
-    )
+         and --dry-run prints the exact requests without sending them.",
+        instrument.lane()
+    ))
 }
 
 /// What a set of requests will cost, before any of it is spent.
@@ -2804,7 +2808,7 @@ fn run_health(
     instrument: Instrument,
 ) -> Result<(Value, bool), String> {
     if !options.dry_run {
-        require_key(key)?;
+        require_key(key, instrument)?;
         endpoint()?;
     }
     let found = discover_for(root, &options.paths, instrument)?;
@@ -3159,7 +3163,7 @@ fn run_patch(
     key: Option<&str>,
     instrument: Instrument,
 ) -> Result<(Value, bool), String> {
-    require_key(key)?;
+    require_key(key, instrument)?;
     endpoint()?;
     let collected = changes::collect(root, range, paths)?;
     let configured = scope::configured_roots();
