@@ -502,40 +502,7 @@ fn read_evidence_directory(
             .collect::<Result<Vec<_>, _>>()?;
         parse_transport(name, &contents, &slot_contents, layout.as_ref())
     };
-    let threads = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(work.len().div_ceil(64).max(1));
-    let parsed = if threads <= 1 {
-        work.iter().map(parse).collect::<Vec<_>>()
-    } else {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let mut parsed = std::thread::scope(|scope| {
-            let workers = (0..threads)
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut done = Vec::new();
-                        loop {
-                            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(item) = work.get(index) else {
-                                break done;
-                            };
-                            done.push((index, parse(item)));
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
-            workers
-                .into_iter()
-                .flat_map(|worker| {
-                    worker
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                })
-                .collect::<Vec<_>>()
-        });
-        parsed.sort_unstable_by_key(|(index, _)| *index);
-        parsed.into_iter().map(|(_, parsed)| parsed).collect()
-    };
+    let parsed = parallel_map(&work, parse);
     for ((name, _, _), parsed) in work.iter().zip(parsed) {
         apply_transport(name, parsed?, run_id, &mut evidence)?;
     }
@@ -980,6 +947,43 @@ impl Decoded {
         }
         records
     }
+}
+
+/// `items.iter().map(work)`, spread over the machine's cores, in order.
+fn parallel_map<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(items.len().div_ceil(64).max(1));
+    if threads <= 1 {
+        return items.iter().map(work).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut done = std::thread::scope(|scope| {
+        let workers = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            break done;
+                        };
+                        done.push((index, work(item)));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect::<Vec<_>>()
+    });
+    done.sort_unstable_by_key(|(index, _)| *index);
+    done.into_iter().map(|(_, result)| result).collect()
 }
 
 fn transport_u32(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -1553,28 +1557,31 @@ fn scope(run: &str, worker: &str, test: &str, retry: usize) -> ExecutionScope {
 }
 
 struct ManifestIndex<'a> {
-    points: BTreeSet<&'a str>,
-    alternatives: BTreeSet<&'a str>,
-    decisions: BTreeMap<&'a str, &'a DecisionMeta>,
-    lines: BTreeMap<&'a str, (String, usize)>,
-    files: BTreeMap<String, Vec<&'a str>>,
+    points: crate::interned::FastSet<&'a str>,
+    alternatives: crate::interned::FastSet<&'a str>,
+    decisions: crate::interned::FastMap<&'a str, &'a DecisionMeta>,
+    lines: BTreeMap<&'a str, (&'a str, usize)>,
+    files: BTreeMap<&'a str, Vec<&'a str>>,
 }
 
 impl<'a> ManifestIndex<'a> {
     fn new(manifest: &'a CoverageManifest) -> Self {
         let mut lines = BTreeMap::new();
         for point in &manifest.points {
-            lines.insert(point.id.as_str(), (point.file.clone(), point.line));
+            lines.insert(point.id.as_str(), (point.file.as_str(), point.line));
         }
         for decision in &manifest.decisions {
-            lines.insert(decision.id.as_str(), (decision.file.clone(), decision.line));
+            lines.insert(
+                decision.id.as_str(),
+                (decision.file.as_str(), decision.line),
+            );
         }
         for branch in &manifest.branches {
-            lines.insert(branch.id.as_str(), (branch.file.clone(), branch.line));
+            lines.insert(branch.id.as_str(), (branch.file.as_str(), branch.line));
         }
-        let mut files = BTreeMap::<String, Vec<&str>>::new();
+        let mut files = BTreeMap::<&str, Vec<&str>>::new();
         for (id, (file, _)) in &lines {
-            files.entry(file.clone()).or_default().push(*id);
+            files.entry(*file).or_default().push(*id);
         }
         Self {
             points: manifest
@@ -1789,6 +1796,24 @@ pub fn build_python_frontend_run(
             .or_default()
             .push((identity, observations));
     }
+    // Each phase's snapshot stands alone: built side by side, taken in the
+    // order below, and any error raised where the phase is reached.
+    let phases_observed = per_identity.iter().collect::<Vec<_>>();
+    let mut snapshots = phases_observed
+        .iter()
+        .map(|(identity, _)| *identity)
+        .zip(parallel_map(
+            &phases_observed,
+            |(identity, observations)| {
+                snapshot(&index, observations, &slot_ids, &phase_id(run_id, identity))
+            },
+        ))
+        .collect::<BTreeMap<_, _>>();
+    let mut take = |identity: &Identity| {
+        snapshots
+            .remove(identity)
+            .expect("each phase's snapshot is taken once")
+    };
     for ((worker, test, retry), mut outcomes) in outcomes {
         let runner = runners
             .get(&(worker.clone(), test.clone(), retry))
@@ -1833,11 +1858,11 @@ pub fn build_python_frontend_run(
                 }),
                 error: None,
             });
-            if let Some((_, observations)) = attempt_identities
+            if let Some((observed, _)) = attempt_identities
                 .iter()
                 .find(|(candidate, _)| candidate.phase == phase_name.as_str())
             {
-                runtime.push(snapshot(&index, observations, &slot_ids, &id)?);
+                runtime.push(take(observed)?);
             }
             if phase_name != "call" {
                 continue;
@@ -1845,7 +1870,7 @@ pub fn build_python_frontend_run(
             // What the test recorded before its first assertion is that
             // assertion's evidence, linked when the phase passed outright:
             // a failed, skipped or expected-to-fail phase witnessed nothing.
-            if let Some((identity, observations)) = attempt_identities
+            if let Some((identity, _)) = attempt_identities
                 .iter()
                 .find(|(candidate, _)| candidate.phase == "assertion")
             {
@@ -1869,7 +1894,7 @@ pub fn build_python_frontend_run(
                     ),
                     error: None,
                 });
-                runtime.push(snapshot(&index, observations, &slot_ids, &id)?);
+                runtime.push(take(identity)?);
                 // One phase per assertion site the call phase reached, so an
                 // assertion map can tell the sites apart. The per-test phase
                 // above keeps carrying the pre-assertion evidence; these are
@@ -1910,7 +1935,7 @@ pub fn build_python_frontend_run(
         }
         // A phase the runtime entered but pytest never reported (the worker
         // died inside it) is a failed phase with its evidence kept.
-        for (identity, observations) in attempt_identities {
+        for (identity, _) in attempt_identities {
             if !observed_phases.contains(&identity.phase) {
                 let id = phase_id(run_id, identity);
                 phases.push(CoveragePhase {
@@ -1928,7 +1953,7 @@ pub fn build_python_frontend_run(
                     status: Some("failed".into()),
                     error: Some("the phase started but the runner reported no outcome".into()),
                 });
-                runtime.push(snapshot(&index, observations, &slot_ids, &id)?);
+                runtime.push(take(identity)?);
             }
         }
         let status = if phases.iter().any(|phase| phase.error.is_some()) {
@@ -1984,7 +2009,7 @@ pub fn build_python_frontend_run(
         let runner = default_observed.clone();
         let mut phases = Vec::new();
         let mut runtime = Vec::new();
-        for (position, (identity, observations)) in identities.iter().enumerate() {
+        for (position, (identity, _)) in identities.iter().enumerate() {
             let id = phase_id(run_id, identity);
             phases.push(CoveragePhase {
                 id: id.clone(),
@@ -2001,7 +2026,7 @@ pub fn build_python_frontend_run(
                 status: Some("failed".into()),
                 error: Some("the phase started but the runner reported no outcome".into()),
             });
-            runtime.push(snapshot(&index, observations, &slot_ids, &id)?);
+            runtime.push(take(identity)?);
         }
         raw_results.push(RawTestResult {
             test_id: Some(test.clone()),
@@ -2102,7 +2127,7 @@ pub fn build_python_frontend_run(
             // every obligation in that source file from being observed. Mark
             // the whole file unmeasured instead of presenting its denominator
             // as ordinary uncovered code.
-            if let Some(obligations) = index.files.get(file) {
+            if let Some(obligations) = index.files.get(file.as_str()) {
                 unmeasured.extend(obligations.iter().map(|id| (*id).to_owned()));
             }
         }
@@ -2121,7 +2146,12 @@ pub fn build_python_frontend_run(
             let (file, line) = limitation
                 .obligation
                 .as_deref()
-                .and_then(|id| index.lines.get(id).cloned())
+                .and_then(|id| {
+                    index
+                        .lines
+                        .get(id)
+                        .map(|(file, line)| ((*file).to_owned(), *line))
+                })
                 .unwrap_or_else(|| {
                     (
                         limitation.file.clone().unwrap_or_else(|| {
