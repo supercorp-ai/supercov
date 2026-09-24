@@ -160,11 +160,11 @@ fn usize_u32(value: usize) -> Result<u32, CoverageIndexError> {
 
 #[derive(Default)]
 struct StringTable {
-    ids: HashMap<String, u32>,
+    ids: crate::interned::FastMap<String, u32>,
     strings: Vec<String>,
     // Keep each allocation alive: its address can then identify repeated Id
     // references without hashing the same long test name for every line.
-    shared_ids: HashMap<usize, (Id, u32)>,
+    shared_ids: crate::interned::FastMap<usize, (Id, u32)>,
 }
 
 #[derive(Default)]
@@ -173,7 +173,7 @@ struct StringRelations {
     /// Where each distinct run already sits. Readers reach a run only through
     /// the (offset, count) pair the record stores, so two records naming the
     /// same run can share one copy of it and nothing downstream can tell.
-    interned: HashMap<Vec<u32>, (u64, u64)>,
+    interned: crate::interned::FastMap<Vec<u32>, (u64, u64)>,
 }
 
 impl StringRelations {
@@ -654,7 +654,7 @@ fn limitation_kind(value: &serde_json::Value) -> Option<(&str, &str)> {
 
 fn includes_selected<T: AsRef<str>>(
     tests: &[T],
-    selected: Option<&BTreeSet<String>>,
+    selected: Option<&Selected>,
     covered: bool,
 ) -> bool {
     selected.map_or(covered, |selected| {
@@ -665,7 +665,7 @@ fn includes_selected<T: AsRef<str>>(
 fn classify(
     gap: &mut MutableFileGap,
     dimension: usize,
-    selected: Option<&BTreeSet<String>>,
+    selected: Option<&Selected>,
     covered_overall: bool,
 ) {
     if selected.is_some() && covered_overall {
@@ -675,20 +675,31 @@ fn classify(
     }
 }
 
+/// A file's gap, its name copied only the first time the file is met.
+fn gap_for<'m>(
+    files: &'m mut BTreeMap<String, MutableFileGap>,
+    file: &str,
+) -> &'m mut MutableFileGap {
+    if !files.contains_key(file) {
+        files.insert(file.to_owned(), MutableFileGap::default());
+    }
+    files.get_mut(file).expect("gap was inserted")
+}
+
 fn file_gaps(
     view: &CoverageView,
-    selected: Option<&BTreeSet<String>>,
+    selected: Option<&Selected>,
 ) -> Result<Vec<(String, MutableFileGap)>, CoverageIndexError> {
     let mut files = BTreeMap::<String, MutableFileGap>::new();
     for line in &view.lines {
-        let gap = files.entry(line.file.clone()).or_default();
+        let gap = gap_for(&mut files, &line.file);
         if line.measured && !includes_selected(&line.tests, selected, line.covered) {
             gap.uncovered_lines += 1;
             classify(gap, 0, selected, line.covered);
         }
     }
     for point in &view.points {
-        let gap = files.entry(point.meta.file.clone()).or_default();
+        let gap = gap_for(&mut files, &point.meta.file);
         if point.measured && !includes_selected(&point.tests, selected, point.covered) {
             match point.meta.kind {
                 crate::coverage_analysis::PointKind::Statement => {
@@ -703,7 +714,7 @@ fn file_gaps(
         }
     }
     for branch in &view.branches {
-        let gap = files.entry(branch.meta.file.clone()).or_default();
+        let gap = gap_for(&mut files, &branch.meta.file);
         for alternative in &branch.alternatives {
             if !includes_selected(&alternative.tests, selected, alternative.covered) {
                 gap.missing_branches += 1;
@@ -712,7 +723,7 @@ fn file_gaps(
         }
     }
     for decision in &view.decisions {
-        let gap = files.entry(decision.meta.file.clone()).or_default();
+        let gap = gap_for(&mut files, &decision.meta.file);
         let selected_vectors = decision
             .vector_observations
             .iter()
@@ -795,7 +806,12 @@ fn file_gap_record(
     Ok(record)
 }
 
-fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, BTreeSet<String>)> {
+/// The tests a projection selects. Hashed: every line, point, branch and
+/// vector of the view asks whether any of its tests is selected, once per
+/// projection, and a tree of long test names answered each by comparing them.
+type Selected = crate::interned::FastSet<String>;
+
+fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, Selected)> {
     let kinds = view
         .tests
         .iter()
@@ -832,7 +848,7 @@ fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, BTre
                             .is_none_or(|value| test.provenance.runner == *value)
                 })
                 .map(|test| test.id.clone())
-                .collect::<BTreeSet<_>>();
+                .collect::<Selected>();
             (!selected.is_empty()).then_some((kind, runner, selected))
         })
         .collect()
@@ -841,7 +857,7 @@ fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, BTre
 fn decision_gap_record(
     view_id: CoverageViewId,
     decision: &crate::coverage_report::DecisionResult,
-    selected: Option<&BTreeSet<String>>,
+    selected: Option<&Selected>,
     kind: Option<&str>,
     runner: Option<&str>,
     strings: &mut StringTable,
@@ -1050,7 +1066,7 @@ fn scope_projection<'a>(
 fn projection_record(
     view_id: CoverageViewId,
     view: &CoverageView,
-    selected: Option<&BTreeSet<String>>,
+    selected: Option<&Selected>,
     kind: Option<&str>,
     runner: Option<&str>,
     strings: &mut StringTable,
@@ -1095,7 +1111,7 @@ fn projection_record(
     let summary = selected.map_or_else(
         || Ok(view.summary.clone()),
         |ids| {
-            coverage_summary_for_tests(view, ids)
+            coverage_summary_for_tests(view, &ids.iter().cloned().collect())
                 .map_err(|_| CoverageIndexError::InvalidRecord("projection summary"))
         },
     )?;
@@ -3982,7 +3998,7 @@ mod tests {
             point.covered = false;
             point.tests.clear();
         }
-        let selected = BTreeSet::new();
+        let selected = Selected::default();
         for filter in [None, Some(&selected)] {
             let gaps = file_gaps(&report.view, filter).unwrap();
             let (_, gap) = &gaps[0];

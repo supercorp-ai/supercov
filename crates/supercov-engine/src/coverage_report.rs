@@ -1140,8 +1140,14 @@ fn summary_for_results(
     lines: &[LineResult],
     test_ids: Option<&BTreeSet<String>>,
 ) -> Result<CoverageSummary, ReportError> {
+    // Hashed once: every obligation asks it about each of its tests.
+    let test_ids = test_ids.map(|ids| {
+        ids.iter()
+            .map(String::as_str)
+            .collect::<crate::interned::FastSet<&str>>()
+    });
     let includes = |tests: &[Id], covered: bool| {
-        test_ids.map_or(covered, |selected| {
+        test_ids.as_ref().map_or(covered, |selected| {
             tests.iter().any(|test| selected.contains(test.as_str()))
         })
     };
