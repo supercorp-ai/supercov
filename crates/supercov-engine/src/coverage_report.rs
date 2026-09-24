@@ -856,7 +856,7 @@ struct MutableTest {
     provenance: TestProvenance,
     role: String,
     attribution: String,
-    hits: BTreeSet<Id>,
+    hits: BTreeSet<usize>,
     decisions: BTreeMap<String, OrderedVectors>,
 }
 
@@ -864,7 +864,7 @@ struct MutableTest {
 struct MutablePhase {
     phase: CoveragePhase,
     test: Id,
-    hits: BTreeSet<Id>,
+    hits: BTreeSet<usize>,
     decisions: BTreeMap<String, OrderedVectors>,
     browser_events: usize,
     server_events: usize,
@@ -1308,21 +1308,44 @@ fn correlate_event<'a>(
     })
 }
 
-/// Which tests or phases reached each obligation, collected as numbers while the
-/// evidence is walked and turned into sorted id sets once, at the end.
-///
-/// Every test reaches hundreds of obligations and every phase reports each hit,
-/// so a 3,900-test run adds millions of references. Inserted straight into a
-/// set of ids, each paid for comparing ids that share long prefixes
-/// (`h11/tests/test_connection.py::...`, `python-phase:...`) at every level of
-/// the tree -- a third of building a view. Numbered, each is a push; the sets
-/// that come out are the same.
+/// One lookup per hit while ingesting evidence. All hit relations share these
+/// dense numbers, avoiding repeated string hashing and tree comparisons. Even
+/// IDs absent from the manifest are retained; output restores lexical ordering.
+#[derive(Default)]
+struct HitIds {
+    names: Vec<Id>,
+    numbers: HashMap<String, usize>,
+}
+
+impl HitIds {
+    fn number(&mut self, name: &str, ids: &mut Interner) -> usize {
+        if let Some(number) = self.numbers.get(name) {
+            return *number;
+        }
+        let number = self.names.len();
+        self.names.push(ids.id(name));
+        self.numbers.insert(name.to_owned(), number);
+        number
+    }
+
+    fn sorted(&self, numbers: BTreeSet<usize>) -> Vec<Id> {
+        let mut names = numbers
+            .into_iter()
+            .map(|n| self.names[n].clone())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    }
+}
+
+/// Which tests or phases reached each obligation. Both sides are numbered
+/// while ingesting evidence, then restored to sorted ID sets for the report.
 #[derive(Default)]
 struct References {
     names: Vec<Id>,
     numbers: HashMap<Id, u32>,
     last: Option<u32>,
-    by_obligation: HashMap<String, Vec<u32>>,
+    by_obligation: Vec<Vec<u32>>,
 }
 
 impl References {
@@ -1348,15 +1371,18 @@ impl References {
         number
     }
 
-    fn add(&mut self, obligation: &str, name: &str, ids: &mut Interner) {
+    fn add(&mut self, obligation: usize, name: &str, ids: &mut Interner) {
         let number = self.number(name, ids);
-        let reached = hash_slot(&mut self.by_obligation, obligation);
+        if self.by_obligation.len() <= obligation {
+            self.by_obligation.resize_with(obligation + 1, Vec::new);
+        }
+        let reached = &mut self.by_obligation[obligation];
         if reached.last() != Some(&number) {
             reached.push(number);
         }
     }
 
-    fn into_sets(self) -> HashMap<String, BTreeSet<Id>> {
+    fn into_sets(self, hits: &HitIds) -> HashMap<String, BTreeSet<Id>> {
         let mut order = (0..self.names.len()).collect::<Vec<_>>();
         order.sort_unstable_by(|left, right| self.names[*left].cmp(&self.names[*right]));
         let mut rank = vec![0_usize; self.names.len()];
@@ -1366,6 +1392,8 @@ impl References {
         let names = &self.names;
         self.by_obligation
             .into_iter()
+            .enumerate()
+            .filter(|(_, reached)| !reached.is_empty())
             .map(|(obligation, mut reached)| {
                 reached.sort_unstable_by_key(|number| rank[*number as usize]);
                 reached.dedup();
@@ -1373,7 +1401,7 @@ impl References {
                     .into_iter()
                     .map(|number| names[number as usize].clone())
                     .collect::<BTreeSet<_>>();
-                (obligation, set)
+                (hits.names[obligation].to_string(), set)
             })
             .collect()
     }
@@ -1441,6 +1469,7 @@ fn create_coverage_view_with_model(
     let mut vector_indexes = HashMap::<String, HashMap<String, usize>>::new();
     let mut tests_by_decision = HashMap::<String, BTreeSet<Id>>::new();
     let mut tests_by_hit = References::default();
+    let mut hit_ids = HitIds::default();
     let mut tests_by_id = HashMap::<Id, MutableTest>::new();
     let mut test_order = Vec::<Id>::new();
     let mut phases_by_id = HashMap::<Id, MutablePhase>::new();
@@ -1554,8 +1583,9 @@ fn create_coverage_view_with_model(
             }
             let test_hits = &mut tests_by_id.get_mut(&id).expect("registered test").hits;
             for hit in &snapshot.hits {
+                let hit = hit_ids.number(hit, ids);
                 tests_by_hit.add(hit, &id, ids);
-                insert_absent(test_hits, hit, ids);
+                test_hits.insert(hit);
             }
             for event in &snapshot.events {
                 let explicit = event.phase_id.is_some();
@@ -1586,10 +1616,11 @@ fn create_coverage_view_with_model(
                     phase.inferred_events += 1;
                 }
                 if event.event_type == "hit" {
-                    insert_absent(&mut phase.hits, &event.id, ids);
-                    phases_by_hit.add(&event.id, phase_id, ids);
+                    let hit = hit_ids.number(&event.id, ids);
+                    phase.hits.insert(hit);
+                    phases_by_hit.add(hit, phase_id, ids);
                     if explicit {
-                        explicit_phases_by_hit.add(&event.id, phase_id, ids);
+                        explicit_phases_by_hit.add(hit, phase_id, ids);
                     }
                 } else if event.event_type == "decision" {
                     let vector = event
@@ -1668,12 +1699,13 @@ fn create_coverage_view_with_model(
                     .id
                     .as_ref()
                     .ok_or_else(|| ReportError::InvalidServerRecord("missing hit id".into()))?;
-                tests_by_hit.add(hit, &id, ids);
+                let number = hit_ids.number(hit, ids);
+                tests_by_hit.add(number, &id, ids);
                 tests_by_id
                     .get_mut(&id)
                     .expect("registered test")
                     .hits
-                    .insert(ids.id(hit));
+                    .insert(number);
                 (hit.clone(), None)
             } else {
                 return Err(ReportError::InvalidServerRecord(record.record_type.clone()));
@@ -1705,10 +1737,11 @@ fn create_coverage_view_with_model(
                 phase.inferred_server_events += 1;
             }
             if event.event_type == "hit" {
-                insert_absent(&mut phase.hits, &event.id, ids);
-                phases_by_hit.add(&event.id, &phase_id, ids);
+                let hit = hit_ids.number(&event.id, ids);
+                phase.hits.insert(hit);
+                phases_by_hit.add(hit, &phase_id, ids);
                 if explicit {
-                    explicit_phases_by_hit.add(&event.id, &phase_id, ids);
+                    explicit_phases_by_hit.add(hit, &phase_id, ids);
                 }
             } else if let Some(vector) = &event.vector {
                 phase
@@ -1743,9 +1776,9 @@ fn create_coverage_view_with_model(
             .then(left.line.cmp(&right.line))
             .then(left.column.cmp(&right.column))
     });
-    let tests_by_hit = tests_by_hit.into_sets();
-    let phases_by_hit = phases_by_hit.into_sets();
-    let explicit_phases_by_hit = explicit_phases_by_hit.into_sets();
+    let tests_by_hit = tests_by_hit.into_sets(&hit_ids);
+    let phases_by_hit = phases_by_hit.into_sets(&hit_ids);
+    let explicit_phases_by_hit = explicit_phases_by_hit.into_sets(&hit_ids);
     let mut decisions = Vec::with_capacity(decision_metadata.len());
     for meta in decision_metadata {
         let mutable = vectors_by_decision.remove(&meta.id).unwrap_or_default();
@@ -1982,8 +2015,8 @@ fn create_coverage_view_with_model(
         .map(|id| {
             let test = tests_by_id.remove(&id).expect("test order references test");
             let outcome = test_outcome(&test);
-            let lines = test
-                .hits
+            let hits = hit_ids.sorted(test.hits);
+            let lines = hits
                 .iter()
                 .filter_map(|hit| point_locations.get(hit.as_str()).cloned())
                 .collect::<BTreeSet<_>>();
@@ -1998,7 +2031,7 @@ fn create_coverage_view_with_model(
                 provenance: test.provenance,
                 role: test.role,
                 attribution: test.attribution,
-                hits: test.hits.into_iter().collect(),
+                hits,
                 decisions: test
                     .decisions
                     .into_iter()
@@ -2055,15 +2088,15 @@ fn create_coverage_view_with_model(
     let phases = phases
         .into_iter()
         .map(|phase| {
-            let lines = phase
-                .hits
+            let hits = hit_ids.sorted(phase.hits);
+            let lines = hits
                 .iter()
                 .filter_map(|hit| point_locations.get(hit.as_str()).cloned())
                 .collect::<BTreeSet<_>>();
             PhaseResult {
                 phase: phase.phase,
                 test: phase.test,
-                hits: phase.hits.into_iter().collect(),
+                hits,
                 decisions: phase
                     .decisions
                     .into_iter()
@@ -2658,21 +2691,35 @@ mod tests {
             ("py:statement:b", "h11/tests/test_x.py::test_b[2-50]"),
         ];
         let mut ids = Interner::default();
+        let mut hits = HitIds::default();
         let mut numbered = References::default();
+        // A hit known to another relation must not become covered here.
+        hits.number("unused", &mut ids);
         let mut direct = HashMap::<String, BTreeSet<String>>::new();
         for (obligation, name) in arrivals {
-            numbered.add(obligation, name, &mut ids);
+            let hit = hits.number(obligation, &mut ids);
+            numbered.add(hit, name, &mut ids);
             direct
                 .entry(obligation.to_owned())
                 .or_default()
                 .insert(name.to_owned());
         }
         let numbered = numbered
-            .into_sets()
+            .into_sets(&hits)
             .into_iter()
             .map(|(obligation, names)| (obligation, names.into_iter().map(String::from).collect()))
             .collect::<HashMap<_, BTreeSet<String>>>();
         assert_eq!(numbered, direct);
+        assert_eq!(
+            hits.sorted((0..hits.names.len()).collect()),
+            [
+                "py:statement:a",
+                "py:statement:b",
+                "py:statement:c",
+                "unused"
+            ]
+            .map(Id::from)
+        );
     }
 
     static ARCHIVE_ID: AtomicU64 = AtomicU64::new(0);
