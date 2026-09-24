@@ -48,6 +48,17 @@ const skills = readdirSync(resolve(repository, "plugins"), { withFileTypes: true
   })
   .filter(existsSync);
 
+// Plugin commands are Claude Code only, so they sit outside skills/ and are
+// not held to the Agent Skills format, but the commands in them still are.
+const commands = readdirSync(resolve(repository, "plugins"), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .flatMap((plugin) => {
+    const root = resolve(repository, "plugins", plugin.name, "commands");
+    return existsSync(root)
+      ? readdirSync(root).filter((name) => name.endsWith(".md")).map((name) => resolve(root, name))
+      : [];
+  });
+
 const docs = readdirSync(resolve(repository, "docs"))
   .filter((name) => name.endsWith(".md"))
   .map((name) => resolve(repository, "docs", name));
@@ -104,9 +115,9 @@ function invocations(text) {
   return found;
 }
 
-/** A value, path, location, run id or placeholder, rather than a subcommand word. */
+/** A value, path, location, run id, placeholder or `$ARGUMENTS`, rather than a subcommand word. */
 const isValue = (token) =>
-  /[/.:<>]/.test(token) || /^\d+$/.test(token) || token === "latest" || /^(run|q)_/.test(token);
+  /[/.:<>$]/.test(token) || /^\d+$/.test(token) || token === "latest" || /^(run|q)_/.test(token);
 
 const mentions = (help, word) =>
   new RegExp(`(^|[\\s\\[(|,])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[\\s\\]),|=])`, "m").test(help);
@@ -149,7 +160,7 @@ function check(where, args) {
 }
 
 let checked = 0;
-for (const [paths, examplesOnly] of [[skills, false], [docs, true]]) {
+for (const [paths, examplesOnly] of [[skills, false], [commands, false], [docs, true]]) {
   for (const path of paths) {
     for (const fragment of codeFragments(path, { examplesOnly })) {
       for (const args of invocations(fragment.text)) {
@@ -200,4 +211,4 @@ if (failures.length > 0) {
   console.error(`[agent-commands] ${failures.length} problem(s) in ${checked} command(s)`);
   process.exit(1);
 }
-console.log(`[agent-commands] ${checked} command(s) across ${skills.length} skill(s) and the docs' examples match the CLI`);
+console.log(`[agent-commands] ${checked} command(s) across ${skills.length} skill(s), ${commands.length} plugin command(s) and the docs' examples match the CLI`);
