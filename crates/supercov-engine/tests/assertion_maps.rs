@@ -1054,6 +1054,28 @@ fn empty_selectors_never_mean_all_tests_and_zero_credit_is_distinct_from_no_work
 }
 
 #[test]
+fn observed_unexplained_assertions_require_exact_inventory_identity() {
+    let (inputs, mut map, state) = fixture();
+    let coverage = report_fixture(&["a", "b"], true);
+    let count = |map: &AssertionMap, coverage: &CoverageReport| {
+        assess_summary(map, &state, &inputs, coverage, true)["summary"]
+            ["observedAssertionsWithoutCurrentExplanation"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(count(&map, &coverage), 0, "a current explanation exists");
+    map.assertions[0].flows.clear();
+    assert_eq!(count(&map, &coverage), 1, "observed but unexplained");
+    assert_eq!(count(&map, &report_fixture(&["a", "b"], false)), 0);
+    // Same coordinates with different text must not count twice. The exact
+    // inventoried assertion is still included as an unmapped inventory site.
+    map.assertions[0].at.text.push_str(" /* stale */");
+    assert_eq!(count(&map, &coverage), 1);
+    map.assertions.clear();
+    assert_eq!(count(&map, &coverage), 1, "unmapped inventory is included");
+}
+
+#[test]
 fn qualified_selectors_reject_ambiguous_names_and_missing_siblings_do_not_erase_evidence() {
     let (inputs, mut map, state) = fixture();
     let mut coverage = report_fixture(&["a", "b"], true);

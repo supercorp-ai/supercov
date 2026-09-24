@@ -1027,6 +1027,7 @@ fn assess_with(
     let mut invalid_flows = 0;
     let mut current_flows = 0;
     let mut credit_flows = 0;
+    let mut assertions_without_current_explanation = 0;
     let mut line_assertions = BTreeMap::<(String, usize), BTreeSet<String>>::new();
     // Duplicate identities invalidate all credit; stale anchors only invalidate
     // their own flow, so an agent can repair a large map incrementally.
@@ -1335,6 +1336,15 @@ fn assess_with(
         } else {
             "No passing occurrence recorded. The assertion may be in an untaken branch or its execution attribution may be missing; inspect the selected tests."
         };
+        // Keep the exact anchor lookup typed. Scanning and serializing the
+        // entire inventory for each JSON row made publication quadratic in
+        // assertion count, including for maps with no authored flows.
+        if inventory.contains_key(&a.at)
+            && !witnesses.is_empty()
+            && !flows.iter().any(|f| f["eligible"] == true)
+        {
+            assertions_without_current_explanation += 1;
+        }
         rows.push(json!({"observation":observation,"id":a.id,"at":a.at,"questions":a.questions,"inMap":in_map,"observes":a.observes,"operations":inventory.get(&a.at).cloned().unwrap_or_default(),"observedPassingTests":witnesses,"flows":flows}));
     }
     // Only lines carrying a measured statement can ever be asserted: credit is
@@ -1374,7 +1384,7 @@ fn assess_with(
     let missing_inventory = inputs
         .assertions
         .iter()
-        .filter(|s| !map.assertions.iter().any(|a| a.at == s.at))
+        .filter(|s| !mapped_anchors.contains(&s.at))
         .count();
     let (status, reason) = if !passed || !identities_valid {
         ("unavailable", "Run failed or map identities are invalid")
@@ -1395,18 +1405,6 @@ fn assess_with(
             "No current flow with matching passing assertion evidence",
         )
     };
-    let assertions_without_current_explanation = rows
-        .iter()
-        .filter(|a| {
-            inventory.keys().any(|at| json!(at) == a["at"])
-                && a["observedPassingTests"]
-                    .as_array()
-                    .is_some_and(|v| !v.is_empty())
-                && a["flows"]
-                    .as_array()
-                    .is_none_or(|v| !v.iter().any(|f| f["eligible"] == true))
-        })
-        .count();
     let total = denominator.len();
     // Each measured statement is located once. The detail list and the
     // summary's count of statements that cannot be located read these same
