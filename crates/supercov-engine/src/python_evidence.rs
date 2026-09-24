@@ -116,6 +116,13 @@ enum Record {
         ctx: u64,
         ids: Vec<String>,
     },
+    /// Hits read out of a slot, by position in the layout's ids. Made here,
+    /// never written by the runtime.
+    #[serde(skip)]
+    SlotHits {
+        ctx: u64,
+        positions: Vec<u32>,
+    },
     Dec {
         ctx: u64,
         id: String,
@@ -363,7 +370,18 @@ impl PythonAssertionInventory {
 #[derive(Debug, Default)]
 struct Observations {
     hits: BTreeSet<String>,
+    /// Hits a harvest named by slot byte, as positions in the layout's ids,
+    /// repeats included: turned into ids once, when the phase's snapshot is
+    /// built. A subprocess-heavy run harvests millions, and an owned id per
+    /// hit was most of reading its evidence.
+    slot_hits: Vec<u32>,
     vectors: BTreeMap<String, ObservedVectors>,
+}
+
+impl Observations {
+    fn is_empty(&self) -> bool {
+        self.hits.is_empty() && self.slot_hits.is_empty() && self.vectors.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -385,6 +403,8 @@ struct Evidence {
     test_files: TestFilesByAttempt,
     sites: SitesByAttempt,
     limitations: BTreeMap<(String, Option<String>, Option<String>), RuntimeLimitation>,
+    /// The layout's ids, which slot hits are positions in.
+    slot_ids: Vec<String>,
 }
 
 fn read_evidence_directory(
@@ -519,6 +539,7 @@ fn read_evidence_directory(
     for ((name, _, _), parsed) in work.iter().zip(parsed) {
         apply_transport(name, parsed?, run_id, &mut evidence)?;
     }
+    evidence.slot_ids = layout.map(|layout| layout.ids).unwrap_or_default();
     if let Some((_, orphans)) = slots.into_iter().next() {
         return Err(PythonEvidenceError::InvalidTransport {
             file: orphans[0].0.clone(),
@@ -915,7 +936,7 @@ impl SlotLayout {
     fn decode_one(&self, index: usize, into: &mut Decoded) {
         let id_end = self.header + self.ids.len();
         if index < id_end {
-            into.ids.push(self.ids[index - self.header].clone());
+            into.positions.push((index - self.header) as u32);
             return;
         }
         let decision = &self.decisions[self
@@ -932,12 +953,19 @@ impl SlotLayout {
 #[derive(Default)]
 struct Decoded {
     ids: Vec<String>,
+    positions: Vec<u32>,
     vectors: Vec<(String, String, u8)>,
 }
 
 impl Decoded {
     fn into_records(self, context: u64) -> Vec<Record> {
         let mut records = Vec::new();
+        if !self.positions.is_empty() {
+            records.push(Record::SlotHits {
+                ctx: context,
+                positions: self.positions,
+            });
+        }
         if !self.ids.is_empty() {
             records.push(Record::Hits {
                 ctx: context,
@@ -1254,6 +1282,22 @@ fn apply_transport(
             }
             // An empty record names no phase evidence: it must not make one.
             Record::Hits { ids, .. } if ids.is_empty() => {}
+            Record::SlotHits { positions, .. } if positions.is_empty() => {}
+            Record::SlotHits { ctx, positions } => {
+                if let Some(before) = before_assertion.get_mut(&ctx) {
+                    before.slot_hits.extend(&positions);
+                }
+                observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .slot_hits
+                .extend(positions);
+            }
             Record::Decs { v, .. } if v.is_empty() => {}
             Record::Hits { ctx, ids } => {
                 if let Some(before) = before_assertion.get_mut(&ctx) {
@@ -1365,6 +1409,7 @@ fn apply_transport(
                         })
                         .or_default();
                     asserted.hits.extend(before.hits);
+                    asserted.slot_hits.extend(before.slot_hits);
                     for (id, vectors) in before.vectors {
                         asserted.vectors.entry(id).or_default().extend(vectors);
                     }
@@ -1556,15 +1601,24 @@ impl<'a> ManifestIndex<'a> {
 fn snapshot(
     index: &ManifestIndex<'_>,
     observations: &Observations,
+    slot_ids: &[String],
     phase: &str,
 ) -> Result<RuntimeSnapshot, PythonEvidenceError> {
+    let mut positions = observations.slot_hits.clone();
+    positions.sort_unstable();
+    positions.dedup();
     let mut hits = BTreeSet::new();
-    for id in &observations.hits {
-        if !index.points.contains(id.as_str()) && !index.alternatives.contains(id.as_str()) {
-            return Err(PythonEvidenceError::UnknownObligation(id.clone()));
+    for id in observations.hits.iter().map(String::as_str).chain(
+        positions
+            .iter()
+            .map(|position| slot_ids[*position as usize].as_str()),
+    ) {
+        if !index.points.contains(id) && !index.alternatives.contains(id) {
+            return Err(PythonEvidenceError::UnknownObligation(id.to_owned()));
         }
-        hits.insert(id.clone());
+        hits.insert(id);
     }
+    let hits = hits.into_iter().map(str::to_owned).collect::<BTreeSet<_>>();
     let mut decisions = Vec::new();
     for (id, vectors) in &observations.vectors {
         let Some(meta) = index.decisions.get(id.as_str()) else {
@@ -1716,6 +1770,7 @@ pub fn build_python_frontend_run(
         test_files,
         sites,
         limitations,
+        slot_ids,
     } = evidence;
     let mut manifest = manifest.clone();
     let index = ManifestIndex::new(&manifest);
@@ -1782,7 +1837,7 @@ pub fn build_python_frontend_run(
                 .iter()
                 .find(|(candidate, _)| candidate.phase == phase_name.as_str())
             {
-                runtime.push(snapshot(&index, observations, &id)?);
+                runtime.push(snapshot(&index, observations, &slot_ids, &id)?);
             }
             if phase_name != "call" {
                 continue;
@@ -1814,7 +1869,7 @@ pub fn build_python_frontend_run(
                     ),
                     error: None,
                 });
-                runtime.push(snapshot(&index, observations, &id)?);
+                runtime.push(snapshot(&index, observations, &slot_ids, &id)?);
                 // One phase per assertion site the call phase reached, so an
                 // assertion map can tell the sites apart. The per-test phase
                 // above keeps carrying the pre-assertion evidence; these are
@@ -1873,7 +1928,7 @@ pub fn build_python_frontend_run(
                     status: Some("failed".into()),
                     error: Some("the phase started but the runner reported no outcome".into()),
                 });
-                runtime.push(snapshot(&index, observations, &id)?);
+                runtime.push(snapshot(&index, observations, &slot_ids, &id)?);
             }
         }
         let status = if phases.iter().any(|phase| phase.error.is_some()) {
@@ -1946,7 +2001,7 @@ pub fn build_python_frontend_run(
                 status: Some("failed".into()),
                 error: Some("the phase started but the runner reported no outcome".into()),
             });
-            runtime.push(snapshot(&index, observations, &id)?);
+            runtime.push(snapshot(&index, observations, &slot_ids, &id)?);
         }
         raw_results.push(RawTestResult {
             test_id: Some(test.clone()),
@@ -1979,7 +2034,7 @@ pub fn build_python_frontend_run(
         });
     }
     for (worker, observations) in &background {
-        if observations.hits.is_empty() && observations.vectors.is_empty() {
+        if observations.is_empty() {
             continue;
         }
         let test = format!("__supercov_background__:{worker}");
@@ -2019,7 +2074,7 @@ pub fn build_python_frontend_run(
                 status: Some("passed".into()),
                 error: None,
             }],
-            runtime: vec![snapshot(&index, observations, &phase)?],
+            runtime: vec![snapshot(&index, observations, &slot_ids, &phase)?],
             browser: Vec::new(),
             server: Vec::new(),
         });
@@ -2376,7 +2431,19 @@ mod tests {
             .iter()
             .find(|(identity, _)| identity.phase == "call")
             .map(|(_, observations)| Observations {
-                hits: observations.hits.clone(),
+                // Slot hits named, as a snapshot names them.
+                hits: observations
+                    .hits
+                    .iter()
+                    .cloned()
+                    .chain(
+                        observations
+                            .slot_hits
+                            .iter()
+                            .map(|position| evidence.slot_ids[*position as usize].clone()),
+                    )
+                    .collect(),
+                slot_hits: Vec::new(),
                 vectors: observations.vectors.clone(),
             })
             .unwrap_or_default()
