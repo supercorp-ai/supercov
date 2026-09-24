@@ -4,7 +4,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { replaceCargoLock, replaceCargoToml } from "../../scripts/bump-version.mjs";
+import {
+  replaceCargoLock,
+  replaceCargoToml,
+  replacePackageJson,
+} from "../../scripts/bump-version.mjs";
 
 const MANIFEST = `[workspace.package]
 version = "1.1.0"
@@ -44,4 +48,32 @@ test("a lockfile moves the crates Supercov publishes and nobody else's", () => {
   assert.equal(count, 1);
   assert.match(text, /name = "supercov-engine"\nversion = "1\.1\.1"/);
   assert.match(text, /name = "tree-sitter-kotlin-ng"\nversion = "1\.1\.0"/);
+});
+
+// At 2.0.0 the peer range ">=2.0.0" ended in the same characters as Supercov's
+// own version, and the bump refused to move ten references it expected nine of.
+const PACKAGE = `{
+  "name": "supercov",
+  "version": "2.0.0",
+  "dependencies": {
+    "left-pad": "2.0.0"
+  },
+  "optionalDependencies": {
+    "@supercov/cli-darwin-arm64": "2.0.0",
+    "@supercov/cli-win32-x64": "2.0.0"
+  },
+  "peerDependencies": {
+    "vitest": ">=2.0.0"
+  }
+}
+`;
+
+test("a package manifest moves Supercov's own version and native pins, nobody else's", () => {
+  const { text, count } = replacePackageJson(PACKAGE, "2.0.0", "2.0.1");
+  assert.equal(count, 3, "the package version and the two native pins");
+  assert.match(text, /^ {2}"version": "2\.0\.1",$/m);
+  assert.match(text, /"@supercov\/cli-darwin-arm64": "2\.0\.1",/);
+  assert.match(text, /"@supercov\/cli-win32-x64": "2\.0\.1"$/m);
+  assert.match(text, /"vitest": ">=2\.0\.0"/, "a peer range ending in the release's version stays");
+  assert.match(text, /"left-pad": "2\.0\.0"/, "and so does a dependency pinned at the same version");
 });
