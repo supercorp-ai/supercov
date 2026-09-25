@@ -225,18 +225,28 @@ for (const directory of pluginDirectories) {
   }
 }
 
-// Claude Code finds plugins through .claude-plugin/marketplace.json, Codex
-// through .agents/plugins/marketplace.json.
+// Each agent finds the plugin through its own marketplace file: Claude Code
+// through .claude-plugin/, Codex through .agents/plugins/, Cursor through
+// .cursor-plugin/.
 const marketplaces = [
   [".claude-plugin/marketplace.json", (plugin) => plugin.source, ".claude-plugin/plugin.json"],
   [".agents/plugins/marketplace.json", (plugin) => plugin.source.path, "plugin.json"],
+  [".cursor-plugin/marketplace.json", (plugin) => plugin.source, "plugin.json"],
 ];
 for (const [path, source, manifest] of marketplaces) {
   const marketplace = JSON.parse(readFileSync(resolve(repository, path), "utf8"));
   for (const plugin of marketplace.plugins) {
-    if (!existsSync(resolve(repository, source(plugin), manifest))) {
+    const directory = resolve(repository, source(plugin));
+    if (!existsSync(resolve(directory, manifest))) {
       fail(path, `${plugin.name} source ${source(plugin)} has no ${manifest}`);
+      continue;
     }
+    const described = JSON.parse(readFileSync(resolve(directory, manifest), "utf8"));
+    if (plugin.name !== described.name) fail(path, `${plugin.name} must be named ${described.name}, as its manifest is`);
+    if (plugin.description !== undefined && plugin.description !== described.description) {
+      fail(path, `${plugin.name} description must match its manifest`);
+    }
+    if (plugin.logo && !existsSync(resolve(directory, plugin.logo))) fail(path, `${plugin.logo} does not exist`);
   }
 }
 
