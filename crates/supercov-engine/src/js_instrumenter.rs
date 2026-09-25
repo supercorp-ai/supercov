@@ -7920,10 +7920,17 @@ mod tests {
             serde_json::to_string(&b.code).unwrap(),
             serde_json::to_string(&b.code).unwrap()
         );
-        let result = std::process::Command::new("node")
-            .args(["-e", &script])
-            .output()
+        // Through stdin: the script carries the whole runtime, longer than a
+        // Windows command line may be.
+        let mut node = std::process::Command::new("node")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("Node.js for the JavaScript regression");
+        std::io::Write::write_all(&mut node.stdin.take().unwrap(), script.as_bytes()).unwrap();
+        let result = node.wait_with_output().unwrap();
         assert!(
             result.status.success(),
             "{}",
