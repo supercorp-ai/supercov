@@ -2042,3 +2042,165 @@ fn a_summary_counts_exactly_what_the_full_assessment_counts() {
         }
     }
 }
+
+/// Two tests asserting the same thing, each explained by one flow.
+fn repeated_fixture(test: &str) -> (Inputs, AssertionMap, State) {
+    let source =
+        "export function a() {\n  return null;\n}\nexport function b() {\n  return null;\n}\n";
+    let sites: Vec<InventorySite> = test
+        .match_indices("assert.equal(result, 1)")
+        .map(|(start, needle)| InventorySite {
+            at: Anchor::new("test.js", test, start, start + needle.len()),
+            operation: "assert.equal".into(),
+        })
+        .collect();
+    let inputs = Inputs {
+        schema_version: 1,
+        language: "javascript".into(),
+        context_digest: "context".into(),
+        files: Files::from([
+            ("test.js".into(), test.into()),
+            ("src/a.js".into(), source.into()),
+        ]),
+        assertions: sites,
+        limitations: vec![],
+    };
+    let (mut map, state) = seed(&inputs, "archive");
+    let second = source.rfind("return null;").unwrap();
+    for (index, a) in map.assertions.iter_mut().enumerate() {
+        a.observes = vec!["result equals one".into()];
+        a.flows = vec![Flow {
+            id: format!("f{index}"),
+            basis: None,
+            questions: vec![],
+            explanation: format!("Author judgement {index}"),
+            applies_to: vec![TestSelector {
+                file: "test.js".into(),
+                name: format!("test {index}"),
+            }],
+            nodes: vec![Node {
+                id: "return".into(),
+                at: Anchor::new("src/a.js", source, second, second + "return null;".len()),
+                role: "value".into(),
+                meaning: String::new(),
+            }],
+            edges: vec![Edge {
+                from: "return".into(),
+                to: "$assertion".into(),
+                kind: "data".into(),
+                basis: String::new(),
+            }],
+            counts_as_asserted: vec!["return".into()],
+            watch: vec![],
+        }];
+    }
+    acknowledge(&mut map, &state, &inputs, &BTreeSet::new(), true, false).unwrap();
+    (inputs, map, state)
+}
+
+fn with_file(inputs: &Inputs, file: &str, text: &str) -> Inputs {
+    let mut next = inputs.clone();
+    next.files.insert(file.into(), text.into());
+    if file == "test.js" {
+        next.assertions = text
+            .match_indices("assert.")
+            .map(|(start, _)| {
+                let end = start + text[start..].find(')').unwrap() + 1;
+                InventorySite {
+                    at: Anchor::new("test.js", text, start, end),
+                    operation: "assert.equal".into(),
+                }
+            })
+            .collect();
+    }
+    next
+}
+
+#[test]
+fn a_line_added_above_repeated_assertions_keeps_them_and_their_explanations() {
+    // TodoMVC: one assertion added at the top of a test retired 11 of 25
+    // mapped assertions, because their text repeats in the file and a moved
+    // site was found again only by text unique in the whole file.
+    let test = "test('0', () => {\n  assert.equal(result, 1);\n});\ntest('1', () => {\n  assert.equal(result, 1);\n});\n";
+    let (old, map, state) = repeated_fixture(test);
+    let edited = format!("assert.ok(ready);\n{test}");
+    let new = with_file(&old, "test.js", &edited);
+    let (next, _) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
+    assert!(
+        next.retired_assertions.is_empty(),
+        "{:?}",
+        next.retired_assertions
+    );
+    for (index, previous) in map.assertions.iter().enumerate() {
+        let kept = next
+            .assertions
+            .iter()
+            .find(|a| a.id == previous.id)
+            .unwrap();
+        assert_eq!(
+            kept.at.line,
+            previous.at.line + 1,
+            "assertion {index} moved with its line"
+        );
+        assert_eq!(kept.flows[0].explanation, previous.flows[0].explanation);
+    }
+}
+
+#[test]
+fn identical_assertions_that_could_have_traded_places_are_only_suggestions() {
+    // A third identical assertion between the two: either old one could be
+    // either new one. The explanations are kept, and their identity is asked.
+    let test = "test('0', () => {\n  assert.equal(result, 1);\n});\ntest('1', () => {\n  assert.equal(result, 1);\n});\n";
+    let (old, map, state) = repeated_fixture(test);
+    let edited = test.replacen(
+        "test('1'",
+        "test('new', () => {\n  assert.equal(result, 1);\n});\ntest('1'",
+        1,
+    );
+    let new = with_file(&old, "test.js", &edited);
+    let (next, next_state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
+    assert!(next.retired_assertions.is_empty());
+    for previous in &map.assertions {
+        let kept = next
+            .assertions
+            .iter()
+            .find(|a| a.id == previous.id)
+            .unwrap();
+        let why = reasons(kept, &kept.flows[0], &next, &next_state, &new);
+        assert!(
+            why.iter().any(|r| r.contains("confirm identity")),
+            "{why:?}"
+        );
+    }
+}
+
+#[test]
+fn a_node_in_an_unchanged_function_follows_it_down_the_file() {
+    // `return null;` appears in both functions, so a text search cannot find
+    // the second one again after a line is added above them.
+    let test = "test('0', () => {\n  assert.equal(result, 1);\n});\n";
+    let (old, map, state) = repeated_fixture(test);
+    let source = &old.files["src/a.js"];
+    let new = with_file(
+        &old,
+        "src/a.js",
+        &format!("import {{ x }} from './x.js';\n{source}"),
+    );
+    let (next, next_state) = carry(&map, &state, &old.manifest(), &new, "two", false).unwrap();
+    let node = &next.assertions[0].flows[0].nodes[0];
+    assert_eq!(
+        node.at.line,
+        map.assertions[0].flows[0].nodes[0].at.line + 1
+    );
+    let why = reasons(
+        &next.assertions[0],
+        &next.assertions[0].flows[0],
+        &next,
+        &next_state,
+        &new,
+    );
+    assert!(
+        !why.iter().any(|r| r.contains("changed or ambiguous")),
+        "{why:?}"
+    );
+}
