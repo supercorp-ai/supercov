@@ -193,16 +193,20 @@ for (const skill of skills) {
   if (body.split("\n").length > 500) fail(where, "body must stay under 500 lines");
 }
 
-// Each plugin carries two manifests: Claude Code reads .claude-plugin/, while
-// Codex and Cursor read the portable Agent Plugins plugin.json. Both
-// must name the release they ship with and describe the plugin the same way.
+// Each plugin carries three manifests: Claude Code reads .claude-plugin/,
+// Codex reads .codex-plugin/ for its listing, and Cursor and Copilot read the
+// portable Agent Plugins plugin.json. All must name the release they ship
+// with and describe the plugin the same way.
 const PORTABLE_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+const license = readFileSync(resolve(repository, "LICENSE"), "utf8");
 const pluginDirectories = readdirSync(resolve(repository, "plugins"), { withFileTypes: true })
   .filter((entry) => entry.isDirectory())
   .map((entry) => resolve(repository, "plugins", entry.name));
 for (const directory of pluginDirectories) {
-  const manifests = [".claude-plugin/plugin.json", "plugin.json"].map((name) => resolve(directory, name));
-  const [claude, portable] = manifests.map((path) => {
+  const manifests = [".claude-plugin/plugin.json", "plugin.json", ".codex-plugin/plugin.json"].map((name) =>
+    resolve(directory, name),
+  );
+  const [claude, portable, codex] = manifests.map((path) => {
     if (!existsSync(path)) {
       fail(relative(repository, path), "is missing");
       return null;
@@ -213,15 +217,22 @@ for (const directory of pluginDirectories) {
     }
     return plugin;
   });
-  if (!claude || !portable) continue;
-  const where = relative(repository, manifests[1]);
-  if (portable.$schema !== PORTABLE_SCHEMA) fail(where, `$schema must be ${PORTABLE_SCHEMA}`);
-  for (const key of ["name", "description"]) {
-    if (portable[key] !== claude[key]) fail(where, `${key} must match .claude-plugin/plugin.json`);
+  if (!claude || !portable || !codex) continue;
+  if (portable.$schema !== PORTABLE_SCHEMA) fail(relative(repository, manifests[1]), `$schema must be ${PORTABLE_SCHEMA}`);
+  for (const [index, plugin] of [[1, portable], [2, codex]]) {
+    for (const key of ["name", "description"]) {
+      if (plugin[key] !== claude[key]) fail(relative(repository, manifests[index]), `${key} must match .claude-plugin/plugin.json`);
+    }
   }
-  const listing = portable.extensions?.["com.openai"]?.interface ?? {};
+  const listing = codex.interface ?? {};
   for (const asset of new Set([listing.logo, listing.composerIcon, ...(listing.screenshots ?? [])].filter(Boolean))) {
-    if (!existsSync(resolve(directory, asset))) fail(where, `${asset} does not exist`);
+    if (!existsSync(resolve(directory, asset))) fail(relative(repository, manifests[2]), `${asset} does not exist`);
+  }
+  // The plugin folder is copied on its own into each agent's plugin cache, so
+  // it carries the repository's license with it.
+  const copied = resolve(directory, "LICENSE");
+  if (!existsSync(copied) || readFileSync(copied, "utf8") !== license) {
+    fail(relative(repository, copied), "must be a copy of the repository's LICENSE");
   }
 }
 
@@ -230,7 +241,7 @@ for (const directory of pluginDirectories) {
 // .cursor-plugin/.
 const marketplaces = [
   [".claude-plugin/marketplace.json", (plugin) => plugin.source, ".claude-plugin/plugin.json"],
-  [".agents/plugins/marketplace.json", (plugin) => plugin.source.path, "plugin.json"],
+  [".agents/plugins/marketplace.json", (plugin) => plugin.source.path, ".codex-plugin/plugin.json"],
   [".cursor-plugin/marketplace.json", (plugin) => plugin.source, "plugin.json"],
 ];
 for (const [path, source, manifest] of marketplaces) {

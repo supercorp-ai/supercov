@@ -114,6 +114,7 @@ const FILES = [
   { name: "Cargo.lock", expected: 3, replace: replaceCargoLock },
   { name: "plugins/supercov/.claude-plugin/plugin.json", expected: 1, replace: replacePackageJson },
   { name: "plugins/supercov/plugin.json", expected: 1, replace: replacePackageJson },
+  { name: "plugins/supercov/.codex-plugin/plugin.json", expected: 1, replace: replacePackageJson },
 ];
 
 export function bump(from, to, root = resolve(import.meta.dirname, "..")) {
