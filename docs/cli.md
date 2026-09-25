@@ -461,6 +461,7 @@ terminal or offline environment after the package has been downloaded.
 | --- | --- |
 | `SUPERCOV_SOURCE_ROOTS` | Comma-separated directories or files that hold your own code, in any language; everything else is left out |
 | `SUPERCOV_TEST_KIND` | Label the wrapped command as a test level such as `unit` or `e2e` |
+| `SUPERCOV_BUILD_COMMAND` | The build a JavaScript project's tests need, as words or a JSON array, such as `yarn workspace web build` in a monorepo whose root `build` builds every package. Without it Supercov runs the project's `build` script, through the package manager that started the tests, when the tests need built output |
 
 Examples:
 

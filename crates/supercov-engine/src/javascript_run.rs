@@ -719,8 +719,15 @@ pub fn run_direct_javascript(
             .map(OsString::from)
             .collect::<Vec<_>>();
         if project.build_adapter == BuildAdapter::Vite {
+            // npm hands a script the arguments after `--`; Yarn, pnpm and Bun
+            // hand it every argument after the script's name.
+            let npm = Path::new(&project.build_command[0])
+                .file_stem()
+                .is_some_and(|name| name.eq_ignore_ascii_case("npm"));
+            if npm {
+                arguments.push(OsString::from("--"));
+            }
             arguments.extend([
-                OsString::from("--"),
                 OsString::from("--config"),
                 OsString::from(".supercov/vite.config.mjs"),
                 OsString::from("--logLevel"),

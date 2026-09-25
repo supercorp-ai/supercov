@@ -767,6 +767,40 @@ fn first_config(root: &Path, candidates: &[&str]) -> Option<PathBuf> {
         .find(|path| regular_file(path))
 }
 
+/// The package manager the project's tests were started with, to run its
+/// build the same way. A Yarn or pnpm workspace's scripts call the manager
+/// that runs them; building through npm changed that for no reason.
+fn build_package_manager(command: &[String]) -> String {
+    command
+        .first()
+        .filter(|program| package_manager(program))
+        .cloned()
+        .unwrap_or_else(|| "npm".into())
+}
+
+/// The build a project names in `SUPERCOV_BUILD_COMMAND`, as words or as a
+/// JSON array of arguments.
+///
+/// A monorepo's root `build` builds every package: Actual's ran `lage build`
+/// across the repository when its browser tests needed one target. Naming
+/// the build, such as `yarn workspace @actual-app/web build`, is the answer
+/// no discovery can give, because which target a suite needs is not written
+/// down anywhere Supercov reads.
+pub fn declared_build_command(environment: &BTreeMap<String, String>) -> Option<Vec<String>> {
+    let value = environment.get(BUILD_COMMAND_VARIABLE)?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.starts_with('[') {
+        return serde_json::from_str::<Vec<String>>(value)
+            .ok()
+            .filter(|words| !words.is_empty());
+    }
+    Some(value.split_whitespace().map(str::to_owned).collect())
+}
+
+pub const BUILD_COMMAND_VARIABLE: &str = "SUPERCOV_BUILD_COMMAND";
+
 pub fn discover_coverage_project(
     root: &Path,
     environment: &BTreeMap<String, String>,
@@ -825,8 +859,10 @@ pub fn discover_coverage_project(
     let executes_source_directly = (source_transforming_runner
         || (node_test && typescript_test && !owns_build))
         && !tests_require_build_output(root, &manifest);
-    let build_command = if script(&manifest, "build").is_some() && !executes_source_directly {
-        vec!["npm".into(), "run".into(), "build".into()]
+    let build_command = if let Some(declared) = declared_build_command(environment) {
+        declared
+    } else if script(&manifest, "build").is_some() && !executes_source_directly {
+        vec![build_package_manager(command), "run".into(), "build".into()]
     } else {
         Vec::new()
     };
@@ -957,6 +993,66 @@ mod tests {
             assert!(discovered.build_command.is_empty(), "{label}");
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn builds_with_the_package_manager_the_tests_were_started_with() {
+        let root = project(
+            "yarn-build",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","test":"jest --runInBand"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                ("test/index.test.js", "require('../dist/index.js')"),
+            ],
+        );
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["yarn", "test"]))
+                .unwrap();
+        assert_eq!(discovered.build_command, command(&["yarn", "run", "build"]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_declared_build_replaces_the_root_one() {
+        // Actual's root build is `lage build` across the monorepo; its
+        // browser tests need one workspace built.
+        let root = project(
+            "declared-build",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"lage build","test":"playwright test"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+            ],
+        );
+        for (value, expected) in [
+            (
+                "yarn workspace @actual-app/web build",
+                command(&["yarn", "workspace", "@actual-app/web", "build"]),
+            ),
+            (
+                r#"["node", ".yarn/releases/yarn-4.cjs", "workspace", "web", "build"]"#,
+                command(&[
+                    "node",
+                    ".yarn/releases/yarn-4.cjs",
+                    "workspace",
+                    "web",
+                    "build",
+                ]),
+            ),
+        ] {
+            let environment = BTreeMap::from([(BUILD_COMMAND_VARIABLE.into(), value.into())]);
+            let discovered =
+                discover_coverage_project(&root, &environment, &command(&["yarn", "test"]))
+                    .unwrap();
+            assert_eq!(discovered.build_command, expected);
+            assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
