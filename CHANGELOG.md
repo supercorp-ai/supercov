@@ -1,13 +1,12 @@
 # Changelog
 
-## Unreleased
+## 2.0.1
 
 **Added**
 
-- Four Claude Code plugin commands: `/supercov:coverage` writes one test for untested code and reports coverage before and after, `/supercov:security` and `/supercov:quality` check the repository or a change, and `/supercov:review` checks a branch for what it introduced.
-- Agent skills and a Claude Code plugin, so a coding agent uses Supercov on its own when asked for tests, coverage, refactoring or a security scan, and runs the scan when `TYPESAFE_API_KEY` is set instead of asking again: `/plugin marketplace add supercorp-ai/supercov`, or `npx skills add supercorp-ai/supercov` for other agents. The skill points agents at `supercov docs`, so it follows the installed version, and a check fails the build when a command it or the guides name stops existing.
-
-- The plugin installs in Codex (`codex plugin marketplace add supercorp-ai/supercov`) and in Gemini CLI (`gemini extensions install https://github.com/supercorp-ai/supercov`), with the same skills, and in Gemini the same four commands. Cursor reads the same plugin.
+- A Supercov plugin for coding agents. The agent uses Supercov on its own when asked for tests, coverage, refactoring or a security scan, and runs the scan when `TYPESAFE_API_KEY` is set instead of asking again. It installs in Claude Code (`/plugin marketplace add supercorp-ai/supercov`), Codex (`codex plugin marketplace add supercorp-ai/supercov`) and Gemini CLI (`gemini extensions install https://github.com/supercorp-ai/supercov`). Cursor and GitHub Copilot read the same plugin, and `npx skills add supercorp-ai/supercov` adds the skills to other agents.
+- Four commands in Claude Code and Gemini CLI: `/supercov:coverage` writes one test for untested code and reports coverage before and after, `/supercov:security` and `/supercov:quality` check the repository or a change, and `/supercov:review` checks a branch for what it introduced.
+- The skills point agents at `supercov docs`, so they follow the installed version, and a check fails the build when a command they or the guides name stops existing.
 
 **Fixed**
 
