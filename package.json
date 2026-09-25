@@ -2,6 +2,23 @@
   "name": "supercov",
   "version": "2.0.1",
   "description": "Coverage, security and code quality for coding agents",
+  "keywords": [
+    "coverage",
+    "code-coverage",
+    "test-coverage",
+    "branch-coverage",
+    "mcdc",
+    "vitest",
+    "jest",
+    "playwright",
+    "pytest",
+    "security",
+    "code-quality",
+    "coding-agents",
+    "claude-code",
+    "codex",
+    "cli"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",

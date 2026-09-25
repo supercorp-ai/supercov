@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 description = "Coverage, security and code quality for coding agents"
-keywords = ["coverage", "testing", "mcdc", "cli"]
+keywords = ["coverage", "mcdc", "testing", "security", "code-quality"]
 categories = ["command-line-utilities", "development-tools::testing"]
 publish = ["crates-io"]
 

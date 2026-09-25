@@ -9,7 +9,7 @@ description = "Coverage, security and code quality for coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-keywords = ["coverage", "testing", "mcdc", "cli"]
+keywords = ["coverage", "code-coverage", "test-coverage", "branch-coverage", "mcdc", "pytest", "testing", "security", "code-quality", "coding-agents", "claude-code", "codex", "cli"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Environment :: Console",
