@@ -27,7 +27,9 @@ check                       Fail on invalid references, dirty flows, failed run,
   --min <0..100>             Minimum agent-assessed statement percentage.
 
 --needs-attention           List assertions with no flows, stale/draft flows, open questions or uncredited claims.
---file <path>               Filter assertion lists or statement/line report views.
+--file <path>[,<path>...]   Filter assertion lists or statement/line report views.
+--id <id>[,<id>...]         Only these assertions or statements (report --view assertions|statements).
+--compact                   List views without source text, with test lists as counts.
 --offset <n> --limit <n>     Page lists, assertion flows or source (zero-based offset, limit 1..1000).
 --json                      Structured output for integrations; source uses {line, text} items.
                             Large JSON pages may return fewer items; follow pagination.nextOffset.
@@ -51,6 +53,8 @@ struct Options {
     file: Option<String>,
     view: String,
     needs_attention: bool,
+    ids: Option<BTreeSet<String>>,
+    compact: bool,
     offset: usize,
     limit: usize,
 }
@@ -63,6 +67,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
         file: None,
         view: "assertions".into(),
         needs_attention: false,
+        ids: None,
+        compact: false,
         offset: 0,
         limit: 20,
     };
@@ -79,10 +85,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
         match arg.as_str() {
             "--json" => (),
             "--needs-attention" => o.needs_attention = true,
+            "--compact" => o.compact = true,
             "--require-mappings" => o.require_mappings = true,
             "--require-observed" => o.require_observed = true,
             "--archived" => return Err("--archived is removed: assertion analysis requires current files matching the run; rerun tests to inherit previous mappings".into()),
-            "--file" | "--view" | "--offset" | "--limit" | "--min" => {
+            "--file" | "--id" | "--view" | "--offset" | "--limit" | "--min" => {
                 let value = args
                     .next()
                     .filter(|v| !v.starts_with('-'))
@@ -90,6 +97,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 match arg.as_str() {
                     "--min" => o.minimum = Some(value.parse().map_err(|_| "Invalid minimum")?),
                     "--file" => o.file = Some(value.clone()),
+                    "--id" => {
+                        o.ids = Some(
+                            value
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|id| !id.is_empty())
+                                .map(str::to_owned)
+                                .collect(),
+                        );
+                    }
                     "--view" => o.view = value.clone(),
                     "--offset" => o.offset = value.parse().map_err(|_| "Invalid offset")?,
                     "--limit" => o.limit = value.parse().map_err(|_| "Invalid limit")?,
@@ -137,6 +154,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         | "excludedStatements"
                 ),
         ),
+        (
+            "--id",
+            o.action == "report" && matches!(o.view.as_str(), "assertions" | "statements"),
+        ),
+        ("--compact", o.action == "report" && o.view != "summary"),
         ("--view", matches!(o.action.as_str(), "report" | "validate")),
     ] {
         if seen.contains(flag) && !valid {
@@ -275,15 +297,30 @@ pub fn command(args: &[String]) -> ExitCode {
                         .unwrap()
                         .iter()
                         .filter(|row| {
-                            o.file.as_ref().is_none_or(|file| {
-                                row["file"].as_str().or_else(|| row["at"]["file"].as_str())
-                                    == Some(file.as_str())
+                            // Several files at once, comma-separated: an author
+                            // mapping a change reads the files it touches in
+                            // one call rather than one call per file.
+                            o.file.as_ref().is_none_or(|files| {
+                                let file =
+                                    row["file"].as_str().or_else(|| row["at"]["file"].as_str());
+                                files.split(',').map(str::trim).any(|f| Some(f) == file)
+                            })
+                        })
+                        .filter(|row| {
+                            o.ids.as_ref().is_none_or(|ids| {
+                                row["id"].as_str().is_some_and(|id| ids.contains(id))
                             })
                         })
                         .filter(|row| !o.needs_attention || needs_attention(row))
                         .cloned()
                         .collect::<Vec<_>>();
-                    page(&values, o.offset, o.limit)
+                    let mut paged = page(&values, o.offset, o.limit);
+                    if o.compact {
+                        compact_anchors(&mut paged["items"]);
+                        compact_test_lists(&mut paged["items"]);
+                        paged["compact"] = json!(true);
+                    }
+                    paged
                 };
                 for key in [
                     "summary",
@@ -297,7 +334,27 @@ pub fn command(args: &[String]) -> ExitCode {
                 }
                 data["view"] = json!(o.view);
                 data["file"] = json!(o.file);
-                data["needsAttention"] = json!(o.needs_attention);
+                // Whether anything in the run asks for work, whatever this
+                // page shows. It used to echo the --needs-attention filter, so
+                // a map whose check failed on four open questions read
+                // `needsAttention: false`.
+                let attention = report["assertions"].as_array().map_or(0, |rows| {
+                    rows.iter().filter(|row| needs_attention(row)).count()
+                });
+                data["attention"] = json!({ "assertions": attention });
+                data["needsAttention"] = json!(
+                    attention > 0
+                        || report["summary"]["pendingChanges"].as_u64().unwrap_or(0) > 0
+                        || report["validationErrors"]
+                            .as_array()
+                            .is_none_or(|e| !e.is_empty())
+                );
+                data["filters"] = json!({
+                    "file": o.file,
+                    "ids": o.ids,
+                    "needsAttention": o.needs_attention,
+                    "compact": o.compact,
+                });
                 data["scope"] = json!(
                     "summary covers the whole run with matching current source; --file filters items only"
                 );
@@ -412,6 +469,32 @@ fn parse_inspection(args: &[String], source: bool) -> Result<Inspection, String>
         return Err("--view nodes|edges requires --flow <id>".into());
     }
     Ok(o)
+}
+
+/// Test lists as counts. A statement run by four hundred tests carried four
+/// hundred IDs in every row of an authoring inventory; the counts say whether
+/// and how widely it ran, and `runs <run> line <file:line>` names the tests.
+fn compact_test_lists(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for key in ["tests", "passingTests", "outsidePassingTests"] {
+                if let Some(Value::Array(tests)) = object.get(key) {
+                    let count = tests.len();
+                    object.remove(key);
+                    object.insert(format!("{key}Count"), json!(count));
+                }
+            }
+            for child in object.values_mut() {
+                compact_test_lists(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                compact_test_lists(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn compact_anchors(value: &mut Value) {
@@ -723,6 +806,47 @@ pub fn global_command(args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_authoring_inventory_selects_files_and_ids_and_compacts_rows() {
+        let args: Vec<String> = [
+            "report",
+            "--view",
+            "statements",
+            "--file",
+            "src/a.ts,src/b.ts",
+            "--id",
+            "s1, s2",
+            "--compact",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let options = super::parse(&args).unwrap();
+        assert!(options.compact);
+        assert_eq!(
+            options.ids.unwrap(),
+            ["s1", "s2"].into_iter().map(String::from).collect()
+        );
+        // Compacting is for list views; a summary has no rows to compact.
+        assert!(super::parse(&["report".into(), "--compact".into()]).is_err());
+        assert!(super::parse(&["check".into(), "--id".into(), "s1".into()]).is_err());
+
+        let mut rows = serde_json::json!([{
+            "id": "s1",
+            "at": {"file": "src/a.ts", "line": 1, "column": 1, "text": "return (\n  1\n);"},
+            "tests": ["t1", "t2", "t3"],
+            "executionEvidence": {"passingTests": ["t1"], "outsidePassingTests": []},
+        }]);
+        super::compact_anchors(&mut rows);
+        super::compact_test_lists(&mut rows);
+        let row = &rows[0];
+        assert_eq!(row["at"]["textOmitted"], true);
+        assert_eq!(row["at"]["sourceLines"], 3);
+        assert_eq!(row["testsCount"], 3);
+        assert_eq!(row["executionEvidence"]["passingTestsCount"], 1);
+        assert!(row.get("tests").is_none());
+    }
+
     #[test]
     fn large_flow_can_be_paged_and_compacted_without_changing_the_map() {
         let options = parse_inspection(
