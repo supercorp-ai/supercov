@@ -291,6 +291,20 @@ pub const ATTRIBUTION_RUN_WIDE: &str = "run-wide";
 /// prove what it ran and its silence proves nothing.
 pub const ATTRIBUTION_PARTIAL: &str = "partial";
 
+/// Of two attributions for one test, the one that claims less.
+fn least_exact(left: &str, right: &str) -> String {
+    let rank = |attribution: &str| match attribution {
+        ATTRIBUTION_RUN_WIDE => 2,
+        ATTRIBUTION_PARTIAL => 1,
+        _ => 0,
+    };
+    if rank(right) > rank(left) {
+        right.to_owned()
+    } else {
+        left.to_owned()
+    }
+}
+
 /// Whether what this test is recorded as reaching is its own.
 ///
 /// True for `exact` and for `partial`: both record real coverage of this
@@ -1579,6 +1593,11 @@ fn create_coverage_view_with_model(
             );
         }
         let test = tests_by_id.get_mut(&id).expect("test was inserted");
+        // A test's records can disagree about how exactly its coverage is its
+        // own, and the least exact one is true of the whole: Playwright's
+        // outcome record says nothing about coverage and often arrives first,
+        // before the record that says a worker could not be read.
+        test.attribution = least_exact(&test.attribution, &raw.attribution);
         test.unstarted |= raw.status.as_deref() == Some("unstarted");
         if let Some(retry) = raw.retry {
             test.retries.insert(retry);
@@ -3839,6 +3858,21 @@ mod tests {
         assert!(coverage_is_complete(ATTRIBUTION_EXACT));
         assert!(!coverage_is_complete(ATTRIBUTION_PARTIAL));
         assert!(!coverage_is_complete(ATTRIBUTION_RUN_WIDE));
+
+        // A test's records merge to the least exact claim among them, in
+        // whichever order they arrive.
+        for (left, right, merged) in [
+            (ATTRIBUTION_EXACT, ATTRIBUTION_PARTIAL, ATTRIBUTION_PARTIAL),
+            (ATTRIBUTION_PARTIAL, ATTRIBUTION_EXACT, ATTRIBUTION_PARTIAL),
+            (
+                ATTRIBUTION_PARTIAL,
+                ATTRIBUTION_RUN_WIDE,
+                ATTRIBUTION_RUN_WIDE,
+            ),
+            (ATTRIBUTION_EXACT, ATTRIBUTION_EXACT, ATTRIBUTION_EXACT),
+        ] {
+            assert_eq!(least_exact(left, right), merged);
+        }
 
         // And a frontend that has never heard of the field keeps its meaning:
         // absent is exact, so nothing already measured changes shape.
