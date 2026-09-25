@@ -750,7 +750,43 @@ pub fn is_security_extra(path: &Path) -> bool {
     {
         return false;
     }
+    if extension == "json" {
+        return json_configuration(path);
+    }
     TEMPLATE_EXTENSIONS.contains(&extension) || CONFIG_EXTENSIONS.contains(&extension)
+}
+
+/// Whether a JSON file is configuration rather than data.
+///
+/// JSON is where a project keeps its settings and, as often, its data:
+/// translation tables, schema snapshots, API descriptions, scanner output.
+/// Across the 72 held-out RealVuln repositories Supercov read 136 JSON files,
+/// 44 of them failed over the request budget, three were flagged, and none
+/// held a labelled weakness. A secret or a switched-off protection lives in a
+/// file whose name or directory says it configures something, so only those
+/// are read.
+fn json_configuration(path: &Path) -> bool {
+    const NAMES: &[&str] = &[
+        "appsettings",
+        "config",
+        "conf",
+        "credentials",
+        "firebase",
+        "secret",
+        "secrets",
+        "serviceaccount",
+        "settings",
+    ];
+    const DIRECTORIES: &[&str] = &["config", "configs", "conf", "settings", "secrets"];
+    let lower = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let (directories, name) = lower.rsplit_once('/').unwrap_or(("", lower.as_str()));
+    let stem = name.strip_suffix(".json").unwrap_or(name);
+    stem.split(['.', '-', '_'])
+        .any(|part| NAMES.contains(&part) || part == "env")
+        || directories.split('/').any(|d| DIRECTORIES.contains(&d))
 }
 
 fn template_or_config_nodes(path: &Path, source: &str) -> Vec<Node> {

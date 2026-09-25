@@ -188,6 +188,9 @@ const MAX_REQUEST_TOKENS: usize = 30_000;
 // bytes per token on jev-1.13.0; dense, minified or non-Latin source packs more
 // tokens into the same bytes, so estimating low keeps us inside the limit.
 const BYTES_PER_TOKEN: usize = 3;
+// A run of base64 characters at least this long is counted at a token a byte.
+// Identifiers and URLs in ordinary source stay well under it.
+const DENSE_RUN: usize = 64;
 // Nothing larger is read into memory, whether it would be windowed or not.
 const MAX_SOURCE_BYTES: usize = 4 << 20;
 // A declaration larger than half the budget is split at its own children rather
@@ -661,14 +664,38 @@ struct Window {
 
 /// Tokens the provider is likely to charge for a serialized request. An
 /// estimate, never a measurement; `BYTES_PER_TOKEN` explains the direction.
-fn estimated_tokens(bytes: usize) -> usize {
-    bytes.div_ceil(BYTES_PER_TOKEN)
+///
+/// A long run of base64 characters, such as an image inlined into an HTML
+/// report, is counted at a token per byte. Such text has no words for a
+/// tokenizer to merge: a 74,653-byte report whose inline images made up
+/// 33,804 bytes was estimated at 24,885 tokens, sent, and rejected by the API
+/// as too large. Measured against 1,367 requests whose real input counts the
+/// API reported, this estimate is below the real count once, by 3%, which the
+/// gap between `MAX_REQUEST_TOKENS` and the model's limit absorbs.
+fn estimated_tokens(bytes: &[u8]) -> usize {
+    let dense = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-');
+    let mut runs = 0;
+    let mut run = 0;
+    for byte in bytes {
+        if dense(byte) {
+            run += 1;
+        } else {
+            if run >= DENSE_RUN {
+                runs += run;
+            }
+            run = 0;
+        }
+    }
+    if run >= DENSE_RUN {
+        runs += run;
+    }
+    (bytes.len() - runs).div_ceil(BYTES_PER_TOKEN) + runs
 }
 
 /// The serialized request, when it fits the token budget.
 fn within_budget(request: &Value) -> Result<Option<Vec<u8>>, String> {
     let bytes = serde_json::to_vec(request).map_err(|e| e.to_string())?;
-    Ok((estimated_tokens(bytes.len()) <= MAX_REQUEST_TOKENS).then_some(bytes))
+    Ok((estimated_tokens(&bytes) <= MAX_REQUEST_TOKENS).then_some(bytes))
 }
 
 /// Byte offset of every line start, so a window can be sliced without
@@ -750,6 +777,23 @@ fn split_units(path: &str, source: &str) -> Option<(Value, Vec<(String, usize)>)
 /// Every line of the file assigned to one candidate window, split only at the
 /// first line of a top-level declaration. Code before the first declaration
 /// joins it rather than becoming a window of its own.
+/// Where a file may be split: its declarations when Supercov parses it, and
+/// otherwise the whole file as one piece for the caller to cut at lines.
+fn window_candidates(path: &str, source: &str, lines: &[usize]) -> Vec<Window> {
+    candidates(path, source, lines).map_or_else(
+        || {
+            vec![Window {
+                index: 1,
+                of: 1,
+                start_line: 1,
+                end_line: lines.len().max(1),
+                declarations: Vec::new(),
+            }]
+        },
+        |(_, windows)| windows,
+    )
+}
+
 fn candidates(path: &str, source: &str, lines: &[usize]) -> Option<(Value, Vec<Window>)> {
     let (outline, top) = split_units(path, source)?;
     if top.is_empty() {
@@ -962,6 +1006,17 @@ fn generated_header(source: &str) -> bool {
         })
 }
 
+/// A directory an assessment never walks into. `target` is one only when a
+/// build owns it; see `target_is_build_output`.
+fn ignored_directory_at(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    ignored_directory(&name)
+        && (name != "target" || supercov_engine::source_discovery::target_is_build_output(path))
+}
+
 fn ignored_directory(name: &str) -> bool {
     matches!(
         name,
@@ -985,6 +1040,7 @@ fn is_assessable(path: &Path, instrument: Instrument) -> bool {
     is_source(path) || (instrument == Instrument::Security && candidates::is_security_extra(path))
 }
 
+#[cfg(test)]
 fn discover(root: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     discover_for(root, paths, Instrument::Catalog)
 }
@@ -1024,8 +1080,12 @@ fn discover_for(
                 ));
             }
         }
+        // Assessability is judged on the path inside the project: a JSON file
+        // is configuration by its own directories, not by where the checkout
+        // happens to sit.
+        let inside = |path: &Path| path.strip_prefix(root).unwrap_or(path).to_owned();
         if metadata.is_file() {
-            if !is_assessable(&canonical, instrument) {
+            if !is_assessable(&inside(&canonical), instrument) {
                 return Err(format!("unsupported source extension: {}", path.display()));
             }
             files.insert(canonical);
@@ -1036,13 +1096,13 @@ fn discover_for(
                 .filter_entry(|entry| {
                     entry.depth() == 0
                         || !entry.file_type().is_some_and(|t| t.is_dir())
-                        || !ignored_directory(&entry.file_name().to_string_lossy())
+                        || !ignored_directory_at(entry.path())
                 })
                 .build();
             for entry in walker {
                 let entry = entry.map_err(|e| e.to_string())?;
                 if entry.file_type().is_some_and(|t| t.is_file())
-                    && is_assessable(entry.path(), instrument)
+                    && is_assessable(&inside(entry.path()), instrument)
                 {
                     files.insert(entry.into_path());
                 }
@@ -1296,9 +1356,7 @@ fn evaluate(
             continue;
         }
         if !(200..300).contains(&status) {
-            return Err(format!(
-                "{host} HTTP {status} (check credentials, quota or request size)"
-            ));
+            return Err(http_failure(host, status));
         }
         let mut bytes = Vec::new();
         response
@@ -1448,6 +1506,46 @@ fn answer_all(
         .expect("answers are only locked to insert one")
 }
 
+/// Whether a report has nothing in it to read: every file it tried failed.
+///
+/// That, and not one oversized data file among five hundred, is what exit 2
+/// ("Supercov could not complete the request") means. A report that assessed
+/// 490 of 532 files is complete, names the rest with their reasons, and exits
+/// 0; a script that treated 2 as failure was discarding it.
+fn nothing_assessed(files: &[Value]) -> bool {
+    !files.is_empty() && files.iter().all(|f| f["status"] == "failed")
+}
+
+/// The line that says some files were not assessed, for a report that is
+/// otherwise complete.
+fn unassessed_note(report: &Value) -> Option<String> {
+    let files = report["files"].as_array()?;
+    let failed = files.iter().filter(|f| f["status"] == "failed").count();
+    (failed > 0 && failed < files.len()).then(|| {
+        format!(
+            "[supercov] {failed} of {} files could not be assessed; each is listed in the \
+             report with its reason",
+            files.len()
+        )
+    })
+}
+
+/// What a refused request most likely means, by status. One message naming
+/// credentials, quota and size together sent a reader to their key for a file
+/// that was simply too large.
+fn http_failure(host: &str, status: u16) -> String {
+    let cause = match status {
+        400 | 413 => {
+            "the request was refused, most often because it is larger than the \
+                      model accepts"
+        }
+        401 | 403 => "the key was refused; check TYPESAFE_API_KEY",
+        402 | 429 => "the account is out of quota or rate-limited; try again later",
+        _ => "the request failed",
+    };
+    format!("{host} HTTP {status}: {cause}")
+}
+
 /// A saved view: JSON for a program, text for a person. Reading never fails
 /// the command on the strength of what it found.
 /// Windows for a file too large to send whole, planned for the catalog.
@@ -1456,17 +1554,50 @@ fn answer_all(
 /// one text, so a window is still a real piece of code to ask about. Windows
 /// merge greedily while the merged request still fits, which keeps their number
 /// down and each one as wide as possible.
-fn catalog_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, String> {
+///
+/// Sized with the instrument's own request, which is the one sent: the
+/// security questions are longer than the catalog's, so a window planned for
+/// the catalog could still be over budget when security sent it.
+///
+/// A piece too large to send on its own is cut at line boundaries: a file
+/// with no parser, such as a template, or one declaration larger than the
+/// budget. Only a single line over the budget cannot be assessed, and the
+/// error says so.
+fn catalog_windows(
+    path: &str,
+    source: &str,
+    instrument: Instrument,
+) -> Result<Vec<(Window, String)>, String> {
     let starts = line_starts(source);
-    let (_, candidates) = candidates(path, source, &starts).ok_or(
-        "file is over the request budget and has no parsed top-level declarations to window on",
-    )?;
     let fits = |window: &Window| -> Result<bool, String> {
         let text = window_source(source, &starts, window);
-        Ok(within_budget(&catalog::file_request(path, text))?.is_some())
+        Ok(within_budget(&instrument.file_request(path, text))?.is_some())
     };
+    let mut pieces: Vec<Window> = Vec::new();
+    for candidate in window_candidates(path, source, &starts) {
+        if fits(&candidate)? {
+            pieces.push(candidate);
+            continue;
+        }
+        for line in candidate.start_line..=candidate.end_line {
+            let piece = Window {
+                index: 0,
+                of: 0,
+                start_line: line,
+                end_line: line,
+                declarations: candidate.declarations.clone(),
+            };
+            if !fits(&piece)? {
+                return Err(format!(
+                    "file is over the request budget and line {line} alone is too; \
+                     it is probably minified or embeds data"
+                ));
+            }
+            pieces.push(piece);
+        }
+    }
     let mut planned: Vec<Window> = Vec::new();
-    for candidate in candidates {
+    for candidate in pieces {
         let merged = planned.last().map(|open| Window {
             index: open.index,
             of: open.of,
@@ -1616,7 +1747,7 @@ fn require_key(key: Option<&str>, instrument: Instrument) -> Result<(), String> 
 fn estimated_cost(pending: &[(Slot, Value, Vec<u8>)]) -> (usize, f64) {
     let tokens: usize = pending
         .iter()
-        .map(|(_, _, bytes)| estimated_tokens(bytes.len()))
+        .map(|(_, _, bytes)| estimated_tokens(bytes))
         .sum();
     (tokens, tokens as f64 / 1e6 * USD_PER_MILLION_INPUT_TOKENS)
 }
@@ -1862,9 +1993,7 @@ fn line_views(path: &str, source: &str, nodes: &[candidates::Node]) -> Vec<View>
 /// budget is cut every two hundred lines.
 fn line_windows(path: &str, source: &str) -> Result<Vec<(Window, String)>, String> {
     let starts = line_starts(source);
-    let (_, declared) = candidates(path, source, &starts).ok_or(
-        "file is over the request budget and has no parsed top-level declarations to window on",
-    )?;
+    let declared = window_candidates(path, source, &starts);
     let half = MAX_REQUEST_TOKENS * BYTES_PER_TOKEN / 2;
     let bytes = |window: &Window| window_source(source, &starts, window).len();
     let mut cut: Vec<Window> = Vec::new();
@@ -2729,6 +2858,33 @@ fn finding_counts(files: &[Value]) -> (usize, usize, BTreeMap<String, usize>) {
     (flagged, line_confirmed, by_check)
 }
 
+/// The files an instrument reads, decided once for the assessment, its dry run,
+/// its `scope` view and its `patch`. Each used to decide for itself, so
+/// `security scope` could report no source at all on a checkout `security`
+/// then assessed.
+///
+/// Security reads every file the conventions did not exclude. The model's
+/// reading of what ships is a fine scope for a health number and a bad one for
+/// weaknesses: a directory it reads as not part of the product (`bad/` in a
+/// vulnerable-by-design app, an examples tree, a script) is deployed as often
+/// as not, and leaving it out cost 53 of 57 labelled weaknesses on one
+/// repository.
+fn scope_for(root: &Path, files: &[PathBuf], instrument: Instrument) -> scope::Scope {
+    let configured = scope::configured_roots();
+    let mut scope = scope::classify(root, files, configured.as_deref());
+    if instrument == Instrument::Security {
+        for entry in scope
+            .entries
+            .iter_mut()
+            .filter(|e| e.status == scope::Status::Ambiguous)
+        {
+            entry.status = scope::Status::Included;
+            entry.reason = "security reads every file the conventions do not exclude".into();
+        }
+    }
+    scope
+}
+
 /// Health for every file, every directory that holds one, and the tree.
 /// Ask the model about the files no convention could settle.
 ///
@@ -2812,25 +2968,8 @@ fn run_health(
         endpoint()?;
     }
     let found = discover_for(root, &options.paths, instrument)?;
-    let configured = scope::configured_roots();
-    let mut scope = scope::classify(root, &found, configured.as_deref());
-    let resolved = if options.dry_run {
-        None
-    } else if instrument == Instrument::Security {
-        // Security reads every source file the conventions did not exclude.
-        // The model's reading of what ships is a fine scope for a health
-        // number and a bad one for weaknesses: a directory it reads as not
-        // part of the product (`bad/` in a vulnerable-by-design app, an
-        // examples tree, a script) is deployed as often as not, and leaving
-        // it out cost 53 of 57 labelled weaknesses on one repository.
-        for entry in scope
-            .entries
-            .iter_mut()
-            .filter(|e| e.status == scope::Status::Ambiguous)
-        {
-            entry.status = scope::Status::Included;
-            entry.reason = "security reads every file the conventions do not exclude".into();
-        }
+    let mut scope = scope_for(root, &found, instrument);
+    let resolved = if options.dry_run || instrument == Instrument::Security {
         None
     } else {
         resolve_ambiguity(root, &mut scope, &found, key, options.refresh)
@@ -2942,7 +3081,7 @@ fn run_health(
                         sha256,
                         note: None,
                     }),
-                    Ok(None) => match catalog_windows(&relative, &source) {
+                    Ok(None) => match catalog_windows(&relative, &source, instrument) {
                         Ok(windows) => {
                             let count = windows.len();
                             for (window, text) in windows {
@@ -3075,7 +3214,7 @@ fn run_health(
     }
     files.extend(unreadable);
     let (flagged, line_confirmed, by_check) = finding_counts(&files);
-    let failed = files.iter().any(|f| f["status"] == "failed");
+    let failed = nothing_assessed(&files);
     let errors = files.iter().filter(|f| f["status"] == "failed").count();
 
     let directories: Vec<Value> = by_directory
@@ -3166,9 +3305,8 @@ fn run_patch(
     require_key(key, instrument)?;
     endpoint()?;
     let collected = changes::collect(root, range, paths)?;
-    let configured = scope::configured_roots();
     let changed: Vec<PathBuf> = collected.iter().map(|c| root.join(&c.path)).collect();
-    let scope = scope::classify(root, &changed, configured.as_deref());
+    let scope = scope_for(root, &changed, instrument);
     let in_scope: BTreeMap<String, scope::Status> = scope
         .entries
         .iter()
@@ -3189,7 +3327,7 @@ fn run_patch(
             }));
             continue;
         }
-        if !is_source(Path::new(&change.path)) {
+        if !is_assessable(Path::new(&change.path), instrument) {
             skipped.push(json!({ "path": change.path, "reason": "not a source file" }));
             continue;
         }
@@ -3260,7 +3398,7 @@ fn run_patch(
             .cmp(&a["introduced"].as_u64().unwrap_or(0))
             .then_with(|| a["path"].as_str().cmp(&b["path"].as_str()))
     });
-    let failed = ordered.iter().any(|f| f["status"] == "failed");
+    let failed = nothing_assessed(&ordered);
     Ok((
         json!({
             "instrument": instrument.name(),
@@ -3930,9 +4068,8 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 limit,
             } => present(query::gaps(&root, lane, snapshot.as_deref(), limit)?, json),
             Command::Scope { json, limit } => {
-                let found = discover(&root, &here())?;
-                let configured = scope::configured_roots();
-                let view = scope::classify(&root, &found, configured.as_deref());
+                let found = discover_for(&root, &here(), instrument)?;
+                let view = scope_for(&root, &found, instrument);
                 let shown: Vec<&scope::Entry> = view
                     .entries
                     .iter()
@@ -3988,6 +4125,9 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 } else {
                     print!("{}", human_security(&report));
                 }
+                if let Some(note) = unassessed_note(&report) {
+                    eprintln!("{note}");
+                }
                 Ok(failed)
             }
             Command::Patch {
@@ -4034,6 +4174,9 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                 }
                 if annotate {
                     print!("{}", annotations(&report));
+                }
+                if let Some(note) = unassessed_note(&report) {
+                    eprintln!("{note}");
                 }
                 Ok(failed)
             }

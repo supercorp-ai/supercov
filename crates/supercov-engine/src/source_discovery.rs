@@ -32,6 +32,33 @@ const GENERATED_DIRECTORIES: &[&str] = &[
     "test-results",
     "vendor",
 ];
+/// Whether a directory called `target` is a build tool's output rather than a
+/// project's own code.
+///
+/// Cargo, Maven, sbt and Leiningen write there, but the name is not theirs: a
+/// Flask application kept its whole package in `target/`, and dropping the
+/// directory by name left the repository with no source at all. It is output
+/// when a build that writes there is declared beside it, or when Cargo's own
+/// markers are inside it, which also covers a `CARGO_TARGET_DIR` placed
+/// elsewhere.
+pub fn target_is_build_output(directory: &Path) -> bool {
+    const BUILDS: &[&str] = &[
+        "Cargo.toml",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "build.sbt",
+        "project.clj",
+    ];
+    const MARKERS: &[&str] = &["CACHEDIR.TAG", ".rustc_info.json"];
+    directory
+        .parent()
+        .is_some_and(|parent| BUILDS.iter().any(|name| parent.join(name).is_file()))
+        || MARKERS.iter().any(|name| directory.join(name).is_file())
+}
+
 const SOURCE_DIRECTORIES: &[&str] = &["app", "src", "lib", "server", "client", "functions", "api"];
 const PACKAGE_PARENTS: &[&str] = &["apps", "packages", "services", "workspaces"];
 const TEST_DIRECTORIES: &[&str] = &[

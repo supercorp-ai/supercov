@@ -1,10 +1,10 @@
 # Security surface
 
-`supercov security` tells you what security-relevant surface each file shows:
+`npx supercov security` tells you what security-relevant surface each file shows:
 twelve named checks, asked file by file, each mapped to the weakness classes it
 stands for. There is no score. A file is clean, or it names what fired.
 
-Judgments come from [Jev](https://typesafe.ai), the same way `supercov quality`
+Judgments come from [Jev](https://typesafe.ai), the same way `npx supercov quality`
 gets them. Set `TYPESAFE_API_KEY`, and optionally another provider, as described
 in [quality](quality.md); reading a saved assessment never needs a key.
 
@@ -61,8 +61,35 @@ are the weakest, because the guard that decides them lives in another file.
 Every scanner's results are at
 [supercov.com/docs/security-benchmark](https://supercov.com/docs/security-benchmark).
 A file too large for one request is read in windows at declaration
-boundaries.
+boundaries, or at line boundaries where Supercov has no parser for it, such as
+a template.
+## What is read
 
+Security reads every source file, template and configuration file that the
+conventions do not exclude, including files under no recognised source root,
+because code a project did not declare is deployed as often as not.
+`npx supercov security scope` lists exactly the files a run reads and why the
+rest were left out. Three kinds are left out because they are not the code
+under review:
+
+- **Tests and generated output**, as for `quality`.
+- **Vendored and minified JavaScript.** A minified file anywhere, and in a
+  served or vendor directory (`static/`, `public/`, `assets/`, `plugins/`,
+  `vendor/`, `lib/`) a file with a licence banner or a well-known library's
+  name, such as `jquery.flot.js` or `swagger-ui-bundle.js`.
+- **JSON data.** A JSON file is read when its name or directory says it
+  configures something (`config.json`, `proxy.conf.json`, `appsettings.json`,
+  `secrets.json`, anything under `config/`), and not when it holds data such
+  as translations, schema snapshots or scanner output.
+
+A directory called `target/` is build output only when a build that writes
+there (Cargo, Maven, Gradle, sbt, Leiningen) is declared beside it; otherwise
+it is read like any other. Name a file directly to read it whatever the scope
+says: `npx supercov security static/js/app.min.js`.
+
+A run that could not assess a few files still exits 0: each one is in the
+report with its reason, and stderr says how many. It exits 2 only when no
+file could be assessed.
 ## Across files
 
 The second pass also labels every function of every file, on the same

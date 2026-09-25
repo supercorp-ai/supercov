@@ -145,7 +145,8 @@ fn walk(
             .to_string_lossy()
             .replace('\\', "/");
         if file_type.is_dir() {
-            if EXCLUDED_DIRECTORIES.contains(&name.as_str())
+            if (EXCLUDED_DIRECTORIES.contains(&name.as_str())
+                && (name != "target" || crate::source_discovery::target_is_build_output(&path)))
                 || name.ends_with(".egg-info")
                 || is_venv(&path)
             {
