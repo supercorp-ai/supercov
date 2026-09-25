@@ -2,8 +2,23 @@
 
 ## Unreleased
 
+**Changed**
+
+- `supercov security` reads what the code under review is: a `target/` directory is build output only when Cargo, Maven, Gradle, sbt or Leiningen owns it, minified and vendored JavaScript is left out, and JSON is read only when it configures something. On the 72 held-out RealVuln repositories F1 rises from 0.42 to 0.44, and one repository whose code sat in `target/` goes from no findings to 11 of its 21 labelled weaknesses. `security scope`, `--dry-run` and `patch` list the files a run reads.
+- `quality` and `security` exit 0 for a report in which some files could not be assessed, and say how many on stderr; 2 means none could.
+- Each Vitest, Jest and node:test test is recorded by appending to a journal instead of writing and syncing a file. A 63,740-test Vitest suite that did not finish in seven minutes now records in under two.
+- Instrumenting a long JavaScript file takes time proportional to its length; a 16,000-line file takes under two seconds where 8,000 lines took over a minute and a half.
+- `assertions report` says whether the run needs attention whatever the filter, takes `--compact`, several `--file`s and `--id`, and a JavaScript build runs through the package manager that started the tests, or as `SUPERCOV_BUILD_COMMAND` names it.
+
 **Fixed**
 
+- JSX in a `.js` file is measured instead of failing the run before any test.
+- An application served as plain `<script>` files is measured, and so are its classic and dedicated workers; a worker blocked in `Atomics.wait` no longer stalls the suite, and a test whose worker could not be read is reported as a lower bound.
+- A TypeScript test typechecks under `tsc --strict` after instrumentation, and `@ts-expect-error` stays on the line it guards: test files are edited in place rather than reprinted.
+- A TypeScript Playwright config in a CommonJS package keeps its settings.
+- An assertion or node whose text repeats in its file keeps its explanation when a line is added above it, and a flow can watch the HTML or CSS a browser test renders.
+- Benchmarks (`*.bench.ts`) are not counted as application source.
+- A file larger than the model accepts is windowed or skipped with a reason, not sent and refused with HTTP 400.
 - `supercov docs` prints commands the way you started Supercov: `npx supercov` from npm, the `go run` command from Go, and `supercov` from the PyPI, Ruby and Rust packages. Guides that wrote a bare `supercov …` no longer print a command a JavaScript project cannot run.
 - The security guide quotes the 2.0.1 benchmark on 72 RealVuln repositories (F1 0.42, 10 seconds and about 5 cents a repository) with a link to every scanner's results.
 
