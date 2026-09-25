@@ -16,7 +16,7 @@ Scoring needs a [TypeSafe AI](https://typesafe.ai) API key, and your coding agen
 
 Supported languages: [JavaScript](https://supercov.com/docs/javascript) · [TypeScript](https://supercov.com/docs/javascript) · [Rust](https://supercov.com/docs/rust) · [Python](https://supercov.com/docs/python) · [Ruby](https://supercov.com/docs/ruby) · [Go](https://supercov.com/docs/go) · [Java](https://supercov.com/docs/java) · [Kotlin](https://supercov.com/docs/kotlin).
 
-In Claude Code you can also [install it as a plugin](#give-supercov-a-job).
+In Claude Code, Codex and Gemini CLI you can also [install it as a plugin](#give-supercov-a-job).
 
 Supported by [Supercorp](https://supercorp.ai).
 
@@ -177,9 +177,22 @@ Or install the agent skill, and your agent reaches for Supercov on its own when 
 /plugin install supercov@supercov
 ```
 
-For Codex, Cursor and other agents that read skills: `npx skills add supercorp-ai/supercov`.
+In Codex:
 
-The Claude Code plugin also adds four commands you can type:
+```bash
+codex plugin marketplace add supercorp-ai/supercov
+codex plugin add supercov@supercov
+```
+
+In Gemini CLI:
+
+```bash
+gemini extensions install https://github.com/supercorp-ai/supercov
+```
+
+For Cursor, GitHub Copilot and other agents that read skills: `npx skills add supercorp-ai/supercov`.
+
+The Claude Code plugin and the Gemini CLI extension also add four commands you can type:
 
 | Command | What it does |
 | --- | --- |
