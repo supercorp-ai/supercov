@@ -191,18 +191,73 @@ for (const skill of skills) {
   if (!description || description.length > 1024) fail(where, "description must be 1 to 1024 characters");
   if (/[<>]/.test(frontmatter)) fail(where, "frontmatter must not contain angle brackets");
   if (body.split("\n").length > 500) fail(where, "body must stay under 500 lines");
+}
 
-  const manifest = resolve(dirname(skill), "../../.claude-plugin/plugin.json");
-  const plugin = JSON.parse(readFileSync(manifest, "utf8"));
-  if (plugin.version !== version) {
-    fail(relative(repository, manifest), `version ${plugin.version} must match package.json ${version}`);
+// Each plugin carries three manifests: Claude Code reads .claude-plugin/,
+// Codex reads .codex-plugin/ for its listing, and Cursor and Copilot read the
+// portable Agent Plugins plugin.json. All must name the release they ship
+// with and describe the plugin the same way.
+const PORTABLE_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+const license = readFileSync(resolve(repository, "LICENSE"), "utf8");
+const pluginDirectories = readdirSync(resolve(repository, "plugins"), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => resolve(repository, "plugins", entry.name));
+for (const directory of pluginDirectories) {
+  const manifests = [".claude-plugin/plugin.json", "plugin.json", ".codex-plugin/plugin.json"].map((name) =>
+    resolve(directory, name),
+  );
+  const [claude, portable, codex] = manifests.map((path) => {
+    if (!existsSync(path)) {
+      fail(relative(repository, path), "is missing");
+      return null;
+    }
+    const plugin = JSON.parse(readFileSync(path, "utf8"));
+    if (plugin.version !== version) {
+      fail(relative(repository, path), `version ${plugin.version} must match package.json ${version}`);
+    }
+    return plugin;
+  });
+  if (!claude || !portable || !codex) continue;
+  if (portable.$schema !== PORTABLE_SCHEMA) fail(relative(repository, manifests[1]), `$schema must be ${PORTABLE_SCHEMA}`);
+  for (const [index, plugin] of [[1, portable], [2, codex]]) {
+    for (const key of ["name", "description"]) {
+      if (plugin[key] !== claude[key]) fail(relative(repository, manifests[index]), `${key} must match .claude-plugin/plugin.json`);
+    }
+  }
+  const listing = codex.interface ?? {};
+  for (const asset of new Set([listing.logo, listing.composerIcon, ...(listing.screenshots ?? [])].filter(Boolean))) {
+    if (!existsSync(resolve(directory, asset))) fail(relative(repository, manifests[2]), `${asset} does not exist`);
+  }
+  // The plugin folder is copied on its own into each agent's plugin cache, so
+  // it carries the repository's license with it.
+  const copied = resolve(directory, "LICENSE");
+  if (!existsSync(copied) || readFileSync(copied, "utf8") !== license) {
+    fail(relative(repository, copied), "must be a copy of the repository's LICENSE");
   }
 }
 
-const marketplace = JSON.parse(readFileSync(resolve(repository, ".claude-plugin/marketplace.json"), "utf8"));
-for (const plugin of marketplace.plugins) {
-  if (!existsSync(resolve(repository, plugin.source, ".claude-plugin/plugin.json"))) {
-    fail(".claude-plugin/marketplace.json", `${plugin.name} source ${plugin.source} has no plugin.json`);
+// Each agent finds the plugin through its own marketplace file: Claude Code
+// through .claude-plugin/, Codex through .agents/plugins/, Cursor through
+// .cursor-plugin/.
+const marketplaces = [
+  [".claude-plugin/marketplace.json", (plugin) => plugin.source, ".claude-plugin/plugin.json"],
+  [".agents/plugins/marketplace.json", (plugin) => plugin.source.path, ".codex-plugin/plugin.json"],
+  [".cursor-plugin/marketplace.json", (plugin) => plugin.source, "plugin.json"],
+];
+for (const [path, source, manifest] of marketplaces) {
+  const marketplace = JSON.parse(readFileSync(resolve(repository, path), "utf8"));
+  for (const plugin of marketplace.plugins) {
+    const directory = resolve(repository, source(plugin));
+    if (!existsSync(resolve(directory, manifest))) {
+      fail(path, `${plugin.name} source ${source(plugin)} has no ${manifest}`);
+      continue;
+    }
+    const described = JSON.parse(readFileSync(resolve(directory, manifest), "utf8"));
+    if (plugin.name !== described.name) fail(path, `${plugin.name} must be named ${described.name}, as its manifest is`);
+    if (plugin.description !== undefined && plugin.description !== described.description) {
+      fail(path, `${plugin.name} description must match its manifest`);
+    }
+    if (plugin.logo && !existsSync(resolve(directory, plugin.logo))) fail(path, `${plugin.logo} does not exist`);
   }
 }
 

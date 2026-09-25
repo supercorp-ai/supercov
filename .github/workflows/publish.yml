@@ -183,6 +183,10 @@ jobs:
         with:
           name: supercov-native-release-set
           path: native-release
+      # Gemini CLI installs its extension from the release, taking the asset
+      # named for the user's platform.
+      - name: Build the Gemini CLI extension
+        run: node scripts/gemini-extension.mjs gemini-release
       # CHANGELOG.md holds the public notes. Package preflight already refused
       # the release unless this version has a section, so the release simply
       # publishes it. Commit messages stay internal.
@@ -198,13 +202,13 @@ jobs:
           if gh release view "$tag" > /dev/null 2>&1; then
             echo "$tag already exists; attaching its files again."
             gh release upload "$tag" \
-              native-release/*.tgz native-release/*.whl native-release/*.gem --clobber
+              native-release/*.tgz native-release/*.whl native-release/*.gem gemini-release/*.tar.gz --clobber
           else
             gh release create "$tag" \
               --target "$RELEASE_SHA" \
               --title "Release ${RELEASE_VERSION}" \
               --notes-file /tmp/release-notes.md \
-              native-release/*.tgz native-release/*.whl native-release/*.gem
+              native-release/*.tgz native-release/*.whl native-release/*.gem gemini-release/*.tar.gz
           fi
 
   # The tap carries a sha256 per platform, so its formula is only correct for
