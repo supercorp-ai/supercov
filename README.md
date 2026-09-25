@@ -163,7 +163,7 @@ newest available map for that command and language and identifies dirty flows. R
 validation, change tracking and reporting; the agent supplies semantic reasoning.
 The score is agent-assessed and separate from MC/DC. See
 [assertion maps](docs/assertion-maps.md) for the format and JS/TS limits, or run
-`supercov docs assertion-agent` for the agent workflow. `supercov assertions schema`
+`npx supercov docs assertion-agent` for the agent workflow. `npx supercov assertions schema`
 exports the editor schema; `assertions validate --file <path>` checks JSON syntax.
 
 ## Give Supercov a job

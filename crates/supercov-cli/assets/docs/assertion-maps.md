@@ -227,7 +227,7 @@ metrics or the returned items are filtered.
 
 ## Find the next part to investigate
 
-| Command after `supercov runs <run-id>` | Shows |
+| Command after `npx supercov runs <run-id>` | Shows |
 | --- | --- |
 | `assertions` | Assertions, including those without recorded flows. |
 | `assertions --needs-attention` | Missing explanations, questions, stale or draft flows, and claimed nodes without credit. |

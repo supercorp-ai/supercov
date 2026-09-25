@@ -107,7 +107,7 @@ The **New run** button beside
 the view tabs opens a prompt to measure the current project, reusing the saved
 test command when available. Neither button executes commands or requires report
 generation. Security prompts include the saved audit ID and current findings,
-and use the `supercov security` command.
+and use the `npx supercov security` command.
 
 File headers show Coverage, Assertions, Quality, and Security without repeating
 the detailed counts. Below the source, Tests comes before Assertions and Quality,
