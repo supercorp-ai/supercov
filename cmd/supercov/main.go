@@ -152,6 +152,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Tells the binary how it was started, so the commands it prints (such as
+	// those in `supercov docs`) can be pasted back into this shell.
+	if err := os.Setenv("SUPERCOV_LAUNCHER", "go"); err != nil {
+		return err
+	}
 	return hand(binary, os.Args[1:])
 }
 

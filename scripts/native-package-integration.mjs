@@ -147,7 +147,7 @@ try {
   for (const file of primary.files.filter(file => file.startsWith('docs/'))) {
     const topic = file.slice(5, -3);
     assert.equal(run(process.execPath, [executable, 'docs', topic], { cwd: consumer, env: consumerEnv }),
-      readFileSync(resolve(consumer, 'node_modules/supercov', file), 'utf8').trim());
+      asLaunchedFromNpm(readFileSync(resolve(consumer, 'node_modules/supercov', file), 'utf8')).trim());
   }
   const installedSchema = JSON.parse(readFileSync(resolve(consumer, 'node_modules/supercov/schemas/assertions.schema.json'), 'utf8'));
   assert.deepEqual(JSON.parse(run(process.execPath, [executable, 'assertions', 'schema'], { cwd: consumer, env: consumerEnv })), installedSchema);
@@ -192,4 +192,21 @@ try {
   console.log(`[native-package] packed install and execution passed with ${target.package}`);
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+}
+
+// `supercov docs` prints a guide's commands the way the reader started it; from
+// npm a bare `supercov <args>` in a shell block or inline code gains `npx`.
+// Recorded `text` blocks are printed as written.
+function asLaunchedFromNpm(markdown) {
+  let fence = null;
+  return markdown.split(/(?<=\n)/).map((line) => {
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith('```')) {
+      fence = fence === null ? ['sh', 'bash', 'shell', 'console'].includes(trimmed.replace(/^`+/, '').trim().split(/\s+/)[0]) : null;
+      return line;
+    }
+    if (fence === true) return line.replace(/^(\s*(?:\$ )?)supercov /, '$1npx supercov ');
+    if (fence === false) return line;
+    return line.split('`').map((piece, index) => index % 2 === 1 && piece.startsWith('supercov ') ? `npx ${piece}` : piece).join('`');
+  }).join('');
 }

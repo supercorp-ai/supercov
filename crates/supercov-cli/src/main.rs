@@ -420,6 +420,75 @@ fn build_rust_libtest_companion(arguments: Vec<String>) -> ExitCode {
     }
 }
 
+/// The command the reader used to start Supercov. The npm package sets
+/// `SUPERCOV_PACKAGE_ROOT`, the Go launcher sets `SUPERCOV_LAUNCHER=go`, and
+/// the PyPI, Ruby and Rust packages run the binary itself as `supercov`.
+fn launcher_command() -> &'static str {
+    match std::env::var("SUPERCOV_LAUNCHER").as_deref() {
+        Ok("go") => "go run github.com/supercorp-ai/supercov/cmd/supercov@latest",
+        _ if std::env::var_os("SUPERCOV_PACKAGE_ROOT").is_some() => "npx supercov",
+        _ => "supercov",
+    }
+}
+
+/// Guides write commands as `npx supercov …`, and sometimes as bare
+/// `supercov …`. Print both the way the reader started Supercov, in shell
+/// blocks and inline code, so a pasted command runs. `text` blocks are
+/// recorded output and stay exactly as recorded.
+fn localize_guide(markdown: &str, command: &str) -> String {
+    // A bare `supercov` on its own names the binary; with arguments it is a command.
+    let rewrite = |code: &str| -> Option<String> {
+        if let Some(rest) = code.strip_prefix("npx supercov") {
+            return (rest.is_empty() || rest.starts_with(' ')).then(|| format!("{command}{rest}"));
+        }
+        let rest = code.strip_prefix("supercov")?;
+        rest.starts_with(' ').then(|| format!("{command}{rest}"))
+    };
+    let mut fence: Option<bool> = None;
+    let mut out = String::with_capacity(markdown.len());
+    for line in markdown.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            fence = match fence {
+                Some(_) => None,
+                None => {
+                    let info = trimmed.trim_start_matches('`').trim();
+                    let language = info.split_whitespace().next().unwrap_or("");
+                    Some(matches!(language, "sh" | "bash" | "shell" | "console"))
+                }
+            };
+            out.push_str(line);
+            continue;
+        }
+        match fence {
+            Some(true) => {
+                let indent = &line[..line.len() - trimmed.len()];
+                let (prompt, body) = trimmed
+                    .strip_prefix("$ ")
+                    .map_or(("", trimmed), |body| ("$ ", body));
+                match rewrite(body) {
+                    Some(text) => out.push_str(&format!("{indent}{prompt}{text}")),
+                    None => out.push_str(line),
+                }
+            }
+            Some(false) => out.push_str(line),
+            None => {
+                // Inline code: every other backtick-separated piece is code.
+                for (index, piece) in line.split('`').enumerate() {
+                    if index > 0 {
+                        out.push('`');
+                    }
+                    match (index % 2 == 1).then(|| rewrite(piece)).flatten() {
+                        Some(text) => out.push_str(&text),
+                        None => out.push_str(piece),
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 fn docs_command(arguments: Vec<String>) -> ExitCode {
     if arguments
         .iter()
@@ -464,8 +533,9 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         "workspace-isolation" => Some(include_str!("../assets/docs/workspace-isolation.md")),
         _ => None,
     };
+    let command = launcher_command();
     if let Some(markdown) = embedded {
-        print!("{markdown}");
+        print!("{}", localize_guide(markdown, command));
         return ExitCode::SUCCESS;
     }
     let mut roots = Vec::new();
@@ -480,7 +550,7 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         let path = root.join("docs").join(format!("{topic}.md"));
         match fs::read_to_string(&path) {
             Ok(markdown) => {
-                print!("{markdown}");
+                print!("{}", localize_guide(&markdown, command));
                 if !markdown.ends_with('\n') {
                     println!();
                 }
@@ -4484,6 +4554,35 @@ fn pack_evidence() -> ExitCode {
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod docs_command_tests {
+    use super::localize_guide;
+
+    const GUIDE: &str = "Run `npx supercov security` or `supercov quality`.\nKeep `supercov-cli` and `supercov`.\n\n```sh\nnpx supercov -- npm test\nsupercov runs latest   # newest run\n$ supercov security patch\n```\n\n```text\nsupercov security: 3 files flagged\n```\n";
+
+    #[test]
+    fn guides_print_commands_the_way_the_reader_started_supercov() {
+        let go = "go run github.com/supercorp-ai/supercov/cmd/supercov@latest";
+        let printed = localize_guide(GUIDE, go);
+        assert!(printed.contains(&format!("Run `{go} security` or `{go} quality`.")));
+        assert!(printed.contains(&format!(
+            "{go} -- npm test\n{go} runs latest   # newest run\n$ {go} security patch"
+        )));
+        // A package name, the bare binary name and recorded output stay put.
+        assert!(printed.contains("Keep `supercov-cli` and `supercov`."));
+        assert!(printed.contains("```text\nsupercov security: 3 files flagged\n```"));
+
+        let npm = localize_guide(GUIDE, "npx supercov");
+        assert!(npm.contains("`npx supercov quality`"));
+        assert!(npm.contains("npx supercov runs latest"));
+        assert!(!npm.contains("npx npx"));
+
+        let native = localize_guide(GUIDE, "supercov");
+        assert!(native.contains("`supercov security`"));
+        assert!(native.contains("```sh\nsupercov -- npm test"));
+    }
 }
 
 #[cfg(test)]

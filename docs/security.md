@@ -50,15 +50,18 @@ attempt measured on the labelled corpus fired on unguarded handlers the
 application leaves open by design as often as on the ones it should not.
 
 
-Measured with this command on fifteen held-out repositories of a
-140-repository labelled corpus, whole repositories, at finding level: F1
-0.47 with 54% precision and 41% recall, where Semgrep scores 0.14, the
-general agentic LLM scanners 0.50 to 0.60, and the two leaders 0.76 and
-0.77, at about two cents per repository against 30 cents to 4 dollars for
-the agentic scanners. Injection, secrets, path, redirect and mass
-assignment are found at 70 to 90% recall; authorisation and authentication
-at 10%, because the guard that decides them lives in another file. A file
-too large for one request is read in windows at declaration boundaries.
+Measured with 2.0.1 on the 72 held-out repositories of RealVuln, a
+140-repository labelled corpus, scored by its own rule: F1 0.42 with 42%
+precision and 43% recall, in a median of 10 seconds and about 5 cents a
+repository. The strongest agent-based scanners score 0.69 to 0.71 but take
+5 to 9 minutes and about $4 a repository; Semgrep's default rules score 0.11.
+Redirects, injection, unsafe code execution and paths taken from a request
+are found at 79 to 89% recall; authorisation (11%) and authentication (24%)
+are the weakest, because the guard that decides them lives in another file.
+Every scanner's results are at
+[supercov.com/docs/security-benchmark](https://supercov.com/docs/security-benchmark).
+A file too large for one request is read in windows at declaration
+boundaries.
 
 ## Across files
 

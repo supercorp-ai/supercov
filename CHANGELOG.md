@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `supercov docs` prints commands the way you started Supercov: `npx supercov` from npm, the `go run` command from Go, and `supercov` from the PyPI, Ruby and Rust packages. Guides that wrote a bare `supercov …` no longer print a command a JavaScript project cannot run.
+- The security guide quotes the 2.0.1 benchmark on 72 RealVuln repositories (F1 0.42, 10 seconds and about 5 cents a repository) with a link to every scanner's results.
+
 ## 2.0.1
 
 **Added**
