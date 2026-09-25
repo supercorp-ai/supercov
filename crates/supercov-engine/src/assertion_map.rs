@@ -321,29 +321,41 @@ fn required_basis<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
     let value = Option::<String>::deserialize(d)?;
     if value.as_deref().is_some_and(|s| !valid_basis(s)) {
         return Err(serde::de::Error::custom(
-            "expected null or scov3:<64 lowercase hex digits>",
+            "expected null or scov<format>:<64 lowercase hex digits>",
         ));
     }
     Ok(value)
 }
 fn basis_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({"type":["string","null"],"pattern":"^scov[23]:[0-9a-f]{64}$"})
+    schemars::json_schema!({"type":["string","null"],"pattern":"^scov[0-9]+:[0-9a-f]{64}$"})
+}
+/// The format of an acknowledgement token: what goes into its digest.
+///
+/// Raise it whenever that changes -- the parts of a claim the token covers,
+/// or how a declaration is digested -- because every acknowledged flow then
+/// reads as needing acknowledgement, and with the format raised it says why.
+/// Without it, 0.0.51 to 0.0.53 left 604 of supergateway's 721 flows stale
+/// with nothing changed and nothing said. The tests that pin a token and the
+/// declaration digests fail when the format should rise.
+pub const BASIS_FORMAT: u32 = 3;
+fn basis_format(s: &str) -> Option<u32> {
+    let (format, hash) = s.strip_prefix("scov")?.split_once(':')?;
+    let format = format.parse::<u32>().ok()?;
+    (hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(format)
 }
 fn valid_basis(s: &str) -> bool {
-    s.strip_prefix("scov3:")
-        .or_else(|| s.strip_prefix("scov2:"))
-        .is_some_and(|h| {
-            h.len() == 64
-                && h.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
+    basis_format(s).is_some_and(|format| (2..=BASIS_FORMAT).contains(&format))
 }
-/// A token from a release whose basis pinned files rather than the code a
-/// claim rests on. It still parses, so the map stays valid; it can no longer
-/// match, so the claim reads as needing acknowledgement, with this as its
-/// reason rather than a change that never happened.
+/// A token from a release whose format was different. It still parses, so the
+/// map stays valid; it can no longer match, so the claim reads as needing
+/// acknowledgement, with this as its reason rather than a change that never
+/// happened.
 pub fn superseded_basis(s: &str) -> bool {
-    s.starts_with("scov2:")
+    basis_format(s).is_some_and(|format| format < BASIS_FORMAT)
 }
 pub const SUPERSEDED_BASIS: &str = "acknowledged under an earlier Supercov basis format; reread the claim and copy the current expectedBasis";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -770,7 +782,7 @@ pub fn dependencies<'a>(a: &'a Assertion, f: &'a Flow) -> BTreeSet<&'a str> {
         .collect()
 }
 fn token(value: &impl Serialize) -> String {
-    format!("scov3:{}", digest(value))
+    format!("scov{BASIS_FORMAT}:{}", digest(value))
 }
 fn flow_keys(map: &AssertionMap) -> BTreeSet<String> {
     map.assertions
