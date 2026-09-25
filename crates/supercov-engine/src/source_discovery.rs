@@ -585,6 +585,22 @@ fn test_or_fixture(file: &str) -> bool {
         .any(|part| matches!(part, "test" | "spec"))
 }
 
+/// A benchmark: Vitest's `*.bench.ts` beside the code it measures, or a file
+/// under a `bench`/`benchmarks` directory. It runs the product; it is not the
+/// product. jshttp/cookie keeps four `src/*.bench.ts` files, which were
+/// counted as application source and led the list of code no test ran.
+fn benchmark(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    let (directories, name) = lower.rsplit_once('/').unwrap_or(("", lower.as_str()));
+    directories
+        .split('/')
+        .any(|segment| matches!(segment, "bench" | "benches" | "benchmark" | "benchmarks"))
+        || name
+            .split('.')
+            .skip(1)
+            .any(|part| matches!(part, "bench" | "benchmark"))
+}
+
 fn tool_script(file: &str) -> bool {
     file.to_ascii_lowercase()
         .split('/')
@@ -1079,6 +1095,8 @@ pub fn discover_source_scope(
                 SourceScopeStatus::Excluded,
                 "conventional tool script",
             ));
+        } else if benchmark(&file) {
+            entries.push(entry(SourceScopeStatus::Excluded, "benchmark"));
         } else if config_file(&file) {
             entries.push(entry(
                 SourceScopeStatus::Excluded,
@@ -1216,13 +1234,27 @@ mod tests {
                 ("packages/ui/tests/ui.spec.ts", "test('ui', () => {})"),
                 ("dist/generated.js", "generated"),
                 (".cache/tool/generated.js", "cached"),
+                ("src/parse.bench.ts", "bench('parse', () => {})"),
+                (
+                    "benchmarks/value-slice.bench.ts",
+                    "bench('slice', () => {})",
+                ),
+                ("src/benchmarkReport.ts", "export const report = 1"),
             ],
         );
         let discovered = discover_source_scope(&root, None).unwrap();
         assert_eq!(
             discovered.source_files,
-            ["lib/helper.js", "packages/ui/src/index.ts", "src/index.ts"]
+            [
+                "lib/helper.js",
+                "packages/ui/src/index.ts",
+                "src/benchmarkReport.ts",
+                "src/index.ts"
+            ]
         );
+        for file in ["src/parse.bench.ts", "benchmarks/value-slice.bench.ts"] {
+            assert_eq!(entry(&discovered, file).reason, "benchmark", "{file}");
+        }
         assert_eq!(
             entry(&discovered, "orphan.ts").status,
             SourceScopeStatus::Ambiguous

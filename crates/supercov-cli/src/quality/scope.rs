@@ -381,6 +381,14 @@ fn beside_the_product(file: &str) -> Option<&'static str> {
             _ => {}
         }
     }
+    // Vitest keeps a benchmark beside the code it measures, as `*.bench.ts`.
+    if name
+        .split('.')
+        .skip(1)
+        .any(|part| matches!(part, "bench" | "benchmark"))
+    {
+        return Some("benchmark");
+    }
     // How a build tool is configured is not the product being built. `config`
     // as a whole dot-separated part covers `vite.config.ts`, `eslint.config.mjs`
     // and `tsup.config.ts` without touching a file merely named `configure.ts`.
