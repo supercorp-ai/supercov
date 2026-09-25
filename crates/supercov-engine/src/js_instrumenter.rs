@@ -1368,6 +1368,7 @@ pub fn assertion_ranges_with_expect_modules(
     source: &str,
     modules: &[String],
 ) -> Result<Vec<(usize, usize, String)>, String> {
+    let _positions = PositionScope::enter();
     let source_type = project_source_type(Path::new(file))?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
@@ -1593,6 +1594,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
     capability_wrapper: Option<&str>,
     assertion_runtime: Option<&str>,
 ) -> Result<NodeAssertionInstrumentation, CandidateError> {
+    let _positions = PositionScope::enter();
     let assertion_candidate = source.contains("assert") || source.contains("expect");
     let capability_candidate = capability_wrapper.is_some() && capability_source_candidate(source);
     if !assertion_candidate && !capability_candidate {
@@ -2506,6 +2508,7 @@ fn observes_function_source<State>(span: Span, context: &TraverseCtx<'_, State>)
 }
 
 pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
+    let _positions = PositionScope::enter();
     let elide_type_imports = false;
     let source_type =
         project_source_type(Path::new(file)).map_err(CandidateError::UnknownSourceType)?;
@@ -2759,6 +2762,7 @@ fn instrument_candidate_with_binding(
     capability_wrapper: Option<&str>,
     elide_type_imports: bool,
 ) -> Result<CandidateOutput, CandidateError> {
+    let _positions = PositionScope::enter();
     let source_type =
         project_source_type(Path::new(file)).map_err(CandidateError::UnknownSourceType)?;
     let allocator = Allocator::default();
@@ -5397,7 +5401,12 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
 
 struct CandidateNames<'s> {
     source: &'s str,
-    allocated: Vec<String>,
+    /// Every identifier in the source that begins with `_`, which every
+    /// generated name does. Asking the source whether it contains a name was
+    /// a scan of the whole file per name, and names are allocated per
+    /// function: the second quadratic cost in instrumenting a long file.
+    underscored: HashSet<&'s str>,
+    allocated: HashSet<String>,
     suffix: usize,
     /// Appended to every name, so output that shares a scope with other
     /// instrumented files cannot collide with theirs.
@@ -5410,12 +5419,27 @@ impl<'s> CandidateNames<'s> {
     }
 
     fn within(source: &'s str, namespace: &str) -> Self {
+        let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+        let underscored = source
+            .split(|c: char| !identifier(c))
+            .filter(|word| word.starts_with('_'))
+            .collect();
         Self {
             source,
-            allocated: Vec::new(),
+            underscored,
+            allocated: HashSet::new(),
             suffix: 0,
             namespace: namespace.to_owned(),
         }
+    }
+
+    fn taken(&self, candidate: &str) -> bool {
+        self.allocated.contains(candidate)
+            || if candidate.starts_with('_') {
+                self.underscored.contains(candidate)
+            } else {
+                self.source.contains(candidate)
+            }
     }
 
     fn allocate(&mut self, base: &str) -> String {
@@ -5426,8 +5450,8 @@ impl<'s> CandidateNames<'s> {
                 format!("{base}{}{}", self.suffix, self.namespace)
             };
             self.suffix += 1;
-            if !self.source.contains(&candidate) && !self.allocated.contains(&candidate) {
-                self.allocated.push(candidate.clone());
+            if !self.taken(&candidate) {
+                self.allocated.insert(candidate.clone());
                 return candidate;
             }
         }
@@ -7684,7 +7708,144 @@ fn source_slice(source: &str, span: Span) -> &str {
     &source[span.start as usize..span.end as usize]
 }
 
+/// Where every line of one source starts, in bytes and in UTF-16 units, so a
+/// position is a binary search rather than a scan from the top of the file.
+///
+/// Every probe, decision and branch records its line, column and a UTF-16
+/// offset, and each was counted from the first byte of the file: the work
+/// grew with the square of the file's length. An 8,000-line file took 97
+/// seconds to instrument on a debug build, a 24,000-line one did not finish
+/// in ten minutes, and Actual's setup spent minutes before its first test.
+struct SourcePositions {
+    address: usize,
+    length: usize,
+    sample: u64,
+    line_starts: Vec<usize>,
+    utf16_before_line: Vec<usize>,
+    ascii_line: Vec<bool>,
+}
+
+impl SourcePositions {
+    fn sample(source: &str) -> u64 {
+        let bytes = source.as_bytes();
+        let head = &bytes[..bytes.len().min(64)];
+        let tail = &bytes[bytes.len().saturating_sub(64)..];
+        head.iter()
+            .chain(tail)
+            .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            })
+    }
+
+    fn new(source: &str) -> Self {
+        let mut line_starts = vec![0];
+        let mut utf16_before_line = vec![0];
+        let mut ascii_line = Vec::new();
+        let mut utf16 = 0;
+        let mut ascii = true;
+        for (index, character) in source.char_indices() {
+            utf16 += character.len_utf16();
+            ascii &= character.is_ascii();
+            if character == '\n' {
+                line_starts.push(index + 1);
+                utf16_before_line.push(utf16);
+                ascii_line.push(ascii);
+                ascii = true;
+            }
+        }
+        ascii_line.push(ascii);
+        Self {
+            address: source.as_ptr() as usize,
+            length: source.len(),
+            sample: Self::sample(source),
+            line_starts,
+            utf16_before_line,
+            ascii_line,
+        }
+    }
+
+    fn describes(&self, source: &str) -> bool {
+        self.address == source.as_ptr() as usize
+            && self.length == source.len()
+            && self.sample == Self::sample(source)
+    }
+
+    /// Zero-based line, and the UTF-16 units from that line's start.
+    fn locate(&self, source: &str, offset: usize) -> (usize, usize) {
+        let line = self.line_starts.partition_point(|start| *start <= offset) - 1;
+        let start = self.line_starts[line];
+        let column = if self.ascii_line[line] {
+            offset - start
+        } else {
+            source[start..offset].encode_utf16().count()
+        };
+        (line, column)
+    }
+}
+
+thread_local! {
+    static POSITIONS: std::cell::RefCell<Option<Vec<std::rc::Rc<SourcePositions>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While one of these is alive, positions in any source are computed from an
+/// index built once for it. It lives for one instrumentation call, during
+/// which the source it indexes is borrowed and cannot move; outside one,
+/// positions are counted from the top as before.
+pub(crate) struct PositionScope {
+    owner: bool,
+}
+
+impl PositionScope {
+    pub(crate) fn enter() -> Self {
+        let owner = POSITIONS.with(|positions| {
+            let mut positions = positions.borrow_mut();
+            let owner = positions.is_none();
+            if owner {
+                *positions = Some(Vec::new());
+            }
+            owner
+        });
+        Self { owner }
+    }
+}
+
+impl Drop for PositionScope {
+    fn drop(&mut self) {
+        if self.owner {
+            POSITIONS.with(|positions| *positions.borrow_mut() = None);
+        }
+    }
+}
+
+fn indexed(source: &str) -> Option<std::rc::Rc<SourcePositions>> {
+    POSITIONS.with(|positions| {
+        let mut positions = positions.borrow_mut();
+        let known = positions.as_mut()?;
+        if let Some(found) = known.iter().find(|index| index.describes(source)) {
+            return Some(found.clone());
+        }
+        let built = std::rc::Rc::new(SourcePositions::new(source));
+        known.push(built.clone());
+        Some(built)
+    })
+}
+
+fn utf16_offset(source: &str, offset: usize) -> usize {
+    match indexed(source) {
+        Some(index) => {
+            let (line, column) = index.locate(source, offset);
+            index.utf16_before_line[line] + column
+        }
+        None => source[..offset].encode_utf16().count(),
+    }
+}
+
 pub(crate) fn line_and_utf16_column(source: &str, offset: usize) -> (usize, usize) {
+    if let Some(index) = indexed(source) {
+        let (line, column) = index.locate(source, offset);
+        return (line + 1, column + 1);
+    }
     let prefix = &source[..offset];
     let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
@@ -7693,8 +7854,8 @@ pub(crate) fn line_and_utf16_column(source: &str, offset: usize) -> (usize, usiz
 }
 
 fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> String {
-    let start = source[..span.start as usize].encode_utf16().count();
-    let end = source[..span.end as usize].encode_utf16().count();
+    let start = utf16_offset(source, span.start as usize);
+    let end = utf16_offset(source, span.end as usize);
     let digest = Sha256::digest(format!("{file}:{kind}:{start}:{end}:{suffix}").as_bytes());
     let mut id = String::with_capacity(16);
     for byte in &digest[..8] {
@@ -7706,6 +7867,33 @@ fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_positions_agree_with_counting_from_the_top() {
+        let source =
+            "const s = 'naïve 🚀';\n\nexport function f(a) {\n  return a ? 'é' : s;\n}\n// 日本\nx";
+        let counted: Vec<_> = source
+            .char_indices()
+            .map(|(offset, _)| {
+                (
+                    line_and_utf16_column(source, offset),
+                    stable_id(source, "f.js", "k", Span::new(0, offset as u32), ""),
+                )
+            })
+            .collect();
+        let _positions = PositionScope::enter();
+        for ((offset, _), (position, id)) in source.char_indices().zip(counted) {
+            assert_eq!(
+                line_and_utf16_column(source, offset),
+                position,
+                "offset {offset}"
+            );
+            assert_eq!(
+                stable_id(source, "f.js", "k", Span::new(0, offset as u32), ""),
+                id
+            );
+        }
+    }
 
     #[test]
     fn classic_scripts_share_application_globals_but_not_probe_bindings() {
