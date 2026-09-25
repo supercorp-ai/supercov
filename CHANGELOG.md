@@ -13,6 +13,8 @@
 **Fixed**
 
 - JSX in a `.js` file is measured instead of failing the run before any test.
+- A run whose tests leave async work running into the next test opens: axios's ended with `Failed to open coverage index … unknown frontend phase reference`. A leftover no longer carries the ended test's phase, and runs recorded by 2.0.1 open too.
+- Tests that pollute `Object.prototype`, as axios's prototype-pollution tests do, pass under Supercov as they do without it.
 - An application served as plain `<script>` files is measured, and so are its classic and dedicated workers; a worker blocked in `Atomics.wait` no longer stalls the suite, and a test whose worker could not be read is reported as a lower bound.
 - A TypeScript test typechecks under `tsc --strict` after instrumentation, and `@ts-expect-error` stays on the line it guards: test files are edited in place rather than reprinted.
 - A TypeScript Playwright config in a CommonJS package keeps its settings.

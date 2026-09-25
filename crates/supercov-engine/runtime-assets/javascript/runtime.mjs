@@ -1,10 +1,13 @@
 var __defProp = Object.defineProperty;
-var __defProps = Object.defineProperties;
-var __getOwnPropDescs = Object.getOwnPropertyDescriptors;
 var __getOwnPropSymbols = Object.getOwnPropertySymbols;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __propIsEnum = Object.prototype.propertyIsEnumerable;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+// The runtime runs inside the application under test, and its tests may
+// pollute Object.prototype on purpose: axios's set `Object.prototype.get`, and
+// a descriptor that inherits `get` makes defineProperty throw "Getter must be a
+// function", failing tests that pass without Supercov. Every descriptor here has
+// no prototype, and spreading copies values rather than descriptors.
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { __proto__: null, enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __spreadValues = (a, b) => {
   for (var prop in b || (b = {}))
     if (__hasOwnProp.call(b, prop))
@@ -16,7 +19,7 @@ var __spreadValues = (a, b) => {
     }
   return a;
 };
-var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
+var __spreadProps = (a, b) => __spreadValues(a, b);
 
 // dist/transport.js
 var COVERAGE_SCOPE_HEADER = "x-supercov-scope";
@@ -897,13 +900,26 @@ installServerChildPropagation();
  * against the attempt it claims to belong to without a lookup.
  */
 function phaseBelongsToAttempt(phaseId, attemptId) {
-  return typeof phaseId === "string" && typeof attemptId === "string" && attemptId.length > 0 && phaseId.startsWith(`${attemptId}:phase:`);
+  return typeof phaseId === "string" && typeof attemptId === "string" && attemptId.length > 0 && phaseId.startsWith(`${attemptId}:`);
 }
 function currentPhaseId() {
   if (runtimeGlobal.__SUPERCOV_PHASE_ID__)
     return runtimeGlobal.__SUPERCOV_PHASE_ID__;
-  if (!isBrowser)
-    return currentRequestContext().phaseId;
+  if (!isBrowser) {
+    // Async work an earlier test started -- a stream, a socket, a timer --
+    // keeps that test's context and can run after the next test has begun.
+    // Its phase belongs to the earlier attempt, and tagging this test's
+    // evidence with it made the whole run unreadable ("unknown frontend phase
+    // reference"): axios's HTTP/2 upload tests did it three times in 2,201.
+    // Where the process knows which test is running, only that test's phases
+    // are honoured; a server process, which learns its test from the request,
+    // keeps the carried phase.
+    const context = currentRequestContext();
+    const active = runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__;
+    if (context.phaseId && active && !phaseBelongsToAttempt(context.phaseId, active.attemptId))
+      return void 0;
+    return context.phaseId;
+  }
   try {
     // The stored phase is per origin, so in a browser context that outlives
     // its test (a persistent profile shared by a whole worker) it still holds
@@ -1170,6 +1186,7 @@ function selectionBegin(shortId, rightId) {
 function applyInferredName(value, inferredName) {
   if (inferredName && typeof value === "function" && value.name === "") {
     Object.defineProperty(value, "name", {
+      __proto__: null,
       value: inferredName,
       configurable: true
     });
