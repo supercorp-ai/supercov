@@ -679,6 +679,346 @@ fn capability_import_roots(program: &Program<'_>, source: &str) -> HashSet<Strin
     collector.roots
 }
 
+/// One change to a test file's text: `text` replaces `start..end`, an empty
+/// range for an insertion. Insertions at one offset are ordered by `rank`, so
+/// a wrapper that encloses another opens before it and closes after it.
+struct TextEdit {
+    start: usize,
+    end: usize,
+    rank: i64,
+    text: String,
+}
+
+impl TextEdit {
+    fn insert(at: usize, rank: i64, text: String) -> Self {
+        Self {
+            start: at,
+            end: at,
+            rank,
+            text,
+        }
+    }
+
+    fn replace(start: usize, end: usize, text: String) -> Self {
+        Self {
+            start,
+            end,
+            rank: 0,
+            text,
+        }
+    }
+}
+
+/// Apply edits to a test file, keeping every line of it where it was.
+///
+/// A test file used to be reprinted from its syntax tree to add assertion
+/// wrappers, which moved lines and reflowed literals: a `@ts-expect-error`
+/// above `period: { period: 'fortnight', amount: 1 }` then sat above a line
+/// with no error, and the error surfaced on the next one (TS2578, TS2322).
+/// Edits never add or remove a line break, so a directive, a comment and a
+/// stack-trace line number all stay where the author put them. The source map
+/// maps every copied run of the original back to itself.
+fn apply_text_edits(
+    source: &str,
+    mut edits: Vec<TextEdit>,
+    file: &str,
+) -> Result<(String, oxc_sourcemap::SourceMap), CandidateError> {
+    edits.sort_by_key(|edit| (edit.start, edit.end > edit.start, edit.rank));
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content(file, source);
+    let mut code = String::with_capacity(source.len() + edits.len() * 64);
+    let (mut line, mut column) = (0u32, 0u32);
+    let (mut source_line, mut source_column) = (0u32, 0u32);
+    let advance = |text: &str, line: &mut u32, column: &mut u32| {
+        for unit in text.chars() {
+            if unit == '\n' {
+                *line += 1;
+                *column = 0;
+            } else {
+                *column += unit.len_utf16() as u32;
+            }
+        }
+    };
+    let copy = |from: usize,
+                to: usize,
+                code: &mut String,
+                line: &mut u32,
+                column: &mut u32,
+                source_line: &mut u32,
+                source_column: &mut u32,
+                builder: &mut oxc_sourcemap::SourceMapBuilder| {
+        for (index, piece) in source[from..to].split('\n').enumerate() {
+            if index > 0 {
+                code.push('\n');
+                *line += 1;
+                *column = 0;
+                *source_line += 1;
+                *source_column = 0;
+            }
+            if !piece.is_empty() {
+                builder.add_token(
+                    *line,
+                    *column,
+                    *source_line,
+                    *source_column,
+                    Some(source_id),
+                    None,
+                );
+                code.push_str(piece);
+                let width = piece.encode_utf16().count() as u32;
+                *column += width;
+                *source_column += width;
+            }
+        }
+    };
+    let mut at = 0;
+    for edit in edits {
+        if edit.start < at || edit.end > source.len() || edit.start > edit.end {
+            return Err(CandidateError::Parse(vec![format!(
+                "overlapping assertion edits in {file}"
+            )]));
+        }
+        copy(
+            at,
+            edit.start,
+            &mut code,
+            &mut line,
+            &mut column,
+            &mut source_line,
+            &mut source_column,
+            &mut builder,
+        );
+        let removed = &source[edit.start..edit.end];
+        if edit.text.matches('\n').count() != removed.matches('\n').count() {
+            return Err(CandidateError::Parse(vec![format!(
+                "an assertion edit in {file} would move a line"
+            )]));
+        }
+        code.push_str(&edit.text);
+        advance(&edit.text, &mut line, &mut column);
+        advance(removed, &mut source_line, &mut source_column);
+        at = edit.end;
+    }
+    copy(
+        at,
+        source.len(),
+        &mut code,
+        &mut line,
+        &mut column,
+        &mut source_line,
+        &mut source_column,
+        &mut builder,
+    );
+    Ok((code, builder.into_sourcemap()))
+}
+
+/// The runtime's assertion helpers as a TypeScript test sees them, declared
+/// once at the end of each instrumented file.
+///
+/// Reading `globalThis.__SUPERCOV_DIRECT_RUNTIME__` without a declaration is
+/// an implicit `any` index on `typeof globalThis`, which `tsc --strict` rejects
+/// (TS7017) at every wrapped assertion; Actual's browser build failed on 66 of
+/// them. A wrapped assertion keeps its own result type, and a bound matcher
+/// keeps the method's own signature, overloads included, as `T[K]`: inferring
+/// it through a conditional type made generic matchers `never` (TS2349,
+/// TS2769). Every instrumented file declares the same type, which TypeScript
+/// merges.
+const ASSERTION_RUNTIME_TYPE: &str = "{ \
+    withNodeAssertionPhase<T>(operation: string, source: string, callback: () => T): T; \
+    bindNodeAssertionPhase<T>(operation: string, source: string, target: T, property: null): T; \
+    bindNodeAssertionPhase<T, K extends keyof T>(operation: string, source: string, target: T, property: K): T[K]; \
+    bindNodeAssertionPhase(operation: string, source: string, target: unknown, property: PropertyKey): any; \
+    }";
+
+const ASSERTION_RUNTIME: &str = "globalThis.__SUPERCOV_DIRECT_RUNTIME__";
+
+/// Where each recognised assertion is wrapped or bound, as text edits.
+struct AssertionEdits<'s> {
+    source: &'s str,
+    sites: HashMap<SpanKey, (String, String, bool)>,
+    edits: Vec<TextEdit>,
+}
+
+impl AssertionEdits<'_> {
+    fn opening(helper: &str, operation: &str, source: &str) -> String {
+        format!(
+            "{ASSERTION_RUNTIME}.{helper}({}, {}, ",
+            serde_json::to_string(operation).expect("a string serializes"),
+            serde_json::to_string(source).expect("a string serializes")
+        )
+    }
+
+    /// Open the assertion phase around the call, before its arguments run.
+    fn wrap(&mut self, call: &CallExpression<'_>, operation: &str, source: &str) {
+        let (start, end) = (call.span.start as usize, call.span.end as usize);
+        let width = (end - start) as i64;
+        self.edits.push(TextEdit::insert(
+            start,
+            -width,
+            format!(
+                "{}() => (",
+                Self::opening("withNodeAssertionPhase", operation, source)
+            ),
+        ));
+        self.edits.push(TextEdit::insert(end, width, "))".into()));
+    }
+
+    /// Bind the original callee and receiver, leaving await and yield operands
+    /// in their own function: no async thunk, extra await or new microtask.
+    fn bind(&mut self, call: &CallExpression<'_>, operation: &str, source: &str) {
+        let callee = call.callee.span();
+        let width = (callee.end - callee.start) as i64;
+        let opening = Self::opening("bindNodeAssertionPhase", operation, source);
+        self.edits
+            .push(TextEdit::insert(callee.start as usize, -width, opening));
+        match &call.callee {
+            Expression::StaticMemberExpression(member) => {
+                // `.name` becomes `, "name")`, keeping whatever whitespace and
+                // line breaks sat between the receiver and the dot.
+                let between = &self.source
+                    [member.object.span().end as usize..member.property.span.start as usize];
+                let dot = between.rfind('.').unwrap_or(0);
+                let mut text = String::from(",");
+                text.push_str(&between[..dot]);
+                text.push(' ');
+                text.push_str(&between[dot + 1..]);
+                text.push_str(
+                    &serde_json::to_string(member.property.name.as_str())
+                        .expect("a string serializes"),
+                );
+                text.push(')');
+                self.edits.push(TextEdit::replace(
+                    member.object.span().end as usize,
+                    member.property.span.end as usize,
+                    text,
+                ));
+            }
+            Expression::ComputedMemberExpression(member) => {
+                let object_end = member.object.span().end as usize;
+                let open = object_end + self.source[object_end..].find('[').unwrap_or(0);
+                self.edits
+                    .push(TextEdit::replace(open, open + 1, ",".into()));
+                let close = member.span.end as usize - 1;
+                self.edits
+                    .push(TextEdit::replace(close, close + 1, ")".into()));
+            }
+            _ => {
+                self.edits.push(TextEdit::insert(
+                    callee.end as usize,
+                    width,
+                    ", null)".into(),
+                ));
+            }
+        }
+    }
+}
+
+impl<'a> Visit<'a> for AssertionEdits<'_> {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if let Some((operation, source, bound)) = self.sites.remove(&span_key(call.span)) {
+            if bound {
+                self.bind(call, &operation, &source);
+            } else {
+                self.wrap(call, &operation, &source);
+            }
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
+/// `transform_capability_imports` as text edits, for a test file.
+fn capability_import_edits(
+    program: &Program<'_>,
+    source: &str,
+    wrapper: &str,
+) -> (Vec<TextEdit>, usize) {
+    if !capability_source_candidate(source) || !program.source_type.is_module() {
+        return (Vec::new(), 0);
+    }
+    let capability_roots = capability_import_roots(program, source);
+    if capability_roots.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let mut names = CandidateNames::new(source);
+    let wrapper_local = names.allocate("__supercovImportedCapability");
+    let mut edits = Vec::new();
+    let mut wrapped = 0;
+    for statement in &program.body {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        if declaration.import_kind == ImportOrExportKind::Type
+            || excluded_capability_import(declaration.source.value.as_str(), wrapper)
+        {
+            continue;
+        }
+        let mut declarators = Vec::new();
+        for specifier in declaration.specifiers.iter().flatten() {
+            let (local, shorthand) = match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                    if specifier.import_kind == ImportOrExportKind::Type =>
+                {
+                    continue;
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => (
+                    &specifier.local,
+                    specifier.imported.span() == specifier.local.span,
+                ),
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    (&specifier.local, false)
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    (&specifier.local, false)
+                }
+            };
+            let original = local.name.to_string();
+            if !capability_roots.contains(&original) {
+                continue;
+            }
+            let raw = names.allocate(&format!("__supercovRaw{original}"));
+            if shorthand {
+                edits.push(TextEdit::insert(
+                    local.span.end as usize,
+                    0,
+                    format!(" as {raw}"),
+                ));
+            } else {
+                edits.push(TextEdit::replace(
+                    local.span.start as usize,
+                    local.span.end as usize,
+                    raw.clone(),
+                ));
+            }
+            declarators.push(format!("{original} = {wrapper_local}({raw})"));
+            wrapped += 1;
+        }
+        if !declarators.is_empty() {
+            edits.push(TextEdit::insert(
+                declaration.span.end as usize,
+                i64::MAX,
+                format!("; const {};", declarators.join(", ")),
+            ));
+        }
+    }
+    if wrapped > 0 {
+        // First among the imports, as the syntax-tree transform put it, on the
+        // first statement's own line.
+        let first = program
+            .body
+            .first()
+            .map_or(0, |statement| statement.span().start as usize);
+        edits.push(TextEdit::insert(
+            first,
+            i64::MIN,
+            format!(
+                "import {{ wrapImportedCapability as {wrapper_local} }} from {}; ",
+                serde_json::to_string(wrapper).expect("a string serializes")
+            ),
+        ));
+    }
+    (edits, wrapped)
+}
+
 /// Wrap value imports that can hide a remote execution capability. This is an
 /// ahead-of-run Rust transform; the runtime shim only proxies the imported
 /// value and never parses or rewrites source.
@@ -1007,12 +1347,28 @@ pub fn assertion_ranges(file: &str, source: &str) -> Result<Vec<(usize, usize, S
     assertion_ranges_with_expect_modules(file, source, &[])
 }
 
+/// How a project's JavaScript is parsed: in the script or module mode its
+/// extension implies, with JSX allowed. React code is routinely written in
+/// `.js` and compiled by Babel, Webpack or Vite, so a `.js` file with JSX in it
+/// is ordinary; rejecting it failed a whole run before any test started.
+/// Enabling JSX changes nothing for JavaScript without it, because `<` cannot
+/// begin an expression there. TypeScript is left alone: in `.ts` a leading `<`
+/// is a type assertion, and only `.tsx` means JSX.
+pub fn project_source_type(path: &Path) -> Result<SourceType, String> {
+    let source_type = SourceType::from_path(path).map_err(|error| error.to_string())?;
+    Ok(if source_type.is_typescript() {
+        source_type
+    } else {
+        source_type.with_jsx(true)
+    })
+}
+
 pub fn assertion_ranges_with_expect_modules(
     file: &str,
     source: &str,
     modules: &[String],
 ) -> Result<Vec<(usize, usize, String)>, String> {
-    let source_type = SourceType::from_path(Path::new(file)).map_err(|e| e.to_string())?;
+    let source_type = project_source_type(Path::new(file))?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.errors.is_empty() {
@@ -1190,145 +1546,6 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
     }
 }
 
-struct NodeAssertionTransformer<'a> {
-    ast: AstBuilder<'a>,
-    sites: HashMap<SpanKey, (String, String, bool)>,
-}
-
-impl<'a> NodeAssertionTransformer<'a> {
-    fn helper(&self, name: &str) -> Expression<'a> {
-        let runtime = Expression::StaticMemberExpression(
-            self.ast.alloc_static_member_expression(
-                Span::default(),
-                self.ast
-                    .expression_identifier(Span::default(), self.ast.ident("globalThis")),
-                self.ast.identifier_name(
-                    Span::default(),
-                    self.ast.ident("__SUPERCOV_DIRECT_RUNTIME__"),
-                ),
-                false,
-            ),
-        );
-        Expression::StaticMemberExpression(
-            self.ast.alloc_static_member_expression(
-                Span::default(),
-                runtime,
-                self.ast
-                    .identifier_name(Span::default(), self.ast.ident(name)),
-                false,
-            ),
-        )
-    }
-    fn wrap(&self, original: Expression<'a>, operation: &str, source: &str) -> Expression<'a> {
-        let helper = self.helper("withNodeAssertionPhase");
-        let parameters = self.ast.alloc_formal_parameters(
-            Span::default(),
-            FormalParameterKind::ArrowFormalParameters,
-            self.ast.vec(),
-            NONE,
-        );
-        let body = self.ast.alloc_function_body(
-            Span::default(),
-            self.ast.vec(),
-            self.ast
-                .vec1(self.ast.statement_return(Span::default(), Some(original))),
-        );
-        let callback = self.ast.expression_arrow_function(
-            Span::default(),
-            false,
-            false,
-            NONE,
-            parameters,
-            NONE,
-            body,
-        );
-        self.ast.expression_call(
-            Span::default(),
-            helper,
-            NONE,
-            self.ast.vec_from_array([
-                Argument::from(self.ast.expression_string_literal(
-                    Span::default(),
-                    self.ast.str(operation),
-                    None,
-                )),
-                Argument::from(self.ast.expression_string_literal(
-                    Span::default(),
-                    self.ast.str(source),
-                    None,
-                )),
-                Argument::from(callback),
-            ]),
-            false,
-        )
-    }
-}
-
-impl<'a> NodeAssertionTransformer<'a> {
-    /// Bind the original callee and receiver, leaving await/yield operands in
-    /// their original function. No async thunk, extra await or new microtask.
-    fn bind_call(&self, original: Expression<'a>, operation: &str, source: &str) -> Expression<'a> {
-        let Expression::CallExpression(mut call) = original else {
-            unreachable!("assertion call")
-        };
-        let (target, property) = match &mut call.callee {
-            Expression::StaticMemberExpression(m) => (
-                m.object.take_in(self.ast.allocator),
-                self.ast.expression_string_literal(
-                    Span::default(),
-                    self.ast.str(m.property.name.as_str()),
-                    None,
-                ),
-            ),
-            Expression::ComputedMemberExpression(m) => (
-                m.object.take_in(self.ast.allocator),
-                m.expression.take_in(self.ast.allocator),
-            ),
-            _ => (
-                call.callee.take_in(self.ast.allocator),
-                self.ast.expression_null_literal(Span::default()),
-            ),
-        };
-        call.callee = self.ast.expression_call(
-            Span::default(),
-            self.helper("bindNodeAssertionPhase"),
-            NONE,
-            self.ast.vec_from_array([
-                Argument::from(self.ast.expression_string_literal(
-                    Span::default(),
-                    self.ast.str(operation),
-                    None,
-                )),
-                Argument::from(self.ast.expression_string_literal(
-                    Span::default(),
-                    self.ast.str(source),
-                    None,
-                )),
-                Argument::from(target),
-                Argument::from(property),
-            ]),
-            false,
-        );
-        Expression::CallExpression(call)
-    }
-}
-
-impl<'a> VisitMut<'a> for NodeAssertionTransformer<'a> {
-    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
-        let key = span_key(expression.span());
-        walk_mut::walk_expression(self, expression);
-        let Some((operation, source, bound)) = self.sites.remove(&key) else {
-            return;
-        };
-        let original = expression.take_in(self.ast.allocator);
-        *expression = if bound {
-            self.bind_call(original, &operation, &source)
-        } else {
-            self.wrap(original, &operation, &source)
-        };
-    }
-}
-
 /// Attribute native node:assert and node:test expect calls by opening the
 /// assertion phase before argument evaluation when possible, or binding the
 /// callee when arguments contain await/yield. Lexical symbol identity avoids
@@ -1385,10 +1602,10 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
             capability_imports: 0,
         });
     }
-    let source_type = SourceType::from_path(Path::new(file))
-        .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
+    let source_type =
+        project_source_type(Path::new(file)).map_err(CandidateError::UnknownSourceType)?;
     let allocator = Allocator::default();
-    let mut parsed = Parser::new(&allocator, source, source_type).parse();
+    let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.errors.is_empty() {
         return Err(CandidateError::Parse(
             parsed
@@ -1399,6 +1616,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         ));
     }
     let mut assertions = 0;
+    let mut edits = Vec::new();
 
     if assertion_candidate {
         let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
@@ -1415,15 +1633,19 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         collector.visit_program(&parsed.program);
         assertions = collector.sites.len();
         if assertions > 0 {
-            NodeAssertionTransformer {
-                ast: AstBuilder::new(&allocator),
+            let mut located = AssertionEdits {
+                source,
                 sites: collector.sites,
-            }
-            .visit_program(&mut parsed.program);
+                edits: Vec::new(),
+            };
+            located.visit_program(&parsed.program);
+            edits.extend(located.edits);
         }
     }
     let capability_imports = capability_wrapper.map_or(0, |wrapper| {
-        transform_capability_imports(&allocator, &mut parsed.program, source, wrapper)
+        let (found, wrapped) = capability_import_edits(&parsed.program, source, wrapper);
+        edits.extend(found);
+        wrapped
     });
     if assertions == 0 && capability_imports == 0 {
         return Ok(NodeAssertionInstrumentation {
@@ -1432,13 +1654,21 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
             capability_imports: 0,
         });
     }
-    let module_assertion_runtime = (assertions > 0 && parsed.program.source_type.is_module())
+    let module = parsed.program.source_type.is_module();
+    let module_assertion_runtime = (assertions > 0 && module)
         .then_some(assertion_runtime)
         .flatten();
-    let (mut code, map) = generate_candidate(&parsed.program, file)?;
-    // Append instead of prepend so every generated source-map location for
-    // user code remains unchanged. Import declarations are instantiated before
-    // module evaluation regardless of their textual position.
+    // An inline map is resolved relative to the transformed file itself, and
+    // assertion-only transforms replace the file in place, so its basename is
+    // the exact source-map reference.
+    let reference = Path::new(file)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(file);
+    let (mut code, map) = apply_text_edits(source, edits, reference)?;
+    // Append instead of prepend so every line of user code stays where it
+    // was. Import declarations are instantiated before module evaluation
+    // regardless of their textual position.
     if let Some(runtime) = module_assertion_runtime {
         code.push_str("\nimport ");
         code.push_str(
@@ -1447,17 +1677,18 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         );
         code.push_str(";\n");
     }
-    let mut map = map.expect("assertion source maps are enabled");
-    // An inline map is resolved relative to the transformed file itself. The
-    // code generator receives a project-relative path for manifest identity,
-    // but retaining that full path here would resolve `tests/a.js` from
-    // `tests/a.js` as `tests/tests/a.js`. Assertion-only transforms replace
-    // the file in place, so its basename is the exact source-map reference.
-    map["sources"] = serde_json::json!([Path::new(file)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(file)]);
-    let map = serde_json::to_vec(&map).expect("source-map values always serialize");
+    if assertions > 0 && source_type.is_typescript() {
+        if module {
+            code.push_str(&format!(
+                "\ndeclare global {{ var __SUPERCOV_DIRECT_RUNTIME__: {ASSERTION_RUNTIME_TYPE}; }}\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "\ndeclare var __SUPERCOV_DIRECT_RUNTIME__: {ASSERTION_RUNTIME_TYPE};\n"
+            ));
+        }
+    }
+    let map = map.to_json_string();
     code.push_str("\n//# sourceMappingURL=data:application/json;base64,");
     BASE64_STANDARD.encode_string(map, &mut code);
     code.push('\n');
@@ -2276,8 +2507,8 @@ fn observes_function_source<State>(span: Span, context: &TraverseCtx<'_, State>)
 
 pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
     let elide_type_imports = false;
-    let source_type = SourceType::from_path(Path::new(file))
-        .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
+    let source_type =
+        project_source_type(Path::new(file)).map_err(CandidateError::UnknownSourceType)?;
     let allocator = Allocator::default();
     let mut parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.errors.is_empty() {
@@ -2528,8 +2759,8 @@ fn instrument_candidate_with_binding(
     capability_wrapper: Option<&str>,
     elide_type_imports: bool,
 ) -> Result<CandidateOutput, CandidateError> {
-    let source_type = SourceType::from_path(Path::new(file))
-        .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
+    let source_type =
+        project_source_type(Path::new(file)).map_err(CandidateError::UnknownSourceType)?;
     let allocator = Allocator::default();
     let mut parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.errors.is_empty() {
@@ -2639,7 +2870,24 @@ fn instrument_candidate_with_binding(
     branches.extend(logical_analysis.branches);
     branches.extend(switch_analysis.branches.clone());
 
-    let mut names = CandidateNames::new(source);
+    // Direct-runtime output can be served as several classic scripts in one
+    // document, and every classic script shares the page's global lexical
+    // scope: two files declaring `const __supercovMcdcBegin` is a SyntaxError
+    // on the second, and a shared probe-file binding would credit one file's
+    // statements to another. Names are made unique per file, and declared with
+    // `var` so a script included twice is still legal, as it was before.
+    let (namespace, runtime_declaration_kind) = if runtime_binding == RuntimeBinding::DirectGlobal {
+        (
+            format!(
+                "_{}",
+                &stable_id("", file, "runtime", Span::default(), "")[..8]
+            ),
+            VariableDeclarationKind::Var,
+        )
+    } else {
+        (String::new(), VariableDeclarationKind::Const)
+    };
+    let mut names = CandidateNames::within(source, &namespace);
     let mcdc_begin = names.allocate("__supercovMcdcBegin");
     let mcdc_condition = names.allocate("__supercovMcdcCondition");
     let mcdc_end = names.allocate("__supercovMcdcEnd");
@@ -2797,7 +3045,7 @@ fn instrument_candidate_with_binding(
         loop_end: loop_end.clone(),
         try_targets: extended_analysis.try_targets,
         loop_targets: extended_analysis.loop_targets,
-        names: CandidateNames::new(source),
+        names: CandidateNames::within(source, &namespace),
         scope_declarations: Vec::new(),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         with_statements: safety.with_statements.clone(),
@@ -2824,7 +3072,7 @@ fn instrument_candidate_with_binding(
         selection_begin: selection_begin.clone(),
         selection_right: selection_right.clone(),
         selection_end: selection_end.clone(),
-        names: CandidateNames::new(source),
+        names: CandidateNames::within(source, &namespace),
         scope_declarations: Vec::new(),
         logical_targets: logical_analysis.logical_targets,
         assignment_targets: assignment_analysis.targets,
@@ -2836,7 +3084,7 @@ fn instrument_candidate_with_binding(
         ast,
         coverage_hit: coverage_hit.clone(),
         targets: switch_analysis.targets,
-        names: CandidateNames::new(source),
+        names: CandidateNames::within(source, &namespace),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         with_statements: safety.with_statements.clone(),
     };
@@ -2846,7 +3094,7 @@ fn instrument_candidate_with_binding(
         file,
         with_request_phase: with_request_phase.clone(),
         used: false,
-        names: CandidateNames::new(source),
+        names: CandidateNames::within(source, &namespace),
     };
     route_transformer.transform_program(&mut parsed.program);
     let mut request_transformer = RequestPhaseTransformer {
@@ -2875,10 +3123,10 @@ fn instrument_candidate_with_binding(
         0,
         Statement::VariableDeclaration(ast.alloc_variable_declaration(
             Span::default(),
-            VariableDeclarationKind::Const,
+            runtime_declaration_kind,
             ast.vec1(ast.variable_declarator(
                 Span::default(),
-                VariableDeclarationKind::Const,
+                runtime_declaration_kind,
                 ast.binding_pattern_binding_identifier(Span::default(), ast.ident(&probe_file_v2)),
                 NONE,
                 Some(registration_call),
@@ -2946,7 +3194,7 @@ fn instrument_candidate_with_binding(
                     ));
                 ast.variable_declarator(
                     Span::default(),
-                    VariableDeclarationKind::Const,
+                    runtime_declaration_kind,
                     ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
                     NONE,
                     Some(runtime_helper),
@@ -2957,7 +3205,7 @@ fn instrument_candidate_with_binding(
             0,
             Statement::VariableDeclaration(ast.alloc_variable_declaration(
                 Span::default(),
-                VariableDeclarationKind::Const,
+                runtime_declaration_kind,
                 declarators,
                 false,
             )),
@@ -5151,23 +5399,31 @@ struct CandidateNames<'s> {
     source: &'s str,
     allocated: Vec<String>,
     suffix: usize,
+    /// Appended to every name, so output that shares a scope with other
+    /// instrumented files cannot collide with theirs.
+    namespace: String,
 }
 
 impl<'s> CandidateNames<'s> {
     fn new(source: &'s str) -> Self {
+        Self::within(source, "")
+    }
+
+    fn within(source: &'s str, namespace: &str) -> Self {
         Self {
             source,
             allocated: Vec::new(),
             suffix: 0,
+            namespace: namespace.to_owned(),
         }
     }
 
     fn allocate(&mut self, base: &str) -> String {
         loop {
             let candidate = if self.suffix == 0 {
-                base.to_string()
+                format!("{base}{}", self.namespace)
             } else {
-                format!("{base}{}", self.suffix)
+                format!("{base}{}{}", self.suffix, self.namespace)
             };
             self.suffix += 1;
             if !self.source.contains(&candidate) && !self.allocated.contains(&candidate) {
@@ -7450,6 +7706,70 @@ fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classic_scripts_share_application_globals_but_not_probe_bindings() {
+        // TodoMVC's ES5 app loads several classic scripts into one document.
+        // They share the global lexical scope, so a second
+        // `const __supercovMcdcBegin` was a SyntaxError and no item was added.
+        let a = instrument_direct_candidate(
+            "var count = 0; function increment() { if (count >= 0) { count += 1; } }",
+            "public/a.js",
+        )
+        .unwrap();
+        let b = instrument_direct_candidate("increment(); var observed = count;", "public/b.js")
+            .unwrap();
+        let runtime = include_str!("../runtime-assets/javascript/runtime.mjs");
+        let runtime = &runtime[..runtime.rfind("\nexport {").unwrap()];
+        let script = format!(
+            "const vm = require('node:vm'); const ctx = vm.createContext({{ setTimeout, clearTimeout, queueMicrotask, console }});\
+             vm.runInContext({}, ctx); vm.runInContext({}, ctx); vm.runInContext({}, ctx);\
+             if (ctx.observed !== 1) throw Error('shared globals changed');\
+             vm.runInContext({}, ctx);\
+             if (ctx.observed !== 2) throw Error('a repeated script changed');",
+            serde_json::to_string(runtime).unwrap(),
+            serde_json::to_string(&a.code).unwrap(),
+            serde_json::to_string(&b.code).unwrap(),
+            serde_json::to_string(&b.code).unwrap()
+        );
+        let result = std::process::Command::new("node")
+            .args(["-e", &script])
+            .output()
+            .expect("Node.js for the JavaScript regression");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    fn javascript_with_jsx_is_measured_in_every_javascript_extension() {
+        // TodoMVC's React app keeps JSX in `src/index.js`; the run failed on
+        // `Unexpected token` before any test started.
+        for file in [
+            "src/index.js",
+            "src/index.jsx",
+            "src/index.mjs",
+            "src/index.cjs",
+            "src/index.tsx",
+        ] {
+            let source = "export const View = ({ok}) => <div>{ok ? 'yes' : 'no'}</div>;";
+            let output = instrument_candidate(source, file).unwrap();
+            assert!(!output.points.is_empty(), "{file}");
+            assert!(output.code.contains("<div>"), "{file}");
+            assert!(assertion_ranges(file, source).is_ok(), "{file}");
+        }
+        // TypeScript keeps its angle-bracket assertion; JSX would misread it.
+        assert!(instrument_candidate("const n = <number>value;", "src/index.ts").is_ok());
+        // The script or module mode an extension implies is kept.
+        for file in ["a.js", "a.cjs", "a.mjs"] {
+            let before = SourceType::from_path(file).unwrap();
+            let after = project_source_type(Path::new(file)).unwrap();
+            assert_eq!(after.module_kind(), before.module_kind(), "{file}");
+            assert!(after.is_jsx(), "{file}");
+        }
+    }
 
     const SOURCE: &str =
         "export function decide(a,b,c) {\n  if ((a && b) || !c) return 1;\n  return 0;\n}\n";

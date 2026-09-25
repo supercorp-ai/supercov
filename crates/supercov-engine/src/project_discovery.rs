@@ -14,7 +14,6 @@ use oxc_ast::ast::{
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
-use oxc_span::SourceType;
 use oxc_syntax::operator::BinaryOperator;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -167,7 +166,7 @@ fn parse_program<'a>(
     path: &Path,
     source: &'a str,
 ) -> Option<Program<'a>> {
-    let source_type = SourceType::from_path(path).ok()?;
+    let source_type = crate::js_instrumenter::project_source_type(path).ok()?;
     let parsed = Parser::new(allocator, source, source_type).parse();
     parsed.errors.is_empty().then_some(parsed.program)
 }

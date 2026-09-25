@@ -551,7 +551,8 @@ fn javascript(path: &str, source: &str) -> Option<Outline> {
     use oxc_ast_visit::{Visit, walk};
     use oxc_span::GetSpan;
 
-    let source_type = oxc_span::SourceType::from_path(std::path::Path::new(path)).ok()?;
+    let source_type =
+        crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {

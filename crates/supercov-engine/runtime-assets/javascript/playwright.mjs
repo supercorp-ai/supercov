@@ -31,6 +31,18 @@ const targetTestExport = process.env["SUPERCOV_PLAYWRIGHT_TEST_EXPORT"] ??
 const adapter = (targetModule === "@playwright/test"
     ? standardPlaywright
     : await import(__rewriteRelativeImportExtension(targetModule)));
+// A page that loads the application as plain `<script>` files, from a static
+// server, has no bundler to import the runtime the way a module graph would,
+// and instrumented classic scripts read it from a global. Install the same
+// self-contained runtime in every document before any of the page's scripts
+// run. Every copy keys its state on the page's global, so this copy and one a
+// bundler imports record into the same place. Its locals stay inside a
+// function, out of the page's global scope.
+const browserRuntimeSource = readFileSync(new URL("./runtime.mjs", import.meta.url), "utf8");
+const browserRuntimeExport = browserRuntimeSource.lastIndexOf("\nexport {");
+if (/^import\s/m.test(browserRuntimeSource) || browserRuntimeExport < 0)
+    throw new Error("Supercov's browser runtime must stay self-contained");
+const browserRuntimePrelude = `(() => { if (globalThis.__SUPERCOV_DIRECT_RUNTIME__) return;\n${browserRuntimeSource.slice(0, browserRuntimeExport)}\n})();`;
 const base = (adapter[targetTestExport] ?? adapter.test);
 const baseExpect = adapter.expect;
 const GENERATED_EVIDENCE_DIRECTORY = "__SUPERCOV_EVIDENCE_DIRECTORY__";
@@ -299,6 +311,7 @@ class CoveragePhaseController {
         this.contextConfiguredHeaders.set(context, configuredHeaders);
         if (adopted)
             this.adoptedContexts.add(context);
+        await context.addInitScript({ content: browserRuntimePrelude }).catch(() => undefined);
         // A context that outlives its test (a worker-scoped browser fixture)
         // is registered again by every later test, so this script accumulates
         // on it and each new document runs every copy in registration order.

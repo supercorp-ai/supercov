@@ -1129,12 +1129,18 @@ fn write_playwright_config(
     } else {
         "const original = {};\n".into()
     };
+    // A TypeScript config in a CommonJS package is transpiled to CommonJS and
+    // imported here as its module namespace, `{ __esModule: true, default }`,
+    // not as the config. Spreading the namespace lost `testDir`, `use` and
+    // `webServer`, and Playwright found no tests. Only an explicitly marked
+    // namespace is unwrapped; a config that merely has a `default` key is not.
     let source = format!(
         "import './node_modules/register.mjs';\n\
          import {{ dirname, isAbsolute, relative, resolve }} from 'node:path';\n\
          import {{ fileURLToPath }} from 'node:url';\n\
          {original_import}\
-         const resolvedValue = typeof original === 'function' ? await original({{ command: 'test', mode: 'test' }}) : original;\n\
+         const configExport = original && original.__esModule === true && Object.prototype.hasOwnProperty.call(original, 'default') ? original.default : original;\n\
+         const resolvedValue = typeof configExport === 'function' ? await configExport({{ command: 'test', mode: 'test' }}) : configExport;\n\
          const resolved = resolvedValue ?? {{}};\n\
          const runtimeProjectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');\n\
          const originalDirectory = {};
