@@ -39,8 +39,8 @@ test("duplicate and nested registrations retain separate witnesses across execut
   assert.match(native.stdout, /# tests 10\b/);
   assert.match(native.stdout, /# pass 9\b/);
   assert.match(native.stdout, /# fail 1\b/);
-  const read = () => readdirSync(directory).filter(name => name.startsWith("node_test-")).map(name =>
-    JSON.parse(readFileSync(resolve(directory, name, "mcdc.json"), "utf8")));
+  const read = () => readdirSync(directory).filter(name => name.startsWith("node_test-") && name.endsWith(".mcdc.jsonl")).flatMap(name =>
+    readFileSync(resolve(directory, name), "utf8").trimEnd().split("\n").map(line => JSON.parse(line)));
   let first;
   for (let run = 1; run <= 2; run++) {
     const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", fixture], { env, encoding: "utf8", timeout: 15000 });
@@ -90,8 +90,8 @@ test("worker threads with a shared pid cannot overwrite one another's attempts",
   `], { env, encoding: "utf8", timeout: 15000 });
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  const records = readdirSync(directory).filter(name => name.startsWith("node_test-")).map(name =>
-    JSON.parse(readFileSync(resolve(directory, name, "mcdc.json"), "utf8")));
+  const records = readdirSync(directory).filter(name => name.startsWith("node_test-") && name.endsWith(".mcdc.jsonl")).flatMap(name =>
+    readFileSync(resolve(directory, name), "utf8").trimEnd().split("\n").map(line => JSON.parse(line)));
   assert.equal(records.length, 20);
   assert.equal(new Set(records.map(r => r.scope.attemptId)).size, 20);
   const groups = [...Map.groupBy(records, r => r.scope.workerId).values()];

@@ -61,8 +61,8 @@ test('async connection ownership, shared HTTP requests and teardown keep exact a
   delete env.NODE_TEST_CONTEXT;
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', source], { env, encoding: 'utf8', timeout: 15000 });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  const records = readdirSync(directory).filter(n => n.startsWith('node_test-')).map(n =>
-    JSON.parse(readFileSync(resolve(directory, n, 'mcdc.json'), 'utf8')));
+  const records = readdirSync(directory).filter(n => n.startsWith('node_test-') && n.endsWith('.mcdc.jsonl')).flatMap(n =>
+    readFileSync(resolve(directory, n), 'utf8').trimEnd().split('\n').map(line => JSON.parse(line)));
   for (const id of ['one', 'two']) {
     const row = records.find(r => r.test === id);
     assert.equal(row.status, 'passed');

@@ -1,8 +1,7 @@
-import { mkdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inferTestProvenance } from "./provenance.mjs";
-import { atomicWriteFileSync } from "./atomic.mjs";
+import { appendEvidenceRecord } from "./atomic.mjs";
 function sourcePath(moduleId) {
     const absolute = moduleId.startsWith("file:")
         ? fileURLToPath(moduleId)
@@ -63,11 +62,8 @@ export default class SupercovVitestReporter {
             browser: [],
             server: [],
         };
-        const safeId = testCase.id.replace(/[^a-zA-Z0-9_-]/g, "_");
         this.reportedAttempts.add(`${testCase.id}:${retry}`);
-        const directory = resolve(process.cwd(), evidenceDirectory, `vitest-${safeId}-${retry}-status`);
-        mkdirSync(directory, { recursive: true });
-        atomicWriteFileSync(resolve(directory, "mcdc.json"), `${JSON.stringify(payload)}\n`);
+        appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), "vitest-status", payload);
     }
     /** Vitest 2 compatibility; Vitest 3+ uses onTestCaseResult above. */
     onFinished(files = []) {
@@ -111,10 +107,7 @@ export default class SupercovVitestReporter {
                     browser: [],
                     server: [],
                 };
-                const safeId = String(task.id ?? names.join("-")).replace(/[^a-zA-Z0-9_-]/g, "_");
-                const directory = resolve(process.cwd(), evidenceDirectory, `vitest-${safeId}-${retry}-status`);
-                mkdirSync(directory, { recursive: true });
-                atomicWriteFileSync(resolve(directory, "mcdc.json"), `${JSON.stringify(payload)}\n`);
+                appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), "vitest-status", payload);
             }
             for (const child of task.tasks ?? [])
                 visit(child, file);

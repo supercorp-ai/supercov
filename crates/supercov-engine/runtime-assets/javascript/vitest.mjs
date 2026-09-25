@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { afterEach, beforeEach } from "vitest";
 import { coverageSnapshot as localCoverageSnapshot, activateCoverageScope as localActivateCoverageScope, enableRuntimeSnapshotEvidence as localEnableRuntimeSnapshotEvidence, resetCoverage as localResetCoverage, takeNodeAssertionPhases as localTakeNodeAssertionPhases, } from "./runtime.mjs";
 import { inferTestProvenance } from "./provenance.mjs";
-import { atomicWriteFileSync } from "./atomic.mjs";
+import { appendEvidenceRecord } from "./atomic.mjs";
 const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
 const emittedSetupFiles = new Set();
 const attempts = new Map();
@@ -39,12 +38,10 @@ function titlePath(task) {
     }
     return names;
 }
-function writeEvidence(payload, suffix) {
+function writeEvidence(payload) {
     if (!evidenceDirectory)
         return;
-    const directory = resolve(process.cwd(), evidenceDirectory, suffix);
-    mkdirSync(directory, { recursive: true });
-    atomicWriteFileSync(resolve(directory, "mcdc.json"), `${JSON.stringify(payload)}\n`);
+    appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), "vitest-worker", payload);
 }
 beforeEach((context) => {
     const task = context.task;
@@ -72,7 +69,7 @@ beforeEach((context) => {
                 runtime: [setupSnapshot],
                 browser: [],
                 server: [],
-            }, `vitest-${task.file.id}-setup`);
+            });
         }
     }
     const testId = `vitest:${task.id}`;
@@ -118,7 +115,7 @@ afterEach((context) => {
         browser: [],
         server: [],
     };
-    writeEvidence(payload, `vitest-${task.id}-${retry}`);
+    writeEvidence(payload);
     activeScopes.delete(task.id);
     runtime.activateCoverageScope();
 });
