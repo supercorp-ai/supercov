@@ -191,18 +191,52 @@ for (const skill of skills) {
   if (!description || description.length > 1024) fail(where, "description must be 1 to 1024 characters");
   if (/[<>]/.test(frontmatter)) fail(where, "frontmatter must not contain angle brackets");
   if (body.split("\n").length > 500) fail(where, "body must stay under 500 lines");
+}
 
-  const manifest = resolve(dirname(skill), "../../.claude-plugin/plugin.json");
-  const plugin = JSON.parse(readFileSync(manifest, "utf8"));
-  if (plugin.version !== version) {
-    fail(relative(repository, manifest), `version ${plugin.version} must match package.json ${version}`);
+// Each plugin carries two manifests: Claude Code reads .claude-plugin/, while
+// Codex and Cursor read the portable Agent Plugins plugin.json. Both
+// must name the release they ship with and describe the plugin the same way.
+const PORTABLE_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+const pluginDirectories = readdirSync(resolve(repository, "plugins"), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => resolve(repository, "plugins", entry.name));
+for (const directory of pluginDirectories) {
+  const manifests = [".claude-plugin/plugin.json", "plugin.json"].map((name) => resolve(directory, name));
+  const [claude, portable] = manifests.map((path) => {
+    if (!existsSync(path)) {
+      fail(relative(repository, path), "is missing");
+      return null;
+    }
+    const plugin = JSON.parse(readFileSync(path, "utf8"));
+    if (plugin.version !== version) {
+      fail(relative(repository, path), `version ${plugin.version} must match package.json ${version}`);
+    }
+    return plugin;
+  });
+  if (!claude || !portable) continue;
+  const where = relative(repository, manifests[1]);
+  if (portable.$schema !== PORTABLE_SCHEMA) fail(where, `$schema must be ${PORTABLE_SCHEMA}`);
+  for (const key of ["name", "description"]) {
+    if (portable[key] !== claude[key]) fail(where, `${key} must match .claude-plugin/plugin.json`);
+  }
+  const listing = portable.extensions?.["com.openai"]?.interface ?? {};
+  for (const asset of new Set([listing.logo, listing.composerIcon, ...(listing.screenshots ?? [])].filter(Boolean))) {
+    if (!existsSync(resolve(directory, asset))) fail(where, `${asset} does not exist`);
   }
 }
 
-const marketplace = JSON.parse(readFileSync(resolve(repository, ".claude-plugin/marketplace.json"), "utf8"));
-for (const plugin of marketplace.plugins) {
-  if (!existsSync(resolve(repository, plugin.source, ".claude-plugin/plugin.json"))) {
-    fail(".claude-plugin/marketplace.json", `${plugin.name} source ${plugin.source} has no plugin.json`);
+// Claude Code finds plugins through .claude-plugin/marketplace.json, Codex
+// through .agents/plugins/marketplace.json.
+const marketplaces = [
+  [".claude-plugin/marketplace.json", (plugin) => plugin.source, ".claude-plugin/plugin.json"],
+  [".agents/plugins/marketplace.json", (plugin) => plugin.source.path, "plugin.json"],
+];
+for (const [path, source, manifest] of marketplaces) {
+  const marketplace = JSON.parse(readFileSync(resolve(repository, path), "utf8"));
+  for (const plugin of marketplace.plugins) {
+    if (!existsSync(resolve(repository, source(plugin), manifest))) {
+      fail(path, `${plugin.name} source ${source(plugin)} has no ${manifest}`);
+    }
   }
 }
 
