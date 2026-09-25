@@ -82,7 +82,13 @@ pub fn capture_with_expect_modules(
     if language == "javascript" {
         inputs.limitations.push("Optional assertion calls are inventoried but currently have no injected phase. Unrecognized custom assertion wrappers and dynamically selected matchers may be absent. Use check --require-observed to detect inventoried sites without passing evidence.".into());
     }
-    for path in paths.into_iter().map(simplified).collect::<BTreeSet<_>>() {
+    let watched = watched_by_the_newest_map(&root);
+    for path in paths
+        .into_iter()
+        .map(simplified)
+        .chain(watched)
+        .collect::<BTreeSet<_>>()
+    {
         let full = if path.is_absolute() {
             root.join(path.strip_prefix(&supplied_root).unwrap_or(&path))
         } else {
@@ -151,6 +157,47 @@ pub fn capture_with_expect_modules(
     }
     inputs.assertions.sort_by(|a, b| a.at.cmp(&b.at));
     Ok(inputs)
+}
+
+/// Every file the newest stored map's flows watch.
+///
+/// A flow may rest on a file no language adapter reads -- a browser test's
+/// `index.html` or stylesheet -- and a watch is checked against the files the
+/// run captured, so TodoMVC's author was told `watched file missing:
+/// index.html` about a file that existed, and removed the watch to get a
+/// valid map. The map is the declaration: a run captures what the map it
+/// inherits watches, so the dependency is written once, in the map, and holds
+/// on every run after it. A file that is gone or not UTF-8 is not captured,
+/// and the watch reports it.
+fn watched_by_the_newest_map(root: &Path) -> Vec<PathBuf> {
+    let Ok(inventory) = crate::run_store::discover_runs(root) else {
+        return Vec::new();
+    };
+    let Some(newest) = inventory
+        .runs
+        .iter()
+        .filter(|run| {
+            run.directory
+                .join(crate::assertion_store::MAP_FILE)
+                .is_file()
+        })
+        .max_by(|a, b| a.metadata.started_at.cmp(&b.metadata.started_at))
+    else {
+        return Vec::new();
+    };
+    let Ok(bytes) = fs::read(newest.directory.join(crate::assertion_store::MAP_FILE)) else {
+        return Vec::new();
+    };
+    let Ok(map) = crate::assertion_map::parse(&bytes) else {
+        return Vec::new();
+    };
+    map.assertions
+        .iter()
+        .flat_map(|a| a.flows.iter())
+        .flat_map(|flow| flow.watch.iter())
+        .filter(|file| local_path(file) && root.join(file).is_file())
+        .map(PathBuf::from)
+        .collect()
 }
 
 pub fn append(
@@ -424,6 +471,52 @@ fn ruby_ranges(source: &str) -> Result<Vec<(usize, usize, String)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_captures_the_files_its_inherited_map_watches() {
+        // TodoMVC's flows rest on index.html, which no JavaScript adapter
+        // reads; the watch reported a file that existed as missing.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-watch-capture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("public")).unwrap();
+        fs::write(
+            root.join("public/index.html"),
+            "<script src=\"a.js\"></script>\n",
+        )
+        .unwrap();
+        fs::write(root.join("public/a.js"), "var a = 1;\n").unwrap();
+        let run = crate::run_store::create_analyzable_test_run(&root, "run_watch");
+        let map = serde_json::json!({
+            "schemaVersion": 2,
+            "assertions": [{
+                "id": "a_1",
+                "at": {"file": "e2e/a.spec.js", "line": 1, "column": 1, "text": "expect(x)"},
+                "observes": [],
+                "flows": [{
+                    "id": "f", "basis": null, "questions": [], "explanation": "renders",
+                    "appliesTo": [], "nodes": [], "edges": [], "countsAsAsserted": [],
+                    "watch": ["public/index.html", "public/gone.css", "../outside.html"]
+                }]
+            }]
+        });
+        fs::write(
+            run.join(crate::assertion_store::MAP_FILE),
+            serde_json::to_vec(&map).unwrap(),
+        )
+        .unwrap();
+        let inputs = capture(&root, "javascript", [PathBuf::from("public/a.js")]).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert!(inputs.files.contains_key("public/index.html"));
+        assert!(inputs.files.contains_key("public/a.js"));
+        assert!(!inputs.files.contains_key("public/gone.css"));
+        assert_eq!(inputs.files.len(), 2);
+    }
 
     fn empty(_: &str) -> Option<String> {
         None

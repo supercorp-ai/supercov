@@ -724,8 +724,15 @@ pub fn validate_flow(flow: &Flow, files: &Files) -> Vec<String> {
         errors.push("missing explanation".into());
     }
     for file in &flow.watch {
-        if !local_path(file) || !files.contains_key(file) {
-            errors.push(format!("watched file missing: {file}"));
+        if !local_path(file) {
+            errors.push(format!("watched file is not a project path: {file}"));
+        } else if !files.contains_key(file) {
+            // A run captures what its inherited map watches, so a watch added
+            // since this run was recorded is captured by the next one.
+            errors.push(format!(
+                "watched file missing: {file} is not among this run's inputs; if it exists, \
+                 run the tests again, since a run captures every file its map watches"
+            ));
         }
     }
     errors
