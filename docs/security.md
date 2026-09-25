@@ -63,6 +63,7 @@ Every scanner's results are at
 A file too large for one request is read in windows at declaration
 boundaries, or at line boundaries where Supercov has no parser for it, such as
 a template.
+
 ## What is read
 
 Security reads every source file, template and configuration file that the
