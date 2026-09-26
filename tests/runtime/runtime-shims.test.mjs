@@ -435,6 +435,7 @@ test("a background writer that meets a clone of itself moves to a fresh shard", 
         `import { readdirSync, appendFileSync } from "node:fs";
          const runtime = await import(${JSON.stringify(runtime)});
          runtime.coverageHit("before-clone");
+         await new Promise((resolve) => setImmediate(resolve));
          const directory = ${JSON.stringify(resolve(root, "run-clone", "background"))};
          const [shard] = readdirSync(directory);
          appendFileSync(directory + "/" + shard, JSON.stringify({ type: "hit", id: "from-a-clone" }) + String.fromCharCode(10));
@@ -460,7 +461,7 @@ test("a background writer that meets a clone of itself moves to a fresh shard", 
   }
 });
 
-test("background evidence is durable before an uncatchable process death", {
+test("background evidence is on disk once its turn ends, before an uncatchable process death", {
   skip: process.platform === "win32",
 }, () => {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-background-kill-"));
@@ -473,7 +474,7 @@ test("background evidence is durable before an uncatchable process death", {
       [
         "--input-type=module",
         "--eval",
-        `const runtime = await import(${JSON.stringify(runtime)}); runtime.coverageHit("kill-safe-hit"); process.kill(process.pid, "SIGKILL");`,
+        `const runtime = await import(${JSON.stringify(runtime)}); runtime.coverageHit("kill-safe-hit"); await new Promise((resolve) => setImmediate(resolve)); process.kill(process.pid, "SIGKILL");`,
       ],
       {
         cwd: process.cwd(),
@@ -500,11 +501,10 @@ test("background evidence is durable before an uncatchable process death", {
   }
 });
 
-test("background records reuse the directory and the open shard", () => {
+test("background records are written once per turn through one open shard", () => {
   // Under tap, AVA or Mocha every first hit is a background record, and each
   // one created the directory and opened and closed the shard around its
-  // append: lru-cache's 10 ms TTL test spent over half its window there. Each
-  // record is still written before the probe returns (see the SIGKILL test).
+  // append: lru-cache's 10 ms TTL test spent over half its window there.
   const root = mkdtempSync(resolve(tmpdir(), "supercov-background-descriptor-"));
   try {
     const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
@@ -526,7 +526,15 @@ test("background records reuse the directory and the open shard", () => {
            };
          }
          const runtime = await import(${JSON.stringify(runtime)});
-         for (let index = 0; index < 100; index += 1) runtime.coverageHit("hit-" + index);
+         const opens = fs.openSync, writes = fs.writeSync;
+         let appending, lineWrites = 0;
+         fs.openSync = function (...args) { const fd = opens.apply(this, args); if (args[1] === "a") appending = fd; return fd; };
+         fs.writeSync = function (...args) { if (args[0] === appending) lineWrites += 1; return writes.apply(this, args); };
+         for (let turn = 0; turn < 10; turn += 1) {
+           for (let index = 0; index < 10; index += 1) runtime.coverageHit("hit-" + (turn * 10 + index));
+           await new Promise((resolve) => setImmediate(resolve));
+         }
+         calls.writeSync = lineWrites;
          process.stdout.write(JSON.stringify(calls));`,
       ],
       {
@@ -536,12 +544,13 @@ test("background records reuse the directory and the open shard", () => {
       },
     );
     assert.equal(child.status, 0, child.stderr);
-    // The first record creates the shard exclusively; the other 99 are
-    // appended through one descriptor opened for appending.
+    // The first turn creates the shard exclusively; each of the other nine is
+    // one write through a descriptor opened once for appending.
     const calls = JSON.parse(child.stdout);
     assert.equal(calls.mkdirSync, 1, child.stdout);
     assert.equal(calls["openSync:a"], 1, child.stdout);
     assert.equal(calls.appendFileSync, undefined, child.stdout);
+    assert.equal(calls.writeSync, 9, child.stdout);
     const directory = resolve(root, "run-descriptor", "background");
     const ids = readdirSync(directory).flatMap((file) =>
       readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line).id),

@@ -166,6 +166,7 @@ function createState() {
     backgroundWriters: /* @__PURE__ */ new Map(),
     backgroundShardSizes: /* @__PURE__ */ new Map(),
     backgroundDescriptors: /* @__PURE__ */ new Map(),
+    pendingBackgroundAppends: /* @__PURE__ */ new Map(),
     backgroundSequence: 0,
     runtimeSnapshots: false,
     assertionPhases: /* @__PURE__ */ new Map(),
@@ -461,19 +462,50 @@ function backgroundWriterToken() {
   }
   return Math.floor(Math.random() * 4294967295).toString(16);
 }
+// Background records -- every first hit under tap, AVA or Mocha, and code run
+// outside any test -- are written once per event-loop turn, as a test's own
+// records are, and on exit and the terminating signals. Written one by one
+// they cost lru-cache's 10 ms TTL test a write and a stat for each of the 132
+// first hits in its window, and the test missed its deadline under load. A
+// process killed in the middle of a turn loses that turn's records.
 function appendDurableBackgroundRecord(fs, runId, record) {
-  var _a8;
   const records = state.backgroundBuffers.get(runId) != null ? state.backgroundBuffers.get(runId) : /* @__PURE__ */ new Map();
   const key = serverRecordKey(record);
   if (records.has(key))
     return state.backgroundWriters.get(runId);
+  if (state.serverTransportFailure)
+    throw state.serverTransportFailure;
+  records.set(key, record);
+  state.backgroundBuffers.set(runId, records);
+  let pending = state.pendingBackgroundAppends.get(runId);
+  if (!pending) {
+    pending = [];
+    state.pendingBackgroundAppends.set(runId, pending);
+  }
+  pending.push(JSON.stringify(record) + "\n");
+  if (pending.length >= 2048)
+    flushServerAppends();
+  else
+    scheduleServerFlush();
+  return state.backgroundWriters.get(runId);
+}
+function flushBackgroundAppends(fs) {
+  for (const [runId, lines] of state.pendingBackgroundAppends) {
+    state.pendingBackgroundAppends.delete(runId);
+    try {
+      if (!fs)
+        throw new Error("node:fs is unavailable");
+      writeBackgroundLines(fs, runId, lines.join(""));
+    } catch (cause) {
+      const failure = cause instanceof Error && cause.code === "SUPERCOV_EVIDENCE_TRANSPORT_FAILED" ? cause : serverTransportError(runId, cause);
+      state.serverTransportFailure = failure;
+      throw failure;
+    }
+  }
+}
+function writeBackgroundLines(fs, runId, payload) {
+  var _a8;
   const directory = backgroundEvidenceDirectory(runId);
-  const payload = JSON.stringify(record) + "\n";
-  // Each record still reaches the kernel before this returns, so a process
-  // killed right after keeps it. What goes is creating the directory for every
-  // record and opening and closing the shard around every append: under tap,
-  // AVA or Mocha every first hit lands here, and lru-cache's 10 ms TTL test
-  // spent over half of its window in those calls.
   if (!state.createdEvidenceDirectories.has(directory)) {
     fs.mkdirSync(directory, { recursive: true });
     state.createdEvidenceDirectories.add(directory);
@@ -503,20 +535,17 @@ function appendDurableBackgroundRecord(fs, runId, record) {
     path = backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
     state.backgroundWriters.set(runId, path);
     state.backgroundShardSizes.set(path, capturedBuffer.byteLength(payload));
-  } else {
-    let descriptor = state.backgroundDescriptors.get(path);
-    if (descriptor === void 0) {
-      descriptor = fs.openSync(path, "a");
-      state.backgroundDescriptors.set(path, descriptor);
-    }
-    const bytes = capturedBuffer.from(payload);
-    for (let written = 0; written < bytes.length; )
-      written += fs.writeSync(descriptor, bytes, written, bytes.length - written);
-    state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) || 0) + bytes.length);
+    return;
   }
-  records.set(key, record);
-  state.backgroundBuffers.set(runId, records);
-  return path;
+  let descriptor = state.backgroundDescriptors.get(path);
+  if (descriptor === void 0) {
+    descriptor = fs.openSync(path, "a");
+    state.backgroundDescriptors.set(path, descriptor);
+  }
+  const bytes = capturedBuffer.from(payload);
+  for (let written = 0; written < bytes.length; )
+    written += fs.writeSync(descriptor, bytes, written, bytes.length - written);
+  state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) || 0) + bytes.length);
 }
 function closeBackgroundShard(fs, path) {
   const descriptor = state.backgroundDescriptors.get(path);
@@ -598,9 +627,10 @@ function serverTransportError(runId, cause) {
 }
 function flushServerAppends() {
   const pending = state.pendingServerAppends;
-  if (pending.size === 0)
+  if (pending.size === 0 && state.pendingBackgroundAppends.size === 0)
     return;
   const fs = getFs();
+  flushBackgroundAppends(fs);
   for (const [path, entry] of pending) {
     pending.delete(path);
     try {
@@ -631,6 +661,9 @@ function enqueueServerAppend(directory, path, line, runId) {
   } else {
     state.pendingServerAppends.set(path, { directory, runId, lines: [line] });
   }
+  scheduleServerFlush();
+}
+function scheduleServerFlush() {
   if (!state.serverExitHookInstalled && typeof process !== "undefined") {
     state.serverExitHookInstalled = true;
     try {
