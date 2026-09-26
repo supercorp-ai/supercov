@@ -221,10 +221,11 @@ try {
     const shown = supercov(workers, ['runs', 'latest', 'file', file]);
     assert.match(shown.output, /Lines not executed\s+0/, `${file} executed in its worker\n${shown.output}`);
   }
-  // The first test closed its page with the sleeper still blocked, so what
-  // it recorded is a lower bound; the second woke it and is exact.
+  // The first test closed its page with the sleeper still blocked in
+  // Atomics.wait, where no evaluation runs; it pushed its evidence to the page
+  // before it blocked, so both tests are exact.
   const summary = supercov(workers, ['runs', 'latest']);
-  assert.match(summary.output, /Attribution\s+1 exact, 1 a lower bound/, summary.output);
+  assert.match(summary.output, /Attribution\s+Exact for 2 test\(s\)/, summary.output);
 
   console.log('[classic-browser] classic scripts share a page, workers are measured without stalling the suite, and a CommonJS TypeScript config keeps its settings');
 } finally {
