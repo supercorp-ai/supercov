@@ -165,6 +165,7 @@ function createState() {
     backgroundBuffers: /* @__PURE__ */ new Map(),
     backgroundWriters: /* @__PURE__ */ new Map(),
     backgroundShardSizes: /* @__PURE__ */ new Map(),
+    backgroundDescriptors: /* @__PURE__ */ new Map(),
     backgroundSequence: 0,
     runtimeSnapshots: false,
     assertionPhases: /* @__PURE__ */ new Map(),
@@ -468,7 +469,15 @@ function appendDurableBackgroundRecord(fs, runId, record) {
     return state.backgroundWriters.get(runId);
   const directory = backgroundEvidenceDirectory(runId);
   const payload = JSON.stringify(record) + "\n";
-  fs.mkdirSync(directory, { recursive: true });
+  // Each record still reaches the kernel before this returns, so a process
+  // killed right after keeps it. What goes is creating the directory for every
+  // record and opening and closing the shard around every append: under tap,
+  // AVA or Mocha every first hit lands here, and lru-cache's 10 ms TTL test
+  // spent over half of its window in those calls.
+  if (!state.createdEvidenceDirectories.has(directory)) {
+    fs.mkdirSync(directory, { recursive: true });
+    state.createdEvidenceDirectories.add(directory);
+  }
   let path = state.backgroundWriters.get(runId);
   // A pid is not an identity: pool VMs restored from one snapshot run clones
   // of this very process, same pid and same cached shard path, and their
@@ -482,6 +491,7 @@ function appendDurableBackgroundRecord(fs, runId, record) {
     } catch (e) {
     }
     if (currentSize !== (state.backgroundShardSizes.has(path) ? state.backgroundShardSizes.get(path) : -1)) {
+      closeBackgroundShard(fs, path);
       path = void 0;
     }
   }
@@ -494,12 +504,29 @@ function appendDurableBackgroundRecord(fs, runId, record) {
     state.backgroundWriters.set(runId, path);
     state.backgroundShardSizes.set(path, capturedBuffer.byteLength(payload));
   } else {
-    fs.appendFileSync(path, payload);
-    state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) || 0) + capturedBuffer.byteLength(payload));
+    let descriptor = state.backgroundDescriptors.get(path);
+    if (descriptor === void 0) {
+      descriptor = fs.openSync(path, "a");
+      state.backgroundDescriptors.set(path, descriptor);
+    }
+    const bytes = capturedBuffer.from(payload);
+    for (let written = 0; written < bytes.length; )
+      written += fs.writeSync(descriptor, bytes, written, bytes.length - written);
+    state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) || 0) + bytes.length);
   }
   records.set(key, record);
   state.backgroundBuffers.set(runId, records);
   return path;
+}
+function closeBackgroundShard(fs, path) {
+  const descriptor = state.backgroundDescriptors.get(path);
+  if (descriptor === void 0)
+    return;
+  state.backgroundDescriptors.delete(path);
+  try {
+    fs.closeSync(descriptor);
+  } catch (e) {
+  }
 }
 var _a7;
 // Evidence buffered for the current turn is lost when a signal ends the

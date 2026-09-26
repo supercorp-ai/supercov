@@ -500,6 +500,58 @@ test("background evidence is durable before an uncatchable process death", {
   }
 });
 
+test("background records reuse the directory and the open shard", () => {
+  // Under tap, AVA or Mocha every first hit is a background record, and each
+  // one created the directory and opened and closed the shard around its
+  // append: lru-cache's 10 ms TTL test spent over half its window there. Each
+  // record is still written before the probe returns (see the SIGKILL test).
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-background-descriptor-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `const fs = process.getBuiltinModule("node:fs");
+         const calls = {};
+         for (const name of ["mkdirSync", "openSync", "appendFileSync"]) {
+           const original = fs[name];
+           fs[name] = function (...args) {
+             if (String(args[0]).startsWith(process.env.SUPERCOV_SERVER_EVIDENCE_ROOT)) {
+               const key = name === "openSync" ? name + ":" + args[1] : name;
+               calls[key] = (calls[key] || 0) + 1;
+             }
+             return original.apply(this, args);
+           };
+         }
+         const runtime = await import(${JSON.stringify(runtime)});
+         for (let index = 0; index < 100; index += 1) runtime.coverageHit("hit-" + index);
+         process.stdout.write(JSON.stringify(calls));`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, SUPERCOV_RUN_ID: "run-descriptor", SUPERCOV_SERVER_EVIDENCE_ROOT: root },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    // The first record creates the shard exclusively; the other 99 are
+    // appended through one descriptor opened for appending.
+    const calls = JSON.parse(child.stdout);
+    assert.equal(calls.mkdirSync, 1, child.stdout);
+    assert.equal(calls["openSync:a"], 1, child.stdout);
+    assert.equal(calls.appendFileSync, undefined, child.stdout);
+    const directory = resolve(root, "run-descriptor", "background");
+    const ids = readdirSync(directory).flatMap((file) =>
+      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line).id),
+    );
+    assert.deepEqual(ids.sort(), Array.from({ length: 100 }, (_, index) => `hit-${index}`).sort());
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a loopback request that loses its carrier is retained as background evidence", () => {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-loopback-background-"));
   try {

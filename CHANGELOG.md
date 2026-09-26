@@ -9,6 +9,7 @@
 - Each Vitest, Jest and node:test test is recorded by appending to a journal instead of writing and syncing a file. A 63,740-test Vitest suite that did not finish in seven minutes now records in under two.
 - Instrumenting a long JavaScript file takes time proportional to its length; a 16,000-line file takes under two seconds where 8,000 lines took over a minute and a half.
 - Code a probe already recorded runs at close to its own speed: a repeat is one inline comparison, and a script's top-level code no longer records every repeat again. A million-iteration lru-cache loop took 177 s outside a test and 1.6 s inside one; it now takes 0.9 s and 0.8 s (0.06 s without Supercov), and minimatch's backtracking guard test passes its one-second limit.
+- Under tap, AVA, Mocha and the other runners Supercov measures in aggregate, recording a probe's first hit writes one line to an evidence file already open, instead of creating the directory and opening and closing the file for each record; each record is still on disk before the probe returns. lru-cache's 10 ms TTL test, whose window records 132 first hits, runs that window in 2.3–2.6 ms instead of 5–7.7 ms (0.55 ms without Supercov); on a heavily loaded machine it can still miss its 10 ms.
 - `assertions report` says whether the run needs attention whatever the filter, takes `--compact`, several `--file`s and `--id`, and a JavaScript build runs through the package manager that started the tests, or as `SUPERCOV_BUILD_COMMAND` names it.
 
 **Fixed**
