@@ -409,8 +409,10 @@ test('picks', () => {
   assert.equal(vitestRun.status, 0, vitestRun.output);
   assert.doesNotMatch(vitestRun.output, /does not meet/, vitestRun.output);
   // The suite covers every branch, and Vitest says so: Supercov's probes no
-  // longer count against the user's lines (they read 87.5%).
-  assert.match(vitestRun.output, /Branches\s+:\s+100%/, vitestRun.output);
+  // longer count against the user's lines (they read 87.5%). Vitest prints its
+  // table's rows on Linux and only the summary under it on macOS, with or
+  // without Supercov.
+  assert.match(vitestRun.output, /All files\s*\|\s*100\s*\|\s*100\s*\||Branches\s+:\s+100%/, vitestRun.output);
   assert.equal(vitestRun.output.match(skipped('Vitest'))?.length, 1, vitestRun.output);
   const vitestCli = supercov(vitestGate, ['--', process.execPath, 'node_modules/vitest/vitest.mjs', 'run', '--coverage',
     '--config', 'vitest.plain.config.js', '--coverage.thresholds.lines', '100', '--coverage.thresholds.branches=100']);
