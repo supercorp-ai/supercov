@@ -12,6 +12,7 @@
 const { createHash, randomUUID } = require("node:crypto");
 const { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, statSync, writeFileSync } = require("node:fs");
 const { relative, resolve, sep } = require("node:path");
+const { Buffer } = require("node:buffer");
 
 // jest-environment-node exposes the outer process's own globals to the sandbox
 // through getters, so this is the same runtime instance the instrumented

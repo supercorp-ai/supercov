@@ -4,6 +4,11 @@ export const COVERAGE_SCOPE_COOKIE = "__supercov_scope";
 export const COVERAGE_PHASE_COOKIE = "__supercov_phase";
 export const COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 export const DEFAULT_SERVER_EVIDENCE_ROOT = "/tmp/supercov-server-evidence";
+// Buffer as it was when Supercov loaded. Tests replace globals -- axios's set
+// `globalThis.Buffer = undefined` to check it copes -- and the runtime runs
+// inside those tests; it must not fail where the application does not.
+var capturedBuffer = typeof Buffer === "undefined" ? void 0 : Buffer;
+
 function configuredServerEvidenceRoot() {
     return typeof process !== "undefined" &&
         process.env?.["SUPERCOV_SERVER_EVIDENCE_ROOT"]
@@ -68,13 +73,13 @@ export function decodeCoverageScope(encoded) {
     }
 }
 export function encodeCoverageCarrier(carrier) {
-    return Buffer.from(JSON.stringify(carrier), "utf8").toString("base64url");
+    return capturedBuffer.from(JSON.stringify(carrier), "utf8").toString("base64url");
 }
 export function decodeCoverageCarrier(encoded) {
     if (!encoded)
         return undefined;
     try {
-        const value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+        const value = JSON.parse(capturedBuffer.from(encoded, "base64url").toString("utf8"));
         if (value.version !== 1)
             return undefined;
         if (value.scope) {
