@@ -25,6 +25,9 @@ var __spreadProps = (a, b) => __spreadValues(a, b);
 // `globalThis.Buffer = undefined` to check it copes -- and the runtime runs
 // inside those tests; it must not fail where the application does not.
 var capturedBuffer = typeof Buffer === "undefined" ? void 0 : Buffer;
+// Likewise the timer: a test that installs fake timers would otherwise hold
+// the browser's evidence back until it advanced its clock.
+var capturedSetTimeout = setTimeout;
 
 // dist/transport.js
 var COVERAGE_SCOPE_HEADER = "x-supercov-scope";
@@ -369,7 +372,7 @@ function persistBrowser() {
   if (persistBrowserScheduled)
     return;
   persistBrowserScheduled = true;
-  setTimeout(() => {
+  capturedSetTimeout(() => {
     persistBrowserScheduled = false;
     persistBrowserNow();
   }, 0);
