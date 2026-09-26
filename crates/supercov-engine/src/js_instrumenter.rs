@@ -558,8 +558,8 @@ pub struct CandidateRuntime {
     pub optional_call_reached: String,
     pub optional_call_continued: String,
     pub optional_call_end: String,
-    pub default_selected: String,
-    pub default_entered: String,
+    pub default_selected_v2: String,
+    pub default_entered_v2: String,
     pub try_begin: String,
     pub try_catch: String,
     pub try_end: String,
@@ -3049,8 +3049,8 @@ fn instrument_candidate_with_binding(
     let optional_call_reached = names.allocate("__supercovOptionalCallReached");
     let optional_call_continued = names.allocate("__supercovOptionalCallContinued");
     let optional_call_end = names.allocate("__supercovOptionalCallEnd");
-    let default_selected = names.allocate("__supercovDefaultSelected");
-    let default_entered = names.allocate("__supercovDefaultEntered");
+    let default_selected_v2 = names.allocate("__supercovDefaultSelectedV2");
+    let default_entered_v2 = names.allocate("__supercovDefaultEnteredV2");
     let try_begin = names.allocate("__supercovTryBegin");
     let try_catch = names.allocate("__supercovTryCatch");
     let try_end = names.allocate("__supercovTryEnd");
@@ -3069,6 +3069,36 @@ fn instrument_candidate_with_binding(
         .enumerate()
         .map(|(index, point)| (point.id.clone(), index))
         .collect::<HashMap<_, _>>();
+    // A default's two outcomes are V2 points after the statement points, and
+    // its pending count a slot of the file's `pendingDefaults`, both in source
+    // order. lru-cache's `set` and `get` destructure options with defaults, and
+    // the string-keyed count behind each was a third of a hot loop.
+    let mut default_sites = default_analysis
+        .parameter_targets
+        .iter()
+        .chain(&default_analysis.binding_targets)
+        .map(|(span, target)| (*span, target.default_id.clone(), target.provided_id.clone()))
+        .collect::<Vec<_>>();
+    default_sites.sort();
+    let mut default_point_ids = Vec::with_capacity(default_sites.len() * 2);
+    let default_slots = default_sites
+        .into_iter()
+        .enumerate()
+        .map(|(slot, (_, default_id, provided_id))| {
+            let default_point = point_analysis.points.len() + default_point_ids.len();
+            default_point_ids.push(default_id.clone());
+            default_point_ids.push(provided_id);
+            (
+                default_id,
+                DefaultSlot {
+                    slot,
+                    default_point,
+                    provided_point: default_point + 1,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let default_count = default_slots.len();
     let statement_targets = point_analysis
         .statement_targets
         .into_iter()
@@ -3161,8 +3191,10 @@ fn instrument_candidate_with_binding(
     call_transformer.visit_program(&mut parsed.program);
     let mut default_transformer = DefaultTransformer {
         ast,
-        default_selected: default_selected.clone(),
-        default_entered: default_entered.clone(),
+        default_selected_v2: default_selected_v2.clone(),
+        default_entered_v2: default_entered_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        slots: default_slots,
         parameter_targets: default_analysis.parameter_targets,
         binding_targets: default_analysis.binding_targets,
         function_entries: Vec::new(),
@@ -3247,8 +3279,9 @@ fn instrument_candidate_with_binding(
 
     let registration = serde_json::json!({
         "decisions": &collector.decisions,
-        "pointIds": point_analysis.points.iter().map(|point| &point.id).collect::<Vec<_>>(),
+        "pointIds": point_analysis.points.iter().map(|point| &point.id).chain(&default_point_ids).collect::<Vec<_>>(),
         "decisionVectorCounts": &collector.decision_vector_counts,
+        "defaultCount": default_count,
     });
     let registration_call = ast.expression_call(
         Span::default(),
@@ -3294,8 +3327,8 @@ fn instrument_candidate_with_binding(
         ("optionalCallReached", &optional_call_reached),
         ("optionalCallContinued", &optional_call_continued),
         ("optionalCallEnd", &optional_call_end),
-        ("defaultSelected", &default_selected),
-        ("defaultEntered", &default_entered),
+        ("defaultSelectedV2", &default_selected_v2),
+        ("defaultEnteredV2", &default_entered_v2),
         ("tryBegin", &try_begin),
         ("tryCatch", &try_catch),
         ("tryEnd", &try_end),
@@ -3406,8 +3439,8 @@ fn instrument_candidate_with_binding(
             optional_call_reached,
             optional_call_continued,
             optional_call_end,
-            default_selected,
-            default_entered,
+            default_selected_v2,
+            default_entered_v2,
             try_begin,
             try_catch,
             try_end,
@@ -4174,10 +4207,20 @@ impl<'a> VisitMut<'a> for OptionalCallTransformer<'a, '_> {
     }
 }
 
+/// Where a default's pending count and its two outcomes live in the file's V2
+/// probe state: a slot of `pendingDefaults`, and two indices of `pointIds`.
+struct DefaultSlot {
+    slot: usize,
+    default_point: usize,
+    provided_point: usize,
+}
+
 struct DefaultTransformer<'a> {
     ast: AstBuilder<'a>,
-    default_selected: String,
-    default_entered: String,
+    default_selected_v2: String,
+    default_entered_v2: String,
+    probe_file_v2: String,
+    slots: HashMap<String, DefaultSlot>,
     parameter_targets: HashMap<SpanKey, DefaultTarget>,
     binding_targets: HashMap<SpanKey, DefaultTarget>,
     function_entries: Vec<Vec<Statement<'a>>>,
@@ -4202,9 +4245,28 @@ impl<'a> DefaultTransformer<'a> {
         ))
     }
 
+    fn index_argument(&self, index: usize) -> Argument<'a> {
+        Argument::from(self.ast.expression_numeric_literal(
+            Span::default(),
+            index as f64,
+            None,
+            NumberBase::Decimal,
+        ))
+    }
+
+    fn slot(&self, target: &DefaultTarget) -> &DefaultSlot {
+        self.slots
+            .get(&target.default_id)
+            .expect("every default target has a V2 slot")
+    }
+
+    /// `defaultSelectedV2(file, slot, value[, name])`: the default counts
+    /// itself after its value evaluates, so a default that throws leaves no
+    /// count behind.
     fn selected(&self, value: Expression<'a>, target: &DefaultTarget) -> Expression<'a> {
         let mut arguments = self.ast.vec_from_array([
-            self.string_argument(&target.default_id),
+            Argument::from(self.identifier(&self.probe_file_v2)),
+            self.index_argument(self.slot(target).slot),
             Argument::from(value),
         ]);
         if let Some(name) = &target.inferred_name {
@@ -4212,23 +4274,28 @@ impl<'a> DefaultTransformer<'a> {
         }
         self.ast.expression_call(
             Span::default(),
-            self.identifier(&self.default_selected),
+            self.identifier(&self.default_selected_v2),
             NONE,
             arguments,
             false,
         )
     }
 
+    /// `defaultEnteredV2(file, slot, defaultPoint, providedPoint)`, once the
+    /// parameters or the declaration are bound.
     fn entered(&self, target: &DefaultTarget) -> Statement<'a> {
+        let slot = self.slot(target);
         self.ast.statement_expression(
             Span::default(),
             self.ast.expression_call(
                 Span::default(),
-                self.identifier(&self.default_entered),
+                self.identifier(&self.default_entered_v2),
                 NONE,
                 self.ast.vec_from_array([
-                    self.string_argument(&target.default_id),
-                    self.string_argument(&target.provided_id),
+                    Argument::from(self.identifier(&self.probe_file_v2)),
+                    self.index_argument(slot.slot),
+                    self.index_argument(slot.default_point),
+                    self.index_argument(slot.provided_point),
                 ]),
                 false,
             ),

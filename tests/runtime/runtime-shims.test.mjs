@@ -714,6 +714,40 @@ test("assertion callee binding preserves receivers, await order and synchronous 
   assert.deepEqual(phases.map(p => [p.source, p.status]), [['test.js:1:1', 'passed'], ['test.js:2:1', 'failed']], 'rejected arguments do not create an assertion occurrence');
 });
 
+test("a default records whether it was taken or a value was provided, per slot", async () => {
+  const { registerProbeV2, defaultSelectedV2, defaultEnteredV2, resetCoverage, coverageSnapshot } = await import(
+    "../../runtime/javascript/runtime.mjs"
+  );
+  const file = registerProbeV2({
+    file: "src/cache.js",
+    pointIds: ["statement", "ttl:default", "ttl:provided", "cb:default", "cb:provided"],
+    decisions: [],
+    defaultCount: 2,
+  });
+  resetCoverage("default-taken");
+  // `ttl = 10` taken: the default counts itself when its value evaluates, and
+  // the entry after the parameters are bound spends the count.
+  assert.equal(defaultSelectedV2(file, 0, 10), 10);
+  defaultEnteredV2(file, 0, 1, 2);
+  assert.deepEqual(coverageSnapshot().hits.filter((id) => id.startsWith("ttl")), ["ttl:default"]);
+  resetCoverage("default-provided");
+  // The count is spent, so the next entry without a taken default is a value
+  // the caller provided.
+  defaultEnteredV2(file, 0, 1, 2);
+  assert.deepEqual(coverageSnapshot().hits.filter((id) => id.startsWith("ttl")), ["ttl:provided"]);
+  // A function default keeps the name the binding gives it, and each slot
+  // counts on its own: a nested call taking the same default spends its own.
+  resetCoverage("default-nested");
+  const callback = defaultSelectedV2(file, 1, () => {}, "cb");
+  assert.equal(callback.name, "cb");
+  defaultSelectedV2(file, 1, 0);
+  defaultEnteredV2(file, 1, 3, 4);
+  defaultEnteredV2(file, 1, 3, 4);
+  defaultEnteredV2(file, 1, 3, 4);
+  assert.deepEqual(coverageSnapshot().hits.filter((id) => id.startsWith("cb")).sort(), ["cb:default", "cb:provided"]);
+  assert.equal(file.pendingDefaults[1], 0);
+});
+
 test("a rendered JSX expression records its own evaluation and passes the value through", async () => {
   const { registerProbeV2, renderedValueV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"

@@ -1289,7 +1289,8 @@ function registerProbeV2(definition) {
     }),
     decisionObservationEpochs: new Uint32Array(definition.decisions.length),
     decisionObservationCounts: new Uint16Array(definition.decisions.length),
-    decisionCompleteEpochs: new Uint32Array(definition.decisions.length)
+    decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
+    pendingDefaults: new Uint32Array(definition.defaultCount || 0)
   };
   state.probeV2Files.add(file);
   if (isBrowser) {
@@ -1510,6 +1511,24 @@ function defaultEntered(defaultId, providedId) {
     coverageHit(providedId);
   }
 }
+// The same count per default, in a slot of the file's typed array instead of
+// a Map keyed by the default's id, and the outcome recorded through the V2
+// point check, which ends at one comparison once it fired in this context.
+// lru-cache's set and get destructure options with defaults: the Map and the
+// two calls behind each were a third of a hot loop.
+function defaultSelectedV2(file, slot, value, inferredName) {
+  file.pendingDefaults[slot] += 1;
+  return inferredName ? applyInferredName(value, inferredName) : value;
+}
+function defaultEnteredV2(file, slot, defaultPoint, providedPoint) {
+  const pending = file.pendingDefaults;
+  if (pending[slot] > 0) {
+    pending[slot] -= 1;
+    coverageHitV2(file, defaultPoint);
+  } else {
+    coverageHitV2(file, providedPoint);
+  }
+}
 function tryBegin(successId, catchId) {
   return { successId, catchId, caught: false };
 }
@@ -1599,7 +1618,9 @@ const directRuntimeApi = {
   coverageSnapshot,
   decodeProbeV2Vector,
   defaultEntered,
+  defaultEnteredV2,
   defaultSelected,
+  defaultSelectedV2,
   enableRuntimeSnapshotEvidence,
   flushBufferedBackgroundEvidence,
   flushBufferedServerEvidence,
@@ -1651,7 +1672,9 @@ export {
   coverageSnapshot,
   decodeProbeV2Vector,
   defaultEntered,
+  defaultEnteredV2,
   defaultSelected,
+  defaultSelectedV2,
   enableRuntimeSnapshotEvidence,
   flushBufferedBackgroundEvidence,
   flushBufferedServerEvidence,

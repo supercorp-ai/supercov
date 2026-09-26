@@ -893,6 +893,8 @@ export declare function optionalCallContinued(...args: any[]): any;\n\
 export declare function optionalCallEnd(...args: any[]): any;\n\
 export declare function defaultSelected(...args: any[]): any;\n\
 export declare function defaultEntered(...args: any[]): any;\n\
+export declare function defaultSelectedV2(...args: any[]): any;\n\
+export declare function defaultEnteredV2(...args: any[]): any;\n\
 export declare function tryBegin(...args: any[]): any;\n\
 export declare function tryCatch(...args: any[]): any;\n\
 export declare function tryEnd(...args: any[]): any;\n\
