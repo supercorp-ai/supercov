@@ -79,6 +79,16 @@ pub struct CoverageProject {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jest_config: Option<PathBuf>,
     pub uses_jest: bool,
+    /// The tests bundle sources for a browser through a runner Supercov has
+    /// no adapter for -- karma, testem, airtap, zuul, mochify -- so each
+    /// script-style file carries the runtime the page otherwise lacks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub browser_runner: bool,
+    /// The build compiles each source into another directory -- tsc, tshy,
+    /// babel, swc -- where a later step may bundle the output, so an
+    /// instrumented source imports the runtime by absolute path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relocating_build: bool,
     pub playwright_module: String,
     pub playwright_test_export: String,
     pub playwright_exports: Vec<String>,
@@ -745,6 +755,41 @@ fn has_tool(tokens: &[String], tool: &str) -> bool {
     })
 }
 
+/// `tokens` and the tokens of every package script they run, however deep:
+/// debug's `npm test` runs `npm run test:browser`, which runs karma.
+fn reachable_script_tokens(manifest: &Value, tokens: &[String]) -> Vec<String> {
+    let mut all = tokens.to_vec();
+    let mut visited = BTreeSet::new();
+    let mut index = 0;
+    while index < all.len() {
+        let runner = all[index]
+            .rsplit('/')
+            .next()
+            .unwrap_or(&all[index])
+            .to_owned();
+        let named = match runner.as_str() {
+            "npm" | "pnpm" | "yarn" | "bun" => {
+                let next = all.get(index + 1).map(String::as_str);
+                match next {
+                    Some("run" | "run-script") => all.get(index + 2).cloned(),
+                    Some("test" | "t") => Some("test".to_owned()),
+                    Some(name) if runner != "npm" => Some(name.to_owned()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(name) = named
+            && visited.insert(name.clone())
+            && let Some(body) = script(manifest, &name)
+        {
+            all.extend(command_tokens(body));
+        }
+        index += 1;
+    }
+    all
+}
+
 /// Resolve npm/pnpm/yarn script indirection before identifying a runner. This
 /// is shared by discovery and the Rust-owned execution frontend so `npm test`
 /// receives exactly the same adapter decision as an explicit runner command.
@@ -843,6 +888,10 @@ pub fn discover_coverage_project(
     let tokens = command_tokens(&expanded_test_command);
     let uses_jest =
         jest_config.is_some() || has_tool(&tokens, "jest") || manifest.get("jest").is_some();
+    let script_tokens = reachable_script_tokens(&manifest, &tokens);
+    let browser_runner = ["karma", "testem", "airtap", "zuul", "mochify"]
+        .iter()
+        .any(|tool| has_tool(&script_tokens, tool));
     let source_transforming_runner = has_tool(&tokens, "jest") || has_tool(&tokens, "vitest");
     let node_test = has_tool(&tokens, "node") && tokens.iter().any(|token| token == "--test");
     let typescript_test = tokens.iter().any(|token| {
@@ -867,6 +916,9 @@ pub fn discover_coverage_project(
         Vec::new()
     };
     let build_tokens = command_tokens(&expanded_command(root, &build_command));
+    let relocating_build = ["tsc", "tshy", "babel", "swc"]
+        .iter()
+        .any(|tool| has_tool(&reachable_script_tokens(&manifest, &build_tokens), tool));
     let uses_vite_build = has_tool(&build_tokens, "vite") || has_tool(&build_tokens, "vite-node");
     let playwright_exports = if playwright_module == discovered_playwright.module {
         discovered_playwright.exports
@@ -883,6 +935,8 @@ pub fn discover_coverage_project(
         vitest_config,
         jest_config,
         uses_jest,
+        browser_runner,
+        relocating_build,
         playwright_module,
         playwright_test_export,
         playwright_exports,
@@ -960,6 +1014,61 @@ mod tests {
         assert_eq!(discovered.build_adapter, BuildAdapter::Vite);
         assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_build_that_compiles_into_another_directory_is_told_from_a_bundler() {
+        // lru-cache: `npm run build` runs `npm run prepare`, which runs tshy.
+        let relocating = project(
+            "tshy",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"npm run prepare","prepare":"tshy && bash scripts/build.sh","test":"tap"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+            ],
+        );
+        let command = ["npm".to_owned(), "test".to_owned()];
+        let discovered =
+            discover_coverage_project(&relocating, &BTreeMap::new(), &command).unwrap();
+        assert!(discovered.relocating_build);
+        let bundled = project(
+            "next-build",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"next build","test":"playwright test"}}"#,
+                ),
+                (
+                    "app/page.jsx",
+                    "export default function Page() { return null }",
+                ),
+            ],
+        );
+        let discovered = discover_coverage_project(&bundled, &BTreeMap::new(), &command).unwrap();
+        assert!(!discovered.relocating_build);
+    }
+
+    #[test]
+    fn a_browser_runner_the_tests_reach_through_nested_scripts_is_found() {
+        // debug's `npm test` runs `npm run test:browser`, which runs karma.
+        let root = project(
+            "karma",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"test":"npm run test:node && npm run test:browser","test:node":"mocha test.js","test:browser":"karma start --single-run"}}"#,
+                ),
+                ("src/index.js", "module.exports = 1"),
+            ],
+        );
+        let command = ["npm".to_owned(), "test".to_owned()];
+        let discovered = discover_coverage_project(&root, &BTreeMap::new(), &command).unwrap();
+        assert!(discovered.browser_runner);
+        let node_only = ["npm".to_owned(), "run".to_owned(), "test:node".to_owned()];
+        let discovered = discover_coverage_project(&root, &BTreeMap::new(), &node_only).unwrap();
+        assert!(!discovered.browser_runner);
     }
 
     #[test]

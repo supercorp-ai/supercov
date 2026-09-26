@@ -5,7 +5,7 @@
 //! remains a language shim and is copied into the workspace under `.supercov`.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -29,6 +29,12 @@ const RUNTIME_INSTANCE_MARKER: &str = "__SUPERCOV_RUNTIME_INSTANCE__";
 const FRONTEND_CACHE_SCHEMA_VERSION: u32 = 2;
 const FRONTEND_CACHE_FILE: &str = ".supercov/frontend-cache.json";
 const FRONTEND_CACHE_DIRECTORY: &str = ".supercov/frontend-cache-artifacts";
+/// Each file Supercov rewrites, as its author wrote it, and the list of them.
+/// A linter, formatter or type check run by the test command reads these
+/// instead (register.mjs); both sit under node_modules, which none of them
+/// walk into.
+const AUTHORED_DIRECTORY: &str = ".supercov/node_modules/.authored";
+const AUTHORED_LIST: &str = ".supercov/node_modules/authored-sources.json";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.mjs",
     "capability.mjs",
@@ -395,10 +401,43 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
             }
         }
     }
+    let rewritten = project
+        .source_files
+        .iter()
+        .chain(project.source_scope.entries.iter().map(|entry| &entry.file))
+        .map(|file| format!("{AUTHORED_DIRECTORY}/{file}"))
+        .collect::<Vec<_>>();
+    artifacts.extend(rewritten);
+    artifacts.push(AUTHORED_LIST.to_owned());
     artifacts.sort();
     artifacts.dedup();
     artifacts.retain(|path| regular_file(workspace, path));
     artifacts
+}
+
+/// The project files this run rewrote, as the authored list records them.
+pub fn rewritten_files(workspace: &Path) -> Vec<String> {
+    fs::read(workspace.join(AUTHORED_LIST))
+        .ok()
+        .and_then(|contents| serde_json::from_slice(&contents).ok())
+        .unwrap_or_default()
+}
+
+/// Keep `file` as its author wrote it, the first time it is rewritten.
+fn keep_authored(
+    workspace: &Path,
+    authored: &mut BTreeSet<String>,
+    file: &str,
+    source: &str,
+) -> Result<(), JavascriptFrontendError> {
+    if authored.insert(file.to_owned()) {
+        let path = checked_source_path(&workspace.join(AUTHORED_DIRECTORY), file)?;
+        if let Some(parent) = path.parent() {
+            create_directory_all(parent)?;
+        }
+        atomic_write(&path, source.as_bytes())?;
+    }
+    Ok(())
 }
 
 fn write_javascript_frontend_cache(
@@ -910,6 +949,20 @@ fn generic_runtime_binding(
         let contents = fs::read(&source).map_err(|error| io_error(&source, error))?;
         atomic_write(&destination, &contents)?;
     }
+    // A compiler moves the file to its output directory, where a bundler may
+    // read it next: lru-cache compiles src/ into dist/esm/ with tshy and
+    // bundles that with esbuild, which could not resolve a path relative to
+    // src/. There the runtime is imported by absolute path. A bundler that
+    // reads the sources where they are keeps the relative one: Turbopack
+    // refuses an absolute import ("server relative imports are not
+    // implemented yet") and Parcel reads one as relative to its root. Node
+    // resolves either (resolve-loader.mjs).
+    if project.relocating_build {
+        return Ok(runtime_directory
+            .join("runtime.mjs")
+            .to_string_lossy()
+            .replace('\\', "/"));
+    }
     let parent = source_path.parent().ok_or_else(|| {
         JavascriptFrontendError::UnsafeSourcePath(source_path.display().to_string())
     })?;
@@ -979,7 +1032,7 @@ fn bootstrap_runtime(
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
     let prelude = format!(
-        "(() => {{ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {{\n{}\n}} globalThis.__supercovRuntime ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__; }})();\n",
+        "(() => {{ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {{\n{}\n}} if (globalThis.__supercovRuntime == null) globalThis.__supercovRuntime = globalThis.__SUPERCOV_DIRECT_RUNTIME__; }})();\n",
         &runtime_source[..export_start]
     );
     let line = output.code[..offset].matches('\n').count();
@@ -1418,7 +1471,12 @@ pub fn prepare_javascript_frontend(
     let runtime_path = runtime_directory.join("runtime.mjs");
     let standalone_runtime =
         fs::read_to_string(&runtime_path).map_err(|source| io_error(&runtime_path, source))?;
-    let browser_suite = project.playwright_config.is_some();
+    // debug's karma bundles its sources with browserify and runs them in
+    // Chrome, where nothing had installed the runtime: every file failed on
+    // its first line ("reading 'mcdcBegin'"). The browser's evidence has no
+    // adapter to reach the run, but its tests pass as they do without it.
+    let browser_suite = project.playwright_config.is_some() || project.browser_runner;
+    let mut authored = BTreeSet::new();
     let sources_started = Instant::now();
     for file in &project.source_files {
         let path = checked_source_path(workspace, file)?;
@@ -1487,6 +1545,7 @@ pub fn prepare_javascript_frontend(
                 Some(code) => code,
                 None => output.code.clone(),
             };
+            keep_authored(workspace, &mut authored, file, &source)?;
             atomic_write(&path, code.as_bytes())?;
         }
         exclusions.extend(output.excluded_statements);
@@ -1532,6 +1591,7 @@ pub fn prepare_javascript_frontend(
             && project.source_files.contains(&entry.file);
         if (output.assertions > 0 || output.capability_imports > 0) && !coverage_transformed_by_vite
         {
+            keep_authored(workspace, &mut authored, &entry.file, &source)?;
             atomic_write(&path, output.code.as_bytes())?;
             assertion_calls += output.assertions;
         }
@@ -1579,6 +1639,10 @@ pub fn prepare_javascript_frontend(
         )
     });
 
+    atomic_write(
+        &workspace.join(AUTHORED_LIST),
+        &serde_json::to_vec(&authored).map_err(JavascriptFrontendError::Serialize)?,
+    )?;
     atomic_write(
         &generated.join("statement-exclusions.json"),
         &serde_json::to_vec(&exclusions).map_err(JavascriptFrontendError::Serialize)?,

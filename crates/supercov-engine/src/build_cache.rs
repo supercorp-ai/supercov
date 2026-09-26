@@ -35,6 +35,9 @@ struct CacheIdentity<'a> {
     /// output from a different instrumenter must never be reused.
     instrumenter_fingerprint: &'a str,
     adapter: crate::project_discovery::BuildAdapter,
+    /// Instrumented sources import the runtime by absolute path, so output
+    /// built in one place does not run from another.
+    root: &'a Path,
     command: &'a [String],
     environment: &'a BTreeMap<String, String>,
     node: String,
@@ -78,6 +81,7 @@ pub fn build_cache_key(
         execution_fingerprint: &integrity.fingerprint.execution,
         instrumenter_fingerprint: &integrity.fingerprint.instrumenter,
         adapter: project.build_adapter,
+        root: &project.root,
         command: &project.build_command,
         environment: &project.build_environment,
         node: node_version(),

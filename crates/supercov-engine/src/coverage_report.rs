@@ -925,11 +925,14 @@ fn record_attempt(test: &mut MutableTest, raw: &RawTestResult) {
         return;
     };
     let previous = test.attempts.get(&retry);
-    let status = if raw_status == "unknown" {
-        previous.map_or_else(|| raw_status.clone(), |attempt| attempt.status.clone())
-    } else {
-        raw_status.clone()
-    };
+    // A later record does not pass an attempt an earlier one failed: the same
+    // tests run twice under one identity fail if either execution did.
+    let status =
+        if raw_status == "unknown" || previous.is_some_and(|attempt| attempt.status == "failed") {
+            previous.map_or_else(|| raw_status.clone(), |attempt| attempt.status.clone())
+        } else {
+            raw_status.clone()
+        };
     let expected_status = raw
         .expected_status
         .clone()
@@ -2794,6 +2797,7 @@ pub fn analyze_coverage_archive(
     if frontend.frontend_version == "rust-compiler-v1" {
         validate_rust_compiler_scope(&manifest)?;
     }
+    separate_repeated_executions(&mut raw_results);
     release_leaked_phases(&mut raw_results);
     let normalized = CoverageReportRequest {
         run_id: request.run_id.clone(),
@@ -2809,6 +2813,58 @@ pub fn analyze_coverage_archive(
     // resident while the views are built beside what was parsed from them.
     drop(entries);
     analyze_frontend_request(&frontend, &normalized, transport)
+}
+
+/// Give a test that ran again under the same identity phases of its own.
+///
+/// A runner's attempt counter lives in its process, so a command that runs the
+/// same tests twice -- ms runs Jest once in Node's environment and once in the
+/// edge runtime's -- mints the same attempt, and the same phase ids, twice.
+/// Every such run was refused whole ("duplicate frontend phase ID"). A record
+/// that declares a phase an earlier record already declared is another
+/// execution: its phases, and its own references to them, are renamed apart.
+/// Both executions stay one attempt, whose outcome folds as any attempt's does.
+fn separate_repeated_executions(raw_results: &mut [RawTestResult]) {
+    let mut declared = BTreeSet::<String>::new();
+    let mut executions = BTreeMap::<String, usize>::new();
+    for raw in raw_results.iter_mut() {
+        let repeated = raw.phases.iter().any(|phase| declared.contains(&phase.id));
+        if !repeated {
+            declared.extend(raw.phases.iter().map(|phase| phase.id.clone()));
+            continue;
+        }
+        let mut renamed = BTreeMap::<String, String>::new();
+        for phase in &raw.phases {
+            let count = executions.entry(phase.id.clone()).or_insert(1);
+            let fresh = loop {
+                *count += 1;
+                let candidate = format!("{}~{}", phase.id, count);
+                if !declared.contains(&candidate) {
+                    break candidate;
+                }
+            };
+            renamed.insert(phase.id.clone(), fresh);
+        }
+        let rename = |phase: &mut Option<String>| {
+            if let Some(fresh) = phase.as_ref().and_then(|id| renamed.get(id)) {
+                *phase = Some(fresh.clone());
+            }
+        };
+        for phase in &mut raw.phases {
+            phase.id = renamed[&phase.id].clone();
+            rename(&mut phase.caused_by_phase_id);
+        }
+        for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
+            rename(&mut snapshot.phase_id);
+            for event in &mut snapshot.events {
+                rename(&mut event.phase_id);
+            }
+        }
+        for record in &mut raw.server {
+            rename(&mut record.phase_id);
+        }
+        declared.extend(renamed.into_values());
+    }
 }
 
 /// Untag evidence that names another test's phase.
@@ -3907,6 +3963,89 @@ mod tests {
                 // No record declares it: that is corruption, and it is refused later.
                 ("corrupt".into(), Some("z-0:assertion:9".into())),
             ]
+        );
+    }
+
+    #[test]
+    fn a_test_run_twice_under_one_identity_keeps_both_executions_apart() {
+        // ms runs its Jest suite twice, in Node's environment and the edge
+        // runtime's; each process numbers the same test's attempt 0.
+        let record = |status: &str, events: &[(&str, &str)]| -> RawTestResult {
+            serde_json::from_value(serde_json::json!({
+                "test": "parse",
+                "testId": "parse",
+                "retry": 0,
+                "status": status,
+                "phases": [
+                    { "id": "t-0:assertion:1", "kind": "assertion", "operation": "expect", "startedAtMs": 0 },
+                    { "id": "t-0:assertion:2", "kind": "assertion", "operation": "expect", "startedAtMs": 0, "causedByPhaseId": "t-0:assertion:1" }
+                ],
+                "runtime": [{
+                    "events": events.iter().map(|(id, phase)| serde_json::json!({
+                        "type": "hit", "id": id, "timestampMs": 0, "phaseId": phase, "environment": "server"
+                    })).collect::<Vec<_>>()
+                }]
+            }))
+            .unwrap()
+        };
+        let mut results = vec![
+            record("failed", &[("node", "t-0:assertion:1")]),
+            record("passed", &[("edge", "t-0:assertion:2")]),
+            record("passed", &[("third", "t-0:assertion:1")]),
+        ];
+        separate_repeated_executions(&mut results);
+        let ids = |raw: &RawTestResult| {
+            raw.phases
+                .iter()
+                .map(|phase| (phase.id.clone(), phase.caused_by_phase_id.clone()))
+                .collect::<Vec<_>>()
+        };
+        let events = |raw: &RawTestResult| {
+            raw.runtime[0]
+                .events
+                .iter()
+                .map(|event| event.phase_id.clone().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&results[0]),
+            [
+                ("t-0:assertion:1".into(), None),
+                ("t-0:assertion:2".into(), Some("t-0:assertion:1".into()))
+            ]
+        );
+        assert_eq!(
+            ids(&results[1]),
+            [
+                ("t-0:assertion:1~2".into(), None),
+                ("t-0:assertion:2~2".into(), Some("t-0:assertion:1~2".into()))
+            ]
+        );
+        assert_eq!(events(&results[1]), ["t-0:assertion:2~2"]);
+        assert_eq!(events(&results[2]), ["t-0:assertion:1~3"]);
+
+        let mut test = MutableTest {
+            id: "parse".into(),
+            name: "parse".into(),
+            file: None,
+            title: None,
+            retries: BTreeSet::new(),
+            attempts: BTreeMap::new(),
+            unstarted: false,
+            runner_reported_flaky: false,
+            provenance: TestProvenance::default(),
+            role: "test".into(),
+            attribution: "exact".into(),
+            hits: Vec::new(),
+            decisions: BTreeMap::new(),
+        };
+        for raw in &results {
+            record_attempt(&mut test, raw);
+        }
+        assert_eq!(
+            test_outcome(&test),
+            "failed",
+            "a failed execution fails the attempt"
         );
     }
 

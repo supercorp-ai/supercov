@@ -481,7 +481,7 @@ function appendDurableBackgroundRecord(fs, runId, record) {
       currentSize = fs.statSync(path).size;
     } catch (e) {
     }
-    if (currentSize !== (state.backgroundShardSizes.get(path) ?? -1)) {
+    if (currentSize !== (state.backgroundShardSizes.has(path) ? state.backgroundShardSizes.get(path) : -1)) {
       path = void 0;
     }
   }
@@ -495,7 +495,7 @@ function appendDurableBackgroundRecord(fs, runId, record) {
     state.backgroundShardSizes.set(path, capturedBuffer.byteLength(payload));
   } else {
     fs.appendFileSync(path, payload);
-    state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) ?? 0) + capturedBuffer.byteLength(payload));
+    state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) || 0) + capturedBuffer.byteLength(payload));
   }
   records.set(key, record);
   state.backgroundBuffers.set(runId, records);
@@ -687,11 +687,19 @@ function appendServer(record) {
     throw serverTransportError(runId, cause);
   }
 }
+// Read on every probe outside a test, and the variable rarely changes: decode
+// it once per value.
+var decodedEnvironmentCarrier = { raw: void 0, context: void 0 };
 function environmentRequestContext() {
   if (isBrowser || typeof process === "undefined")
     return void 0;
-  const carrier = decodeCoverageCarrier(process.env[COVERAGE_CARRIER_ENV]);
-  return carrier ? __spreadValues(__spreadValues({}, carrier.scope ? { scope: carrier.scope } : {}), carrier.phaseId ? { phaseId: carrier.phaseId } : {}) : void 0;
+  const raw = process.env[COVERAGE_CARRIER_ENV];
+  if (raw === decodedEnvironmentCarrier.raw)
+    return decodedEnvironmentCarrier.context;
+  const carrier = decodeCoverageCarrier(raw);
+  const context = carrier ? __spreadValues(__spreadValues({}, carrier.scope ? { scope: carrier.scope } : {}), carrier.phaseId ? { phaseId: carrier.phaseId } : {}) : void 0;
+  decodedEnvironmentCarrier = { raw, context };
+  return context;
 }
 function currentRequestContext() {
   const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
@@ -729,7 +737,8 @@ function assertionPhaseState(scope) {
   const key = attemptKey(scope);
   const existing = state.assertionPhases.get(key);
   if (existing) {
-    existing.phaseIds ??= new Set(existing.phases.filter(phase => phase.kind === "assertion").map(phase => phase.id));
+    if (existing.phaseIds == null)
+      existing.phaseIds = new Set(existing.phases.filter(phase => phase.kind === "assertion").map(phase => phase.id));
     return existing;
   }
   const created = { counter: 0, phases: [], phaseIds: new Set() };
@@ -817,6 +826,92 @@ function bindNodeAssertionPhase(operation, source, target, property = null) {
   const receiver = property === null ? undefined : target;
   return (...args) => withNodeAssertionPhase(operation, source, () => Reflect.apply(callback, receiver, args));
 }
+// withCoverageCarrier for code that runs in place rather than in a callback:
+// the carrier holds until the returned function restores what it replaced.
+// Opened and restored within one synchronous run, it is what run() does.
+function enterCoverageCarrier(carrier) {
+  if (!serverPhaseStorage)
+    return () => {
+    };
+  const previousStore = serverPhaseStorage.getStore();
+  const previousEpoch = state.probeV2Clock.epoch;
+  const context = __spreadValues(__spreadValues({}, carrier.scope ? { scope: carrier.scope } : {}), carrier.phaseId ? { phaseId: carrier.phaseId } : {});
+  serverPhaseStorage.enterWith(context);
+  activateProbeV2Context(context);
+  return () => {
+    serverPhaseStorage.enterWith(previousStore);
+    state.probeV2Clock.epoch = previousEpoch;
+  };
+}
+var inertAssertionPhase = { close: (value) => value, fail: (error) => error };
+// The phase withNodeAssertionPhase runs its callback in, opened before a
+// TypeScript assertion's operands and closed after its call. The rewrite calls
+// the assertion in place because TypeScript narrows nothing into a callback:
+// `prior < id` under `if (prior !== undefined)`, an evolving `const ids = []`
+// and an `asserts` signature all failed to typecheck once wrapped in one.
+function openNodeAssertionPhase(operation, source) {
+  var _a8;
+  const context = currentRequestContext();
+  const scope = context.scope;
+  if (!scope)
+    return inertAssertionPhase;
+  const nested = context.phaseId && assertionPhaseState(scope).phaseIds.has(context.phaseId);
+  if (nested && typeof source !== "string")
+    return inertAssertionPhase;
+  if (typeof source === "function")
+    source = source();
+  let carrier;
+  let finish;
+  let release;
+  const bridged = (_a8 = runtimeGlobal.__SUPERCOV_ASSERTION_PHASE_OPENER__) == null ? void 0 : _a8.call(runtimeGlobal, operation, source);
+  if (bridged) {
+    ({ carrier, finish, release } = bridged);
+  } else {
+    const attempt = assertionPhaseState(scope);
+    const phase = __spreadProps(__spreadValues({
+      id: `${scope.attemptId}:assertion:${++attempt.counter}`,
+      kind: "assertion",
+      operation
+    }, source ? { source } : {}), {
+      startedAtMs: Date.now()
+    });
+    attempt.phases.push(phase);
+    attempt.phaseIds.add(phase.id);
+    carrier = { version: 1, scope, phaseId: phase.id };
+    finish = (error) => finishAssertionPhase(phase, error);
+  }
+  const restore = enterCoverageCarrier(carrier);
+  let open = true;
+  const settle = () => {
+    if (!open)
+      return false;
+    open = false;
+    restore();
+    release == null ? void 0 : release();
+    return true;
+  };
+  return {
+    close(value) {
+      if (!settle())
+        return value;
+      if (value && typeof value.then === "function")
+        return Promise.resolve(value).then((resolved) => {
+          finish();
+          return resolved;
+        }, (error) => {
+          finish(error);
+          throw cleanInstrumentationStack(error);
+        });
+      finish();
+      return value;
+    },
+    fail(error) {
+      if (settle())
+        finish(error);
+      return cleanInstrumentationStack(error);
+    }
+  };
+}
 function takeNodeAssertionPhases(scope) {
   var _a8, _b;
   const key = attemptKey(scope);
@@ -857,6 +952,35 @@ function installServerFetchPropagation() {
   runtimeGlobal.__SUPERCOV_FETCH_PATCHED__ = true;
 }
 installServerFetchPropagation();
+// util.promisify(exec) and util.promisify(execFile) resolve { stdout, stderr }
+// through a function Node keeps on the original, and that function calls the
+// original. A wrapper carries its own, which calls the wrapper, or a promisified
+// call resolves the bare stdout string and skips the wrapper.
+const promisifyCustom = Symbol.for("nodejs.util.promisify.custom");
+function keepPromisifiedShape(original, wrapper) {
+  if (typeof original[promisifyCustom] !== "function")
+    return wrapper;
+  Object.defineProperty(wrapper, promisifyCustom, {
+    configurable: true,
+    value: (...args) => {
+      let settle, reject;
+      const promise = new Promise((ok, fail) => {
+        settle = ok;
+        reject = fail;
+      });
+      promise.child = wrapper(...args, (error, stdout, stderr) => {
+        if (error !== null) {
+          error.stdout = stdout;
+          error.stderr = stderr;
+          reject(error);
+        } else
+          settle({ stdout, stderr });
+      });
+      return promise;
+    }
+  });
+  return wrapper;
+}
 function installServerChildPropagation() {
   var _a8;
   if (isBrowser || runtimeGlobal.__SUPERCOV_CHILD_PATCHED__ || typeof process === "undefined")
@@ -866,9 +990,12 @@ function installServerChildPropagation() {
   if (!child)
     return;
   const mutableChild = child;
+  // (file, args?, options?, callback?): options follow an argument list, or an
+  // explicit null or undefined in its place. exec itself calls execFile as
+  // (file, options, callback), and that object is the options, not a list.
   const optionIndex = (method, args) => {
     if (method === "spawn" || method === "spawnSync" || method === "fork" || method === "execFile" || method === "execFileSync")
-      return Array.isArray(args[1]) || args.length > 2 && args[2] !== void 0 ? 2 : 1;
+      return Array.isArray(args[1]) || args[1] == null && args.length > 2 ? 2 : 1;
     return 1;
   };
   for (const method of [
@@ -883,12 +1010,15 @@ function installServerChildPropagation() {
     const original = mutableChild[method];
     if (typeof original !== "function")
       continue;
-    mutableChild[method] = function(...args) {
+    mutableChild[method] = keepPromisifiedShape(original, function(...args) {
       var _a9;
       const index = optionIndex(method, args);
       const existing = args[index] && typeof args[index] === "object" ? args[index] : {};
+      // An env the caller passed is the child's whole environment -- execa's
+      // extendEnv: false keeps the parent's CI out of chalk's fixtures -- so
+      // only the carrier joins it. Without one, the child inherits ours.
       const options = __spreadProps(__spreadValues({}, existing), {
-        env: __spreadValues(__spreadValues(__spreadValues({}, process.env), (_a9 = existing.env) != null ? _a9 : {}), coverageContextEnvironment())
+        env: __spreadValues(__spreadValues({}, (_a9 = existing.env) != null ? _a9 : process.env), coverageContextEnvironment())
       });
       const scoped = [...args];
       if (typeof scoped[index] === "function")
@@ -896,7 +1026,7 @@ function installServerChildPropagation() {
       else
         scoped[index] = options;
       return Reflect.apply(original, child, scoped);
-    };
+    });
   }
   const moduleBuiltin = getBuiltinModule == null ? void 0 : getBuiltinModule("node:module");
   (_a8 = moduleBuiltin == null ? void 0 : moduleBuiltin.syncBuiltinESMExports) == null ? void 0 : _a8.call(moduleBuiltin);
@@ -1000,15 +1130,23 @@ function requestCoverageContext(value) {
 }
 // Keep connection ownership on the emitter, without changing listener
 // identity (removeListener/off and once still see the original callbacks).
-const emitterContextMaps = runtimeGlobal.__SUPERCOV_EMITTER_CONTEXT_MAPS__ ??= new Map();
-const emitterCoverageContexts = emitterContextMaps.get(runtimeInstance) ?? new WeakMap();
+if (runtimeGlobal.__SUPERCOV_EMITTER_CONTEXT_MAPS__ == null)
+  runtimeGlobal.__SUPERCOV_EMITTER_CONTEXT_MAPS__ = new Map();
+const emitterContextMaps = runtimeGlobal.__SUPERCOV_EMITTER_CONTEXT_MAPS__;
+const emitterCoverageContexts = emitterContextMaps.get(runtimeInstance) || new WeakMap();
 emitterContextMaps.set(runtimeInstance, emitterCoverageContexts);
-const patchedEmitterInstances = runtimeGlobal.__SUPERCOV_EMITTER_PATCHED_INSTANCES__ ??= new Set();
+if (runtimeGlobal.__SUPERCOV_EMITTER_PATCHED_INSTANCES__ == null)
+  runtimeGlobal.__SUPERCOV_EMITTER_PATCHED_INSTANCES__ = new Set();
+const patchedEmitterInstances = runtimeGlobal.__SUPERCOV_EMITTER_PATCHED_INSTANCES__;
 function installNodeRequestPropagation() {
   if (isBrowser || patchedEmitterInstances.has(runtimeInstance) || typeof process === "undefined") return;
-  const EventEmitter = process.getBuiltinModule?.("node:events")?.EventEmitter;
-  const Server = process.getBuiltinModule?.("node:http")?.Server;
-  const SecureServer = process.getBuiltinModule?.("node:https")?.Server;
+  const builtin = (name) => typeof process.getBuiltinModule === "function" ? process.getBuiltinModule(name) : void 0;
+  const events = builtin("node:events");
+  const http = builtin("node:http");
+  const https = builtin("node:https");
+  const EventEmitter = events && events.EventEmitter;
+  const Server = http && http.Server;
+  const SecureServer = https && https.Server;
   if (!EventEmitter) return;
   const original = EventEmitter.prototype.emit;
   EventEmitter.prototype.emit = function(event, ...args) {
@@ -1018,7 +1156,7 @@ function installNodeRequestPropagation() {
       // HTTP headers establish ownership even when Express/SDK listeners and
       // the server process were created by a shared before hook.
       const incoming = requestCoverageContext(args[0]);
-      if (incoming) context = incoming.scope ? incoming : context ?? currentRequestContext();
+      if (incoming) context = incoming.scope ? incoming : context != null ? context : currentRequestContext();
     }
     const invoke = () => Reflect.apply(original, this, [event, ...args]);
     try {
@@ -1040,7 +1178,7 @@ function withRequestPhase(handler, event) {
     const requestContext = args.map((argument) => requestCoverageContext(argument)).find((context2) => context2 !== void 0);
     // An untagged request to a test-owned server must not erase that server's
     // owner. Shared servers have no captured test scope and stay unattributed.
-    const inheritedContext = requestContext?.scope ? {} : registeredContext.scope ? registeredContext : requestContext === void 0 ? currentRequestContext() : {};
+    const inheritedContext = requestContext && requestContext.scope ? {} : registeredContext.scope ? registeredContext : requestContext === void 0 ? currentRequestContext() : {};
     const context = __spreadValues(__spreadValues({}, ((_a8 = requestContext == null ? void 0 : requestContext.scope) != null ? _a8 : inheritedContext.scope) ? { scope: (_b = requestContext == null ? void 0 : requestContext.scope) != null ? _b : inheritedContext.scope } : {}), ((_c = requestContext == null ? void 0 : requestContext.phaseId) != null ? _c : inheritedContext.phaseId) ? { phaseId: (_d = requestContext == null ? void 0 : requestContext.phaseId) != null ? _d : inheritedContext.phaseId } : {});
     const invoke = () => {
       if (event === "connection" && context.scope && args[0] &&
@@ -1064,8 +1202,33 @@ function recordBrowserEvent(event) {
   state.events.push(event);
   return true;
 }
+// A hit is recorded once per context, as a statement probe's is: selections,
+// optional chains, defaults and loops reach here on every evaluation, and
+// each built and serialized its record before the transport dropped it as a
+// repeat.
 function coverageHit(id) {
+  const clock = state.probeV2Clock;
+  if (clock.fast && state.hitEpochs !== void 0 && state.hitEpochs.get(id) === clock.epoch)
+    return;
+  recordCoverageHit(id);
+}
+// resetCoverage forces a fresh epoch, so a hit skipped above was recorded in
+// this epoch after the last reset and is in state.hits already.
+function recordCoverageHit(id) {
   state.hits.add(id);
+  const clock = state.probeV2Clock;
+  let epoch = clock.epoch;
+  if (!clock.fast) {
+    const previousEpoch = clock.epoch;
+    activateProbeV2Context(currentRequestContext());
+    epoch = clock.epoch;
+    clock.epoch = previousEpoch;
+  }
+  if (!state.hitEpochs)
+    state.hitEpochs = /* @__PURE__ */ new Map();
+  if (state.hitEpochs.get(id) === epoch)
+    return;
+  state.hitEpochs.set(id, epoch);
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
@@ -1107,10 +1270,27 @@ function registerProbeV2(definition) {
     activateProbeV2Key(`browser\0${(_a8 = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__) != null ? _a8 : testId}\0${(_b = runtimeGlobal.__SUPERCOV_PHASE_ID__) != null ? _b : "unscoped"}`);
   } else {
     installProbeV2AsyncHook();
+    // The hook sets the epoch when an async callback begins. Code that runs
+    // before any did -- a script's own top level -- found it NaN, which no
+    // epoch equals, so every probe there took the slow path every time: a
+    // million-iteration loop ran 1,700 times slower than without Supercov.
+    if (Number.isNaN(state.probeV2Clock.epoch))
+      activateProbeV2Context(currentRequestContext());
   }
   return file;
 }
+// Every repeat of a probe in the same context ends at the first check, so it
+// stays small enough for V8 to inline into the instrumented function; the
+// rest runs once per context. minimatch's backtracking guard test needs a
+// pathological match inside a second, and the full body in every call put it
+// at ten times the uninstrumented time.
 function coverageHitV2(file, index) {
+  const clock = file.clock;
+  if (clock.fast && file.hitEpochs[index] === clock.epoch)
+    return;
+  recordCoverageHitV2(file, index);
+}
+function recordCoverageHitV2(file, index) {
   const id = file.pointIds[index];
   if (!id)
     return;
@@ -1142,6 +1322,15 @@ function decodeProbeV2Vector(conditionCount, encoded, outcome) {
   return remaining === 0 ? { values, outcome } : void 0;
 }
 function mcdcEndV2(file, decisionIndex, encoded, value) {
+  const clock = file.clock;
+  if (clock.fast) {
+    const seen = file.decisionEpochs[decisionIndex];
+    if (seen instanceof Uint32Array && seen[encoded * 2 + (value ? 1 : 0)] === clock.epoch)
+      return value;
+  }
+  return recordMcdcEndV2(file, decisionIndex, encoded, value);
+}
+function recordMcdcEndV2(file, decisionIndex, encoded, value) {
   var _a8, _b;
   const meta = file.decisions[decisionIndex];
   if (!meta || !Number.isSafeInteger(encoded) || encoded < 0)
@@ -1214,21 +1403,30 @@ function selectionRight(frame, value, inferredName) {
   frame.rightEvaluated = true;
   return applyInferredName(value, inferredName);
 }
+var selectionOutcomeKeys = ["SF", "ST", "RF", "RT"];
+var selectionBranchIds = /* @__PURE__ */ new Map();
 function selectionEnd(frame, value) {
-  coverageHit(frame.rightEvaluated ? frame.rightId : frame.shortId);
+  const right = frame.rightEvaluated;
+  coverageHit(right ? frame.rightId : frame.shortId);
   // Per-operand outcomes for the verifier: which side was selected and whether the result is
   // truthy. With the operator (known from the manifest) this gives each operand's outcome.
-  const separator = frame.shortId.lastIndexOf(":");
-  if (separator > 0) {
-    const branchId = frame.shortId.slice(0, separator);
-    const right = frame.rightEvaluated;
+  // The branch id is cut from the short id once, not on every evaluation.
+  let branchId = selectionBranchIds.get(frame.shortId);
+  if (branchId === void 0) {
+    const separator = frame.shortId.lastIndexOf(":");
+    branchId = separator > 0 ? frame.shortId.slice(0, separator) : null;
+    selectionBranchIds.set(frame.shortId, branchId);
+  }
+  if (branchId !== null) {
     const truthy = Boolean(value);
     let vectors = state.logicals.get(branchId);
     if (!vectors) {
       vectors = /* @__PURE__ */ new Map();
       state.logicals.set(branchId, vectors);
     }
-    vectors.set(`${right ? "R" : "S"}${truthy ? "T" : "F"}`, { right, truthy });
+    const key = selectionOutcomeKeys[(right ? 2 : 0) + (truthy ? 1 : 0)];
+    if (!vectors.has(key))
+      vectors.set(key, { right, truthy });
   }
   return value;
 }
@@ -1405,12 +1603,14 @@ const directRuntimeApi = {
   withCoverageCarrier,
   withNodeAssertionPhase,
   bindNodeAssertionPhase,
+  openNodeAssertionPhase,
   withRequestPhase,
   writeExclusiveBackgroundRecord
 };
-globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= directRuntimeApi;
-if (typeof process !== "undefined")
-  process.__SUPERCOV_DIRECT_RUNTIME__ ??= directRuntimeApi;
+if (globalThis.__SUPERCOV_DIRECT_RUNTIME__ == null)
+  globalThis.__SUPERCOV_DIRECT_RUNTIME__ = directRuntimeApi;
+if (typeof process !== "undefined" && process.__SUPERCOV_DIRECT_RUNTIME__ == null)
+  process.__SUPERCOV_DIRECT_RUNTIME__ = directRuntimeApi;
 export {
   activateCoverageScope,
   beginBufferedServerEvidence,
@@ -1456,6 +1656,7 @@ export {
   withCoverageCarrier,
   withNodeAssertionPhase,
   bindNodeAssertionPhase,
+  openNodeAssertionPhase,
   withRequestPhase,
   writeExclusiveBackgroundRecord
 };

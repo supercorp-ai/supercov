@@ -214,6 +214,19 @@ try {
   assert.equal(query(setupRun.runId, 'all', 'summary').data.testOutcomes.flaky, 1);
   assert.equal(query(setupRun.runId, 'all', 'summary').data.testOutcomes.unknown, 0);
 
+  // ms runs its suite twice, in Node's environment and the edge runtime's.
+  // Each Jest process numbers a test's attempts from 0, so the second run's
+  // assertion phases repeated the first's and the run could not be opened.
+  manifest.scripts = { test: 'jest && jest --testEnvironment node' };
+  writeFileSync(resolve(project, 'package.json'), JSON.stringify(manifest));
+  const twice = rust('__run-js-direct', {root:project, command:['npm','test'],
+    runId:'rust-twice-jest', startedAt:'2026-09-26T00:00:05.000Z'});
+  assert.equal(twice.exitCode, 0, `the suite passes both times\n${twice.output}`);
+  const twiceSummary = query(twice.runId, 'all', 'summary');
+  assert.equal(twiceSummary.data.tests, 5, 'the same five tests, run twice');
+  assert.equal(twiceSummary.data.testOutcomes.passed, 4, JSON.stringify(twiceSummary.data.testOutcomes));
+  assert.equal(twiceSummary.data.testOutcomes.flaky, 1, JSON.stringify(twiceSummary.data.testOutcomes));
+
   console.log('[rust-direct-jest] a Jest suite has exact per-test identity, reporter outcomes, its own setup file and assertion phases for the global expect');
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });

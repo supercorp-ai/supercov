@@ -21,9 +21,9 @@ use oxc_ast::{
         AssignmentPattern, AssignmentTarget, BindingPattern, CallExpression, CatchClause,
         ChainElement, ChainExpression, Class, Comment, ComputedMemberExpression,
         ConditionalExpression, Declaration, DoWhileStatement, ExportDefaultDeclarationKind,
-        Expression, ForInStatement, ForOfStatement, ForStatement, ForStatementLeft,
-        FormalParameter, FormalParameterKind, FormalParameters, Function, FunctionBody,
-        IfStatement, ImportDeclarationSpecifier, ImportOrExportKind, JSXExpression,
+        Expression, ExpressionStatement, ForInStatement, ForOfStatement, ForStatement,
+        ForStatementLeft, FormalParameter, FormalParameterKind, FormalParameters, Function,
+        FunctionBody, IfStatement, ImportDeclarationSpecifier, ImportOrExportKind, JSXExpression,
         JSXExpressionContainer, LogicalExpression, NewExpression, ObjectPropertyKind,
         PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
         StaticMemberExpression, SwitchStatement, TSGlobalDeclaration, TSModuleDeclaration,
@@ -884,6 +884,7 @@ fn apply_text_edits(
 /// merges.
 const ASSERTION_RUNTIME_TYPE: &str = "{ \
     withNodeAssertionPhase<T>(operation: string, source: string, callback: () => T): T; \
+    openNodeAssertionPhase(operation: string, source: string): { close<T>(value: T): T; close(): void; fail(error: unknown): unknown }; \
     bindNodeAssertionPhase<T>(operation: string, source: string, target: T, property: null): T; \
     bindNodeAssertionPhase<T, K extends keyof T>(operation: string, source: string, target: T, property: K): T[K]; \
     bindNodeAssertionPhase(operation: string, source: string, target: unknown, property: PropertyKey): any; \
@@ -896,6 +897,9 @@ struct AssertionEdits<'s> {
     source: &'s str,
     sites: HashMap<SpanKey, (String, String, bool)>,
     edits: Vec<TextEdit>,
+    /// In TypeScript the call runs in place, under these two names, instead
+    /// of in a callback, which TypeScript narrows nothing into.
+    in_place: Option<(String, String)>,
 }
 
 impl AssertionEdits<'_> {
@@ -907,19 +911,65 @@ impl AssertionEdits<'_> {
         )
     }
 
+    fn open(operation: &str, source: &str) -> String {
+        format!(
+            "{ASSERTION_RUNTIME}.openNodeAssertionPhase({}, {})",
+            serde_json::to_string(operation).expect("a string serializes"),
+            serde_json::to_string(source).expect("a string serializes")
+        )
+    }
+
     /// Open the assertion phase around the call, before its arguments run.
+    ///
+    /// In TypeScript the call stays in its own flow: an immediately invoked
+    /// arrow, which TypeScript narrows into, opens the phase as its argument.
     fn wrap(&mut self, call: &CallExpression<'_>, operation: &str, source: &str) {
         let (start, end) = (call.span.start as usize, call.span.end as usize);
         let width = (end - start) as i64;
-        self.edits.push(TextEdit::insert(
-            start,
-            -width,
-            format!(
-                "{}() => (",
-                Self::opening("withNodeAssertionPhase", operation, source)
+        let (opening, closing) = match &self.in_place {
+            Some((phase, error)) => (
+                format!("(({phase}) => {{ try {{ return {phase}.close("),
+                format!(
+                    "); }} catch ({error}) {{ throw {phase}.fail({error}); }} }})({})",
+                    Self::open(operation, source)
+                ),
             ),
-        ));
-        self.edits.push(TextEdit::insert(end, width, "))".into()));
+            None => (
+                format!(
+                    "{}() => (",
+                    Self::opening("withNodeAssertionPhase", operation, source)
+                ),
+                "))".into(),
+            ),
+        };
+        self.edits.push(TextEdit::insert(start, -width, opening));
+        self.edits.push(TextEdit::insert(end, width, closing));
+    }
+
+    /// Open the assertion phase around a TypeScript statement that is the
+    /// call, leaving the call a statement: an `asserts` signature narrows
+    /// only from an expression statement. `finally` closes the phase, so a
+    /// call typed `never` leaves nothing after it unreachable.
+    fn wrap_statement(
+        &mut self,
+        statement: &ExpressionStatement<'_>,
+        operation: &str,
+        source: &str,
+    ) {
+        let Some((phase, error)) = &self.in_place else {
+            return;
+        };
+        let (start, end) = (statement.span.start as usize, statement.span.end as usize);
+        let width = (end - start) as i64;
+        let opening = format!(
+            "{{ const {phase} = {}; try {{ ",
+            Self::open(operation, source)
+        );
+        let closing = format!(
+            " }} catch ({error}) {{ throw {phase}.fail({error}); }} finally {{ {phase}.close(); }} }}"
+        );
+        self.edits.push(TextEdit::insert(start, -width, opening));
+        self.edits.push(TextEdit::insert(end, width, closing));
     }
 
     /// Bind the original callee and receiver, leaving await and yield operands
@@ -973,6 +1023,23 @@ impl AssertionEdits<'_> {
 }
 
 impl<'a> Visit<'a> for AssertionEdits<'_> {
+    fn visit_expression_statement(&mut self, statement: &ExpressionStatement<'a>) {
+        if self.in_place.is_some()
+            && let Expression::CallExpression(call) = &statement.expression
+            && self
+                .sites
+                .get(&span_key(call.span))
+                .is_some_and(|(_, _, bound)| !bound)
+        {
+            let (operation, source, _) = self
+                .sites
+                .remove(&span_key(call.span))
+                .expect("the site was just found");
+            self.wrap_statement(statement, &operation, &source);
+        }
+        walk::walk_expression_statement(self, statement);
+    }
+
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         if let Some((operation, source, bound)) = self.sites.remove(&span_key(call.span)) {
             if bound {
@@ -1694,10 +1761,18 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         collector.visit_program(&parsed.program);
         assertions = collector.sites.len();
         if assertions > 0 {
+            let in_place = source_type.is_typescript().then(|| {
+                let mut names = CandidateNames::new(source);
+                (
+                    names.allocate("__supercovAssertionPhase"),
+                    names.allocate("__supercovAssertionError"),
+                )
+            });
             let mut located = AssertionEdits {
                 source,
                 sites: collector.sites,
                 edits: Vec::new(),
+                in_place,
             };
             located.visit_program(&parsed.program);
             edits.extend(located.edits);
@@ -3351,6 +3426,59 @@ fn instrument_candidate_with_binding(
     })
 }
 
+/// `file.clock.fast && file.hitEpochs[index] === file.clock.epoch || hit(file, index);`
+///
+/// A statement probe that already fired in this context costs three loads and
+/// a comparison, not a call: in minimatch's backtracking matcher the call per
+/// statement was most of a tenfold slowdown, and its guard test failed. The
+/// clock is `fast` only while an async hook keeps its epoch current; without
+/// one the call decides, as before.
+fn probe_v2_hit<'a>(ast: AstBuilder<'a>, hit: &str, file: &str, index: usize) -> Statement<'a> {
+    let span = Span::default();
+    let file_expression = || ast.expression_identifier(span, ast.ident(file));
+    let member = |object: Expression<'a>, name: &str| -> Expression<'a> {
+        Expression::from(ast.member_expression_static(
+            span,
+            object,
+            ast.identifier_name(span, ast.ident(name)),
+            false,
+        ))
+    };
+    let index_literal =
+        || ast.expression_numeric_literal(span, index as f64, None, NumberBase::Decimal);
+    let fast = member(member(file_expression(), "clock"), "fast");
+    let seen = ast.expression_binary(
+        span,
+        Expression::from(ast.member_expression_computed(
+            span,
+            member(file_expression(), "hitEpochs"),
+            index_literal(),
+            false,
+        )),
+        BinaryOperator::StrictEquality,
+        member(member(file_expression(), "clock"), "epoch"),
+    );
+    let call = ast.expression_call(
+        span,
+        ast.expression_identifier(span, ast.ident(hit)),
+        NONE,
+        ast.vec_from_array([
+            Argument::from(file_expression()),
+            Argument::from(index_literal()),
+        ]),
+        false,
+    );
+    ast.statement_expression(
+        span,
+        ast.expression_logical(
+            span,
+            ast.expression_logical(span, fast, LogicalOperator::And, seen),
+            LogicalOperator::Or,
+            call,
+        ),
+    )
+}
+
 struct StatementProbeTransformer<'a> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
@@ -3362,27 +3490,11 @@ struct StatementProbeTransformer<'a> {
 
 impl<'a> StatementProbeTransformer<'a> {
     fn probe(&self, target: &PointTarget) -> Statement<'a> {
-        self.ast.statement_expression(
-            Span::default(),
-            self.ast.expression_call(
-                Span::default(),
-                self.ast
-                    .expression_identifier(Span::default(), self.ast.ident(&self.coverage_hit_v2)),
-                NONE,
-                self.ast.vec_from_array([
-                    Argument::from(self.ast.expression_identifier(
-                        Span::default(),
-                        self.ast.ident(&self.probe_file_v2),
-                    )),
-                    Argument::from(self.ast.expression_numeric_literal(
-                        Span::default(),
-                        target.index as f64,
-                        None,
-                        NumberBase::Decimal,
-                    )),
-                ]),
-                false,
-            ),
+        probe_v2_hit(
+            self.ast,
+            &self.coverage_hit_v2,
+            &self.probe_file_v2,
+            target.index,
         )
     }
 
@@ -3567,27 +3679,11 @@ struct FunctionProbeTransformer<'a> {
 
 impl<'a> FunctionProbeTransformer<'a> {
     fn probe(&self, target: &PointTarget) -> Statement<'a> {
-        self.ast.statement_expression(
-            Span::default(),
-            self.ast.expression_call(
-                Span::default(),
-                self.ast
-                    .expression_identifier(Span::default(), self.ast.ident(&self.coverage_hit_v2)),
-                NONE,
-                self.ast.vec_from_array([
-                    Argument::from(self.ast.expression_identifier(
-                        Span::default(),
-                        self.ast.ident(&self.probe_file_v2),
-                    )),
-                    Argument::from(self.ast.expression_numeric_literal(
-                        Span::default(),
-                        target.index as f64,
-                        None,
-                        NumberBase::Decimal,
-                    )),
-                ]),
-                false,
-            ),
+        probe_v2_hit(
+            self.ast,
+            &self.coverage_hit_v2,
+            &self.probe_file_v2,
+            target.index,
         )
     }
 }
