@@ -665,10 +665,25 @@ class CoveragePhaseController {
         };
         return scoped;
     }
+    /**
+     * Tell every context, frame, worker and future document of the test about
+     * a new phase. The four go to different targets and none waits on another,
+     * so they run together: an action waits for the slowest instead of their
+     * sum, which was most of what Actual's suite spent under Supercov (47 of
+     * the 43 extra seconds, with the database worker's bounded wait the
+     * largest part).
+     */
     async activateInBrowser(phaseId) {
-        await timed("activate.contextHeaders", () => Promise.all([...this.contexts]
-            .filter((context) => !this.adoptedContexts.has(context))
-            .map((context) => this.updateContextHeaders(context, phaseId))));
+        await Promise.all([
+            timed("activate.contextHeaders", () => Promise.all([...this.contexts]
+                .filter((context) => !this.adoptedContexts.has(context))
+                .map((context) => this.updateContextHeaders(context, phaseId)))),
+            this.activateFrames(phaseId),
+            this.activateWorkers(phaseId),
+            timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId)))),
+        ]);
+    }
+    async activateFrames(phaseId) {
         await timed("activate.frameEvaluate", () => Promise.all([...this.pages].flatMap((page) => page.frames()).map((frame) => frame
             .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
@@ -695,6 +710,8 @@ class CoveragePhaseController {
             phaseCookie: COVERAGE_PHASE_COOKIE,
         })
             .catch(() => undefined))));
+    }
+    async activateWorkers(phaseId) {
         await timed("activate.workerEvaluate", () => Promise.all([...this.workers].map(async (worker) => {
             const activation = worker
                 .evaluate((id) => {
@@ -711,7 +728,6 @@ class CoveragePhaseController {
             if ((await bounded(activation, WORKER_ACTIVATION_WAIT_MS)) === WORKER_TIMED_OUT)
                 this.unresponsiveWorkers.add(worker);
         })));
-        await timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId))));
     }
     async updateContextHeaders(context, phaseId) {
         await context
