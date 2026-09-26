@@ -27,6 +27,18 @@ snapshots, calls a service, or changes a database, wrapping it does not remove
 that behavior. The isolation guarantee applies to Supercov's instrumentation
 and evidence work.
 
+## Tools that judge the code
+
+Some tools a test command runs read or measure the code instead of running it,
+and the instrumented copy is not what you wrote:
+
+- Linters, formatters and `tsc --noEmit` (ESLint, Prettier, standard, xo and
+  the like) read each file as you wrote it, and don't see `.supercov`.
+- Coverage tools the command runs itself (tap, c8, nyc, Jest's and Vitest's
+  `--coverage`) still collect and report coverage, but they measure the
+  instrumented copy, probes included. Their thresholds are not checked, and the
+  run prints a line saying so. Supercov's own report has the run's coverage.
+
 Files the wrapped command creates or changes inside the isolated workspace are
 synced back to the project after the run, so `supercov -- npm test -- -u`
 updates snapshots in the repository exactly as `npm test -- -u` would. Two

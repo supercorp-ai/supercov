@@ -27,7 +27,7 @@
 - A build that compiles instrumented sources to another directory and bundles them there, as lru-cache does with esbuild, finds the runtime.
 - Sources bundled for a browser by karma, testem, airtap, zuul or mochify carry the runtime, so debug's karma suite runs, and the runtime parses as ES2019 for the bundlers that stop there.
 - The test command sees a git repository of its own, with the project's HEAD, remotes and branches: npm's `template-oss-check` failed semver's posttest without one. A test's commits stay in it.
-- tap's own coverage gate no longer fails a run under Supercov, whose probes it measured as uncovered branches; its report is unchanged.
+- A project's own coverage gate no longer fails a run under Supercov, whose probes it measured as uncovered branches: tap, c8 and nyc thresholds, Jest's `coverageThreshold` and Vitest's `coverage.thresholds`, in configuration or on the command line. A suite that covers every branch failed a 100% gate at 80% under c8, 83.33% under Jest and 87.5% under Vitest. Each tool still reports its coverage, the run says its thresholds were not checked, and a failing test still fails the run.
 - An install a tool makes inside the project, such as tap's plugins in `.tap/plugins`, is not half copied back: its manifest and lockfile stay behind with the dependencies that never flow back, and the tool installs them again.
 - JSX in a `.js` file is measured instead of failing the run before any test.
 - A run whose tests leave async work running into the next test opens: axios's ended with `Failed to open coverage index … unknown frontend phase reference`. A leftover no longer carries the ended test's phase, and runs recorded by 2.0.1 open too.

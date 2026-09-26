@@ -12,8 +12,12 @@
 //   of their own, which Supercov extended with the parent's CI.
 // - ms runs its suite twice, and the second run's phases repeated the first's,
 //   so the run could not be opened.
+// - A project's own coverage tool measures the instrumented copy, whose probes
+//   are branches no test was written to cover: c8, Jest and Vitest failed a
+//   100% gate on a suite that covers every branch. They still report; their
+//   thresholds are not checked, and a failing test still fails the run.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -27,15 +31,29 @@ function write(root, path, text) {
   writeFileSync(resolve(root, path), text);
 }
 
-function supercov(cwd, args) {
+function supercov(cwd, args, env = {}) {
   const result = spawnSync(binary, args, {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, CI: '1', NO_COLOR: '1' },
+    env: { ...process.env, CI: '1', NO_COLOR: '1', ...env },
     timeout: 240_000,
   });
   return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
 }
+
+// The repository's own copies of real tools, linked the way npm installs them.
+function link(root, packages, bins) {
+  mkdirSync(resolve(root, 'node_modules/.bin'), { recursive: true });
+  for (const name of packages) {
+    mkdirSync(resolve(root, 'node_modules', name, '..'), { recursive: true });
+    symlinkSync(resolve(repository, 'node_modules', name), resolve(root, 'node_modules', name));
+  }
+  for (const name of bins) {
+    symlinkSync(resolve(repository, 'node_modules/.bin', name), resolve(root, 'node_modules/.bin', name));
+  }
+}
+
+const skipped = (tool) => new RegExp(`\\[supercov\\] ${tool}'s coverage thresholds were not checked`, 'g');
 
 function covered(cwd) {
   const summary = supercov(cwd, ['runs', 'latest']);
@@ -204,6 +222,168 @@ test('an asserts signature narrows what follows', () => {
   assert.doesNotMatch(built.output, /error TS\d+/, built.output);
   const typedCoverage = covered(typed);
   assert.ok(typedCoverage.covered > 0, typedCoverage.output);
+
+  // c8 and nyc as stand-ins with the layout the preload patches: c8's report
+  // takes checkCoverages from check-coverage.js when it loads and its
+  // check-coverage command calls the export; nyc checks through
+  // NYC.prototype.checkCoverage. Each check fails the way the real tools
+  // judged Supercov's probes.
+  const gates = resolve(temporary, 'gates');
+  write(gates, 'package.json', JSON.stringify({
+    name: 'gates-fixture',
+    private: true,
+    scripts: {
+      test: 'c8 --check-coverage --100 node --test && nyc --check-coverage node --test && c8 check-coverage && nyc check-coverage',
+    },
+  }));
+  write(gates, 'lib/index.js', `'use strict';
+exports.pick = function pick(value, fallback) {
+  if (value && value.length > 0) return value;
+  return fallback;
+};
+`);
+  write(gates, 'test/index.test.js', `'use strict';
+const assert = require('node:assert/strict');
+const test = require('node:test');
+const { pick } = require('../lib/index.js');
+
+test('picks', () => {
+  assert.equal(pick('a', 'b'), 'a');
+  assert.equal(pick('', 'b'), 'b');
+});
+
+test('fails when asked to', () => {
+  assert.equal(process.env.FAIL_ONE, undefined);
+});
+`);
+  write(gates, 'node_modules/c8/lib/commands/check-coverage.js', `exports.handler = (argv) => { exports.checkCoverages(argv); };
+exports.checkCoverages = async () => {
+  process.exitCode = 1;
+  console.error('ERROR: Coverage for branches (80%) does not meet global threshold (100%)');
+};
+`);
+  write(gates, 'node_modules/c8/lib/commands/report.js', `const { checkCoverages } = require('./check-coverage');
+exports.outputReport = async (argv) => {
+  console.log('c8 report');
+  if (argv.checkCoverage) await checkCoverages(argv);
+};
+`);
+  write(gates, 'node_modules/c8/bin/c8.js', `#!/usr/bin/env node
+const { spawnSync } = require('node:child_process');
+const { outputReport } = require('../lib/commands/report');
+const args = process.argv.slice(2);
+if (args[0] === 'check-coverage') {
+  require('../lib/commands/check-coverage').handler({});
+} else {
+  const at = args.findIndex((arg) => !arg.startsWith('-'));
+  const child = spawnSync(args[at], args.slice(at + 1), { stdio: 'inherit' });
+  outputReport({ checkCoverage: args.includes('--check-coverage') || args.includes('--100') })
+    .then(() => process.exit(process.exitCode || child.status));
+}
+`);
+  write(gates, 'node_modules/nyc/index.js', `module.exports = class NYC {
+  async checkCoverage() {
+    process.exitCode = 1;
+    console.error('ERROR: Coverage for lines (95%) does not meet global threshold (100%)');
+  }
+};
+`);
+  write(gates, 'node_modules/nyc/bin/nyc.js', `#!/usr/bin/env node
+const { spawnSync } = require('node:child_process');
+const NYC = require('../index.js');
+const args = process.argv.slice(2);
+(async () => {
+  const nyc = new NYC();
+  if (args[0] === 'check-coverage') return nyc.checkCoverage({});
+  const at = args.findIndex((arg) => !arg.startsWith('-'));
+  const child = spawnSync(args[at], args.slice(at + 1), { stdio: 'inherit' });
+  if (args.includes('--check-coverage')) await nyc.checkCoverage({});
+  process.exit(process.exitCode || child.status);
+})();
+`);
+  mkdirSync(resolve(gates, 'node_modules/.bin'), { recursive: true });
+  for (const tool of ['c8', 'nyc']) {
+    chmodSync(resolve(gates, `node_modules/${tool}/bin/${tool}.js`), 0o755);
+    symlinkSync(`../${tool}/bin/${tool}.js`, resolve(gates, `node_modules/.bin/${tool}`));
+  }
+  const gated = supercov(gates, ['--', 'npm', 'test']);
+  assert.equal(gated.status, 0, gated.output);
+  assert.doesNotMatch(gated.output, /ERROR: Coverage/, gated.output);
+  // Once per process: the gated run and the check-coverage command of each.
+  assert.equal(gated.output.match(skipped('c8'))?.length, 2, gated.output);
+  assert.equal(gated.output.match(skipped('nyc'))?.length, 2, gated.output);
+  const failing = supercov(gates, ['--', 'npm', 'test'], { FAIL_ONE: '1' });
+  assert.notEqual(failing.status, 0, failing.output);
+
+  const jestGate = resolve(temporary, 'jest-gate');
+  link(jestGate, ['jest', 'jest-config'], ['jest']);
+  write(jestGate, 'package.json', JSON.stringify({
+    name: 'jest-gate-fixture',
+    private: true,
+    scripts: { test: 'jest --coverage' },
+    jest: { testEnvironment: 'node', coverageThreshold: { global: { branches: 100, lines: 100 } } },
+  }));
+  write(jestGate, 'jest.plain.config.js', "module.exports = { testEnvironment: 'node' };\n");
+  write(jestGate, 'lib/index.js', `exports.pick = function pick(value, fallback) {
+  if (value && value.length > 0) return value;
+  return fallback;
+};
+`);
+  write(jestGate, 'test/index.test.js', `const { pick } = require('../lib/index.js');
+test('picks', () => {
+  expect(pick('a', 'b')).toBe('a');
+  expect(pick('', 'b')).toBe('b');
+  expect(pick(null, 'b')).toBe('b');
+});
+`);
+  const jestRun = supercov(jestGate, ['--', 'npm', 'test']);
+  assert.equal(jestRun.status, 0, jestRun.output);
+  assert.doesNotMatch(jestRun.output, /does not meet/, jestRun.output);
+  assert.match(jestRun.output, /All files/, jestRun.output);
+  assert.equal(jestRun.output.match(skipped('Jest'))?.length, 1, jestRun.output);
+  // No shell between here and Jest, so the JSON needs no quoting.
+  const jestCli = supercov(jestGate, ['--', process.execPath, 'node_modules/jest/bin/jest.js', '--coverage',
+    '--config', 'jest.plain.config.js', '--coverageThreshold', '{"global":{"lines":100,"branches":100}}']);
+  assert.equal(jestCli.status, 0, jestCli.output);
+  assert.equal(jestCli.output.match(skipped('Jest'))?.length, 1, jestCli.output);
+
+  const vitestGate = resolve(temporary, 'vitest-gate');
+  link(vitestGate, ['vite', 'vitest', '@vitest/coverage-v8'], ['vitest']);
+  write(vitestGate, 'package.json', JSON.stringify({
+    name: 'vitest-gate-fixture',
+    private: true,
+    type: 'module',
+    scripts: { test: 'vitest run --coverage' },
+  }));
+  write(vitestGate, 'vitest.config.js', `export default {
+  test: { coverage: { provider: 'v8', include: ['src/**'], thresholds: { 100: true, autoUpdate: true } } },
+};
+`);
+  write(vitestGate, 'vitest.plain.config.js', `export default { test: { coverage: { provider: 'v8', include: ['src/**'] } } };
+`);
+  write(vitestGate, 'src/index.js', `export function pick(value, fallback) {
+  if (value && value.length > 0) return value;
+  return fallback;
+}
+`);
+  write(vitestGate, 'test/index.test.js', `import { expect, test } from 'vitest';
+import { pick } from '../src/index.js';
+test('picks', () => {
+  expect(pick('a', 'b')).toBe('a');
+  expect(pick('', 'b')).toBe('b');
+  expect(pick(null, 'b')).toBe('b');
+});
+`);
+  const vitestRun = supercov(vitestGate, ['--', 'npm', 'test']);
+  assert.equal(vitestRun.status, 0, vitestRun.output);
+  assert.doesNotMatch(vitestRun.output, /does not meet/, vitestRun.output);
+  assert.match(vitestRun.output, /All files/, vitestRun.output);
+  assert.equal(vitestRun.output.match(skipped('Vitest'))?.length, 1, vitestRun.output);
+  const vitestCli = supercov(vitestGate, ['--', process.execPath, 'node_modules/vitest/vitest.mjs', 'run', '--coverage',
+    '--config', 'vitest.plain.config.js', '--coverage.thresholds.lines', '100', '--coverage.thresholds.branches=100']);
+  assert.equal(vitestCli.status, 0, vitestCli.output);
+  assert.doesNotMatch(vitestCli.output, /does not meet/, vitestCli.output);
+  assert.equal(vitestCli.output.match(skipped('Vitest'))?.length, 1, vitestCli.output);
   console.log('top package failure classes pass through the public command');
 } finally {
   rmSync(temporary, { recursive: true, force: true });

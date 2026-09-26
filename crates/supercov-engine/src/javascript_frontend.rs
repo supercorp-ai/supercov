@@ -1133,6 +1133,18 @@ fn write_vitest_config(
              }}\n\
            }}\n\
          }};\n\
+         // Vitest's coverage measures the instrumented copy, probes included:\n\
+         // a suite at 100% read 87.5% of branches, and autoUpdate would write\n\
+         // what it measured into this file. Coverage is still collected and\n\
+         // reported (see register.mjs). Vitest 0.x kept thresholds in coverage.\n\
+         const supercovThresholdKeys = ['thresholds', 'lines', 'functions', 'branches', 'statements', 'perFile', '100', 'thresholdAutoUpdate'];\n\
+         const supercovSkipCoverageThresholds = (coverage) => {{\n\
+           const configured = supercovThresholdKeys.filter((key) => coverage?.[key] !== undefined);\n\
+           for (const key of configured) delete coverage[key];\n\
+           const collecting = coverage?.enabled === true ||\n\
+             process.argv.some((argument) => /^--coverage(?:\\.enabled)?(?:=true)?$/.test(argument));\n\
+           if (configured.length && collecting) process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__?.('Vitest');\n\
+         }};\n\
          export default async function supercovVitestConfig(env) {{\n\
            const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;\n\
            const loaded = originalPath ? await loadConfigFromFile(env, originalPath, process.cwd()) : undefined;\n\
@@ -1141,6 +1153,7 @@ fn write_vitest_config(
              plugins: [supercovViteInstrumentation(process.cwd())],\n\
              test: {{ setupFiles: [resolve(process.cwd(), supercovSetupFile(loaded?.config))], maxConcurrency: 1, ...supercovBrowserTest(loaded?.config) }},\n\
            }});\n\
+           supercovSkipCoverageThresholds(config.test?.coverage);\n\
            const configuredReporters = loaded?.config?.test?.reporters;\n\
            config.test ??= {{}};\n\
            config.test.reporters = configuredReporters\n\
