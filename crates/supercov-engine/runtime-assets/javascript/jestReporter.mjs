@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { inferTestProvenance } from "./provenance.mjs";
-import { atomicWriteFileSync } from "./atomic.mjs";
+import { appendEvidenceRecord } from "./atomic.mjs";
 function digest(value) {
     return createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
@@ -69,9 +68,7 @@ export default class SupercovJestReporter {
                 browser: [],
                 server: [],
             };
-            const directory = resolve(process.cwd(), evidenceDirectory, `jest-${digest(testId)}-${attempt}-status`);
-            mkdirSync(directory, { recursive: true });
-            atomicWriteFileSync(resolve(directory, "mcdc.json"), `${JSON.stringify(payload)}\n`);
+            appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), "jest-status", payload);
         };
         // `jest.retryTimes` reports one result after the last attempt; every
         // attempt before it failed, or there would have been no retry. The

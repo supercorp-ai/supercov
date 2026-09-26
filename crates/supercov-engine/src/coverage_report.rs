@@ -291,6 +291,20 @@ pub const ATTRIBUTION_RUN_WIDE: &str = "run-wide";
 /// prove what it ran and its silence proves nothing.
 pub const ATTRIBUTION_PARTIAL: &str = "partial";
 
+/// Of two attributions for one test, the one that claims less.
+fn least_exact(left: &str, right: &str) -> String {
+    let rank = |attribution: &str| match attribution {
+        ATTRIBUTION_RUN_WIDE => 2,
+        ATTRIBUTION_PARTIAL => 1,
+        _ => 0,
+    };
+    if rank(right) > rank(left) {
+        right.to_owned()
+    } else {
+        left.to_owned()
+    }
+}
+
 /// Whether what this test is recorded as reaching is its own.
 ///
 /// True for `exact` and for `partial`: both record real coverage of this
@@ -1579,6 +1593,11 @@ fn create_coverage_view_with_model(
             );
         }
         let test = tests_by_id.get_mut(&id).expect("test was inserted");
+        // A test's records can disagree about how exactly its coverage is its
+        // own, and the least exact one is true of the whole: Playwright's
+        // outcome record says nothing about coverage and often arrives first,
+        // before the record that says a worker could not be read.
+        test.attribution = least_exact(&test.attribution, &raw.attribution);
         test.unstarted |= raw.status.as_deref() == Some("unstarted");
         if let Some(retry) = raw.retry {
             test.retries.insert(retry);
@@ -2775,6 +2794,7 @@ pub fn analyze_coverage_archive(
     if frontend.frontend_version == "rust-compiler-v1" {
         validate_rust_compiler_scope(&manifest)?;
     }
+    release_leaked_phases(&mut raw_results);
     let normalized = CoverageReportRequest {
         run_id: request.run_id.clone(),
         manifest,
@@ -2789,6 +2809,46 @@ pub fn analyze_coverage_archive(
     // resident while the views are built beside what was parsed from them.
     drop(entries);
     analyze_frontend_request(&frontend, &normalized, transport)
+}
+
+/// Untag evidence that names another test's phase.
+///
+/// Work a test starts can finish after it: axios's HTTP/2 upload tests leave a
+/// stream settling, and 2.0.1's runtime tagged what it ran with the ended
+/// test's assertion phase, inside the next test's record. Three such events
+/// in 2,201 records made the whole run unreadable ("unknown frontend phase
+/// reference"). A phase another record of the same run declares is not
+/// corruption: the event keeps its hit in the record that holds it and loses
+/// the phase it cannot belong to. A phase no record declares is still refused.
+fn release_leaked_phases(raw_results: &mut [RawTestResult]) {
+    let declared = raw_results
+        .iter()
+        .flat_map(|raw| raw.phases.iter().map(|phase| phase.id.clone()))
+        .collect::<BTreeSet<_>>();
+    for raw in raw_results.iter_mut() {
+        let own = raw
+            .phases
+            .iter()
+            .map(|phase| phase.id.clone())
+            .collect::<BTreeSet<_>>();
+        let leaked = |phase: &mut Option<String>| {
+            if phase
+                .as_ref()
+                .is_some_and(|id| !own.contains(id) && declared.contains(id))
+            {
+                *phase = None;
+            }
+        };
+        for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
+            leaked(&mut snapshot.phase_id);
+            for event in &mut snapshot.events {
+                leaked(&mut event.phase_id);
+            }
+        }
+        for record in &mut raw.server {
+            leaked(&mut record.phase_id);
+        }
+    }
 }
 
 /// The analysis of a frontend run, from its request as an archive holds it:
@@ -3795,6 +3855,62 @@ mod tests {
         );
     }
     #[test]
+    fn a_phase_leaked_from_another_test_is_untagged_and_an_unknown_one_is_kept() {
+        let record = |test: &str, phases: &[&str], events: &[(&str, &str)]| -> RawTestResult {
+            serde_json::from_value(serde_json::json!({
+                "test": test,
+                "phases": phases.iter().map(|id| serde_json::json!({
+                    "id": id, "kind": "assertion", "operation": "assert.ok", "startedAtMs": 0
+                })).collect::<Vec<_>>(),
+                "runtime": [{
+                    "events": events.iter().map(|(id, phase)| serde_json::json!({
+                        "type": "hit", "id": id, "timestampMs": 0, "phaseId": phase, "environment": "server"
+                    })).collect::<Vec<_>>()
+                }]
+            }))
+            .unwrap()
+        };
+        let mut results = vec![
+            record(
+                "upload",
+                &["a-0:assertion:1"],
+                &[("own", "a-0:assertion:1")],
+            ),
+            // The stream the upload left settling ran during the next test.
+            record(
+                "form data",
+                &["b-0:assertion:1"],
+                &[
+                    ("late", "a-0:assertion:1"),
+                    ("mine", "b-0:assertion:1"),
+                    ("corrupt", "z-0:assertion:9"),
+                ],
+            ),
+        ];
+        release_leaked_phases(&mut results);
+        let phases = |raw: &RawTestResult| {
+            raw.runtime[0]
+                .events
+                .iter()
+                .map(|event| (event.id.clone(), event.phase_id.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            phases(&results[0]),
+            [("own".into(), Some("a-0:assertion:1".into()))]
+        );
+        assert_eq!(
+            phases(&results[1]),
+            [
+                ("late".into(), None),
+                ("mine".into(), Some("b-0:assertion:1".into())),
+                // No record declares it: that is corruption, and it is refused later.
+                ("corrupt".into(), Some("z-0:assertion:9".into())),
+            ]
+        );
+    }
+
+    #[test]
     fn a_dimension_is_summarised_over_the_tests_it_can_describe() {
         // A test whose reach nothing recorded contributes no hits. Counting it
         // in the denominator of a coverage percentage reported a package
@@ -3839,6 +3955,21 @@ mod tests {
         assert!(coverage_is_complete(ATTRIBUTION_EXACT));
         assert!(!coverage_is_complete(ATTRIBUTION_PARTIAL));
         assert!(!coverage_is_complete(ATTRIBUTION_RUN_WIDE));
+
+        // A test's records merge to the least exact claim among them, in
+        // whichever order they arrive.
+        for (left, right, merged) in [
+            (ATTRIBUTION_EXACT, ATTRIBUTION_PARTIAL, ATTRIBUTION_PARTIAL),
+            (ATTRIBUTION_PARTIAL, ATTRIBUTION_EXACT, ATTRIBUTION_PARTIAL),
+            (
+                ATTRIBUTION_PARTIAL,
+                ATTRIBUTION_RUN_WIDE,
+                ATTRIBUTION_RUN_WIDE,
+            ),
+            (ATTRIBUTION_EXACT, ATTRIBUTION_EXACT, ATTRIBUTION_EXACT),
+        ] {
+            assert_eq!(least_exact(left, right), merged);
+        }
 
         // And a frontend that has never heard of the field keeps its meaning:
         // absent is exact, so nothing already measured changes shape.

@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { atomicWriteFileSync } from "./atomic.mjs";
+import { appendEvidenceRecord } from "./atomic.mjs";
 import { inferTestProvenance } from "./provenance.mjs";
 import { serverEvidencePath } from "./transport.mjs";
 
@@ -131,7 +131,5 @@ export function writeRunnerEvidence(identity, status, scope, evidenceDirectoryOv
             ? readScopedServerEvidence(scope, serverEvidenceSource)
             : readScopedServerEvidence(scope),
     };
-    const directory = resolve(process.cwd(), evidenceDirectory, `${identity.runner.replace(/[^A-Za-z0-9_-]/g, "_")}-${scope.attemptId}`);
-    mkdirSync(directory, { recursive: true });
-    atomicWriteFileSync(resolve(directory, "mcdc.json"), `${JSON.stringify(payload)}\n`);
+    appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), identity.runner.replace(/[^A-Za-z0-9_-]/g, "_"), payload);
 }

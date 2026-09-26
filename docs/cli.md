@@ -36,17 +36,17 @@ npx supercov --help
 ## Assess source quality
 
 ```sh supercov-example
-supercov quality                 # this repository
-supercov quality src/            # one directory
-supercov quality gaps            # only files something fired on
-supercov quality file src/a.ts   # one file, every check
-supercov quality scope           # which files are assessed, and why
-supercov quality snapshots       # saved assessments
-supercov quality diff <older> <newer>
-supercov security                # twelve security checks, every file
-supercov security gaps           # only files something fired on
-supercov security patch --base origin/main
-supercov security --run latest   # flagged files no test exercises
+npx supercov quality                 # this repository
+npx supercov quality src/            # one directory
+npx supercov quality gaps            # only files something fired on
+npx supercov quality file src/a.ts   # one file, every check
+npx supercov quality scope           # which files are assessed, and why
+npx supercov quality snapshots       # saved assessments
+npx supercov quality diff <older> <newer>
+npx supercov security                # twelve security checks, every file
+npx supercov security gaps           # only files something fired on
+npx supercov security patch --base origin/main
+npx supercov security --run latest   # flagged files no test exercises
 ```
 
 With no argument the subject is the repository you are standing in. Every
@@ -74,9 +74,9 @@ number is worth and which files get assessed.
 ## Review what a change introduced
 
 ```sh supercov-example
-supercov quality patch
-supercov quality patch --base origin/main
-supercov quality patch --base origin/main --annotate github --run latest
+npx supercov quality patch
+npx supercov quality patch --base origin/main
+npx supercov quality patch --base origin/main --annotate github --run latest
 ```
 
 The same twelve properties asked of a change, plus six risk checks that only
@@ -207,8 +207,8 @@ maps. The [map reference](assertion-maps.md) describes all fields and gates.
 ## Fail CI below a coverage floor
 
 ```sh supercov-example
-supercov runs check --min-lines 90 --min-branches 80 --min-mcdc 80
-supercov runs check --min-lines 100 --per-file --json
+npx supercov runs check --min-lines 90 --min-branches 80 --min-mcdc 80
+npx supercov runs check --min-lines 100 --per-file --json
 ```
 
 `check` reads a recorded run; it never runs tests again. Give a floor per metric
@@ -239,8 +239,8 @@ that answer needs.
 ## Check the lines a change touches
 
 ```sh supercov-example
-supercov runs patch --base origin/main --min-lines 100
-supercov runs patch --base origin/main --annotate github
+npx supercov runs patch --base origin/main --min-lines 100
+npx supercov runs patch --base origin/main --annotate github
 ```
 
 `patch` answers whether the lines this change added or modified are tested. It
@@ -267,9 +267,9 @@ needs no token and posts no comment.
 ## Export for other tools
 
 ```sh supercov-example
-supercov runs report --format lcov --output coverage/lcov.info
-supercov runs report --format cobertura --output coverage/cobertura.xml
-supercov runs report --format html --output coverage/report
+npx supercov runs report --format lcov --output coverage/lcov.info
+npx supercov runs report --format cobertura --output coverage/cobertura.xml
+npx supercov runs report --format html --output coverage/report
 ```
 
 Both are written from the same view `check` and `patch` read, so a viewer,
@@ -461,6 +461,7 @@ terminal or offline environment after the package has been downloaded.
 | --- | --- |
 | `SUPERCOV_SOURCE_ROOTS` | Comma-separated directories or files that hold your own code, in any language; everything else is left out |
 | `SUPERCOV_TEST_KIND` | Label the wrapped command as a test level such as `unit` or `e2e` |
+| `SUPERCOV_BUILD_COMMAND` | The build a JavaScript project's tests need, as words or a JSON array, such as `yarn workspace web build` in a monorepo whose root `build` builds every package. Without it Supercov runs the project's `build` script, through the package manager that started the tests, when the tests need built output |
 
 Examples:
 
@@ -477,3 +478,8 @@ SUPERCOV_TEST_KIND=e2e npx supercov -- npx playwright test
 | Wrapped command's code | The test command failed and Supercov preserved its status |
 | `1` | A valid measurement failed a policy you set, such as a coverage floor |
 | `2` | Supercov could not complete the request, or the evidence cannot answer it |
+
+`quality` and `security` exit `0` for a complete report in which some files
+could not be assessed, such as a file larger than the model accepts; each is
+listed in the report with its reason, and stderr says how many. They exit `2`
+when no file could be assessed.

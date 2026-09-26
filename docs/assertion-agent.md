@@ -12,12 +12,12 @@ can copy. The steps below are the agent's working instructions.
 
 1. Use a matching current run, or run the requested suite through
    `supercov -- <test command>`. Use the full suite for a suite-wide result.
-2. Read `supercov runs latest assertions --json` and keep `data.run` fixed for
+2. Read `npx supercov runs latest assertions --json` and keep `data.run` fixed for
    this investigation. Edit the file at `data.map`.
 3. Check `data.inheritance` for reused work or fallback errors. Keep the old
    runs and maps. Inspect changes before renewing inherited flows.
 4. Read the [map format](assertion-maps.md), also available through
-   `supercov docs assertion-maps`.
+   `npx supercov docs assertion-maps`.
 
 Use a single writer for the map. Save atomically if your editor supports it.
 Do not change application code or tests unless the user also requested those

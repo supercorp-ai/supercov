@@ -20,7 +20,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType, Span};
+use oxc_span::{GetSpan, Span};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeKind {
@@ -328,7 +328,7 @@ pub fn structure(file: &Path, source: &str) -> Result<Structure, String> {
 }
 
 fn parse(file: &Path, source: &str) -> Result<(Vec<Node>, Structure), String> {
-    let source_type = SourceType::from_path(file).map_err(|e| e.to_string())?;
+    let source_type = crate::js_instrumenter::project_source_type(file)?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked {

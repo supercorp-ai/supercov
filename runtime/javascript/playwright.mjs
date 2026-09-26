@@ -31,6 +31,35 @@ const targetTestExport = process.env["SUPERCOV_PLAYWRIGHT_TEST_EXPORT"] ??
 const adapter = (targetModule === "@playwright/test"
     ? standardPlaywright
     : await import(__rewriteRelativeImportExtension(targetModule)));
+// A page that loads the application as plain `<script>` files, from a static
+// server, has no bundler to import the runtime the way a module graph would,
+// and instrumented classic scripts read it from a global. Install the same
+// self-contained runtime in every document before any of the page's scripts
+// run. Every copy keys its state on the page's global, so this copy and one a
+// bundler imports record into the same place. Its locals stay inside a
+// function, out of the page's global scope.
+const browserRuntimeSource = readFileSync(new URL("./runtime.mjs", import.meta.url), "utf8");
+const browserRuntimeExport = browserRuntimeSource.lastIndexOf("\nexport {");
+if (/^import\s/m.test(browserRuntimeSource) || browserRuntimeExport < 0)
+    throw new Error("Supercov's browser runtime must stay self-contained");
+const browserRuntimePrelude = `(() => { if (globalThis.__SUPERCOV_DIRECT_RUNTIME__) return;\n${browserRuntimeSource.slice(0, browserRuntimeExport)}\n})();`;
+// A worker blocked in `Atomics.wait` runs no evaluation until the page wakes
+// it, and the page action that wakes it comes after Supercov's own call: an
+// awaited evaluation deadlocked Actual's suite. Every worker evaluation is
+// bounded; one that does not answer in time is left queued, and a test whose
+// worker evidence could not be read is recorded as partial, never as complete.
+const WORKER_ACTIVATION_WAIT_MS = 250;
+const WORKER_SNAPSHOT_WAIT_MS = 5000;
+const WORKER_TIMED_OUT = Symbol("worker did not answer");
+function bounded(promise, milliseconds) {
+    let timer;
+    return Promise.race([
+        promise,
+        new Promise((resolve) => {
+            timer = setTimeout(() => resolve(WORKER_TIMED_OUT), milliseconds);
+        }),
+    ]).finally(() => clearTimeout(timer));
+}
 const base = (adapter[targetTestExport] ?? adapter.test);
 const baseExpect = adapter.expect;
 const GENERATED_EVIDENCE_DIRECTORY = "__SUPERCOV_EVIDENCE_DIRECTORY__";
@@ -187,6 +216,13 @@ class CoveragePhaseController {
     // closed page cannot be evaluated, so the evidence is taken on the way out.
     earlySnapshots = [];
     snapshottedPages = new WeakSet();
+    snapshottedWorkers = new WeakSet();
+    // Workers that did not answer an evaluation in time. They are not waited
+    // for again until one answers.
+    unresponsiveWorkers = new WeakSet();
+    // Set when a worker's evidence could not be read: the test's coverage is
+    // then a lower bound.
+    workerEvidenceMissing = false;
     disposed = false;
     // Parameter properties are stateful despite the base ESLint rule treating
     // this as an empty constructor.
@@ -216,20 +252,34 @@ class CoveragePhaseController {
             snapshots.push(...(await this.snapshotPage(page)));
         }
         for (const worker of this.allWorkers()) {
-            const snapshot = await worker
-                .evaluate(() => {
-                const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
-                return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
-            })
-                .catch(() => ({
-                decisions: [],
-                hits: [],
-                events: [],
-            }));
-            snapshots.push(snapshot);
+            if (this.snapshottedWorkers.has(worker))
+                continue;
+            const snapshot = await this.snapshotWorker(worker);
+            if (snapshot)
+                snapshots.push(snapshot);
         }
         this.runtimeSnapshots = snapshots;
         return snapshots;
+    }
+    /**
+     * A worker's evidence, or nothing when it cannot be read. A worker that
+     * closed with its page has nothing left to read; one that did not answer
+     * in time is still running and its evidence is missing from this test.
+     */
+    async snapshotWorker(worker) {
+        const answer = await bounded(worker
+            .evaluate(() => {
+            const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
+            return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
+        })
+            .catch(() => undefined), WORKER_SNAPSHOT_WAIT_MS);
+        if (answer === WORKER_TIMED_OUT) {
+            this.unresponsiveWorkers.add(worker);
+            this.workerEvidenceMissing = true;
+            return undefined;
+        }
+        this.snapshottedWorkers.add(worker);
+        return answer;
     }
     async snapshotPage(page) {
         const snapshots = [];
@@ -253,6 +303,16 @@ class CoveragePhaseController {
             return;
         this.snapshottedPages.add(page);
         this.earlySnapshots.push(...(await this.snapshotPage(page)));
+        // A dedicated worker ends with the page that owns it, so it is read
+        // now; read after the page closed, a worker that ran the test's code
+        // reported nothing.
+        for (const worker of page.workers()) {
+            if (this.snapshottedWorkers.has(worker))
+                continue;
+            const snapshot = await this.snapshotWorker(worker);
+            if (snapshot)
+                this.earlySnapshots.push(snapshot);
+        }
     }
     /**
      * Register every live context the process created outside the wrapped
@@ -299,6 +359,7 @@ class CoveragePhaseController {
         this.contextConfiguredHeaders.set(context, configuredHeaders);
         if (adopted)
             this.adoptedContexts.add(context);
+        await context.addInitScript({ content: browserRuntimePrelude }).catch(() => undefined);
         // A context that outlives its test (a worker-scoped browser fixture)
         // is registered again by every later test, so this script accumulates
         // on it and each new document runs every copy in registration order.
@@ -595,13 +656,22 @@ class CoveragePhaseController {
             phaseCookie: COVERAGE_PHASE_COOKIE,
         })
             .catch(() => undefined))));
-        await timed("activate.workerEvaluate", () => Promise.all([...this.workers].map((worker) => worker
-            .evaluate((id) => {
-            const coverageGlobal = globalThis;
-            coverageGlobal.__SUPERCOV_PHASE_ID__ = id;
-            coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped", id);
-        }, phaseId)
-            .catch(() => undefined))));
+        await timed("activate.workerEvaluate", () => Promise.all([...this.workers].map(async (worker) => {
+            const activation = worker
+                .evaluate((id) => {
+                const coverageGlobal = globalThis;
+                coverageGlobal.__SUPERCOV_PHASE_ID__ = id;
+                coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped", id);
+            }, phaseId)
+                .then(() => this.unresponsiveWorkers.delete(worker))
+                .catch(() => undefined);
+            // Evaluations run in order, so one left queued still applies this
+            // phase before any later one; it is only not waited for.
+            if (this.unresponsiveWorkers.has(worker))
+                return;
+            if ((await bounded(activation, WORKER_ACTIVATION_WAIT_MS)) === WORKER_TIMED_OUT)
+                this.unresponsiveWorkers.add(worker);
+        })));
         await timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId))));
     }
     async updateContextHeaders(context, phaseId) {
@@ -1154,6 +1224,7 @@ const instrumentedFixtures = {
                             explicitKind: process.env["SUPERCOV_TEST_KIND"],
                         }),
                         phases: mergeCollectedPhases(controller.phases, directRuntime()?.takeNodeAssertionPhases(scope) ?? []),
+                        ...(controller.workerEvidenceMissing ? { attribution: "partial" } : {}),
                         browser,
                         server,
                     };

@@ -235,7 +235,7 @@ credited with none of them: what a test is credited with is really its own, and
 what it is not credited with is not evidence it did not run the code.
 
 Totals are unaffected — every line is credited to exactly one test. What this
-changes is per-test reporting: `supercov runs <id> test <name>` gives its
+changes is per-test reporting: `npx supercov runs <id> test <name>` gives its
 numbers as "at least", and `tests affected` reports a test whose own record
 cannot settle the question as **undetermined** rather than unaffected, so
 `--names` includes it in the set to run.
@@ -300,7 +300,7 @@ which costs whatever its parallelism was worth — on sixteen I/O-bound JUnit
 tests across fifteen cores, 3.6x. Either way the coverage totals are the same;
 what changes is whether a line can be traced to the test that ran it.
 
-`supercov runs latest` reports which you got, under `Attribution`.
+`npx supercov runs latest` reports which you got, under `Attribution`.
 
 ## Go
 
@@ -332,7 +332,7 @@ measured the same way: `go test` runs both, and what they reach is real
 coverage no test can claim.
 
 Such a test is still recorded as having run, with its outcome, and credited
-with no coverage. `supercov runs <id> test <name>` says that rather than
+with no coverage. `npx supercov runs <id> test <name>` says that rather than
 reporting zeroes, coverage percentages leave it out, and `tests affected` lists
 it as **undetermined**: nothing can say a change missed it, so `--names`
 includes it in the set to run. A package where every test calls `t.Parallel()`
@@ -423,7 +423,7 @@ same goes for a loop over a constant, `while (true)`, which can only go one
 way. A Kotlin `contract { }` has to stay the first statement of its function,
 so the probe that records the function being entered is written after it.
 
-Every one of these is named in the run: ask for `supercov runs latest
+Every one of these is named in the run: ask for `npx supercov runs latest
 limitations` and each appears with its file, its line, and why it was left
 alone. A source file the parser cannot read is declared there too, so a hole in
 the denominator stays visible after the build log is gone.

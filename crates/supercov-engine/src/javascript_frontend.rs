@@ -936,6 +936,66 @@ fn limitation_from_source(value: &SourceLimitation) -> CandidateLimitation {
     }
 }
 
+/// Install the runtime in a file that reads it from a global, before the file
+/// reads it.
+///
+/// A file with no `import` or `export` cannot import the runtime, so it reads
+/// `globalThis.__supercovRuntime`, which the page or the preload sets. Nothing
+/// sets it in a worker: Actual's database worker, a classic script in its
+/// built bundle, stopped on `Cannot read properties of undefined (reading
+/// 'mcdcBegin')` and the application never started. Such a file carries a
+/// guarded copy of the runtime, which does nothing where a runtime is already
+/// installed. In a browser suite the same goes for directly served files,
+/// which read `__SUPERCOV_DIRECT_RUNTIME__` and may be loaded by a worker.
+/// The copy is inserted as whole lines before the helper declarations, and the
+/// source map gains as many empty lines, so every mapped position still holds.
+fn bootstrap_runtime(
+    output: &mut crate::js_instrumenter::CandidateOutput,
+    runtime_source: &str,
+    browser_suite: bool,
+) {
+    let Some(binding) = output.runtime.as_ref() else {
+        return;
+    };
+    let script = format!(
+        "{} = globalThis.__supercovRuntime.mcdcBegin",
+        binding.mcdc_begin
+    );
+    let direct = format!(
+        "{} = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin",
+        binding.mcdc_begin
+    );
+    let Some(found) = output
+        .code
+        .find(&script)
+        .or_else(|| browser_suite.then(|| output.code.find(&direct)).flatten())
+    else {
+        return;
+    };
+    let Some(export_start) = runtime_source.rfind("\nexport {") else {
+        return;
+    };
+    let offset = output.code[..found]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let prelude = format!(
+        "(() => {{ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {{\n{}\n}} globalThis.__supercovRuntime ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__; }})();\n",
+        &runtime_source[..export_start]
+    );
+    let line = output.code[..offset].matches('\n').count();
+    let added = prelude.matches('\n').count();
+    if let Some(serde_json::Value::String(mappings)) =
+        output.map.as_mut().and_then(|map| map.get_mut("mappings"))
+    {
+        let mut lines: Vec<&str> = mappings.split(';').collect();
+        if line <= lines.len() {
+            lines.splice(line..line, std::iter::repeat_n("", added));
+            *mappings = lines.join(";");
+        }
+    }
+    output.code.insert_str(offset, &prelude);
+}
+
 fn relocated_project_file(
     workspace: &Path,
     project: &CoverageProject,
@@ -1129,12 +1189,18 @@ fn write_playwright_config(
     } else {
         "const original = {};\n".into()
     };
+    // A TypeScript config in a CommonJS package is transpiled to CommonJS and
+    // imported here as its module namespace, `{ __esModule: true, default }`,
+    // not as the config. Spreading the namespace lost `testDir`, `use` and
+    // `webServer`, and Playwright found no tests. Only an explicitly marked
+    // namespace is unwrapped; a config that merely has a `default` key is not.
     let source = format!(
         "import './node_modules/register.mjs';\n\
          import {{ dirname, isAbsolute, relative, resolve }} from 'node:path';\n\
          import {{ fileURLToPath }} from 'node:url';\n\
          {original_import}\
-         const resolvedValue = typeof original === 'function' ? await original({{ command: 'test', mode: 'test' }}) : original;\n\
+         const configExport = original && original.__esModule === true && Object.prototype.hasOwnProperty.call(original, 'default') ? original.default : original;\n\
+         const resolvedValue = typeof configExport === 'function' ? await configExport({{ command: 'test', mode: 'test' }}) : configExport;\n\
          const resolved = resolvedValue ?? {{}};\n\
          const runtimeProjectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');\n\
          const originalDirectory = {};
@@ -1349,6 +1415,10 @@ pub fn prepare_javascript_frontend(
         limitations.insert(limitation.id.clone(), limitation_from_source(limitation));
     }
 
+    let runtime_path = runtime_directory.join("runtime.mjs");
+    let standalone_runtime =
+        fs::read_to_string(&runtime_path).map_err(|source| io_error(&runtime_path, source))?;
+    let browser_suite = project.playwright_config.is_some();
     let sources_started = Instant::now();
     for file in &project.source_files {
         let path = checked_source_path(workspace, file)?;
@@ -1377,6 +1447,7 @@ pub fn prepare_javascript_frontend(
             let runtime = generic_runtime_binding(workspace, project, &path, &generated)?;
             output.code = output.code.replace("virtual:supercov-runtime", &runtime);
         }
+        bootstrap_runtime(&mut output, &standalone_runtime, browser_suite);
         // Direct commands can compile TypeScript themselves (`npm test` may
         // begin with `tsc`), so they need the same generated-source exemption
         // as Supercov's separately orchestrated generic build. Instrumentation

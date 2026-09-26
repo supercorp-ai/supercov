@@ -1,6 +1,6 @@
 # Understanding quality
 
-`supercov quality` tells you what is in your code: twelve named properties,
+`npx supercov quality` tells you what is in your code: twelve named properties,
 checked file by file, so a score is never a number you have to take on faith.
 
 Judgments come from [Jev](https://typesafe.ai), which answers typed questions

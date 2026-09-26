@@ -9,8 +9,8 @@
 //
 // CommonJS on purpose: Jest's module system loads setup files without the
 // ESM flag, and the runtime it needs is already on the sandbox global.
-const { createHash } = require("node:crypto");
-const { mkdirSync, renameSync, writeFileSync } = require("node:fs");
+const { createHash, randomUUID } = require("node:crypto");
+const { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, statSync, writeFileSync } = require("node:fs");
 const { relative, resolve, sep } = require("node:path");
 
 // jest-environment-node exposes the outer process's own globals to the sandbox
@@ -71,13 +71,43 @@ function provenance(testFile) {
         ? { runner: "jest", kind, source: "path" }
         : { runner: "jest", kind: "unit", source: "runner-default" };
 }
-function writeEvidence(suffix, payload) {
-    const directory = resolve(process.cwd(), evidenceDirectory, suffix);
-    mkdirSync(directory, { recursive: true });
-    const target = resolve(directory, "mcdc.json");
-    const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(payload)}\n`);
-    renameSync(temporary, target);
+// One journal per writer, as atomic.mjs's appendEvidenceRecord keeps it: a
+// file per test cost a directory, a file and a rename each. Jest gives every
+// test file a fresh module registry, so a worker starts one journal per file.
+let journal;
+function writeEvidence(payload) {
+    const line = `${JSON.stringify(payload)}\n`;
+    if (journal) {
+        let size = -1;
+        try {
+            size = statSync(journal.path).size;
+        }
+        catch {
+            // A missing journal is started again below.
+        }
+        if (size !== journal.size)
+            journal = undefined;
+    }
+    if (!journal) {
+        const directory = resolve(process.cwd(), evidenceDirectory);
+        mkdirSync(directory, { recursive: true });
+        const writer = (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?? `pid-${process.pid}`).replace(/[^A-Za-z0-9_-]/g, "_");
+        journal = { path: resolve(directory, `jest-worker-${writer}-${randomUUID()}.mcdc.jsonl`), size: 0 };
+    }
+    if (process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1") {
+        const descriptor = openSync(journal.path, "a", 0o600);
+        try {
+            writeFileSync(descriptor, line);
+            fsyncSync(descriptor);
+        }
+        finally {
+            closeSync(descriptor);
+        }
+    }
+    else {
+        appendFileSync(journal.path, line, { mode: 0o600 });
+    }
+    journal.size += Buffer.byteLength(line);
 }
 
 if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof afterAll === "function") {
@@ -96,7 +126,7 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
             emittedSetupFiles.add(testFile);
             const setupSnapshot = runtime.coverageSnapshot();
             if (setupSnapshot.hits.length || setupSnapshot.decisions.length) {
-                writeEvidence(`jest-${digest(testFile)}-setup`, {
+                writeEvidence({
                     testId: `jest:${digest(testFile)}:setup`,
                     test: `${testFile} > module setup`,
                     testFile,
@@ -139,7 +169,7 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
         if (!current)
             return;
         const { scope } = current;
-        writeEvidence(`jest-${scope.attemptId}`, {
+        writeEvidence({
             testId: scope.testId,
             scope,
             test: current.fullName,

@@ -162,7 +162,7 @@ fn assertions(data: &Value) -> String {
     if let Some(file) = data["file"].as_str() {
         let _ = write!(command, " --file {}", quote(file));
     }
-    if data["needsAttention"] == true {
+    if data["filters"]["needsAttention"] == true {
         command.push_str(" --needs-attention");
     }
     page_footer(&mut out, data, &command);

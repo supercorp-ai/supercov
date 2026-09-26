@@ -34,6 +34,8 @@ fn discovery_honors_ignores_deduplicates_and_checks_scope() {
     temp.write("src/.hidden.ts", "hidden");
     temp.write("src/ignored.ts", "ignored");
     temp.write("src/node_modules/lib/index.js", "dependency");
+    // Build output, because a Cargo package sits beside it.
+    temp.write("src/Cargo.toml", "[package]\nname = \"a\"\n");
     temp.write("src/target/lib.rs", "build");
     temp.write("src/readme.md", "docs");
     assert_eq!(
@@ -698,7 +700,7 @@ fn an_oversized_file_is_windowed_and_every_window_fits() {
             .is_none(),
         "the fixture must exceed the budget or this proves nothing"
     );
-    let windows = catalog_windows("big.ts", &source).unwrap();
+    let windows = catalog_windows("big.ts", &source, Instrument::Catalog).unwrap();
     assert!(windows.len() > 1, "an oversized file is split");
     for (window, text) in &windows {
         assert!(
@@ -717,13 +719,56 @@ fn an_oversized_file_is_windowed_and_every_window_fits() {
 }
 
 #[test]
-fn a_file_with_nothing_to_window_on_says_so_rather_than_failing_silently() {
-    let source = format!("const blob = \"{}\";\n", "x".repeat(200_000));
-    let error = catalog_windows("blob.ts", &source).unwrap_err();
-    assert!(
-        error.contains("no parsed top-level declarations"),
-        "{error}"
-    );
+fn a_single_line_over_the_budget_says_so_rather_than_failing_silently() {
+    let source = format!("const blob = \"{}\";\n", "x y ".repeat(60_000));
+    let error = catalog_windows("blob.ts", &source, Instrument::Catalog).unwrap_err();
+    assert!(error.contains("line 1 alone"), "{error}");
+}
+
+#[test]
+fn a_template_with_no_parser_is_windowed_at_line_boundaries() {
+    // A template has no declarations to split at, and was reported as a failure
+    // whatever its size. Lines are a real boundary in a template.
+    let mut source = String::from("<html><body>\n");
+    for index in 0..4000 {
+        source.push_str(&format!(
+            "<p class=\"row\">{{{{ rows[{index}].name }}}} and more text</p>\n"
+        ));
+    }
+    source.push_str("</body></html>\n");
+    for instrument in [Instrument::Catalog, Instrument::Security] {
+        assert!(
+            within_budget(&instrument.file_request("page.html", &source))
+                .unwrap()
+                .is_none(),
+            "the fixture must exceed the budget or this proves nothing"
+        );
+        let windows = catalog_windows("page.html", &source, instrument).unwrap();
+        assert!(windows.len() > 1);
+        for (_, text) in &windows {
+            assert!(
+                within_budget(&instrument.file_request("page.html", text))
+                    .unwrap()
+                    .is_some(),
+                "a window planned for {instrument:?} is over its own budget"
+            );
+        }
+        let covered: usize = windows.iter().map(|(_, text)| text.len()).sum();
+        assert_eq!(covered, source.len());
+    }
+}
+
+#[test]
+fn inline_base64_is_estimated_at_a_token_a_byte() {
+    // The report that came back HTTP 400: a third of it inline PNGs.
+    let image = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA".repeat(40);
+    let prose = "div.row { width: 32px; height: 32px; }\n".repeat(50);
+    let dense = format!("{prose}background-image: url(data:image/png;base64,{image});\n");
+    assert_eq!(estimated_tokens(prose.as_bytes()), prose.len().div_ceil(3));
+    assert!(estimated_tokens(dense.as_bytes()) >= prose.len() / 3 + image.len());
+    // An identifier or URL in ordinary source is not a dense run.
+    let code = "const sessionTokenRefreshIntervalMilliseconds = fetchConfiguration();\n";
+    assert_eq!(estimated_tokens(code.as_bytes()), code.len().div_ceil(3));
 }
 
 #[test]
@@ -2425,4 +2470,152 @@ fn a_host_is_named_without_credentials_port_or_path() {
     );
     assert_eq!(host("http://user:secret@127.0.0.1:8787/api"), "127.0.0.1");
     assert_eq!(host("http://[::1]:8787"), "[::1]");
+}
+
+#[test]
+fn a_target_directory_is_output_only_when_a_build_owns_it() {
+    // realvuln-python-app keeps its whole Flask package in `target/`. Dropping
+    // the directory by name left `security scope` with no source at all.
+    let flask = Temp::new();
+    flask.write(
+        "target/runserver.py",
+        "from project import app\napp.run()\n",
+    );
+    flask.write("target/project/__init__.py", "app = object()\n");
+    let found = discover_for(&flask.0, &here(), Instrument::Security).unwrap();
+    assert!(found.iter().any(|p| p.ends_with("target/runserver.py")));
+
+    let cargo = Temp::new();
+    cargo.write("Cargo.toml", "[package]\nname = \"a\"\n");
+    cargo.write("src/lib.rs", "pub fn a() {}\n");
+    cargo.write("target/debug/build/out.rs", "pub fn generated() {}\n");
+    let found = discover_for(&cargo.0, &here(), Instrument::Catalog).unwrap();
+    assert!(
+        found
+            .iter()
+            .all(|p| !p.to_string_lossy().contains("/target/"))
+    );
+
+    // A target directory elsewhere that Cargo wrote, by its own marker.
+    let marked = Temp::new();
+    marked.write("app/main.py", "print(1)\n");
+    marked.write(
+        "target/CACHEDIR.TAG",
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    );
+    marked.write("target/release/build.py", "print(2)\n");
+    let found = discover_for(&marked.0, &here(), Instrument::Catalog).unwrap();
+    assert!(
+        found
+            .iter()
+            .all(|p| !p.to_string_lossy().contains("/target/"))
+    );
+}
+
+#[test]
+fn security_scope_is_the_list_security_reads() {
+    // `security scope` walked with the quality rules and without the
+    // promotion, so it could report no source for a checkout `security` then
+    // assessed, and `--dry-run` sent nothing for a file at the root.
+    let temp = Temp::new();
+    temp.write("dsvw.py", "import http.server\n");
+    temp.write("templates/report.html", "<p>{{ name | safe }}</p>\n");
+    let found = discover_for(&temp.0, &here(), Instrument::Security).unwrap();
+    let view = scope_for(&temp.0, &found, Instrument::Security);
+    let included: Vec<&str> = view.included().map(|e| e.path.as_str()).collect();
+    assert_eq!(included, ["dsvw.py", "templates/report.html"]);
+    let quality = scope_for(
+        &temp.0,
+        &discover_for(&temp.0, &here(), Instrument::Catalog).unwrap(),
+        Instrument::Catalog,
+    );
+    assert_eq!(
+        quality.included().count(),
+        0,
+        "quality still leaves it ambiguous"
+    );
+    assert_eq!(quality.ambiguous(), 1);
+}
+
+#[test]
+fn vendored_and_minified_javascript_is_not_the_code_under_review() {
+    let temp = Temp::new();
+    temp.write("package.json", "{}\n");
+    temp.write(
+        "src/app.js",
+        "/*! @license MIT, our own library */\nexport const a = 1;\n",
+    );
+    temp.write(
+        "public/js/app.js",
+        "$(function () { $('#form').submit(); });\n",
+    );
+    temp.write(
+        "public/plugins/flot/jquery.flot.js",
+        "(function ($) {\n  $.plot = 1;\n})(jQuery);\n",
+    );
+    temp.write(
+        "static/js/widgets.js",
+        "/*!\n * Widgets v1.2 | MIT\n */\nvar w = 1;\n",
+    );
+    temp.write(
+        "static/js/redoc.standalone.js",
+        &format!("!function(){{{}}}();\n", "var a=1;".repeat(2000)),
+    );
+    // A Python file with one enormous HTML string is still first-party.
+    temp.write(
+        "app/dsvw.py",
+        &format!("HTML = \"{}\"\nprint(HTML)\n", "<td>".repeat(3000)),
+    );
+    let found = discover_for(&temp.0, &here(), Instrument::Security).unwrap();
+    let view = scope_for(&temp.0, &found, Instrument::Security);
+    let reason = |path: &str| {
+        let entry = view.entries.iter().find(|e| e.path == path).unwrap();
+        (entry.status, entry.reason.clone())
+    };
+    assert_eq!(
+        reason("src/app.js").0,
+        scope::Status::Included,
+        "a licence in src/ is ours"
+    );
+    assert_eq!(reason("public/js/app.js").0, scope::Status::Included);
+    assert_eq!(reason("app/dsvw.py").0, scope::Status::Included);
+    for path in ["public/plugins/flot/jquery.flot.js", "static/js/widgets.js"] {
+        assert_eq!(
+            reason(path),
+            (
+                scope::Status::Excluded,
+                "vendored third-party library".to_owned()
+            ),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        reason("static/js/redoc.standalone.js"),
+        (scope::Status::Excluded, "minified code".to_owned())
+    );
+}
+
+#[test]
+fn json_is_read_for_security_only_when_it_configures_something() {
+    for (path, read) in [
+        ("config/default.json", true),
+        ("src/config.json", true),
+        ("proxy.conf.json", true),
+        ("appsettings.Development.json", true),
+        ("firebase.json", true),
+        ("secrets.json", true),
+        ("data/static/i18n/fr_FR.json", false),
+        ("frontend/src/assets/i18n/de_CH.json", false),
+        ("drizzle/meta/0000_snapshot.json", false),
+        ("sarif.json", false),
+        ("swagger-output.json", false),
+        ("bower.json", false),
+        ("package.json", false),
+    ] {
+        assert_eq!(
+            is_assessable(Path::new(path), Instrument::Security),
+            read,
+            "{path}"
+        );
+    }
 }

@@ -321,29 +321,41 @@ fn required_basis<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
     let value = Option::<String>::deserialize(d)?;
     if value.as_deref().is_some_and(|s| !valid_basis(s)) {
         return Err(serde::de::Error::custom(
-            "expected null or scov3:<64 lowercase hex digits>",
+            "expected null or scov<format>:<64 lowercase hex digits>",
         ));
     }
     Ok(value)
 }
 fn basis_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({"type":["string","null"],"pattern":"^scov[23]:[0-9a-f]{64}$"})
+    schemars::json_schema!({"type":["string","null"],"pattern":"^scov[0-9]+:[0-9a-f]{64}$"})
+}
+/// The format of an acknowledgement token: what goes into its digest.
+///
+/// Raise it whenever that changes -- the parts of a claim the token covers,
+/// or how a declaration is digested -- because every acknowledged flow then
+/// reads as needing acknowledgement, and with the format raised it says why.
+/// Without it, 0.0.51 to 0.0.53 left 604 of supergateway's 721 flows stale
+/// with nothing changed and nothing said. The tests that pin a token and the
+/// declaration digests fail when the format should rise.
+pub const BASIS_FORMAT: u32 = 3;
+fn basis_format(s: &str) -> Option<u32> {
+    let (format, hash) = s.strip_prefix("scov")?.split_once(':')?;
+    let format = format.parse::<u32>().ok()?;
+    (hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(format)
 }
 fn valid_basis(s: &str) -> bool {
-    s.strip_prefix("scov3:")
-        .or_else(|| s.strip_prefix("scov2:"))
-        .is_some_and(|h| {
-            h.len() == 64
-                && h.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
+    basis_format(s).is_some_and(|format| (2..=BASIS_FORMAT).contains(&format))
 }
-/// A token from a release whose basis pinned files rather than the code a
-/// claim rests on. It still parses, so the map stays valid; it can no longer
-/// match, so the claim reads as needing acknowledgement, with this as its
-/// reason rather than a change that never happened.
+/// A token from a release whose format was different. It still parses, so the
+/// map stays valid; it can no longer match, so the claim reads as needing
+/// acknowledgement, with this as its reason rather than a change that never
+/// happened.
 pub fn superseded_basis(s: &str) -> bool {
-    s.starts_with("scov2:")
+    basis_format(s).is_some_and(|format| format < BASIS_FORMAT)
 }
 pub const SUPERSEDED_BASIS: &str = "acknowledged under an earlier Supercov basis format; reread the claim and copy the current expectedBasis";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -724,8 +736,15 @@ pub fn validate_flow(flow: &Flow, files: &Files) -> Vec<String> {
         errors.push("missing explanation".into());
     }
     for file in &flow.watch {
-        if !local_path(file) || !files.contains_key(file) {
-            errors.push(format!("watched file missing: {file}"));
+        if !local_path(file) {
+            errors.push(format!("watched file is not a project path: {file}"));
+        } else if !files.contains_key(file) {
+            // A run captures what its inherited map watches, so a watch added
+            // since this run was recorded is captured by the next one.
+            errors.push(format!(
+                "watched file missing: {file} is not among this run's inputs; if it exists, \
+                 run the tests again, since a run captures every file its map watches"
+            ));
         }
     }
     errors
@@ -763,7 +782,7 @@ pub fn dependencies<'a>(a: &'a Assertion, f: &'a Flow) -> BTreeSet<&'a str> {
         .collect()
 }
 fn token(value: &impl Serialize) -> String {
-    format!("scov3:{}", digest(value))
+    format!("scov{BASIS_FORMAT}:{}", digest(value))
 }
 fn flow_keys(map: &AssertionMap) -> BTreeSet<String> {
     map.assertions
@@ -1378,7 +1397,60 @@ fn target_file(file: &str, old: &FileManifest, new: &Files) -> Option<String> {
     matches.next().is_none().then(|| first.clone())
 }
 pub fn relocate(at: &Anchor, old: &FileManifest, new: &Files) -> Option<Anchor> {
-    relocate_indexed(at, old, new, None)
+    relocate_indexed(at, old, new, None, None)
+}
+
+/// Where a statement is now, when the declaration holding it did not change
+/// and only moved: its digest, and the place of everything nested in it, are
+/// what they were. Code added above a function moves every statement in it
+/// by the same number of lines, and a statement whose text repeats in the
+/// file -- `return null;`, `expect(html).toContain("li")` -- has no other way
+/// to be found again, since a text search needs the text to be unique.
+fn moved_with_declaration(
+    at: &Anchor,
+    target: &str,
+    old: &FileManifest,
+    new: &FileManifest,
+) -> Option<Anchor> {
+    let before = old.get(&at.file)?.code.as_ref()?;
+    let after = new.get(target)?.code.as_ref()?;
+    let held = before.unit_at(at.line, at.column);
+    if held == 0 {
+        // The file itself: an edit anywhere in it is an edit to its unit.
+        return None;
+    }
+    let unit = &before.units[held];
+    let moved = after.units.iter().position(|u| u.path == unit.path)?;
+    let now = &after.units[moved];
+    let layout = |code: &Code, index: usize| {
+        let base = code.units[index].line;
+        code.units
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index && code.ancestors(*i).any(|a| a == index))
+            .map(|(_, u)| {
+                (
+                    u.path.clone(),
+                    u.line - base,
+                    u.end_line - base,
+                    u.digest.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    if now.digest != unit.digest
+        || now.end_line - now.line != unit.end_line - unit.line
+        || layout(before, held) != layout(after, moved)
+    {
+        return None;
+    }
+    let mut candidate = at.clone();
+    candidate.file = target.to_owned();
+    candidate.line = at.line - unit.line + now.line;
+    if at.line == unit.line {
+        candidate.column = at.column - unit.column + now.column;
+    }
+    Some(candidate)
 }
 
 fn relocate_indexed(
@@ -1386,6 +1458,7 @@ fn relocate_indexed(
     old: &FileManifest,
     new: &Files,
     lines: Option<&LineIndex<'_>>,
+    new_manifest: Option<&FileManifest>,
 ) -> Option<Anchor> {
     old.get(&at.file)?;
     let target = target_file(&at.file, old, new)?;
@@ -1408,6 +1481,13 @@ fn relocate_indexed(
     {
         return Some(candidate);
     }
+    if let Some(moved) = new_manifest.and_then(|m| moved_with_declaration(at, &target, old, m))
+        && lines
+            .map_or_else(|| moved.offset(new), |index| index.offset(&moved))
+            .is_some()
+    {
+        return Some(moved);
+    }
     let position = unique_occurrence(after, &at.text)?;
     Some(Anchor::new(
         &target,
@@ -1415,6 +1495,101 @@ fn relocate_indexed(
         position,
         position + at.text.len(),
     ))
+}
+
+/// Old inventory sites matched to new ones, file by file, keeping their order.
+///
+/// A site used to be found again only by the exact place it was recorded at,
+/// or by text unique in the whole file. A test file repeats its assertions --
+/// TodoMVC's suite checks `toHaveText` two dozen times -- so one line added at
+/// the top retired every repeated assertion below it along with its
+/// explanation: 11 of 25 in the reported case. Aligning the two inventories
+/// as sequences finds them where they went. A pair is certain when the
+/// earliest and the latest optimal alignment agree on it; when they differ,
+/// identical assertions could have traded places, and the pair is only a
+/// suggestion, which keeps the explanation and asks for its identity to be
+/// confirmed.
+fn aligned_inventories<'a>(
+    old: &'a [InventorySite],
+    new: &'a [InventorySite],
+) -> BTreeMap<&'a Anchor, (&'a Anchor, bool)> {
+    let by_file = |sites: &'a [InventorySite]| {
+        let mut files: BTreeMap<&'a str, Vec<&'a Anchor>> = BTreeMap::new();
+        for site in sites {
+            files
+                .entry(site.at.file.as_str())
+                .or_default()
+                .push(&site.at);
+        }
+        for anchors in files.values_mut() {
+            anchors.sort_by_key(|at| (at.line, at.column));
+        }
+        files
+    };
+    let (before, after) = (by_file(old), by_file(new));
+    let mut aligned = BTreeMap::new();
+    for (file, old_sites) in &before {
+        let Some(new_sites) = after.get(file) else {
+            continue;
+        };
+        let (n, m) = (old_sites.len(), new_sites.len());
+        // Bounded, so a generated file with thousands of assertions costs
+        // nothing here; it keeps the exact and unique-text matches it had.
+        if n.saturating_mul(m) > 4_000_000 {
+            continue;
+        }
+        let same = |i: usize, j: usize| old_sites[i].text == new_sites[j].text;
+        // prefix[i][j]: common subsequence of the first i and first j sites.
+        let mut prefix = vec![vec![0u32; m + 1]; n + 1];
+        for i in 0..n {
+            for j in 0..m {
+                prefix[i + 1][j + 1] = if same(i, j) {
+                    prefix[i][j] + 1
+                } else {
+                    prefix[i][j + 1].max(prefix[i + 1][j])
+                };
+            }
+        }
+        // suffix[i][j]: the same for the sites from i and from j on.
+        let mut suffix = vec![vec![0u32; m + 1]; n + 1];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                suffix[i][j] = if same(i, j) {
+                    suffix[i + 1][j + 1] + 1
+                } else {
+                    suffix[i + 1][j].max(suffix[i][j + 1])
+                };
+            }
+        }
+        // Latest: trace back from the end, matching as late as possible.
+        let mut latest = BTreeMap::new();
+        let (mut i, mut j) = (n, m);
+        while i > 0 && j > 0 {
+            if same(i - 1, j - 1) && prefix[i][j] == prefix[i - 1][j - 1] + 1 {
+                latest.insert(i - 1, j - 1);
+                i -= 1;
+                j -= 1;
+            } else if prefix[i - 1][j] >= prefix[i][j - 1] {
+                i -= 1;
+            } else {
+                j -= 1;
+            }
+        }
+        // Earliest: trace forward from the start, matching as early as possible.
+        let (mut i, mut j) = (0, 0);
+        while i < n && j < m {
+            if same(i, j) && suffix[i][j] == suffix[i + 1][j + 1] + 1 {
+                aligned.insert(old_sites[i], (new_sites[j], latest.get(&i) == Some(&j)));
+                i += 1;
+                j += 1;
+            } else if suffix[i + 1][j] >= suffix[i][j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+    }
+    aligned
 }
 
 /// How one captured file moved between two runs, judged once and read for
@@ -1607,12 +1782,25 @@ pub fn carry(
         .iter()
         .map(|site| &site.at)
         .collect::<BTreeSet<_>>();
+    let aligned = aligned_inventories(&old.assertions, &new.assertions);
     let exact = map
         .assertions
         .iter()
         .map(|a| {
-            relocate_indexed(&a.at, &old.files, &new.files, Some(&lines))
-                .filter(|at| new_sites.contains(at) || !old_sites.contains(&a.at))
+            relocate_indexed(
+                &a.at,
+                &old.files,
+                &new.files,
+                Some(&lines),
+                Some(&new_manifest.files),
+            )
+            .or_else(|| {
+                aligned
+                    .get(&a.at)
+                    .filter(|(_, certain)| *certain)
+                    .map(|(at, _)| (*at).clone())
+            })
+            .filter(|at| new_sites.contains(at) || !old_sites.contains(&a.at))
         })
         .collect::<Vec<_>>();
     let reserved = exact.iter().flatten().collect::<BTreeSet<_>>();
@@ -1640,6 +1828,14 @@ pub fn carry(
         } else {
             None
         };
+        // An alignment that another, equally good one contradicts is a
+        // suggestion too: identical assertions can trade places.
+        let replacement = replacement.or_else(|| {
+            aligned
+                .get(&a.at)
+                .filter(|(_, certain)| !*certain)
+                .map(|(at, _)| *at)
+        });
         let matched = exact[index]
             .as_ref()
             .or(replacement)
@@ -1798,7 +1994,13 @@ pub fn carry(
                 dirty.insert("assertion changed or replaced; confirm identity and meaning".into());
             }
             for node in &mut f.nodes {
-                if let Some(at) = relocate_indexed(&node.at, &old.files, &new.files, Some(&lines)) {
+                if let Some(at) = relocate_indexed(
+                    &node.at,
+                    &old.files,
+                    &new.files,
+                    Some(&lines),
+                    Some(&new_manifest.files),
+                ) {
                     node.at = at;
                 } else {
                     dirty.insert(format!("node {} changed or ambiguous", node.id));

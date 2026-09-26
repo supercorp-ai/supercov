@@ -551,7 +551,8 @@ fn javascript(path: &str, source: &str) -> Option<Outline> {
     use oxc_ast_visit::{Visit, walk};
     use oxc_span::GetSpan;
 
-    let source_type = oxc_span::SourceType::from_path(std::path::Path::new(path)).ok()?;
+    let source_type =
+        crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
@@ -1463,6 +1464,65 @@ fn kotlin(source: &str) -> Option<Outline> {
 
 #[cfg(test)]
 mod tests {
+    /// Every acknowledged assertion flow rests on these digests. If this
+    /// fails, a change made declaration digests different, so every
+    /// acknowledged flow in every map will read as needing acknowledgement:
+    /// raise `assertion_map::BASIS_FORMAT` so each says why, and only then
+    /// update the pinned value.
+    #[test]
+    fn declaration_digests_are_pinned_to_the_basis_format() {
+        let samples = [
+            (
+                "a.ts",
+                "// lead\nexport class A {\n  /** doc */\n  run(x: number): string {\n    const s = `a ${x}  b`; // tail\n    return s;\n  }\n}\nexport interface I { a: string }\nexport const f = (y) => y ?? 'z';\n",
+            ),
+            (
+                "a.jsx",
+                "export function View({ ok }) {\n  return <div title={ok && 'y'}>{ok ? 'yes' : 'no'}</div>;\n}\n",
+            ),
+            (
+                "a.py",
+                "# lead\nclass A:\n    def run(self, x):\n        \"\"\"doc\"\"\"\n        s = f\"a {x}  b\"  # tail\n        return s\n\ndef f(y):\n    return y or 'z'\n",
+            ),
+            (
+                "a.rs",
+                "//! crate doc\n/// doc\npub fn run(x: u8) -> u8 {\n    // inner\n    let s = \"a  b\";\n    x + s.len() as u8\n}\nmod m {\n    pub fn g() {}\n}\n",
+            ),
+            (
+                "a.rb",
+                "# frozen_string_literal: true\nclass A\n  def run(x)\n    s = \"a  b\" # tail\n    x + s.size\n  end\nend\n",
+            ),
+            (
+                "a.go",
+                "package a\n\n//go:embed x.txt\nvar x string\n\n// Run runs.\nfunc Run(y int) int {\n\treturn y + len(\"a  b\")\n}\n",
+            ),
+            (
+                "A.java",
+                "package a;\n/** doc */\npublic class A {\n  // tail\n  public int run(int x) { return x + \"a  b\".length(); }\n}\n",
+            ),
+            (
+                "A.kt",
+                "package a\n// lead\nclass A {\n    fun run(x: Int): Int = x + \"a  b\".length\n}\n",
+            ),
+        ];
+        let mut all = String::new();
+        for (path, source) in samples {
+            let code = code(path, source).unwrap_or_else(|| panic!("{path} parses"));
+            all.push_str(&format!("{path} {} {}", code.semantic, code.structure));
+            for unit in &code.units {
+                all.push_str(&format!(" {}={}", unit.path, unit.digest));
+            }
+            all.push('\n');
+        }
+        let pinned = format!("{:x}", Sha256::digest(all.as_bytes()));
+        assert_eq!(
+            pinned, PINNED_DECLARATION_DIGESTS,
+            "declaration digests changed: raise assertion_map::BASIS_FORMAT, then update the pin\n{all}"
+        );
+    }
+    const PINNED_DECLARATION_DIGESTS: &str =
+        "e350d052c0bf53390700122e45fb4ad582d97437028c2a207b413cb1f70d5209";
+
     use super::*;
 
     fn paths(code: &Code) -> Vec<(&str, &str)> {
