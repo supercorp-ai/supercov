@@ -352,15 +352,30 @@ pub fn run_direct_python(
             .or_else(|_| std::env::var("SUPERCOV_DEBUG"))
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
         measured.set(true);
-        let mut run: PythonFrontendRun = build_python_frontend_run(
+        let mut run: PythonFrontendRun = match build_python_frontend_run(
             &project.manifest,
             &evidence_directory,
             &request.run_id,
             &request.started_at,
             execution.exit_code,
             &PythonAssertionInventory::new(&root, &assertion_inputs),
-        )
-        .map_err(|error| error.to_string())?;
+        ) {
+            // No test reported an outcome and the command itself failed: it
+            // never ran its tests (`No module named pytest`, an error while
+            // collecting). That is the command's failure, said in its own
+            // output, not a Supercov bug to report with evidence.
+            Err(
+                crate::python_evidence::PythonEvidenceError::NoTests
+                | crate::python_evidence::PythonEvidenceError::NoInterpreter,
+            ) if execution.exit_code != 0 => {
+                measured.set(false);
+                return Err(format!(
+                    "the test command exited {} before any test reported an outcome; its own output above says why, and no run was published",
+                    execution.exit_code
+                ));
+            }
+            result => result.map_err(|error| error.to_string())?,
+        };
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let joined_ms = elapsed_ms(publication_started);

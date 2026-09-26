@@ -306,15 +306,30 @@ pub fn run_direct_ruby(
         }
         let publication_started = Instant::now();
         measured.set(true);
-        let run: RubyFrontendRun = build_ruby_frontend_run(
+        let run: RubyFrontendRun = match build_ruby_frontend_run(
             &project.manifest,
             &evidence_directory,
             &request.run_id,
             &request.started_at,
             execution.exit_code,
             &RubyAssertionInventory::new(&root, &assertion_inputs),
-        )
-        .map_err(|error| error.to_string())?;
+        ) {
+            // No test reported an outcome and the command itself failed: it
+            // never ran its tests (`No module named pytest`, an error while
+            // collecting). That is the command's failure, said in its own
+            // output, not a Supercov bug to report with evidence.
+            Err(
+                crate::ruby_evidence::RubyEvidenceError::NoTests
+                | crate::ruby_evidence::RubyEvidenceError::NoInterpreter,
+            ) if execution.exit_code != 0 => {
+                measured.set(false);
+                return Err(format!(
+                    "the test command exited {} before any test reported an outcome; its own output above says why, and no run was published",
+                    execution.exit_code
+                ));
+            }
+            result => result.map_err(|error| error.to_string())?,
+        };
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");

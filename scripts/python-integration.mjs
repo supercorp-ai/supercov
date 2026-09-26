@@ -596,6 +596,14 @@ try {
   assert.ok(moduleEntry.counts.coveredLines > 0, 'a module entry goes through the import loader and stays measured');
   assert.equal(moduleEntry.counts.measurementLimitations, 0);
 
+  // A command that never ran its tests is the command's failure, not a
+  // Supercov bug with evidence to send: pytest refuses an unknown option.
+  const refusedProject = createProject(resolve(repository, 'tests/fixtures/python-subprocess'), 'refused');
+  const refused = supercov(refusedProject, ['--', 'python', '-m', 'pytest', '--no-such-option'], environmentFor(refusedProject, venv));
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /before any test reported an outcome/);
+  assert.doesNotMatch(refused.stderr, /Supercov bug/);
+
   // `python -m py_compile` runs py_compile as __main__, where the patch that
   // keeps its bytecode plain was never applied: a measured test that ran it
   // wrote probed bytecode to the ordinary cache (issue #40).
