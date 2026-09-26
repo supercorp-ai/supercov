@@ -8,6 +8,7 @@
 - `quality` and `security` exit 0 for a report in which some files could not be assessed, and say how many on stderr; 2 means none could.
 - Each Vitest, Jest and node:test test is recorded by appending to a journal instead of writing and syncing a file. A 63,740-test Vitest suite that did not finish in seven minutes now records in under two.
 - Instrumenting a long JavaScript file takes time proportional to its length; a 16,000-line file takes under two seconds where 8,000 lines took over a minute and a half.
+- Code a probe already recorded runs at close to its own speed: a repeat is one inline comparison, and a script's top-level code no longer records every repeat again. A million-iteration lru-cache loop took 177 s outside a test and 1.6 s inside one; it now takes 0.9 s and 0.8 s (0.06 s without Supercov), and minimatch's backtracking guard test passes its one-second limit.
 - `assertions report` says whether the run needs attention whatever the filter, takes `--compact`, several `--file`s and `--id`, and a JavaScript build runs through the package manager that started the tests, or as `SUPERCOV_BUILD_COMMAND` names it.
 
 **Fixed**
@@ -19,6 +20,15 @@
 - A JavaScript file the project tells git to ignore, such as a generated bundle, is not counted as its source. Actual's 5 MB ignored bundle had made setup take over 30 minutes.
 - Instrumenting a file with long non-ASCII lines takes time proportional to its length.
 - A browser test that installs fake timers no longer holds its evidence back until it advances the clock.
+- Linters, formatters and `tsc --noEmit` run by the test command read the project as written: ESLint, Prettier, standard, xo and the like see each file as its author wrote it and never see Supercov's `.supercov` directory. semver, js-yaml and picomatch failed their lint step on instrumented code.
+- A TypeScript test compiled by `tsc --strict` keeps its type narrowing: an assertion runs in place instead of in a callback, so `if (prior !== undefined) assert.ok(prior < id)`, an array built in a loop, and an `asserts` signature typecheck as they do without Supercov (uuid failed its build with TS18048, TS7034 and TS7005).
+- `util.promisify(execFile)` and `util.promisify(exec)` resolve `{ stdout, stderr }` under Supercov, and `exec` with options works; commander's CLI tests read `undefined`. A child given its own environment, as execa's `extendEnv: false` gives chalk's fixtures, no longer inherits the parent's.
+- A command that runs the same Jest tests twice, as ms does in Node's environment and then the edge runtime's, opens: the second run's phases no longer repeat the first's, and a test fails if either run failed.
+- A build that compiles instrumented sources to another directory and bundles them there, as lru-cache does with esbuild, finds the runtime.
+- Sources bundled for a browser by karma, testem, airtap, zuul or mochify carry the runtime, so debug's karma suite runs, and the runtime parses as ES2019 for the bundlers that stop there.
+- The test command sees a git repository of its own, with the project's HEAD, remotes and branches: npm's `template-oss-check` failed semver's posttest without one. A test's commits stay in it.
+- tap's own coverage gate no longer fails a run under Supercov, whose probes it measured as uncovered branches; its report is unchanged.
+- An install a tool makes inside the project, such as tap's plugins in `.tap/plugins`, is not half copied back: its manifest and lockfile stay behind with the dependencies that never flow back, and the tool installs them again.
 - JSX in a `.js` file is measured instead of failing the run before any test.
 - A run whose tests leave async work running into the next test opens: axios's ended with `Failed to open coverage index … unknown frontend phase reference`. A leftover no longer carries the ended test's phase, and runs recorded by 2.0.1 open too.
 - Tests that pollute `Object.prototype`, as axios's prototype-pollution tests do, pass under Supercov as they do without it.

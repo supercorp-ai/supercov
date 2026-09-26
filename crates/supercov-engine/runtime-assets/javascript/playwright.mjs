@@ -874,6 +874,30 @@ globalThis.__SUPERCOV_ASSERTION_PHASE_BRIDGE__ = (operation, source, callback) =
         throw error;
     }
 };
+// The same bridge for an assertion that runs in place: the runtime enters the
+// carrier and calls release when the call returns, finish when it settles.
+globalThis.__SUPERCOV_ASSERTION_PHASE_OPENER__ = (operation, source) => {
+    const controller = activeController;
+    if (!controller || !directRuntime())
+        return undefined;
+    const phase = controller.beginAssertion(operation, source);
+    bridgedAssertionDepth += 1;
+    let held = true;
+    const release = () => {
+        if (held) {
+            held = false;
+            bridgedAssertionDepth -= 1;
+        }
+    };
+    return {
+        carrier: { version: 1, scope: controller.scope, phaseId: phase.id },
+        release,
+        finish: (error) => {
+            release();
+            controller.finish(phase, error);
+        },
+    };
+};
 function activeCoverageHeaders() {
     const controller = activeController;
     if (!controller)
@@ -960,9 +984,10 @@ function scopedChildOptions(args, optionIndex) {
         : {};
     const options = {
         ...existing,
+        // An env the caller passed is the child's whole environment; only
+        // Supercov's own variables join it. Without one, it inherits ours.
         env: {
-            ...process.env,
-            ...(existing.env ?? {}),
+            ...(existing.env ?? process.env),
             SUPERCOV_RUN_ID: controller.scope.runId,
             [COVERAGE_CARRIER_ENV]: encodeCoverageCarrier({
                 version: 1,
@@ -979,12 +1004,47 @@ function scopedChildOptions(args, optionIndex) {
         scoped[optionIndex] = options;
     return scoped;
 }
+// spawn, fork and execFile take (file, args?, options?, callback?): options
+// follow an argument list, or an explicit null or undefined in its place.
 function childOptionIndex(method, args) {
-    if (method === "spawn" || method === "spawnSync" || method === "fork")
-        return Array.isArray(args[1]) ? 2 : 1;
-    if (method === "execFile" || method === "execFileSync")
-        return Array.isArray(args[1]) ? 2 : 1;
+    if (method === "spawn" ||
+        method === "spawnSync" ||
+        method === "fork" ||
+        method === "execFile" ||
+        method === "execFileSync")
+        return Array.isArray(args[1]) || (args[1] == null && args.length > 2) ? 2 : 1;
     return 1;
+}
+// util.promisify(exec) and util.promisify(execFile) resolve { stdout, stderr }
+// through a function Node keeps on the original, and that function calls the
+// original. A wrapper carries its own, which calls the wrapper, or a promisified
+// call resolves the bare stdout string and skips the wrapper.
+const promisifyCustom = Symbol.for("nodejs.util.promisify.custom");
+function keepPromisifiedShape(original, wrapper) {
+    if (typeof original[promisifyCustom] !== "function")
+        return wrapper;
+    Object.defineProperty(wrapper, promisifyCustom, {
+        configurable: true,
+        value: (...args) => {
+            let settle;
+            let reject;
+            const promise = new Promise((ok, fail) => {
+                settle = ok;
+                reject = fail;
+            });
+            promise.child = wrapper(...args, (error, stdout, stderr) => {
+                if (error !== null) {
+                    error.stdout = stdout;
+                    error.stderr = stderr;
+                    reject(error);
+                }
+                else
+                    settle({ stdout, stderr });
+            });
+            return promise;
+        },
+    });
+    return wrapper;
 }
 function installChildProcessScopePropagation() {
     for (const method of [
@@ -997,9 +1057,9 @@ function installChildProcessScopePropagation() {
         "spawnSync",
     ]) {
         const original = childProcess[method];
-        childProcess[method] = function (...args) {
+        childProcess[method] = keepPromisifiedShape(original, function (...args) {
             return Reflect.apply(original, childProcess, scopedChildOptions(args, childOptionIndex(method, args)));
-        };
+        });
     }
     syncBuiltinESMExports();
 }

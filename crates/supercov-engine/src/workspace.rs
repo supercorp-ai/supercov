@@ -1672,6 +1672,9 @@ pub fn sync_command_outputs(
             sync.skipped_instrumented.push(relative.clone());
             continue;
         }
+        if unaccompanied_install_manifest(root, workspace, relative) {
+            continue;
+        }
         validate_writeback_destination(root, relative)?;
         let to = root.join(relative);
         if let Some(parent) = to.parent() {
@@ -1686,6 +1689,170 @@ pub fn sync_command_outputs(
         }
     }
     Ok(sync)
+}
+
+/// Give the workspace a git repository of its own, as the project has one.
+///
+/// Tools in a test command read git: npm's template-oss-check derives the
+/// repository and release branches it expects from it, and semver's posttest
+/// failed without one ("\"repository\" ... expected to be removed"). The
+/// project's own .git is never shared -- a test's `git add` or `commit`
+/// would then change the user's index and refs -- so this is a clone that
+/// borrows the project's objects and has its own refs, index and config: the
+/// project's HEAD, remotes and remote branches, and an index read from HEAD.
+/// Best effort: without git, or on any failure, the workspace has no .git.
+pub fn mirror_git_repository(root: &Path, workspace: &Path) -> Result<(), String> {
+    if fs::symlink_metadata(root.join(".git")).is_err() {
+        return Ok(());
+    }
+    let target = workspace.join(".git");
+    let git = |directory: &Path, arguments: &[&str]| -> Result<String, String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(arguments)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| format!("git {}: {error}", arguments.join(" ")))?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        } else {
+            Err(format!(
+                "git {}: {}",
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    };
+    let result = (|| {
+        if fs::symlink_metadata(&target).is_ok() {
+            fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
+        }
+        let source = root.to_string_lossy();
+        let destination = target.to_string_lossy();
+        git(
+            workspace,
+            &[
+                "clone",
+                "--quiet",
+                "--shared",
+                "--bare",
+                &source,
+                &destination,
+            ],
+        )?;
+        git(workspace, &["config", "core.bare", "false"])?;
+        match git(root, &["symbolic-ref", "-q", "HEAD"]) {
+            Ok(branch) => git(workspace, &["symbolic-ref", "HEAD", &branch])?,
+            Err(_) => {
+                let commit = git(root, &["rev-parse", "HEAD"])?;
+                git(workspace, &["update-ref", "--no-deref", "HEAD", &commit])?
+            }
+        };
+        git(workspace, &["remote", "remove", "origin"])?;
+        let remotes = git(root, &["remote"])?;
+        for name in remotes.lines().filter(|name| !name.is_empty()) {
+            // As configured: get-url applies the user's insteadOf rewrites,
+            // which the clone's own reads apply again.
+            let url = git(root, &["config", "--get", &format!("remote.{name}.url")])?;
+            git(workspace, &["remote", "add", name, &url])?;
+        }
+        git(
+            workspace,
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                &source,
+                "+refs/remotes/*:refs/remotes/*",
+            ],
+        )?;
+        git(workspace, &["read-tree", "HEAD"])?;
+        // Supercov's own directories are not the command's untracked files.
+        let exclude = target.join("info/exclude");
+        fs::create_dir_all(target.join("info")).map_err(|error| error.to_string())?;
+        let mut patterns = fs::read_to_string(&exclude).unwrap_or_default();
+        patterns.push_str("\n.supercov/\n");
+        fs::write(&exclude, patterns).map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&target);
+    }
+    result
+}
+
+/// Keep the files Supercov rewrote out of the workspace repository's status:
+/// natively they are unmodified, and a test that checks for a clean tree must
+/// find one. Best effort, as the repository is.
+pub fn hide_rewritten_files(workspace: &Path, files: &[String]) {
+    if files.is_empty() || !workspace.join(".git").is_dir() {
+        return;
+    }
+    let run = |arguments: &[&str], input: &str| {
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(arguments)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+        let output = child.wait_with_output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    // Only tracked files carry the bit; git refuses the rest.
+    let Some(listed) = run(&["ls-files", "-z"], "") else {
+        return;
+    };
+    let tracked = listed.split('\0').collect::<BTreeSet<_>>();
+    let hidden = files
+        .iter()
+        .filter(|file| tracked.contains(file.as_str()))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !hidden.is_empty() {
+        let _ = run(
+            &["update-index", "--skip-worktree", "--stdin"],
+            &hidden.join("\n"),
+        );
+    }
+}
+
+/// Whether `relative` is the manifest or lockfile of an install the command
+/// made in the workspace alone. node_modules never flows back, so copying
+/// these would leave the project claiming an install it does not have: tap
+/// installs its plugins into .tap/plugins, found package.json and a lockfile
+/// there on the next run without Supercov, and failed to import them. Left
+/// out, the tool installs them again as it would the first time.
+fn unaccompanied_install_manifest(root: &Path, workspace: &Path, relative: &Path) -> bool {
+    let manifest = relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name,
+                "package.json"
+                    | "package-lock.json"
+                    | "npm-shrinkwrap.json"
+                    | "yarn.lock"
+                    | "pnpm-lock.yaml"
+                    | "bun.lock"
+                    | "bun.lockb"
+            )
+        });
+    let Some(directory) = relative.parent() else {
+        return false;
+    };
+    manifest
+        && workspace.join(directory).join("node_modules").is_dir()
+        && !root.join(directory).join("node_modules").exists()
 }
 
 /// Whether `path` mentions the generated runtime module, which exists only
@@ -1795,6 +1962,98 @@ mod tests {
         fs::write(workspace.join("src/app.ts"), "instrumented\n").unwrap();
         fs::write(workspace.join(".supercov/state.json"), "{}").unwrap();
         (root, workspace)
+    }
+
+    #[test]
+    fn the_workspace_has_a_repository_of_its_own_that_reads_like_the_project() {
+        let (root, workspace) = writeback_fixture("git-mirror");
+        let git = |directory: &Path, arguments: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args(arguments)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {arguments:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&root, &["init", "--quiet", "--initial-branch=release/v2"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/app.git",
+            ],
+        );
+        git(&root, &["add", "src/app.ts"]);
+        git(&root, &["commit", "--quiet", "-m", "first"]);
+        let head = git(&root, &["rev-parse", "HEAD"]);
+
+        mirror_git_repository(&root, &workspace).unwrap();
+        assert_eq!(git(&workspace, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            git(&workspace, &["symbolic-ref", "HEAD"]),
+            "refs/heads/release/v2"
+        );
+        assert_eq!(
+            git(&workspace, &["config", "--get", "remote.origin.url"]),
+            "https://github.com/example/app.git"
+        );
+        // The workspace copy is instrumented and .supercov is Supercov's.
+        hide_rewritten_files(&workspace, &["src/app.ts".to_owned()]);
+        assert_eq!(git(&workspace, &["status", "--porcelain"]), "");
+
+        // A commit a test makes stays in the workspace's own repository.
+        fs::write(workspace.join("new.txt"), "new\n").unwrap();
+        git(&workspace, &["add", "new.txt"]);
+        git(
+            &workspace,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "--quiet",
+                "-m",
+                "second",
+            ],
+        );
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(&root, &["status", "--porcelain"]), "");
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_install_the_command_made_does_not_flow_back_without_its_dependencies() {
+        let (root, workspace) = writeback_fixture("tool-install");
+        fs::write(workspace.join("package.json"), "{}").unwrap();
+        fs::write(root.join("package.json"), "{}").unwrap();
+        fs::create_dir_all(workspace.join("node_modules")).unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        // tap installs the plugins its config names into .tap/plugins.
+        fs::create_dir_all(workspace.join(".tap/plugins/node_modules/@tapjs/clock")).unwrap();
+        fs::write(workspace.join(".tap/plugins/package.json"), "{}").unwrap();
+        fs::write(workspace.join(".tap/plugins/package-lock.json"), "{}").unwrap();
+        fs::create_dir_all(workspace.join(".tap/test-results")).unwrap();
+        fs::write(workspace.join(".tap/test-results/basic.tap"), "ok").unwrap();
+        // The project's own manifest still flows back beside its own install.
+        fs::write(workspace.join("package.json"), "{\"version\":\"2\"}").unwrap();
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+        assert!(!root.join(".tap/plugins/package.json").exists());
+        assert!(!root.join(".tap/plugins/package-lock.json").exists());
+        assert!(root.join(".tap/test-results/basic.tap").is_file());
+        assert_eq!(
+            fs::read_to_string(root.join("package.json")).unwrap(),
+            "{\"version\":\"2\"}"
+        );
+        assert_eq!(sync.synced, 2);
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     #[test]

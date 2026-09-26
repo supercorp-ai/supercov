@@ -550,11 +550,14 @@ pub fn run_direct_javascript(
         std::slice::from_ref(&project.playwright_module),
     )?;
     let build_cache_key = build_cache_key(&integrity, &project)?;
+    // The root too: a generic build's sources import the runtime by
+    // absolute path, which a moved project must not reuse.
     let frontend_cache_key = format!(
-        "{}:{}:{}",
+        "{}:{}:{}:{}",
         integrity.fingerprint.combined,
         integrity.fingerprint.execution,
-        crate::assertion_map::digest(&request.command)
+        crate::assertion_map::digest(&request.command),
+        crate::assertion_map::digest(&project.root.to_string_lossy())
     );
     let prior_workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
     let reusable_build = if project.build_adapter == BuildAdapter::Direct {
@@ -577,6 +580,11 @@ pub fn run_direct_javascript(
         .map_err(|error| error.to_string())?;
     drop(workspace_progress);
     cleanup.set_workspace(workspace.clone());
+    if let Err(error) = crate::workspace::mirror_git_repository(&root, &workspace)
+        && std::env::var_os("SUPERCOV_DEBUG").is_some()
+    {
+        eprintln!("[supercov] the workspace has no git repository of its own: {error}");
+    }
     let workspace_preparation_ms = elapsed_ms(workspace_started);
     writeln!(
         diagnostics,
@@ -616,6 +624,10 @@ pub fn run_direct_javascript(
         )
     }
     .map_err(|error| error.to_string())?;
+    crate::workspace::hide_rewritten_files(
+        &workspace,
+        &crate::javascript_frontend::rewritten_files(&workspace),
+    );
     drop(instrumentation_progress);
     let adapter_setup_ms = elapsed_ms(adapter_started);
     if let Some(detail) = crate::javascript_frontend::setup_timing_detail() {
@@ -630,6 +642,11 @@ pub fn run_direct_javascript(
         ("NODE_OPTIONS".into(), node_options(&frontend.preload_path)),
         ("SUPERCOV_CJS_INTERCEPT".into(), "1".into()),
         ("SUPERCOV_DIRECT_INSTRUMENTATION".into(), "1".into()),
+        // tap measures its own coverage and fails a run short of 100%. Under
+        // Supercov it measures the instrumented copies, whose probes are
+        // branches the suite was never meant to cover: minimatch passed all
+        // 6,236 tests and still failed. Its report stays; only the gate goes.
+        ("TAP_ALLOW_INCOMPLETE_COVERAGE".into(), "1".into()),
         // Must be absolute: monorepo runners spawn test processes with a
         // package directory as cwd, and a relative evidence directory made
         // every per-test record land beside the package, never collected.

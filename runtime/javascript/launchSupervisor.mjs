@@ -545,19 +545,51 @@ function inspectExports(value, depth = 0) {
         }
     }
 }
+// spawn, fork and execFile take (file, args?, options?, callback?): options
+// follow an argument list, or an explicit null or undefined in its place. exec
+// takes (command, options?, callback?), and calls execFile as (file, options,
+// callback) itself -- that object is the options, not an argument list.
 function childOptionsIndex(method, args) {
-    if (method === "spawn" || method === "spawnSync" || method === "fork")
-        return Array.isArray(args[1]) || (args.length > 2 && args[2] !== undefined)
-            ? 2
-            : 1;
-    if (method === "exec" ||
-        method === "execSync" ||
+    if (method === "spawn" ||
+        method === "spawnSync" ||
+        method === "fork" ||
         method === "execFile" ||
         method === "execFileSync")
-        return Array.isArray(args[1]) || (args.length > 2 && args[2] !== undefined)
-            ? 2
-            : 1;
+        return Array.isArray(args[1]) || (args[1] == null && args.length > 2) ? 2 : 1;
+    if (method === "exec" || method === "execSync")
+        return 1;
     return undefined;
+}
+// util.promisify(exec) and util.promisify(execFile) resolve { stdout, stderr }
+// through a function Node keeps on the original, and that function calls the
+// original. A wrapper carries its own, which calls the wrapper, or a promisified
+// call resolves the bare stdout string and skips the wrapper.
+const promisifyCustom = Symbol.for("nodejs.util.promisify.custom");
+function keepPromisifiedShape(original, wrapper) {
+    if (typeof original[promisifyCustom] !== "function")
+        return wrapper;
+    Object.defineProperty(wrapper, promisifyCustom, {
+        configurable: true,
+        value: (...args) => {
+            let settle;
+            let reject;
+            const promise = new Promise((ok, fail) => {
+                settle = ok;
+                reject = fail;
+            });
+            promise.child = wrapper(...args, (error, stdout, stderr) => {
+                if (error !== null) {
+                    error.stdout = stdout;
+                    error.stderr = stderr;
+                    reject(error);
+                }
+                else
+                    settle({ stdout, stderr });
+            });
+            return promise;
+        },
+    });
+    return wrapper;
 }
 function injectChildEnvironment(method, args) {
     const index = childOptionsIndex(method, args);
@@ -617,7 +649,7 @@ function patchChildProcesses() {
             configurable: true,
             enumerable: true,
             writable: true,
-            value: (...args) => Reflect.apply(original, childProcess, injectChildEnvironment(method, args)),
+            value: keepPromisifiedShape(original, (...args) => Reflect.apply(original, childProcess, injectChildEnvironment(method, args))),
         });
     }
     syncBuiltinESMExports();

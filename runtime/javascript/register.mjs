@@ -7,8 +7,8 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
     return path;
 };
 import Module, { register, syncBuiltinESMExports } from "node:module";
-import { closeSync, openSync, unlinkSync } from "node:fs";
-import { resolve } from "node:path";
+import fs, { closeSync, openSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
@@ -130,6 +130,96 @@ const isPlaywrightEntrypoint = /\/(?:node_modules\/\.bin\/playwright|node_module
 const isJestEntrypoint = /\/node_modules\/(?:\.bin\/jest|(?:jest|jest-cli)\/bin\/jest\.js)$/.test(entrypoint);
 if (generatedPlaywrightConfig && isPlaywrightEntrypoint)
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT = "1";
+// Linters, formatters and type checks read the project to judge it, not to
+// run it. The workspace holds rewritten copies, and ESLint failed semver,
+// js-yaml and picomatch on code nobody wrote ("Strings must use singlequote",
+// "'globalThis' is not defined"), Supercov's own .supercov/*.mjs included.
+// Such a process reads every rewritten file as its author wrote it, and no
+// directory listing in the workspace shows .supercov.
+const analysisTools = "eslint|eslint_d|prettier|standard|semistandard|ts-standard|xo|jshint|tslint";
+const isAnalysisEntrypoint = new RegExp(`/node_modules/(?:\\.bin/(?:${analysisTools})$|(?:${analysisTools})/)`).test(entrypoint) ||
+    (/\/node_modules\/(?:\.bin\/(?:tsc|vue-tsc)$|(?:typescript|vue-tsc)\/bin\/)/.test(entrypoint) &&
+        process.argv.includes("--noEmit"));
+if (isAnalysisEntrypoint)
+    installAuthoredSourceView();
+function installAuthoredSourceView() {
+    let authored;
+    try {
+        authored = new Set(JSON.parse(readFileSync(new URL("./authored-sources.json", import.meta.url), "utf8")));
+    }
+    catch {
+        authored = new Set();
+    }
+    const authoredRoot = fileURLToPath(new URL("./.authored/", import.meta.url));
+    const workspace = fileURLToPath(new URL("../../", import.meta.url));
+    const roots = [...new Set([workspace, (() => {
+                try {
+                    return realpathSync(workspace);
+                }
+                catch {
+                    return workspace;
+                }
+            })()])];
+    const inside = (path) => {
+        if (typeof path !== "string" && !(path instanceof URL))
+            return undefined;
+        let absolute;
+        try {
+            absolute = resolve(path instanceof URL ? fileURLToPath(path) : path);
+        }
+        catch {
+            return undefined;
+        }
+        for (const root of roots) {
+            const local = relative(root, absolute);
+            if (local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local))
+                return local.split(sep).join("/");
+        }
+        return undefined;
+    };
+    const authoredPath = (path) => {
+        const local = inside(path);
+        return local !== undefined && authored.has(local) ? resolve(authoredRoot, local) : path;
+    };
+    // A recursive listing names nested entries by relative path, or as
+    // entries whose parent is inside .supercov.
+    const supercovPath = (path) => typeof path === "string" && path.split(/[\\/]/).includes(".supercov");
+    const hidden = (entry) => {
+        if (typeof entry === "string")
+            return supercovPath(entry);
+        if (entry instanceof Uint8Array)
+            return supercovPath(new TextDecoder().decode(entry));
+        const parent = inside(entry?.parentPath ?? entry?.path ?? "");
+        return entry?.name === ".supercov" || supercovPath(parent);
+    };
+    const listed = (path, entries) => inside(path) === undefined || !Array.isArray(entries)
+        ? entries
+        : entries.filter((entry) => !hidden(entry));
+    const { readFileSync: readSync, readFile: readCallback, readdirSync: listSync, readdir: listCallback } = fs;
+    const { readFile: readPromise, readdir: listPromise } = fs.promises;
+    fs.readFileSync = function readFileSync(path, ...rest) {
+        return Reflect.apply(readSync, this, [authoredPath(path), ...rest]);
+    };
+    fs.readFile = function readFile(path, ...rest) {
+        return Reflect.apply(readCallback, this, [authoredPath(path), ...rest]);
+    };
+    fs.promises.readFile = function readFile(path, ...rest) {
+        return Reflect.apply(readPromise, this, [authoredPath(path), ...rest]);
+    };
+    fs.readdirSync = function readdirSync(path, ...rest) {
+        return listed(path, Reflect.apply(listSync, this, [path, ...rest]));
+    };
+    fs.readdir = function readdir(path, ...rest) {
+        const callback = rest.at(-1);
+        if (typeof callback !== "function")
+            return Reflect.apply(listCallback, this, [path, ...rest]);
+        return Reflect.apply(listCallback, this, [path, ...rest.slice(0, -1), (error, entries) => callback(error, error ? entries : listed(path, entries))]);
+    };
+    fs.promises.readdir = async function readdir(path, ...rest) {
+        return listed(path, await Reflect.apply(listPromise, this, [path, ...rest]));
+    };
+    syncBuiltinESMExports();
+}
 register(new URL("./resolve-loader.mjs", import.meta.url));
 if (process.env.SUPERCOV_DEBUG === "1") {
     console.error("[supercov] preload", { entrypoint });
