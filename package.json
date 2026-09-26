@@ -157,6 +157,7 @@
     "@swc/core": "^1.16.1",
     "@types/node": "^24.0.0",
     "@vitest/browser-playwright": "4.1.11",
+    "@vitest/coverage-v8": "4.1.11",
     "esbuild": "^0.28.2",
     "expect": "30.4.1",
     "jest": "30.5.1",

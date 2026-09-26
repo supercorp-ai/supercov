@@ -73,6 +73,8 @@ function installRuntime(target) {
         decisionObservationEpochs: new Uint32Array(definition.decisions.length),
         decisionObservationCounts: new Uint16Array(definition.decisions.length),
         decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
+        pendingDefaults: new Uint32Array(definition.defaultCount ?? 0),
+        none: { [Symbol.iterator]: () => ({ next: () => ({ done: true }) }) },
       };
     },
     coverageHitV2() {},
@@ -126,6 +128,25 @@ function installRuntime(target) {
       if (pending <= 1) pendingDefaults.delete(defaultId);
       else pendingDefaults.set(defaultId, pending - 1);
     },
+    defaultSelectedV2(file, slot, value, inferredName) {
+      file.pendingDefaults[slot] += 1;
+      return applyInferredName(value, inferredName);
+    },
+    defaultEnteredV2(file, slot) {
+      if (file.pendingDefaults[slot] > 0) file.pendingDefaults[slot] -= 1;
+    },
+    optionalSelectV2(_file, _first, value) {
+      return value;
+    },
+    selectShortV2(_file, _first, value) {
+      return value;
+    },
+    selectRightV2(_file, _first, value) {
+      return value;
+    },
+    optionalCallEndV2(_file, _first, value) {
+      return value;
+    },
     tryBegin(successId, catchId) {
       return { successId, catchId, caught: false };
     },
@@ -171,6 +192,12 @@ const runtimeExports = [
   "optionalCallEnd",
   "defaultSelected",
   "defaultEntered",
+  "defaultSelectedV2",
+  "defaultEnteredV2",
+  "optionalSelectV2",
+  "selectShortV2",
+  "selectRightV2",
+  "optionalCallEndV2",
   "tryBegin",
   "tryCatch",
   "tryEnd",
@@ -290,7 +317,7 @@ async function runBrowser(name) {
               mcdcBegin(_id, meta) { return { meta, values: Array(meta.conditions.length).fill(null) }; },
               mcdcCondition(frame, conditionIndex, value) { frame.values[conditionIndex] = Boolean(value); return value; },
               mcdcEnd(_frame, value) { return value; },
-              registerProbeV2(definition) { return { ...definition, clock: { epoch: 1, fast: true }, hitEpochs: new Uint32Array(definition.pointIds.length), decisionEpochs: definition.decisions.map((meta) => meta.conditions.length <= 6 ? new Uint32Array(2 * 3 ** meta.conditions.length) : new Map()), decisionVectorCounts: definition.decisions.map((_meta, definitionIndex) => definition.decisionVectorCounts?.[definitionIndex] ?? 0), decisionObservationEpochs: new Uint32Array(definition.decisions.length), decisionObservationCounts: new Uint16Array(definition.decisions.length), decisionCompleteEpochs: new Uint32Array(definition.decisions.length) }; },
+              registerProbeV2(definition) { return { ...definition, clock: { epoch: 1, fast: true }, hitEpochs: new Uint32Array(definition.pointIds.length), decisionEpochs: definition.decisions.map((meta) => meta.conditions.length <= 6 ? new Uint32Array(2 * 3 ** meta.conditions.length) : new Map()), decisionVectorCounts: definition.decisions.map((_meta, definitionIndex) => definition.decisionVectorCounts?.[definitionIndex] ?? 0), decisionObservationEpochs: new Uint32Array(definition.decisions.length), decisionObservationCounts: new Uint16Array(definition.decisions.length), decisionCompleteEpochs: new Uint32Array(definition.decisions.length), pendingDefaults: new Uint32Array(definition.defaultCount ?? 0), none: emptySpread }; },
               coverageHitV2() {},
               renderedValueV2(_file, _index, value) { return value; },
               mcdcEndV2(_file, _decisionIndex, _encoded, value) { return value; },
@@ -306,6 +333,12 @@ async function runBrowser(name) {
               optionalCallEnd(_frame, value) { return value; },
               defaultSelected(defaultId, value, inferredName) { pendingDefaults.set(defaultId, (pendingDefaults.get(defaultId) ?? 0) + 1); return applyInferredName(value, inferredName); },
               defaultEntered(defaultId) { const pending = pendingDefaults.get(defaultId) ?? 0; if (pending <= 1) pendingDefaults.delete(defaultId); else pendingDefaults.set(defaultId, pending - 1); },
+              defaultSelectedV2(file, slot, value, inferredName) { file.pendingDefaults[slot] += 1; return applyInferredName(value, inferredName); },
+              defaultEnteredV2(file, slot) { if (file.pendingDefaults[slot] > 0) file.pendingDefaults[slot] -= 1; },
+              optionalSelectV2(_file, _first, value) { return value; },
+              selectShortV2(_file, _first, value) { return value; },
+              selectRightV2(_file, _first, value) { return value; },
+              optionalCallEndV2(_file, _first, value) { return value; },
               tryBegin(successId, catchId) { return { successId, catchId, caught: false }; },
               tryCatch(frame, value) { frame.caught = true; return value; },
               tryEnd() {},

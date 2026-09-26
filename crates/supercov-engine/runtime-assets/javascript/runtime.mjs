@@ -165,6 +165,8 @@ function createState() {
     backgroundBuffers: /* @__PURE__ */ new Map(),
     backgroundWriters: /* @__PURE__ */ new Map(),
     backgroundShardSizes: /* @__PURE__ */ new Map(),
+    backgroundDescriptors: /* @__PURE__ */ new Map(),
+    pendingBackgroundAppends: /* @__PURE__ */ new Map(),
     backgroundSequence: 0,
     runtimeSnapshots: false,
     assertionPhases: /* @__PURE__ */ new Map(),
@@ -460,15 +462,54 @@ function backgroundWriterToken() {
   }
   return Math.floor(Math.random() * 4294967295).toString(16);
 }
+// Background records -- every first hit under tap, AVA or Mocha, and code run
+// outside any test -- are written once per event-loop turn, as a test's own
+// records are, and on exit and the terminating signals. Written one by one
+// they cost lru-cache's 10 ms TTL test a write and a stat for each of the 132
+// first hits in its window, and the test missed its deadline under load. A
+// process killed in the middle of a turn loses that turn's records.
 function appendDurableBackgroundRecord(fs, runId, record) {
-  var _a8;
   const records = state.backgroundBuffers.get(runId) != null ? state.backgroundBuffers.get(runId) : /* @__PURE__ */ new Map();
   const key = serverRecordKey(record);
   if (records.has(key))
     return state.backgroundWriters.get(runId);
+  if (state.serverTransportFailure)
+    throw state.serverTransportFailure;
+  records.set(key, record);
+  state.backgroundBuffers.set(runId, records);
+  let pending = state.pendingBackgroundAppends.get(runId);
+  if (!pending) {
+    pending = [];
+    state.pendingBackgroundAppends.set(runId, pending);
+  }
+  pending.push(JSON.stringify(record) + "\n");
+  if (pending.length >= 2048)
+    flushServerAppends();
+  else
+    scheduleServerFlush();
+  return state.backgroundWriters.get(runId);
+}
+function flushBackgroundAppends(fs) {
+  for (const [runId, lines] of state.pendingBackgroundAppends) {
+    state.pendingBackgroundAppends.delete(runId);
+    try {
+      if (!fs)
+        throw new Error("node:fs is unavailable");
+      writeBackgroundLines(fs, runId, lines.join(""));
+    } catch (cause) {
+      const failure = cause instanceof Error && cause.code === "SUPERCOV_EVIDENCE_TRANSPORT_FAILED" ? cause : serverTransportError(runId, cause);
+      state.serverTransportFailure = failure;
+      throw failure;
+    }
+  }
+}
+function writeBackgroundLines(fs, runId, payload) {
+  var _a8;
   const directory = backgroundEvidenceDirectory(runId);
-  const payload = JSON.stringify(record) + "\n";
-  fs.mkdirSync(directory, { recursive: true });
+  if (!state.createdEvidenceDirectories.has(directory)) {
+    fs.mkdirSync(directory, { recursive: true });
+    state.createdEvidenceDirectories.add(directory);
+  }
   let path = state.backgroundWriters.get(runId);
   // A pid is not an identity: pool VMs restored from one snapshot run clones
   // of this very process, same pid and same cached shard path, and their
@@ -482,6 +523,7 @@ function appendDurableBackgroundRecord(fs, runId, record) {
     } catch (e) {
     }
     if (currentSize !== (state.backgroundShardSizes.has(path) ? state.backgroundShardSizes.get(path) : -1)) {
+      closeBackgroundShard(fs, path);
       path = void 0;
     }
   }
@@ -493,13 +535,27 @@ function appendDurableBackgroundRecord(fs, runId, record) {
     path = backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
     state.backgroundWriters.set(runId, path);
     state.backgroundShardSizes.set(path, capturedBuffer.byteLength(payload));
-  } else {
-    fs.appendFileSync(path, payload);
-    state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) || 0) + capturedBuffer.byteLength(payload));
+    return;
   }
-  records.set(key, record);
-  state.backgroundBuffers.set(runId, records);
-  return path;
+  let descriptor = state.backgroundDescriptors.get(path);
+  if (descriptor === void 0) {
+    descriptor = fs.openSync(path, "a");
+    state.backgroundDescriptors.set(path, descriptor);
+  }
+  const bytes = capturedBuffer.from(payload);
+  for (let written = 0; written < bytes.length; )
+    written += fs.writeSync(descriptor, bytes, written, bytes.length - written);
+  state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) || 0) + bytes.length);
+}
+function closeBackgroundShard(fs, path) {
+  const descriptor = state.backgroundDescriptors.get(path);
+  if (descriptor === void 0)
+    return;
+  state.backgroundDescriptors.delete(path);
+  try {
+    fs.closeSync(descriptor);
+  } catch (e) {
+  }
 }
 var _a7;
 // Evidence buffered for the current turn is lost when a signal ends the
@@ -571,9 +627,10 @@ function serverTransportError(runId, cause) {
 }
 function flushServerAppends() {
   const pending = state.pendingServerAppends;
-  if (pending.size === 0)
+  if (pending.size === 0 && state.pendingBackgroundAppends.size === 0)
     return;
   const fs = getFs();
+  flushBackgroundAppends(fs);
   for (const [path, entry] of pending) {
     pending.delete(path);
     try {
@@ -604,6 +661,9 @@ function enqueueServerAppend(directory, path, line, runId) {
   } else {
     state.pendingServerAppends.set(path, { directory, runId, lines: [line] });
   }
+  scheduleServerFlush();
+}
+function scheduleServerFlush() {
   if (!state.serverExitHookInstalled && typeof process !== "undefined") {
     state.serverExitHookInstalled = true;
     try {
@@ -1262,7 +1322,12 @@ function registerProbeV2(definition) {
     }),
     decisionObservationEpochs: new Uint32Array(definition.decisions.length),
     decisionObservationCounts: new Uint16Array(definition.decisions.length),
-    decisionCompleteEpochs: new Uint32Array(definition.decisions.length)
+    decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
+    pendingDefaults: new Uint32Array(definition.defaultCount || 0),
+    // A selection's outcomes -- short falsy, short truthy, right falsy, right
+    // truthy -- are four consecutive points per site from the first index.
+    selectionPoints: definition.selectionPoints,
+    none: optionalCallEmptySpread
   };
   state.probeV2Files.add(file);
   if (isBrowser) {
@@ -1304,6 +1369,9 @@ function recordCoverageHitV2(file, index) {
       return;
     file.hitEpochs[index] = epoch;
     coverageHit(id);
+    const selections = file.selectionPoints;
+    if (selections !== void 0 && index >= selections[0] && index < selections[0] + 4 * selections[1])
+      recordSelectionOutcome(id, index - selections[0] & 3);
   } finally {
     if (fallbackEpoch)
       file.clock.epoch = previousEpoch;
@@ -1408,27 +1476,30 @@ var selectionBranchIds = /* @__PURE__ */ new Map();
 function selectionEnd(frame, value) {
   const right = frame.rightEvaluated;
   coverageHit(right ? frame.rightId : frame.shortId);
-  // Per-operand outcomes for the verifier: which side was selected and whether the result is
-  // truthy. With the operator (known from the manifest) this gives each operand's outcome.
-  // The branch id is cut from the short id once, not on every evaluation.
-  let branchId = selectionBranchIds.get(frame.shortId);
-  if (branchId === void 0) {
-    const separator = frame.shortId.lastIndexOf(":");
-    branchId = separator > 0 ? frame.shortId.slice(0, separator) : null;
-    selectionBranchIds.set(frame.shortId, branchId);
-  }
-  if (branchId !== null) {
-    const truthy = Boolean(value);
-    let vectors = state.logicals.get(branchId);
-    if (!vectors) {
-      vectors = /* @__PURE__ */ new Map();
-      state.logicals.set(branchId, vectors);
-    }
-    const key = selectionOutcomeKeys[(right ? 2 : 0) + (truthy ? 1 : 0)];
-    if (!vectors.has(key))
-      vectors.set(key, { right, truthy });
-  }
+  recordSelectionOutcome(frame.shortId, (right ? 2 : 0) + (value ? 1 : 0));
   return value;
+}
+// Per-operand outcomes for the verifier: which side was selected and whether
+// the result is truthy. With the operator (known from the manifest) this gives
+// each operand's outcome. The branch id is cut from the outcome's id -- its
+// short or right id, which share it -- once, not on every evaluation.
+function recordSelectionOutcome(id, outcome) {
+  let branchId = selectionBranchIds.get(id);
+  if (branchId === void 0) {
+    const separator = id.lastIndexOf(":");
+    branchId = separator > 0 ? id.slice(0, separator) : null;
+    selectionBranchIds.set(id, branchId);
+  }
+  if (branchId === null)
+    return;
+  let vectors = state.logicals.get(branchId);
+  if (!vectors) {
+    vectors = /* @__PURE__ */ new Map();
+    state.logicals.set(branchId, vectors);
+  }
+  const key = selectionOutcomeKeys[outcome];
+  if (!vectors.has(key))
+    vectors.set(key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
 }
 // A JSX expression container has nowhere to put a statement and cannot hold a
 // bare comma operator, so a rendered expression carries its probe as a call
@@ -1443,6 +1514,24 @@ function optionalSelect(shortId, continuedId, value) {
   coverageHit(value === null || value === void 0 ? shortId : continuedId);
   return value;
 }
+// `a || b` (kind 0), `a && b` (1), `a ?? b` (2), with the program's own
+// operator between the two calls: the left operand records its short outcome
+// when it decides the result -- truthy, falsy, present -- and the right one
+// whether it came out truthy. The outcomes are the selection's four points.
+function selectShortV2(file, first, value, kind) {
+  if (kind === 0 ? value : kind === 1 ? !value : value !== null && value !== void 0)
+    coverageHitV2(file, value ? first + 1 : first);
+  return value;
+}
+function selectRightV2(file, first, value) {
+  coverageHitV2(file, value ? first + 3 : first + 2);
+  return value;
+}
+// `object?.member`: the short and continued outcomes are two V2 points.
+function optionalSelectV2(file, first, value) {
+  coverageHitV2(file, value === null || value === void 0 ? first : first + 1);
+  return value;
+}
 function optionalCallBegin(shortId, continuedId) {
   return { shortId, continuedId, reached: false, continued: false };
 }
@@ -1450,13 +1539,17 @@ function optionalCallReached(frame, value) {
   frame.reached = true;
   return value;
 }
+// Spread into an optional call's arguments to mark that the call went ahead:
+// it yields nothing, and allocates nothing per call.
+var optionalCallDone = { done: true, value: void 0 };
+var optionalCallEmptyIterator = {
+  next() {
+    return optionalCallDone;
+  }
+};
 var optionalCallEmptySpread = {
   [Symbol.iterator]() {
-    return {
-      next() {
-        return { done: true, value: void 0 };
-      }
-    };
+    return optionalCallEmptyIterator;
   }
 };
 function optionalCallContinued(frame) {
@@ -1466,6 +1559,13 @@ function optionalCallContinued(frame) {
 function optionalCallEnd(frame, value) {
   if (frame.reached)
     coverageHit(frame.continued ? frame.continuedId : frame.shortId);
+  return value;
+}
+// The site's state, read after the chain: 0 not reached, 1 reached and
+// short-circuited, 2 called. Short and continued are two V2 points.
+function optionalCallEndV2(file, first, value, state) {
+  if (state)
+    coverageHitV2(file, state === 2 ? first + 1 : first);
   return value;
 }
 function defaultSelected(defaultId, value, inferredName) {
@@ -1481,6 +1581,24 @@ function defaultEntered(defaultId, providedId) {
     coverageHit(defaultId);
   } else {
     coverageHit(providedId);
+  }
+}
+// The same count per default, in a slot of the file's typed array instead of
+// a Map keyed by the default's id, and the outcome recorded through the V2
+// point check, which ends at one comparison once it fired in this context.
+// lru-cache's set and get destructure options with defaults: the Map and the
+// two calls behind each were a third of a hot loop.
+function defaultSelectedV2(file, slot, value, inferredName) {
+  file.pendingDefaults[slot] += 1;
+  return inferredName ? applyInferredName(value, inferredName) : value;
+}
+function defaultEnteredV2(file, slot, defaultPoint, providedPoint) {
+  const pending = file.pendingDefaults;
+  if (pending[slot] > 0) {
+    pending[slot] -= 1;
+    coverageHitV2(file, defaultPoint);
+  } else {
+    coverageHitV2(file, providedPoint);
   }
 }
 function tryBegin(successId, catchId) {
@@ -1572,7 +1690,9 @@ const directRuntimeApi = {
   coverageSnapshot,
   decodeProbeV2Vector,
   defaultEntered,
+  defaultEnteredV2,
   defaultSelected,
+  defaultSelectedV2,
   enableRuntimeSnapshotEvidence,
   flushBufferedBackgroundEvidence,
   flushBufferedServerEvidence,
@@ -1587,7 +1707,9 @@ const directRuntimeApi = {
   optionalCallContinued,
   optionalCallEnd,
   optionalCallReached,
+  optionalCallEndV2,
   optionalSelect,
+  optionalSelectV2,
   renderedValueV2,
   parenthesizedAssignmentValue,
   phaseBelongsToAttempt,
@@ -1596,6 +1718,8 @@ const directRuntimeApi = {
   selectionBegin,
   selectionEnd,
   selectionRight,
+  selectShortV2,
+  selectRightV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,
@@ -1624,7 +1748,9 @@ export {
   coverageSnapshot,
   decodeProbeV2Vector,
   defaultEntered,
+  defaultEnteredV2,
   defaultSelected,
+  defaultSelectedV2,
   enableRuntimeSnapshotEvidence,
   flushBufferedBackgroundEvidence,
   flushBufferedServerEvidence,
@@ -1640,7 +1766,9 @@ export {
   optionalCallContinued,
   optionalCallEnd,
   optionalCallReached,
+  optionalCallEndV2,
   optionalSelect,
+  optionalSelectV2,
   renderedValueV2,
   parenthesizedAssignmentValue,
   phaseBelongsToAttempt,
@@ -1649,6 +1777,8 @@ export {
   selectionBegin,
   selectionEnd,
   selectionRight,
+  selectShortV2,
+  selectRightV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,

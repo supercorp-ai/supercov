@@ -435,6 +435,7 @@ test("a background writer that meets a clone of itself moves to a fresh shard", 
         `import { readdirSync, appendFileSync } from "node:fs";
          const runtime = await import(${JSON.stringify(runtime)});
          runtime.coverageHit("before-clone");
+         await new Promise((resolve) => setImmediate(resolve));
          const directory = ${JSON.stringify(resolve(root, "run-clone", "background"))};
          const [shard] = readdirSync(directory);
          appendFileSync(directory + "/" + shard, JSON.stringify({ type: "hit", id: "from-a-clone" }) + String.fromCharCode(10));
@@ -460,7 +461,7 @@ test("a background writer that meets a clone of itself moves to a fresh shard", 
   }
 });
 
-test("background evidence is durable before an uncatchable process death", {
+test("background evidence is on disk once its turn ends, before an uncatchable process death", {
   skip: process.platform === "win32",
 }, () => {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-background-kill-"));
@@ -473,7 +474,7 @@ test("background evidence is durable before an uncatchable process death", {
       [
         "--input-type=module",
         "--eval",
-        `const runtime = await import(${JSON.stringify(runtime)}); runtime.coverageHit("kill-safe-hit"); process.kill(process.pid, "SIGKILL");`,
+        `const runtime = await import(${JSON.stringify(runtime)}); runtime.coverageHit("kill-safe-hit"); await new Promise((resolve) => setImmediate(resolve)); process.kill(process.pid, "SIGKILL");`,
       ],
       {
         cwd: process.cwd(),
@@ -495,6 +496,66 @@ test("background evidence is durable before an uncatchable process death", {
       .map((line) => JSON.parse(line));
     assert.equal(records.length, 1);
     assert.equal(records[0].id, "kill-safe-hit");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("background records are written once per turn through one open shard", () => {
+  // Under tap, AVA or Mocha every first hit is a background record, and each
+  // one created the directory and opened and closed the shard around its
+  // append: lru-cache's 10 ms TTL test spent over half its window there.
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-background-descriptor-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `const fs = process.getBuiltinModule("node:fs");
+         const calls = {};
+         for (const name of ["mkdirSync", "openSync", "appendFileSync"]) {
+           const original = fs[name];
+           fs[name] = function (...args) {
+             if (String(args[0]).startsWith(process.env.SUPERCOV_SERVER_EVIDENCE_ROOT)) {
+               const key = name === "openSync" ? name + ":" + args[1] : name;
+               calls[key] = (calls[key] || 0) + 1;
+             }
+             return original.apply(this, args);
+           };
+         }
+         const runtime = await import(${JSON.stringify(runtime)});
+         const opens = fs.openSync, writes = fs.writeSync;
+         let appending, lineWrites = 0;
+         fs.openSync = function (...args) { const fd = opens.apply(this, args); if (args[1] === "a") appending = fd; return fd; };
+         fs.writeSync = function (...args) { if (args[0] === appending) lineWrites += 1; return writes.apply(this, args); };
+         for (let turn = 0; turn < 10; turn += 1) {
+           for (let index = 0; index < 10; index += 1) runtime.coverageHit("hit-" + (turn * 10 + index));
+           await new Promise((resolve) => setImmediate(resolve));
+         }
+         calls.writeSync = lineWrites;
+         process.stdout.write(JSON.stringify(calls));`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, SUPERCOV_RUN_ID: "run-descriptor", SUPERCOV_SERVER_EVIDENCE_ROOT: root },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    // The first turn creates the shard exclusively; each of the other nine is
+    // one write through a descriptor opened once for appending.
+    const calls = JSON.parse(child.stdout);
+    assert.equal(calls.mkdirSync, 1, child.stdout);
+    assert.equal(calls["openSync:a"], 1, child.stdout);
+    assert.equal(calls.appendFileSync, undefined, child.stdout);
+    assert.equal(calls.writeSync, 9, child.stdout);
+    const directory = resolve(root, "run-descriptor", "background");
+    const ids = readdirSync(directory).flatMap((file) =>
+      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line).id),
+    );
+    assert.deepEqual(ids.sort(), Array.from({ length: 100 }, (_, index) => `hit-${index}`).sort());
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -660,6 +721,76 @@ test("assertion callee binding preserves receivers, await order and synchronous 
   });
   const phases = runtime.takeNodeAssertionPhases(scope);
   assert.deepEqual(phases.map(p => [p.source, p.status]), [['test.js:1:1', 'passed'], ['test.js:2:1', 'failed']], 'rejected arguments do not create an assertion occurrence');
+});
+
+test("a default records whether it was taken or a value was provided, per slot", async () => {
+  const { registerProbeV2, defaultSelectedV2, defaultEnteredV2, resetCoverage, coverageSnapshot } = await import(
+    "../../runtime/javascript/runtime.mjs"
+  );
+  const file = registerProbeV2({
+    file: "src/cache.js",
+    pointIds: ["statement", "ttl:default", "ttl:provided", "cb:default", "cb:provided"],
+    decisions: [],
+    defaultCount: 2,
+  });
+  resetCoverage("default-taken");
+  // `ttl = 10` taken: the default counts itself when its value evaluates, and
+  // the entry after the parameters are bound spends the count.
+  assert.equal(defaultSelectedV2(file, 0, 10), 10);
+  defaultEnteredV2(file, 0, 1, 2);
+  assert.deepEqual(coverageSnapshot().hits.filter((id) => id.startsWith("ttl")), ["ttl:default"]);
+  resetCoverage("default-provided");
+  // The count is spent, so the next entry without a taken default is a value
+  // the caller provided.
+  defaultEnteredV2(file, 0, 1, 2);
+  assert.deepEqual(coverageSnapshot().hits.filter((id) => id.startsWith("ttl")), ["ttl:provided"]);
+  // A function default keeps the name the binding gives it, and each slot
+  // counts on its own: a nested call taking the same default spends its own.
+  resetCoverage("default-nested");
+  const callback = defaultSelectedV2(file, 1, () => {}, "cb");
+  assert.equal(callback.name, "cb");
+  defaultSelectedV2(file, 1, 0);
+  defaultEnteredV2(file, 1, 3, 4);
+  defaultEnteredV2(file, 1, 3, 4);
+  defaultEnteredV2(file, 1, 3, 4);
+  assert.deepEqual(coverageSnapshot().hits.filter((id) => id.startsWith("cb")).sort(), ["cb:default", "cb:provided"]);
+  assert.equal(file.pendingDefaults[1], 0);
+});
+
+test("V2 selections and optional chains record what their frame-based forms recorded", async () => {
+  const { registerProbeV2, selectShortV2, selectRightV2, optionalSelectV2, optionalCallEndV2, resetCoverage, coverageSnapshot } = await import(
+    "../../runtime/javascript/runtime.mjs"
+  );
+  // One selection (points 0-3: short falsy, short truthy, right falsy, right
+  // truthy), one optional member (4-5) and one optional call (6-7).
+  const file = registerProbeV2({
+    file: "src/pick.js",
+    pointIds: ["pick:short", "pick:short", "pick:right", "pick:right", "member:short", "member:continued", "call:short", "call:continued"],
+    decisions: [],
+    selectionPoints: [0, 1],
+  });
+  resetCoverage("v2-selection");
+  // `"a" || x`: the left operand decides, short and truthy. `"" || 0`: the
+  // right operand decides, and comes out falsy.
+  assert.equal(selectShortV2(file, 0, "a", 0), "a");
+  assert.equal(selectShortV2(file, 0, "", 0) || selectRightV2(file, 0, 0), 0);
+  const snapshot = coverageSnapshot();
+  assert.deepEqual(snapshot.hits.filter((id) => id.startsWith("pick")).sort(), ["pick:right", "pick:short"]);
+  const pick = snapshot.logicals.find((logical) => logical.id === "pick");
+  assert.deepEqual(
+    pick.vectors.map((vector) => [vector.right, vector.truthy]).sort(),
+    [[false, true], [true, false]],
+  );
+  resetCoverage("v2-optional");
+  assert.equal(optionalSelectV2(file, 4, null), null);
+  assert.equal(optionalCallEndV2(file, 6, "called", 2), "called");
+  // State 0: the chain stopped before the call site, which records nothing.
+  assert.equal(optionalCallEndV2(file, 6, undefined, 0), undefined);
+  assert.deepEqual(
+    coverageSnapshot().hits.filter((id) => /^(member|call):/.test(id)).sort(),
+    ["call:continued", "member:short"],
+  );
+  assert.equal([...file.none].length, 0);
 });
 
 test("a rendered JSX expression records its own evaluation and passes the value through", async () => {

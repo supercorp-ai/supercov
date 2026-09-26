@@ -26,8 +26,16 @@ export default async function supercovJestConfig() {
         // configuration is not read and Jest's defaults apply.
         process.emitWarning(`[supercov] the project's Jest configuration was not read (${error?.message ?? error}); Jest's defaults apply`);
     }
+    // Jest's coverage measures the instrumented copy, probes included, and a
+    // suite at 100% read 83.33% of branches: its coverageThreshold failed
+    // passing runs. Jest still collects and reports coverage.
+    const { coverageThreshold, ...own } = config;
+    const collecting = own.collectCoverage === true ||
+        process.argv.some((argument) => /^--(?:coverage|collectCoverage|collect-coverage)(?:=true)?$/.test(argument));
+    if (coverageThreshold && collecting)
+        process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__?.("Jest");
     return {
-        ...config,
+        ...own,
         // Concurrent tests in one file would share the worker's scope.
         maxConcurrency: 1,
         setupFiles: [here("jestRuntime.cjs"), ...asList(config.setupFiles)],

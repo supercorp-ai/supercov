@@ -601,6 +601,21 @@ fn benchmark(file: &str) -> bool {
             .any(|part| matches!(part, "bench" | "benchmark"))
 }
 
+/// Example code at the top of the project or of a package: uuid keeps nine
+/// example apps under `examples/`, which its tsconfig leaves out and which
+/// were counted as application source, putting uuid at 32% of lines. A
+/// directory of that name deeper in the source (`app/examples/page.tsx`) can
+/// be the product and stays in.
+fn example(file: &str, package_root: Option<&str>) -> bool {
+    let local = package_root
+        .and_then(|package| file.strip_prefix(package))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(file);
+    local.split_once('/').is_some_and(|(first, _)| {
+        matches!(first.to_ascii_lowercase().as_str(), "example" | "examples")
+    })
+}
+
 fn tool_script(file: &str) -> bool {
     file.to_ascii_lowercase()
         .split('/')
@@ -619,6 +634,8 @@ fn config_file(file: &str) -> bool {
                 .any(|tool| name.starts_with(&format!(".{tool}rc.")))
             || (!lower.contains('/')
                 && (name.contains(".config.")
+                    // wdio.conf.js, karma.conf.js, protractor.conf.js
+                    || name.contains(".conf.")
                     || name.starts_with("build.")
                     || name.starts_with("gulpfile.")
                     || name.starts_with("gruntfile."))))
@@ -1119,6 +1136,8 @@ pub fn discover_source_scope(
             ));
         } else if benchmark(&file) {
             entries.push(entry(SourceScopeStatus::Excluded, "benchmark"));
+        } else if example(&file, package_root.as_deref()) {
+            entries.push(entry(SourceScopeStatus::Excluded, "example"));
         } else if config_file(&file) {
             entries.push(entry(
                 SourceScopeStatus::Excluded,
@@ -1277,6 +1296,46 @@ mod tests {
             entry(&discovered, "src/bootstrap.js").reason,
             "declared test setup"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn example_apps_and_conf_files_are_not_source() {
+        // uuid: a tsconfig with no `include` makes the whole checkout a root.
+        let root = repository(
+            "examples",
+            &[
+                ("package.json", r#"{"exports":{".":"./dist/index.js"}}"#),
+                ("tsconfig.json", r#"{"exclude":["dist","examples"]}"#),
+                ("src/v4.ts", "export const v4 = () => ''"),
+                ("wdio.conf.js", "exports.config = {}"),
+                ("karma.conf.cjs", "module.exports = () => {}"),
+                ("examples/browser-esmodules/package.json", "{}"),
+                ("examples/browser-esmodules/example.js", "console.log(1)"),
+                ("examples/utils/testpage.js", "export default 1"),
+                ("example/demo.js", "console.log(1)"),
+                ("app/examples/page.tsx", "export default function Page() {}"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert_eq!(
+            discovered.source_files,
+            ["app/examples/page.tsx", "src/v4.ts"]
+        );
+        for file in [
+            "examples/browser-esmodules/example.js",
+            "examples/utils/testpage.js",
+            "example/demo.js",
+        ] {
+            assert_eq!(entry(&discovered, file).reason, "example", "{file}");
+        }
+        for file in ["wdio.conf.js", "karma.conf.cjs"] {
+            assert_eq!(
+                entry(&discovered, file).reason,
+                "build/test/tool configuration",
+                "{file}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
