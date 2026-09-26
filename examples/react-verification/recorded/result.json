@@ -1,6 +1,6 @@
 {
   "node": "v24.21.0",
-  "recordedAt": "2026-09-15T20:26:57.394Z",
+  "recordedAt": "2026-09-26T09:15:38.174Z",
   "before": {
     "tests": 3,
     "lineCoverage": 100

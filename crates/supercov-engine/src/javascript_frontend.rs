@@ -949,15 +949,32 @@ fn generic_runtime_binding(
         let contents = fs::read(&source).map_err(|error| io_error(&source, error))?;
         atomic_write(&destination, &contents)?;
     }
-    // By absolute path: a compiler moves the file to its output directory
-    // and a bundler then reads it there. lru-cache compiles src/ into
-    // dist/esm/ and bundles that with esbuild, which could not resolve a path
-    // relative to src/ ("Could not resolve ./.supercov/node_modules/runtime.mjs").
-    // Node resolves either (resolve-loader.mjs); a bundler only this.
-    Ok(runtime_directory
-        .join("runtime.mjs")
-        .to_string_lossy()
-        .replace('\\', "/"))
+    // A compiler moves the file to its output directory, where a bundler may
+    // read it next: lru-cache compiles src/ into dist/esm/ with tshy and
+    // bundles that with esbuild, which could not resolve a path relative to
+    // src/. There the runtime is imported by absolute path. A bundler that
+    // reads the sources where they are keeps the relative one: Turbopack
+    // refuses an absolute import ("server relative imports are not
+    // implemented yet") and Parcel reads one as relative to its root. Node
+    // resolves either (resolve-loader.mjs).
+    if project.relocating_build {
+        return Ok(runtime_directory
+            .join("runtime.mjs")
+            .to_string_lossy()
+            .replace('\\', "/"));
+    }
+    let parent = source_path.parent().ok_or_else(|| {
+        JavascriptFrontendError::UnsafeSourcePath(source_path.display().to_string())
+    })?;
+    let local = parent.strip_prefix(&host).map_err(|_| {
+        JavascriptFrontendError::UnsafeSourcePath(source_path.display().to_string())
+    })?;
+    let depth = local.components().count();
+    Ok(if depth == 0 {
+        "./.supercov/node_modules/runtime.mjs".into()
+    } else {
+        format!("{}.supercov/node_modules/runtime.mjs", "../".repeat(depth))
+    })
 }
 
 fn limitation_from_source(value: &SourceLimitation) -> CandidateLimitation {

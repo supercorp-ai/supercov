@@ -41,21 +41,21 @@
       "excludedStatements": 0
     },
     "basis": "agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
-    "revision": "233511d86aa86761403d4ca73e706fc61414b73321bc71c89ca14bd91d5c2359",
+    "revision": "7f489fd0a17b0c08118c39e02d7ef47dddab07da3cfb78f6bcec8e621d4b1f34",
     "inheritance": {
       "from": null,
       "skipped": []
     },
-    "map": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/runs/run_6f86beed95a82a1b/assertions.json",
+    "map": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-Zh9Ncv/.supercov/runs/run_6b4248ca00143440/assertions.json",
     "validationErrors": [],
     "scope": "whole run with matching current source; independent of structural query filters"
   },
-  "run": "run_6f86beed95a82a1b",
+  "run": "run_6b4248ca00143440",
   "command": [
     "npm",
     "test"
   ],
-  "workspace": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/workspaces/workspace/supercov-react-verification-LavbfO",
+  "workspace": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-Zh9Ncv/.supercov/workspaces/workspace/supercov-react-verification-Zh9Ncv",
   "filters": {
     "outcome": "all",
     "kind": null,
@@ -88,7 +88,7 @@
       "mutation score or assertion fault-detection strength"
     ]
   },
-  "generatedAt": "2026-09-15T20:26:50.056Z",
+  "generatedAt": "2026-09-26T09:15:32.012Z",
   "valid": true,
   "testExitCode": 0,
   "stale": false,
@@ -157,6 +157,7 @@
       "kind": "unit",
       "tests": 7,
       "setups": 2,
+      "attributed": 7,
       "summary": {
         "decisions": 0,
         "executedDecisions": 0,
@@ -208,6 +209,7 @@
       "runner": "vitest",
       "tests": 7,
       "setups": 2,
+      "attributed": 7,
       "summary": {
         "decisions": 0,
         "executedDecisions": 0,
@@ -259,6 +261,11 @@
     "browserFallback": 0,
     "serverExplicit": 0,
     "serverFallback": 10
+  },
+  "testAttribution": {
+    "exact": 7,
+    "partial": 0,
+    "runWide": 0
   },
   "transport": {
     "processes": 4,

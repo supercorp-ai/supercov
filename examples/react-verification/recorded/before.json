@@ -41,16 +41,16 @@
       "excludedStatements": 0
     },
     "basis": "agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
-    "revision": "fcd37e09c35f16a130cef40827dd756114624016abe5046b30a8de7ddaf52b9a",
+    "revision": "05e46e33d9e854b3f0cb0e04d5a3564d0744a399c92f12a8b8f31e93a849cf73",
     "inheritance": {
       "from": null,
       "skipped": []
     },
-    "map": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/runs/run_5c23599854c51519/assertions.json",
+    "map": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-Zh9Ncv/.supercov/runs/run_c773af485cad95a5/assertions.json",
     "validationErrors": [],
     "scope": "whole run with matching current source; independent of structural query filters"
   },
-  "run": "run_5c23599854c51519",
+  "run": "run_c773af485cad95a5",
   "command": [
     "npm",
     "run",
@@ -59,7 +59,7 @@
   "hints": [
     "This run observed only the `unit` test kind and wrapped `npm run test:before`. Other test scripts include test:after. For whole-project coverage, measure the package's full test command: `npx supercov -- npm test`."
   ],
-  "workspace": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/workspaces/workspace/supercov-react-verification-LavbfO",
+  "workspace": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-Zh9Ncv/.supercov/workspaces/workspace/supercov-react-verification-Zh9Ncv",
   "filters": {
     "outcome": "all",
     "kind": null,
@@ -92,7 +92,7 @@
       "mutation score or assertion fault-detection strength"
     ]
   },
-  "generatedAt": "2026-09-15T20:26:48.452Z",
+  "generatedAt": "2026-09-26T09:15:30.429Z",
   "valid": true,
   "testExitCode": 0,
   "stale": false,
@@ -161,6 +161,7 @@
       "kind": "unit",
       "tests": 3,
       "setups": 1,
+      "attributed": 3,
       "summary": {
         "decisions": 0,
         "executedDecisions": 0,
@@ -212,6 +213,7 @@
       "runner": "vitest",
       "tests": 3,
       "setups": 1,
+      "attributed": 3,
       "summary": {
         "decisions": 0,
         "executedDecisions": 0,
@@ -263,6 +265,11 @@
     "browserFallback": 0,
     "serverExplicit": 0,
     "serverFallback": 0
+  },
+  "testAttribution": {
+    "exact": 3,
+    "partial": 0,
+    "runWide": 0
   },
   "transport": {
     "processes": 3,

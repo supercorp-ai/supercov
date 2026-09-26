@@ -84,6 +84,11 @@ pub struct CoverageProject {
     /// script-style file carries the runtime the page otherwise lacks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub browser_runner: bool,
+    /// The build compiles each source into another directory -- tsc, tshy,
+    /// babel, swc -- where a later step may bundle the output, so an
+    /// instrumented source imports the runtime by absolute path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relocating_build: bool,
     pub playwright_module: String,
     pub playwright_test_export: String,
     pub playwright_exports: Vec<String>,
@@ -911,6 +916,9 @@ pub fn discover_coverage_project(
         Vec::new()
     };
     let build_tokens = command_tokens(&expanded_command(root, &build_command));
+    let relocating_build = ["tsc", "tshy", "babel", "swc"]
+        .iter()
+        .any(|tool| has_tool(&reachable_script_tokens(&manifest, &build_tokens), tool));
     let uses_vite_build = has_tool(&build_tokens, "vite") || has_tool(&build_tokens, "vite-node");
     let playwright_exports = if playwright_module == discovered_playwright.module {
         discovered_playwright.exports
@@ -928,6 +936,7 @@ pub fn discover_coverage_project(
         jest_config,
         uses_jest,
         browser_runner,
+        relocating_build,
         playwright_module,
         playwright_test_export,
         playwright_exports,
@@ -1005,6 +1014,40 @@ mod tests {
         assert_eq!(discovered.build_adapter, BuildAdapter::Vite);
         assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_build_that_compiles_into_another_directory_is_told_from_a_bundler() {
+        // lru-cache: `npm run build` runs `npm run prepare`, which runs tshy.
+        let relocating = project(
+            "tshy",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"npm run prepare","prepare":"tshy && bash scripts/build.sh","test":"tap"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+            ],
+        );
+        let command = ["npm".to_owned(), "test".to_owned()];
+        let discovered =
+            discover_coverage_project(&relocating, &BTreeMap::new(), &command).unwrap();
+        assert!(discovered.relocating_build);
+        let bundled = project(
+            "next-build",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"next build","test":"playwright test"}}"#,
+                ),
+                (
+                    "app/page.jsx",
+                    "export default function Page() { return null }",
+                ),
+            ],
+        );
+        let discovered = discover_coverage_project(&bundled, &BTreeMap::new(), &command).unwrap();
+        assert!(!discovered.relocating_build);
     }
 
     #[test]
