@@ -1,11 +1,14 @@
 
- RUN  v4.1.11 /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-Zh9Ncv
+> test
+> vitest run
 
- ❯ tests/checkout.strong.test.tsx (4 tests | 1 failed) 59ms
-   × displays the exact order total 40ms
+
+ RUN  v4.1.11 /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO
+
+ ❯ tests/checkout.strong.test.tsx (4 tests | 1 failed) 76ms
+   × displays the exact order total 52ms
 
  Test Files  1 failed | 1 passed (2)
       Tests  1 failed | 6 passed (7)
-   Start at  12:15:34
-   Duration  401ms (transform 28ms, setup 86ms, import 43ms, tests 129ms, environment 422ms)
-
+   Start at  23:26:52
+   Duration  466ms (transform 26ms, setup 99ms, import 42ms, tests 165ms, environment 491ms)

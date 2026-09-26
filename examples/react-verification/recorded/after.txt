@@ -1,12 +1,16 @@
 
- RUN  v4.1.11 /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-Zh9Ncv/.supercov/workspaces/workspace/supercov-react-verification-Zh9Ncv
+> test
+> vitest run
 
- ✓ tests/checkout.strong.test.tsx (4 tests) 61ms
- ✓ tests/checkout.weak.test.tsx (3 tests) 65ms
+
+ RUN  v4.1.11 /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/workspaces/workspace/supercov-react-verification-LavbfO
+
+ ✓ tests/checkout.strong.test.tsx (4 tests) 128ms
+ ✓ tests/checkout.weak.test.tsx (3 tests) 131ms
 
  Test Files  2 passed (2)
       Tests  7 passed (7)
-   Start at  12:15:32
-   Duration  541ms (transform 44ms, setup 114ms, import 75ms, tests 126ms, environment 573ms)
+   Start at  23:26:50
+   Duration  698ms (transform 52ms, setup 142ms, import 87ms, tests 259ms, environment 623ms)
 
-[coverage] evidence: /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-Zh9Ncv/.supercov/runs/run_6b4248ca00143440/evidence.raw.gz
+[coverage] evidence: /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/runs/run_6f86beed95a82a1b/evidence.raw.gz
