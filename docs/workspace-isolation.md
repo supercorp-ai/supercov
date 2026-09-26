@@ -35,9 +35,10 @@ and the instrumented copy is not what you wrote:
 - Linters, formatters and `tsc --noEmit` (ESLint, Prettier, standard, xo and
   the like) read each file as you wrote it, and don't see `.supercov`.
 - Coverage tools the command runs itself (tap, c8, nyc, Jest's and Vitest's
-  `--coverage`) still collect and report coverage, but they measure the
-  instrumented copy, probes included. Their thresholds are not checked, and the
-  run prints a line saying so. Supercov's own report has the run's coverage.
+  `--coverage`) still collect and report coverage. They measure the
+  instrumented copy, and report close to what they report without Supercov,
+  but not always exactly, so their thresholds are not checked, and the run
+  prints a line saying so. Supercov's own report has the run's coverage.
 
 Files the wrapped command creates or changes inside the isolated workspace are
 synced back to the project after the run, so `supercov -- npm test -- -u`

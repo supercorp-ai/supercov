@@ -553,6 +553,8 @@ pub struct CandidateRuntime {
     pub parenthesized_assignment_value: String,
     pub with_request_phase: String,
     pub optional_select_v2: String,
+    pub select_short_v2: String,
+    pub select_right_v2: String,
     pub rendered_value_v2: String,
     pub optional_call_end_v2: String,
     pub default_selected_v2: String,
@@ -3035,6 +3037,8 @@ fn instrument_candidate_with_binding(
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
     let with_request_phase = names.allocate("__supercovWithRequestPhase");
     let optional_select_v2 = names.allocate("__supercovOptionalSelectV2");
+    let select_short_v2 = names.allocate("__supercovSelectShortV2");
+    let select_right_v2 = names.allocate("__supercovSelectRightV2");
     let rendered_value_v2 = names.allocate("__supercovRenderedValueV2");
     let optional_call_end_v2 = names.allocate("__supercovOptionalCallEndV2");
     let default_selected_v2 = names.allocate("__supercovDefaultSelectedV2");
@@ -3244,7 +3248,8 @@ fn instrument_candidate_with_binding(
         selection_begin: selection_begin.clone(),
         selection_right: selection_right.clone(),
         selection_end: selection_end.clone(),
-        coverage_hit_v2: coverage_hit_v2.clone(),
+        select_short_v2: select_short_v2.clone(),
+        select_right_v2: select_right_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
         typescript,
         names: CandidateNames::within(source, &namespace),
@@ -3328,6 +3333,8 @@ fn instrument_candidate_with_binding(
             &parenthesized_assignment_value,
         ),
         ("optionalSelectV2", &optional_select_v2),
+        ("selectShortV2", &select_short_v2),
+        ("selectRightV2", &select_right_v2),
         ("renderedValueV2", &rendered_value_v2),
         ("optionalCallEndV2", &optional_call_end_v2),
         ("defaultSelectedV2", &default_selected_v2),
@@ -3431,6 +3438,8 @@ fn instrument_candidate_with_binding(
             parenthesized_assignment_value,
             with_request_phase,
             optional_select_v2,
+            select_short_v2,
+            select_right_v2,
             rendered_value_v2,
             optional_call_end_v2,
             default_selected_v2,
@@ -3633,11 +3642,15 @@ impl<'a> StatementProbeTransformer<'a> {
         if ids.is_empty() {
             return;
         }
+        // The block takes the statement's span, so its braces map to the
+        // statement's own start and end: a coverage tool mapping the copy back
+        // (nyc, Jest) dropped a statement whose end was a brace of nowhere.
+        let span = statement.span();
         let original = statement.take_in(self.ast.allocator);
         let mut body = self.ast.vec_with_capacity(ids.len() + 1);
         body.extend(ids.iter().map(|target| self.probe(target)));
         body.push(original);
-        *statement = self.ast.statement_block(Span::default(), body);
+        *statement = self.ast.statement_block(span, body);
     }
 }
 
@@ -4378,11 +4391,12 @@ impl<'a> DefaultTransformer<'a> {
             }
             return;
         }
+        let span = body.span();
         let original = body.take_in(self.ast.allocator);
         let mut statements = self.ast.vec_with_capacity(entries.len() + 1);
         statements.extend(entries);
         statements.push(original);
-        *body = self.ast.statement_block(Span::default(), statements);
+        *body = self.ast.statement_block(span, statements);
     }
 
     fn variable_span(statement: &Statement<'a>) -> Option<SpanKey> {
@@ -4622,8 +4636,9 @@ impl<'a> ExtendedTransformer<'a, '_> {
             block.body.insert(0, entry);
             return;
         }
+        let span = body.span();
         let original = body.take_in(ast.allocator);
-        *body = ast.statement_block(Span::default(), ast.vec_from_array([entry, original]));
+        *body = ast.statement_block(span, ast.vec_from_array([entry, original]));
     }
 
     fn hit(&self, index: usize) -> Expression<'a> {
@@ -4672,6 +4687,9 @@ impl<'a> ExtendedTransformer<'a, '_> {
     }
 
     fn instrument_try(&mut self, statement: &mut Statement<'a>, first: usize) {
+        // What Supercov adds around the statement takes its span (see
+        // `wrap_bare`), so its braces map to the statement's own ends.
+        let span = statement.span();
         let flag = self.scratch("_supercovTryFrame");
         let reset = self.reset(&flag);
         // Recorded the moment the catch starts, not when the construct is
@@ -4688,18 +4706,16 @@ impl<'a> ExtendedTransformer<'a, '_> {
         if let Some(finalizer) = &mut node.finalizer {
             finalizer.body.insert(0, end);
         } else {
-            node.finalizer = Some(
-                self.ast
-                    .alloc_block_statement(Span::default(), self.ast.vec1(end)),
-            );
+            node.finalizer = Some(self.ast.alloc_block_statement(span, self.ast.vec1(end)));
         }
         let original = statement.take_in(self.ast.allocator);
         *statement = self
             .ast
-            .statement_block(Span::default(), self.ast.vec_from_array([reset, original]));
+            .statement_block(span, self.ast.vec_from_array([reset, original]));
     }
 
     fn instrument_loop(&mut self, statement: &mut Statement<'a>, first: usize) {
+        let span = statement.span();
         let flag = self.scratch("_supercovLoopFrame");
         let reset = self.reset(&flag);
         let entered = self.first_time(&flag, first + 1);
@@ -4711,18 +4727,14 @@ impl<'a> ExtendedTransformer<'a, '_> {
         let original = statement.take_in(self.ast.allocator);
         let end = self.otherwise(&flag, first);
         let wrapped = self.ast.statement_try(
-            Span::default(),
-            self.ast
-                .block_statement(Span::default(), self.ast.vec1(original)),
+            span,
+            self.ast.block_statement(span, self.ast.vec1(original)),
             None::<oxc_allocator::Box<'a, CatchClause<'a>>>,
-            Some(
-                self.ast
-                    .block_statement(Span::default(), self.ast.vec1(end)),
-            ),
+            Some(self.ast.block_statement(span, self.ast.vec1(end))),
         );
         *statement = self
             .ast
-            .statement_block(Span::default(), self.ast.vec_from_array([reset, wrapped]));
+            .statement_block(span, self.ast.vec_from_array([reset, wrapped]));
     }
 }
 
@@ -4797,7 +4809,8 @@ struct LogicalValueTransformer<'a, 's> {
     selection_begin: String,
     selection_right: String,
     selection_end: String,
-    coverage_hit_v2: String,
+    select_short_v2: String,
+    select_right_v2: String,
     probe_file_v2: String,
     typescript: bool,
     names: CandidateNames<'s>,
@@ -4868,98 +4881,49 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         name
     }
 
-    fn hit(&self, index: usize) -> Expression<'a> {
-        probe_v2_hit_expression(self.ast, &self.coverage_hit_v2, &self.probe_file_v2, index)
+    fn helper(&self, name: &str, arguments: [Argument<'a>; 3]) -> Expression<'a> {
+        let mut all = self
+            .ast
+            .vec_from_array([Argument::from(self.identifier(&self.probe_file_v2))]);
+        all.extend(arguments);
+        self.call(name, all)
     }
 
-    /// `T = function () {}` would name the function after the temporary;
-    /// `T = (0, function () {})` leaves it anonymous, as in the original.
-    fn unnamed(&self, operand: Expression<'a>) -> Expression<'a> {
-        if expression_is_anonymous_definition(&operand) {
-            self.ast.expression_sequence(
-                Span::default(),
-                self.ast.vec_from_array([numeric(self.ast, 0), operand]),
-            )
-        } else {
-            operand
-        }
-    }
-
-    fn sequence<const N: usize>(&self, items: [Expression<'a>; N]) -> Expression<'a> {
-        self.ast
-            .expression_sequence(Span::default(), self.ast.vec_from_array(items))
-    }
-
-    fn conditional(
-        &self,
-        test: Expression<'a>,
-        consequent: Expression<'a>,
-        alternate: Expression<'a>,
-    ) -> Expression<'a> {
-        self.ast
-            .expression_conditional(Span::default(), test, consequent, alternate)
-    }
-
-    /// `a || b` as `(T = a) ? (hit ST, T) : (T = b, T ? hit RT : hit RF, T)`,
-    /// and `&&` and `??` alike. Nothing of the program runs between an
-    /// assignment to T and the reads after it, so a selection nested in
-    /// either operand, a recursive call or an `await` cannot change what is
-    /// read. Once an outcome fired in this context its check is one
-    /// comparison; the frame and three calls each evaluation cost before were
-    /// a tenth of lru-cache's hot loop, with MC/DC.
+    /// `a || b` as `selectShortV2(file, first, a, 0) || selectRightV2(file,
+    /// first, b)`, and `&&` (1) and `??` (2) alike. The program's own operator
+    /// stays, so a coverage tool the tests run -- nyc, c8, Jest, Vitest -- counts
+    /// the branches it counts without Supercov, and neither call needs a frame
+    /// or a temporary: the short side records its outcome when it decides the
+    /// result, the right side records whether it came out truthy. Both are small
+    /// enough for V8 to inline; the frame and three calls each evaluation cost
+    /// before were a tenth of lru-cache's hot loop, with MC/DC.
     fn instrument(
         &mut self,
         logical: oxc_allocator::Box<'a, LogicalExpression<'a>>,
         first: usize,
     ) -> Expression<'a> {
         let logical = logical.unbox();
-        let temporary = self.scratch();
-        let value = || self.identifier(&temporary);
-        let right = self.unnamed(logical.right);
-        let right = self.sequence([
-            assign_temporary(self.ast, &temporary, right),
-            self.conditional(value(), self.hit(first + 3), self.hit(first + 2)),
-            value(),
+        let kind = match logical.operator {
+            LogicalOperator::Or => 0,
+            LogicalOperator::And => 1,
+            LogicalOperator::Coalesce => 2,
+        };
+        let left = self.helper(
+            &self.select_short_v2,
+            [
+                Argument::from(numeric(self.ast, first)),
+                Argument::from(logical.left),
+                Argument::from(numeric(self.ast, kind)),
+            ],
+        );
+        let mut right_arguments = self.ast.vec_from_array([
+            Argument::from(self.identifier(&self.probe_file_v2)),
+            Argument::from(numeric(self.ast, first)),
         ]);
-        let left = self.unnamed(logical.left);
-        let left = assign_temporary(self.ast, &temporary, left);
-        match logical.operator {
-            LogicalOperator::Or => {
-                self.conditional(left, self.sequence([self.hit(first + 1), value()]), right)
-            }
-            LogicalOperator::And => {
-                self.conditional(left, right, self.sequence([self.hit(first), value()]))
-            }
-            LogicalOperator::Coalesce => {
-                // Strict comparisons: `document.all ?? x` keeps document.all,
-                // which `!= null` would have treated as absent.
-                let present = self.ast.expression_logical(
-                    Span::default(),
-                    self.ast.expression_binary(
-                        Span::default(),
-                        left,
-                        BinaryOperator::StrictInequality,
-                        self.ast.expression_null_literal(Span::default()),
-                    ),
-                    LogicalOperator::And,
-                    self.ast.expression_binary(
-                        Span::default(),
-                        value(),
-                        BinaryOperator::StrictInequality,
-                        self.ast.expression_unary(
-                            Span::default(),
-                            UnaryOperator::Void,
-                            numeric(self.ast, 0),
-                        ),
-                    ),
-                );
-                let short = self.sequence([
-                    self.conditional(value(), self.hit(first + 1), self.hit(first)),
-                    value(),
-                ]);
-                self.conditional(present, short, right)
-            }
-        }
+        right_arguments.push(Argument::from(logical.right));
+        let right = self.call(&self.select_right_v2, right_arguments);
+        self.ast
+            .expression_logical(Span::default(), left, logical.operator, right)
     }
 
     fn instrument_assignment(
@@ -5924,13 +5888,41 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             self.assignment_target(temporary_name),
             expression,
         );
+        // `weight * (1 + +!!V)`: 1 for a false condition, 2 for a true one, in
+        // this condition's base-3 digit. Written as `V ? 2w : w` it was a
+        // branch of its own to a coverage tool the tests run (nyc, c8, Jest,
+        // Vitest), which counted it against the user's line.
         let weight = 3_u64.pow(index as u32);
-        let digit = self.ast.expression_conditional(
+        let truth = self.ast.expression_unary(
             Span::default(),
-            self.identifier(temporary_name),
-            self.number(weight * 2),
-            self.number(weight),
+            UnaryOperator::UnaryPlus,
+            self.ast.expression_unary(
+                Span::default(),
+                UnaryOperator::LogicalNot,
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.identifier(temporary_name),
+                ),
+            ),
         );
+        let one_or_two = self.ast.expression_binary(
+            Span::default(),
+            self.number(1),
+            BinaryOperator::Addition,
+            truth,
+        );
+        let digit = if weight == 1 {
+            one_or_two
+        } else {
+            self.ast.expression_binary(
+                Span::default(),
+                self.number(weight),
+                BinaryOperator::Multiplication,
+                self.ast
+                    .expression_parenthesized(Span::default(), one_or_two),
+            )
+        };
         let add_digit = self.ast.expression_assignment(
             Span::default(),
             AssignmentOperator::Addition,
@@ -9112,7 +9104,7 @@ mod tests {
         assert!(output.code.contains(&runtime.mcdc_end_v2));
         assert!(output.code.contains("_supercovMcdcFrame"));
         assert!(output.code.contains("_supercovMcdcResult"));
-        assert!(output.code.contains("+= _supercovMcdcValue"));
+        assert!(output.code.contains("+= 1 + +!!_supercovMcdcValue"));
         assert_eq!(output.decisions.len(), 1);
         assert!(output.points.iter().any(|point| point.kind == "statement"));
         assert!(output.points.iter().any(|point| point.kind == "function"));

@@ -147,6 +147,8 @@ function runtimePrelude(transformed) {
     defaultSelectedV2: "function(file,slot,value,name){file.pendingDefaults[slot]+=1;if(name&&typeof value==='function'&&value.name==='')Object.defineProperty(value,'name',{value:name,configurable:true});return value;}",
     defaultEnteredV2: "function(file,slot){if(file.pendingDefaults[slot]>0)file.pendingDefaults[slot]-=1;}",
     optionalSelectV2: "function(file,first,value){return value;}",
+    selectShortV2: "function(file,first,value){return value;}",
+    selectRightV2: "function(file,first,value){return value;}",
     optionalCallEndV2: "function(file,first,value){return value;}",
     tryBegin: "function(){return {};}",
     tryCatch: "function(frame,value){return value;}",

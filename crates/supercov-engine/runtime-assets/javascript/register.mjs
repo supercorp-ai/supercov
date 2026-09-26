@@ -253,7 +253,20 @@ function skipCoverageThresholds(tool) {
         else {
             // A gated nyc run, `nyc report --check-coverage` and
             // `nyc check-coverage` all check through this method.
-            toolRequire("../index.js").prototype.checkCoverage = skipped;
+            const NYC = toolRequire("../index.js");
+            NYC.prototype.checkCoverage = skipped;
+            // The instrumented copy's source map leads to the project's own
+            // file, outside the isolated workspace nyc runs in, and
+            // excluding after remapping (nyc's default) dropped it: nyc
+            // reported "All files 0". The project's excludes still apply,
+            // to the copies, before remapping.
+            const collect = NYC.prototype.getCoverageMapFromAllCoverageFiles;
+            if (typeof collect === "function") {
+                NYC.prototype.getCoverageMapFromAllCoverageFiles = function getCoverageMapFromAllCoverageFiles(...args) {
+                    this.config.excludeAfterRemap = false;
+                    return Reflect.apply(collect, this, args);
+                };
+            }
         }
     }
     catch (error) {

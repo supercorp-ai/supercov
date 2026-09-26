@@ -758,7 +758,7 @@ test("a default records whether it was taken or a value was provided, per slot",
 });
 
 test("V2 selections and optional chains record what their frame-based forms recorded", async () => {
-  const { registerProbeV2, coverageHitV2, optionalSelectV2, optionalCallEndV2, resetCoverage, coverageSnapshot } = await import(
+  const { registerProbeV2, selectShortV2, selectRightV2, optionalSelectV2, optionalCallEndV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"
   );
   // One selection (points 0-3: short falsy, short truthy, right falsy, right
@@ -770,8 +770,10 @@ test("V2 selections and optional chains record what their frame-based forms reco
     selectionPoints: [0, 1],
   });
   resetCoverage("v2-selection");
-  coverageHitV2(file, 1);
-  coverageHitV2(file, 2);
+  // `"a" || x`: the left operand decides, short and truthy. `"" || 0`: the
+  // right operand decides, and comes out falsy.
+  assert.equal(selectShortV2(file, 0, "a", 0), "a");
+  assert.equal(selectShortV2(file, 0, "", 0) || selectRightV2(file, 0, 0), 0);
   const snapshot = coverageSnapshot();
   assert.deepEqual(snapshot.hits.filter((id) => id.startsWith("pick")).sort(), ["pick:right", "pick:short"]);
   const pick = snapshot.logicals.find((logical) => logical.id === "pick");

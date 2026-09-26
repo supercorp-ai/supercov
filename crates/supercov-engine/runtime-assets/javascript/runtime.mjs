@@ -1514,6 +1514,19 @@ function optionalSelect(shortId, continuedId, value) {
   coverageHit(value === null || value === void 0 ? shortId : continuedId);
   return value;
 }
+// `a || b` (kind 0), `a && b` (1), `a ?? b` (2), with the program's own
+// operator between the two calls: the left operand records its short outcome
+// when it decides the result -- truthy, falsy, present -- and the right one
+// whether it came out truthy. The outcomes are the selection's four points.
+function selectShortV2(file, first, value, kind) {
+  if (kind === 0 ? value : kind === 1 ? !value : value !== null && value !== void 0)
+    coverageHitV2(file, value ? first + 1 : first);
+  return value;
+}
+function selectRightV2(file, first, value) {
+  coverageHitV2(file, value ? first + 3 : first + 2);
+  return value;
+}
 // `object?.member`: the short and continued outcomes are two V2 points.
 function optionalSelectV2(file, first, value) {
   coverageHitV2(file, value === null || value === void 0 ? first : first + 1);
@@ -1705,6 +1718,8 @@ const directRuntimeApi = {
   selectionBegin,
   selectionEnd,
   selectionRight,
+  selectShortV2,
+  selectRightV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,
@@ -1762,6 +1777,8 @@ export {
   selectionBegin,
   selectionEnd,
   selectionRight,
+  selectShortV2,
+  selectRightV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,

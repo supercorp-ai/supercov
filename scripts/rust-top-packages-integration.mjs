@@ -302,6 +302,12 @@ if (args[0] === 'check-coverage') {
 }
 `);
   write(gates, 'node_modules/nyc/index.js', `module.exports = class NYC {
+  constructor() {
+    this.config = { excludeAfterRemap: true };
+  }
+  async getCoverageMapFromAllCoverageFiles() {
+    console.log('nyc excludeAfterRemap=' + this.config.excludeAfterRemap);
+  }
   async checkCoverage() {
     process.exitCode = 1;
     console.error('ERROR: Coverage for lines (95%) does not meet global threshold (100%)');
@@ -317,6 +323,7 @@ const args = process.argv.slice(2);
   if (args[0] === 'check-coverage') return nyc.checkCoverage({});
   const at = args.findIndex((arg) => !arg.startsWith('-'));
   const child = spawnSync(args[at], args.slice(at + 1), { stdio: 'inherit' });
+  await nyc.getCoverageMapFromAllCoverageFiles();
   if (args.includes('--check-coverage')) await nyc.checkCoverage({});
   process.exit(process.exitCode || child.status);
 })();
@@ -332,6 +339,9 @@ const args = process.argv.slice(2);
   // Once per process: the gated run and the check-coverage command of each.
   assert.equal(gated.output.match(skipped('c8'))?.length, 2, gated.output);
   assert.equal(gated.output.match(skipped('nyc'))?.length, 2, gated.output);
+  // The copy's source map leads outside the workspace; nyc must not exclude
+  // the project's file after remapping it, or its report is empty.
+  assert.match(gated.output, /nyc excludeAfterRemap=false/, gated.output);
   const failing = supercov(gates, ['--', 'npm', 'test'], { FAIL_ONE: '1' });
   assert.notEqual(failing.status, 0, failing.output);
 
@@ -359,7 +369,8 @@ test('picks', () => {
   const jestRun = supercov(jestGate, ['--', 'npm', 'test']);
   assert.equal(jestRun.status, 0, jestRun.output);
   assert.doesNotMatch(jestRun.output, /does not meet/, jestRun.output);
-  assert.match(jestRun.output, /All files/, jestRun.output);
+  // Jest's own report reads what it reads without Supercov (83.33% before).
+  assert.match(jestRun.output, /All files\s*\|\s*100\s*\|\s*100\s*\|/, jestRun.output);
   assert.equal(jestRun.output.match(skipped('Jest'))?.length, 1, jestRun.output);
   // No shell between here and Jest, so the JSON needs no quoting.
   const jestCli = supercov(jestGate, ['--', process.execPath, 'node_modules/jest/bin/jest.js', '--coverage',
@@ -397,7 +408,9 @@ test('picks', () => {
   const vitestRun = supercov(vitestGate, ['--', 'npm', 'test']);
   assert.equal(vitestRun.status, 0, vitestRun.output);
   assert.doesNotMatch(vitestRun.output, /does not meet/, vitestRun.output);
-  assert.match(vitestRun.output, /All files/, vitestRun.output);
+  // The suite covers every branch, and Vitest says so: Supercov's probes no
+  // longer count against the user's lines (they read 87.5%).
+  assert.match(vitestRun.output, /Branches\s+:\s+100%/, vitestRun.output);
   assert.equal(vitestRun.output.match(skipped('Vitest'))?.length, 1, vitestRun.output);
   const vitestCli = supercov(vitestGate, ['--', process.execPath, 'node_modules/vitest/vitest.mjs', 'run', '--coverage',
     '--config', 'vitest.plain.config.js', '--coverage.thresholds.lines', '100', '--coverage.thresholds.branches=100']);
