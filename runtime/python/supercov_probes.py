@@ -790,6 +790,7 @@ _original_compile = builtins.compile
 _probing: Probing | None = None
 _plain_compilation = contextvars.ContextVar("supercov_plain_compilation", default=False)
 _original_py_compile = None
+_plain_process = False
 _original_loader_code = importlib.machinery.SourceFileLoader.get_code
 _original_abc_loader_code = None
 
@@ -811,10 +812,27 @@ def _install_py_compile(module):
         module.compile = _compile_plain_cache
 
 
+def _plain() -> bool:
+    return _plain_process or _plain_compilation.get()
+
+
+def _compiles_bytecode_only() -> bool:
+    """`python -m py_compile` runs py_compile as `__main__`, so the patch that
+    keeps its bytecode plain, applied when the module is imported by name,
+    never goes in: the probed code it compiled was written to the ordinary
+    cache. Such a process runs no measured code, so it compiles plainly. The
+    command line is known from Python 3.10 on."""
+    arguments = getattr(sys, "orig_argv", None) or []
+    for index, argument in enumerate(arguments[:-1]):
+        if argument == "-m":
+            return arguments[index + 1] == "py_compile"
+    return False
+
+
 def _loader_code(loader, fullname, original):
     filename = loader.get_filename(fullname)
     probes = None if _probing is None else _probing.probes_for(filename) or _probing.sites_for(filename)
-    if probes is not None and not _plain_compilation.get():
+    if probes is not None and not _plain():
         # Explicit SourceFileLoader/spec_from_file_location bypasses our
         # finder. Never read or write ordinary .pyc files for these imports.
         return _probing.compile(loader.get_data(filename), filename, probes)
@@ -847,7 +865,7 @@ def _compile_probed(source, filename, mode, flags=0, dont_inherit=False, optimiz
         flags |= sys._getframe(1).f_code.co_flags & _FUTURE_FLAGS
     if (
         _probing is not None
-        and not _plain_compilation.get()
+        and not _plain()
         and mode == "exec"
         and not (flags & _PyCF_ONLY_AST)
         and not keywords
@@ -872,7 +890,8 @@ def install(
 
     `entry_points` binds every name in `PROBE_NAMES` to the runtime's callable.
     """
-    global _probing
+    global _probing, _plain_process
+    _plain_process = _compiles_bytecode_only()
     for attribute in PROBE_NAMES:
         globals()[attribute] = entry_points[attribute]
     probing = Probing(files, relative_for, cache_directory, sites)

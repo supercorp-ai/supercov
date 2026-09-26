@@ -65,3 +65,34 @@ test("work an earlier test left running does not carry its phase into the next t
   assert.deepEqual(recorded.own, ["a-0:assertion:1"], "a test's own phase is kept");
   assert.deepEqual(recorded.late, [null], "an earlier test's phase is not");
 });
+
+test("recording survives a test that removes Buffer", () => {
+  // axios's toFormData test sets `globalThis.Buffer = undefined` to check it
+  // copes; the runtime and the evidence journal read Buffer inside that test.
+  const atomicUrl = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/atomic.mjs")).href;
+  const recorded = run(`
+    const { appendEvidenceRecord } = await import(${JSON.stringify(atomicUrl)});
+    const { mkdtempSync, readdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const directory = mkdtempSync(tmpdir() + "/supercov-buffer-");
+    runtime.activateCoverageScope(scope("a"));
+    runtime.resetCoverage("a");
+    const original = globalThis.Buffer;
+    globalThis.Buffer = undefined;
+    let carrier;
+    try {
+      runtime.withNodeAssertionPhase("assert.throws", "t.js:1:1", () => runtime.coverageHit("inside"));
+      carrier = runtime.coverageContextEnvironment();
+      appendEvidenceRecord(directory, "vitest-worker", { testId: "a" });
+      appendEvidenceRecord(directory, "vitest-worker", { testId: "b" });
+    } finally {
+      globalThis.Buffer = original;
+    }
+    const journals = readdirSync(directory).length;
+    rmSync(directory, { recursive: true, force: true });
+    console.log(JSON.stringify({ hits: [...runtime.coverageSnapshot().hits], carrier: Object.keys(carrier), journals }));
+  `);
+  assert.deepEqual(recorded.hits, ["inside"]);
+  assert.deepEqual(recorded.carrier, ["SUPERCOV_CONTEXT"]);
+  assert.equal(recorded.journals, 1, "both records went to one journal");
+});

@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, statSync, writeFileSync, } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
+import { Buffer } from "node:buffer";
 function fsyncDirectory(path) {
     try {
         const directory = openSync(path, "r");

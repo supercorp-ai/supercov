@@ -21,6 +21,14 @@ var __spreadValues = (a, b) => {
 };
 var __spreadProps = (a, b) => __spreadValues(a, b);
 
+// Buffer as it was when Supercov loaded. Tests replace globals -- axios's set
+// `globalThis.Buffer = undefined` to check it copes -- and the runtime runs
+// inside those tests; it must not fail where the application does not.
+var capturedBuffer = typeof Buffer === "undefined" ? void 0 : Buffer;
+// Likewise the timer: a test that installs fake timers would otherwise hold
+// the browser's evidence back until it advanced its clock.
+var capturedSetTimeout = setTimeout;
+
 // dist/transport.js
 var COVERAGE_SCOPE_HEADER = "x-supercov-scope";
 var COVERAGE_PHASE_HEADER = "x-supercov-phase";
@@ -80,13 +88,13 @@ function decodeCoverageScope(encoded) {
   }
 }
 function encodeCoverageCarrier(carrier) {
-  return Buffer.from(JSON.stringify(carrier), "utf8").toString("base64url");
+  return capturedBuffer.from(JSON.stringify(carrier), "utf8").toString("base64url");
 }
 function decodeCoverageCarrier(encoded) {
   if (!encoded)
     return void 0;
   try {
-    const value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    const value = JSON.parse(capturedBuffer.from(encoded, "base64url").toString("utf8"));
     if (value.version !== 1)
       return void 0;
     if (value.scope) {
@@ -364,7 +372,7 @@ function persistBrowser() {
   if (persistBrowserScheduled)
     return;
   persistBrowserScheduled = true;
-  setTimeout(() => {
+  capturedSetTimeout(() => {
     persistBrowserScheduled = false;
     persistBrowserNow();
   }, 0);
@@ -484,10 +492,10 @@ function appendDurableBackgroundRecord(fs, runId, record) {
     state.backgroundSequence = nextSequence;
     path = backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
     state.backgroundWriters.set(runId, path);
-    state.backgroundShardSizes.set(path, Buffer.byteLength(payload));
+    state.backgroundShardSizes.set(path, capturedBuffer.byteLength(payload));
   } else {
     fs.appendFileSync(path, payload);
-    state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) ?? 0) + Buffer.byteLength(payload));
+    state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) ?? 0) + capturedBuffer.byteLength(payload));
   }
   records.set(key, record);
   state.backgroundBuffers.set(runId, records);
