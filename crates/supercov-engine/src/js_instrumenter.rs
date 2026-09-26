@@ -552,20 +552,13 @@ pub struct CandidateRuntime {
     pub selection_end: String,
     pub parenthesized_assignment_value: String,
     pub with_request_phase: String,
-    pub optional_select: String,
+    pub optional_select_v2: String,
+    pub select_short_v2: String,
+    pub select_right_v2: String,
     pub rendered_value_v2: String,
-    pub optional_call_begin: String,
-    pub optional_call_reached: String,
-    pub optional_call_continued: String,
-    pub optional_call_end: String,
-    pub default_selected: String,
-    pub default_entered: String,
-    pub try_begin: String,
-    pub try_catch: String,
-    pub try_end: String,
-    pub loop_begin: String,
-    pub loop_entered: String,
-    pub loop_end: String,
+    pub optional_call_end_v2: String,
+    pub default_selected_v2: String,
+    pub default_entered_v2: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3043,20 +3036,14 @@ fn instrument_candidate_with_binding(
     let selection_end = names.allocate("__supercovSelectionEnd");
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
     let with_request_phase = names.allocate("__supercovWithRequestPhase");
-    let optional_select = names.allocate("__supercovOptionalSelect");
+    let optional_select_v2 = names.allocate("__supercovOptionalSelectV2");
+    let select_short_v2 = names.allocate("__supercovSelectShortV2");
+    let select_right_v2 = names.allocate("__supercovSelectRightV2");
     let rendered_value_v2 = names.allocate("__supercovRenderedValueV2");
-    let optional_call_begin = names.allocate("__supercovOptionalCallBegin");
-    let optional_call_reached = names.allocate("__supercovOptionalCallReached");
-    let optional_call_continued = names.allocate("__supercovOptionalCallContinued");
-    let optional_call_end = names.allocate("__supercovOptionalCallEnd");
-    let default_selected = names.allocate("__supercovDefaultSelected");
-    let default_entered = names.allocate("__supercovDefaultEntered");
-    let try_begin = names.allocate("__supercovTryBegin");
-    let try_catch = names.allocate("__supercovTryCatch");
-    let try_end = names.allocate("__supercovTryEnd");
-    let loop_begin = names.allocate("__supercovLoopBegin");
-    let loop_entered = names.allocate("__supercovLoopEntered");
-    let loop_end = names.allocate("__supercovLoopEnd");
+    let optional_call_end_v2 = names.allocate("__supercovOptionalCallEndV2");
+    let default_selected_v2 = names.allocate("__supercovDefaultSelectedV2");
+    let default_entered_v2 = names.allocate("__supercovDefaultEnteredV2");
+    let typescript = parsed.program.source_type.is_typescript();
     let ast = AstBuilder::new(&allocator);
     let mut assignment_name_safety = AssignmentNameSafetyTransformer {
         ast,
@@ -3069,6 +3056,58 @@ fn instrument_candidate_with_binding(
         .enumerate()
         .map(|(index, point)| (point.id.clone(), index))
         .collect::<HashMap<_, _>>();
+    // A default's two outcomes are V2 points after the statement points, and
+    // its pending count a slot of the file's `pendingDefaults`, both in source
+    // order. lru-cache's `set` and `get` destructure options with defaults, and
+    // the string-keyed count behind each was a third of a hot loop.
+    let mut default_sites = default_analysis
+        .parameter_targets
+        .iter()
+        .chain(&default_analysis.binding_targets)
+        .map(|(span, target)| (*span, target.default_id.clone(), target.provided_id.clone()))
+        .collect::<Vec<_>>();
+    default_sites.sort();
+    let mut default_point_ids = Vec::with_capacity(default_sites.len() * 2);
+    let default_slots = default_sites
+        .into_iter()
+        .enumerate()
+        .map(|(slot, (_, default_id, provided_id))| {
+            let default_point = point_analysis.points.len() + default_point_ids.len();
+            default_point_ids.push(default_id.clone());
+            default_point_ids.push(provided_id);
+            (
+                default_id,
+                DefaultSlot {
+                    slot,
+                    default_point,
+                    provided_point: default_point + 1,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let default_count = default_slots.len();
+    let mut extra = ExtraPoints {
+        base: point_analysis.points.len() + default_point_ids.len(),
+        ids: Vec::new(),
+    };
+    let selection_first = extra.next();
+    let selection_targets = extra.allocate(&logical_analysis.logical_targets, |(short, right)| {
+        vec![short.clone(), short.clone(), right.clone(), right.clone()]
+    });
+    let selection_count = selection_targets.len();
+    let optional_member_targets = extra
+        .allocate(&optional_analysis.targets, |(short, continued)| {
+            vec![short.clone(), continued.clone()]
+        });
+    let optional_call_sites = extra.allocate(&call_analysis.sites, |(short, continued)| {
+        vec![short.clone(), continued.clone()]
+    });
+    let loop_targets = extra.allocate(&extended_analysis.loop_targets, |target| {
+        vec![target.first_id.clone(), target.second_id.clone()]
+    });
+    let try_targets = extra.allocate(&extended_analysis.try_targets, |target| {
+        vec![target.first_id.clone(), target.second_id.clone()]
+    });
     let statement_targets = point_analysis
         .statement_targets
         .into_iter()
@@ -3140,8 +3179,9 @@ fn instrument_candidate_with_binding(
     rendered_transformer.visit_program(&mut parsed.program);
     let mut optional_transformer = OptionalMemberTransformer {
         ast,
-        optional_select: optional_select.clone(),
-        targets: optional_analysis.targets,
+        optional_select_v2: optional_select_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        targets: optional_member_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         with_statements: safety.with_statements.clone(),
     };
@@ -3149,11 +3189,10 @@ fn instrument_candidate_with_binding(
     let mut call_transformer = OptionalCallTransformer::new(
         ast,
         source,
-        optional_call_begin.clone(),
-        optional_call_reached.clone(),
-        optional_call_continued.clone(),
-        optional_call_end.clone(),
-        call_analysis.sites,
+        optional_call_end_v2.clone(),
+        probe_file_v2.clone(),
+        typescript,
+        optional_call_sites,
         call_analysis.roots,
         safety.source_sensitive_functions.clone(),
         safety.with_statements.clone(),
@@ -3161,8 +3200,10 @@ fn instrument_candidate_with_binding(
     call_transformer.visit_program(&mut parsed.program);
     let mut default_transformer = DefaultTransformer {
         ast,
-        default_selected: default_selected.clone(),
-        default_entered: default_entered.clone(),
+        default_selected_v2: default_selected_v2.clone(),
+        default_entered_v2: default_entered_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        slots: default_slots,
         parameter_targets: default_analysis.parameter_targets,
         binding_targets: default_analysis.binding_targets,
         function_entries: Vec::new(),
@@ -3175,14 +3216,11 @@ fn instrument_candidate_with_binding(
     default_transformer.visit_program(&mut parsed.program);
     let mut extended_transformer = ExtendedTransformer {
         ast,
-        try_begin: try_begin.clone(),
-        try_catch: try_catch.clone(),
-        try_end: try_end.clone(),
-        loop_begin: loop_begin.clone(),
-        loop_entered: loop_entered.clone(),
-        loop_end: loop_end.clone(),
-        try_targets: extended_analysis.try_targets,
-        loop_targets: extended_analysis.loop_targets,
+        coverage_hit_v2: coverage_hit_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        typescript,
+        try_targets,
+        loop_targets,
         names: CandidateNames::within(source, &namespace),
         scope_declarations: Vec::new(),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
@@ -3210,9 +3248,13 @@ fn instrument_candidate_with_binding(
         selection_begin: selection_begin.clone(),
         selection_right: selection_right.clone(),
         selection_end: selection_end.clone(),
+        select_short_v2: select_short_v2.clone(),
+        select_right_v2: select_right_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        typescript,
         names: CandidateNames::within(source, &namespace),
         scope_declarations: Vec::new(),
-        logical_targets: logical_analysis.logical_targets,
+        logical_targets: selection_targets,
         assignment_targets: assignment_analysis.targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         with_statements: safety.with_statements.clone(),
@@ -3247,8 +3289,10 @@ fn instrument_candidate_with_binding(
 
     let registration = serde_json::json!({
         "decisions": &collector.decisions,
-        "pointIds": point_analysis.points.iter().map(|point| &point.id).collect::<Vec<_>>(),
+        "pointIds": point_analysis.points.iter().map(|point| &point.id).chain(&default_point_ids).chain(&extra.ids).collect::<Vec<_>>(),
         "decisionVectorCounts": &collector.decision_vector_counts,
+        "defaultCount": default_count,
+        "selectionPoints": [selection_first, selection_count],
     });
     let registration_call = ast.expression_call(
         Span::default(),
@@ -3288,20 +3332,13 @@ fn instrument_candidate_with_binding(
             "parenthesizedAssignmentValue",
             &parenthesized_assignment_value,
         ),
-        ("optionalSelect", &optional_select),
+        ("optionalSelectV2", &optional_select_v2),
+        ("selectShortV2", &select_short_v2),
+        ("selectRightV2", &select_right_v2),
         ("renderedValueV2", &rendered_value_v2),
-        ("optionalCallBegin", &optional_call_begin),
-        ("optionalCallReached", &optional_call_reached),
-        ("optionalCallContinued", &optional_call_continued),
-        ("optionalCallEnd", &optional_call_end),
-        ("defaultSelected", &default_selected),
-        ("defaultEntered", &default_entered),
-        ("tryBegin", &try_begin),
-        ("tryCatch", &try_catch),
-        ("tryEnd", &try_end),
-        ("loopBegin", &loop_begin),
-        ("loopEntered", &loop_entered),
-        ("loopEnd", &loop_end),
+        ("optionalCallEndV2", &optional_call_end_v2),
+        ("defaultSelectedV2", &default_selected_v2),
+        ("defaultEnteredV2", &default_entered_v2),
     ];
     if uses_request_phase {
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
@@ -3400,20 +3437,13 @@ fn instrument_candidate_with_binding(
             selection_end,
             parenthesized_assignment_value,
             with_request_phase,
-            optional_select,
+            optional_select_v2,
+            select_short_v2,
+            select_right_v2,
             rendered_value_v2,
-            optional_call_begin,
-            optional_call_reached,
-            optional_call_continued,
-            optional_call_end,
-            default_selected,
-            default_entered,
-            try_begin,
-            try_catch,
-            try_end,
-            loop_begin,
-            loop_entered,
-            loop_end,
+            optional_call_end_v2,
+            default_selected_v2,
+            default_entered_v2,
         }),
         coverage_limitations: {
             let mut limitations = safety.semantic_limitations;
@@ -3434,6 +3464,20 @@ fn instrument_candidate_with_binding(
 /// clock is `fast` only while an async hook keeps its epoch current; without
 /// one the call decides, as before.
 fn probe_v2_hit<'a>(ast: AstBuilder<'a>, hit: &str, file: &str, index: usize) -> Statement<'a> {
+    ast.statement_expression(
+        Span::default(),
+        probe_v2_hit_expression(ast, hit, file, index),
+    )
+}
+
+/// The expression inside `probe_v2_hit`, for probes that sit in an expression:
+/// a selection's outcome, a loop's first iteration, a caught exception.
+fn probe_v2_hit_expression<'a>(
+    ast: AstBuilder<'a>,
+    hit: &str,
+    file: &str,
+    index: usize,
+) -> Expression<'a> {
     let span = Span::default();
     let file_expression = || ast.expression_identifier(span, ast.ident(file));
     let member = |object: Expression<'a>, name: &str| -> Expression<'a> {
@@ -3468,15 +3512,90 @@ fn probe_v2_hit<'a>(ast: AstBuilder<'a>, hit: &str, file: &str, index: usize) ->
         ]),
         false,
     );
-    ast.statement_expression(
+    ast.expression_logical(
         span,
-        ast.expression_logical(
-            span,
-            ast.expression_logical(span, fast, LogicalOperator::And, seen),
-            LogicalOperator::Or,
-            call,
-        ),
+        ast.expression_logical(span, fast, LogicalOperator::And, seen),
+        LogicalOperator::Or,
+        call,
     )
+}
+
+/// `let` declarations for probe temporaries at the top of a scope. In
+/// TypeScript a temporary that holds user values is declared `any`, as the
+/// runtime calls it replaces returned: `tsc --strict` would otherwise infer
+/// its type across assignments and fail code that compiled before.
+fn probe_temporaries<'a>(
+    ast: AstBuilder<'a>,
+    names: Vec<String>,
+    typescript: bool,
+) -> Statement<'a> {
+    let declarations = ast.vec_from_iter(names.into_iter().map(|name| {
+        let annotation = typescript.then(|| {
+            ast.alloc_ts_type_annotation(Span::default(), ast.ts_type_any_keyword(Span::default()))
+        });
+        ast.variable_declarator(
+            Span::default(),
+            VariableDeclarationKind::Let,
+            ast.binding_pattern_binding_identifier(Span::default(), ast.ident(&name)),
+            annotation,
+            None,
+            false,
+        )
+    }));
+    Statement::VariableDeclaration(ast.alloc_variable_declaration(
+        Span::default(),
+        VariableDeclarationKind::Let,
+        declarations,
+        false,
+    ))
+}
+
+/// `T = value`, as an expression.
+fn assign_temporary<'a>(ast: AstBuilder<'a>, name: &str, value: Expression<'a>) -> Expression<'a> {
+    ast.expression_assignment(
+        Span::default(),
+        AssignmentOperator::Assign,
+        AssignmentTarget::from(ast.simple_assignment_target_assignment_target_identifier(
+            Span::default(),
+            ast.ident(name),
+        )),
+        value,
+    )
+}
+
+fn numeric<'a>(ast: AstBuilder<'a>, value: usize) -> Expression<'a> {
+    ast.expression_numeric_literal(Span::default(), value as f64, None, NumberBase::Decimal)
+}
+
+/// Where each V2 point beyond the statement points begins, per site, in
+/// source order: every probe kind records through `coverageHitV2` with the
+/// ids it always recorded.
+#[derive(Default)]
+struct ExtraPoints {
+    base: usize,
+    ids: Vec<String>,
+}
+
+impl ExtraPoints {
+    fn allocate<T>(
+        &mut self,
+        targets: &HashMap<SpanKey, T>,
+        ids: impl Fn(&T) -> Vec<String>,
+    ) -> HashMap<SpanKey, usize> {
+        let mut keys = targets.keys().copied().collect::<Vec<_>>();
+        keys.sort();
+        keys.into_iter()
+            .map(|key| {
+                let first = self.base + self.ids.len();
+                self.ids.extend(ids(&targets[&key]));
+                (key, first)
+            })
+            .collect()
+    }
+
+    fn next(&self) -> usize {
+        self.base + self.ids.len()
+    }
 }
 
 struct StatementProbeTransformer<'a> {
@@ -3523,11 +3642,15 @@ impl<'a> StatementProbeTransformer<'a> {
         if ids.is_empty() {
             return;
         }
+        // The block takes the statement's span, so its braces map to the
+        // statement's own start and end: a coverage tool mapping the copy back
+        // (nyc, Jest) dropped a statement whose end was a brace of nowhere.
+        let span = statement.span();
         let original = statement.take_in(self.ast.allocator);
         let mut body = self.ast.vec_with_capacity(ids.len() + 1);
         body.extend(ids.iter().map(|target| self.probe(target)));
         body.push(original);
-        *statement = self.ast.statement_block(Span::default(), body);
+        *statement = self.ast.statement_block(span, body);
     }
 }
 
@@ -3738,35 +3861,31 @@ impl<'a> VisitMut<'a> for FunctionProbeTransformer<'a> {
 
 struct OptionalMemberTransformer<'a> {
     ast: AstBuilder<'a>,
-    optional_select: String,
-    targets: HashMap<SpanKey, (String, String)>,
+    optional_select_v2: String,
+    probe_file_v2: String,
+    /// The short and continued outcomes are two V2 points from this index.
+    targets: HashMap<SpanKey, usize>,
     source_sensitive_functions: HashSet<SpanKey>,
     with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> OptionalMemberTransformer<'a> {
-    fn instrument_operand(
-        &self,
-        operand: Expression<'a>,
-        short_id: &str,
-        continued_id: &str,
-    ) -> Expression<'a> {
+    /// `optionalSelectV2(file, first, object)`: records whether the object of
+    /// `object?.member` was nullish and passes it through.
+    fn instrument_operand(&self, operand: Expression<'a>, first: usize) -> Expression<'a> {
         self.ast.expression_call(
             Span::default(),
             self.ast
-                .expression_identifier(Span::default(), self.ast.ident(&self.optional_select)),
+                .expression_identifier(Span::default(), self.ast.ident(&self.optional_select_v2)),
             NONE,
             self.ast.vec_from_array([
-                Argument::from(self.ast.expression_string_literal(
-                    Span::default(),
-                    self.ast.str(short_id),
-                    None,
-                )),
-                Argument::from(self.ast.expression_string_literal(
-                    Span::default(),
-                    self.ast.str(continued_id),
-                    None,
-                )),
+                Argument::from(
+                    self.ast.expression_identifier(
+                        Span::default(),
+                        self.ast.ident(&self.probe_file_v2),
+                    ),
+                ),
+                Argument::from(numeric(self.ast, first)),
                 Argument::from(operand),
             ]),
             false,
@@ -3774,11 +3893,11 @@ impl<'a> OptionalMemberTransformer<'a> {
     }
 
     fn instrument_target(&mut self, span: Span, object: &mut Expression<'a>) {
-        let Some((short_id, continued_id)) = self.targets.remove(&span_key(span)) else {
+        let Some(first) = self.targets.remove(&span_key(span)) else {
             return;
         };
         let operand = object.take_in(self.ast.allocator);
-        *object = self.instrument_operand(operand, &short_id, &continued_id);
+        *object = self.instrument_operand(operand, first);
     }
 }
 
@@ -3826,19 +3945,20 @@ impl<'a> VisitMut<'a> for OptionalMemberTransformer<'a> {
     }
 }
 
+/// A call site's state lives in a temporary of its own: 0 before the chain,
+/// 1 once the callee is evaluated, 2 once the call goes ahead. Its short and
+/// continued outcomes are two V2 points from `first`.
 #[derive(Clone)]
 struct OptionalCallSiteRuntime {
     frame: String,
-    short_id: String,
-    continued_id: String,
+    first: usize,
 }
 
 struct OptionalCallTransformer<'a, 's> {
     ast: AstBuilder<'a>,
-    optional_call_begin: String,
-    optional_call_reached: String,
-    optional_call_continued: String,
-    optional_call_end: String,
+    optional_call_end_v2: String,
+    probe_file_v2: String,
+    typescript: bool,
     scope_declarations: Vec<Vec<String>>,
     sites: HashMap<SpanKey, OptionalCallSiteRuntime>,
     roots: HashMap<SpanKey, Vec<SpanKey>>,
@@ -3852,35 +3972,34 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
     fn new(
         ast: AstBuilder<'a>,
         source: &'s str,
-        optional_call_begin: String,
-        optional_call_reached: String,
-        optional_call_continued: String,
-        optional_call_end: String,
-        sites: HashMap<SpanKey, (String, String)>,
+        optional_call_end_v2: String,
+        probe_file_v2: String,
+        typescript: bool,
+        sites: HashMap<SpanKey, usize>,
         roots: HashMap<SpanKey, Vec<SpanKey>>,
         source_sensitive_functions: HashSet<SpanKey>,
         with_statements: HashSet<SpanKey>,
     ) -> Self {
         let mut names = CandidateNames::new(source);
-        let sites = sites
+        let mut ordered = sites.into_iter().collect::<Vec<_>>();
+        ordered.sort();
+        let sites = ordered
             .into_iter()
-            .map(|(key, (short_id, continued_id))| {
+            .map(|(key, first)| {
                 (
                     key,
                     OptionalCallSiteRuntime {
                         frame: names.allocate("_optionalCall"),
-                        short_id,
-                        continued_id,
+                        first,
                     },
                 )
             })
             .collect();
         Self {
             ast,
-            optional_call_begin,
-            optional_call_reached,
-            optional_call_continued,
-            optional_call_end,
+            optional_call_end_v2,
+            probe_file_v2,
+            typescript,
             scope_declarations: Vec::new(),
             sites,
             roots,
@@ -3895,16 +4014,6 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
             .expression_identifier(Span::default(), self.ast.ident(name))
     }
 
-    fn assignment_target(&self, name: &str) -> AssignmentTarget<'a> {
-        AssignmentTarget::from(
-            self.ast
-                .simple_assignment_target_assignment_target_identifier(
-                    Span::default(),
-                    self.ast.ident(name),
-                ),
-        )
-    }
-
     fn call(&self, name: &str, arguments: oxc_allocator::Vec<'a, Argument<'a>>) -> Expression<'a> {
         self.ast.expression_call(
             Span::default(),
@@ -3915,20 +4024,13 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
         )
     }
 
-    fn string_argument(&self, value: &str) -> Argument<'a> {
-        Argument::from(self.ast.expression_string_literal(
-            Span::default(),
-            self.ast.str(value),
-            None,
-        ))
-    }
-
+    /// `(T = 1, value)`: the callee's position was evaluated.
     fn reached(&self, frame: &str, value: Expression<'a>) -> Expression<'a> {
-        self.call(
-            &self.optional_call_reached,
+        self.ast.expression_sequence(
+            Span::default(),
             self.ast.vec_from_array([
-                Argument::from(self.identifier(frame)),
-                Argument::from(value),
+                assign_temporary(self.ast, frame, numeric(self.ast, 1)),
+                value,
             ]),
         )
     }
@@ -3945,26 +4047,7 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
         if names.is_empty() {
             return;
         }
-        let declarations = self.ast.vec_from_iter(names.into_iter().map(|name| {
-            self.ast.variable_declarator(
-                Span::default(),
-                VariableDeclarationKind::Let,
-                self.ast
-                    .binding_pattern_binding_identifier(Span::default(), self.ast.ident(&name)),
-                NONE,
-                None,
-                false,
-            )
-        }));
-        statements.insert(
-            0,
-            Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
-                Span::default(),
-                VariableDeclarationKind::Let,
-                declarations,
-                false,
-            )),
-        );
+        statements.insert(0, probe_temporaries(self.ast, names, self.typescript));
     }
 
     fn instrument_callee(
@@ -4061,9 +4144,23 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
     fn instrument_call(&self, call: &mut CallExpression<'a>, site: &OptionalCallSiteRuntime) {
         let callee = call.callee.take_in(self.ast.allocator);
         call.callee = self.instrument_callee(callee, site);
-        let continued = self.call(
-            &self.optional_call_continued,
-            self.ast.vec1(Argument::from(self.identifier(&site.frame))),
+        // `...(T = 2, file.none)` runs only when the call goes ahead, before its
+        // own arguments, and spreads nothing.
+        let none = Expression::from(
+            self.ast.member_expression_static(
+                Span::default(),
+                self.identifier(&self.probe_file_v2),
+                self.ast
+                    .identifier_name(Span::default(), self.ast.ident("none")),
+                false,
+            ),
+        );
+        let continued = self.ast.expression_sequence(
+            Span::default(),
+            self.ast.vec_from_array([
+                assign_temporary(self.ast, &site.frame, numeric(self.ast, 2)),
+                none,
+            ]),
         );
         call.arguments.insert(
             0,
@@ -4086,31 +4183,27 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
             .expect("optional-call root must be inside a program or function")
             .extend(sites.iter().map(|site| site.frame.clone()));
 
+        // `optionalCallEndV2(file, first, chain, T)` reads T after the chain,
+        // so it sees what that evaluation did.
         let original = expression.take_in(self.ast.allocator);
         let mut measured = original;
         for site in sites.iter().rev() {
             measured = self.call(
-                &self.optional_call_end,
+                &self.optional_call_end_v2,
                 self.ast.vec_from_array([
-                    Argument::from(self.identifier(&site.frame)),
+                    Argument::from(self.identifier(&self.probe_file_v2)),
+                    Argument::from(numeric(self.ast, site.first)),
                     Argument::from(measured),
+                    Argument::from(self.identifier(&site.frame)),
                 ]),
             );
         }
         let mut sequence = self.ast.vec_with_capacity(sites.len() + 1);
         for site in &sites {
-            let begin = self.call(
-                &self.optional_call_begin,
-                self.ast.vec_from_array([
-                    self.string_argument(&site.short_id),
-                    self.string_argument(&site.continued_id),
-                ]),
-            );
-            sequence.push(self.ast.expression_assignment(
-                Span::default(),
-                AssignmentOperator::Assign,
-                self.assignment_target(&site.frame),
-                begin,
+            sequence.push(assign_temporary(
+                self.ast,
+                &site.frame,
+                numeric(self.ast, 0),
             ));
         }
         sequence.push(measured);
@@ -4174,10 +4267,20 @@ impl<'a> VisitMut<'a> for OptionalCallTransformer<'a, '_> {
     }
 }
 
+/// Where a default's pending count and its two outcomes live in the file's V2
+/// probe state: a slot of `pendingDefaults`, and two indices of `pointIds`.
+struct DefaultSlot {
+    slot: usize,
+    default_point: usize,
+    provided_point: usize,
+}
+
 struct DefaultTransformer<'a> {
     ast: AstBuilder<'a>,
-    default_selected: String,
-    default_entered: String,
+    default_selected_v2: String,
+    default_entered_v2: String,
+    probe_file_v2: String,
+    slots: HashMap<String, DefaultSlot>,
     parameter_targets: HashMap<SpanKey, DefaultTarget>,
     binding_targets: HashMap<SpanKey, DefaultTarget>,
     function_entries: Vec<Vec<Statement<'a>>>,
@@ -4202,9 +4305,28 @@ impl<'a> DefaultTransformer<'a> {
         ))
     }
 
+    fn index_argument(&self, index: usize) -> Argument<'a> {
+        Argument::from(self.ast.expression_numeric_literal(
+            Span::default(),
+            index as f64,
+            None,
+            NumberBase::Decimal,
+        ))
+    }
+
+    fn slot(&self, target: &DefaultTarget) -> &DefaultSlot {
+        self.slots
+            .get(&target.default_id)
+            .expect("every default target has a V2 slot")
+    }
+
+    /// `defaultSelectedV2(file, slot, value[, name])`: the default counts
+    /// itself after its value evaluates, so a default that throws leaves no
+    /// count behind.
     fn selected(&self, value: Expression<'a>, target: &DefaultTarget) -> Expression<'a> {
         let mut arguments = self.ast.vec_from_array([
-            self.string_argument(&target.default_id),
+            Argument::from(self.identifier(&self.probe_file_v2)),
+            self.index_argument(self.slot(target).slot),
             Argument::from(value),
         ]);
         if let Some(name) = &target.inferred_name {
@@ -4212,23 +4334,28 @@ impl<'a> DefaultTransformer<'a> {
         }
         self.ast.expression_call(
             Span::default(),
-            self.identifier(&self.default_selected),
+            self.identifier(&self.default_selected_v2),
             NONE,
             arguments,
             false,
         )
     }
 
+    /// `defaultEnteredV2(file, slot, defaultPoint, providedPoint)`, once the
+    /// parameters or the declaration are bound.
     fn entered(&self, target: &DefaultTarget) -> Statement<'a> {
+        let slot = self.slot(target);
         self.ast.statement_expression(
             Span::default(),
             self.ast.expression_call(
                 Span::default(),
-                self.identifier(&self.default_entered),
+                self.identifier(&self.default_entered_v2),
                 NONE,
                 self.ast.vec_from_array([
-                    self.string_argument(&target.default_id),
-                    self.string_argument(&target.provided_id),
+                    Argument::from(self.identifier(&self.probe_file_v2)),
+                    self.index_argument(slot.slot),
+                    self.index_argument(slot.default_point),
+                    self.index_argument(slot.provided_point),
                 ]),
                 false,
             ),
@@ -4264,11 +4391,12 @@ impl<'a> DefaultTransformer<'a> {
             }
             return;
         }
+        let span = body.span();
         let original = body.take_in(self.ast.allocator);
         let mut statements = self.ast.vec_with_capacity(entries.len() + 1);
         statements.extend(entries);
         statements.push(original);
-        *body = self.ast.statement_block(Span::default(), statements);
+        *body = self.ast.statement_block(span, statements);
     }
 
     fn variable_span(statement: &Statement<'a>) -> Option<SpanKey> {
@@ -4429,16 +4557,17 @@ enum ExtendedKind {
     Loop,
 }
 
+/// A try's success and catch outcomes, and a loop's zero-iteration and
+/// entered outcomes, are two V2 points from the index each target maps to. A
+/// flag of the site's own is set once the second outcome fires: the frame
+/// and the call per iteration before cost every enumeration loop.
 struct ExtendedTransformer<'a, 's> {
     ast: AstBuilder<'a>,
-    try_begin: String,
-    try_catch: String,
-    try_end: String,
-    loop_begin: String,
-    loop_entered: String,
-    loop_end: String,
-    try_targets: HashMap<SpanKey, ExtendedTarget>,
-    loop_targets: HashMap<SpanKey, ExtendedTarget>,
+    coverage_hit_v2: String,
+    probe_file_v2: String,
+    typescript: bool,
+    try_targets: HashMap<SpanKey, usize>,
+    loop_targets: HashMap<SpanKey, usize>,
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
     source_sensitive_functions: HashSet<SpanKey>,
@@ -4449,43 +4578,6 @@ impl<'a> ExtendedTransformer<'a, '_> {
     fn identifier(&self, name: &str) -> Expression<'a> {
         self.ast
             .expression_identifier(Span::default(), self.ast.ident(name))
-    }
-
-    fn assignment_target(&self, name: &str) -> AssignmentTarget<'a> {
-        AssignmentTarget::from(
-            self.ast
-                .simple_assignment_target_assignment_target_identifier(
-                    Span::default(),
-                    self.ast.ident(name),
-                ),
-        )
-    }
-
-    fn string_argument(&self, value: &str) -> Argument<'a> {
-        Argument::from(self.ast.expression_string_literal(
-            Span::default(),
-            self.ast.str(value),
-            None,
-        ))
-    }
-
-    fn call(&self, name: &str, arguments: oxc_allocator::Vec<'a, Argument<'a>>) -> Expression<'a> {
-        self.ast.expression_call(
-            Span::default(),
-            self.identifier(name),
-            NONE,
-            arguments,
-            false,
-        )
-    }
-
-    fn call_statement(
-        &self,
-        name: &str,
-        arguments: oxc_allocator::Vec<'a, Argument<'a>>,
-    ) -> Statement<'a> {
-        self.ast
-            .statement_expression(Span::default(), self.call(name, arguments))
     }
 
     fn enter_scope(&mut self) {
@@ -4500,26 +4592,7 @@ impl<'a> ExtendedTransformer<'a, '_> {
         if names.is_empty() {
             return;
         }
-        let declarations = self.ast.vec_from_iter(names.into_iter().map(|name| {
-            self.ast.variable_declarator(
-                Span::default(),
-                VariableDeclarationKind::Let,
-                self.ast
-                    .binding_pattern_binding_identifier(Span::default(), self.ast.ident(&name)),
-                NONE,
-                None,
-                false,
-            )
-        }));
-        statements.insert(
-            0,
-            Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
-                Span::default(),
-                VariableDeclarationKind::Let,
-                declarations,
-                false,
-            )),
-        );
+        statements.insert(0, probe_temporaries(self.ast, names, self.typescript));
     }
 
     fn scratch(&mut self, base: &str) -> String {
@@ -4563,98 +4636,105 @@ impl<'a> ExtendedTransformer<'a, '_> {
             block.body.insert(0, entry);
             return;
         }
+        let span = body.span();
         let original = body.take_in(ast.allocator);
-        *body = ast.statement_block(Span::default(), ast.vec_from_array([entry, original]));
+        *body = ast.statement_block(span, ast.vec_from_array([entry, original]));
     }
 
-    fn begin_assignment(&self, frame: &str, begin: &str, target: &ExtendedTarget) -> Statement<'a> {
-        let call = self.call(
-            begin,
+    fn hit(&self, index: usize) -> Expression<'a> {
+        probe_v2_hit_expression(self.ast, &self.coverage_hit_v2, &self.probe_file_v2, index)
+    }
+
+    /// `T = 0;`
+    fn reset(&self, flag: &str) -> Statement<'a> {
+        self.ast.statement_expression(
+            Span::default(),
+            assign_temporary(self.ast, flag, numeric(self.ast, 0)),
+        )
+    }
+
+    /// `T || (T = 1, hit);` -- recorded the first time only.
+    fn first_time(&self, flag: &str, index: usize) -> Statement<'a> {
+        let record = self.ast.expression_sequence(
+            Span::default(),
             self.ast.vec_from_array([
-                self.string_argument(&target.first_id),
-                self.string_argument(&target.second_id),
+                assign_temporary(self.ast, flag, numeric(self.ast, 1)),
+                self.hit(index),
             ]),
         );
         self.ast.statement_expression(
             Span::default(),
-            self.ast.expression_assignment(
+            self.ast.expression_logical(
                 Span::default(),
-                AssignmentOperator::Assign,
-                self.assignment_target(frame),
-                call,
+                self.identifier(flag),
+                LogicalOperator::Or,
+                record,
             ),
         )
     }
 
-    fn instrument_try(&mut self, statement: &mut Statement<'a>, target: ExtendedTarget) {
-        let frame = self.scratch("_supercovTryFrame");
-        let assignment = self.begin_assignment(&frame, &self.try_begin, &target);
+    /// `T || hit;` -- the other outcome, when the first never fired.
+    fn otherwise(&self, flag: &str, index: usize) -> Statement<'a> {
+        self.ast.statement_expression(
+            Span::default(),
+            self.ast.expression_logical(
+                Span::default(),
+                self.identifier(flag),
+                LogicalOperator::Or,
+                self.hit(index),
+            ),
+        )
+    }
+
+    fn instrument_try(&mut self, statement: &mut Statement<'a>, first: usize) {
+        // What Supercov adds around the statement takes its span (see
+        // `wrap_bare`), so its braces map to the statement's own ends.
+        let span = statement.span();
+        let flag = self.scratch("_supercovTryFrame");
+        let reset = self.reset(&flag);
+        // Recorded the moment the catch starts, not when the construct is
+        // left: `process.exit()` in a catch skips the `finally`.
+        let caught = self.first_time(&flag, first + 1);
         let node = Self::inner_try(statement).expect("try target must remain a try statement");
         node.handler
             .as_mut()
             .expect("try coverage requires a catch handler")
             .body
             .body
-            .insert(
-                0,
-                self.call_statement(
-                    &self.try_catch,
-                    self.ast.vec_from_array([
-                        Argument::from(self.identifier(&frame)),
-                        Argument::from(self.identifier("undefined")),
-                    ]),
-                ),
-            );
-        let end = self.call_statement(
-            &self.try_end,
-            self.ast.vec1(Argument::from(self.identifier(&frame))),
-        );
+            .insert(0, caught);
+        let end = self.otherwise(&flag, first);
         if let Some(finalizer) = &mut node.finalizer {
             finalizer.body.insert(0, end);
         } else {
-            node.finalizer = Some(
-                self.ast
-                    .alloc_block_statement(Span::default(), self.ast.vec1(end)),
-            );
+            node.finalizer = Some(self.ast.alloc_block_statement(span, self.ast.vec1(end)));
         }
         let original = statement.take_in(self.ast.allocator);
-        *statement = self.ast.statement_block(
-            Span::default(),
-            self.ast.vec_from_array([assignment, original]),
-        );
+        *statement = self
+            .ast
+            .statement_block(span, self.ast.vec_from_array([reset, original]));
     }
 
-    fn instrument_loop(&mut self, statement: &mut Statement<'a>, target: ExtendedTarget) {
-        let frame = self.scratch("_supercovLoopFrame");
-        let assignment = self.begin_assignment(&frame, &self.loop_begin, &target);
-        let entered = self.call_statement(
-            &self.loop_entered,
-            self.ast.vec1(Argument::from(self.identifier(&frame))),
-        );
+    fn instrument_loop(&mut self, statement: &mut Statement<'a>, first: usize) {
+        let span = statement.span();
+        let flag = self.scratch("_supercovLoopFrame");
+        let reset = self.reset(&flag);
+        let entered = self.first_time(&flag, first + 1);
         Self::prepend(
             Self::inner_loop_body(statement).expect("loop target must remain an enumeration loop"),
             entered,
             self.ast,
         );
         let original = statement.take_in(self.ast.allocator);
-        let end = self.call_statement(
-            &self.loop_end,
-            self.ast.vec1(Argument::from(self.identifier(&frame))),
-        );
+        let end = self.otherwise(&flag, first);
         let wrapped = self.ast.statement_try(
-            Span::default(),
-            self.ast
-                .block_statement(Span::default(), self.ast.vec1(original)),
+            span,
+            self.ast.block_statement(span, self.ast.vec1(original)),
             None::<oxc_allocator::Box<'a, CatchClause<'a>>>,
-            Some(
-                self.ast
-                    .block_statement(Span::default(), self.ast.vec1(end)),
-            ),
+            Some(self.ast.block_statement(span, self.ast.vec1(end))),
         );
-        *statement = self.ast.statement_block(
-            Span::default(),
-            self.ast.vec_from_array([assignment, wrapped]),
-        );
+        *statement = self
+            .ast
+            .statement_block(span, self.ast.vec_from_array([reset, wrapped]));
     }
 }
 
@@ -4729,9 +4809,15 @@ struct LogicalValueTransformer<'a, 's> {
     selection_begin: String,
     selection_right: String,
     selection_end: String,
+    select_short_v2: String,
+    select_right_v2: String,
+    probe_file_v2: String,
+    typescript: bool,
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
-    logical_targets: HashMap<SpanKey, (String, String)>,
+    /// A selection's four outcomes -- short falsy, short truthy, right falsy,
+    /// right truthy -- are consecutive V2 points from this index.
+    logical_targets: HashMap<SpanKey, usize>,
     assignment_targets: HashMap<SpanKey, (String, String)>,
     source_sensitive_functions: HashSet<SpanKey>,
     with_statements: HashSet<SpanKey>,
@@ -4783,26 +4869,7 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         if names.is_empty() {
             return;
         }
-        let declarations = self.ast.vec_from_iter(names.into_iter().map(|name| {
-            self.ast.variable_declarator(
-                Span::default(),
-                VariableDeclarationKind::Let,
-                self.ast
-                    .binding_pattern_binding_identifier(Span::default(), self.ast.ident(&name)),
-                NONE,
-                None,
-                false,
-            )
-        }));
-        statements.insert(
-            0,
-            Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
-                Span::default(),
-                VariableDeclarationKind::Let,
-                declarations,
-                false,
-            )),
-        );
+        statements.insert(0, probe_temporaries(self.ast, names, self.typescript));
     }
 
     fn scratch(&mut self) -> String {
@@ -4814,46 +4881,49 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         name
     }
 
+    fn helper(&self, name: &str, arguments: [Argument<'a>; 3]) -> Expression<'a> {
+        let mut all = self
+            .ast
+            .vec_from_array([Argument::from(self.identifier(&self.probe_file_v2))]);
+        all.extend(arguments);
+        self.call(name, all)
+    }
+
+    /// `a || b` as `selectShortV2(file, first, a, 0) || selectRightV2(file,
+    /// first, b)`, and `&&` (1) and `??` (2) alike. The program's own operator
+    /// stays, so a coverage tool the tests run -- nyc, c8, Jest, Vitest -- counts
+    /// the branches it counts without Supercov, and neither call needs a frame
+    /// or a temporary: the short side records its outcome when it decides the
+    /// result, the right side records whether it came out truthy. Both are small
+    /// enough for V8 to inline; the frame and three calls each evaluation cost
+    /// before were a tenth of lru-cache's hot loop, with MC/DC.
     fn instrument(
         &mut self,
         logical: oxc_allocator::Box<'a, LogicalExpression<'a>>,
-        short_id: &str,
-        right_id: &str,
+        first: usize,
     ) -> Expression<'a> {
         let logical = logical.unbox();
-        let frame = self.scratch();
-        let begin = self.call(
-            &self.selection_begin,
-            self.ast.vec_from_array([
-                self.string_argument(short_id),
-                self.string_argument(right_id),
-            ]),
+        let kind = match logical.operator {
+            LogicalOperator::Or => 0,
+            LogicalOperator::And => 1,
+            LogicalOperator::Coalesce => 2,
+        };
+        let left = self.helper(
+            &self.select_short_v2,
+            [
+                Argument::from(numeric(self.ast, first)),
+                Argument::from(logical.left),
+                Argument::from(numeric(self.ast, kind)),
+            ],
         );
-        let assign = self.ast.expression_assignment(
-            Span::default(),
-            AssignmentOperator::Assign,
-            self.assignment_target(&frame),
-            begin,
-        );
-        let right = self.call(
-            &self.selection_right,
-            self.ast.vec_from_array([
-                Argument::from(self.identifier(&frame)),
-                Argument::from(logical.right),
-            ]),
-        );
-        let selection =
-            self.ast
-                .expression_logical(Span::default(), logical.left, logical.operator, right);
-        let end = self.call(
-            &self.selection_end,
-            self.ast.vec_from_array([
-                Argument::from(self.identifier(&frame)),
-                Argument::from(selection),
-            ]),
-        );
+        let mut right_arguments = self.ast.vec_from_array([
+            Argument::from(self.identifier(&self.probe_file_v2)),
+            Argument::from(numeric(self.ast, first)),
+        ]);
+        right_arguments.push(Argument::from(logical.right));
+        let right = self.call(&self.select_right_v2, right_arguments);
         self.ast
-            .expression_sequence(Span::default(), self.ast.vec_from_array([assign, end]))
+            .expression_logical(Span::default(), left, logical.operator, right)
     }
 
     fn instrument_assignment(
@@ -4965,14 +5035,14 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
             *expression = self.instrument_assignment(assignment, &short_id, &right_id);
             return;
         }
-        let Some((short_id, right_id)) = self.logical_targets.remove(&key) else {
+        let Some(first) = self.logical_targets.remove(&key) else {
             return;
         };
         let original = expression.take_in(self.ast.allocator);
         let Expression::LogicalExpression(logical) = original else {
             panic!("logical-value target must remain a logical expression");
         };
-        *expression = self.instrument(logical, &short_id, &right_id);
+        *expression = self.instrument(logical, first);
     }
 }
 
@@ -5818,13 +5888,41 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             self.assignment_target(temporary_name),
             expression,
         );
+        // `weight * (1 + +!!V)`: 1 for a false condition, 2 for a true one, in
+        // this condition's base-3 digit. Written as `V ? 2w : w` it was a
+        // branch of its own to a coverage tool the tests run (nyc, c8, Jest,
+        // Vitest), which counted it against the user's line.
         let weight = 3_u64.pow(index as u32);
-        let digit = self.ast.expression_conditional(
+        let truth = self.ast.expression_unary(
             Span::default(),
-            self.identifier(temporary_name),
-            self.number(weight * 2),
-            self.number(weight),
+            UnaryOperator::UnaryPlus,
+            self.ast.expression_unary(
+                Span::default(),
+                UnaryOperator::LogicalNot,
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.identifier(temporary_name),
+                ),
+            ),
         );
+        let one_or_two = self.ast.expression_binary(
+            Span::default(),
+            self.number(1),
+            BinaryOperator::Addition,
+            truth,
+        );
+        let digit = if weight == 1 {
+            one_or_two
+        } else {
+            self.ast.expression_binary(
+                Span::default(),
+                self.number(weight),
+                BinaryOperator::Multiplication,
+                self.ast
+                    .expression_parenthesized(Span::default(), one_or_two),
+            )
+        };
         let add_digit = self.ast.expression_assignment(
             Span::default(),
             AssignmentOperator::Addition,
@@ -9006,7 +9104,7 @@ mod tests {
         assert!(output.code.contains(&runtime.mcdc_end_v2));
         assert!(output.code.contains("_supercovMcdcFrame"));
         assert!(output.code.contains("_supercovMcdcResult"));
-        assert!(output.code.contains("+= _supercovMcdcValue"));
+        assert!(output.code.contains("+= 1 + +!!_supercovMcdcValue"));
         assert_eq!(output.decisions.len(), 1);
         assert!(output.points.iter().any(|point| point.kind == "statement"));
         assert!(output.points.iter().any(|point| point.kind == "function"));

@@ -220,6 +220,60 @@ function installAuthoredSourceView() {
     };
     syncBuiltinESMExports();
 }
+// A project's own coverage tool measures what runs, and under Supercov that is
+// the instrumented copy, whose probes are branches no test was written to
+// cover: c8, Jest and Vitest each failed a 100% gate on a suite that covers
+// every branch (80%, 83.33%, 87.5%). The tool still runs and reports; its
+// thresholds are not checked, and the run says so once. Jest's and Vitest's
+// thresholds are dropped from the configurations Supercov hands them, which
+// call this too.
+process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__ ??= (tool) => {
+    if (process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS_NOTED__)
+        return;
+    process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS_NOTED__ = true;
+    console.error(`[supercov] ${tool}'s coverage thresholds were not checked: under Supercov, ${tool} measures the instrumented copy, probes included. Supercov's own report has this run's coverage.`);
+};
+const coverageTool = /\/node_modules\/(?:\.bin\/(c8|nyc)|(c8|nyc)\/bin\/(?:c8|nyc)\.js)$/.exec(entrypoint);
+if (coverageTool)
+    skipCoverageThresholds(coverageTool[1] ?? coverageTool[2]);
+function skipCoverageThresholds(tool) {
+    const skipped = async function skippedCoverageThresholds() {
+        process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__(tool);
+    };
+    try {
+        // Resolved from the tool's own bin, so the module patched is the one
+        // its CLI loads next (npm links .bin/c8 to c8/bin/c8.js).
+        const toolRequire = Module.createRequire(realpathSync(process.argv[1]));
+        if (tool === "c8") {
+            // Every c8 threshold -- --check-coverage, --100, .c8rc, .nycrc,
+            // package.json, `c8 check-coverage` -- is checked here, and
+            // report.js takes this export when it loads.
+            toolRequire("../lib/commands/check-coverage.js").checkCoverages = skipped;
+        }
+        else {
+            // A gated nyc run, `nyc report --check-coverage` and
+            // `nyc check-coverage` all check through this method.
+            const NYC = toolRequire("../index.js");
+            NYC.prototype.checkCoverage = skipped;
+            // The instrumented copy's source map leads to the project's own
+            // file, outside the isolated workspace nyc runs in, and
+            // excluding after remapping (nyc's default) dropped it: nyc
+            // reported "All files 0". The project's excludes still apply,
+            // to the copies, before remapping.
+            const collect = NYC.prototype.getCoverageMapFromAllCoverageFiles;
+            if (typeof collect === "function") {
+                NYC.prototype.getCoverageMapFromAllCoverageFiles = function getCoverageMapFromAllCoverageFiles(...args) {
+                    this.config.excludeAfterRemap = false;
+                    return Reflect.apply(collect, this, args);
+                };
+            }
+        }
+    }
+    catch (error) {
+        if (process.env.SUPERCOV_DEBUG === "1")
+            console.error(`[supercov] ${tool}'s coverage thresholds stay as configured`, error);
+    }
+}
 register(new URL("./resolve-loader.mjs", import.meta.url));
 if (process.env.SUPERCOV_DEBUG === "1") {
     console.error("[supercov] preload", { entrypoint });
@@ -251,6 +305,18 @@ if (generatedVitestConfig && /\/vitest(?:\.m?js)?$/.test(entrypoint)) {
             process.argv.splice(index, 1);
             index -= 1;
         }
+    }
+    // Thresholds on the command line override the configuration's, which the
+    // generated config leaves out (see the coverage tools above). Vitest 0.x
+    // took them directly under --coverage.
+    for (let index = 2; index < process.argv.length; index += 1) {
+        const argument = process.argv[index];
+        if (!/^--coverage\.(?:thresholds(?:\.[^=]+)?|lines|functions|branches|statements|perFile|100|thresholdAutoUpdate)(?:=|$)/.test(argument))
+            continue;
+        const valued = !argument.includes("=") && /^(?:\d+(?:\.\d+)?|true|false)$/.test(process.argv[index + 1] ?? "");
+        process.argv.splice(index, valued ? 2 : 1);
+        index -= 1;
+        process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__("Vitest");
     }
     if (originalConfig) {
         process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG = originalConfig;
@@ -299,6 +365,14 @@ if (isJestEntrypoint && process.env.SUPERCOV_EVIDENCE_DIR) {
                 process.env.SUPERCOV_ORIGINAL_JEST_CONFIG = value;
             process.argv.splice(index, 1);
             index -= 1;
+        }
+        else if (/^--coverage-?[Tt]hreshold(?:=|$)/.test(argument ?? "")) {
+            // Overrides the configuration's coverageThreshold, which
+            // jest.config.mjs leaves out (see the coverage tools above).
+            const valued = !argument.includes("=") && process.argv[index + 1]?.startsWith("{");
+            process.argv.splice(index, valued ? 2 : 1);
+            index -= 1;
+            process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__("Jest");
         }
     }
     process.argv.push("--config", generatedJestConfig);

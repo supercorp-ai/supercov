@@ -76,9 +76,10 @@ jobs:
         # leg's Vitest could use and its peer range pins the very version the
         # leg exists to move away from. Dropping it is what lets the older set
         # resolve; nothing here runs Vitest Browser Mode, which lives in
-        # `test:react` and `test:engine`.
+        # `test:react` and `test:engine`. `@vitest/coverage-v8` pins Vitest
+        # the same way, and only `test:engine` uses it.
         run: |
-          npm pkg delete 'devDependencies.@vitest/browser-playwright'
+          npm pkg delete 'devDependencies.@vitest/browser-playwright' 'devDependencies.@vitest/coverage-v8'
           npm install --no-save "@playwright/test@$PLAYWRIGHT_VERSION" "vite@$VITE_VERSION" "vitest@$VITEST_VERSION"
       # The fixture matrix drives Chromium, Firefox and WebKit.
       - run: npx playwright install --with-deps
