@@ -1283,7 +1283,9 @@ class Runtime:
             if relative is not None and relative in self.probe_files:
                 self.limitation(
                     "python-probes-unobserved-module",
-                    "CPython compiled the entry script without import probes; its execution was not observed",
+                    "a test ran this file as a script (python path/to/script.py), which CPython compiles "
+                    "outside the import system, so what that run executed was not observed; lines shown "
+                    "uncovered may have run there",
                     relative,
                 )
         if hasattr(os, "register_at_fork"):

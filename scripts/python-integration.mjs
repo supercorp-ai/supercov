@@ -583,15 +583,47 @@ try {
   successfulSupercov(processes, ['--', 'python', '-m', 'unittest', '-q'], processesEnvironment);
   const processFiles = query(processes, ['runs', 'latest', 'files'], processesEnvironment).files;
   for (const file of ['app/entry_one.py', 'app/entry_two.py']) {
+    // The parent imports these files and children run them as scripts. What
+    // the imports ran stays measured; the direct runs are declared, so the
+    // file reads as a lower bound rather than as unmeasured (issue #40).
     const detail = query(processes, ['runs', 'latest', 'file', file], processesEnvironment);
-    assert.equal(detail.counts.totalLines, 0, 'native entry scripts are declared unmeasured, not missed');
+    assert.ok(detail.counts.totalLines > 0, 'a script the tests also import stays measured');
+    assert.ok(detail.counts.coveredLines > 0, 'what its imports ran is counted');
     assert.ok(detail.totalTests > 0, 'the parent also imported this source, retaining its observed test identity');
-    assert.equal(processFiles.find(row => row.file === file).uncoveredLines, 0);
     assert.equal(processFiles.find(row => row.file === file).measurementLimitations, 1, 'each affected script keeps its own limitation');
   }
   const moduleEntry = query(processes, ['runs', 'latest', 'file', 'app/module_entry.py'], processesEnvironment);
   assert.ok(moduleEntry.counts.coveredLines > 0, 'a module entry goes through the import loader and stays measured');
   assert.equal(moduleEntry.counts.measurementLimitations, 0);
+
+  // `python -m py_compile` runs py_compile as __main__, where the patch that
+  // keeps its bytecode plain was never applied: a measured test that ran it
+  // wrote probed bytecode to the ordinary cache (issue #40).
+  const compiled = createProject(resolve(repository, 'tests/fixtures/python-subprocess'), 'py-compile');
+  const compiledEnvironment = environmentFor(compiled, venv);
+  writeFileSync(resolve(compiled, 'test_py_compile.py'), [
+    'import marshal, os, pathlib, subprocess, sys, tempfile, unittest',
+    '',
+    'def names(code):',
+    '    found = set(code.co_names)',
+    '    for constant in code.co_consts:',
+    '        if hasattr(constant, "co_names"):',
+    '            found |= names(constant)',
+    '    return found',
+    '',
+    'class PyCompile(unittest.TestCase):',
+    '    def test_writes_plain_bytecode(self):',
+    '        with tempfile.TemporaryDirectory() as prefix:',
+    '            env = dict(os.environ, PYTHONPYCACHEPREFIX=prefix)',
+    '            subprocess.run([sys.executable, "-m", "py_compile", "app/entry_one.py"], env=env, check=True)',
+    '            [pyc] = list(pathlib.Path(prefix).rglob("entry_one*.pyc"))',
+    '            probed = sorted(n for n in names(marshal.loads(pyc.read_bytes()[16:])) if "supercov" in n.lower())',
+    '            self.assertEqual(probed, [])',
+    '',
+  ].join('\n'));
+  if (version.minor >= 10) {
+    successfulSupercov(compiled, ['--', 'python', '-m', 'unittest', '-q', 'test_py_compile'], compiledEnvironment);
+  }
 
   // -- what probes compiled at import have to get right on their own --------
   // pytest keeps the bytecode it rewrote, site probes included; a plain run

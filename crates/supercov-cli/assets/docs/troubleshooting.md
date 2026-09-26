@@ -93,11 +93,18 @@ outside that loader. Supercov declares this boundary on the affected file,
 including on Python 3.9–3.11. It does not silently rewrite the child command,
 which could change imports, `sys.argv`, or process behavior.
 
-A file can therefore have tests that touched it through an import, while a
-separate direct execution makes its overall coverage unmeasured. Those lines
-are excluded from both the measured denominator and the uncovered-lines list.
-Inspect the file's measurement limitations before treating a zero denominator
-as complete coverage.
+A file that tests also import stays measured: what the imports ran is
+counted, and the file carries the limitation, because lines it shows as
+uncovered may have run in the direct execution. Its numbers are a lower bound,
+and the run reports its measurement as incomplete. A file that is only ever
+run directly has nothing observed, and is left out of the measured denominator
+and the uncovered-lines list; inspect its measurement limitations before
+treating a zero denominator as complete coverage.
+
+To have a script measured, run it through the import system:
+`python -m package.module`, or, for a file whose name is not a module name
+such as `bin/anti-drift-gate.py`, `runpy.run_path("bin/anti-drift-gate.py",
+run_name="__main__")` from a test.
 
 ## Python subprocess output or timeout assertions fail
 

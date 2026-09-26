@@ -2116,6 +2116,13 @@ pub fn build_python_frontend_run(
         .collect::<BTreeSet<_>>();
     let mut unmeasured = manifest.unmeasured.iter().cloned().collect::<BTreeSet<_>>();
     let mut new_limitations = Vec::new();
+    // What any process was seen to run, to tell a file some process ran
+    // unobserved from a file nothing observed at all.
+    let observed = raw_results
+        .iter()
+        .flat_map(|raw| raw.runtime.iter())
+        .flat_map(|snapshot| snapshot.hits.iter().cloned())
+        .collect::<std::collections::HashSet<String>>();
     for limitation in limitations.values() {
         if let Some(obligation) = &limitation.obligation {
             if !index.lines.contains_key(obligation.as_str()) {
@@ -2127,7 +2134,21 @@ pub fn build_python_frontend_run(
             // every obligation in that source file from being observed. Mark
             // the whole file unmeasured instead of presenting its denominator
             // as ordinary uncovered code.
-            if let Some(obligations) = index.files.get(file.as_str()) {
+            //
+            // An unobserved module is narrower: one process ran the file
+            // without probes -- most often `python path/script.py`, which
+            // CPython compiles outside the import system -- while every
+            // process that imported it was measured. A project whose tests
+            // both import its scripts and run them lost 43 files and six
+            // points of line coverage when the direct run discarded the
+            // imports' evidence. Such a file stays measured, a lower bound
+            // the limitation still flags, unless nothing it ran was observed.
+            let observed_elsewhere = limitation.id == "python-probes-unobserved-module"
+                && index
+                    .files
+                    .get(file.as_str())
+                    .is_some_and(|obligations| obligations.iter().any(|id| observed.contains(*id)));
+            if !observed_elsewhere && let Some(obligations) = index.files.get(file.as_str()) {
                 unmeasured.extend(obligations.iter().map(|id| (*id).to_owned()));
             }
         }
@@ -2987,6 +3008,68 @@ mod tests {
         assert_eq!(limitations[1]["file"], "b.py");
         assert_eq!(limitations[0]["code"], "python-probes-unobserved-module");
         assert_eq!(run.request.manifest.unmeasured.len(), 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_script_run_unobserved_stays_measured_where_its_imports_were_observed() {
+        // issue #40: tests import `bin/anti-drift-gate.py` and also run it as
+        // `python bin/anti-drift-gate.py`. The direct run made the whole file
+        // unmeasured, discarding what the imports were seen to run.
+        let imported = build_python_obligations("imported.py", "def f():\n    return 1\n").unwrap();
+        let only_run = build_python_obligations("only_run.py", "y = 2\n").unwrap();
+        let mut manifest = imported.manifest.clone();
+        manifest.points.extend(only_run.manifest.points.clone());
+        let statement = &imported.plan.statements[0];
+        let directory = temporary("script-and-import");
+        let records = vec![
+            json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.11","executable":"python","argv":["pytest"]}),
+            json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call"}),
+            json!({"t":"hit","ctx":1,"id":statement.id}),
+            json!({"t":"outcome","worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call","outcome":"passed","xfail":false}),
+            json!({"t":"limitation","id":"python-probes-unobserved-module","file":"imported.py","reason":"entry script"}),
+            json!({"t":"limitation","id":"python-probes-unobserved-module","file":"only_run.py","reason":"entry script"}),
+        ];
+        write_transport(&directory.join("main.1.mmap"), &records, 0);
+        let run = build_python_frontend_run(
+            &manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            &PythonAssertionInventory::empty(),
+        )
+        .unwrap();
+        let unmeasured = &run.request.manifest.unmeasured;
+        let file_points = |file: &str| {
+            manifest
+                .points
+                .iter()
+                .filter(|point| point.file == file)
+                .map(|point| point.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            file_points("imported.py")
+                .iter()
+                .all(|id| !unmeasured.contains(id)),
+            "an observed file keeps its measurement"
+        );
+        assert!(
+            file_points("only_run.py")
+                .iter()
+                .all(|id| unmeasured.contains(id)),
+            "a file nothing observed stays unmeasured"
+        );
+        // Both still say so: the imported file's numbers are a lower bound.
+        let files = run
+            .request
+            .manifest
+            .limitations
+            .iter()
+            .map(|limitation| limitation["file"].as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert!(files.contains("imported.py") && files.contains("only_run.py"));
         fs::remove_dir_all(directory).unwrap();
     }
 

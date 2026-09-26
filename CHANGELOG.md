@@ -12,6 +12,8 @@
 
 **Fixed**
 
+- A Python script that tests both import and run as `python path/script.py` keeps the lines its imports ran: the direct run made the whole file unmeasured, and one project lost 43 files and six points of line coverage to it. The file is flagged as a lower bound, and a file only ever run directly is still left out. Reported by [@maik-intellicoach](https://github.com/maik-intellicoach). (#40)
+- `python -m py_compile` in a measured test writes plain bytecode. (#40)
 - JSX in a `.js` file is measured instead of failing the run before any test.
 - A run whose tests leave async work running into the next test opens: axios's ended with `Failed to open coverage index … unknown frontend phase reference`. A leftover no longer carries the ended test's phase, and runs recorded by 2.0.1 open too.
 - Tests that pollute `Object.prototype`, as axios's prototype-pollution tests do, pass under Supercov as they do without it.
