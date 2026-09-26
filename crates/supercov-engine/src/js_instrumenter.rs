@@ -547,14 +547,13 @@ pub struct CandidateRuntime {
     pub mcdc_end_v2: String,
     pub coverage_hit_v2: String,
     pub probe_file_v2: String,
-    pub selection_begin: String,
-    pub selection_right: String,
-    pub selection_end: String,
     pub parenthesized_assignment_value: String,
     pub with_request_phase: String,
     pub optional_select_v2: String,
     pub select_short_v2: String,
     pub select_right_v2: String,
+    pub select_named_right_v2: String,
+    pub select_assign_end_v2: String,
     pub rendered_value_v2: String,
     pub optional_call_end_v2: String,
     pub default_selected_v2: String,
@@ -3031,14 +3030,13 @@ fn instrument_candidate_with_binding(
     let _probe_hits_v2 = names.allocate("__supercovProbeHitsV2");
     let _probe_decisions_v2 = names.allocate("__supercovProbeDecisionsV2");
     let _probe_complete_v2 = names.allocate("__supercovProbeCompleteV2");
-    let selection_begin = names.allocate("__supercovSelectionBegin");
-    let selection_right = names.allocate("__supercovSelectionRight");
-    let selection_end = names.allocate("__supercovSelectionEnd");
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
     let with_request_phase = names.allocate("__supercovWithRequestPhase");
     let optional_select_v2 = names.allocate("__supercovOptionalSelectV2");
     let select_short_v2 = names.allocate("__supercovSelectShortV2");
     let select_right_v2 = names.allocate("__supercovSelectRightV2");
+    let select_named_right_v2 = names.allocate("__supercovSelectNamedRightV2");
+    let select_assign_end_v2 = names.allocate("__supercovSelectAssignEndV2");
     let rendered_value_v2 = names.allocate("__supercovRenderedValueV2");
     let optional_call_end_v2 = names.allocate("__supercovOptionalCallEndV2");
     let default_selected_v2 = names.allocate("__supercovDefaultSelectedV2");
@@ -3094,7 +3092,12 @@ fn instrument_candidate_with_binding(
     let selection_targets = extra.allocate(&logical_analysis.logical_targets, |(short, right)| {
         vec![short.clone(), short.clone(), right.clone(), right.clone()]
     });
-    let selection_count = selection_targets.len();
+    // A logical assignment's outcomes are a selection's four points too, next
+    // to the others, so the runtime records its per-operand outcomes the same.
+    let assignment_targets = extra.allocate(&assignment_analysis.targets, |(short, right)| {
+        vec![short.clone(), short.clone(), right.clone(), right.clone()]
+    });
+    let selection_count = selection_targets.len() + assignment_targets.len();
     let optional_member_targets = extra
         .allocate(&optional_analysis.targets, |(short, continued)| {
             vec![short.clone(), continued.clone()]
@@ -3245,17 +3248,16 @@ fn instrument_candidate_with_binding(
     transformer.visit_program(&mut parsed.program);
     let mut logical_transformer = LogicalValueTransformer {
         ast,
-        selection_begin: selection_begin.clone(),
-        selection_right: selection_right.clone(),
-        selection_end: selection_end.clone(),
         select_short_v2: select_short_v2.clone(),
         select_right_v2: select_right_v2.clone(),
+        select_named_right_v2: select_named_right_v2.clone(),
+        select_assign_end_v2: select_assign_end_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
         typescript,
         names: CandidateNames::within(source, &namespace),
         scope_declarations: Vec::new(),
         logical_targets: selection_targets,
-        assignment_targets: assignment_analysis.targets,
+        assignment_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         with_statements: safety.with_statements.clone(),
     };
@@ -3325,9 +3327,6 @@ fn instrument_candidate_with_binding(
         ("registerProbeV2", &register_probe_v2),
         ("mcdcEndV2", &mcdc_end_v2),
         ("coverageHitV2", &coverage_hit_v2),
-        ("selectionBegin", &selection_begin),
-        ("selectionRight", &selection_right),
-        ("selectionEnd", &selection_end),
         (
             "parenthesizedAssignmentValue",
             &parenthesized_assignment_value,
@@ -3335,6 +3334,8 @@ fn instrument_candidate_with_binding(
         ("optionalSelectV2", &optional_select_v2),
         ("selectShortV2", &select_short_v2),
         ("selectRightV2", &select_right_v2),
+        ("selectNamedRightV2", &select_named_right_v2),
+        ("selectAssignEndV2", &select_assign_end_v2),
         ("renderedValueV2", &rendered_value_v2),
         ("optionalCallEndV2", &optional_call_end_v2),
         ("defaultSelectedV2", &default_selected_v2),
@@ -3432,14 +3433,13 @@ fn instrument_candidate_with_binding(
             mcdc_end_v2,
             coverage_hit_v2,
             probe_file_v2,
-            selection_begin,
-            selection_right,
-            selection_end,
             parenthesized_assignment_value,
             with_request_phase,
             optional_select_v2,
             select_short_v2,
             select_right_v2,
+            select_named_right_v2,
+            select_assign_end_v2,
             rendered_value_v2,
             optional_call_end_v2,
             default_selected_v2,
@@ -4806,11 +4806,10 @@ impl<'a> VisitMut<'a> for ExtendedTransformer<'a, '_> {
 
 struct LogicalValueTransformer<'a, 's> {
     ast: AstBuilder<'a>,
-    selection_begin: String,
-    selection_right: String,
-    selection_end: String,
     select_short_v2: String,
     select_right_v2: String,
+    select_named_right_v2: String,
+    select_assign_end_v2: String,
     probe_file_v2: String,
     typescript: bool,
     names: CandidateNames<'s>,
@@ -4818,7 +4817,8 @@ struct LogicalValueTransformer<'a, 's> {
     /// A selection's four outcomes -- short falsy, short truthy, right falsy,
     /// right truthy -- are consecutive V2 points from this index.
     logical_targets: HashMap<SpanKey, usize>,
-    assignment_targets: HashMap<SpanKey, (String, String)>,
+    /// The same four points for `||=`, `&&=` and `??=`.
+    assignment_targets: HashMap<SpanKey, usize>,
     source_sensitive_functions: HashSet<SpanKey>,
     with_statements: HashSet<SpanKey>,
 }
@@ -4873,7 +4873,7 @@ impl<'a> LogicalValueTransformer<'a, '_> {
     }
 
     fn scratch(&mut self) -> String {
-        let name = self.names.allocate("_supercovSelectionFrame");
+        let name = self.names.allocate("_supercovAssignedRight");
         self.scope_declarations
             .last_mut()
             .expect("logical expression must be inside a program or function")
@@ -4926,11 +4926,16 @@ impl<'a> LogicalValueTransformer<'a, '_> {
             .expression_logical(Span::default(), left, logical.operator, right)
     }
 
+    /// `x ||= y` as `(T = 0, selectAssignEndV2(file, first, x ||= selectRightV2(
+    /// file, first, y, T = 1), T))`, and `&&=` and `??=` alike. The operator
+    /// stays, so the target is read and written once, as the program does, and
+    /// a frame per evaluation is gone. `T` is a temporary of the enclosing
+    /// function, set after the right side evaluates, so a recursive call there
+    /// has its own; the end records the short outcome when it is still 0.
     fn instrument_assignment(
         &mut self,
         assignment: oxc_allocator::Box<'a, AssignmentExpression<'a>>,
-        short_id: &str,
-        right_id: &str,
+        first: usize,
     ) -> Expression<'a> {
         let assignment = assignment.unbox();
         let inferred_name = match &assignment.left {
@@ -4942,28 +4947,30 @@ impl<'a> LogicalValueTransformer<'a, '_> {
             }
             _ => None,
         };
-        let frame = self.scratch();
-        let begin = self.call(
-            &self.selection_begin,
-            self.ast.vec_from_array([
-                self.string_argument(short_id),
-                self.string_argument(right_id),
-            ]),
-        );
-        let assign_frame = self.ast.expression_assignment(
-            Span::default(),
-            AssignmentOperator::Assign,
-            self.assignment_target(&frame),
-            begin,
-        );
+        let right_evaluated = self.scratch();
+        let set = |value| {
+            self.ast.expression_assignment(
+                Span::default(),
+                AssignmentOperator::Assign,
+                self.assignment_target(&right_evaluated),
+                numeric(self.ast, value),
+            )
+        };
+        let (reset, mark) = (set(0), set(1));
         let mut right_arguments = self.ast.vec_from_array([
-            Argument::from(self.identifier(&frame)),
+            Argument::from(self.identifier(&self.probe_file_v2)),
+            Argument::from(numeric(self.ast, first)),
             Argument::from(assignment.right),
         ]);
-        if let Some(name) = inferred_name {
-            right_arguments.push(self.string_argument(&name));
-        }
-        let right = self.call(&self.selection_right, right_arguments);
+        let right_helper = match inferred_name {
+            Some(name) => {
+                right_arguments.push(self.string_argument(&name));
+                &self.select_named_right_v2
+            }
+            None => &self.select_right_v2,
+        };
+        right_arguments.push(Argument::from(mark));
+        let right = self.call(right_helper, right_arguments);
         let measured_assignment = self.ast.expression_assignment(
             Span::default(),
             assignment.operator,
@@ -4971,15 +4978,17 @@ impl<'a> LogicalValueTransformer<'a, '_> {
             right,
         );
         let end = self.call(
-            &self.selection_end,
+            &self.select_assign_end_v2,
             self.ast.vec_from_array([
-                Argument::from(self.identifier(&frame)),
+                Argument::from(self.identifier(&self.probe_file_v2)),
+                Argument::from(numeric(self.ast, first)),
                 Argument::from(measured_assignment),
+                Argument::from(self.identifier(&right_evaluated)),
             ]),
         );
         self.ast.expression_sequence(
             Span::default(),
-            self.ast.vec_from_array([assign_frame, end]),
+            self.ast.vec_from_array([reset, end]),
         )
     }
 }
@@ -5027,12 +5036,12 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
         let key = span_key(expression.span());
         walk_mut::walk_expression(self, expression);
-        if let Some((short_id, right_id)) = self.assignment_targets.remove(&key) {
+        if let Some(first) = self.assignment_targets.remove(&key) {
             let original = expression.take_in(self.ast.allocator);
             let Expression::AssignmentExpression(assignment) = original else {
                 panic!("logical-assignment target must remain an assignment expression");
             };
-            *expression = self.instrument_assignment(assignment, &short_id, &right_id);
+            *expression = self.instrument_assignment(assignment, first);
             return;
         }
         let Some(first) = self.logical_targets.remove(&key) else {
@@ -9184,6 +9193,33 @@ mod tests {
             instrument_with_import_policy(source, "src/mixed.ts", "./capability.mjs", true, true)
                 .unwrap();
         assert!(mixed.excluded_statements.is_empty());
+    }
+
+    #[test]
+    fn logical_assignments_keep_their_operator_and_record_through_v2_points() {
+        let source = "export function fill(o, key) { o.name ||= 'anon'; o[key()] ??= 0; let named; named &&= function () {}; return o; }";
+        for file in ["app/fill.js", "app/fill.ts"] {
+            let output = instrument_candidate(source, file).unwrap();
+            let runtime = output.runtime.expect("candidate runtime binding");
+            // No frame per evaluation: the target is written by the program's
+            // own operator, once.
+            assert!(!output.code.contains("SelectionFrame"), "{}", output.code);
+            assert!(output.code.contains("||= "), "{}", output.code);
+            assert!(output.code.contains("??= "), "{}", output.code);
+            assert!(output.code.contains("&&= "), "{}", output.code);
+            assert_eq!(
+                output.code.matches(&format!("{}(", runtime.select_assign_end_v2)).count(),
+                3
+            );
+            assert_eq!(
+                output.code.matches(&format!("{}(", runtime.select_named_right_v2)).count(),
+                1
+            );
+            let allocator = Allocator::default();
+            let reparsed =
+                Parser::new(&allocator, &output.code, SourceType::from_path(file).unwrap()).parse();
+            assert!(reparsed.errors.is_empty(), "{:?}", reparsed.errors);
+        }
     }
 
     #[test]

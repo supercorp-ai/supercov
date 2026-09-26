@@ -149,6 +149,8 @@ function runtimePrelude(transformed) {
     optionalSelectV2: "function(file,first,value){return value;}",
     selectShortV2: "function(file,first,value){return value;}",
     selectRightV2: "function(file,first,value){return value;}",
+    selectNamedRightV2: "function(file,first,value,name){if(name&&typeof value==='function'&&value.name==='')Object.defineProperty(value,'name',{value:name,configurable:true});return value;}",
+    selectAssignEndV2: "function(file,first,value){return value;}",
     optionalCallEndV2: "function(file,first,value){return value;}",
     tryBegin: "function(){return {};}",
     tryCatch: "function(frame,value){return value;}",

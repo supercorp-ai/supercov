@@ -898,6 +898,8 @@ export declare function defaultEnteredV2(...args: any[]): any;\n\
 export declare function optionalSelectV2(...args: any[]): any;\n\
 export declare function selectShortV2(...args: any[]): any;\n\
 export declare function selectRightV2(...args: any[]): any;\n\
+export declare function selectNamedRightV2(...args: any[]): any;\n\
+export declare function selectAssignEndV2(...args: any[]): any;\n\
 export declare function optionalCallEndV2(...args: any[]): any;\n\
 export declare function tryBegin(...args: any[]): any;\n\
 export declare function tryCatch(...args: any[]): any;\n\

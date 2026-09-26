@@ -1527,6 +1527,20 @@ function selectRightV2(file, first, value) {
   coverageHitV2(file, value ? first + 3 : first + 2);
   return value;
 }
+// `x ||= y`, `x &&= y`, `x ??= y` keep their operator and their single
+// evaluation of the target: the right side goes through selectRightV2 (or the
+// named form, for an anonymous function the assignment would have named), and
+// a site temporary set to 1 after it tells the end whether the assignment was
+// skipped, which is then the short outcome for the value the target kept.
+function selectNamedRightV2(file, first, value, inferredName) {
+  coverageHitV2(file, value ? first + 3 : first + 2);
+  return applyInferredName(value, inferredName);
+}
+function selectAssignEndV2(file, first, value, right) {
+  if (!right)
+    coverageHitV2(file, value ? first + 1 : first);
+  return value;
+}
 // `object?.member`: the short and continued outcomes are two V2 points.
 function optionalSelectV2(file, first, value) {
   coverageHitV2(file, value === null || value === void 0 ? first : first + 1);
@@ -1720,6 +1734,8 @@ const directRuntimeApi = {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  selectNamedRightV2,
+  selectAssignEndV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,
@@ -1779,6 +1795,8 @@ export {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  selectNamedRightV2,
+  selectAssignEndV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,
