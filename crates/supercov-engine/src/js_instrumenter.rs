@@ -345,10 +345,23 @@ fn equal_ignoring_whitespace(left: &str, right: &str) -> bool {
     significant(left).eq(significant(right))
 }
 
+/// Line starts, and for each line how to turn a UTF-16 column into bytes
+/// without walking the line from its start.
+///
+/// Every source-map token is converted, and walking the line made a file with
+/// long lines cost the product of its tokens and its line length: recording
+/// Actual stopped for more than half an hour inside one such file. An ASCII
+/// line's column is its byte offset; a line that is not keeps a checkpoint
+/// every `CHECKPOINT` UTF-16 units, so a lookup walks at most that far.
 struct Utf16LineIndex<'s> {
     source: &'s str,
     starts: Vec<usize>,
+    /// Per line: `None` when ASCII, otherwise `(utf16 column, byte offset)`
+    /// checkpoints from the line's start, the first being `(0, 0)`.
+    checkpoints: Vec<Option<Vec<(usize, usize)>>>,
 }
+
+const CHECKPOINT: usize = 256;
 
 impl<'s> Utf16LineIndex<'s> {
     fn new(source: &'s str) -> Self {
@@ -359,28 +372,74 @@ impl<'s> Utf16LineIndex<'s> {
                 .char_indices()
                 .filter_map(|(offset, character)| (character == '\n').then_some(offset + 1)),
         );
-        Self { source, starts }
+        let checkpoints = (0..starts.len())
+            .map(|line| {
+                let end = starts.get(line + 1).copied().unwrap_or(source.len());
+                let text = &source[starts[line]..end];
+                if text.is_ascii() {
+                    return None;
+                }
+                let mut marks = vec![(0, 0)];
+                let mut column = 0;
+                for (offset, character) in text.char_indices() {
+                    if column >= marks.last().expect("a first mark").0 + CHECKPOINT {
+                        marks.push((column, offset));
+                    }
+                    column += character.len_utf16();
+                }
+                Some(marks)
+            })
+            .collect();
+        Self {
+            source,
+            starts,
+            checkpoints,
+        }
+    }
+
+    fn line_end(&self, line: usize) -> usize {
+        self.starts
+            .get(line + 1)
+            .copied()
+            .unwrap_or(self.source.len())
     }
 
     fn byte_offset(&self, target_line: usize, target_utf16_col: usize) -> usize {
         let Some(&start) = self.starts.get(target_line) else {
             return self.source.len();
         };
-        let end = self
-            .starts
-            .get(target_line + 1)
-            .copied()
-            .unwrap_or(self.source.len());
-        start + utf16_col_to_byte(&self.source[start..end], target_utf16_col)
+        let end = self.line_end(target_line);
+        match &self.checkpoints[target_line] {
+            None => start + target_utf16_col.min(end - start),
+            Some(marks) => {
+                let at = marks.partition_point(|(column, _)| *column <= target_utf16_col) - 1;
+                let (column, offset) = marks[at];
+                start
+                    + offset
+                    + utf16_col_to_byte(
+                        &self.source[start + offset..end],
+                        target_utf16_col - column,
+                    )
+            }
+        }
     }
 
     fn line_col(&self, byte_offset: usize) -> (u32, u32) {
         let byte_offset = byte_offset.min(self.source.len());
         let line = self.starts.partition_point(|start| *start <= byte_offset) - 1;
-        let column = self.source[self.starts[line]..byte_offset]
-            .chars()
-            .map(char::len_utf16)
-            .sum::<usize>();
+        let start = self.starts[line];
+        let column = match &self.checkpoints[line] {
+            None => byte_offset - start,
+            Some(marks) => {
+                let at = marks.partition_point(|(_, offset)| *offset <= byte_offset - start) - 1;
+                let (column, offset) = marks[at];
+                column
+                    + self.source[start + offset..byte_offset]
+                        .chars()
+                        .map(char::len_utf16)
+                        .sum::<usize>()
+            }
+        };
         (line as u32, column as u32)
     }
 }
@@ -7722,7 +7781,10 @@ struct SourcePositions {
     sample: u64,
     line_starts: Vec<usize>,
     utf16_before_line: Vec<usize>,
-    ascii_line: Vec<bool>,
+    /// Per line: `None` when ASCII, otherwise `(byte offset, utf16 column)`
+    /// checkpoints from the line's start, so a long line that is not ASCII
+    /// -- a table of currency symbols, say -- is not walked per position.
+    checkpoints: Vec<Option<Vec<(usize, usize)>>>,
 }
 
 impl SourcePositions {
@@ -7740,27 +7802,38 @@ impl SourcePositions {
     fn new(source: &str) -> Self {
         let mut line_starts = vec![0];
         let mut utf16_before_line = vec![0];
-        let mut ascii_line = Vec::new();
+        let mut checkpoints = Vec::new();
+        let mut marks: Option<Vec<(usize, usize)>> = None;
         let mut utf16 = 0;
-        let mut ascii = true;
+        let mut column = 0;
+        let mut line_start = 0;
         for (index, character) in source.char_indices() {
+            if !character.is_ascii() && marks.is_none() {
+                marks = Some(vec![(0, 0)]);
+            }
+            if let Some(marks) = &mut marks
+                && column >= marks.last().expect("a first mark").1 + CHECKPOINT
+            {
+                marks.push((index - line_start, column));
+            }
             utf16 += character.len_utf16();
-            ascii &= character.is_ascii();
+            column += character.len_utf16();
             if character == '\n' {
-                line_starts.push(index + 1);
+                line_start = index + 1;
+                line_starts.push(line_start);
                 utf16_before_line.push(utf16);
-                ascii_line.push(ascii);
-                ascii = true;
+                checkpoints.push(marks.take());
+                column = 0;
             }
         }
-        ascii_line.push(ascii);
+        checkpoints.push(marks);
         Self {
             address: source.as_ptr() as usize,
             length: source.len(),
             sample: Self::sample(source),
             line_starts,
             utf16_before_line,
-            ascii_line,
+            checkpoints,
         }
     }
 
@@ -7774,10 +7847,13 @@ impl SourcePositions {
     fn locate(&self, source: &str, offset: usize) -> (usize, usize) {
         let line = self.line_starts.partition_point(|start| *start <= offset) - 1;
         let start = self.line_starts[line];
-        let column = if self.ascii_line[line] {
-            offset - start
-        } else {
-            source[start..offset].encode_utf16().count()
+        let column = match &self.checkpoints[line] {
+            None => offset - start,
+            Some(marks) => {
+                let at = marks.partition_point(|(byte, _)| *byte <= offset - start) - 1;
+                let (byte, column) = marks[at];
+                column + source[start + byte..offset].encode_utf16().count()
+            }
         };
         (line, column)
     }
@@ -7869,9 +7945,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn line_index_lookups_agree_with_walking_the_line() {
+        let long = "é🚀x".repeat(700);
+        let source = format!("const a = 1;\nconst s = '{long}';\n\nplain ascii line\n{long}");
+        let index = Utf16LineIndex::new(&source);
+        for (line, text) in source.split_inclusive('\n').enumerate() {
+            let start = index.starts[line];
+            let width: usize = text.chars().map(char::len_utf16).sum();
+            for column in 0..=width + 2 {
+                assert_eq!(
+                    index.byte_offset(line, column),
+                    start + utf16_col_to_byte(text, column),
+                    "line {line} column {column}"
+                );
+            }
+            for (offset, _) in text.char_indices() {
+                let walked: usize = text[..offset].chars().map(char::len_utf16).sum();
+                assert_eq!(index.line_col(start + offset), (line as u32, walked as u32));
+            }
+        }
+    }
+
+    #[test]
     fn indexed_positions_agree_with_counting_from_the_top() {
-        let source =
-            "const s = 'naïve 🚀';\n\nexport function f(a) {\n  return a ? 'é' : s;\n}\n// 日本\nx";
+        // The long line passes several checkpoints.
+        let source = &format!(
+            "const s = 'naïve 🚀';\n\nexport function f(a) {{\n  return a ? 'é' : s;\n}}\n// 日本\nconst t = '{}';\nx",
+            "é🚀x".repeat(400)
+        );
+        let source = source.as_str();
         let counted: Vec<_> = source
             .char_indices()
             .map(|(offset, _)| {
