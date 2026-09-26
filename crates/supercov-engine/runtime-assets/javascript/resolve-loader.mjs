@@ -1,5 +1,5 @@
 import { resolve as resolvePath } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 const GENERATED_TARGET = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const TARGET = process.env.SUPERCOV_PLAYWRIGHT_MODULE ??
     (GENERATED_TARGET.startsWith("__") ? "@playwright/test" : GENERATED_TARGET);
@@ -74,4 +74,43 @@ export async function resolve(specifier, context, nextResolve) {
         return nextResolve(REPLACEMENT, context);
     }
     return nextResolve(specifier, context);
+}
+
+// Node's own test coverage filters files by `--test-coverage-include` and
+// `--test-coverage-exclude` globs relative to the working directory, and the
+// instrumented copy's source map names the project's file, outside the
+// isolated workspace the tests run in: `src/**` matched nothing, the report
+// was empty and its thresholds passed with nothing checked. When those globs
+// are given, the map this process caches names the copy's own path instead;
+// its embedded original text is what Node reports. Nothing is written: other
+// coverage tools read the file as it is on disk.
+const NODE_COVERAGE_FILTERS = process.execArgv.some((argument) => /^--test-coverage-(?:include|exclude)(?:=|$)/.test(argument)) &&
+    (Boolean(process.env.NODE_V8_COVERAGE) || process.execArgv.includes("--experimental-test-coverage"));
+const INLINE_MAP = "//# sourceMappingURL=data:application/json;base64,";
+function mapToCopy(source, filename) {
+    if (typeof source !== "string" || !source.includes("__supercov"))
+        return source;
+    const at = source.lastIndexOf(INLINE_MAP);
+    if (at < 0)
+        return source;
+    const end = source.indexOf("\n", at);
+    const encoded = source.slice(at + INLINE_MAP.length, end < 0 ? undefined : end).trim();
+    try {
+        const map = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+        if (!Array.isArray(map.sources) || map.sources.length !== 1)
+            return source;
+        map.sources = [filename.replace(/^.*[\\/]/, "")];
+        return `${source.slice(0, at)}${INLINE_MAP}${Buffer.from(JSON.stringify(map)).toString("base64")}${end < 0 ? "" : source.slice(end)}`;
+    }
+    catch {
+        return source;
+    }
+}
+export async function load(url, context, nextLoad) {
+    const result = await nextLoad(url, context);
+    if (!NODE_COVERAGE_FILTERS || result.source == null || !url.startsWith("file:"))
+        return result;
+    const text = typeof result.source === "string" ? result.source : Buffer.from(result.source).toString("utf8");
+    const mapped = mapToCopy(text, fileURLToPath(url));
+    return mapped === text ? result : { ...result, source: mapped };
 }

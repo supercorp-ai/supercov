@@ -530,6 +530,9 @@ ${body}});
   const summary = (output) => output.match(/^(?:Statements|Branches|Functions|Lines)\s+:.*$/gm)?.join('\n');
   for (const [tool, command, read] of [
     ['node', [process.execPath, '--test', '--experimental-test-coverage', 'test/node.test.js'], nodeRow],
+    // Its include and exclude globs are relative to the working directory, so
+    // the map names the workspace's copy while they are given.
+    ['node, with globs', [process.execPath, '--test', '--experimental-test-coverage', '--test-coverage-include=src/**', '--test-coverage-exclude=src/none/**', 'test/node.test.js'], nodeRow],
     ['jest', [process.execPath, 'node_modules/jest/bin/jest.js', '--coverage', '--coverageReporters=text-summary'], summary],
     ['vitest', [process.execPath, 'node_modules/vitest/vitest.mjs', 'run', '--coverage'], summary],
   ]) {
@@ -542,12 +545,13 @@ ${body}});
     assert.equal(measured.status, 0, measured.output);
     assert.equal(read(measured.output), expected, `${tool} under Supercov:\n${measured.output}`);
   }
-  // Node's thresholds judge that same report: met at its figures, missed a
-  // point above, as without Supercov.
+  // Node's thresholds judge that same report, include glob and all: met at
+  // its figures, missed a point above, as without Supercov. With the glob they
+  // passed on an empty report before.
   const [lines, branches, functions] = nodeRow(spawnSync(process.execPath,
     ['--test', '--experimental-test-coverage', 'test/node.test.js'], { cwd: reports, encoding: 'utf8' }).stdout)
     .split('|').map((cell) => Math.floor(Number.parseFloat(cell)));
-  const thresholds = (extra) => [process.execPath, '--test', '--experimental-test-coverage',
+  const thresholds = (extra) => [process.execPath, '--test', '--experimental-test-coverage', '--test-coverage-include=src/**',
     `--test-coverage-lines=${lines + extra}`, `--test-coverage-branches=${branches}`, `--test-coverage-functions=${functions}`, 'test/node.test.js'];
   const met = supercov(reports, ['--', ...thresholds(0)]);
   assert.equal(met.status, 0, met.output);

@@ -121,6 +121,42 @@ syncBuiltinESMExports();
 const generatedVitestConfig = process.env.SUPERCOV_GENERATED_VITEST_CONFIG;
 const generatedPlaywrightConfig = process.env.SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG;
 const entrypoint = process.argv[1]?.replaceAll("\\", "/") ?? "";
+// Node's own test coverage filters files by `--test-coverage-include` and
+// `--test-coverage-exclude` globs relative to the working directory, and the
+// instrumented copy's source map names the project's file, outside the
+// isolated workspace the tests run in: `src/**` matched nothing, the report
+// was empty and its thresholds passed with nothing checked. When those globs
+// are given, the map this process caches names the copy's own path instead;
+// its embedded original text is what Node reports. Nothing is written: other
+// coverage tools read the file as it is on disk.
+const NODE_COVERAGE_FILTERS = process.execArgv.some((argument) => /^--test-coverage-(?:include|exclude)(?:=|$)/.test(argument)) &&
+    (Boolean(process.env.NODE_V8_COVERAGE) || process.execArgv.includes("--experimental-test-coverage"));
+const INLINE_MAP = "//# sourceMappingURL=data:application/json;base64,";
+function mapToCopy(source, filename) {
+    if (typeof source !== "string" || !source.includes("__supercov"))
+        return source;
+    const at = source.lastIndexOf(INLINE_MAP);
+    if (at < 0)
+        return source;
+    const end = source.indexOf("\n", at);
+    const encoded = source.slice(at + INLINE_MAP.length, end < 0 ? undefined : end).trim();
+    try {
+        const map = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+        if (!Array.isArray(map.sources) || map.sources.length !== 1)
+            return source;
+        map.sources = [filename.replace(/^.*[\\/]/, "")];
+        return `${source.slice(0, at)}${INLINE_MAP}${Buffer.from(JSON.stringify(map)).toString("base64")}${end < 0 ? "" : source.slice(end)}`;
+    }
+    catch {
+        return source;
+    }
+}
+if (NODE_COVERAGE_FILTERS) {
+    const compile = Module.prototype._compile;
+    Module.prototype._compile = function _compile(content, filename, ...rest) {
+        return Reflect.apply(compile, this, [mapToCopy(content, filename), filename, ...rest]);
+    };
+}
 const playwrightTarget = process.env.SUPERCOV_PLAYWRIGHT_MODULE;
 const projectRoot = process.env.SUPERCOV_PROJECT_ROOT?.replaceAll("\\", "/").replace(/\/$/, "");
 const nodeTestWrapper = new URL("./nodeTest.mjs", import.meta.url).href;
