@@ -158,8 +158,10 @@ try {
   write(workers, 'public/page.js', [
     "var worker = new Worker('worker.js');",
     "worker.onmessage = function (event) { document.getElementById('out').textContent = String(event.data); };",
-    "document.getElementById('square').addEventListener('click', function () { worker.postMessage(7); });",
     'var shared = new Int32Array(new SharedArrayBuffer(4));',
+    // A worker built from a string carries no runtime; it blocks too.
+    "var inline = new Worker(URL.createObjectURL(new Blob(['onmessage = function (event) { Atomics.wait(event.data, 0, 0); };'], { type: 'text/javascript' })));",
+    "document.getElementById('square').addEventListener('click', function () { worker.postMessage(7); inline.postMessage(shared); });",
     "var sleeper = new Worker('sleeper.js');",
     "sleeper.onmessage = function (event) { document.getElementById('woke').textContent = event.data; };",
     'sleeper.postMessage(shared);',
@@ -223,7 +225,8 @@ try {
   }
   // The first test closed its page with the sleeper still blocked in
   // Atomics.wait, where no evaluation runs; it pushed its evidence to the page
-  // before it blocked, so both tests are exact.
+  // before it blocked, so both tests are exact. The worker built from a string
+  // blocks as well, and has no evidence to read.
   const summary = supercov(workers, ['runs', 'latest']);
   assert.match(summary.output, /Attribution\s+Exact for 2 test\(s\)/, summary.output);
 

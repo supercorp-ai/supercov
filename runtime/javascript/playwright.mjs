@@ -223,6 +223,11 @@ class CoveragePhaseController {
     // Each worker's token, under which it pushes its evidence to its pages
     // before it blocks in Atomics.wait (see runtime.mjs).
     workerTokens = new WeakMap();
+    // Workers that answered their registration without Supercov's runtime: a
+    // worker built from a string (a `blob:` URL), or from a script nobody
+    // instrumented. There is no phase to set in them and no evidence to read,
+    // and Actual's blocked ones were most of what each step waited for.
+    workersWithoutRuntime = new WeakSet();
     // Set when a worker's evidence could not be read: the test's coverage is
     // then a lower bound.
     workerEvidenceMissing = false;
@@ -270,6 +275,18 @@ class CoveragePhaseController {
      * in time is still running and its evidence is missing from this test.
      */
     async snapshotWorker(worker, pages) {
+        if (this.workersWithoutRuntime.has(worker)) {
+            // Asked once more, without waiting: it may have loaded an
+            // instrumented script since it was registered.
+            const answer = await bounded(worker
+                .evaluate(() => globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__?.())
+                .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
+            if (answer && answer !== WORKER_TIMED_OUT) {
+                this.snapshottedWorkers.add(worker);
+                return answer;
+            }
+            return undefined;
+        }
         const answer = await bounded(worker
             .evaluate(() => {
             const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
@@ -455,16 +472,19 @@ class CoveragePhaseController {
             return;
         this.workers.add(worker);
         const phaseId = this.requestPhaseId();
-        const token = await worker
+        const registration = await worker
             .evaluate(({ attemptId, scopeHeader, scopeValue, phaseHeader, phase }) => {
             globalThis.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
             if (phase)
                 globalThis.__SUPERCOV_PHASE_ID__ = phase;
             globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(attemptId, phase);
-            const token = globalThis.__SUPERCOV_WORKER_TOKEN__;
+            const answer = {
+                token: globalThis.__SUPERCOV_WORKER_TOKEN__,
+                runtime: typeof globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__ === "function",
+            };
             const originalFetch = globalThis.fetch?.bind(globalThis);
             if (!originalFetch)
-                return token;
+                return answer;
             globalThis.fetch = ((input, init) => {
                 const headers = new Headers(init?.headers ??
                     (input instanceof Request ? input.headers : undefined));
@@ -473,7 +493,7 @@ class CoveragePhaseController {
                     headers.set(phaseHeader, phase);
                 return originalFetch(input, { ...init, headers });
             });
-            return token;
+            return answer;
         }, {
             attemptId: this.scope.attemptId,
             scopeHeader: COVERAGE_SCOPE_HEADER,
@@ -482,8 +502,10 @@ class CoveragePhaseController {
             phase: phaseId,
         })
             .catch(() => undefined);
-        if (typeof token === "string")
-            this.workerTokens.set(worker, token);
+        if (typeof registration?.token === "string")
+            this.workerTokens.set(worker, registration.token);
+        if (registration?.runtime === false)
+            this.workersWithoutRuntime.add(worker);
     }
     async beginAction(operation) {
         timingCount("beginAction");
@@ -722,8 +744,9 @@ class CoveragePhaseController {
                 .then(() => this.unresponsiveWorkers.delete(worker))
                 .catch(() => undefined);
             // Evaluations run in order, so one left queued still applies this
-            // phase before any later one; it is only not waited for.
-            if (this.unresponsiveWorkers.has(worker))
+            // phase before any later one; it is only not waited for. One with
+            // no runtime has nothing to apply unless it loads some later.
+            if (this.unresponsiveWorkers.has(worker) || this.workersWithoutRuntime.has(worker))
                 return;
             if ((await bounded(activation, WORKER_ACTIVATION_WAIT_MS)) === WORKER_TIMED_OUT)
                 this.unresponsiveWorkers.add(worker);
