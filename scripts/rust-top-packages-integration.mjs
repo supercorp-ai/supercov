@@ -185,10 +185,25 @@ if (!seen.includes(path.join('lib', 'index.js')) || !seen.includes(path.join('te
 export function find(name: string): { name: string } | undefined {
   return name ? { name } : undefined;
 }
+// Every probe form a strict compile has to accept: selections, optional
+// members and calls, an enumeration loop and a caught exception.
+export function describe(options: { label?: string | null; format?: (value: number) => string; values?: number[] }): string {
+  const label = options.label ?? 'none';
+  const format = options.format || String;
+  let total = 0;
+  for (const value of options.values ?? []) total += value;
+  try {
+    JSON.parse(label);
+  } catch {
+    total += 1;
+  }
+  const shown = options.format?.(total) ?? format(total);
+  return options.values?.length && label ? label + ':' + shown : shown;
+}
 `);
   write(typed, 'src/test/ids.test.ts', `import assert from 'node:assert/strict';
 import test from 'node:test';
-import { find, next } from '../ids.js';
+import { describe, find, next } from '../ids.js';
 
 test('ids sort by creation', () => {
   let prior: string | undefined;
@@ -202,6 +217,11 @@ test('ids sort by creation', () => {
   const ids = [];
   for (let i = 0; i < 3; i++) ids.push(next(i));
   assert.deepEqual(ids, ids.slice().sort())
+});
+
+test('every probe form survives a strict compile', () => {
+  assert.equal(describe({ label: 'a', values: [1, 2] }), 'a:4');
+  assert.equal(describe({ format: (value) => '#' + value }), '#1');
 });
 
 test('an asserts signature narrows what follows', () => {

@@ -757,6 +757,40 @@ test("a default records whether it was taken or a value was provided, per slot",
   assert.equal(file.pendingDefaults[1], 0);
 });
 
+test("V2 selections and optional chains record what their frame-based forms recorded", async () => {
+  const { registerProbeV2, coverageHitV2, optionalSelectV2, optionalCallEndV2, resetCoverage, coverageSnapshot } = await import(
+    "../../runtime/javascript/runtime.mjs"
+  );
+  // One selection (points 0-3: short falsy, short truthy, right falsy, right
+  // truthy), one optional member (4-5) and one optional call (6-7).
+  const file = registerProbeV2({
+    file: "src/pick.js",
+    pointIds: ["pick:short", "pick:short", "pick:right", "pick:right", "member:short", "member:continued", "call:short", "call:continued"],
+    decisions: [],
+    selectionPoints: [0, 1],
+  });
+  resetCoverage("v2-selection");
+  coverageHitV2(file, 1);
+  coverageHitV2(file, 2);
+  const snapshot = coverageSnapshot();
+  assert.deepEqual(snapshot.hits.filter((id) => id.startsWith("pick")).sort(), ["pick:right", "pick:short"]);
+  const pick = snapshot.logicals.find((logical) => logical.id === "pick");
+  assert.deepEqual(
+    pick.vectors.map((vector) => [vector.right, vector.truthy]).sort(),
+    [[false, true], [true, false]],
+  );
+  resetCoverage("v2-optional");
+  assert.equal(optionalSelectV2(file, 4, null), null);
+  assert.equal(optionalCallEndV2(file, 6, "called", 2), "called");
+  // State 0: the chain stopped before the call site, which records nothing.
+  assert.equal(optionalCallEndV2(file, 6, undefined, 0), undefined);
+  assert.deepEqual(
+    coverageSnapshot().hits.filter((id) => /^(member|call):/.test(id)).sort(),
+    ["call:continued", "member:short"],
+  );
+  assert.equal([...file.none].length, 0);
+});
+
 test("a rendered JSX expression records its own evaluation and passes the value through", async () => {
   const { registerProbeV2, renderedValueV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"

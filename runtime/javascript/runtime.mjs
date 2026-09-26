@@ -1323,7 +1323,11 @@ function registerProbeV2(definition) {
     decisionObservationEpochs: new Uint32Array(definition.decisions.length),
     decisionObservationCounts: new Uint16Array(definition.decisions.length),
     decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
-    pendingDefaults: new Uint32Array(definition.defaultCount || 0)
+    pendingDefaults: new Uint32Array(definition.defaultCount || 0),
+    // A selection's outcomes -- short falsy, short truthy, right falsy, right
+    // truthy -- are four consecutive points per site from the first index.
+    selectionPoints: definition.selectionPoints,
+    none: optionalCallEmptySpread
   };
   state.probeV2Files.add(file);
   if (isBrowser) {
@@ -1365,6 +1369,9 @@ function recordCoverageHitV2(file, index) {
       return;
     file.hitEpochs[index] = epoch;
     coverageHit(id);
+    const selections = file.selectionPoints;
+    if (selections !== void 0 && index >= selections[0] && index < selections[0] + 4 * selections[1])
+      recordSelectionOutcome(id, index - selections[0] & 3);
   } finally {
     if (fallbackEpoch)
       file.clock.epoch = previousEpoch;
@@ -1469,27 +1476,30 @@ var selectionBranchIds = /* @__PURE__ */ new Map();
 function selectionEnd(frame, value) {
   const right = frame.rightEvaluated;
   coverageHit(right ? frame.rightId : frame.shortId);
-  // Per-operand outcomes for the verifier: which side was selected and whether the result is
-  // truthy. With the operator (known from the manifest) this gives each operand's outcome.
-  // The branch id is cut from the short id once, not on every evaluation.
-  let branchId = selectionBranchIds.get(frame.shortId);
-  if (branchId === void 0) {
-    const separator = frame.shortId.lastIndexOf(":");
-    branchId = separator > 0 ? frame.shortId.slice(0, separator) : null;
-    selectionBranchIds.set(frame.shortId, branchId);
-  }
-  if (branchId !== null) {
-    const truthy = Boolean(value);
-    let vectors = state.logicals.get(branchId);
-    if (!vectors) {
-      vectors = /* @__PURE__ */ new Map();
-      state.logicals.set(branchId, vectors);
-    }
-    const key = selectionOutcomeKeys[(right ? 2 : 0) + (truthy ? 1 : 0)];
-    if (!vectors.has(key))
-      vectors.set(key, { right, truthy });
-  }
+  recordSelectionOutcome(frame.shortId, (right ? 2 : 0) + (value ? 1 : 0));
   return value;
+}
+// Per-operand outcomes for the verifier: which side was selected and whether
+// the result is truthy. With the operator (known from the manifest) this gives
+// each operand's outcome. The branch id is cut from the outcome's id -- its
+// short or right id, which share it -- once, not on every evaluation.
+function recordSelectionOutcome(id, outcome) {
+  let branchId = selectionBranchIds.get(id);
+  if (branchId === void 0) {
+    const separator = id.lastIndexOf(":");
+    branchId = separator > 0 ? id.slice(0, separator) : null;
+    selectionBranchIds.set(id, branchId);
+  }
+  if (branchId === null)
+    return;
+  let vectors = state.logicals.get(branchId);
+  if (!vectors) {
+    vectors = /* @__PURE__ */ new Map();
+    state.logicals.set(branchId, vectors);
+  }
+  const key = selectionOutcomeKeys[outcome];
+  if (!vectors.has(key))
+    vectors.set(key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
 }
 // A JSX expression container has nowhere to put a statement and cannot hold a
 // bare comma operator, so a rendered expression carries its probe as a call
@@ -1504,6 +1514,11 @@ function optionalSelect(shortId, continuedId, value) {
   coverageHit(value === null || value === void 0 ? shortId : continuedId);
   return value;
 }
+// `object?.member`: the short and continued outcomes are two V2 points.
+function optionalSelectV2(file, first, value) {
+  coverageHitV2(file, value === null || value === void 0 ? first : first + 1);
+  return value;
+}
 function optionalCallBegin(shortId, continuedId) {
   return { shortId, continuedId, reached: false, continued: false };
 }
@@ -1511,13 +1526,17 @@ function optionalCallReached(frame, value) {
   frame.reached = true;
   return value;
 }
+// Spread into an optional call's arguments to mark that the call went ahead:
+// it yields nothing, and allocates nothing per call.
+var optionalCallDone = { done: true, value: void 0 };
+var optionalCallEmptyIterator = {
+  next() {
+    return optionalCallDone;
+  }
+};
 var optionalCallEmptySpread = {
   [Symbol.iterator]() {
-    return {
-      next() {
-        return { done: true, value: void 0 };
-      }
-    };
+    return optionalCallEmptyIterator;
   }
 };
 function optionalCallContinued(frame) {
@@ -1527,6 +1546,13 @@ function optionalCallContinued(frame) {
 function optionalCallEnd(frame, value) {
   if (frame.reached)
     coverageHit(frame.continued ? frame.continuedId : frame.shortId);
+  return value;
+}
+// The site's state, read after the chain: 0 not reached, 1 reached and
+// short-circuited, 2 called. Short and continued are two V2 points.
+function optionalCallEndV2(file, first, value, state) {
+  if (state)
+    coverageHitV2(file, state === 2 ? first + 1 : first);
   return value;
 }
 function defaultSelected(defaultId, value, inferredName) {
@@ -1668,7 +1694,9 @@ const directRuntimeApi = {
   optionalCallContinued,
   optionalCallEnd,
   optionalCallReached,
+  optionalCallEndV2,
   optionalSelect,
+  optionalSelectV2,
   renderedValueV2,
   parenthesizedAssignmentValue,
   phaseBelongsToAttempt,
@@ -1723,7 +1751,9 @@ export {
   optionalCallContinued,
   optionalCallEnd,
   optionalCallReached,
+  optionalCallEndV2,
   optionalSelect,
+  optionalSelectV2,
   renderedValueV2,
   parenthesizedAssignmentValue,
   phaseBelongsToAttempt,
