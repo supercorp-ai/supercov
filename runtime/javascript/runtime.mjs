@@ -1527,6 +1527,28 @@ function selectRightV2(file, first, value) {
   coverageHitV2(file, value ? first + 3 : first + 2);
   return value;
 }
+// A leaf of nested selections, `(a && b) || c`: the program's operators stay
+// between the leaves, so a coverage tool the tests run flattens them into the
+// one branch it reads without Supercov. Each step after the value names a
+// selection above the leaf, nearest first, as `first * 4 + code`: code 3 when
+// the leaf is on its right side, which records that side's outcome, and the
+// operator's kind (0 `||`, 1 `&&`, 2 `??`) when on its left, which records the
+// short outcome when the value decides it; otherwise the selection goes on to
+// its right side, and the leaf decides nothing further up.
+function selectPathV2(file, value) {
+  for (let index = 2; index < arguments.length; index += 1) {
+    const step = arguments[index];
+    const code = step & 3;
+    const first = (step - code) / 4;
+    if (code === 3)
+      coverageHitV2(file, value ? first + 3 : first + 2);
+    else if (code === 0 ? value : code === 1 ? !value : value !== null && value !== void 0)
+      coverageHitV2(file, value ? first + 1 : first);
+    else
+      break;
+  }
+  return value;
+}
 // `x ||= y`, `x &&= y`, `x ??= y` keep their operator and their single
 // evaluation of the target: the right side goes through selectRightV2 (or the
 // named form, for an anonymous function the assignment would have named), and
@@ -1736,6 +1758,7 @@ const directRuntimeApi = {
   selectRightV2,
   selectNamedRightV2,
   selectAssignEndV2,
+  selectPathV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,
@@ -1797,6 +1820,7 @@ export {
   selectRightV2,
   selectNamedRightV2,
   selectAssignEndV2,
+  selectPathV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,

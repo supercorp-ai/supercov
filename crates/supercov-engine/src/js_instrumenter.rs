@@ -35,7 +35,7 @@ use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::{GetSpan, SourceType, Span};
+use oxc_span::{GetSpan, GetSpanMut, SourceType, Span};
 use oxc_syntax::{
     number::NumberBase,
     operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator},
@@ -515,6 +515,271 @@ fn shift_source_map(
     shifted
 }
 
+/// Where a statement Supercov generated inside a function or block starts, in
+/// the source map: past the source's end, where no node of the program starts
+/// and no comment is attached (a comment ending the file is attached to its
+/// length, and oxc prints a comment where its position is printed), rewritten
+/// to an unmapped segment once the code is out. `None` when the source's last
+/// line has non-ASCII text, where oxc's column table has no entry that far;
+/// those files keep the generated statements unmapped-by-omission, as before.
+fn generated_statement_span(source: &str) -> Option<Span> {
+    let last_line = source.rfind('\n').map_or(0, |newline| newline + 1);
+    let length = u32::try_from(source.len()).ok()?;
+    (source[last_line..].is_ascii() && length < u32::MAX - 2)
+        .then(|| Span::new(length + 1, length + 2))
+}
+
+/// A coverage tool the tests run itself (c8, nyc, Node's `--test-coverage`,
+/// Jest, Vitest) reads the instrumented copy through its source map. oxc maps
+/// a node only when its start differs from the last one it mapped, and gives a
+/// generated node none, so a probe inherited the mapping before it: V8 counted
+/// a probe's `||` as a branch of the user's line, and the statement after a
+/// block Supercov added (whose brace took the statement's own start) lost its
+/// mapping, and with it its place in istanbul's report. Each such statement
+/// now starts at `generated_statement_span`, which this makes unmapped: the
+/// probe maps to nothing, and the user's statement after it maps again.
+///
+/// A block Supercov wraps around a statement takes that statement's span, so
+/// its closing brace maps to the statement's last character, where the
+/// statement's own last token or an inner block's brace often already mapped:
+/// the brace then went unmapped, and the enclosing `if` or function, ending
+/// there, left istanbul's report. An empty statement at the unmapped span
+/// before the brace lets it map again.
+struct GeneratedStatementSpans<'a, 's> {
+    ast: AstBuilder<'a>,
+    source: &'s str,
+    span: Span,
+    depth: usize,
+}
+
+impl GeneratedStatementSpans<'_, '_> {
+    /// A block or body Supercov made around the user's code, rather than one
+    /// the user wrote: its span starts somewhere other than a `{`.
+    fn borrowed(&self, span: Span) -> bool {
+        !span.is_empty()
+            && span != self.span
+            && self.source.as_bytes().get(span.start as usize) != Some(&b'{')
+    }
+}
+
+impl<'a> VisitMut<'a> for GeneratedStatementSpans<'a, '_> {
+    fn visit_statement(&mut self, statement: &mut Statement<'a>) {
+        // Top-level ones stay unmapped by omission: the file's first mapping
+        // is then the user's, which Node's coverage takes for a range starting
+        // at the top of the file.
+        if self.depth > 0 && statement.span().is_empty() {
+            *statement.span_mut() = self.span;
+        }
+        self.depth += 1;
+        walk_mut::walk_statement(self, statement);
+        self.depth -= 1;
+    }
+
+    fn visit_block_statement(&mut self, block: &mut oxc_ast::ast::BlockStatement<'a>) {
+        if self.depth > 0 && block.span.is_empty() {
+            block.span = self.span;
+        } else if self.borrowed(block.span)
+            // Not after a jump: `allowUnreachableCode: false` would reject it
+            // in a TypeScript build of the instrumented copy.
+            && !matches!(
+                block.body.last(),
+                Some(
+                    Statement::ReturnStatement(_)
+                        | Statement::ThrowStatement(_)
+                        | Statement::BreakStatement(_)
+                        | Statement::ContinueStatement(_)
+                )
+            )
+        {
+            block.body.push(self.ast.statement_empty(self.span));
+        }
+        walk_mut::walk_block_statement(self, block);
+    }
+
+    fn visit_function_body(&mut self, body: &mut FunctionBody<'a>) {
+        // An arrow's expression body made a block: its brace maps just past
+        // the expression, where nothing inside it mapped.
+        if self.borrowed(body.span) && (body.span.end as usize) < self.source.len() {
+            body.span.end += 1;
+        }
+        self.depth += 1;
+        walk_mut::walk_function_body(self, body);
+        self.depth -= 1;
+    }
+}
+
+fn mark_generated_statements<'a>(ast: AstBuilder<'a>, program: &mut Program<'a>) {
+    let Some(span) = generated_statement_span(program.source_text) else {
+        return;
+    };
+    GeneratedStatementSpans {
+        ast,
+        source: program.source_text,
+        span,
+        depth: 0,
+    }
+    .visit_program(program);
+}
+
+fn unmap_generated_statements(
+    map: oxc_sourcemap::SourceMap,
+    source: &str,
+) -> oxc_sourcemap::SourceMap {
+    let Some(span) = generated_statement_span(source) else {
+        return map;
+    };
+    let line = source.matches('\n').count() as u32;
+    let column = span.start - source.rfind('\n').map_or(0, |newline| newline as u32 + 1);
+    let is_generated = |token: &oxc_sourcemap::Token| {
+        token.get_src_line() == line && token.get_src_col() == column
+    };
+    if !map.get_tokens().any(|token| is_generated(&token)) {
+        return map;
+    }
+    let tokens = map
+        .get_tokens()
+        .map(|token| {
+            if is_generated(&token) {
+                oxc_sourcemap::Token::new(
+                    token.get_dst_line(),
+                    token.get_dst_col(),
+                    0,
+                    0,
+                    None,
+                    None,
+                )
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut unmapped = oxc_sourcemap::SourceMap::new(
+        map.get_file().cloned(),
+        map.get_names().cloned().collect::<Vec<Arc<str>>>(),
+        map.get_source_root().map(str::to_string),
+        map.get_sources().cloned().collect::<Vec<Arc<str>>>(),
+        map.get_source_contents()
+            .map(|content| content.cloned())
+            .collect::<Vec<Option<Arc<str>>>>(),
+        tokens.into_boxed_slice(),
+        None,
+    );
+    if let Some(ignore_list) = map.get_x_google_ignore_list() {
+        unmapped.set_x_google_ignore_list(ignore_list.to_vec());
+    }
+    if let Some(debug_id) = map.get_debug_id() {
+        unmapped.set_debug_id(debug_id);
+    }
+    unmapped
+}
+
+/// A line of the instrumented copy starting with a closing brace Supercov
+/// added (a wrapper's `try` block, `} finally {`) has no mapping at that
+/// brace, and istanbul, c8 and v8-to-istanbul look a position up on its own
+/// line only: a V8 range or a statement ending there was dropped from their
+/// reports. Node's own coverage takes the nearest mapping before it instead;
+/// so does each such brace now, with a copy of that mapping, unmapped if it
+/// was.
+///
+/// oxc maps where a node starts, never a statement's closing `;`, so a range
+/// ending with `break;` ended, for Node's own coverage, at the `b`: the line
+/// was no longer inside the range of the `case` no test reached, and read as
+/// covered. When the text after a line's last mapping is the source's own
+/// text after that position, ending in `;`, the `;` maps to the source's.
+fn map_closing_lines(
+    map: oxc_sourcemap::SourceMap,
+    code: &str,
+    source: &str,
+) -> oxc_sourcemap::SourceMap {
+    let source_lines = source.split('\n').collect::<Vec<_>>();
+    let tokens = map.get_tokens().collect::<Vec<_>>();
+    let mut patched = Vec::with_capacity(tokens.len());
+    let mut next = 0;
+    let mut previous: Option<oxc_sourcemap::Token> = None;
+    let mut added = false;
+    for (line, text) in code.split('\n').enumerate() {
+        let line = line as u32;
+        let first = next;
+        while next < tokens.len() && tokens[next].get_dst_line() == line {
+            next += 1;
+        }
+        let column = (text.len() - text.trim_start().len()) as u32;
+        if text.trim_start().starts_with(['}', ')', ']'])
+            && (first == next || tokens[first].get_dst_col() > column)
+            && let Some(previous) = &previous
+        {
+            patched.push(oxc_sourcemap::Token::new(
+                line,
+                column,
+                previous.get_src_line(),
+                previous.get_src_col(),
+                previous.get_source_id(),
+                None,
+            ));
+            added = true;
+        }
+        patched.extend_from_slice(&tokens[first..next]);
+        if next > first {
+            let last = tokens[next - 1];
+            previous = Some(last);
+            if let (Some(_), Some(original)) = (
+                last.get_source_id(),
+                source_lines.get(last.get_src_line() as usize),
+            ) && text.is_ascii()
+                && original.is_ascii()
+            {
+                let generated_rest = text
+                    .get(last.get_dst_col() as usize..)
+                    .unwrap_or("")
+                    .trim_end();
+                let original_rest = original
+                    .get(last.get_src_col() as usize..)
+                    .unwrap_or("")
+                    .trim_end();
+                if generated_rest.len() > 1
+                    && generated_rest.ends_with(';')
+                    && original_rest.starts_with(generated_rest)
+                {
+                    let offset = (generated_rest.len() - 1) as u32;
+                    let end = oxc_sourcemap::Token::new(
+                        line,
+                        last.get_dst_col() + offset,
+                        last.get_src_line(),
+                        last.get_src_col() + offset,
+                        last.get_source_id(),
+                        None,
+                    );
+                    patched.push(end);
+                    previous = Some(end);
+                    added = true;
+                }
+            }
+        }
+    }
+    patched.extend_from_slice(&tokens[next..]);
+    if !added {
+        return map;
+    }
+    let mut closed = oxc_sourcemap::SourceMap::new(
+        map.get_file().cloned(),
+        map.get_names().cloned().collect::<Vec<Arc<str>>>(),
+        map.get_source_root().map(str::to_string),
+        map.get_sources().cloned().collect::<Vec<Arc<str>>>(),
+        map.get_source_contents()
+            .map(|content| content.cloned())
+            .collect::<Vec<Option<Arc<str>>>>(),
+        patched.into_boxed_slice(),
+        None,
+    );
+    if let Some(ignore_list) = map.get_x_google_ignore_list() {
+        closed.set_x_google_ignore_list(ignore_list.to_vec());
+    }
+    if let Some(debug_id) = map.get_debug_id() {
+        closed.set_debug_id(debug_id);
+    }
+    closed
+}
+
 fn generate_candidate(
     program: &Program<'_>,
     file: &str,
@@ -524,11 +789,15 @@ fn generate_candidate(
         ..CodegenOptions::default()
     };
     let generated = Codegen::new().with_options(options).build(program);
-    let (code, map) = restore_comment_text(
-        program,
-        &generated.code,
+    // Unmapped before comments are restored: a restored comment goes where
+    // the first mapping at or after it in the source was printed, and the
+    // generated statements' placeholder is past every comment.
+    let map = unmap_generated_statements(
         generated.map.expect("source maps are enabled"),
-    )?;
+        program.source_text,
+    );
+    let (code, map) = restore_comment_text(program, &generated.code, map)?;
+    let map = map_closing_lines(map, &code, program.source_text);
     let map = Some({
         serde_json::from_str(&map.to_json_string())
             .expect("oxc must serialize its own generated source map")
@@ -554,6 +823,7 @@ pub struct CandidateRuntime {
     pub select_right_v2: String,
     pub select_named_right_v2: String,
     pub select_assign_end_v2: String,
+    pub select_path_v2: String,
     pub rendered_value_v2: String,
     pub optional_call_end_v2: String,
     pub default_selected_v2: String,
@@ -3037,6 +3307,7 @@ fn instrument_candidate_with_binding(
     let select_right_v2 = names.allocate("__supercovSelectRightV2");
     let select_named_right_v2 = names.allocate("__supercovSelectNamedRightV2");
     let select_assign_end_v2 = names.allocate("__supercovSelectAssignEndV2");
+    let select_path_v2 = names.allocate("__supercovSelectPathV2");
     let rendered_value_v2 = names.allocate("__supercovRenderedValueV2");
     let optional_call_end_v2 = names.allocate("__supercovOptionalCallEndV2");
     let default_selected_v2 = names.allocate("__supercovDefaultSelectedV2");
@@ -3252,6 +3523,7 @@ fn instrument_candidate_with_binding(
         select_right_v2: select_right_v2.clone(),
         select_named_right_v2: select_named_right_v2.clone(),
         select_assign_end_v2: select_assign_end_v2.clone(),
+        select_path_v2: select_path_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
         typescript,
         names: CandidateNames::within(source, &namespace),
@@ -3336,6 +3608,7 @@ fn instrument_candidate_with_binding(
         ("selectRightV2", &select_right_v2),
         ("selectNamedRightV2", &select_named_right_v2),
         ("selectAssignEndV2", &select_assign_end_v2),
+        ("selectPathV2", &select_path_v2),
         ("renderedValueV2", &rendered_value_v2),
         ("optionalCallEndV2", &optional_call_end_v2),
         ("defaultSelectedV2", &default_selected_v2),
@@ -3413,6 +3686,7 @@ fn instrument_candidate_with_binding(
         transform_capability_imports(&allocator, &mut parsed.program, source, wrapper);
     }
     let limitations = Vec::new();
+    mark_generated_statements(ast, &mut parsed.program);
     let (code, map) = generate_candidate(&parsed.program, file)?;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
@@ -3440,6 +3714,7 @@ fn instrument_candidate_with_binding(
             select_right_v2,
             select_named_right_v2,
             select_assign_end_v2,
+            select_path_v2,
             rendered_value_v2,
             optional_call_end_v2,
             default_selected_v2,
@@ -4706,7 +4981,13 @@ impl<'a> ExtendedTransformer<'a, '_> {
         if let Some(finalizer) = &mut node.finalizer {
             finalizer.body.insert(0, end);
         } else {
-            node.finalizer = Some(self.ast.alloc_block_statement(span, self.ast.vec1(end)));
+            // Its braces map to the statement's last character: to its start
+            // they would take that mapping from the `try`, and unmapped the
+            // `try` would end nowhere.
+            node.finalizer = Some(
+                self.ast
+                    .alloc_block_statement(Span::new(span.end - 1, span.end), self.ast.vec1(end)),
+            );
         }
         let original = statement.take_in(self.ast.allocator);
         *statement = self
@@ -4726,11 +5007,17 @@ impl<'a> ExtendedTransformer<'a, '_> {
         );
         let original = statement.take_in(self.ast.allocator);
         let end = self.otherwise(&flag, first);
+        // Only the outer block takes the loop's span: the `try` inside it
+        // mapped to the same start would take that mapping from the loop.
         let wrapped = self.ast.statement_try(
-            span,
-            self.ast.block_statement(span, self.ast.vec1(original)),
+            Span::default(),
+            self.ast
+                .block_statement(Span::default(), self.ast.vec1(original)),
             None::<oxc_allocator::Box<'a, CatchClause<'a>>>,
-            Some(self.ast.block_statement(span, self.ast.vec1(end))),
+            Some(
+                self.ast
+                    .block_statement(Span::default(), self.ast.vec1(end)),
+            ),
         );
         *statement = self
             .ast
@@ -4810,6 +5097,7 @@ struct LogicalValueTransformer<'a, 's> {
     select_right_v2: String,
     select_named_right_v2: String,
     select_assign_end_v2: String,
+    select_path_v2: String,
     probe_file_v2: String,
     typescript: bool,
     names: CandidateNames<'s>,
@@ -4897,33 +5185,76 @@ impl<'a> LogicalValueTransformer<'a, '_> {
     /// result, the right side records whether it came out truthy. Both are small
     /// enough for V8 to inline; the frame and three calls each evaluation cost
     /// before were a tenth of lru-cache's hot loop, with MC/DC.
-    fn instrument(
-        &mut self,
-        logical: oxc_allocator::Box<'a, LogicalExpression<'a>>,
-        first: usize,
-    ) -> Expression<'a> {
-        let logical = logical.unbox();
+    ///
+    /// Nested selections, `(a && b) || c`, stay one tree of the program's
+    /// operators with only the leaves wrapped: istanbul flattens a tree through
+    /// its logical children only, and a call around `a && b` made two branches
+    /// of its one. A leaf deeper than one selection records, through
+    /// `selectPathV2`, every selection above it that its value decides.
+    fn instrument_tree(&mut self, expression: &mut Expression<'a>, path: &[usize]) {
+        let key = span_key(expression.span());
+        let first = self
+            .logical_targets
+            .remove(&key)
+            .expect("a selection tree starts at a selection");
+        let Expression::LogicalExpression(logical) = expression else {
+            panic!("logical-value target must remain a logical expression");
+        };
         let kind = match logical.operator {
             LogicalOperator::Or => 0,
             LogicalOperator::And => 1,
             LogicalOperator::Coalesce => 2,
         };
-        let left = self.helper(
-            &self.select_short_v2,
-            [
-                Argument::from(numeric(self.ast, first)),
-                Argument::from(logical.left),
-                Argument::from(numeric(self.ast, kind)),
-            ],
-        );
-        let mut right_arguments = self.ast.vec_from_array([
-            Argument::from(self.identifier(&self.probe_file_v2)),
-            Argument::from(numeric(self.ast, first)),
-        ]);
-        right_arguments.push(Argument::from(logical.right));
-        let right = self.call(&self.select_right_v2, right_arguments);
-        self.ast
-            .expression_logical(Span::default(), left, logical.operator, right)
+        let mut left_path = vec![first * 4 + kind];
+        left_path.extend_from_slice(path);
+        let mut right_path = vec![first * 4 + 3];
+        right_path.extend_from_slice(path);
+        self.instrument_operand(&mut logical.left, &left_path);
+        self.instrument_operand(&mut logical.right, &right_path);
+    }
+
+    fn instrument_operand(&mut self, operand: &mut Expression<'a>, path: &[usize]) {
+        let mut inner = &mut *operand;
+        while let Expression::ParenthesizedExpression(parenthesized) = inner {
+            inner = &mut parenthesized.expression;
+        }
+        if matches!(inner, Expression::LogicalExpression(_))
+            && self.logical_targets.contains_key(&span_key(inner.span()))
+        {
+            self.instrument_tree(inner, path);
+            return;
+        }
+        self.visit_expression(operand);
+        let value = operand.take_in(self.ast.allocator);
+        *operand = match *path {
+            [step] if step % 4 == 3 => {
+                let mut arguments = self.ast.vec_from_array([
+                    Argument::from(self.identifier(&self.probe_file_v2)),
+                    Argument::from(numeric(self.ast, step / 4)),
+                ]);
+                arguments.push(Argument::from(value));
+                self.call(&self.select_right_v2, arguments)
+            }
+            [step] => self.helper(
+                &self.select_short_v2,
+                [
+                    Argument::from(numeric(self.ast, step / 4)),
+                    Argument::from(value),
+                    Argument::from(numeric(self.ast, step % 4)),
+                ],
+            ),
+            _ => {
+                let mut arguments = self.ast.vec_from_array([
+                    Argument::from(self.identifier(&self.probe_file_v2)),
+                    Argument::from(value),
+                ]);
+                arguments.extend(
+                    path.iter()
+                        .map(|step| Argument::from(numeric(self.ast, *step))),
+                );
+                self.call(&self.select_path_v2, arguments)
+            }
+        };
     }
 
     /// `x ||= y` as `(T = 0, selectAssignEndV2(file, first, x ||= selectRightV2(
@@ -4986,10 +5317,8 @@ impl<'a> LogicalValueTransformer<'a, '_> {
                 Argument::from(self.identifier(&right_evaluated)),
             ]),
         );
-        self.ast.expression_sequence(
-            Span::default(),
-            self.ast.vec_from_array([reset, end]),
-        )
+        self.ast
+            .expression_sequence(Span::default(), self.ast.vec_from_array([reset, end]))
     }
 }
 
@@ -5035,6 +5364,12 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
         let key = span_key(expression.span());
+        if matches!(expression, Expression::LogicalExpression(_))
+            && self.logical_targets.contains_key(&key)
+        {
+            self.instrument_tree(expression, &[]);
+            return;
+        }
         walk_mut::walk_expression(self, expression);
         if let Some(first) = self.assignment_targets.remove(&key) {
             let original = expression.take_in(self.ast.allocator);
@@ -5042,16 +5377,7 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
                 panic!("logical-assignment target must remain an assignment expression");
             };
             *expression = self.instrument_assignment(assignment, first);
-            return;
         }
-        let Some(first) = self.logical_targets.remove(&key) else {
-            return;
-        };
-        let original = expression.take_in(self.ast.allocator);
-        let Expression::LogicalExpression(logical) = original else {
-            panic!("logical-value target must remain a logical expression");
-        };
-        *expression = self.instrument(logical, first);
     }
 }
 
@@ -9195,6 +9521,122 @@ mod tests {
         assert!(mixed.excluded_statements.is_empty());
     }
 
+    /// A line's first mapping: `None` for no segment, `Some(None)` for an
+    /// unmapped one, else the source line and column it names.
+    type FirstMapping = Option<Option<(u32, u32)>>;
+
+    /// The instrumented copy's lines with their first mapping.
+    fn first_mappings(output: &CandidateOutput) -> Vec<(String, FirstMapping)> {
+        let map = oxc_sourcemap::SourceMap::from_json_string(
+            &output
+                .map
+                .as_ref()
+                .expect("instrumented copy has a map")
+                .to_string(),
+        )
+        .unwrap();
+        let tokens = map.get_tokens().collect::<Vec<_>>();
+        output
+            .code
+            .split('\n')
+            .enumerate()
+            .map(|(line, text)| {
+                let first = tokens
+                    .iter()
+                    .find(|token| token.get_dst_line() == line as u32)
+                    .map(|token| {
+                        token
+                            .get_source_id()
+                            .map(|_| (token.get_src_line(), token.get_src_col()))
+                    });
+                (text.trim().to_string(), first)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn probes_map_to_nothing_and_the_statements_around_them_to_their_own_starts() {
+        let source = "function f(list) {\n  let total = 0;\n  for (const item of list) {\n    if (item > 1) total += item;\n    else if (item === 0) continue;\n    else total -= 1;\n  }\n  return total;\n}\nconst twice = (value) => value * 2;\n";
+        let output = instrument_candidate(source, "app/f.js").unwrap();
+        let lines = first_mappings(&output);
+        let runtime = output.runtime.as_ref().unwrap();
+        for (text, first) in &lines {
+            // A probe maps to nothing: a coverage tool reading the copy
+            // through its map counts no branch of the user's for its `||`.
+            if text.contains(&format!("{}.clock.fast", runtime.probe_file_v2))
+                && let Some(first) = first
+            {
+                assert_eq!(*first, None, "{text}");
+            }
+        }
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .find(|(text, _)| text.starts_with(needle))
+                .unwrap_or_else(|| panic!("{needle} in {}", output.code))
+                .1
+        };
+        // Each statement after a block Supercov added maps at its own start,
+        // where the block's brace used to take that mapping from it.
+        assert_eq!(at("for (const item of list)"), Some(Some((2, 2))));
+        assert_eq!(at("continue;"), Some(Some((4, 25))));
+        assert_eq!(at("total -= 1;"), Some(Some((5, 9))));
+        // The arrow's body, made a block, returns what the expression it was
+        // evaluated: the line maps where that expression starts.
+        assert_eq!(at("return value * 2;"), Some(Some((9, 25))));
+        // Every line of the program starting with a closing brace maps where
+        // it starts, so a tool that looks a position up on its own line finds
+        // a mapping.
+        let program = lines
+            .iter()
+            .position(|(text, _)| text.starts_with("function f("))
+            .unwrap();
+        for (text, first) in &lines[program..] {
+            if text.starts_with('}') {
+                assert!(first.is_some(), "{text} in {}", output.code);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_selections_stay_one_tree_of_the_programs_operators() {
+        let source =
+            "export const ok = (total, name, force) => (total > 0 && name !== 'x') || !!force;\n";
+        let output = instrument_candidate(source, "app/ok.js").unwrap();
+        let runtime = output.runtime.expect("candidate runtime binding");
+        // The two leaves of `total > 0 && name !== 'x'` also decide the `||`;
+        // `!!force` is its right side alone.
+        assert_eq!(
+            output
+                .code
+                .matches(&format!("{}(", runtime.select_path_v2))
+                .count(),
+            2
+        );
+        assert_eq!(
+            output
+                .code
+                .matches(&format!("{}(", runtime.select_right_v2))
+                .count(),
+            1
+        );
+        assert!(
+            !output
+                .code
+                .contains(&format!("{}(", runtime.select_short_v2)),
+            "{}",
+            output.code
+        );
+        let allocator = Allocator::default();
+        let reparsed = Parser::new(&allocator, &output.code, SourceType::mjs()).parse();
+        assert!(reparsed.errors.is_empty(), "{:?}", reparsed.errors);
+        let text = &output.code;
+        let or = text
+            .find(") || ")
+            .expect("the `||` stays between the two sides");
+        assert!(text[..or].contains(" && "), "{text}");
+    }
+
     #[test]
     fn logical_assignments_keep_their_operator_and_record_through_v2_points() {
         let source = "export function fill(o, key) { o.name ||= 'anon'; o[key()] ??= 0; let named; named &&= function () {}; return o; }";
@@ -9208,16 +9650,26 @@ mod tests {
             assert!(output.code.contains("??= "), "{}", output.code);
             assert!(output.code.contains("&&= "), "{}", output.code);
             assert_eq!(
-                output.code.matches(&format!("{}(", runtime.select_assign_end_v2)).count(),
+                output
+                    .code
+                    .matches(&format!("{}(", runtime.select_assign_end_v2))
+                    .count(),
                 3
             );
             assert_eq!(
-                output.code.matches(&format!("{}(", runtime.select_named_right_v2)).count(),
+                output
+                    .code
+                    .matches(&format!("{}(", runtime.select_named_right_v2))
+                    .count(),
                 1
             );
             let allocator = Allocator::default();
-            let reparsed =
-                Parser::new(&allocator, &output.code, SourceType::from_path(file).unwrap()).parse();
+            let reparsed = Parser::new(
+                &allocator,
+                &output.code,
+                SourceType::from_path(file).unwrap(),
+            )
+            .parse();
             assert!(reparsed.errors.is_empty(), "{:?}", reparsed.errors);
         }
     }

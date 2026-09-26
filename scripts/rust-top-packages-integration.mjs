@@ -16,6 +16,9 @@
 //   are branches no test was written to cover: c8, Jest and Vitest failed a
 //   100% gate on a suite that covers every branch. They still report; their
 //   thresholds are not checked, and a failing test still fails the run.
+// - What those tools report is what they report without Supercov: Node's own
+//   coverage, Jest and Vitest read the same figures on code with every probe
+//   form, and Node's thresholds judge that same report.
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -253,7 +256,7 @@ test('an asserts signature narrows what follows', () => {
     name: 'gates-fixture',
     private: true,
     scripts: {
-      test: 'c8 --check-coverage --100 node --test && nyc --check-coverage node --test && c8 check-coverage && nyc check-coverage',
+      test: 'c8 --check-coverage --100 node --test && nyc --check-coverage node --test && c8 check-coverage && nyc check-coverage && karma start',
     },
   }));
   write(gates, 'lib/index.js', `'use strict';
@@ -328,17 +331,41 @@ const args = process.argv.slice(2);
   process.exit(process.exitCode || child.status);
 })();
 `);
+  // karma builds karma-coverage's reporter from the plugin it requires by
+  // name, through the constructor's $inject list, and the reporter checks
+  // coverageReporter.check.
+  write(gates, 'node_modules/karma-coverage/index.js', `function CoverageReporter(config) {
+  if (config.coverageReporter && 'check' in config.coverageReporter) {
+    process.exitCode = 1;
+    console.error('ERROR: Coverage for branches (80%) does not meet global threshold (100%)');
+  }
+}
+CoverageReporter.$inject = ['config'];
+module.exports = { 'reporter:coverage': ['type', CoverageReporter] };
+`);
+  write(gates, 'node_modules/karma/bin/karma', `#!/usr/bin/env node
+const plugin = require(require.resolve('karma-coverage', { paths: [process.cwd()] }));
+const [, Reporter] = plugin['reporter:coverage'];
+if (Reporter.$inject?.[0] !== 'config') process.exit(2);
+new Reporter({ coverageReporter: { type: 'text-summary', check: { global: { branches: 100 } } } });
+console.log('karma coverage report');
+process.exit(process.exitCode || 0);
+`);
   mkdirSync(resolve(gates, 'node_modules/.bin'), { recursive: true });
   for (const tool of ['c8', 'nyc']) {
     chmodSync(resolve(gates, `node_modules/${tool}/bin/${tool}.js`), 0o755);
     symlinkSync(`../${tool}/bin/${tool}.js`, resolve(gates, `node_modules/.bin/${tool}`));
   }
+  chmodSync(resolve(gates, 'node_modules/karma/bin/karma'), 0o755);
+  symlinkSync('../karma/bin/karma', resolve(gates, 'node_modules/.bin/karma'));
   const gated = supercov(gates, ['--', 'npm', 'test']);
   assert.equal(gated.status, 0, gated.output);
   assert.doesNotMatch(gated.output, /ERROR: Coverage/, gated.output);
   // Once per process: the gated run and the check-coverage command of each.
   assert.equal(gated.output.match(skipped('c8'))?.length, 2, gated.output);
   assert.equal(gated.output.match(skipped('nyc'))?.length, 2, gated.output);
+  assert.equal(gated.output.match(skipped('karma-coverage'))?.length, 1, gated.output);
+  assert.match(gated.output, /karma coverage report/, gated.output);
   // The copy's source map leads outside the workspace; nyc must not exclude
   // the project's file after remapping it, or its report is empty.
   assert.match(gated.output, /nyc excludeAfterRemap=false/, gated.output);
@@ -419,6 +446,114 @@ test('picks', () => {
   assert.equal(vitestCli.status, 0, vitestCli.output);
   assert.doesNotMatch(vitestCli.output, /does not meet/, vitestCli.output);
   assert.equal(vitestCli.output.match(skipped('Vitest'))?.length, 1, vitestCli.output);
+  // Every probe form, partly covered. Each tool reads the instrumented copy
+  // through its source map; the probes map to nothing, and every statement,
+  // branch and function of the program keeps its place: before, Supercov's
+  // `||` checks read as covered branches, a statement after a block Supercov
+  // added lost its start, and `(a && b) || c` became two branches of three.
+  const reports = resolve(temporary, 'reports');
+  link(reports, ['jest', 'jest-config', 'vite', 'vitest', '@vitest/coverage-v8'], []);
+  write(reports, 'package.json', JSON.stringify({
+    name: 'reports-fixture',
+    private: true,
+    jest: { testEnvironment: 'node', testMatch: ['**/test/jest.test.js'], collectCoverageFrom: ['src/**'] },
+  }));
+  write(reports, 'vitest.config.mjs', `export default {
+  test: { include: ['test/vitest.test.mjs'], coverage: { provider: 'v8', include: ['src/**'], reporter: ['text-summary'] } },
+};
+`);
+  write(reports, 'src/mixed.js', `function mixed(options = {}, list = []) {
+  const { scale = 1, label: given } = options;
+  const name = options.name ?? 'anon';
+  let total = 0;
+  for (const item of list) {
+    if (item > 0 && item < 10) total += item * scale;
+    else if (item === 0) continue;
+    else total -= 1;
+  }
+  for (const key in options.extra) total += key.length;
+  let rounds = 0;
+  while (rounds < 2) rounds += 1;
+  try {
+    if (options.fail) throw new Error('x');
+  } catch (error) {
+    total = -1;
+  }
+  switch (options.mode) {
+    case 'a':
+      total += 1;
+      break;
+    case 'b':
+      total += 2;
+      break;
+  }
+  const label = given || (total > 5 ? 'big' : 'small');
+  options.seen ||= 1;
+  options.count &&= options.count + 1;
+  options.tag ??= 'none';
+  const ok = (total > 0 && name !== 'x') || !!options.force;
+  return { name, total, label, ok, len: list?.length, call: options.cb?.() };
+}
+const twice = (value) => value * 2;
+class Box {
+  constructor(v) { this.v = v ?? 0; }
+  get doubled() { return twice(this.v); }
+}
+function unused(a) {
+  return a ? 1 : 2;
+}
+module.exports = { mixed, Box, unused };
+`);
+  const body = `  assert.equal(mixed({ name: 'n', mode: 'a' }, [1, 20]).total, 1);
+  assert.equal(mixed().label, 'small');
+  assert.equal(mixed({ count: 2, extra: { ab: 1 }, cb: () => 3 }, [0, 3]).total, 5);
+  assert.equal(new Box(2).doubled, 4);
+`;
+  write(reports, 'test/node.test.js', `const test = require('node:test');
+const assert = require('node:assert/strict');
+const { mixed, Box } = require('../src/mixed.js');
+test('mixed', () => {
+${body}});
+`);
+  write(reports, 'test/jest.test.js', `const assert = require('node:assert/strict');
+const { mixed, Box } = require('../src/mixed.js');
+test('mixed', () => {
+${body}});
+`);
+  write(reports, 'test/vitest.test.mjs', `import assert from 'node:assert/strict';
+import { test } from 'vitest';
+import { mixed, Box } from '../src/mixed.js';
+test('mixed', () => {
+${body}});
+`);
+  const nodeRow = (output) => /^\S*\s+mixed\.js\s*\|(.*)$/m.exec(output)?.[1].trim();
+  const summary = (output) => output.match(/^(?:Statements|Branches|Functions|Lines)\s+:.*$/gm)?.join('\n');
+  for (const [tool, command, read] of [
+    ['node', [process.execPath, '--test', '--experimental-test-coverage', 'test/node.test.js'], nodeRow],
+    ['jest', [process.execPath, 'node_modules/jest/bin/jest.js', '--coverage', '--coverageReporters=text-summary'], summary],
+    ['vitest', [process.execPath, 'node_modules/vitest/vitest.mjs', 'run', '--coverage'], summary],
+  ]) {
+    const plain = spawnSync(command[0], command.slice(1), { cwd: reports, encoding: 'utf8', env: { ...process.env, CI: '1', NO_COLOR: '1' } });
+    const plainOutput = `${plain.stdout}\n${plain.stderr}`;
+    assert.equal(plain.status, 0, plainOutput);
+    const expected = read(plainOutput);
+    assert.ok(expected, `${tool} reports without Supercov:\n${plainOutput}`);
+    const measured = supercov(reports, ['--', ...command]);
+    assert.equal(measured.status, 0, measured.output);
+    assert.equal(read(measured.output), expected, `${tool} under Supercov:\n${measured.output}`);
+  }
+  // Node's thresholds judge that same report: met at its figures, missed a
+  // point above, as without Supercov.
+  const [lines, branches, functions] = nodeRow(spawnSync(process.execPath,
+    ['--test', '--experimental-test-coverage', 'test/node.test.js'], { cwd: reports, encoding: 'utf8' }).stdout)
+    .split('|').map((cell) => Math.floor(Number.parseFloat(cell)));
+  const thresholds = (extra) => [process.execPath, '--test', '--experimental-test-coverage',
+    `--test-coverage-lines=${lines + extra}`, `--test-coverage-branches=${branches}`, `--test-coverage-functions=${functions}`, 'test/node.test.js'];
+  const met = supercov(reports, ['--', ...thresholds(0)]);
+  assert.equal(met.status, 0, met.output);
+  const missed = supercov(reports, ['--', ...thresholds(1)]);
+  assert.notEqual(missed.status, 0, missed.output);
+  assert.match(missed.output, /line coverage does not meet threshold/, missed.output);
   console.log('top package failure classes pass through the public command');
 } finally {
   rmSync(temporary, { recursive: true, force: true });

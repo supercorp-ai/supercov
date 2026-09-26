@@ -793,6 +793,38 @@ test("V2 selections and optional chains record what their frame-based forms reco
   assert.equal([...file.none].length, 0);
 });
 
+test("a nested selection's leaves record every selection their value decides", async () => {
+  const { registerProbeV2, selectPathV2, selectRightV2, resetCoverage, coverageSnapshot } = await import(
+    "../../runtime/javascript/runtime.mjs"
+  );
+  // `(a && b) || c`: the `||` is points 0-3, the `&&` points 4-7. A step is
+  // `first * 4 + code`: 3 on a right side, the operator's kind on a left one.
+  const file = registerProbeV2({
+    file: "src/ok.js",
+    pointIds: ["or:short", "or:short", "or:right", "or:right", "and:short", "and:short", "and:right", "and:right"],
+    decisions: [],
+    selectionPoints: [0, 2],
+  });
+  const ok = (a, b, c) =>
+    (selectPathV2(file, a, 4 * 4 + 1, 0 * 4 + 0) && selectPathV2(file, b, 4 * 4 + 3, 0 * 4 + 0)) || selectRightV2(file, 0, c);
+  resetCoverage("v2-path");
+  // a falsy: the `&&` short-circuits, and the `||` goes on to c.
+  assert.equal(ok(0, 1, "c"), "c");
+  let snapshot = coverageSnapshot();
+  assert.deepEqual(
+    snapshot.logicals.map((logical) => [logical.id, logical.vectors.map((vector) => [vector.right, vector.truthy])]).sort(),
+    [["and", [[false, false]]], ["or", [[true, true]]]],
+  );
+  resetCoverage("v2-path-truthy");
+  // a and b truthy: b is the `&&`'s right side, and decides the `||` short.
+  assert.equal(ok(1, "b", "c"), "b");
+  snapshot = coverageSnapshot();
+  assert.deepEqual(
+    snapshot.logicals.map((logical) => [logical.id, logical.vectors.map((vector) => [vector.right, vector.truthy])]).sort(),
+    [["and", [[true, true]]], ["or", [[false, true]]]],
+  );
+});
+
 test("V2 logical assignments record the outcomes their frame-based form recorded", async () => {
   const { registerProbeV2, selectRightV2, selectNamedRightV2, selectAssignEndV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"

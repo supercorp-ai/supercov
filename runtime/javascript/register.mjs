@@ -236,6 +236,67 @@ process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__ ??= (tool) => {
 const coverageTool = /\/node_modules\/(?:\.bin\/(c8|nyc)|(c8|nyc)\/bin\/(?:c8|nyc)\.js)$/.exec(entrypoint);
 if (coverageTool)
     skipCoverageThresholds(coverageTool[1] ?? coverageTool[2]);
+if (/\/node_modules\/(?:\.bin\/karma|karma\/bin\/karma)$/.test(entrypoint))
+    skipKarmaCoverageCheck();
+// karma-coverage checks `coverageReporter.check` in the reporter karma builds
+// from its plugin, which the karma process requires by name from the project.
+// Loaded first, the plugin's constructor is replaced by one that leaves the
+// check out of the configuration it is given.
+function skipKarmaCoverageCheck() {
+    try {
+        const plugin = Module.createRequire(resolve(process.cwd(), "package.json"))("karma-coverage");
+        const entry = plugin?.["reporter:coverage"];
+        if (!Array.isArray(entry) || typeof entry[1] !== "function")
+            return;
+        const Reporter = entry[1];
+        function CoverageReporter(rootConfig, ...rest) {
+            const options = rootConfig?.coverageReporter;
+            if (options && Object.prototype.hasOwnProperty.call(options, "check")) {
+                delete options.check;
+                process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__("karma-coverage");
+            }
+            return Reflect.construct(Reporter, [rootConfig, ...rest], new.target);
+        }
+        CoverageReporter.$inject = Reporter.$inject;
+        CoverageReporter.prototype = Reporter.prototype;
+        plugin["reporter:coverage"] = [entry[0], CoverageReporter];
+    }
+    catch (error) {
+        if (process.env.SUPERCOV_DEBUG === "1")
+            console.error("[supercov] karma-coverage's check stays as configured", error);
+    }
+}
+// nyc (through 18) remaps with istanbul-lib-source-maps 4, which drops an
+// `if`'s implicit else from any file with a source map: it has no location to
+// map. The instrumented copy has one, so nyc read one branch fewer for every
+// `if` without an `else` than it reads without Supercov. Version 5 keeps the
+// location in the file of the branch's other one; so does this, loaded before
+// nyc's remapping captures the function.
+function keepImplicitElse(toolRequire) {
+    try {
+        const path = toolRequire.resolve("istanbul-lib-source-maps/lib/get-mapping.js");
+        const getMapping = toolRequire(path);
+        const cached = Module._cache[path];
+        if (typeof getMapping !== "function" || !cached)
+            return;
+        let lastSource;
+        cached.exports = function getMappingKeepingImplicitElse(sourceMap, location, originalFile) {
+            const mapping = getMapping(sourceMap, location, originalFile);
+            if (mapping) {
+                lastSource = mapping.source;
+                return mapping;
+            }
+            const implicit = location?.start?.line === undefined && location?.end?.line === undefined;
+            const source = lastSource;
+            lastSource = undefined;
+            return implicit && source !== undefined ? { source, loc: location } : mapping;
+        };
+    }
+    catch (error) {
+        if (process.env.SUPERCOV_DEBUG === "1")
+            console.error("[supercov] nyc keeps its own remapping", error);
+    }
+}
 function skipCoverageThresholds(tool) {
     const skipped = async function skippedCoverageThresholds() {
         process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__(tool);
@@ -251,6 +312,7 @@ function skipCoverageThresholds(tool) {
             toolRequire("../lib/commands/check-coverage.js").checkCoverages = skipped;
         }
         else {
+            keepImplicitElse(toolRequire);
             // A gated nyc run, `nyc report --check-coverage` and
             // `nyc check-coverage` all check through this method.
             const NYC = toolRequire("../index.js");
