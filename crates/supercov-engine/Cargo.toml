@@ -16,6 +16,7 @@ default = []
 oracle-harnesses = []
 
 [dependencies]
+ignore = "0.4"
 ar_archive_writer.workspace = true
 base64.workspace = true
 cargo-platform.workspace = true

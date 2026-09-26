@@ -633,6 +633,14 @@ fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, SourceDiscoveryError
     Ok(entries)
 }
 
+/// Source files under a root, in name order.
+///
+/// A file the project's own `.gitignore` excludes is not its source: recording
+/// Actual counted `packages/loot-core/lib-dist/browser/kcab.worker.dev.js`, a
+/// 5 MB bundle its build writes and git ignores, as application code, and
+/// instrumented it. Only the project's `.gitignore` files are read, and only
+/// inside a git repository; a user's global excludes and `.git/info/exclude`
+/// differ between machines, and a run must count the same files on each.
 fn files_under(
     root: &Path,
     directory: &Path,
@@ -642,26 +650,40 @@ fn files_under(
     if !metadata.file_type().is_dir() {
         return Err(SourceDiscoveryError::InvalidRoot(directory.to_owned()));
     }
-    for entry in read_directory(directory)? {
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|name| SourceDiscoveryError::NonUtf8Path(directory.join(name)))?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|error| io_error(&path, error))?;
-        if file_type.is_symlink() {
+    let project = root.to_owned();
+    let walker = ignore::WalkBuilder::new(directory)
+        .standard_filters(false)
+        .git_ignore(true)
+        .parents(true)
+        .require_git(true)
+        .follow_links(false)
+        .sort_by_file_name(|left, right| left.cmp(right))
+        .filter_entry(move |entry| {
+            entry.depth() == 0
+                || !entry.file_type().is_some_and(|kind| kind.is_dir())
+                || entry.file_name().to_str().is_some_and(|name| {
+                    !generated_directory(name)
+                        && !owned_workspace_store(entry.path())
+                        && !nested_checkout(entry.path())
+                        && !root_tool_directory(&project, entry.path())
+                })
+        })
+        .build();
+    for entry in walker {
+        let entry =
+            entry.map_err(|error| io_error(directory, io::Error::other(error.to_string())))?;
+        let Some(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() || !kind.is_file() {
             continue;
         }
-        if file_type.is_dir() {
-            if !generated_directory(&name)
-                && !owned_workspace_store(&path)
-                && !nested_checkout(&path)
-                && !root_tool_directory(root, &path)
-            {
-                files_under(root, &path, output)?;
-            }
-        } else if file_type.is_file() && source_file(&name) {
-            output.push(path);
+        let name = entry
+            .file_name()
+            .to_str()
+            .ok_or_else(|| SourceDiscoveryError::NonUtf8Path(entry.path().to_owned()))?;
+        if source_file(name) {
+            output.push(entry.into_path());
         }
     }
     Ok(())
@@ -1186,6 +1208,51 @@ mod tests {
             .iter()
             .find(|entry| entry.file == file)
             .unwrap()
+    }
+
+    #[test]
+    fn a_file_the_project_tells_git_to_ignore_is_not_its_source() {
+        // Actual's build writes a 5 MB worker bundle under
+        // packages/loot-core/lib-dist, which its own nested .gitignore names.
+        let files = [
+            ("package.json", r#"{"workspaces":["packages/*"]}"#),
+            ("packages/core/package.json", r#"{"name":"core"}"#),
+            ("packages/core/.gitignore", "lib-dist\n"),
+            ("packages/core/src/index.ts", "export const a = 1;"),
+            (
+                "packages/core/lib-dist/browser/worker.dev.js",
+                "var bundled = 1;",
+            ),
+        ];
+        let repository_root = repository("gitignored", &files);
+        fs::create_dir_all(repository_root.join(".git")).unwrap();
+        let discovered = discover_source_scope(&repository_root, None).unwrap();
+        assert!(
+            discovered
+                .source_files
+                .contains(&"packages/core/src/index.ts".into())
+        );
+        assert!(
+            !discovered
+                .source_files
+                .iter()
+                .any(|file| file.contains("lib-dist")),
+            "{:?}",
+            discovered.source_files
+        );
+        fs::remove_dir_all(repository_root).unwrap();
+
+        // Outside a git repository a .gitignore means nothing.
+        let plain = repository("not-a-repository", &files);
+        let discovered = discover_source_scope(&plain, None).unwrap();
+        assert!(
+            discovered
+                .scope
+                .entries
+                .iter()
+                .any(|entry| entry.file.contains("lib-dist"))
+        );
+        fs::remove_dir_all(plain).unwrap();
     }
 
     #[test]
