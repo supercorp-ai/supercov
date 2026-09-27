@@ -121,6 +121,42 @@ syncBuiltinESMExports();
 const generatedVitestConfig = process.env.SUPERCOV_GENERATED_VITEST_CONFIG;
 const generatedPlaywrightConfig = process.env.SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG;
 const entrypoint = process.argv[1]?.replaceAll("\\", "/") ?? "";
+// Node's own test coverage filters files by `--test-coverage-include` and
+// `--test-coverage-exclude` globs relative to the working directory, and the
+// instrumented copy's source map names the project's file, outside the
+// isolated workspace the tests run in: `src/**` matched nothing, the report
+// was empty and its thresholds passed with nothing checked. When those globs
+// are given, the map this process caches names the copy's own path instead;
+// its embedded original text is what Node reports. Nothing is written: other
+// coverage tools read the file as it is on disk.
+const NODE_COVERAGE_FILTERS = process.execArgv.some((argument) => /^--test-coverage-(?:include|exclude)(?:=|$)/.test(argument)) &&
+    (Boolean(process.env.NODE_V8_COVERAGE) || process.execArgv.includes("--experimental-test-coverage"));
+const INLINE_MAP = "//# sourceMappingURL=data:application/json;base64,";
+function mapToCopy(source, filename) {
+    if (typeof source !== "string" || !source.includes("__supercov"))
+        return source;
+    const at = source.lastIndexOf(INLINE_MAP);
+    if (at < 0)
+        return source;
+    const end = source.indexOf("\n", at);
+    const encoded = source.slice(at + INLINE_MAP.length, end < 0 ? undefined : end).trim();
+    try {
+        const map = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+        if (!Array.isArray(map.sources) || map.sources.length !== 1)
+            return source;
+        map.sources = [filename.replace(/^.*[\\/]/, "")];
+        return `${source.slice(0, at)}${INLINE_MAP}${Buffer.from(JSON.stringify(map)).toString("base64")}${end < 0 ? "" : source.slice(end)}`;
+    }
+    catch {
+        return source;
+    }
+}
+if (NODE_COVERAGE_FILTERS) {
+    const compile = Module.prototype._compile;
+    Module.prototype._compile = function _compile(content, filename, ...rest) {
+        return Reflect.apply(compile, this, [mapToCopy(content, filename), filename, ...rest]);
+    };
+}
 const playwrightTarget = process.env.SUPERCOV_PLAYWRIGHT_MODULE;
 const projectRoot = process.env.SUPERCOV_PROJECT_ROOT?.replaceAll("\\", "/").replace(/\/$/, "");
 const nodeTestWrapper = new URL("./nodeTest.mjs", import.meta.url).href;
@@ -236,6 +272,67 @@ process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__ ??= (tool) => {
 const coverageTool = /\/node_modules\/(?:\.bin\/(c8|nyc)|(c8|nyc)\/bin\/(?:c8|nyc)\.js)$/.exec(entrypoint);
 if (coverageTool)
     skipCoverageThresholds(coverageTool[1] ?? coverageTool[2]);
+if (/\/node_modules\/(?:\.bin\/karma|karma\/bin\/karma)$/.test(entrypoint))
+    skipKarmaCoverageCheck();
+// karma-coverage checks `coverageReporter.check` in the reporter karma builds
+// from its plugin, which the karma process requires by name from the project.
+// Loaded first, the plugin's constructor is replaced by one that leaves the
+// check out of the configuration it is given.
+function skipKarmaCoverageCheck() {
+    try {
+        const plugin = Module.createRequire(resolve(process.cwd(), "package.json"))("karma-coverage");
+        const entry = plugin?.["reporter:coverage"];
+        if (!Array.isArray(entry) || typeof entry[1] !== "function")
+            return;
+        const Reporter = entry[1];
+        function CoverageReporter(rootConfig, ...rest) {
+            const options = rootConfig?.coverageReporter;
+            if (options && Object.prototype.hasOwnProperty.call(options, "check")) {
+                delete options.check;
+                process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__("karma-coverage");
+            }
+            return Reflect.construct(Reporter, [rootConfig, ...rest], new.target);
+        }
+        CoverageReporter.$inject = Reporter.$inject;
+        CoverageReporter.prototype = Reporter.prototype;
+        plugin["reporter:coverage"] = [entry[0], CoverageReporter];
+    }
+    catch (error) {
+        if (process.env.SUPERCOV_DEBUG === "1")
+            console.error("[supercov] karma-coverage's check stays as configured", error);
+    }
+}
+// nyc (through 18) remaps with istanbul-lib-source-maps 4, which drops an
+// `if`'s implicit else from any file with a source map: it has no location to
+// map. The instrumented copy has one, so nyc read one branch fewer for every
+// `if` without an `else` than it reads without Supercov. Version 5 keeps the
+// location in the file of the branch's other one; so does this, loaded before
+// nyc's remapping captures the function.
+function keepImplicitElse(toolRequire) {
+    try {
+        const path = toolRequire.resolve("istanbul-lib-source-maps/lib/get-mapping.js");
+        const getMapping = toolRequire(path);
+        const cached = Module._cache[path];
+        if (typeof getMapping !== "function" || !cached)
+            return;
+        let lastSource;
+        cached.exports = function getMappingKeepingImplicitElse(sourceMap, location, originalFile) {
+            const mapping = getMapping(sourceMap, location, originalFile);
+            if (mapping) {
+                lastSource = mapping.source;
+                return mapping;
+            }
+            const implicit = location?.start?.line === undefined && location?.end?.line === undefined;
+            const source = lastSource;
+            lastSource = undefined;
+            return implicit && source !== undefined ? { source, loc: location } : mapping;
+        };
+    }
+    catch (error) {
+        if (process.env.SUPERCOV_DEBUG === "1")
+            console.error("[supercov] nyc keeps its own remapping", error);
+    }
+}
 function skipCoverageThresholds(tool) {
     const skipped = async function skippedCoverageThresholds() {
         process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__(tool);
@@ -251,6 +348,7 @@ function skipCoverageThresholds(tool) {
             toolRequire("../lib/commands/check-coverage.js").checkCoverages = skipped;
         }
         else {
+            keepImplicitElse(toolRequire);
             // A gated nyc run, `nyc report --check-coverage` and
             // `nyc check-coverage` all check through this method.
             const NYC = toolRequire("../index.js");

@@ -343,6 +343,80 @@ function resetCoverage(testId2) {
 runtimeGlobal.__SUPERCOV_MCDC_SNAPSHOT__ = decisionSnapshot;
 runtimeGlobal.__SUPERCOV_COVERAGE_SNAPSHOT__ = coverageSnapshot;
 runtimeGlobal.__SUPERCOV_RESET__ = resetCoverage;
+// A dedicated worker blocked in `Atomics.wait` runs no evaluation, so the
+// test runner could not read its evidence and reported the test as a lower
+// bound: Actual's database worker waits that way between every query. The
+// worker pushes its evidence to its pages instead, on a BroadcastChannel,
+// each time it is about to block with something recorded since its last
+// push; a worker that wakes and records something new says its push is no
+// longer current. A page keeps the latest push of each worker, and the runner
+// reads that when the worker itself does not answer: complete when current.
+var workerEvidenceChannelName = "__supercov_worker_evidence__";
+var workerEvidence = null;
+function workerEvidenceChanged() {
+  if (workerEvidence === null || workerEvidence.changed)
+    return;
+  workerEvidence.changed = true;
+  if (!workerEvidence.pushed)
+    return;
+  workerEvidence.pushed = false;
+  try {
+    workerEvidence.channel.postMessage({ token: workerEvidence.token, current: false });
+  } catch (e) {
+  }
+}
+function pushWorkerEvidence() {
+  if (workerEvidence === null || workerEvidence.pushed)
+    return;
+  workerEvidence.changed = false;
+  workerEvidence.pushed = true;
+  try {
+    workerEvidence.channel.postMessage({ token: workerEvidence.token, url: workerEvidence.url, current: true, snapshot: coverageSnapshot() });
+  } catch (e) {
+    workerEvidence.pushed = false;
+  }
+}
+(function installWorkerEvidenceTransport() {
+  if (!isBrowser || typeof BroadcastChannel !== "function")
+    return;
+  if (typeof WorkerGlobalScope === "function" && runtimeGlobal instanceof WorkerGlobalScope) {
+    if (typeof Atomics !== "object" || typeof Atomics.wait !== "function" || runtimeGlobal.__SUPERCOV_WORKER_TOKEN__)
+      return;
+    try {
+      const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      const url = runtimeGlobal.location ? String(runtimeGlobal.location.href) : "";
+      workerEvidence = { channel: new BroadcastChannel(workerEvidenceChannelName), token, url, changed: true, pushed: false };
+      runtimeGlobal.__SUPERCOV_WORKER_TOKEN__ = token;
+      const wait = Atomics.wait;
+      Atomics.wait = function wait2(typedArray, index, value, timeout) {
+        pushWorkerEvidence();
+        return Reflect.apply(wait, Atomics, arguments);
+      };
+    } catch (e) {
+      workerEvidence = null;
+    }
+    return;
+  }
+  if (typeof document === "undefined" || runtimeGlobal.__SUPERCOV_WORKER_EVIDENCE__)
+    return;
+  const received = /* @__PURE__ */ new Map();
+  try {
+    const channel = new BroadcastChannel(workerEvidenceChannelName);
+    channel.onmessage = (event) => {
+      const message = event.data;
+      if (!message || typeof message.token !== "string")
+        return;
+      const pushed = received.get(message.token);
+      if (message.current)
+        received.set(message.token, { url: message.url, snapshot: message.snapshot, current: true });
+      else if (pushed)
+        pushed.current = false;
+    };
+  } catch (e) {
+    return;
+  }
+  runtimeGlobal.__SUPERCOV_WORKER_EVIDENCE__ = () => Array.from(received, ([token, pushed]) => ({ token, url: pushed.url, current: pushed.current, snapshot: pushed.snapshot }));
+})();
 var persistBrowserScheduled = false;
 var persistBrowserListenersInstalled = false;
 function persistBrowserNow() {
@@ -1260,6 +1334,7 @@ function recordBrowserEvent(event) {
     return false;
   state.eventKeys.add(key);
   state.events.push(event);
+  workerEvidenceChanged();
   return true;
 }
 // A hit is recorded once per context, as a statement probe's is: selections,
@@ -1498,8 +1573,10 @@ function recordSelectionOutcome(id, outcome) {
     state.logicals.set(branchId, vectors);
   }
   const key = selectionOutcomeKeys[outcome];
-  if (!vectors.has(key))
+  if (!vectors.has(key)) {
     vectors.set(key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
+    workerEvidenceChanged();
+  }
 }
 // A JSX expression container has nowhere to put a statement and cannot hold a
 // bare comma operator, so a rendered expression carries its probe as a call
@@ -1525,6 +1602,42 @@ function selectShortV2(file, first, value, kind) {
 }
 function selectRightV2(file, first, value) {
   coverageHitV2(file, value ? first + 3 : first + 2);
+  return value;
+}
+// A leaf of nested selections, `(a && b) || c`: the program's operators stay
+// between the leaves, so a coverage tool the tests run flattens them into the
+// one branch it reads without Supercov. Each step after the value names a
+// selection above the leaf, nearest first, as `first * 4 + code`: code 3 when
+// the leaf is on its right side, which records that side's outcome, and the
+// operator's kind (0 `||`, 1 `&&`, 2 `??`) when on its left, which records the
+// short outcome when the value decides it; otherwise the selection goes on to
+// its right side, and the leaf decides nothing further up.
+function selectPathV2(file, value) {
+  for (let index = 2; index < arguments.length; index += 1) {
+    const step = arguments[index];
+    const code = step & 3;
+    const first = (step - code) / 4;
+    if (code === 3)
+      coverageHitV2(file, value ? first + 3 : first + 2);
+    else if (code === 0 ? value : code === 1 ? !value : value !== null && value !== void 0)
+      coverageHitV2(file, value ? first + 1 : first);
+    else
+      break;
+  }
+  return value;
+}
+// `x ||= y`, `x &&= y`, `x ??= y` keep their operator and their single
+// evaluation of the target: the right side goes through selectRightV2 (or the
+// named form, for an anonymous function the assignment would have named), and
+// a site temporary set to 1 after it tells the end whether the assignment was
+// skipped, which is then the short outcome for the value the target kept.
+function selectNamedRightV2(file, first, value, inferredName) {
+  coverageHitV2(file, value ? first + 3 : first + 2);
+  return applyInferredName(value, inferredName);
+}
+function selectAssignEndV2(file, first, value, right) {
+  if (!right)
+    coverageHitV2(file, value ? first + 1 : first);
   return value;
 }
 // `object?.member`: the short and continued outcomes are two V2 points.
@@ -1720,6 +1833,9 @@ const directRuntimeApi = {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  selectNamedRightV2,
+  selectAssignEndV2,
+  selectPathV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,
@@ -1779,6 +1895,9 @@ export {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  selectNamedRightV2,
+  selectAssignEndV2,
+  selectPathV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,

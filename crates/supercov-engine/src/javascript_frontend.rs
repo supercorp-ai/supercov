@@ -800,13 +800,29 @@ fn inline_instrumentation_map(
             line.starts_with("/* eslint-disable */") || line.starts_with("// @ts-nocheck")
         })
         .count();
+    let mut mappings = object.get("mappings")?.as_str()?.to_owned();
     if banner_lines > 0 {
-        let mappings = object.get("mappings")?.as_str()?.to_owned();
-        object.insert(
-            "mappings".into(),
-            serde_json::Value::String(format!("{}{}", ";".repeat(banner_lines), mappings)),
-        );
+        mappings = format!("{}{mappings}", ";".repeat(banner_lines));
     }
+    // The file's first column maps to the source's first: V8's range for the
+    // whole file starts there, and c8 dropped it while Supercov's runtime
+    // prologue or a banner left that line unmapped. `AAAA` keeps every
+    // relative field at zero, so the rest reads the same, and `C` leaves the
+    // rest of the line unmapped, so the prologue is no statement of the user's.
+    if !code.starts_with("#!") && mappings.starts_with(';') {
+        mappings.insert_str(0, "AAAA,C");
+    }
+    // So does the directive line below, with the last position mapped, where
+    // that range ends.
+    let directive_line = code.matches('\n').count() + 1;
+    let mapped_lines = mappings.matches(';').count();
+    if directive_line > mapped_lines
+        && mappings.contains(|c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/')
+    {
+        mappings.push_str(&";".repeat(directive_line - mapped_lines));
+        mappings.push_str("AAAA");
+    }
+    object.insert("mappings".into(), serde_json::Value::String(mappings));
     object.insert(
         "sources".into(),
         serde_json::json!([original_path.display().to_string()]),
@@ -898,6 +914,9 @@ export declare function defaultEnteredV2(...args: any[]): any;\n\
 export declare function optionalSelectV2(...args: any[]): any;\n\
 export declare function selectShortV2(...args: any[]): any;\n\
 export declare function selectRightV2(...args: any[]): any;\n\
+export declare function selectNamedRightV2(...args: any[]): any;\n\
+export declare function selectAssignEndV2(...args: any[]): any;\n\
+export declare function selectPathV2(...args: any[]): any;\n\
 export declare function optionalCallEndV2(...args: any[]): any;\n\
 export declare function tryBegin(...args: any[]): any;\n\
 export declare function tryCatch(...args: any[]): any;\n\

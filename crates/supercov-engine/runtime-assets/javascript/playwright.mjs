@@ -220,6 +220,14 @@ class CoveragePhaseController {
     // Workers that did not answer an evaluation in time. They are not waited
     // for again until one answers.
     unresponsiveWorkers = new WeakSet();
+    // Each worker's token, under which it pushes its evidence to its pages
+    // before it blocks in Atomics.wait (see runtime.mjs).
+    workerTokens = new WeakMap();
+    // Workers that answered their registration without Supercov's runtime: a
+    // worker built from a string (a `blob:` URL), or from a script nobody
+    // instrumented. There is no phase to set in them and no evidence to read,
+    // and Actual's blocked ones were most of what each step waited for.
+    workersWithoutRuntime = new WeakSet();
     // Set when a worker's evidence could not be read: the test's coverage is
     // then a lower bound.
     workerEvidenceMissing = false;
@@ -254,7 +262,7 @@ class CoveragePhaseController {
         for (const worker of this.allWorkers()) {
             if (this.snapshottedWorkers.has(worker))
                 continue;
-            const snapshot = await this.snapshotWorker(worker);
+            const snapshot = await this.snapshotWorker(worker, this.allPages());
             if (snapshot)
                 snapshots.push(snapshot);
         }
@@ -266,7 +274,19 @@ class CoveragePhaseController {
      * closed with its page has nothing left to read; one that did not answer
      * in time is still running and its evidence is missing from this test.
      */
-    async snapshotWorker(worker) {
+    async snapshotWorker(worker, pages) {
+        if (this.workersWithoutRuntime.has(worker)) {
+            // Asked once more, without waiting: it may have loaded an
+            // instrumented script since it was registered.
+            const answer = await bounded(worker
+                .evaluate(() => globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__?.())
+                .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
+            if (answer && answer !== WORKER_TIMED_OUT) {
+                this.snapshottedWorkers.add(worker);
+                return answer;
+            }
+            return undefined;
+        }
         const answer = await bounded(worker
             .evaluate(() => {
             const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
@@ -275,11 +295,43 @@ class CoveragePhaseController {
             .catch(() => undefined), WORKER_SNAPSHOT_WAIT_MS);
         if (answer === WORKER_TIMED_OUT) {
             this.unresponsiveWorkers.add(worker);
+            // Blocked in Atomics.wait, it pushed what it recorded before it
+            // blocked; that is all of it while the push is current.
+            const pushed = await this.pushedWorkerEvidence(worker, pages);
+            if (pushed?.current) {
+                this.snapshottedWorkers.add(worker);
+                return pushed.snapshot;
+            }
             this.workerEvidenceMissing = true;
-            return undefined;
+            return pushed?.snapshot;
         }
         this.snapshottedWorkers.add(worker);
         return answer;
+    }
+    /**
+     * A worker's latest push, found by the token it answered with when it was
+     * registered, or else by its URL when no other worker of the page pushed
+     * from the same one: a worker that blocks on its first message may never
+     * have answered at all.
+     */
+    async pushedWorkerEvidence(worker, pages) {
+        const token = this.workerTokens.get(worker);
+        const url = worker.url();
+        for (const page of pages) {
+            const pushed = await bounded(page
+                .evaluate(({ token, url }) => {
+                const entries = globalThis.__SUPERCOV_WORKER_EVIDENCE__?.() ?? [];
+                const byToken = token ? entries.find((entry) => entry.token === token) : undefined;
+                if (byToken)
+                    return byToken;
+                const byUrl = entries.filter((entry) => entry.url === url);
+                return byUrl.length === 1 ? byUrl[0] : undefined;
+            }, { token, url })
+                .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
+            if (pushed && pushed !== WORKER_TIMED_OUT)
+                return pushed;
+        }
+        return undefined;
     }
     async snapshotPage(page) {
         const snapshots = [];
@@ -309,7 +361,7 @@ class CoveragePhaseController {
         for (const worker of page.workers()) {
             if (this.snapshottedWorkers.has(worker))
                 continue;
-            const snapshot = await this.snapshotWorker(worker);
+            const snapshot = await this.snapshotWorker(worker, [page]);
             if (snapshot)
                 this.earlySnapshots.push(snapshot);
         }
@@ -420,15 +472,19 @@ class CoveragePhaseController {
             return;
         this.workers.add(worker);
         const phaseId = this.requestPhaseId();
-        await worker
+        const registration = await worker
             .evaluate(({ attemptId, scopeHeader, scopeValue, phaseHeader, phase }) => {
             globalThis.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
             if (phase)
                 globalThis.__SUPERCOV_PHASE_ID__ = phase;
             globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(attemptId, phase);
+            const answer = {
+                token: globalThis.__SUPERCOV_WORKER_TOKEN__,
+                runtime: typeof globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__ === "function",
+            };
             const originalFetch = globalThis.fetch?.bind(globalThis);
             if (!originalFetch)
-                return;
+                return answer;
             globalThis.fetch = ((input, init) => {
                 const headers = new Headers(init?.headers ??
                     (input instanceof Request ? input.headers : undefined));
@@ -437,6 +493,7 @@ class CoveragePhaseController {
                     headers.set(phaseHeader, phase);
                 return originalFetch(input, { ...init, headers });
             });
+            return answer;
         }, {
             attemptId: this.scope.attemptId,
             scopeHeader: COVERAGE_SCOPE_HEADER,
@@ -445,6 +502,10 @@ class CoveragePhaseController {
             phase: phaseId,
         })
             .catch(() => undefined);
+        if (typeof registration?.token === "string")
+            this.workerTokens.set(worker, registration.token);
+        if (registration?.runtime === false)
+            this.workersWithoutRuntime.add(worker);
     }
     async beginAction(operation) {
         timingCount("beginAction");
@@ -626,10 +687,25 @@ class CoveragePhaseController {
         };
         return scoped;
     }
+    /**
+     * Tell every context, frame, worker and future document of the test about
+     * a new phase. The four go to different targets and none waits on another,
+     * so they run together: an action waits for the slowest instead of their
+     * sum, which was most of what Actual's suite spent under Supercov (47 of
+     * the 43 extra seconds, with the database worker's bounded wait the
+     * largest part).
+     */
     async activateInBrowser(phaseId) {
-        await timed("activate.contextHeaders", () => Promise.all([...this.contexts]
-            .filter((context) => !this.adoptedContexts.has(context))
-            .map((context) => this.updateContextHeaders(context, phaseId))));
+        await Promise.all([
+            timed("activate.contextHeaders", () => Promise.all([...this.contexts]
+                .filter((context) => !this.adoptedContexts.has(context))
+                .map((context) => this.updateContextHeaders(context, phaseId)))),
+            this.activateFrames(phaseId),
+            this.activateWorkers(phaseId),
+            timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId)))),
+        ]);
+    }
+    async activateFrames(phaseId) {
         await timed("activate.frameEvaluate", () => Promise.all([...this.pages].flatMap((page) => page.frames()).map((frame) => frame
             .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
@@ -656,6 +732,8 @@ class CoveragePhaseController {
             phaseCookie: COVERAGE_PHASE_COOKIE,
         })
             .catch(() => undefined))));
+    }
+    async activateWorkers(phaseId) {
         await timed("activate.workerEvaluate", () => Promise.all([...this.workers].map(async (worker) => {
             const activation = worker
                 .evaluate((id) => {
@@ -666,13 +744,13 @@ class CoveragePhaseController {
                 .then(() => this.unresponsiveWorkers.delete(worker))
                 .catch(() => undefined);
             // Evaluations run in order, so one left queued still applies this
-            // phase before any later one; it is only not waited for.
-            if (this.unresponsiveWorkers.has(worker))
+            // phase before any later one; it is only not waited for. One with
+            // no runtime has nothing to apply unless it loads some later.
+            if (this.unresponsiveWorkers.has(worker) || this.workersWithoutRuntime.has(worker))
                 return;
             if ((await bounded(activation, WORKER_ACTIVATION_WAIT_MS)) === WORKER_TIMED_OUT)
                 this.unresponsiveWorkers.add(worker);
         })));
-        await timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId))));
     }
     async updateContextHeaders(context, phaseId) {
         await context
