@@ -3,6 +3,7 @@
 //! are owned here.
 
 pub mod agent_json;
+pub mod assertion_coverage;
 pub mod assertion_inputs;
 pub mod assertion_map;
 pub mod assertion_store;

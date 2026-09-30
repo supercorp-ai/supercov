@@ -44,6 +44,7 @@ use supercov_engine::{
 };
 use time::{OffsetDateTime, macros::format_description};
 
+mod assertions_command;
 mod assertions_human;
 mod assertions_query;
 mod html_report;
@@ -3169,10 +3170,13 @@ fn execute_public_query(
 }
 
 fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
+    if command == "runs" && arguments.get(1).is_some_and(|a| a == "assertions") {
+        return assertions_command::command(&arguments);
+    }
     if command == "runs"
         && arguments
             .get(1)
-            .is_some_and(|a| matches!(a.as_str(), "assertions" | "assertion" | "source"))
+            .is_some_and(|a| matches!(a.as_str(), "assertion" | "source"))
     {
         return assertions_query::command(&arguments);
     }

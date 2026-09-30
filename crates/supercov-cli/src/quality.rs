@@ -128,14 +128,14 @@ const BASE_URL: &str = "https://api.typesafe.ai";
 /// The model every request names. `TYPESAFE_DEFAULT_MODEL` is the variable
 /// TypeSafe's own SDKs read, so a gateway that names Jev differently works the
 /// way it already does for them.
-fn model() -> &'static str {
+pub(crate) fn model() -> &'static str {
     static MODEL_IN_USE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     MODEL_IN_USE.get_or_init(|| setting("TYPESAFE_DEFAULT_MODEL").unwrap_or_else(|| MODEL.into()))
 }
 
 /// Where requests go: `TYPESAFE_BASE_URL`, read as TypeSafe's SDKs read it,
 /// with the API path appended.
-fn endpoint() -> Result<&'static str, String> {
+pub(crate) fn endpoint() -> Result<&'static str, String> {
     static ENDPOINT: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
     ENDPOINT
         .get_or_init(|| endpoint_for(setting("TYPESAFE_BASE_URL").as_deref()))
@@ -173,7 +173,7 @@ fn host(url: &str) -> &str {
 }
 
 /// An environment variable, where blank means unset as it does for the SDKs.
-fn setting(name: &str) -> Option<String> {
+pub(crate) fn setting(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
@@ -672,7 +672,7 @@ struct Window {
 /// as too large. Measured against 1,367 requests whose real input counts the
 /// API reported, this estimate is below the real count once, by 3%, which the
 /// gap between `MAX_REQUEST_TOKENS` and the model's limit absorbs.
-fn estimated_tokens(bytes: &[u8]) -> usize {
+pub(crate) fn estimated_tokens(bytes: &[u8]) -> usize {
     let dense = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-');
     let mut runs = 0;
     let mut run = 0;
@@ -1135,21 +1135,21 @@ fn read_text(path: &Path) -> Result<String, String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ApiResponse {
-    model: String,
-    answers: BTreeMap<String, Answer>,
-    usage: Usage,
+pub(crate) struct ApiResponse {
+    pub(crate) model: String,
+    pub(crate) answers: BTreeMap<String, Answer>,
+    pub(crate) usage: Usage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Usage {
-    input_tokens: u64,
-    output_tokens: u64,
+pub(crate) struct Usage {
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-enum Answer {
+pub(crate) enum Answer {
     Noul {
         noul: f64,
     },
@@ -1309,7 +1309,7 @@ fn jitter() -> Duration {
     Duration::from_millis((nanos % 250) as u64)
 }
 
-fn client() -> ureq::Agent {
+pub(crate) fn client() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(45)))
         .max_redirects(0)
@@ -1318,7 +1318,7 @@ fn client() -> ureq::Agent {
         .new_agent()
 }
 
-fn evaluate(
+pub(crate) fn evaluate(
     agent: &ureq::Agent,
     endpoint: &str,
     key: &str,
@@ -1454,7 +1454,7 @@ const CONCURRENCY: usize = 8;
 const MAX_BACKOFF_SECONDS: u64 = 30;
 
 /// What Jev charges for input. Output is free, so this is the whole bill.
-const USD_PER_MILLION_INPUT_TOKENS: f64 = 0.042;
+pub(crate) const USD_PER_MILLION_INPUT_TOKENS: f64 = 0.042;
 
 /// A request answered: its hash, the answer, whether it came from the cache,
 /// and any trouble saving it.
