@@ -51,17 +51,6 @@ function save(name, value) {
     typeof value === 'string' ? value : JSON.stringify(value, null, 2) + '\n',
   );
 }
-function anchor(text) {
-  const i = original.indexOf(text);
-  assert.ok(i >= 0, text);
-  const lines = original.slice(0, i).split('\n');
-  return {
-    file: 'src/Checkout.tsx',
-    line: lines.length,
-    column: Buffer.byteLength(lines.at(-1)) + 1,
-    text,
-  };
-}
 try {
   save('before.txt', cli(['--', 'npm', 'run', 'test:before']));
   const before = query(['runs', 'latest']);
@@ -72,90 +61,36 @@ try {
   const after = query(['runs', 'latest']);
   assert.equal(after.tests, 7);
   assert.equal(after.measurement.complete, true);
-  const map = JSON.parse(readFileSync(after.assertionCoverage.map, 'utf8'));
-  const checks = [
-    [
-      'total',
-      'toHaveTextContent(/^25',
-      '(quantity * 12.5).toFixed(2)',
-      'displays the exact order total',
-      'The status text equals 25.00 after whitespace normalization.',
-      'For quantity 2 this expression produces 25.00 in the output element. The anchored regular expression checks that rendered text.',
-    ],
-    [
-      'accessible-name',
-      'toHaveAccessibleName',
-      '`Pay for ${quantity} items`',
-      'names the payment action accessibly',
-      'The payment button has the exact accessible name Pay for 2 items.',
-      'This aria-label template supplies the button accessible name, which the matcher compares with Pay for 2 items.',
-    ],
-    [
-      'disabled',
-      'toBeDisabled',
-      'quantity === 0 || saving',
-      'disables payment for an empty order',
-      'The payment button is disabled for quantity zero.',
-      'For quantity zero this expression sets the HTML button disabled property, checked by the matcher. This claim does not cover the saving branch.',
-    ],
-    [
-      'error-message',
-      'toHaveTextContent(/^Payment',
-      "String('Payment failed. Try again.')",
-      'explains a failed payment',
-      'The alert text equals Payment failed. Try again. after whitespace normalization.',
-      'The rejected save sets error. React renders this string inside the alert, whose text the anchored regular expression checks after the alert appears.',
-    ],
+  // Assertion coverage for both suites, when a TypeSafe AI key is set: which of
+  // the four UI expressions a test is judged to catch breaking. The deliberate
+  // edits below check the same four expressions independently.
+  const expressions = [
+    '(quantity * 12.5).toFixed(2)',
+    '`Pay for ${quantity} items`',
+    'quantity === 0 || saving',
+    "String('Payment failed. Try again.')",
   ];
-  const ids = [];
-  for (const [id, matcher, text, name, observes, explanation] of checks) {
-    const item = map.assertions.find(
-      (a) =>
-        a.at.file.endsWith('checkout.strong.test.tsx') &&
-        a.at.text.replace(/\s/g, '').includes(matcher),
-    );
-    assert.ok(item, matcher);
-    ids.push(item.id);
-    item.observes = [observes];
-    item.flows = [
-      {
-        id,
-        basis: null,
-        appliesTo: [{ file: item.at.file, name }],
-        explanation,
-        nodes: [{ id: 'ui-value', at: anchor(text) }],
-        edges: [{ from: 'ui-value', to: '$assertion', kind: 'data' }],
-        countsAsAsserted: ['ui-value'],
-        watch: [],
-      },
-    ];
+  const assessments = {};
+  if (process.env.TYPESAFE_API_KEY) {
+    for (const [label, run] of [['before', before.run], ['after', after.run]]) {
+      cli(['runs', run, 'assertions', 'assess']);
+      const result = JSON.parse(
+        readFileSync(resolve(root, '.supercov/runs', run, 'assertion-coverage.json'), 'utf8'),
+      );
+      assessments[label] = {
+        percentage: result.summary.percentage,
+        expressions: expressions.map((text) => ({
+          text,
+          asserted: result.statements.some(
+            (s) => s.file === 'src/Checkout.tsx' && s.asserted && s.text.includes(text),
+          ),
+        })),
+      };
+    }
+    save('ui-assertions.json', assessments);
+  } else {
+    console.log('TYPESAFE_API_KEY is not set: skipping the assertion coverage assessment.');
   }
-  writeFileSync(
-    after.assertionCoverage.map,
-    JSON.stringify(map, null, 2) + '\n',
-  );
-  for (const id of ids) {
-    const detail = query(['runs', after.run, 'assertion', id]);
-    assert.ok(detail.assertion.flows[0].expectedBasis, JSON.stringify(detail));
-    map.assertions.find((a) => a.id === id).flows[0].basis =
-      detail.assertion.flows[0].expectedBasis;
-  }
-  writeFileSync(
-    after.assertionCoverage.map,
-    JSON.stringify(map, null, 2) + '\n',
-  );
-  const evidence = ids.map(
-    (id) => query(['runs', after.run, 'assertion', id]).assertion,
-  );
-  for (const item of evidence) {
-    assert.equal(item.flows[0].eligible, true, JSON.stringify(item));
-    assert.equal(
-      item.flows[0].nodeCredit[0].status,
-      'credited',
-      JSON.stringify(item),
-    );
-  }
-  save('ui-assertions.json', evidence);
   save('after.json', query(['runs', after.run]));
   // Deliberate edits test this example; Supercov does not perform mutation testing.
   const mutations = [
@@ -183,13 +118,16 @@ try {
     node: process.version,
     recordedAt: new Date().toISOString(),
     before: { tests: 3, lineCoverage: 100 },
-    after: { tests: 7, reviewedUiFlows: 4 },
+    after: { tests: 7 },
+    assessments,
     mutations: results,
   });
   console.log('3 weak tests: 100% lines. Four UI regressions still pass.');
-  console.log(
-    '7 tests with focused assertions: all four regressions fail; four UI expressions have credited maps.',
-  );
+  console.log('7 tests with focused assertions: all four regressions fail.');
+  for (const [label, a] of Object.entries(assessments))
+    console.log(
+      `${label}: ${a.percentage}% asserted; UI expressions asserted: ${a.expressions.filter((e) => e.asserted).length} of 4.`,
+    );
   console.log(`Evidence: ${recorded}`);
 } finally {
   rmSync(root, { recursive: true, force: true });

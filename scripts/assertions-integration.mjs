@@ -8,6 +8,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { latestRun, requireSupercov } from "./coverage-test-helpers.mjs";
 
+// An optional binary, as the Alpine job passes its release musl build.
+const binary = process.argv[2] ? { SUPERCOV_RUST_BINARY: resolve(process.argv[2]) } : {};
+
 const root = mkdtempSync(join(tmpdir(), "supercov-assertions-"));
 const write = (file, text) => {
   mkdirSync(resolve(root, file, ".."), { recursive: true });
@@ -82,7 +85,7 @@ const server = spawn(process.execPath, ["--input-type=module", "-e", `
   server.listen(0, "127.0.0.1", () => console.log(server.address().port));
 `], { stdio: ["ignore", "pipe", "inherit"] });
 const port = await new Promise((ok) => server.stdout.once("data", (d) => ok(Number(String(d).trim()))));
-const env = { TYPESAFE_BASE_URL: `http://127.0.0.1:${port}`, TYPESAFE_API_KEY: "test-key" };
+const env = { ...binary, TYPESAFE_BASE_URL: `http://127.0.0.1:${port}`, TYPESAFE_API_KEY: "test-key" };
 const requests = () => (existsSync(counter) ? readFileSync(counter, "utf8").trim().split("\n").filter(Boolean).length : 0);
 const assess = (...extra) => {
   const result = requireSupercov(root, ["runs", latestRun(root), "assertions", "assess", "--json", ...extra], { env });
@@ -96,7 +99,7 @@ const fail = (message, data) => {
 };
 
 try {
-  requireSupercov(root, ["--", "npm", "test"]);
+  requireSupercov(root, ["--", "npm", "test"], { env: binary });
 
   const dry = assess("--dry-run");
   if (dry.statements !== 11 || requests() !== 0) fail("a dry run estimates 11 statements and sends nothing", { dry, requests: requests() });
@@ -112,7 +115,7 @@ try {
     fail("expected the run's saved result", first);
 
   // Reading needs neither the network nor a key.
-  const read = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", "--json"], { env: { TYPESAFE_API_KEY: "", TYPESAFE_BASE_URL: "http://127.0.0.1:9" } }).stdout).data;
+  const read = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", "--json"], { env: { ...binary, TYPESAFE_API_KEY: "", TYPESAFE_BASE_URL: "http://127.0.0.1:9" } }).stdout).data;
   if (read.summary?.asserted !== 10 || read.notAsserted?.[0]?.line !== 9) fail("reading returns the saved result", read);
 
   const sent = requests();
@@ -123,7 +126,7 @@ try {
   // One line of format.mjs changes: its statements are asked again, cart.mjs's
   // answers are reused.
   write("src/format.mjs", readFileSync(resolve(root, "src/format.mjs"), "utf8").replace("toUpperCase()", "toLocaleUpperCase()"));
-  requireSupercov(root, ["--", "npm", "test"]);
+  requireSupercov(root, ["--", "npm", "test"], { env: binary });
   const unassessed = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", "--json"], { env }).stdout).data;
   if (unassessed.assessed !== false || unassessed.lastAssessed?.percentage !== 90.9)
     fail("a new run reads as not assessed and names the last assessment", unassessed);

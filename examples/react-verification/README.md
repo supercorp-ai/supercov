@@ -7,7 +7,7 @@ the failure message says payment succeeded.
 
 Four small assertions make those expectations explicit:
 
-| UI behavior | Assertion | Source mapped by Supercov |
+| UI behavior | Assertion | Expression it checks |
 | --- | --- | --- |
 | Exact displayed total | `toHaveTextContent(/^25\.00$/)` | Price formatting inside `<output>` |
 | Accessible payment name | `toHaveAccessibleName('Pay for 2 items')` | The `aria-label` template |
@@ -21,32 +21,32 @@ From the repository root:
 ```sh
 cargo build -p supercov
 npm --prefix examples/react-verification ci
-npm --prefix examples/react-verification run demo
+TYPESAFE_API_KEY=... npm --prefix examples/react-verification run demo
 ```
 
-The script measures the before/after suites, writes four reviewed assertion
-maps, validates passing assertions and same-test execution, and checks four
-deliberately broken copies. It changes only a temporary copy; output goes to
-`recorded/`. Set `SUPERCOV_BINARY` to test another built CLI.
+The script measures the before and after suites, assesses assertion coverage
+for both with `supercov runs <run> assertions assess`, and checks four
+deliberately broken copies of the component. It changes only a temporary copy;
+output goes to `recorded/`. Without `TYPESAFE_API_KEY` it skips the assessment.
+Set `SUPERCOV_BINARY` to test another built CLI.
 
-These are deliberately narrow, authored explanations. Supercov does not infer
-that text is correct merely because it rendered, and it does not perform the
-mutation checks itself. The script supplies those checks independently. The
-empty-order assertion does not establish the saving-state branch, and four
-credited expressions do not mean the whole component is assertion-covered.
+Recorded result: the three weak tests reach 100% of lines, 58.3% of the
+statements are asserted, and 1 of the 4 UI expressions is judged asserted -- the
+broken copies show that none of the four is actually caught, so that one is a
+miss. The seven focused tests reach 83.3%, all four expressions are asserted,
+and all four broken copies fail.
 
 ## Why this adds something to existing coverage
 
-Keep Vitest, Testing Library and your current assertions. Traditional execution
-coverage answers whether code ran. Supercov also gives an agent small source
-queries, observed passing assertion identities and reviewable mappings between
-assertions and measured JSX expressions. That makes “what checks this value?” a
-specific, inspectable question. The map is an explanation backed by execution,
-not a proof that a test rejects every possible bug.
+Keep Vitest, Testing Library and your current assertions. Execution coverage
+answers whether code ran; assertion coverage asks whether a test would notice
+that code going wrong, statement by statement, including JSX expressions. That
+makes "what checks this value?" a specific question with an answer per line.
+It is a judgment by a model, checked here against the broken copies, not a
+proof that a test rejects every possible bug.
 
-`recorded/result.json` and `recorded/ui-assertions.json` contain the verified
-results. This is a reproducible teaching example, not a production-app case
-study or a token-savings benchmark.
+`recorded/result.json` and `recorded/ui-assertions.json` contain the results.
+This is a reproducible teaching example, not a production-app case study.
 
 Separate compatibility tests in `compat/` check SSR hydration, preservation of
 server DOM, the first interaction, and recovery from mismatched HTML in both

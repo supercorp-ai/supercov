@@ -631,7 +631,8 @@ fn hex_digest(digest: &[u8; 32]) -> String {
         })
 }
 
-/// Publish immutable run evidence and its initial assertion map/state together.
+/// Publish immutable run evidence with its source manifest cache and per-test
+/// execution record together.
 pub fn publish_run(
     root: &Path,
     metadata: &RunMetadata,
@@ -647,7 +648,7 @@ pub fn publish_run(
 #[derive(Default)]
 pub struct Archived {
     pub report: Option<crate::coverage_report::CoverageReport>,
-    pub inputs: Option<crate::assertion_map::InputManifest>,
+    pub inputs: Option<crate::source_manifest::InputManifest>,
 }
 
 /// `publish_run` for a frontend that holds what it archived; see `Archived`.
@@ -707,9 +708,9 @@ pub(crate) fn publish_run_with_fault(
     let mut json = serde_json::to_vec_pretty(metadata).map_err(LifecycleError::Metadata)?;
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
-    // Everything publication derives from the evidence -- the assertion map's
-    // record of what each test ran, the summary `runs latest` shows, the query
-    // index -- comes from one analysis of it, made here. Each used to analyse
+    // Everything publication derives from the evidence -- the record of what
+    // each test ran and the query index -- comes from one analysis of it, made
+    // here. Each used to analyse
     // the archive on its own: once here, twice more in the first query after
     // the run, and on a 3,900-test Python suite each analysis took 5 to 8
     // seconds. Evidence that will not analyse is published as before; the
@@ -732,7 +733,7 @@ pub(crate) fn publish_run_with_fault(
     let archived_inputs = match archived
         .inputs
         .map(|manifest| {
-            crate::assertion_store::archived_manifest(manifest, hex_digest(&evidence_sha256))
+            crate::source_manifest::archived_manifest(manifest, hex_digest(&evidence_sha256))
         })
         .transpose()
     {
@@ -740,11 +741,11 @@ pub(crate) fn publish_run_with_fault(
         Err(reason) => {
             let _ = remove_stored_tree_deferred(root, &staging);
             return Err(LifecycleError::InvalidState(format!(
-                "assertion map publication: {reason}"
+                "source manifest publication: {reason}"
             )));
         }
     };
-    // The assertion map and the query index both read the analysis and
+    // The execution record and the query index both read the analysis and
     // write their own files, so they are written side by side.
     let prepared = std::thread::scope(|scope| {
         let index = analysed.as_ref().map(|report| {
@@ -758,7 +759,7 @@ pub(crate) fn publish_run_with_fault(
                 }
             })
         });
-        let prepared = crate::assertion_store::prepare_publication_with(
+        let prepared = crate::source_manifest::prepare_publication_with(
             root,
             &staging,
             metadata,
@@ -781,7 +782,7 @@ pub(crate) fn publish_run_with_fault(
     if let Err(reason) = prepared {
         let _ = remove_stored_tree_deferred(root, &staging);
         return Err(LifecycleError::InvalidState(format!(
-            "assertion map publication: {reason}"
+            "source manifest publication: {reason}"
         )));
     }
     sync_directory(&staging)?;
@@ -1348,13 +1349,17 @@ mod tests {
         let (evidence, bytes) = evidence(&root);
         let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
         assert!(published.join("run.json").is_file());
-        assert!(published.join("assertions.json").is_file());
+        assert!(published.join("source-manifest.cache.json").is_file());
         assert!(
             !published
                 .join(crate::run_store::RUST_QUERY_INDEX_FILE)
                 .exists()
         );
-        assert!(!published.join("assertions.summary.cache.json").exists());
+        assert!(
+            !published
+                .join(crate::source_manifest::EXECUTIONS_FILE)
+                .exists()
+        );
         let run = stored(&root, id);
         let Err(query) = crate::run_store::open_or_rebuild_query_index(&run) else {
             panic!("the first query cannot analyse it either");
@@ -1417,8 +1422,7 @@ mod tests {
             fs::read(published.join("evidence.raw.gz")).unwrap(),
             fs::read(&evidence).unwrap()
         );
-        assert!(published.join("assertions.json").is_file());
-        assert!(published.join("assertions.state.json").is_file());
+        assert!(published.join("source-manifest.cache.json").is_file());
         assert!(matches!(
             publish_run(&root, &metadata(id, bytes), &evidence),
             Err(LifecycleError::PublicationExists(_))
@@ -1470,7 +1474,7 @@ mod tests {
             .contents = b"{broken".to_vec();
         let raw = write_archive(entries, &evidence).unwrap();
         let error = publish_run(&root, &metadata(id, raw.compressed_bytes), &evidence).unwrap_err();
-        assert!(error.to_string().contains("assertion map publication"));
+        assert!(error.to_string().contains("source manifest publication"));
         assert!(!root.join(".supercov/runs").join(id).exists());
         assert!(
             !root

@@ -4,8 +4,9 @@
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, process::ExitCode};
 use supercov_engine::{
-    agent_json, assertion_store as maps,
+    agent_json,
     run_store::{StoredRun, compare_run_integrity, discover_runs, select_run},
+    source_manifest as maps,
 };
 
 const HELP: &str = r#"Usage: supercov runs <run> tests affected [--json | --names | --files]

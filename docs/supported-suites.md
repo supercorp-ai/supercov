@@ -50,7 +50,7 @@ Supercov reports the level it actually observed. It does not guess.
 | --- | --- |
 | Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
 | Vitest | Exact per test, with setup execution kept separate; Browser Mode included |
-| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept; passing `expect` occurrences are identified for assertion maps |
+| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept |
 | `node:test` | Exact per test |
 | AVA and Mocha | Aggregate structural coverage |
 | Other Node-based runners | Aggregate when their processes remain visible to Supercov |
@@ -81,9 +81,6 @@ obligations. `{value}` is reached exactly when the tree is, and
 `onClick={() => save()}` is measured where the handler is called rather than
 where it is created.
 
-`expect.element(...)`, `expect.soft(...)` and `expect.poll(...)` are recognised
-as assertions, so their passing occurrences are available to assertion maps.
-
 ### React and React Native
 
 React components can use Testing Library with Vitest/jsdom, Vitest Browser Mode,
@@ -93,11 +90,10 @@ it does not measure Hermes, native modules, simulator/device execution, Detox or
 Maestro. React SSR hydration is exercised in jsdom and Chromium; this does not
 establish Next.js Server Components, streaming SSR or server actions.
 
-An assertion map can explain which displayed value, accessible name, disabled
-state or error message a test checks. JSX expression coverage and a passing
-assertion are evidence for reviewing that explanation, not automatic semantic
-proof. A button being rendered does not establish that its disabled state was
-checked. Keep your existing runner and matchers.
+Assertion coverage treats a JSX expression as a statement: it asks whether a
+test would notice the displayed value, accessible name, disabled state or error
+message becoming undefined. A button being rendered does not establish that its
+disabled state was checked. Keep your existing runner and matchers.
 
 The [React verification example](https://github.com/supercorp-ai/supercov/tree/main/examples/react-verification)
 shows a fully executed checkout whose weak tests accept four UI regressions,
@@ -117,11 +113,6 @@ If tests import compiled output such as `dist/` or launch a script that uses it,
 Supercov runs the project's build inside the isolated copy before testing.
 Keep using your normal test and build commands. Instrumentation does not
 require changing the project's TypeScript settings.
-
-For assertion maps, Node, Vitest, Jest and Playwright's Node-side assertions
-supply supported passing-occurrence evidence. Custom assertion wrappers and
-browser-side checks can have additional observation limits. See
-[Assertion evidence](assertion-evidence.md) before interpreting a missing occurrence.
 
 ### Browsers, servers, and child processes
 
@@ -347,10 +338,6 @@ no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`
 call Supercov wraps — `goleak.VerifyTestMain(m)` runs the suite and exits
 itself. Without periodic writes such a run recorded nothing at all.
 
-For assertion maps, `t.Error`, `t.Errorf`, `t.Fatal`, `t.Fatalf` and testify's
-`assert` and `require` are inventoried. A Go test states its claim with an `if`
-and reports the violation, so the report is the site.
-
 A repository with several modules works either way it is laid out. A directory
 with a `go.mod` of its own that no `go.work` names is a different module, and
 `go test ./...` walks past it, so Supercov leaves it alone. A `go.work`
@@ -427,10 +414,6 @@ Every one of these is named in the run: ask for `npx supercov runs latest
 limitations` and each appears with its file, its line, and why it was left
 alone. A source file the parser cannot read is declared there too, so a hole in
 the denominator stays visible after the build log is gone.
-
-For assertion maps, forms spelled `assertSomething`, `assertThat` or `fail` are
-inventoried, which covers JUnit, TestNG, AssertJ, Hamcrest and kotlin.test.
-Kotest's infix matchers are not.
 
 ```sh
 npx supercov -- mvn test

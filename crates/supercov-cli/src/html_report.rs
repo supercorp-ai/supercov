@@ -203,6 +203,7 @@ struct ReportRun {
     file_totals: BTreeMap<String, BTreeMap<String, usize>>,
     decisions: serde_json::Value,
     assertions: Option<serde_json::Value>,
+    statement_spans: serde_json::Value,
     tests: Vec<ReportTest>,
     lines: Vec<ReportLine>,
     scope: Option<serde_json::Value>,
@@ -534,7 +535,8 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
         file_details,
         file_totals,
         decisions: serde_json::to_value(decisions).map_err(|error| error.to_string())?,
-        assertions: build_assertions(root, run),
+        assertions: build_assertions(run),
+        statement_spans: statement_spans(run),
         tests,
         lines,
         scope,
@@ -542,108 +544,43 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
     })
 }
 
-/// What the assertion map claims this run proved, when there is a map to read.
-///
-/// The query path decides this the same way, and this is deliberately a copy of
-/// that decision rather than a looser one: without a map there is nothing to
-/// report, and against a changed checkout the map's claims are about source
-/// that is no longer there, so the reason is reported instead of the numbers.
-///
-/// The absolute path to the map is dropped. The query path prints it to a
-/// terminal on the machine that holds it; a report is meant to be attached to a
-/// pull request, and the path names somebody's home directory.
-fn build_assertions(root: &Path, run: &StoredRun) -> Option<serde_json::Value> {
-    if !run
-        .directory
-        .join(supercov_engine::assertion_store::MAP_FILE)
-        .exists()
-    {
-        return None;
-    }
-    let current = current_integrity_for_run(root, run);
-    let usable = current.as_ref().is_some_and(|current| {
-        !compare_run_integrity(Some(&run.metadata.integrity), current).stale
-    });
-    let report = if usable {
-        supercov_engine::assertion_store::report(root, run)
-    } else {
-        Err("Current checkout differs from the run or cannot be verified; rerun tests to inherit the assertion map".into())
+/// The run's assessed assertions coverage, when `assertions assess` saved one:
+/// the share asserted, per-file counts, and every assessed statement with
+/// whether it is asserted and the test judged to catch it.
+fn build_assertions(run: &StoredRun) -> Option<serde_json::Value> {
+    let Some(result) = crate::assertions_command::saved(run) else {
+        return Some(serde_json::json!({
+            "available": false,
+            "error": format!("Not assessed for this run. Run: npx supercov runs {} assertions assess", run.id),
+        }));
     };
-    Some(match report {
-        Ok(report) => serde_json::json!({
-            "available": true,
-            "summary": report["summary"],
-            "basis": report["basis"],
-            "revision": report["revision"],
-            "inheritance": report["inheritance"],
-            "validationErrors": report["validationErrors"],
-            "scope": "whole run with matching current source; independent of structural query filters",
-            "files": assertion_files(&report),
-            "statements": assertion_statements(&report),
-            "spans": statement_spans(&report),
-            "sites": assertion_sites(&report, run),
-        }),
-        Err(error) => serde_json::json!({"available": false, "error": error}),
-    })
-}
-
-/// Measured, declared and credited statements per source file.
-///
-/// The run-level percentage says how much of the run an assertion map explains;
-/// this says where. It is folded from the same statement rows the query path
-/// pages, so a file's numbers add up to the run's.
-fn assertion_files(report: &serde_json::Value) -> serde_json::Value {
-    let mut files = BTreeMap::<String, (usize, usize, usize)>::new();
-    for statement in report["statements"].as_array().unwrap_or(&Vec::new()) {
+    let mut files = BTreeMap::<String, (usize, usize)>::new();
+    let empty = Vec::new();
+    let statements = result["statements"].as_array().unwrap_or(&empty);
+    for statement in statements {
         let Some(file) = statement["file"].as_str() else {
             continue;
         };
-        let entry = files.entry(file.to_string()).or_default();
+        let entry = files.entry(file.to_owned()).or_default();
         entry.0 += 1;
-        if statement["declared"] == true {
+        if statement["asserted"] == true {
             entry.1 += 1;
         }
-        if statement["asserted"] == true {
-            entry.2 += 1;
-        }
     }
-    files
-        .into_iter()
-        .map(|(file, (total, declared, asserted))| {
-            (
-                file,
-                serde_json::json!({"total": total, "declared": declared, "asserted": asserted}),
-            )
-        })
-        .collect::<serde_json::Map<_, _>>()
-        .into()
-}
-
-/// The statements an assertion map claims, with whether each earned credit.
-///
-/// Credit is per statement, not per line: a line holding a guard and its
-/// consequence can have one claimed and the other not, and the engine's
-/// line-level figure deliberately refuses such a line. The source view draws
-/// statements, so it gets them. Unclaimed statements are left out; the file
-/// totals above already count them.
-fn assertion_statements(report: &serde_json::Value) -> serde_json::Value {
-    report["statements"]
-        .as_array()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .filter(|statement| statement["declared"] == true || statement["asserted"] == true)
-        .map(|statement| {
-            serde_json::json!({
-                "file": statement["file"],
-                "line": statement["line"],
-                "column": statement["at"]["column"],
-                "text": statement["at"]["text"],
-                "asserted": statement["asserted"],
-                "flows": statement["flows"],
-            })
-        })
-        .collect::<Vec<_>>()
-        .into()
+    let summary = &result["summary"];
+    Some(serde_json::json!({
+        "available": true,
+        "summary": {
+            "status": "available",
+            "statements": {"percentage": summary["percentage"], "asserted": summary["asserted"], "total": summary["statements"]},
+        },
+        "basis": result["basis"],
+        "files": files.into_iter().map(|(file, (total, asserted))| (file, serde_json::json!({"total": total, "asserted": asserted}))).collect::<serde_json::Map<_, _>>(),
+        "statements": statements.iter().map(|s| serde_json::json!({
+            "file": s["file"], "line": s["line"], "text": s["text"], "change": s["change"],
+            "asserted": s["asserted"], "test": s["test"],
+        })).collect::<Vec<_>>(),
+    }))
 }
 
 /// Statements that continue past their first line, with their coverage.
@@ -653,94 +590,20 @@ fn assertion_statements(report: &serde_json::Value) -> serde_json::Value {
 /// executed with that first line, and the source view should say so instead of
 /// marking those lines as if they were comments. Only the multi-line ones are
 /// carried; a single-line statement adds nothing the line record lacks.
-fn statement_spans(report: &serde_json::Value) -> serde_json::Value {
-    report["statements"]
-        .as_array()
-        .unwrap_or(&Vec::new())
+fn statement_spans(run: &StoredRun) -> serde_json::Value {
+    let Ok(coverage) = supercov_engine::source_manifest::coverage(run) else {
+        return serde_json::json!([]);
+    };
+    coverage
+        .view
+        .points
         .iter()
-        .filter_map(|statement| {
-            let text = statement["at"]["text"].as_str()?;
-            let extra = text.matches('\n').count();
-            if extra == 0 {
-                return None;
-            }
-            let line = statement["line"].as_u64()?;
-            Some(serde_json::json!({
-                "file": statement["file"],
-                "line": line,
-                "end": line + extra as u64,
-                "covered": statement["covered"],
+        .filter(|p| p.meta.kind == supercov_engine::coverage_analysis::PointKind::Statement)
+        .filter_map(|p| {
+            let extra = p.meta.source.matches('\n').count();
+            (extra > 0).then(|| serde_json::json!({
+                "file": p.meta.file, "line": p.meta.line, "end": p.meta.line + extra, "covered": p.covered,
             }))
-        })
-        .collect::<Vec<_>>()
-        .into()
-}
-
-/// Where each assertion sits, what it claims to observe, and each flow's own
-/// explanation and selected tests, so a credited line can show the reasoning
-/// behind it without carrying the whole map.
-///
-/// The explanation is authored text and lives only in the map file; the
-/// engine's rows carry the flow's evaluation, so the two are joined here.
-fn assertion_sites(report: &serde_json::Value, run: &StoredRun) -> serde_json::Value {
-    let map = std::fs::read(
-        run.directory
-            .join(supercov_engine::assertion_store::MAP_FILE),
-    )
-    .ok()
-    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-    .unwrap_or(serde_json::Value::Null);
-    let explanations = map["assertions"]
-        .as_array()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .flat_map(|assertion| {
-            let id = assertion["id"].as_str().unwrap_or_default().to_string();
-            assertion["flows"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .map(move |flow| {
-                    (
-                        format!("{id}/{}", flow["id"].as_str().unwrap_or_default()),
-                        flow["explanation"].clone(),
-                    )
-                })
-        })
-        .collect::<BTreeMap<_, _>>();
-    report["assertions"]
-        .as_array()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .map(|assertion| {
-            let id = assertion["id"].as_str().unwrap_or_default();
-            let flows = assertion["flows"]
-                .as_array()
-                .unwrap_or(&Vec::new())
-                .iter()
-                .map(|flow| {
-                    let flow_id = flow["id"].as_str().unwrap_or_default();
-                    serde_json::json!({
-                        "id": flow_id,
-                        "eligible": flow["eligible"],
-                        "explanation": explanations.get(&format!("{id}/{flow_id}")).cloned().unwrap_or(serde_json::Value::Null),
-                        "tests": flow["selectors"].as_array().unwrap_or(&Vec::new()).iter().map(|selector| serde_json::json!({
-                            "file": selector["file"],
-                            "name": selector["name"],
-                            "status": selector["status"],
-                        })).collect::<Vec<_>>(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            serde_json::json!({
-                "id": id,
-                "file": assertion["at"]["file"],
-                "line": assertion["at"]["line"],
-                "text": assertion["at"]["text"],
-                "observes": assertion["observes"],
-                "flows": flows,
-            })
         })
         .collect::<Vec<_>>()
         .into()

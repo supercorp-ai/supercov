@@ -556,8 +556,8 @@ pub fn run_direct_javascript(
         "{}:{}:{}:{}",
         integrity.fingerprint.combined,
         integrity.fingerprint.execution,
-        crate::assertion_map::digest(&request.command),
-        crate::assertion_map::digest(&project.root.to_string_lossy())
+        crate::source_manifest::digest(&request.command),
+        crate::source_manifest::digest(&project.root.to_string_lossy())
     );
     let prior_workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
     let reusable_build = if project.build_adapter == BuildAdapter::Direct {

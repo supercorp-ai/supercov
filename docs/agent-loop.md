@@ -55,24 +55,18 @@ duplicate.
 
 ## Add assertion coverage
 
-For JavaScript and TypeScript projects, you can also ask the agent to explain
-what each test assertion checks. Every normal run creates an `assertions.json`
-map and carries forward compatible work from earlier runs of the same command.
+For JavaScript and TypeScript projects, ask which executed statements no test
+would catch breaking, then add checks for them:
 
 ```sh supercov
+npx supercov runs latest assertions assess
 npx supercov runs latest assertions
-npx supercov docs assertion-agent
 ```
 
-Keep the printed run ID fixed while editing. The agent reads matching current
-source, updates the map, validates its references and saves review tokens for
-the explanations it examined. The regular run report then shows the assertion
-percentage. It does not need another test run just to read the edited map.
-
-Start with [Understanding assertion coverage](assertions.md) for a copyable
-prompt. [Mapping assertions with an agent](assertion-agent.md) gives the complete
-editing and checking loop. Use the evidence and recorded observations alongside
-MC/DC when deciding which tests need stronger checks.
+`assess` needs `TYPESAFE_API_KEY`; reading does not. A statement that is not
+asserted runs in some test, but nothing that test checks depends on it. After
+adding a check, rerun the suite and assess again: only the questions the change
+touched are asked. See [Assertion coverage](assertions.md).
 
 ## Example
 

@@ -1,13 +1,56 @@
 {
   "node": "v24.21.0",
-  "recordedAt": "2026-09-15T20:26:57.394Z",
+  "recordedAt": "2026-09-30T18:43:36.457Z",
   "before": {
     "tests": 3,
     "lineCoverage": 100
   },
   "after": {
-    "tests": 7,
-    "reviewedUiFlows": 4
+    "tests": 7
+  },
+  "assessments": {
+    "before": {
+      "percentage": 58.3,
+      "expressions": [
+        {
+          "text": "(quantity * 12.5).toFixed(2)",
+          "asserted": false
+        },
+        {
+          "text": "`Pay for ${quantity} items`",
+          "asserted": false
+        },
+        {
+          "text": "quantity === 0 || saving",
+          "asserted": false
+        },
+        {
+          "text": "String('Payment failed. Try again.')",
+          "asserted": true
+        }
+      ]
+    },
+    "after": {
+      "percentage": 83.3,
+      "expressions": [
+        {
+          "text": "(quantity * 12.5).toFixed(2)",
+          "asserted": true
+        },
+        {
+          "text": "`Pay for ${quantity} items`",
+          "asserted": true
+        },
+        {
+          "text": "quantity === 0 || saving",
+          "asserted": true
+        },
+        {
+          "text": "String('Payment failed. Try again.')",
+          "asserted": true
+        }
+      ]
+    }
   },
   "mutations": [
     {

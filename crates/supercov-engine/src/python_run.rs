@@ -215,7 +215,7 @@ pub fn current_python_integrity(
 /// the plan. Sorted and deduplicated: a line with two sites is one line to
 /// arm, and the report keeps telling the two apart by column.
 fn assertion_sites(
-    inventory: &[crate::assertion_map::InventorySite],
+    inventory: &[crate::source_manifest::InventorySite],
 ) -> BTreeMap<String, Vec<usize>> {
     let mut sites = BTreeMap::<String, Vec<usize>>::new();
     for site in inventory {
@@ -513,7 +513,7 @@ mod tests {
     // passing assertion -- stays off.
     #[test]
     fn the_plan_names_each_test_files_assertion_lines_once_and_sorted() {
-        use crate::assertion_map::{Anchor, InventorySite};
+        use crate::source_manifest::{Anchor, InventorySite};
         let site = |file: &str, line: usize, column: usize| InventorySite {
             at: Anchor {
                 file: file.into(),

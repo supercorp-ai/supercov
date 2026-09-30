@@ -14,8 +14,8 @@ use supercov_engine::{
     assertion_coverage::{
         self as coverage, Change, FIRST_TESTS, MAX_QUESTIONS, MORE_TESTS, Population, THRESHOLD,
     },
-    assertion_store as maps,
     run_store::{StoredRun, discover_runs, select_run},
+    source_manifest as maps,
 };
 
 const HELP: &str = r#"Usage: supercov runs <run> assertions [--all | --limit N] [--json]
@@ -513,13 +513,31 @@ fn summary(
     })
 }
 
+/// The run's saved result, when it has been assessed.
+pub(crate) fn saved(run: &StoredRun) -> Option<Value> {
+    std::fs::read(run.directory.join(RESULT_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+}
+
+/// The lines of the statements judged asserted in a run, by file.
+pub(crate) fn asserted_lines(run: &StoredRun) -> BTreeMap<String, BTreeSet<u64>> {
+    let mut out = BTreeMap::<String, BTreeSet<u64>>::new();
+    for s in saved(run)
+        .and_then(|r| r["statements"].as_array().cloned())
+        .unwrap_or_default()
+    {
+        if s["asserted"] == true
+            && let (Some(file), Some(line)) = (s["file"].as_str(), s["line"].as_u64())
+        {
+            out.entry(file.to_owned()).or_default().insert(line);
+        }
+    }
+    out
+}
+
 /// The run's saved result, or where the last one is when this run has none.
 fn read(run: &StoredRun, runs: &[StoredRun], limit: Option<usize>) -> Result<Value, String> {
-    let saved = |r: &StoredRun| {
-        std::fs::read(r.directory.join(RESULT_FILE))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-    };
     if let Some(result) = saved(run) {
         return Ok(listing(result, limit));
     }

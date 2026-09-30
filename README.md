@@ -141,30 +141,21 @@ npx supercov -- python -m unittest
 npx supercov -- bundle exec rspec
 ```
 
-## Map what assertions check
+## See what the tests assert
 
-Each normal test run creates an assertion map automatically. An agent can
-optionally fill in what the assertions check:
+Coverage says which code ran; assertion coverage says which of it the tests
+would catch breaking. Supercov asks [Jev](https://typesafe.ai), test by test,
+whether changing each statement the test ran would make it fail:
 
 ```sh
-npx supercov runs latest assertions --json
-# Pin the returned run ID. Inspect assertions and the source that ran:
-npx supercov runs <run> assertion <assertion-id>
-npx supercov runs <run> source src/example.ts
-# Edit assertions.json, then validate and acknowledge:
-npx supercov runs <run> assertions validate --json
-# Copy examined expectedBasis tokens into assertions.json; save again.
-npx supercov runs <run> assertions check --require-mappings --json
-npx supercov runs <run>  # includes the assertion percentage in the regular report
+npx supercov -- npm test
+TYPESAFE_API_KEY=... npx supercov runs latest assertions assess
+npx supercov runs latest assertions   # the share asserted and what is not
 ```
 
-After code or tests change, run the same test command again. Supercov reuses the
-newest available map for that command and language and identifies dirty flows. Rust owns
-validation, change tracking and reporting; the agent supplies semantic reasoning.
-The score is agent-assessed and separate from MC/DC. See
-[assertion maps](docs/assertion-maps.md) for the format and JS/TS limits, or run
-`npx supercov docs assertion-agent` for the agent workflow. `npx supercov assertions schema`
-exports the editor schema; `assertions validate --file <path>` checks JSON syntax.
+Answers are reused across runs whenever the question is the same, so after a
+commit only what changed is asked again. JavaScript and TypeScript runs. See
+[assertion coverage](docs/assertions.md).
 
 ## Give Supercov a job
 
@@ -313,7 +304,7 @@ Supercov uses exact per-test attribution where an adapter is available. For othe
 | --- | --- |
 | Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
 | Vitest | Exact per test, with setup execution kept separate |
-| Jest | Exact per test, including parameterized tests; exact `expect` occurrence identity for assertion maps |
+| Jest | Exact per test, including parameterized tests |
 | `node:test` | Exact per test |
 | AVA and Mocha | Aggregate structural coverage |
 | Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity |

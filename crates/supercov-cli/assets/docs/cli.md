@@ -17,8 +17,8 @@ npx supercov --help
 | Read the newest run | `npx supercov runs latest` |
 | Find useful gaps | `npx supercov runs latest gaps` |
 | Inspect one file | `npx supercov runs latest file <path>` |
-| List assertions and their status | `npx supercov runs latest assertions` |
-| Inspect one assertion and its flows | `npx supercov runs latest assertion <id>` |
+| See how much executed code the tests assert | `npx supercov runs latest assertions` |
+| Assess it with Jev | `npx supercov runs latest assertions assess` |
 | Read matching current source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Open an interactive report | `npx supercov report` |
@@ -146,8 +146,7 @@ npx supercov runs <run-id> [query] [options]
 | `kinds` | Group coverage by test level, such as unit or E2E |
 | `runners` | Group coverage by test runner |
 | `scope` | Review included, excluded, and ambiguous source files |
-| `assertions` | List assertions, including sites without flows, with freshness and execution status |
-| `assertion <id>` | Inspect one assertion and its authored flows |
+| `assertions` | Read the share of executed statements the tests assert, and the ones they do not; `assertions assess` works it out |
 | `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
@@ -169,40 +168,28 @@ npx supercov runs latest file --help
 npx supercov runs latest assertions --help
 ```
 
-Assertion queries read the run-owned map. `source <path>` reads the matching current
-file directly. It prints source code with line numbers, preserving indentation;
-add `--json` only when you want structured `{line, text}` items. `--offset` is
-zero-based and `--limit` controls the number of source lines. Source and assertion
-investigation require current files that match the run. Rerun the suite after
-source changes to inherit the map into a new run.
+`source <path>` reads the matching current file directly. It prints source code
+with line numbers, preserving indentation; add `--json` only when you want
+structured `{line, text}` items. `--offset` is zero-based and `--limit` controls
+the number of source lines. The file must still match the run; rerun the suite
+after source changes.
 
 ### Assertion coverage
 
-The regular run summary includes assertion coverage when a map has been
-assessed. JSON reports expose it under `data.assertionCoverage`. Start with
-[Understanding assertion coverage](assertions.md), or use these commands to
-inspect and check a map:
-
 ```sh supercov-example
-npx supercov runs <run-id> assertions --needs-attention
-npx supercov runs <run-id> assertion <assertion-id>
-npx supercov runs <run-id> assertions report --view statements --file src/shipping.js
-npx supercov runs <run-id> assertions report --view excludedStatements
-npx supercov runs <run-id> assertions validate --json
-npx supercov runs <run-id> assertions check --require-mappings
+npx supercov runs <run-id> assertions assess --dry-run
+npx supercov runs <run-id> assertions assess
+npx supercov runs <run-id> assertions
+npx supercov runs <run-id> assertions --all --json
 ```
 
-Edit the file shown by `assertions`. Validation returns `expectedBasis` tokens;
-after examining a flow, save its token in the map before running `check`.
-`--require-mappings` requires explanations for recognized assertions observed
-passing. Add `--require-observed` when every mapped site and selector should have
-passing evidence, or `--min <percentage>` for a chosen target.
-
-To inspect one large flow, add `--flow <flow-id> --view nodes` or `--view edges`
-to the assertion detail command. `--compact` omits repeated source text from the
-report. Follow the printed next-page command or JSON `pagination.nextOffset`.
-Validation supports `--view flows`, `--view changes` and `--view errors` for large
-maps. The [map reference](assertion-maps.md) describes all fields and gates.
+`assertions assess` asks Jev, test by test, whether each statement the test ran
+would make it fail if changed, and saves the result to the run; it needs
+`TYPESAFE_API_KEY` for questions not answered before. `assertions` reads the
+saved result without the network. The regular run summary shows the same share,
+and JSON reports expose it under `data.assertionCoverage`. See
+[Assertion coverage](assertions.md) for what counts as asserted and how answers
+are reused across runs.
 
 ## Fail CI below a coverage floor
 
@@ -230,11 +217,6 @@ rather than a pass or a failure:
 - a requested metric has nothing eligible, which is not the same as complete
 - a requested metric left obligations unmeasured, so no exact judgement exists
 - a requested metric is not recorded by the language adapter
-
-Assertion coverage keeps its own check. Whether a test *examines* what it
-executes is a different question from whether a line ran, and
-`runs <id> assertions check` carries the freshness and acknowledgement rules
-that answer needs.
 
 ## Check the lines a change touches
 

@@ -312,7 +312,7 @@ pub struct PythonAssertionInventory {
 }
 
 impl PythonAssertionInventory {
-    pub fn new(root: &Path, inputs: &crate::assertion_map::Inputs) -> Self {
+    pub fn new(root: &Path, inputs: &crate::source_manifest::Inputs) -> Self {
         let mut columns = BTreeMap::<(String, usize), Vec<usize>>::new();
         for site in &inputs.assertions {
             columns
@@ -2352,7 +2352,7 @@ mod tests {
     }
 
     fn inventory_of(root: &str, sites: &[(&str, usize, usize)]) -> PythonAssertionInventory {
-        use crate::assertion_map::{Anchor, Files, Inputs, InventorySite};
+        use crate::source_manifest::{Anchor, Files, Inputs, InventorySite};
         PythonAssertionInventory::new(
             Path::new(root),
             &Inputs {

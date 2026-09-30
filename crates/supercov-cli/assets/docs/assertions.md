@@ -1,17 +1,7 @@
 # Assertion coverage
 
-Line coverage shows which code ran. Assertion coverage helps you see what the
-tests checked. Your coding agent traces assertions back to the source, and
-Supercov checks those links against recorded execution from the same test.
-
-Assertion coverage measures JavaScript, TypeScript, Python, Ruby and Rust. The
-map format is the same for every one of them: an assertion is identified by its
-file, line and column, so a project written in more than one language keeps a
-single map.
-
-Python and Ruby report an assertion's line but not its column, so two
-assertions written on one line cannot be told apart and neither is credited.
-Put them on separate lines.
+Line coverage shows which code ran. Assertion coverage shows which of that code
+the tests would catch breaking.
 
 ## A passing test can miss a wrong result
 
@@ -37,75 +27,85 @@ test('confirms an order', () => {
 });
 ```
 
-Every line in the function runs. The test passes. But it would also pass if the
-total were `49` instead of `50`.
+Every line runs and the test passes. It would also pass if `total` were
+`undefined`, so the line computing it is covered but not asserted.
 
-## How the agent finds the gap
+## What counts as asserted
 
-1. **Supercov records execution:** which statements ran in each test and which
-   assertions passed.
-2. **Your agent traces each assertion** through the test and source to explain
-   what it checks. It saves those links in the run's `assertions.json` map.
-3. **Supercov checks the map against the run.** A statement needs a current
-   explanation, execution, and a passing assertion in the same test to count.
+A statement is asserted when changing it would make at least one passing test
+that runs it fail: an assertion fails, test or helper code throws, the test
+times out, or the process crashes. The change depends on the statement:
 
-In this example, the agent follows the status assertion back to the returned
-order. It finds no check that reads the total:
+| Statement | Change |
+| --- | --- |
+| `if` | the condition inverted, each way separately (asserted if either is caught) |
+| `return x` | returns undefined without evaluating `x` |
+| declaration with a value | the value becomes undefined |
+| JSX expression | the value becomes undefined |
+| anything else | skipped |
 
-- `order.status` → must equal `'confirmed'`.
-- `order.total` → no assertion checks the calculated total.
+Imports, declarations without a value, and function, class and type
+declarations are not assessed. **Assertions** is the share of the executed
+statements that are asserted.
 
-The agent adds the missing assertion to the existing test:
+## Assess and read
 
-```js
-assert.equal(order.total, 50);
+```bash
+npx supercov -- npm test
+npx supercov runs latest assertions assess
+npx supercov runs latest assertions
 ```
 
-It reruns the full suite and updates the map. A total of `49` now fails the
-test: two items at $25 must total $50. Line coverage has not changed, but the
-test now checks the calculation.
+`assertions assess` works it out and saves the result to the run. For each test,
+Supercov renders what the test ran -- its code, its helpers, and the source it
+executed -- and asks [Jev](https://typesafe.ai) whether the test would fail for
+each statement's change. It prints an estimate first; `--dry-run` sends nothing.
+It needs a TypeSafe AI API key in `TYPESAFE_API_KEY`.
 
-## Try it in your project
+`assertions` reads the saved result: the share asserted and the statements that
+are not, with no network and no key. `npx supercov runs latest` and the HTML
+report show the same number.
 
-Open your project in your usual coding agent and paste this prompt. The agent
-can install Supercov and run the commands for you.
+```text
+Run run_4f2a: 93.8% asserted (2731 of 2913 executed statements)
 
-```text supercov-prompt
-Read npx supercov docs assertion-agent. Run the full test suite through
-Supercov, then build and validate its assertion map. Find one useful
-missing check and add an assertion for the expected behavior.
-Only change tests; do not weaken existing checks. Rerun the same suite
-and update the map. Show the test change, before-and-after assertion
-coverage, and any uncertainty or missing evidence.
+182 not asserted: no test that runs them was judged to fail if they changed.
+
+  src/adapters.ts
+      100  res.removeListener("close", onResClose);  (skipped)
 ```
 
-The agent uses your actual test command after `--`, for example
-`npx supercov -- npm test`. On later runs of the same command, Supercov reuses
-compatible mappings and flags explanations that need another look.
+A statement that is not asserted is a place to add a check: a test that runs it
+exists, but nothing it asserts depends on what the statement does.
 
-## Read the result
+## Later runs ask only about what changed
 
-The agent can show the summary and the statement-level report for a file:
+Answers are kept in `.supercov/assertions/`. Each is stored under the exact text
+Jev saw for that statement and test, and reused only when a new run would ask
+the same question with the same text. Nothing decides whether a change could
+matter: a change to the statement, to code around it that the test ran, to the
+test or its helpers, or to which tests run it, asks again. A dependency or
+configuration change asks everything again. After a typical commit only a few
+dozen questions are asked; the rest are reused.
 
-```sh
-npx supercov runs <run-id>
-npx supercov runs <run-id> assertions report --view statements --file checkout.js
-```
+## Cost, speed and accuracy
 
-**Assertions** is the percentage of measured source statements linked to
-passing assertions by the agent's map. It is not a count of assertions. Each
-statement counts once; statements that never ran remain in the total.
+Measured on four JavaScript and TypeScript projects (7,393 executed statements):
 
-An unmapped statement is a place to investigate, not proof of a missing test:
-the agent may not have mapped its existing check yet.
+- **Cost:** about 0.007 cents per statement for a first assessment. A project of
+  3,000 statements costs about $0.25; a later commit usually well under a cent.
+- **Speed:** about a minute for 3,000 statements; `--workers` raises the
+  requests in flight (default 8) for a faster, slightly costlier pass.
+- **Accuracy:** against ground truth from applying each change and running the
+  tests, on a fresh sample of 78 statements: 69 right; of the 13 not asserted it
+  found 8, and 8 of the 12 it flagged were truly not asserted. The share it
+  reported was 84.6% against a true 83.3%.
 
-The strength of the check still matters. `assert.ok(order.total)` accepts both
-`49` and `50`; `assert.equal(order.total, 50)` distinguishes them. Review the
-expected behavior, not just the percentage.
+The share is a good measure of a project; a single statement's verdict is a
+judgment worth checking before acting on it. Supercov does not run mutated code
+for this: nothing is executed, and your tests are never slowed.
 
-Supercov does not generate or execute mutated code for this assessment. Unlike
-mutation testing, it does not test whether deliberately introduced bugs are
-caught. The agent's explanations still need review.
+## Requirements
 
-For the detailed workflow, see [Mapping assertions with an agent](assertion-agent.md).
-For a result you cannot explain, see [Investigating assertion evidence](assertion-evidence.md).
+JavaScript and TypeScript runs, and `TYPESAFE_API_KEY` for `assess`. Reading a
+saved result needs neither.

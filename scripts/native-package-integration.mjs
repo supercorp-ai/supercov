@@ -13,7 +13,6 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { nativePackageFor } from "../bin/native.js";
-import { assertionMapSmoke } from './assertion-map-js-smoke.mjs';
 import { nativeChecksumName } from "./native-package-names.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
@@ -141,16 +140,11 @@ try {
 
   const consumerEnv = { ...process.env };
   delete consumerEnv.SUPERCOV_RUST_BINARY;
-  for (const typescript of [false, true]) {
-    assertionMapSmoke({ root: resolve(consumer, typescript ? 'map-ts' : 'map-js'), launcher: executable, env: consumerEnv, typescript });
-  }
   for (const file of primary.files.filter(file => file.startsWith('docs/'))) {
     const topic = file.slice(5, -3);
     assert.equal(run(process.execPath, [executable, 'docs', topic], { cwd: consumer, env: consumerEnv }),
       asLaunchedFromNpm(readFileSync(resolve(consumer, 'node_modules/supercov', file), 'utf8')).trim());
   }
-  const installedSchema = JSON.parse(readFileSync(resolve(consumer, 'node_modules/supercov/schemas/assertions.schema.json'), 'utf8'));
-  assert.deepEqual(JSON.parse(run(process.execPath, [executable, 'assertions', 'schema'], { cwd: consumer, env: consumerEnv })), installedSchema);
 
   const installedPackage = resolve(consumer, "node_modules", target.package);
   const installedManifest = resolve(installedPackage, "package.json");

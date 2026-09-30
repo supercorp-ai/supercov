@@ -150,9 +150,8 @@ or generated output merely to make a warning disappear.
 
 ## Assertion percentage
 
-When a run has an `assertions.json` map, its regular summary also shows
-agent-assessed assertion coverage: credited measured statements divided by all
-measured statements. This row always describes the whole archived run,
-independently of `--filter`, `--kind` and `--runner`. It is separate from the
-structural metrics above. See [assertion maps](assertion-maps.md) for credit,
-freshness and incomplete-map rules.
+When a run has been assessed with `assertions assess`, its regular summary also
+shows assertion coverage: executed statements a test is judged to catch
+breaking, divided by all assessed statements. This row always describes the
+whole run, independently of `--filter`, `--kind` and `--runner`, and is separate
+from the structural metrics above. See [assertion coverage](assertions.md).

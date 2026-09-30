@@ -1384,7 +1384,7 @@ fn a_change_selects_the_tests_nothing_could_attribute_when_it_could_have_reached
     let selected = |root: &Path| -> (Vec<String>, Vec<String>) {
         let inventory = discover_runs(root).expect("runs");
         let run = select_run(&inventory, None).expect("a run");
-        let data = supercov_engine::assertion_store::affected_tests(root, run).expect("affected");
+        let data = supercov_engine::source_manifest::affected_tests(root, run).expect("affected");
         let names = |bucket: &str| {
             data[bucket]
                 .as_array()

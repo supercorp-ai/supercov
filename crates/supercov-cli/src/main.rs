@@ -45,12 +45,11 @@ use supercov_engine::{
 use time::{OffsetDateTime, macros::format_description};
 
 mod assertions_command;
-mod assertions_human;
-mod assertions_query;
 mod html_report;
 mod human_query;
 mod public_query;
 mod quality;
+mod source_query;
 mod tests_query;
 
 use human_query::render_human;
@@ -82,9 +81,8 @@ Inspect a run with small, paginated answers:
   supercov runs <run-id> [resource]    query one immutable run
 
 Check what the tests assert:
-  supercov runs latest assertions      assertions and their status
-  supercov runs latest assertion <id>  one assertion and its flows
-  supercov assertions --help           assertion map schema and syntax
+  supercov runs latest assertions         how much executed code the tests assert
+  supercov runs latest assertions assess  work it out with Jev (TYPESAFE_API_KEY)
 
 Compare, combine, and maintain:
   supercov diff <older> <newer>        compare two runs
@@ -102,9 +100,6 @@ const DOC_TOPICS: &[&str] = &[
     "getting-started",
     "agent-loop",
     "assertions",
-    "assertion-evidence",
-    "assertion-maps",
-    "assertion-agent",
     "troubleshooting",
     "cli",
     "coverage-model",
@@ -342,7 +337,6 @@ fn main() -> ExitCode {
         Some("quality") => quality::command(arguments.collect()),
         Some("security") => quality::security_command(arguments.collect()),
         Some("docs") => docs_command(arguments.collect()),
-        Some("assertions") => assertions_query::global_command(&arguments.collect::<Vec<_>>()),
         Some("runs") => {
             let arguments: Vec<String> = arguments.collect();
             match arguments.split_first() {
@@ -519,9 +513,6 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         "getting-started" => Some(include_str!("../assets/docs/getting-started.md")),
         "agent-loop" => Some(include_str!("../assets/docs/agent-loop.md")),
         "assertions" => Some(include_str!("../assets/docs/assertions.md")),
-        "assertion-evidence" => Some(include_str!("../assets/docs/assertion-evidence.md")),
-        "assertion-maps" => Some(include_str!("../assets/docs/assertion-maps.md")),
-        "assertion-agent" => Some(include_str!("../assets/docs/assertion-agent.md")),
         "troubleshooting" => Some(include_str!("../assets/docs/troubleshooting.md")),
         "cli" => Some(include_str!("../assets/docs/cli.md")),
         "coverage-model" => Some(include_str!("../assets/docs/coverage-model.md")),
@@ -2001,88 +1992,16 @@ pub(crate) fn load_run_view(
     .map_err(|error| format!("{error:?}"))
 }
 
-/// A flow of a saved run's assertion map with the lines it is credited with,
-/// and the text the agent wrote about it. The text is what makes the credit
-/// mean something: an assertion that checks the injection succeeded and one
-/// that checks the input was rejected credit the same sink line.
-#[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct CreditedFlow {
-    pub key: String,
-    pub assertion: String,
-    pub observes: Vec<String>,
-    pub explanation: String,
-    pub nodes: Vec<String>,
-    pub lines: Vec<(String, u64)>,
-}
-
-/// Every credited flow of the run the coverage join uses, so a security
-/// finding can be placed on one of three shelves: code no test executes, code
-/// tests execute but no assertion is credited with, and code an assertion
-/// checks, where the flow's own text says what was checked. Empty when the
-/// run carries no assertion map; that is not an error.
-pub(crate) fn load_credited_flows(selector: Option<&str>) -> Result<Vec<CreditedFlow>, String> {
-    let root = std::env::current_dir().map_err(|error| error.to_string())?;
-    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
-    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    let report = supercov_engine::assertion_store::report(&root, run)?;
-    let empty = Vec::new();
-    let mut flows = Vec::new();
-    for assertion in report["assertions"].as_array().unwrap_or(&empty) {
-        let text = assertion["at"]["text"].as_str().unwrap_or("").to_owned();
-        let observes: Vec<String> = assertion["observes"]
-            .as_array()
-            .unwrap_or(&empty)
-            .iter()
-            .filter_map(|o| o.as_str().map(str::to_owned))
-            .collect();
-        for flow in assertion["flows"].as_array().unwrap_or(&empty) {
-            let mut lines = Vec::new();
-            let mut nodes = Vec::new();
-            for node in flow["nodeCredit"].as_array().unwrap_or(&empty) {
-                if let Some(t) = node["text"].as_str() {
-                    nodes.push(t.to_owned());
-                }
-                if node["status"] == "credited"
-                    && let (Some(file), Some(line)) = (
-                        node["location"]["file"].as_str(),
-                        node["location"]["line"].as_u64(),
-                    )
-                {
-                    lines.push((file.to_owned(), line));
-                }
-            }
-            if lines.is_empty() {
-                continue;
-            }
-            flows.push(CreditedFlow {
-                key: format!(
-                    "{}/{}",
-                    assertion["id"].as_str().unwrap_or("?"),
-                    flow["id"].as_str().unwrap_or("?")
-                ),
-                assertion: text.clone(),
-                observes: observes.clone(),
-                explanation: flow["explanation"].as_str().unwrap_or("").to_owned(),
-                nodes,
-                lines,
-            });
-        }
-    }
-    Ok(flows)
-}
-
-/// Which lines of which files a saved run's assertions are credited with.
+/// Which lines of which files a saved run's assessed assertions cover: the
+/// statements `assertions assess` judged asserted. Empty when the run was not
+/// assessed; that is not an error.
 pub(crate) fn load_asserted_lines(
     selector: Option<&str>,
 ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<u64>>, String> {
-    let mut lines: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
-        Default::default();
-    for flow in load_credited_flows(selector)? {
-        for (file, line) in flow.lines {
-            lines.entry(file).or_default().insert(line);
-        }
-    }
-    Ok(lines)
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+    let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
+    Ok(assertions_command::asserted_lines(run))
 }
 
 /// Which tests executed which lines, from a saved run: every covered
@@ -2095,7 +2014,7 @@ pub(crate) fn load_point_tests(
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    let coverage = supercov_engine::assertion_store::coverage(run)?;
+    let coverage = supercov_engine::source_manifest::coverage(run)?;
     Ok(coverage
         .view
         .points
@@ -2294,8 +2213,8 @@ fn javascript_number(value: f64) -> String {
 
 /// `run_ms` is the engine's own clock, which stops before the run is published;
 /// `command_ms`, when the run was published, is the whole command. What lies
-/// between is publication -- analysing the evidence once for the assertion map,
-/// the summary and the query index -- and it is reported, so that the total is
+/// between is publication -- analysing the evidence once for the per-test
+/// execution record and the query index -- and it is reported, so that the total is
 /// what the command cost rather than what it cost before publishing.
 fn format_run_timings(
     timings: &supercov_engine::run_store::RunTimings,
@@ -3136,14 +3055,10 @@ fn execute_public_query(
                         &mut output.data
                     {
                         data.command.clone_from(&run.metadata.command);
-                        if run.directory.join(supercov_engine::assertion_store::MAP_FILE).exists() {
-                            data.assertion_coverage = Some(match if current.as_ref().is_some_and(|c| !compare_run_integrity(Some(&run.metadata.integrity), c).stale) {
-                                supercov_engine::assertion_store::report_summary(root, run)
-                            } else { Err("Current checkout differs from the run or cannot be verified; rerun tests to inherit the assertion map".into()) } {
-                                Ok(report) => serde_json::json!({"available":true,"summary":report["summary"],"basis":report["basis"],"revision":report["revision"],"inheritance":report["inheritance"],"map":run.directory.join(supercov_engine::assertion_store::MAP_FILE),"validationErrors":report["validationErrors"],"scope":"whole run with matching current source; independent of structural query filters"}),
-                                Err(error) => serde_json::json!({"available":false,"error":error}),
-                            });
-                        }
+                        data.assertion_coverage = Some(match assertions_command::saved(run) {
+                            Some(result) => serde_json::json!({"available": true, "summary": result["summary"], "basis": result["basis"], "model": result["model"]}),
+                            None => serde_json::json!({"available": false, "assess": format!("npx supercov runs {} assertions assess", run.id)}),
+                        });
 
                         let observed_kinds = data
                             .coverage_by_kind
@@ -3173,12 +3088,8 @@ fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
     if command == "runs" && arguments.get(1).is_some_and(|a| a == "assertions") {
         return assertions_command::command(&arguments);
     }
-    if command == "runs"
-        && arguments
-            .get(1)
-            .is_some_and(|a| matches!(a.as_str(), "assertion" | "source"))
-    {
-        return assertions_query::command(&arguments);
+    if command == "runs" && arguments.get(1).is_some_and(|a| a == "source") {
+        return source_query::command(&arguments);
     }
     if command == "runs" && arguments.get(1).is_some_and(|a| a == "tests") {
         return tests_query::command(&arguments);

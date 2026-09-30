@@ -684,7 +684,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             if let Some(confidence) = &data.confidence {
                 lines.extend([
                     String::new(),
-                    "Runtime action phases (separate from assertion mappings)".into(),
+                    "Runtime action phases (separate from assertions coverage)".into(),
                     format!(
                         "  Recorded within action phases      {} lines",
                         count(confidence.lines.action)
@@ -693,7 +693,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         "  Other recorded execution           {} lines",
                         count(confidence.lines.executed)
                     ),
-                    "  These runtime phase counts do not include the agent-assessed assertion coverage shown above."
+                    "  These runtime phase counts are separate from the assertions coverage shown above."
                         .into(),
                 ]);
             }
@@ -1489,59 +1489,20 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
 fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
     if value["available"] == false {
         return vec![format!(
-            "Assertions unavailable: {}",
-            value["error"].as_str().unwrap_or("map cannot be assessed")
+            "Assertions   not assessed — {}",
+            value["assess"]
+                .as_str()
+                .unwrap_or("npx supercov runs latest assertions assess")
         )];
     }
     let s = &value["summary"];
-    let score = &s["statements"];
-    let mut lines = if let Some(pct) = score["percentage"].as_f64() {
-        vec![format!(
-            "Assertions {pct:.2}% ({}/{}) — agent-assessed statements, whole run",
-            score["asserted"], score["total"]
-        )]
-    } else {
-        let status = match s["status"].as_str() {
-            Some("notAssessed") => "not assessed",
-            Some("notApplicable") => "n/a",
-            Some(status) => status,
-            None => "unavailable",
-        };
-        vec![format!(
-            "Assertions {status} — {}",
-            s["reason"].as_str().unwrap_or("no assessment available")
-        )]
-    };
-    lines.push(format!(
-        "  {} assertions with flows; {} without; {} current flows; {} stale; {} draft",
-        s["assertionsWithFlows"],
-        s["assertionsWithoutFlows"],
-        s["currentFlows"],
-        s["staleFlows"],
-        s["draftFlows"]
-    ));
-    if let Some(count) = s["excludedStatements"].as_u64().filter(|n| *n > 0) {
-        lines.push(format!("  {count} erased TypeScript imports excluded; inspect assertions report --view excludedStatements."));
+    match s["percentage"].as_f64() {
+        Some(pct) => vec![format!(
+            "Assertions   {pct}% ({}/{} executed statements a test is judged to catch)",
+            s["asserted"], s["statements"]
+        )],
+        None => vec!["Assertions   no executed statements to assess".into()],
     }
-    if let Some(count) = s["unobservedAssertions"].as_u64().filter(|n| *n > 0) {
-        lines.push(format!("  {count} assertion site(s) have no passing occurrence; mapped flows alone do not earn credit."));
-    }
-    if let Some(errors) = value["validationErrors"]
-        .as_array()
-        .filter(|v| !v.is_empty())
-    {
-        lines.push(format!("  {} map reference error(s)", errors.len()));
-    }
-    if let Some(skipped) = value["inheritance"]["skipped"]
-        .as_array()
-        .filter(|v| !v.is_empty())
-    {
-        lines.push(format!(
-            "  Map reuse skipped {} newer candidate(s); inspect assertions report",
-            skipped.len()
-        ));
-    }
-    lines
 }
 
 #[cfg(test)]
@@ -1549,32 +1510,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn assertion_summary_distinguishes_scores_pending_unassessed_and_invalid_maps() {
-        let mut report = serde_json::json!({"available":true,"summary":{"status":"available","reason":"current claims","statements":{"asserted":1,"total":4,"percentage":25},"assertionsWithFlows":1,"assertionsWithoutFlows":2,"currentFlows":1,"staleFlows":0,"draftFlows":0}});
-        assert!(assertion_summary_lines(&report)[0].contains("Assertions 25.00% (1/4)"));
-        for (status, label) in [
-            ("notAssessed", "not assessed"),
-            ("pending", "pending"),
-            ("notApplicable", "n/a"),
-        ] {
-            report["summary"]["status"] = status.into();
-            report["summary"]["statements"]["percentage"] = serde_json::Value::Null;
-            assert!(assertion_summary_lines(&report)[0].contains(label));
-            assert!(!assertion_summary_lines(&report)[0].contains("0.00%"));
-        }
-        report["summary"]["staleFlows"] = 2.into();
-        report["validationErrors"] = serde_json::json!(["bad anchor"]);
-        let lines = assertion_summary_lines(&report);
-        assert!(lines[1].contains("2 stale"));
-        assert!(lines[2].contains("1 map reference error"));
-        report["inheritance"] =
-            serde_json::json!({"from":null,"skipped":[{"run":"older","reason":"bad JSON"}]});
-        assert!(
-            assertion_summary_lines(&report)[3].contains("Map reuse skipped 1 newer candidate")
-        );
+    fn assertion_summary_reads_the_assessed_share_or_says_how_to_assess() {
+        let report = serde_json::json!({"available":true,"summary":{"statements":4,"asserted":1,"percentage":25.0}});
         assert_eq!(
-            assertion_summary_lines(&serde_json::json!({"available":false,"error":"bad JSON"})),
-            vec!["Assertions unavailable: bad JSON"]
+            assertion_summary_lines(&report),
+            vec!["Assertions   25% (1/4 executed statements a test is judged to catch)"]
+        );
+        let none = serde_json::json!({"available":false,"assess":"npx supercov runs r1 assertions assess"});
+        assert_eq!(
+            assertion_summary_lines(&none),
+            vec!["Assertions   not assessed — npx supercov runs r1 assertions assess"]
         );
     }
 

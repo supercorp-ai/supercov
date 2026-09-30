@@ -3595,7 +3595,7 @@ fn human_security(report: &Value) -> String {
         ));
         match report["flagged_executed_unasserted"].as_u64() {
             Some(n) => out.push_str(&format!(
-                "; {n} are executed by tests that no assertion is credited with.\n"
+                "; {n} are executed by tests that are not judged to catch any line of them.\n"
             )),
             None => out.push_str(".\n"),
         }
@@ -3686,26 +3686,19 @@ fn human_security(report: &Value) -> String {
         }
         if file["flagged_and_unasserted"] == true {
             out.push_str(
-                "    executed by tests, but no assertion is credited with any line of it\n",
+                "    executed by tests, but no test is judged to catch a change to any line of it\n",
             );
         } else if let Some(credited) = file["assertions"]["lines_credited"].as_u64() {
             out.push_str(&format!(
-                "    {credited} of its lines are credited to assertions\n"
+                "    {credited} of its lines are asserted (a test is judged to catch a change to them)\n"
             ));
             for finding in file["present"].as_array().unwrap_or(&empty) {
                 for line in finding["lines"].as_array().unwrap_or(&empty) {
-                    match line["asserted"].as_str() {
-                        Some("exercised") => out.push_str(&format!(
-                            "    line {}: proven reachable by a test that asserts it happens: {}\n",
-                            line["line"].as_u64().unwrap_or(0),
-                            line["asserted_by"].as_str().unwrap_or("")
-                        )),
-                        Some("prevented") => out.push_str(&format!(
-                            "    line {}: a test asserts it is prevented: {}\n",
-                            line["line"].as_u64().unwrap_or(0),
-                            line["asserted_by"].as_str().unwrap_or("")
-                        )),
-                        _ => {}
+                    if line["asserted"] == true {
+                        out.push_str(&format!(
+                            "    line {}: asserted; a test is judged to catch a change to it\n",
+                            line["line"].as_u64().unwrap_or(0)
+                        ));
                     }
                 }
             }
@@ -3844,50 +3837,9 @@ fn cross_with_coverage(
     let view = crate::load_run_view(selector)?;
     // Assertion credit is the third shelf, and only the security view asks
     // for it: a change review already says what appeared and where tests do
-    // not go. A run with no assertion map leaves every file on the second.
+    // not go. A run whose assertions were not assessed leaves every file on the second.
     let asserted = (file_flag == "flagged_and_untested")
         .then(|| crate::load_asserted_lines(selector).unwrap_or_default());
-    // What each credited flow establishes, asked once of the map's text. A
-    // line credited by a flow that asserts prevention is close to handled; a
-    // line credited by one that asserts the operation ran is proven reachable.
-    let verdicts: BTreeMap<(String, u64), (String, String)> = asserted
-        .as_ref()
-        .filter(|a| !a.is_empty())
-        .and_then(|_| crate::load_credited_flows(selector).ok())
-        .filter(|flows| !flows.is_empty())
-        .map(|flows| {
-            let key = std::env::var("TYPESAFE_API_KEY").ok();
-            let request = catalog::security::flow_request(&flows);
-            let mut out = BTreeMap::new();
-            if let Ok(Some(bytes)) = within_budget(&request)
-                && let Ok(root) = std::env::current_dir()
-            {
-                let agent = client();
-                let answered = answer_all(
-                    &root,
-                    "security",
-                    &agent,
-                    key.as_deref(),
-                    false,
-                    &[((0, None), request, bytes)],
-                    false,
-                );
-                if let Some(Ok((_, entry, _, _))) = answered.into_values().next() {
-                    for (i, flow) in flows.iter().enumerate() {
-                        if let Some(verdict) = choice(&entry.response, &format!("w{i}")) {
-                            for (file, line) in &flow.lines {
-                                out.insert(
-                                    (file.clone(), *line),
-                                    (verdict.clone(), flow.assertion.clone()),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            out
-        })
-        .unwrap_or_default();
     let mut both = 0usize;
     let mut unasserted = 0usize;
     let empty = Vec::new();
@@ -3923,17 +3875,15 @@ fn cross_with_coverage(
                             unasserted += 1;
                             file["flagged_and_unasserted"] = json!(true);
                         }
-                        // Per confirmed line: what the crediting assertion establishes.
+                        // Per confirmed line: whether a test is judged to catch it.
                         if let Some(present) = file["present"].as_array_mut() {
                             for finding in present {
                                 if let Some(lines) = finding["lines"].as_array_mut() {
                                     for line in lines {
                                         let number = line["line"].as_u64().unwrap_or(0);
-                                        if let Some((verdict, assertion)) =
-                                            verdicts.get(&(path.clone(), number))
+                                        if asserted.get(&path).is_some_and(|l| l.contains(&number))
                                         {
-                                            line["asserted"] = json!(verdict);
-                                            line["asserted_by"] = json!(assertion);
+                                            line["asserted"] = json!(true);
                                         }
                                     }
                                 }

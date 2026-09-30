@@ -5,8 +5,6 @@
 pub mod agent_json;
 pub mod assertion_coverage;
 pub mod assertion_inputs;
-pub mod assertion_map;
-pub mod assertion_store;
 pub mod build_cache;
 pub mod child_signal_guard;
 pub mod coverage_analysis;
@@ -80,6 +78,7 @@ pub mod rust_test_context;
 pub mod rust_test_runner;
 pub mod security_candidates;
 pub mod source_discovery;
+pub mod source_manifest;
 pub mod source_units;
 mod typescript_imports;
 pub mod workspace;

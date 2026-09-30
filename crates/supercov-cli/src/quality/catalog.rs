@@ -596,35 +596,6 @@ data does not count.";
         }))
     }
 
-    /// What an assertion establishes about the weakness on its flow, asked of
-    /// the map's own text, one Choice per credited flow. `prevented` is close
-    /// to a verified negative; `exercised` is a finding proven reachable by the
-    /// project's own test. Both authored vulnpy flows came back `exercised`
-    /// at 1.0.
-    pub fn flow_request(flows: &[crate::CreditedFlow]) -> Value {
-        let mut state = Map::new();
-        let mut questions = Map::new();
-        for (i, flow) in flows.iter().enumerate() {
-            state.insert(
-                flow.key.clone(),
-                json!({ "assertion": flow.assertion, "observes": flow.observes,
-                    "flow_explanation": flow.explanation, "nodes": flow.nodes }),
-            );
-            questions.insert(format!("w{i}"), json!({
-                "type": "choice",
-                "instructions": { "task": format!(
-                    "`flows[\"{}\"]` describes a test assertion and the source flow it checks, written by a reviewer. What does this assertion establish about the weakness on that flow?",
-                    flow.key) },
-                "criteria": {
-                    "prevented": "The test asserts the weakness is prevented: the input was rejected, escaped, parameterised, confined or denied.",
-                    "exercised": "The test asserts the operation ran with the input, or its effect came back, so the weakness is reachable and real.",
-                    "unrelated": "The assertion establishes nothing about the weakness on this flow.",
-                },
-            }));
-        }
-        json!({ "model": super::super::model(), "state": { "flows": state }, "questions": questions })
-    }
-
     /// A report dismissed at or above this by the triage question is not shown.
     pub const DISMISS_AT: f64 = 0.6;
 
