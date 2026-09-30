@@ -1084,8 +1084,8 @@ pub fn run_direct_jvm(
             &mut integrity_inputs.execution_configuration,
             source_roots.as_deref(),
         );
-        let assertion_inputs =
-            crate::assertion_inputs::capture(&root, "jvm", integrity_inputs.assertion_paths())?;
+        let source_inputs =
+            crate::source_capture::capture(&root, "jvm", integrity_inputs.assertion_paths())?;
         let integrity = create_explicit_run_integrity(
             &root,
             &integrity_inputs,
@@ -1318,9 +1318,9 @@ pub fn run_direct_jvm(
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
         let raw = write_archive(
-            crate::assertion_inputs::append(
+            crate::source_capture::append(
                 run.archive_entries().map_err(|error| error.to_string())?,
-                &assertion_inputs,
+                &source_inputs,
             )?,
             &archive_path,
         )

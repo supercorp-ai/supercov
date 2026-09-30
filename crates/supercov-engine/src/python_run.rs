@@ -28,7 +28,7 @@ use crate::{
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
-    python_evidence::{PythonAssertionInventory, PythonFrontendRun, build_python_frontend_run},
+    python_evidence::{PythonFrontendRun, build_python_frontend_run},
     python_project::{PreparedPythonProject, prepare_python_project, python_integrity_inputs},
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
 };
@@ -211,24 +211,60 @@ pub fn current_python_integrity(
         .map_err(|error| error.to_string())
 }
 
-/// The lines of each test file that hold an inventoried assertion site, for
-/// the plan. Sorted and deduplicated: a line with two sites is one line to
-/// arm, and the report keeps telling the two apart by column.
-fn assertion_sites(
-    inventory: &[crate::source_manifest::InventorySite],
-) -> BTreeMap<String, Vec<usize>> {
+/// The lines of each captured Python file that hold an assertion -- an
+/// `assert` statement or an `assert*` method call -- for the plan. The probe on
+/// such a line marks where its test's assertion phase begins. Sorted and
+/// deduplicated: a line with two assertions is one line to arm.
+fn assertion_sites(files: &crate::source_manifest::Files) -> BTreeMap<String, Vec<usize>> {
     let mut sites = BTreeMap::<String, Vec<usize>>::new();
-    for site in inventory {
-        sites
-            .entry(site.at.file.clone())
-            .or_default()
-            .push(site.at.line);
-    }
-    for lines in sites.values_mut() {
+    for (file, text) in files.iter().filter(|(file, _)| file.ends_with(".py")) {
+        let Ok(starts) = assertion_starts(text) else {
+            continue;
+        };
+        let lines = sites.entry(file.clone()).or_default();
+        lines.extend(
+            starts
+                .into_iter()
+                .map(|start| text[..start].bytes().filter(|b| *b == b'\n').count() + 1),
+        );
         lines.sort_unstable();
         lines.dedup();
     }
+    sites.retain(|_, lines| !lines.is_empty());
     sites
+}
+
+/// The byte offset of every `assert` statement and `assert*` method call.
+fn assertion_starts(source: &str) -> Result<Vec<usize>, String> {
+    use ruff_python_ast::{
+        Expr, Stmt,
+        visitor::{Visitor, walk_expr, walk_stmt},
+    };
+    use ruff_text_size::Ranged;
+    struct Collector(Vec<usize>);
+    impl<'a> Visitor<'a> for Collector {
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            if let Stmt::Assert(_) = stmt {
+                self.0.push(stmt.range().start().to_usize());
+            }
+            walk_stmt(self, stmt);
+        }
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if let Expr::Call(call) = expr
+                && let Expr::Attribute(attr) = call.func.as_ref()
+                && attr.attr.as_str().starts_with("assert")
+            {
+                self.0.push(expr.range().start().to_usize());
+            }
+            walk_expr(self, expr);
+        }
+    }
+    let parsed = ruff_python_parser::parse_module(source).map_err(|e| e.to_string())?;
+    let mut collector = Collector(vec![]);
+    for stmt in &parsed.syntax().body {
+        collector.visit_stmt(stmt);
+    }
+    Ok(collector.0)
 }
 
 pub fn run_direct_python(
@@ -281,7 +317,7 @@ pub fn run_direct_python(
             &FrontendIntegrityInputs::embedded_python(),
         )
         .map_err(|error| error.to_string())?;
-        let assertion_inputs = crate::assertion_inputs::capture(
+        let source_inputs = crate::source_capture::capture(
             &root,
             "python",
             python_integrity_inputs(&project.files, &request.command).assertion_paths(),
@@ -293,7 +329,7 @@ pub fn run_direct_python(
         write_runtime(&runtime_directory)?;
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
         let plan = crate::python_instrumenter::PythonProbePlan {
-            assertion_sites: assertion_sites(&assertion_inputs.assertions),
+            assertion_sites: assertion_sites(&source_inputs.files),
             ..project.plan.clone()
         };
         fs::write(
@@ -358,7 +394,7 @@ pub fn run_direct_python(
             &request.run_id,
             &request.started_at,
             execution.exit_code,
-            &PythonAssertionInventory::new(&root, &assertion_inputs),
+            &root,
         ) {
             // No test reported an outcome and the command itself failed: it
             // never ran its tests (`No module named pytest`, an error while
@@ -395,7 +431,7 @@ pub fn run_direct_python(
             let archived = (|| {
                 let entries = run.archive_entries().map_err(|error| error.to_string())?;
                 let serialized_ms = elapsed_ms(publication_started) - joined_ms;
-                let entries = crate::assertion_inputs::append(entries, &assertion_inputs)?;
+                let entries = crate::source_capture::append(entries, &source_inputs)?;
                 let raw =
                     write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
                 let archive_ms = elapsed_ms(publication_started) - joined_ms - serialized_ms;
@@ -465,7 +501,7 @@ pub fn run_direct_python(
             &archive_path,
             Archived {
                 report: analysed.ok(),
-                inputs: Some(assertion_inputs.manifest()),
+                inputs: Some(source_inputs.manifest()),
             },
         )
         .map_err(|error| error.to_string())?;
@@ -507,30 +543,23 @@ pub fn run_direct_python(
 #[cfg(test)]
 mod tests {
 
-    // The plan names each test file's assertion lines from the inventory, so
-    // the runtime can record a site from the line event that runs it and
-    // pytest's assertion-pass hook -- a failure explanation built for every
-    // passing assertion -- stays off.
+    // The plan names each test file's assertion lines, so the runtime can
+    // mark where a test's assertion phase begins from the line event that runs
+    // it, and pytest's assertion-pass hook -- a failure explanation built for
+    // every passing assertion -- stays off.
     #[test]
     fn the_plan_names_each_test_files_assertion_lines_once_and_sorted() {
-        use crate::source_manifest::{Anchor, InventorySite};
-        let site = |file: &str, line: usize, column: usize| InventorySite {
-            at: Anchor {
-                file: file.into(),
-                line,
-                column,
-                text: String::new(),
-            },
-            operation: "assert".into(),
-        };
-        let inventory = vec![
-            site("tests/test_b.py", 9, 4),
-            site("tests/test_a.py", 12, 4),
-            // Two sites on one line are one line to arm.
-            site("tests/test_a.py", 12, 30),
-            site("tests/test_a.py", 3, 4),
-        ];
-        let sites = assertion_sites(&inventory);
+        let files = crate::source_manifest::Files::from([
+            ("tests/test_b.py".to_string(), "def test_b():\n    x = 1\n\n\n\n\n\n\n    assert x\n".to_string()),
+            (
+                "tests/test_a.py".to_string(),
+                // Two assertions on line 12 are one line to arm.
+                "import unittest\n\nassert True\n\n\n\n\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(1, 1); assert 1\n".to_string(),
+            ),
+            ("src/app.py".to_string(), "def f():\n    return 1\n".to_string()),
+            ("README.md".to_string(), "assert nothing\n".to_string()),
+        ]);
+        let sites = assertion_sites(&files);
         assert_eq!(
             sites,
             BTreeMap::from([

@@ -1409,7 +1409,7 @@ mod tests {
         assert_eq!(before.fingerprint, after.fingerprint);
         let project = discover_coverage_project(&root, &BTreeMap::new(), &[]).unwrap();
         let paths = javascript_assertion_paths(&root, &project).unwrap();
-        let inputs = crate::assertion_inputs::capture(&root, "javascript", paths).unwrap();
+        let inputs = crate::source_capture::capture(&root, "javascript", paths).unwrap();
         assert!(inputs.files.contains_key("packages/ui/tests/ui.test.ts"));
         assert!(
             !inputs

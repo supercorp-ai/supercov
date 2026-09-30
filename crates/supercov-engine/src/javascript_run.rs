@@ -543,11 +543,10 @@ pub fn run_direct_javascript(
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
     let integrity = javascript_integrity_for_project(&root, &project)?;
-    let assertion_inputs = crate::assertion_inputs::capture_with_expect_modules(
+    let source_inputs = crate::source_capture::capture(
         &root,
         "javascript",
         crate::integrity::javascript_assertion_paths(&root, &project).map_err(|e| e.to_string())?,
-        std::slice::from_ref(&project.playwright_module),
     )?;
     let build_cache_key = build_cache_key(&integrity, &project)?;
     // The root too: a generic build's sources import the runtime by
@@ -976,7 +975,7 @@ pub fn run_direct_javascript(
     .map_err(|error| error.to_string())?;
     let entries =
         javascript_archive_entries(entries, &frontend.manifest, &run_id, execution.exit_code)?;
-    let entries = crate::assertion_inputs::append(entries, &assertion_inputs)?;
+    let entries = crate::source_capture::append(entries, &source_inputs)?;
     let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
     remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
         .map_err(|error| error.to_string())?;

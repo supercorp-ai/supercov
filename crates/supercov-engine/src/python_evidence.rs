@@ -152,11 +152,6 @@ enum Record {
     /// `unittest` reports the caller's frame and pytest reports the line its
     /// rewriter recorded; both are resolved against the syntax inventory, and
     /// a frame naming no inventoried site witnesses nothing.
-    Asite {
-        ctx: u64,
-        f: String,
-        l: usize,
-    },
     Limitation {
         id: String,
         reason: String,
@@ -293,78 +288,19 @@ type OutcomesByAttempt = BTreeMap<(String, String, usize), Vec<(String, String, 
 type RunnersByAttempt = BTreeMap<(String, String, usize), String>;
 /// (worker, test, retry) -> the source file the runner named for the test
 type TestFilesByAttempt = BTreeMap<(String, String, usize), String>;
-/// (worker, test, retry) -> assertion sites the call phase reached, in the
-/// order they were first seen, as the runtime reported them: (path, line)
-type SitesByAttempt = BTreeMap<(String, String, usize), Vec<(String, usize)>>;
 
-/// The assertion sites Supercov inventoried from source before the run,
-/// indexed so a runtime frame can name one exactly.
-///
-/// Python reports a file and a line for an assertion, while an assertion
-/// anchor is a file, line and column. The inventory supplies the missing
-/// column and validates the frame: one that names no inventoried site
-/// witnesses nothing, so a wrong frame loses a witness rather than inventing
-/// one.
-pub struct PythonAssertionInventory {
-    root: PathBuf,
-    /// (project-relative file, line) -> the sites on that line
-    columns: BTreeMap<(String, usize), Vec<usize>>,
-}
-
-impl PythonAssertionInventory {
-    pub fn new(root: &Path, inputs: &crate::source_manifest::Inputs) -> Self {
-        let mut columns = BTreeMap::<(String, usize), Vec<usize>>::new();
-        for site in &inputs.assertions {
-            columns
-                .entry((site.at.file.clone(), site.at.line))
-                .or_default()
-                // Every native manifest reports a zero-based byte column and
-                // the report adds one to reach the anchor's own column.
-                .push(site.at.column.saturating_sub(1));
-        }
-        for sites in columns.values_mut() {
-            sites.sort_unstable();
-            sites.dedup();
-        }
-        Self {
-            root: root.to_path_buf(),
-            columns,
-        }
-    }
-
-    /// An inventory with no sites: every frame names nothing, which is what a
-    /// run with no assertion inputs should see.
-    pub fn empty() -> Self {
-        Self {
-            root: PathBuf::new(),
-            columns: BTreeMap::new(),
-        }
-    }
-
-    /// Python reports both forms: a frame's `co_filename` is whatever the
-    /// interpreter loaded, absolute or relative. A path outside the project
-    /// names nothing here.
-    pub fn relative(&self, path: &str) -> Option<String> {
-        let candidate = Path::new(path);
-        let relative = if candidate.is_absolute() {
-            candidate.strip_prefix(&self.root).ok()?
-        } else {
-            candidate.strip_prefix("./").unwrap_or(candidate)
-        };
-        let text = relative.to_string_lossy().replace('\\', "/");
-        (!text.is_empty() && !text.starts_with("../")).then_some(text)
-    }
-
-    /// `file:line:column` when that line holds exactly one inventoried site.
-    /// Two assertions on one line cannot be told apart from a line number, so
-    /// the frame names neither rather than guessing between them.
-    pub fn locate(&self, path: &str, line: usize) -> Option<String> {
-        let file = self.relative(path)?;
-        match self.columns.get(&(file.clone(), line))?.as_slice() {
-            [column] => Some(format!("{file}:{line}:{column}")),
-            _ => None,
-        }
-    }
+/// A runtime path, project-relative. Python reports both forms: a frame's
+/// `co_filename` is whatever the interpreter loaded, absolute or relative. A
+/// path outside the project names nothing.
+fn relative(root: &Path, path: &str) -> Option<String> {
+    let candidate = Path::new(path);
+    let relative = if candidate.is_absolute() {
+        candidate.strip_prefix(root).ok()?
+    } else {
+        candidate.strip_prefix("./").unwrap_or(candidate)
+    };
+    let text = relative.to_string_lossy().replace('\\', "/");
+    (!text.is_empty() && !text.starts_with("../")).then_some(text)
 }
 
 #[derive(Debug, Default)]
@@ -401,7 +337,6 @@ struct Evidence {
     outcomes: OutcomesByAttempt,
     runners: RunnersByAttempt,
     test_files: TestFilesByAttempt,
-    sites: SitesByAttempt,
     limitations: BTreeMap<(String, Option<String>, Option<String>), RuntimeLimitation>,
     /// The layout's ids, which slot hits are positions in.
     slot_ids: Vec<String>,
@@ -1419,32 +1354,6 @@ fn apply_transport(
                     }
                 }
             }
-            Record::Asite { ctx, f, l } => {
-                if f.is_empty() || l == 0 {
-                    return Err(invalid("assertion site needs a file and a line"));
-                }
-                let identity = contexts
-                    .get(&ctx)
-                    .ok_or(PythonEvidenceError::UnknownContext {
-                        file: name.into(),
-                        line: line_number,
-                        context: ctx,
-                    })?;
-                // Only the call phase witnesses a test's assertions; setup and
-                // teardown assertions belong to no single site under test.
-                if identity.phase == "call" {
-                    let key = (
-                        identity.worker.clone(),
-                        identity.test.clone(),
-                        identity.retry,
-                    );
-                    let sites = evidence.sites.entry(key).or_default();
-                    let site = (f, l);
-                    if !sites.contains(&site) {
-                        sites.push(site);
-                    }
-                }
-            }
             Record::Limitation {
                 id,
                 reason,
@@ -1758,7 +1667,7 @@ pub fn build_python_frontend_run(
     run_id: &str,
     generated_at: &str,
     test_exit_code: i32,
-    assertions: &PythonAssertionInventory,
+    root: &Path,
 ) -> Result<PythonFrontendRun, PythonEvidenceError> {
     let evidence = read_evidence_directory(evidence_directory, run_id)?;
     if evidence.interpreters == 0 {
@@ -1775,7 +1684,6 @@ pub fn build_python_frontend_run(
         outcomes,
         runners,
         test_files,
-        sites,
         limitations,
         slot_ids,
     } = evidence;
@@ -1895,42 +1803,6 @@ pub fn build_python_frontend_run(
                     error: None,
                 });
                 runtime.push(take(identity)?);
-                // One phase per assertion site the call phase reached, so an
-                // assertion map can tell the sites apart. The per-test phase
-                // above keeps carrying the pre-assertion evidence; these are
-                // witnesses only, and a site the inventory does not know is
-                // skipped rather than guessed at.
-                let attempt = (worker.clone(), test.clone(), retry);
-                // Keyed on the located site, not on the spelling reported:
-                // two spellings of one file name one site, and a phase id
-                // minted twice refuses the run, as it did in #40.
-                let mut located = BTreeSet::new();
-                for (path, line) in sites.get(&attempt).into_iter().flatten() {
-                    let Some(location) = assertions.locate(path, *line) else {
-                        continue;
-                    };
-                    if !located.insert(location.clone()) {
-                        continue;
-                    }
-                    phases.push(CoveragePhase {
-                        id: stable_id("python-assertion", &[run_id, &id, &location]),
-                        kind: "assertion".into(),
-                        operation: format!("{runner} assertion at {location}"),
-                        source: Some(location),
-                        caused_by_phase_id: Some(id.clone()),
-                        started_at_ms: position as i64 * 2 + 1,
-                        ended_at_ms: Some(position as i64 * 2 + 2),
-                        status: Some(
-                            if outcome == "passed" && !*xfail {
-                                "passed"
-                            } else {
-                                "failed"
-                            }
-                            .into(),
-                        ),
-                        error: None,
-                    });
-                }
             }
         }
         // A phase the runtime entered but pytest never reported (the worker
@@ -1970,7 +1842,7 @@ pub fn build_python_frontend_run(
             // derivation stays only as a fallback.
             test_file: test_files
                 .get(&(worker.clone(), test.clone(), retry))
-                .and_then(|path| assertions.relative(path))
+                .and_then(|path| relative(root, path))
                 .or_else(|| test.split("::").next().map(str::to_owned)),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
@@ -2037,7 +1909,7 @@ pub fn build_python_frontend_run(
             // derivation stays only as a fallback.
             test_file: test_files
                 .get(&(worker.clone(), test.clone(), retry))
-                .and_then(|path| assertions.relative(path))
+                .and_then(|path| relative(root, path))
                 .or_else(|| test.split("::").next().map(str::to_owned)),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
@@ -2351,32 +2223,6 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    fn inventory_of(root: &str, sites: &[(&str, usize, usize)]) -> PythonAssertionInventory {
-        use crate::source_manifest::{Anchor, Files, Inputs, InventorySite};
-        PythonAssertionInventory::new(
-            Path::new(root),
-            &Inputs {
-                schema_version: 1,
-                language: "python".into(),
-                context_digest: "context".into(),
-                files: Files::new(),
-                assertions: sites
-                    .iter()
-                    .map(|(file, line, column)| InventorySite {
-                        at: Anchor {
-                            file: (*file).into(),
-                            line: *line,
-                            column: *column,
-                            text: "assert f(1) == 1".into(),
-                        },
-                        operation: "assert".into(),
-                    })
-                    .collect(),
-                limitations: vec![],
-            },
-        )
-    }
-
     fn assertion_sources(run: &PythonFrontendRun) -> Vec<String> {
         run.request.raw_results[0]
             .phases
@@ -2390,7 +2236,7 @@ mod tests {
         name: &str,
         sites: &[serde_json::Value],
         outcome_file: Option<&str>,
-        inventory: &PythonAssertionInventory,
+        root: &str,
     ) -> PythonFrontendRun {
         let source = "def f(a):\n    return a\n";
         let obligations = build_python_obligations("m.py", source).unwrap();
@@ -2414,7 +2260,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            inventory,
+            Path::new(root),
         )
         .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -2646,55 +2492,12 @@ mod tests {
     }
 
     #[test]
-    fn an_assertion_site_becomes_a_located_phase_when_the_inventory_names_one() {
-        // Python reports a file and a line for an assertion, so a line is a
-        // witness only when the inventory holds exactly one site on it. The
-        // column reported is zero-based, which is what every native manifest
-        // reports and what the assertion report adds one to.
-        let inventory = inventory_of(&under("project", ""), &[("tests/test_m.py", 6, 5)]);
-        let run = run_with_sites(
-            "py-asite-located",
-            &[json!({"t":"asite","ctx":1,"f":under("project", "tests/test_m.py"),"l":6})],
-            None,
-            &inventory,
-        );
-        assert!(
-            assertion_sources(&run).contains(&"tests/test_m.py:6:4".to_string()),
-            "expected a located assertion phase, got {:?}",
-            assertion_sources(&run)
-        );
-    }
-
-    #[test]
-    fn an_ambiguous_or_foreign_assertion_site_witnesses_nothing() {
-        // Two sites on one line cannot be told apart from a line number, and a
-        // frame outside the project names nothing. Both lose the witness
-        // rather than guessing one.
-        let ambiguous = inventory_of(
-            &under("project", ""),
-            &[("tests/test_m.py", 6, 5), ("tests/test_m.py", 6, 30)],
-        );
-        let run = run_with_sites(
-            "py-asite-ambiguous",
-            &[json!({"t":"asite","ctx":1,"f":under("project", "tests/test_m.py"),"l":6})],
-            None,
-            &ambiguous,
-        );
+    fn a_test_s_assertions_are_its_one_assertion_phase() {
+        // The per-test assertion phase carries the evidence from the first
+        // assertion on; there is no separate phase per assertion line.
+        let run = run_with_sites("py-assertion-phase", &[], None, &under("project", ""));
         assert_eq!(
             assertion_sources(&run),
-            vec!["tests/test_m.py::test_a".to_string()],
-            "only the per-test assertion phase should remain"
-        );
-
-        let known = inventory_of(&under("project", ""), &[("tests/test_m.py", 6, 5)]);
-        let outside = run_with_sites(
-            "py-asite-outside",
-            &[json!({"t":"asite","ctx":1,"f":under("elsewhere", "tests/test_m.py"),"l":6})],
-            None,
-            &known,
-        );
-        assert_eq!(
-            assertion_sources(&outside),
             vec!["tests/test_m.py::test_a".to_string()]
         );
     }
@@ -2705,20 +2508,20 @@ mod tests {
         // the test's module; either may be absolute or relative. Both name the
         // same project file, and a runner that names none falls back to the
         // node id.
-        let inventory = inventory_of(&under("project", ""), &[("tests/test_m.py", 6, 5)]);
+        let root = under("project", "");
         for reported in [
             under("project", "tests/test_m.py"),
             "tests/test_m.py".to_owned(),
             "./tests/test_m.py".to_owned(),
         ] {
-            let run = run_with_sites("py-asite-file", &[], Some(reported.as_str()), &inventory);
+            let run = run_with_sites("py-asite-file", &[], Some(reported.as_str()), &root);
             assert_eq!(
                 run.request.raw_results[0].test_file.as_deref(),
                 Some("tests/test_m.py"),
                 "{reported} should resolve to the project path"
             );
         }
-        let without = run_with_sites("py-asite-nofile", &[], None, &inventory);
+        let without = run_with_sites("py-asite-nofile", &[], None, &root);
         assert_eq!(
             without.request.raw_results[0].test_file.as_deref(),
             Some("tests/test_m.py"),
@@ -2761,7 +2564,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            &PythonAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -2906,7 +2709,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty(),
+                Path::new(""),
             )
             .unwrap();
             validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -2991,15 +2794,9 @@ mod tests {
             2,
             "deduplicate before manifest expansion"
         );
-        let run = build_python_frontend_run(
-            &manifest,
-            &directory,
-            "run-1",
-            "now",
-            0,
-            &PythonAssertionInventory::empty(),
-        )
-        .unwrap();
+        let run =
+            build_python_frontend_run(&manifest, &directory, "run-1", "now", 0, Path::new(""))
+                .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         let limitations = &run.request.manifest.limitations;
         assert_eq!(limitations.len(), 2);
@@ -3031,15 +2828,9 @@ mod tests {
             json!({"t":"limitation","id":"python-probes-unobserved-module","file":"only_run.py","reason":"entry script"}),
         ];
         write_transport(&directory.join("main.1.mmap"), &records, 0);
-        let run = build_python_frontend_run(
-            &manifest,
-            &directory,
-            "run-1",
-            "now",
-            0,
-            &PythonAssertionInventory::empty(),
-        )
-        .unwrap();
+        let run =
+            build_python_frontend_run(&manifest, &directory, "run-1", "now", 0, Path::new(""))
+                .unwrap();
         let unmeasured = &run.request.manifest.unmeasured;
         let file_points = |file: &str| {
             manifest
@@ -3099,7 +2890,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            &PythonAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -3145,7 +2936,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty(),
+                Path::new(""),
             );
             fs::remove_dir_all(directory).unwrap();
             outcome.map(|_| ()).map_err(|error| error.to_string())
@@ -3192,7 +2983,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            &PythonAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         assert_eq!(run.tests, 2);
@@ -3244,7 +3035,7 @@ mod tests {
             "run-1",
             "now",
             1,
-            &PythonAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         // The protocol refuses a repeated phase id, which is what threw the
@@ -3287,7 +3078,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::NoInterpreter)
         ));
@@ -3306,7 +3097,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::NoTests)
         ));
@@ -3330,7 +3121,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::NoTests)
         ));
@@ -3348,7 +3139,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::UnsupportedPython(_))
         ));
@@ -3366,7 +3157,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::DroppedRecords { count: 2, .. })
         ));

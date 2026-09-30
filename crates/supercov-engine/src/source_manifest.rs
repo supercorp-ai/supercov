@@ -27,84 +27,13 @@ pub fn digest(value: &impl Serialize) -> String {
         Sha256::digest(serde_json::to_vec(value).expect("serializable map"))
     )
 }
-fn version() -> u32 {
-    1
-}
 
 /// One-based lines and UTF-8 byte columns, for every language. Text is exact.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Anchor {
-    pub file: String,
-    pub line: usize,
-    pub column: usize,
-    pub text: String,
-}
-
 pub fn local_path(file: &str) -> bool {
     !file.is_empty()
         && !file.contains(['\\', ':'])
         && file.split('/').all(|p| !matches!(p, "" | "." | ".."))
 }
-impl Anchor {
-    pub fn new(file: &str, source: &str, start: usize, end: usize) -> Self {
-        Self {
-            file: file.into(),
-            line: source[..start].bytes().filter(|b| *b == b'\n').count() + 1,
-            column: start - source[..start].rfind('\n').map_or(0, |n| n + 1) + 1,
-            text: source[start..end].into(),
-        }
-    }
-    pub fn offset(&self, files: &Files) -> Option<usize> {
-        let source = files.get(&self.file)?;
-        self.offset_in(source, &line_starts(source))
-    }
-
-    /// `offset`, given where each line of the anchor's file starts. A caller
-    /// locating many anchors computes those starts once per file: scanning
-    /// from the top of the file for every anchor made an assessment quadratic
-    /// in file length, and a fifth of `runs latest` on a 300-file run was
-    /// spent here.
-    pub fn offset_in(&self, source: &str, starts: &[usize]) -> Option<usize> {
-        locate(
-            &self.file,
-            self.line,
-            self.column,
-            &self.text,
-            source,
-            starts,
-        )
-    }
-}
-
-/// Where an anchor with these parts starts in `source`, without building one.
-/// Counting the statements that cannot be located needs only this answer, and
-/// building an anchor clones the source text of the node around the statement
-/// -- once per statement, which is the allocation a summary exists to avoid.
-pub fn locate(
-    file: &str,
-    line: usize,
-    column: usize,
-    text: &str,
-    source: &str,
-    starts: &[usize],
-) -> Option<usize> {
-    if !local_path(file) || text.is_empty() || line == 0 || column == 0 {
-        return None;
-    }
-    // A line the file does not reach has no start; this is the check the scan
-    // used to make by counting the line feeds before it.
-    let start = *starts.get(line - 1)?;
-    let row = source.get(start..)?.split('\n').next()?;
-    if column - 1 > row.len() {
-        return None;
-    }
-    let pos = start.checked_add(column - 1)?;
-    source.get(pos..)?.starts_with(text).then_some(pos)
-}
-
-/// The byte offset at which each line of `source` starts: 0, then one past
-/// every line feed.
 pub fn line_starts(source: &str) -> Vec<usize> {
     std::iter::once(0)
         .chain(source.match_indices('\n').map(|(at, _)| at + 1))
@@ -128,53 +57,12 @@ pub fn line_text<'s>(source: &'s str, starts: &[usize], line: usize) -> Option<&
     }
 }
 
-/// Line starts for every file of a source set, computed once.
-pub struct LineIndex<'a> {
-    starts: BTreeMap<&'a str, (&'a str, Vec<usize>)>,
-}
-
-impl<'a> LineIndex<'a> {
-    pub fn new(files: &'a Files) -> Self {
-        Self {
-            starts: files
-                .iter()
-                .map(|(file, source)| (file.as_str(), (source.as_str(), line_starts(source))))
-                .collect(),
-        }
-    }
-
-    /// A file's source and the start of each of its lines.
-    pub fn get(&self, file: &str) -> Option<(&'a str, &[usize])> {
-        self.starts
-            .get(file)
-            .map(|(source, starts)| (*source, starts.as_slice()))
-    }
-
-    /// The same answer as `Anchor::offset`, without rescanning the file.
-    pub fn offset(&self, anchor: &Anchor) -> Option<usize> {
-        let (source, starts) = self.get(&anchor.file)?;
-        anchor.offset_in(source, starts)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InventorySite {
-    pub at: Anchor,
-    pub operation: String,
-}
-
 /// Source text held in memory for capture or a verified current-checkout query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Inputs {
-    #[serde(default = "version")]
-    pub schema_version: u32,
     pub language: String,
-    pub context_digest: String,
     pub files: Files,
-    pub assertions: Vec<InventorySite>,
-    pub limitations: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,39 +103,28 @@ pub type FileManifest = BTreeMap<String, FileFingerprint>;
 pub struct InputManifest {
     pub schema_version: u32,
     pub language: String,
-    pub context_digest: String,
     pub files: FileManifest,
-    pub assertions: Vec<InventorySite>,
-    pub limitations: Vec<String>,
 }
+/// The manifest's schema: files, their bytes and their declarations.
+pub const MANIFEST_SCHEMA: u32 = 3;
 impl Inputs {
     pub fn manifest(&self) -> InputManifest {
         InputManifest {
-            schema_version: 2,
+            schema_version: MANIFEST_SCHEMA,
             language: self.language.clone(),
-            context_digest: self.context_digest.clone(),
             files: self
                 .files
                 .iter()
                 .map(|(p, s)| (p.clone(), FileFingerprint::read(p, s)))
                 .collect(),
-            assertions: self.assertions.clone(),
-            limitations: self.limitations.clone(),
         }
-    }
-    pub fn identity(&self) -> String {
-        digest(&self.manifest())
     }
 }
 impl InputManifest {
     pub fn with_sources(&self, files: Files) -> Inputs {
         Inputs {
-            schema_version: 1,
             language: self.language.clone(),
-            context_digest: self.context_digest.clone(),
             files,
-            assertions: self.assertions.clone(),
-            limitations: self.limitations.clone(),
         }
     }
 }
@@ -383,7 +260,7 @@ const MANIFEST_CACHE_FILE: &str = "source-manifest.cache.json";
 /// What each test executed, written at publication; `tests affected` reads it.
 pub const EXECUTIONS_FILE: &str = "test-executions.json";
 /// The archive entry holding the run's source manifest.
-pub use crate::assertion_inputs::ARCHIVE_PATH;
+pub use crate::source_capture::ARCHIVE_PATH;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -412,7 +289,7 @@ impl std::ops::Deref for RunInputs {
 /// run's own byte for byte.
 pub fn load_inputs(root: &Path, run: &StoredRun) -> Result<RunInputs, String> {
     let stored = load_manifest(run)?;
-    let inputs = crate::assertion_inputs::current_sources(root, &stored.manifest)?;
+    let inputs = crate::source_capture::current_sources(root, &stored.manifest)?;
     Ok(RunInputs { inputs, stored })
 }
 pub fn load_manifest(run: &StoredRun) -> Result<RunManifest, String> {
@@ -446,7 +323,7 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
         return Ok(None);
     };
     let value: Value = serde_json::from_slice(&input.contents).map_err(|e| e.to_string())?;
-    if value["schemaVersion"].as_u64() != Some(2) {
+    if value["schemaVersion"].as_u64() != Some(u64::from(MANIFEST_SCHEMA)) {
         return Err(
             "Unsupported source manifest schema; rerun tests with this version of Supercov".into(),
         );
@@ -470,11 +347,6 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
 fn validate_manifest(manifest: &InputManifest) -> Result<(), String> {
     if manifest.files.iter().any(|(p, f)| {
         !local_path(p) || f.sha256.len() != 64 || !f.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-    }) || manifest.assertions.iter().any(|s| {
-        !manifest.files.contains_key(&s.at.file)
-            || s.at.line == 0
-            || s.at.column == 0
-            || s.at.text.is_empty()
     }) {
         return Err("Invalid source manifest".into());
     }
@@ -535,7 +407,7 @@ pub(crate) fn prepare_publication_with(
             None => return Ok(()),
         },
     };
-    let current = crate::assertion_inputs::current_sources(root, &input.manifest);
+    let current = crate::source_capture::current_sources(root, &input.manifest);
     let owned;
     let analysed = match analysed {
         Some(report) => Some(report),
@@ -1071,7 +943,7 @@ mod tests {
         // The fixture run's one point sits at line 1, column 0 of src/app.js
         // with a zero-based byte column, which is how every non-JavaScript
         // frontend reports; the language is named for that.
-        let inputs = crate::assertion_inputs::capture(
+        let inputs = crate::source_capture::capture(
             &root,
             "python",
             ["src/app.js".into(), "tests/app.test.js".into()],
@@ -1079,8 +951,7 @@ mod tests {
         .unwrap();
         let directory = crate::run_store::create_analyzable_test_run(&root, "first");
         let path = directory.join("evidence.raw.gz");
-        let entries =
-            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs).unwrap();
         let archive = write_archive(entries, &path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =
@@ -1211,7 +1082,7 @@ mod tests {
         let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
         fs::write(root.join("src/app.js"), app).unwrap();
         fs::write(root.join("tests/app.test.js"), test).unwrap();
-        let inputs = crate::assertion_inputs::capture(
+        let inputs = crate::source_capture::capture(
             &root,
             "python",
             ["src/app.js".into(), "tests/app.test.js".into()],
@@ -1219,8 +1090,7 @@ mod tests {
         .unwrap();
         let directory = crate::run_store::create_run_wide_test_run(&root, "parallel");
         let path = directory.join("evidence.raw.gz");
-        let entries =
-            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs).unwrap();
         let archive = write_archive(entries, &path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =
@@ -1312,7 +1182,7 @@ mod tests {
         let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
         fs::write(root.join("src/app.js"), app).unwrap();
         fs::write(root.join("tests/app.test.js"), test).unwrap();
-        let inputs = crate::assertion_inputs::capture(
+        let inputs = crate::source_capture::capture(
             &root,
             "python",
             ["src/app.js".into(), "tests/app.test.js".into()],
@@ -1320,8 +1190,7 @@ mod tests {
         .unwrap();
         let directory = crate::run_store::create_partial_test_run(&root, "partial");
         let path = directory.join("evidence.raw.gz");
-        let entries =
-            crate::assertion_inputs::append(read_archive(&path).unwrap(), &inputs).unwrap();
+        let entries = crate::source_capture::append(read_archive(&path).unwrap(), &inputs).unwrap();
         let archive = write_archive(entries, &path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =

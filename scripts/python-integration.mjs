@@ -199,7 +199,7 @@ try {
   // twice more, untimed, by the first query after it.
   const evidencePath = serial.stdout.match(/\[coverage\] evidence: (.+)/)[1].trim();
   const runDirectory = evidencePath.slice(0, -'evidence.raw.gz'.length);
-  for (const name of ['query-index.v1.bin', 'assertions.summary.cache.json']) {
+  for (const name of ['query-index.v1.bin', 'test-executions.json']) {
     assert.ok(existsSync(resolve(runDirectory, name)), `publication wrote ${name} before any query`);
   }
   assert.match(serial.stderr, /\[supercov\] timings .* evidence=\d+(?:\.\d)?ms publication=\d+(?:\.\d)?ms total=/);

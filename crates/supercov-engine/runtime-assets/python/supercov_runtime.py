@@ -386,8 +386,6 @@ class Runtime:
         self.identities: dict[int, dict] = {}
         self.next_context = 1
         self.asserted: set[int] = set()
-        # (context, file, line) of every assertion site a test has reached.
-        self.asserted_sites: set[tuple[int, str, int]] = set()
         # (context, file, line) of every site probe already handled.
         self.probed_sites: set[tuple[int, str, int]] = set()
         self.seen_hits: set = set()
@@ -774,40 +772,6 @@ class Runtime:
             )
         )
 
-    def assertion_site(self, file: "str | None", line: "int | None") -> None:
-        """Where in the test an assertion ran, so a map can tell sites apart.
-
-        The record is a file and a line; the report resolves the column
-        against the syntax inventory Supercov captured before the run, and a
-        frame naming no inventoried site matches nothing rather than inventing
-        a witness. Recorded once per site per test: later sightings cost one
-        set lookup. Only the call phase is reported, because setup and
-        teardown assertions witness no test.
-        """
-        if not file or not line:
-            return
-        context = self.context.get()
-        if context == 0:
-            return
-        # One spelling per site, whoever reports it: a site probe names the
-        # project-relative path and a frame names whatever the interpreter
-        # loaded. The reader keys a site on the text it is given, and two
-        # spellings of one site became two assertion phases with one id.
-        file = self._relative_path(file)
-        if file is None:
-            return
-        key = (context, file, line)
-        if key in self.asserted_sites:
-            return
-        with self.lock:
-            if key in self.asserted_sites:
-                return
-            identity = self.identities.get(context)
-            if identity is None or identity.get("phase") != "call":
-                return
-            self.asserted_sites.add(key)
-            self._record_payload(b'{"ctx":%d,"f":%s,"l":%d,"t":"asite"}' % (context, self._json_id(file), int(line)))
-
     # -- observation --------------------------------------------------------
 
     def _hit(self, context: int, obligation: str) -> None:
@@ -1189,13 +1153,13 @@ class Runtime:
             yield item
 
     def _site_probe(self, file: str, line: int) -> None:
-        # A site probe names its file project-relative already. Once a
-        # context has passed a site, both calls below are no-ops for it, and
-        # a test asserting in a loop passes the same site thousands of times.
+        # The probe on an assertion line marks where the test's assertion
+        # phase begins. Once a context has passed a line the call below is a
+        # no-op for it, and a test asserting in a loop passes the same line
+        # thousands of times.
         key = (self.context.get(), file, line)
         if key in self.probed_sites:
             return
-        self.assertion_site(file, line)
         self.assertion()
         self.probed_sites.add(key)
 

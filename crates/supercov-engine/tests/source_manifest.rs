@@ -13,7 +13,7 @@ fn frozen_inputs_accept_absolute_relative_and_windows_verbatim_paths_once() {
     let root = canonical.clone();
     let source = "import assert from 'node:assert/strict'; assert.equal(1, 1);";
     std::fs::write(root.join("test.js"), source).unwrap();
-    let inputs = supercov_engine::assertion_inputs::capture(
+    let inputs = supercov_engine::source_capture::capture(
         &root,
         "javascript",
         [
@@ -28,7 +28,7 @@ fn frozen_inputs_accept_absolute_relative_and_windows_verbatim_paths_once() {
     let outside = root.parent().unwrap().join("outside.js");
     std::fs::write(&outside, source).unwrap();
     assert!(
-        supercov_engine::assertion_inputs::capture(&root, "javascript", [outside])
+        supercov_engine::source_capture::capture(&root, "javascript", [outside])
             .unwrap_err()
             .contains("outside project")
     );

@@ -192,7 +192,7 @@ pub fn run_direct_rust_compiler(
         }
         let adapter_started = Instant::now();
         let integrity = current_rust_integrity(&root, &request.command, None)?;
-        let assertion_inputs = crate::assertion_inputs::capture(
+        let source_inputs = crate::source_capture::capture(
             &root,
             "rust",
             crate::rust_run::collect_integrity_inputs(&root, &request.command)?.assertion_paths(),
@@ -250,9 +250,9 @@ pub fn run_direct_rust_compiler(
             .join(".supercov/work")
             .join(&request.run_id)
             .join("evidence.raw.gz");
-        let archive_entries = crate::assertion_inputs::append(
+        let archive_entries = crate::source_capture::append(
             run.archive_entries().map_err(|error| error.to_string())?,
-            &assertion_inputs,
+            &source_inputs,
         )?;
         let raw = match request.publication_fault {
             Some(RustCompilerPublicationFault::ArchiveEnospc) => write_archive_with_fault(

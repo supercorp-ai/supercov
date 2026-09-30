@@ -1726,13 +1726,6 @@ struct NodeAssertionSiteCollector<'s> {
     bindings: &'s NodeAssertionBindings,
     scoping: &'s oxc_semantic::Scoping,
     sites: HashMap<SpanKey, (String, String, bool)>,
-    inventory: bool,
-}
-
-/// Syntax/binding inventory using the same recognizer as instrumentation.
-/// Does not trace assertion operands or infer dependencies.
-pub fn assertion_ranges(file: &str, source: &str) -> Result<Vec<(usize, usize, String)>, String> {
-    assertion_ranges_with_expect_modules(file, source, &[])
 }
 
 /// How a project's JavaScript is parsed: in the script or module mode its
@@ -1749,38 +1742,6 @@ pub fn project_source_type(path: &Path) -> Result<SourceType, String> {
     } else {
         source_type.with_jsx(true)
     })
-}
-
-pub fn assertion_ranges_with_expect_modules(
-    file: &str,
-    source: &str,
-    modules: &[String],
-) -> Result<Vec<(usize, usize, String)>, String> {
-    let _positions = PositionScope::enter();
-    let source_type = project_source_type(Path::new(file))?;
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.errors.is_empty() {
-        return Err(format!("{} parse errors", parsed.errors.len()));
-    }
-    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
-    let bindings = node_assertion_bindings(&parsed.program, semantic.scoping(), modules);
-    let mut collector = NodeAssertionSiteCollector {
-        source,
-        file,
-        bindings: &bindings,
-        scoping: semantic.scoping(),
-        sites: HashMap::new(),
-        inventory: true,
-    };
-    collector.visit_program(&parsed.program);
-    let mut sites = collector
-        .sites
-        .into_iter()
-        .map(|((start, end), (op, _, _))| (start as usize, end as usize, op))
-        .collect::<Vec<_>>();
-    sites.sort();
-    Ok(sites)
 }
 
 fn referenced_symbol(
@@ -1915,9 +1876,9 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
                 || matches!(&call.callee,
                 Expression::StaticMemberExpression(m) if m.optional)
                 || matches!(&call.callee, Expression::ComputedMemberExpression(m) if m.optional);
-            // Keep optional sites in inventory, but never manufacture a passed
-            // occurrence when a call can short-circuit before invoking a matcher.
-            if optional && !self.inventory {
+            // Never manufacture a passed occurrence when a call can
+            // short-circuit before invoking a matcher.
+            if optional {
                 walk::walk_call_expression(self, call);
                 return;
             }
@@ -2018,7 +1979,6 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
             bindings: &bindings,
             scoping: semantic.scoping(),
             sites: HashMap::new(),
-            inventory: false,
         };
         collector.visit_program(&parsed.program);
         assertions = collector.sites.len();
@@ -8584,7 +8544,6 @@ mod tests {
             let output = instrument_candidate(source, file).unwrap();
             assert!(!output.points.is_empty(), "{file}");
             assert!(output.code.contains("<div>"), "{file}");
-            assert!(assertion_ranges(file, source).is_ok(), "{file}");
         }
         // TypeScript keeps its angle-bracket assertion; JSX would misread it.
         assert!(instrument_candidate("const n = <number>value;", "src/index.ts").is_ok());

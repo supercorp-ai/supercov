@@ -1233,9 +1233,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let inputs =
-            crate::assertion_inputs::capture(root, "javascript", [PathBuf::from("src/index.js")])
+            crate::source_capture::capture(root, "javascript", [PathBuf::from("src/index.js")])
                 .unwrap();
-        entries = crate::assertion_inputs::append(entries, &inputs).unwrap();
+        entries = crate::source_capture::append(entries, &inputs).unwrap();
         let path = root.join("evidence.gz");
         let metadata = write_archive(entries, &path).unwrap();
         (path, metadata.compressed_bytes)
@@ -1469,7 +1469,7 @@ mod tests {
         let mut entries = read_archive(&evidence).unwrap();
         entries
             .iter_mut()
-            .find(|e| e.path == crate::assertion_inputs::ARCHIVE_PATH)
+            .find(|e| e.path == crate::source_capture::ARCHIVE_PATH)
             .unwrap()
             .contents = b"{broken".to_vec();
         let raw = write_archive(entries, &evidence).unwrap();

@@ -374,12 +374,6 @@ module Supercov
       @active_threads = {}
       @asserted = {}
       @assertion_hooks = {}
-      @seen_sites = {}
-      # Files the assertion libraries and this runtime own. A hooked method
-      # sits below the helper the test actually called -- every Minitest
-      # `assert_equal` reaches `assert` in the same file -- so the caller
-      # scan skips these to reach the test's own frame.
-      @assertion_frames = { __FILE__ => true }
       @realpath_cache = {}
       @saw_file = false
       @matched_file = false
@@ -737,48 +731,6 @@ module Supercov
     # scan and one write, later ones a hash lookup. Only the call phase is
     # reported, because setup and teardown assertions witness no test.
     #
-    # A backtrace costs about as much as the window it asks for, and the
-    # test's own frame is usually one or two above the hooked method: every
-    # Minitest `assert_equal` calls `assert`, every RSpec `expect(x).to` calls
-    # `to`. Ask for a small window and widen only when every frame in it still
-    # belongs to the assertion library, which keeps the common call cheap
-    # without capping how deep a helper may sit.
-    ASSERTION_FRAME_WINDOWS = [4, 24].freeze
-    # Frames to skip before the caller: this method, and the hook that called it.
-    ASSERTION_FRAME_OFFSET = 2
-
-    def assertion_site
-      context = current_context
-      return if context.zero?
-
-      identity = @identities[context]
-      return if identity.nil? || identity["phase"] != "call"
-
-      ASSERTION_FRAME_WINDOWS.each do |window|
-        locations = caller_locations(ASSERTION_FRAME_OFFSET, window) || []
-        locations.each do |location|
-          path = location.absolute_path || location.path
-          next if path.nil?
-          next if @assertion_frames[path]
-
-          line = location.lineno
-          key = [context, path, line]
-          return if @seen_sites[key]
-
-          @seen_lock.synchronize do
-            return if @seen_sites[key]
-
-            @seen_sites[key] = true
-          end
-          record("t" => "asite", "ctx" => context, "f" => path, "l" => line)
-          return
-        end
-        # Every frame was the library's own and the window was full: the
-        # caller sits deeper, so look again with a wider one.
-        return if locations.length < window
-      end
-    end
-
     # Each assertion library reaches the runtime through one method: every
     # Minitest assert_*/refute_* ends in `assert`, every RSpec expectation in
     # `to`/`not_to`, every test-unit assertion runs inside `_wrap_assertion`.
@@ -799,20 +751,11 @@ module Supercov
         next if @assertion_hooks[name] || !Object.const_defined?(name)
 
         owner = Object.const_get(name)
-        # The library's own file, so the caller scan can step over the
-        # helpers that reach the hooked method.
-        methods.each do |method_name|
-          next unless owner.method_defined?(method_name) || owner.private_method_defined?(method_name)
-
-          source = owner.instance_method(method_name).source_location
-          @assertion_frames[source.first] = true if source&.first
-        end
         runtime = self
         hook = Module.new do
           methods.each do |method_name|
             define_method(method_name) do |*args, **options, &block|
               runtime.assertion
-              runtime.assertion_site
               super(*args, **options, &block)
             end
           end
