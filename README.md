@@ -154,7 +154,7 @@ npx supercov runs latest assertions   # the share asserted and what is not
 ```
 
 Answers are reused across runs whenever the question is the same, so after a
-commit only what changed is asked again. JavaScript, TypeScript and Python runs. See
+commit only what changed is asked again. Every language Supercov measures. See
 [assertion coverage](docs/assertions.md).
 
 ## Give Supercov a job

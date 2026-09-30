@@ -38,16 +38,23 @@ times out, or the process crashes. The change depends on the statement:
 
 | Statement | Change |
 | --- | --- |
-| `if` (and Python's `elif`) | the condition inverted, each way separately (asserted if either is caught) |
-| `return x` | returns undefined (Python: `None`) without evaluating `x` |
-| declaration or assignment with a value | the value becomes undefined (Python: `None`) |
+| `if` (and `elif`, `elsif`, `unless`, `else if`) | the condition inverted, each way separately (asserted if either is caught); a Rust `if let` is made not to match |
+| `return x`, and a block's value in Ruby and Rust | returns a stand-in for nothing, without evaluating `x` |
+| declaration or assignment with a value | the value becomes that stand-in, without being evaluated |
 | JSX expression | the value becomes undefined |
 | anything else | skipped: the statement does not run |
 
+The stand-in is `undefined` in JavaScript and TypeScript, `None` in Python,
+`nil` in Ruby and `Default::default()` in Rust (`Ok(Default::default())` for an
+`Ok` or `Err`). Go and the JVM languages replace a value after it is computed,
+as their mutation testers do: the zero value in Go, and `null`, `0` or `false`
+in Java and Kotlin.
+
 Imports, declarations without a value, and function, class and type
 declarations are not assessed; in Python neither are `pass`, `global`,
-`nonlocal` and docstrings. **Assertions** is the share of the executed
-statements that are asserted.
+`nonlocal` and docstrings, and in Ruby neither are the calls that declare
+(`require`, `attr_reader`, `private`, `include` ...). **Assertions** is the
+share of the executed statements that are asserted.
 
 ## Assess and read
 
@@ -105,6 +112,19 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   the same way: 502 right; of the 67 not asserted it found 45, and 45 of the 53
   it flagged were truly not asserted. The share it reported was 90.0% against a
   true 87.4%, for about $0.04.
+- **Go, Rust and Java**, checked the same way:
+
+  | Project | Checked | Right | Flagged (truly not asserted) | Share reported / true |
+  | --- | --- | --- | --- | --- |
+  | google/uuid (Go) | 339 | 294 | 34 (26) | 90.0% / 81.4% |
+  | dtolnay/semver (Rust) | 136 of a sample of 200 | 124 | 11 (10) | 91.9% / 84.6% |
+  | apache/commons-cli (Java) | 196 of a sample of 200 | 167 | 49 (33) | 75.0% / 76.5% |
+
+  In Rust, a change to a value whose type has no default cannot be made, so it
+  cannot be checked this way; that was a third of semver's sample.
+- **Ruby:** Ruby runs credit each line to the first test that runs it, so most
+  statements are asked of a single test and the share reads low: on
+  dry-rb/dry-inflector it reported 43.9% against a true 92.4%.
 
 The share is a good measure of a project; a single statement's verdict is a
 judgment worth checking before acting on it. Supercov does not run mutated code
@@ -112,5 +132,7 @@ for this: nothing is executed, and your tests are never slowed.
 
 ## Requirements
 
-JavaScript, TypeScript and Python runs (pytest and unittest), and
+Runs of any language Supercov measures: JavaScript and TypeScript, Python
+(pytest, unittest), Ruby (RSpec, Minitest, test-unit, Cucumber), Go, Rust
+(libtest, nextest, doctests), and Java and Kotlin (JUnit, TestNG); and
 `TYPESAFE_API_KEY` for `assess`. Reading a saved result needs neither.

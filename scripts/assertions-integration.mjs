@@ -1,10 +1,10 @@
 // `supercov runs <run> assertions` against a local stand-in for Jev: every
 // question answered by rule (a console.log or print line is not asserted;
 // everything else is), so the verdicts, the answer cache and --dry-run are
-// checked without the network, for JavaScript and for Python (unittest, so
-// only an interpreter is needed). --javascript-only skips Python where there
-// is none, as in the Alpine image.
-import { spawn } from "node:child_process";
+// checked without the network, for JavaScript, Python (unittest, so only an
+// interpreter is needed) and Go. --javascript-only skips the others where
+// they are not installed, as in the Alpine image.
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -112,6 +112,76 @@ class FormatTest(unittest.TestCase):
 `);
 const python = process.platform === "win32" ? "python" : "python3";
 
+const go = join(scratch, "go");
+write = writer(go);
+write("go.mod", "module example.com/shop\n\ngo 1.21\n");
+write("cart.go", `package shop
+
+import "fmt"
+
+type Item struct{ Price, Quantity int }
+
+func Total(items []Item) int {
+	sum := 0
+	for _, item := range items {
+		sum += item.Price * item.Quantity
+	}
+	if sum > 100 {
+		sum = sum * 9 / 10
+	}
+	fmt.Println("total", sum)
+	return sum
+}
+`);
+write("format.go", `package shop
+
+import "strings"
+
+func Label(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "unknown"
+	}
+	return strings.ToUpper(trimmed)
+}
+`);
+write("cart_test.go", `package shop
+
+import "testing"
+
+func TestAddsPrices(t *testing.T) {
+	if got := Total([]Item{{10, 2}}); got != 20 {
+		t.Fatal(got)
+	}
+}
+
+func TestDiscountsBigCarts(t *testing.T) {
+	if got := Total([]Item{{60, 2}}); got != 108 {
+		t.Fatal(got)
+	}
+}
+`);
+write("format_test.go", `package shop
+
+import "testing"
+
+func TestUpperCasesAName(t *testing.T) {
+	if got := Label("  ab "); got != "AB" {
+		t.Fatal(got)
+	}
+}
+
+func TestNamesABlankLabel(t *testing.T) {
+	if got := Label("  "); got != "unknown" {
+		t.Fatal(got)
+	}
+}
+`);
+// Go is measured where it is installed; a job that promises it
+// (SUPERCOV_REQUIRE_GO) fails without it rather than skipping.
+const hasGo = spawnSync("go", ["version"]).status === 0;
+if (!hasGo && process.env.SUPERCOV_REQUIRE_GO) throw new Error("SUPERCOV_REQUIRE_GO is set but go is not on PATH");
+
 // The stand-in: answers every noul question, 0.1 for a console.log or print
 // line and 0.9 otherwise, and counts requests in a file.
 const counter = join(scratch, "requests.txt");
@@ -130,7 +200,7 @@ const server = spawn(process.execPath, ["--input-type=module", "-e", `
       if (!request.state.test_code.includes(title)) { res.writeHead(400).end(); return; }
       appendFileSync(${JSON.stringify(counter)}, Object.keys(request.questions).length + "\\n");
       const answers = Object.fromEntries(Object.entries(request.questions).map(([id, q]) =>
-        [id, { type: "noul", noul: /console\\.log|print\\(/.test(q.instructions.task) ? 0.1 : 0.9 }]));
+        [id, { type: "noul", noul: /console\\.log|print\\(|Println\\(/.test(q.instructions.task) ? 0.1 : 0.9 }]));
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ model: request.model, answers, usage: { input_tokens: Math.ceil(body.length / 4), output_tokens: 1 } }));
     });
@@ -201,6 +271,10 @@ try {
   if (!javascriptOnly)
     scenario({ name: "Python", root: py, command: [python, "-m", "unittest", "discover", "-s", "tests", "-t", "."], logFile: "src/cart.py", logText: "print", logLine: 7,
       edit: ["src/format.py", "trimmed.upper()", "trimmed.upper().strip()"] });
+  if (!javascriptOnly && hasGo)
+    scenario({ name: "Go", root: go, command: ["go", "test", "./..."], logFile: "cart.go", logText: "Println", logLine: 15,
+      edit: ["format.go", "strings.ToUpper(trimmed)", "strings.ToUpper(strings.TrimSpace(trimmed))"] });
+  else if (!javascriptOnly) console.log("[assertions] Go: skipped, go is not on PATH");
 } finally {
   server.kill();
   rmSync(scratch, { recursive: true, force: true });

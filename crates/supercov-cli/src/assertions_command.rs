@@ -34,7 +34,7 @@ ran and asks Jev whether the test would fail for each statement, then saves the
 result to the run. Answers are kept in .supercov/assertions/ and reused only
 when a question would be asked with exactly the same text, so after a change
 only the affected questions are asked again. Needs TYPESAFE_API_KEY for
-questions not yet answered. JavaScript, TypeScript and Python runs.
+questions not yet answered. JavaScript, TypeScript, Python, Ruby, Go, Rust, Java and Kotlin runs.
 
 --all         List every statement that is not asserted (default: 50).
 --limit N     List N statements that are not asserted.
@@ -333,7 +333,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     let inputs = maps::load_inputs(root, run)?;
     let Some(language) = coverage::Language::from_manifest(&inputs.inputs.language) else {
         return Err(format!(
-            "Assertion coverage supports JavaScript, TypeScript and Python runs so far; this run is {}",
+            "Assertion coverage supports JavaScript, TypeScript, Python, Ruby, Go, Rust, Java and Kotlin runs; this run is {}",
             inputs.inputs.language
         ));
     };
@@ -466,10 +466,24 @@ fn send_all(
 }
 
 fn change_name(change: Change, language: coverage::Language) -> &'static str {
-    let python = language == coverage::Language::Python;
+    use coverage::Language::*;
+    match (change, language) {
+        (Change::ReturnUndefined, Python) => "returns None",
+        (Change::ValueUndefined, Python) => "value becomes None",
+        (Change::ReturnUndefined, Ruby) => "returns nil",
+        (Change::ValueUndefined, Ruby) => "value becomes nil",
+        (Change::ReturnUndefined, Go) => "returns zero values",
+        (Change::ValueUndefined, Go) => "value becomes the zero value",
+        (Change::ReturnUndefined, Rust) => "returns the default",
+        (Change::ValueUndefined, Rust) => "value becomes the default",
+        (Change::ReturnUndefined, Jvm) => "returns the default",
+        (Change::ValueUndefined, Jvm) => "value becomes the default",
+        (change, _) => change_name_js(change),
+    }
+}
+
+fn change_name_js(change: Change) -> &'static str {
     match change {
-        Change::ReturnUndefined if python => "returns None",
-        Change::ValueUndefined if python => "value becomes None",
         Change::Invert => "condition inverted",
         Change::ReturnUndefined => "returns undefined",
         Change::ValueUndefined => "value becomes undefined",

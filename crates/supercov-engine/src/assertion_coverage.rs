@@ -27,6 +27,15 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+mod go;
+mod jvm;
+mod ruby;
+mod rust_source;
+
+/// Statements starting on each line: their text and change (`None`: not
+/// assessed).
+type Starts = BTreeMap<usize, Vec<(String, Option<Change>)>>;
+
 pub const MODEL: &str = "jev-1.13.0";
 /// Tests asked about a statement before it may be called unchecked, then the
 /// wider set asked before it is (measured: more tests remove false "unchecked"
@@ -55,6 +64,33 @@ fn runtime(runner: &str) -> &'static str {
         }
         "pytest" => {
             "pytest; a failing assert or an uncaught exception fails the test; there is no timeout unless pytest-timeout is configured; fixtures from conftest.py run before the test; a Mock or MagicMock returns another mock unless given a return value."
+        }
+        "rspec" => {
+            "RSpec; a failed expectation or an uncaught exception fails the example; there is no timeout; before hooks and let blocks run for each example; a double raises on messages it was not told to expect, and allow(...).to receive returns nil unless given a value."
+        }
+        "minitest" => {
+            "Minitest; a failed assertion or an uncaught exception fails the test; there is no timeout; setup runs before each test; a stubbed method returns the value it was given."
+        }
+        "test-unit" => {
+            "test-unit; a failed assertion or an uncaught exception fails the test; there is no timeout; setup runs before each test."
+        }
+        "cucumber" => {
+            "Cucumber; a step that raises (a failed expectation included) fails the scenario; a step with no definition leaves it undefined, not passed; Before hooks run for each scenario."
+        }
+        "go-test" => {
+            "go test; t.Error, t.Fatal and a panic fail the test; a test past the -timeout (default 10 minutes) fails; subtests run inside their parent; a nil pointer dereference panics."
+        }
+        "rust-libtest" | "rust-nextest" | "nextest" => {
+            "Rust tests; a panic fails the test (a failed assert!, assert_eq!, unwrap or expect included) unless it is marked #[should_panic], which then fails when nothing panics; there is no timeout."
+        }
+        "rustdoc" => {
+            "Rust doctests; the code block is compiled and run as its own program, and a panic fails it; a block marked no_run is only compiled and should_panic fails when nothing panics."
+        }
+        "junit-platform" => {
+            "JUnit; a failed assertion or an uncaught exception fails the test (an expected one inside assertThrows aside); @BeforeEach runs before each test; there is no timeout unless one is set; a Mockito mock returns null, 0, false or an empty collection unless stubbed."
+        }
+        "testng" => {
+            "TestNG; a failed assertion or an uncaught exception fails the test; @BeforeMethod runs before each test; there is no timeout unless one is set; a Mockito mock returns null, 0, false or an empty collection unless stubbed."
         }
         "unittest" => {
             "unittest; a failing assert* method or an uncaught exception fails the test; there is no timeout; setUp runs before each test; a Mock or MagicMock returns another mock unless given a return value."
@@ -85,6 +121,11 @@ pub enum Change {
 pub enum Language {
     JavaScript,
     Python,
+    Ruby,
+    Go,
+    Rust,
+    /// Java and Kotlin, told apart by file extension.
+    Jvm,
 }
 
 impl Language {
@@ -93,14 +134,18 @@ impl Language {
         match name {
             "javascript" => Some(Self::JavaScript),
             "python" => Some(Self::Python),
+            "ruby" => Some(Self::Ruby),
+            "go" => Some(Self::Go),
+            "rust" => Some(Self::Rust),
+            "jvm" => Some(Self::Jvm),
             _ => None,
         }
     }
     fn comment(self, line: &str) -> bool {
         let t = line.trim_start();
         match self {
-            Self::Python => t.starts_with('#'),
-            Self::JavaScript => {
+            Self::Python | Self::Ruby => t.starts_with('#'),
+            Self::JavaScript | Self::Go | Self::Rust | Self::Jvm => {
                 t.starts_with("//")
                     || t.starts_with("/*")
                     || t.starts_with("*/")
@@ -110,12 +155,29 @@ impl Language {
             }
         }
     }
-    /// What separates a test's name from the groups it sits in.
-    fn separator(self) -> &'static str {
+    /// The value a removed value becomes, as the questions name it.
+    fn nothing(self) -> &'static str {
         match self {
-            Self::Python => "::",
-            Self::JavaScript => " > ",
+            Self::JavaScript => "undefined",
+            Self::Python => "None",
+            Self::Ruby => "nil",
+            Self::Go => "the zero value",
+            Self::Rust => "`Default::default()`",
+            Self::Jvm => "the default value (null, or 0 or false for a primitive)",
         }
+    }
+}
+
+/// What separates a test's name from the groups it sits in.
+fn separator(language: Language, runner: &str) -> &'static str {
+    match (language, runner) {
+        (Language::JavaScript, _) => " > ",
+        (Language::Python, _) => "::",
+        (_, "rspec") => ":",
+        (_, "minitest" | "test-unit" | "junit-platform" | "testng") => "#",
+        (_, "go-test") => "/",
+        (_, "rustdoc") => " - ",
+        _ => "::",
     }
 }
 
@@ -147,6 +209,8 @@ pub struct Population {
     /// Files holding assessed statements; a test's own helpers are the files
     /// it imports that are not among these.
     source_files: BTreeSet<String>,
+    /// The project's Java and Kotlin files, for JVM tests and their imports.
+    jvm_files: Vec<String>,
     aliases: Vec<(String, String)>,
     /// Files read once: every request and every cache key reads the same text.
     files: std::sync::Mutex<BTreeMap<String, Option<std::sync::Arc<str>>>>,
@@ -163,9 +227,25 @@ pub fn population(
     let view = &report.filters.passed;
     let mut tests = Vec::new();
     let mut index = BTreeMap::new();
+    // JVM tests are named by class; their file is found by its path.
+    let jvm_files = if language == Language::Jvm {
+        project_files(root, &["java", "kt"])
+    } else {
+        Vec::new()
+    };
     for test in &view.tests {
-        let Some(file) = test.file.as_ref().filter(|f| !f.is_empty()) else {
-            continue;
+        let file = match test.file.as_ref().filter(|f| !f.is_empty()) {
+            Some(file) => file.clone(),
+            None if language == Language::Jvm => {
+                let found = jvm::class_paths(&test.name)
+                    .iter()
+                    .find_map(|suffix| jvm_files.iter().find(|f| ends_with_path(f, suffix)));
+                match found {
+                    Some(file) => file.clone(),
+                    None => continue,
+                }
+            }
+            None => continue,
         };
         if test.role != "test" {
             continue;
@@ -173,7 +253,7 @@ pub fn population(
         index.insert(test.id.as_str(), tests.len());
         tests.push(TestRef {
             id: test.id.clone(),
-            file: file.clone(),
+            file,
             name: test.name.clone(),
             runner: test.provenance.runner.clone(),
         });
@@ -181,8 +261,9 @@ pub fn population(
     let mut changes = BTreeMap::<String, BTreeMap<usize, Vec<(String, Option<Change>)>>>::new();
     let mut statements = Vec::new();
     let mut seen = BTreeSet::new();
-    // Python records an `elif` as a decision only: its condition is taken
-    // after every statement, where no statement starts on its line.
+    // Python and Ruby record an `elif`/`elsif`, and Go, Rust and the JVM
+    // languages may record an `else if`, as a decision only: its condition is
+    // taken after every statement, where no statement starts on its line.
     let executed = view
         .points
         .iter()
@@ -191,7 +272,7 @@ pub fn population(
     let elifs = view
         .decisions
         .iter()
-        .filter(|d| d.executed && language == Language::Python)
+        .filter(|d| d.executed && language != Language::JavaScript)
         .map(|d| (&d.meta.file, d.meta.line, &d.meta.source, &d.tests, true));
     for (file, line, text, point_tests, decision) in executed.chain(elifs) {
         let key = (file.clone(), line);
@@ -205,6 +286,9 @@ pub fn population(
         if ids.is_empty() {
             continue;
         }
+        if language == Language::Rust && rust_source::test_path(file) {
+            continue;
+        }
         let Some(source) = sources.get(file) else {
             continue;
         };
@@ -213,6 +297,10 @@ pub fn population(
             .or_insert_with(|| match language {
                 Language::JavaScript => statement_starts(file, source),
                 Language::Python => python_statement_starts(source),
+                Language::Ruby => ruby::statement_starts(source),
+                Language::Go => go::statement_starts(source),
+                Language::Rust => rust_source::statement_starts(source),
+                Language::Jvm => jvm::statement_starts(file, source),
             });
         let Some(change) = change_at(lines, line, text, language) else {
             continue;
@@ -242,6 +330,7 @@ pub fn population(
         tests,
         ran,
         source_files,
+        jvm_files,
         aliases: tsconfig_aliases(root),
         files: Default::default(),
     })
@@ -347,9 +436,9 @@ fn change_at(
     match (found, language) {
         (Some((_, change)), _) => *change,
         (None, Language::JavaScript) => Some(Change::ExpressionUndefined),
-        // Every Python statement is its own point; one no statement matches
-        // is not assessed rather than guessed at.
-        (None, Language::Python) => None,
+        // Elsewhere every statement is its own point; one no statement
+        // matches is not assessed rather than guessed at.
+        (None, _) => None,
     }
 }
 
@@ -510,7 +599,10 @@ impl Population {
         for &t in &all {
             let g = (
                 self.tests[t].file.clone(),
-                describe(&self.tests[t].name, self.language.separator()),
+                describe(
+                    &self.tests[t].name,
+                    separator(self.language, &self.tests[t].runner),
+                ),
             );
             match groups.iter_mut().find(|(k, _)| *k == g) {
                 Some((_, v)) => v.push(t),
@@ -559,8 +651,10 @@ impl Population {
     /// The test's code: the file's first lines and the test's own body, found
     /// by its title, comment lines left out.
     pub fn test_code(&self, test: usize) -> String {
-        if self.language == Language::Python {
-            return self.python_test_code(test);
+        match self.language {
+            Language::Python => return self.python_test_code(test),
+            Language::JavaScript => {}
+            _ => return self.located_test_code(test),
         }
         let t = &self.tests[test];
         let text = self.read(&t.file).unwrap_or_default();
@@ -605,6 +699,74 @@ impl Population {
             out.push("  ...".into());
         }
         out.extend(body);
+        out.join("\n")
+    }
+
+    /// A Ruby, Go, Rust or JVM test's code: the file's first lines, the lines
+    /// that frame it (its class or groups, its annotations), and its body.
+    fn located_test_code(&self, test: usize) -> String {
+        let t = &self.tests[test];
+        let text = self.read(&t.file).unwrap_or_default();
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let located = match self.language {
+            Language::Ruby => ruby::locate(&text, &lines, &t.runner, &t.name),
+            Language::Go => go::locate(&lines, &t.name),
+            Language::Rust => rust_source::locate(&lines, &t.name),
+            _ => jvm::locate(&lines, &t.name),
+        };
+        let fmt = |i: usize| format!("{:5} {}", i + 1, lines[i]);
+        // Lines inside `/* ... */` (a license header, say) are comments too.
+        let mut open = false;
+        let commented = lines
+            .iter()
+            .map(|l| {
+                let t = l.trim();
+                let was = open;
+                if self.language != Language::Ruby {
+                    if !open && t.starts_with("/*") {
+                        open = true;
+                    }
+                    if open && t.contains("*/") {
+                        open = false;
+                        return true;
+                    }
+                }
+                was || open || self.language.comment(l)
+            })
+            .collect::<Vec<_>>();
+        // The head: the file's first code lines (its package and imports).
+        let head = (0..lines.len())
+            .filter(|&i| !commented[i])
+            .take(HEAD_LINES)
+            .collect::<Vec<_>>();
+        let head_end = head.last().map_or(0, |&i| i + 1);
+        let mut out = head.iter().map(|&i| fmt(i)).collect::<Vec<_>>();
+        let Some(located) = located else {
+            out.push("  ...".into());
+            out.extend((head_end..(head_end + 200).min(lines.len())).map(fmt));
+            return out.join("\n");
+        };
+        let end = located
+            .end
+            .min(located.start + BODY_LINES)
+            .min(lines.len().saturating_sub(1));
+        let mut last = head_end;
+        let mut shown = located.context.iter().copied().collect::<BTreeSet<_>>();
+        shown.extend(located.start..=end);
+        // What the test uses from its own file: a table it loops over, a
+        // helper it calls, a `let` it reads.
+        shown.extend(used_definitions(&lines, self.language, located.start, end));
+        for i in shown {
+            // A doctest lives in comments: its lines are the test.
+            if i < last || (commented[i] && self.language != Language::Rust) {
+                continue;
+            }
+            if i > last {
+                out.push("  ...".into());
+            }
+            out.push(fmt(i));
+            last = i + 1;
+        }
         out.join("\n")
     }
 
@@ -691,6 +853,20 @@ impl Population {
                 .filter_map(|spec| self.resolve(&t.file, spec))
                 .collect::<Vec<_>>(),
             Language::Python => self.python_helpers(&t.file, &text),
+            Language::Ruby => ruby::helpers(&self.root, &t.file, &text),
+            Language::Go => go::helpers(&self.root, &t.file, &text),
+            Language::Rust => rust_source::helpers(&self.root, &t.file, &text),
+            Language::Jvm => jvm::imports(&text)
+                .iter()
+                .filter_map(|import| {
+                    jvm::class_paths(&import.replace('/', "."))
+                        .iter()
+                        .find_map(|suffix| {
+                            self.jvm_files.iter().find(|f| ends_with_path(f, suffix))
+                        })
+                        .cloned()
+                })
+                .collect(),
         };
         for file in files {
             if out.contains_key(&file) {
@@ -869,6 +1045,50 @@ impl Population {
         let s = &self.statements[statement];
         let line = s.text.lines().next().unwrap_or("").trim();
         let changes = match s.change {
+            // Go and the JVM languages replace a value after it is computed,
+            // as their mutation testers do: the expression still runs.
+            Change::ReturnUndefined if self.language == Language::Go => vec![format!(
+                "`{line}` returns the zero value of each result instead: nil for an error, pointer, slice, map or interface, 0, \"\" or false, or an empty struct (its expressions still run)"
+            )],
+            Change::ReturnUndefined if self.language == Language::Jvm => vec![format!(
+                "`{line}` returns {} instead (its expression still runs)",
+                self.language.nothing()
+            )],
+            Change::ReturnUndefined if matches!(self.language, Language::Ruby | Language::Rust) => {
+                let nothing = match self.language {
+                    Language::Rust
+                        if ["Ok(", "Err(", "return Ok(", "return Err("]
+                            .iter()
+                            .any(|p| line.starts_with(p)) =>
+                    {
+                        "`Ok(Default::default())`"
+                    }
+                    other => other.nothing(),
+                };
+                vec![if line.starts_with("return") {
+                    format!("`{line}` returns {nothing} instead (the expression is not evaluated)")
+                } else {
+                    format!(
+                        "`{line}`, the value the enclosing block or method produces, becomes {nothing} (it is not evaluated)"
+                    )
+                }]
+            }
+            Change::ValueUndefined if self.language == Language::Go => vec![format!(
+                "`{line}`: after it runs, the variables it assigns hold the zero value of their type instead"
+            )],
+            Change::ValueUndefined if self.language == Language::Jvm => vec![format!(
+                "`{line}`: after it runs, the variable it assigns holds {} instead",
+                self.language.nothing()
+            )],
+            Change::ValueUndefined if matches!(self.language, Language::Ruby | Language::Rust) => {
+                let nothing = self.language.nothing();
+                vec![match split_initializer(line) {
+                    Some(head) => format!(
+                        "`{line}`: the value after `{head}` becomes {nothing} (it is not evaluated)"
+                    ),
+                    None => format!("`{line}`: the assigned value becomes {nothing}"),
+                }]
+            }
             Change::ReturnUndefined if self.language == Language::Python => vec![format!(
                 "`{line}` becomes `return None` (the expression is not evaluated)"
             )],
@@ -897,7 +1117,19 @@ impl Population {
                 let c = match self.language {
                     Language::Python => python_condition(line),
                     Language::JavaScript => condition(line),
+                    Language::Ruby => ruby::condition(line),
+                    Language::Go => go::condition(line),
+                    Language::Rust => rust_source::condition(line),
+                    Language::Jvm => jvm::condition(line),
                 };
+                // A pattern match (`if let`) can be made to fail, not to
+                // succeed: its bindings would have no value.
+                if c.starts_with("let ") {
+                    return vec![format!(
+                        "{}:{}: `{line}`: whenever the pattern `{c}` matches it is treated as not matching (the branch it would enter is skipped).",
+                        s.file, s.line
+                    )];
+                }
                 vec![
                     format!(
                         "`{line}`: whenever the condition `{c}` is true it is treated as false (the branch it would enter is skipped)"
@@ -966,6 +1198,223 @@ impl Population {
             Sha256::digest(serde_json::to_vec(&parts).expect("serializable key"))
         )
     }
+}
+
+/// Where a test sits in its file: its first line, its last, and lines that
+/// frame it (its class, groups or annotations), all zero-based.
+struct Located {
+    context: Vec<usize>,
+    start: usize,
+    end: usize,
+}
+
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// The line closing the braces opened from `start` on (strings, characters
+/// and line comments aside).
+fn brace_end(lines: &[&str], start: usize) -> usize {
+    let mut depth = 0i64;
+    let mut opened = false;
+    for (i, line) in lines.iter().enumerate().skip(start).take(BODY_LINES) {
+        let mut chars = line.chars().peekable();
+        let mut quote: Option<char> = None;
+        while let Some(c) = chars.next() {
+            match (quote, c) {
+                (Some(_), '\\') => {
+                    chars.next();
+                }
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), _) => {}
+                (None, '"' | '`') => quote = Some(c),
+                (None, '/') if chars.peek() == Some(&'/') => break,
+                (None, '{') => {
+                    depth += 1;
+                    opened = true;
+                }
+                (None, '}') => depth -= 1,
+                _ => {}
+            }
+        }
+        if opened && depth <= 0 {
+            return i;
+        }
+    }
+    (start + BODY_LINES).min(lines.len()).saturating_sub(1)
+}
+
+/// The `end` (or `}`) closing a Ruby block or method opened on `start`.
+fn keyword_end(lines: &[&str], start: usize) -> usize {
+    let first = lines[start].trim_end();
+    if first.ends_with(" end") || first.ends_with('}') {
+        return start;
+    }
+    let depth = indent(lines[start]);
+    (start + 1..lines.len().min(start + BODY_LINES))
+        .find(|&i| {
+            let t = lines[i].trim_start();
+            indent(lines[i]) == depth && (t == "end" || t.starts_with("end ") || t.starts_with('}'))
+        })
+        .unwrap_or((start + BODY_LINES).min(lines.len()).saturating_sub(1))
+}
+
+const DEFINITION_LINES: usize = 120;
+
+/// The lines of the test file's own definitions that the test at
+/// `start..=end` names, and those they name in turn, up to a budget.
+fn used_definitions(lines: &[&str], language: Language, start: usize, end: usize) -> Vec<usize> {
+    let words = |range: std::ops::RangeInclusive<usize>| {
+        let mut out = BTreeSet::new();
+        for i in range {
+            let line = lines.get(i).copied().unwrap_or("");
+            out.extend(
+                line.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        out
+    };
+    let definitions = definitions(lines, language);
+    let mut wanted = words(start..=end);
+    let mut picked = BTreeSet::new();
+    let mut budget = DEFINITION_LINES;
+    for _ in 0..2 {
+        let mut next = BTreeSet::new();
+        for (name, a, b) in &definitions {
+            let (a, b) = (*a, *b);
+            if picked.contains(&a) || (a >= start && a <= end) || !wanted.contains(name) {
+                continue;
+            }
+            let size = b - a + 1;
+            if size > budget {
+                continue;
+            }
+            budget -= size;
+            picked.insert(a);
+            next.extend(words(a..=b));
+            picked.extend(a..=b);
+        }
+        wanted = next;
+    }
+    picked.into_iter().collect()
+}
+
+/// A file's named definitions (functions, methods, table variables, RSpec
+/// `let`/`subject`) with their first and last lines.
+fn definitions(lines: &[&str], language: Language) -> Vec<(String, usize, usize)> {
+    let ident = |s: &str| {
+        s.chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '?' || *c == '!')
+            .collect::<String>()
+    };
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        let name = match language {
+            Language::Go => t
+                .strip_prefix("func ")
+                .map(|r| match r.strip_prefix('(') {
+                    Some(r) => r.split_once(')').map_or("", |(_, r)| r.trim_start()),
+                    None => r,
+                })
+                .or_else(|| t.strip_prefix("var "))
+                .or_else(|| t.strip_prefix("type "))
+                .filter(|_| indent(line) == 0)
+                .map(ident),
+            Language::Rust => {
+                let r = t.strip_prefix("pub ").unwrap_or(t);
+                let r = r.strip_prefix("pub(crate) ").unwrap_or(r);
+                ["fn ", "const ", "static ", "struct ", "enum "]
+                    .iter()
+                    .find_map(|k| r.strip_prefix(k))
+                    .map(ident)
+            }
+            Language::Ruby => t
+                .strip_prefix("def ")
+                .map(|r| ident(r.strip_prefix("self.").unwrap_or(r)))
+                .or_else(|| {
+                    ["let(:", "let!(:", "subject(:"]
+                        .iter()
+                        .find_map(|k| t.strip_prefix(k))
+                        .map(ident)
+                })
+                .or_else(|| {
+                    (t.starts_with("subject ") || t.starts_with("subject{"))
+                        .then(|| "subject".into())
+                }),
+            Language::Jvm => {
+                if let Some(r) = t.split_once("fun ").filter(|(head, _)| !head.contains('(')) {
+                    Some(ident(r.1.trim_start_matches('`')))
+                } else if t.contains('(')
+                    && !t.ends_with(';')
+                    && !t.starts_with(['@', '}', '.', '/', '*', '+', '"'])
+                    && ![
+                        "return", "new ", "if", "for", "while", "switch", "catch", "else", "try",
+                        "throw", "assert", "super", "this",
+                    ]
+                    .iter()
+                    .any(|k| t.starts_with(k))
+                {
+                    let head = t.split('(').next().unwrap_or("");
+                    let mut parts = head.split_whitespace().rev();
+                    let name = parts.next().unwrap_or("");
+                    (parts.next().is_some() && !head.contains('=')).then(|| ident(name))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let Some(name) = name.filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        let end = match language {
+            Language::Ruby => keyword_end(lines, i),
+            _ if line.contains('{')
+                || lines
+                    .get(i + 1)
+                    .is_some_and(|n| n.trim_start().starts_with('{')) =>
+            {
+                brace_end(lines, i)
+            }
+            _ => i,
+        };
+        out.push((name, i, end));
+    }
+    out
+}
+
+/// Whether `path` is `suffix` or ends with `/suffix`.
+fn ends_with_path(path: &str, suffix: &str) -> bool {
+    path.strip_suffix(suffix)
+        .is_some_and(|head| head.is_empty() || head.ends_with('/'))
+}
+
+/// The project's files with these extensions, as project-relative paths
+/// (ignored files, such as build output, left out).
+fn project_files(root: &Path, extensions: &[&str]) -> Vec<String> {
+    let mut out = ignore::WalkBuilder::new(root)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| extensions.contains(&x))
+        })
+        .filter_map(|e| {
+            e.path()
+                .strip_prefix(root)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+        })
+        .filter(|p| !p.starts_with(".supercov/"))
+        .collect::<Vec<_>>();
+    out.sort();
+    out
 }
 
 fn is_test_call(line: &str) -> bool {
