@@ -38,14 +38,15 @@ times out, or the process crashes. The change depends on the statement:
 
 | Statement | Change |
 | --- | --- |
-| `if` | the condition inverted, each way separately (asserted if either is caught) |
-| `return x` | returns undefined without evaluating `x` |
-| declaration with a value | the value becomes undefined |
+| `if` (and Python's `elif`) | the condition inverted, each way separately (asserted if either is caught) |
+| `return x` | returns undefined (Python: `None`) without evaluating `x` |
+| declaration or assignment with a value | the value becomes undefined (Python: `None`) |
 | JSX expression | the value becomes undefined |
-| anything else | skipped |
+| anything else | skipped: the statement does not run |
 
 Imports, declarations without a value, and function, class and type
-declarations are not assessed. **Assertions** is the share of the executed
+declarations are not assessed; in Python neither are `pass`, `global`,
+`nonlocal` and docstrings. **Assertions** is the share of the executed
 statements that are asserted.
 
 ## Assess and read
@@ -100,6 +101,10 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   tests, on a fresh sample of 78 statements: 69 right; of the 13 not asserted it
   found 8, and 8 of the 12 it flagged were truly not asserted. The share it
   reported was 84.6% against a true 83.3%.
+- **Python:** on h11 (532 executed statements, pytest), every statement checked
+  the same way: 502 right; of the 67 not asserted it found 45, and 45 of the 53
+  it flagged were truly not asserted. The share it reported was 90.0% against a
+  true 87.4%, for about $0.04.
 
 The share is a good measure of a project; a single statement's verdict is a
 judgment worth checking before acting on it. Supercov does not run mutated code
@@ -107,5 +112,5 @@ for this: nothing is executed, and your tests are never slowed.
 
 ## Requirements
 
-JavaScript and TypeScript runs, and `TYPESAFE_API_KEY` for `assess`. Reading a
-saved result needs neither.
+JavaScript, TypeScript and Python runs (pytest and unittest), and
+`TYPESAFE_API_KEY` for `assess`. Reading a saved result needs neither.

@@ -107,7 +107,7 @@ jobs:
       - name: Packed install and real JS/TS runs
         if: matrix.packedInstall
         run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
-      - name: JS/TS assertions coverage on Alpine
+      - name: JS/TS assertion coverage on Alpine
         if: matrix.musl
         shell: bash
         run: |
@@ -117,7 +117,7 @@ jobs:
               mkdir /workspace
               tar -xf - -C /workspace
               cd /workspace
-              node scripts/assertions-integration.mjs /supercov
+              node scripts/assertions-integration.mjs /supercov --javascript-only
             '
       - name: Stage native package
         run: node scripts/package-native.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out native-dist

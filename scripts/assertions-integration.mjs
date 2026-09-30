@@ -1,7 +1,9 @@
 // `supercov runs <run> assertions` against a local stand-in for Jev: every
-// question answered by rule (a console.log line is not asserted; everything
-// else is), so the verdicts, the answer cache and --dry-run are checked
-// without the network.
+// question answered by rule (a console.log or print line is not asserted;
+// everything else is), so the verdicts, the answer cache and --dry-run are
+// checked without the network, for JavaScript and for Python (unittest, so
+// only an interpreter is needed). --javascript-only skips Python where there
+// is none, as in the Alpine image.
 import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,13 +11,19 @@ import { join, resolve } from "node:path";
 import { latestRun, requireSupercov } from "./coverage-test-helpers.mjs";
 
 // An optional binary, as the Alpine job passes its release musl build.
-const binary = process.argv[2] ? { SUPERCOV_RUST_BINARY: resolve(process.argv[2]) } : {};
+const args = process.argv.slice(2);
+const javascriptOnly = args.includes("--javascript-only");
+const binaryPath = args.find((a) => !a.startsWith("--"));
+const binary = binaryPath ? { SUPERCOV_RUST_BINARY: resolve(binaryPath) } : {};
 
-const root = mkdtempSync(join(tmpdir(), "supercov-assertions-"));
-const write = (file, text) => {
+const scratch = mkdtempSync(join(tmpdir(), "supercov-assertions-"));
+const js = join(scratch, "js");
+const py = join(scratch, "py");
+const writer = (root) => (file, text) => {
   mkdirSync(resolve(root, file, ".."), { recursive: true });
   writeFileSync(resolve(root, file), text);
 };
+let write = writer(js);
 write("package.json", JSON.stringify({ name: "assertions-fixture", private: true, type: "module", scripts: { test: "node --test" } }));
 write("src/cart.mjs", `export function total(items) {
   let sum = 0
@@ -62,9 +70,51 @@ test('names a blank label', () => {
 })
 `);
 
-// The stand-in: answers every noul question, 0.1 for a console.log line and
-// 0.9 otherwise, and counts requests in a file.
-const counter = join(root, "requests.txt");
+write = writer(py);
+write("src/__init__.py", "");
+write("src/cart.py", `def total(items):
+    total = 0
+    for item in items:
+        total += item["price"] * item["quantity"]
+    if total > 100:
+        total = total * 0.9
+    print("total", total)
+    return total
+`);
+write("src/format.py", `def label(name):
+    trimmed = name.strip()
+    if not trimmed:
+        return "unknown"
+    return trimmed.upper()
+`);
+write("tests/__init__.py", "");
+write("tests/test_cart.py", `import unittest
+from src.cart import total
+
+
+class CartTest(unittest.TestCase):
+    def test_adds_prices(self):
+        self.assertEqual(total([{"price": 10, "quantity": 2}]), 20)
+
+    def test_discounts_big_carts(self):
+        self.assertEqual(total([{"price": 60, "quantity": 2}]), 108)
+`);
+write("tests/test_format.py", `import unittest
+from src.format import label
+
+
+class FormatTest(unittest.TestCase):
+    def test_upper_cases_a_name(self):
+        self.assertEqual(label("  ab "), "AB")
+
+    def test_names_a_blank_label(self):
+        self.assertEqual(label("  "), "unknown")
+`);
+const python = process.platform === "win32" ? "python" : "python3";
+
+// The stand-in: answers every noul question, 0.1 for a console.log or print
+// line and 0.9 otherwise, and counts requests in a file.
+const counter = join(scratch, "requests.txt");
 const server = spawn(process.execPath, ["--input-type=module", "-e", `
   import { createServer } from "node:http";
   import { appendFileSync } from "node:fs";
@@ -75,9 +125,12 @@ const server = spawn(process.execPath, ["--input-type=module", "-e", `
       const request = JSON.parse(body);
       if (req.url !== "/v1/systemone" || req.headers.authorization !== "Bearer test-key") { res.writeHead(401).end(); return; }
       if (!request.state?.code_run || !request.state?.test_code || !request.state?.test?.name) { res.writeHead(400).end(); return; }
+      // The test's own code, found by its title, not the file's head.
+      const title = request.state.test.name.split(/::| > /).pop().split("[")[0].split(".").pop();
+      if (!request.state.test_code.includes(title)) { res.writeHead(400).end(); return; }
       appendFileSync(${JSON.stringify(counter)}, Object.keys(request.questions).length + "\\n");
       const answers = Object.fromEntries(Object.entries(request.questions).map(([id, q]) =>
-        [id, { type: "noul", noul: q.instructions.task.includes("console.log") ? 0.1 : 0.9 }]));
+        [id, { type: "noul", noul: /console\\.log|print\\(/.test(q.instructions.task) ? 0.1 : 0.9 }]));
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ model: request.model, answers, usage: { input_tokens: Math.ceil(body.length / 4), output_tokens: 1 } }));
     });
@@ -87,56 +140,68 @@ const server = spawn(process.execPath, ["--input-type=module", "-e", `
 const port = await new Promise((ok) => server.stdout.once("data", (d) => ok(Number(String(d).trim()))));
 const env = { ...binary, TYPESAFE_BASE_URL: `http://127.0.0.1:${port}`, TYPESAFE_API_KEY: "test-key" };
 const requests = () => (existsSync(counter) ? readFileSync(counter, "utf8").trim().split("\n").filter(Boolean).length : 0);
-const assess = (...extra) => {
-  const result = requireSupercov(root, ["runs", latestRun(root), "assertions", "assess", "--json", ...extra], { env });
-  const envelope = JSON.parse(result.stdout);
-  if (envelope.ok !== true) throw new Error(`assertions failed: ${result.stdout}`);
-  return envelope.data;
-};
 const fail = (message, data) => {
   server.kill();
   throw new Error(`${message}: ${JSON.stringify(data, null, 1)}`);
 };
 
-try {
-  requireSupercov(root, ["--", "npm", "test"], { env: binary });
+// The same checks on each language: 10 of 11 asserted, the logging line not;
+// reading offline; a repeat pass sending nothing; one edited line asked again.
+function scenario({ name, root, command, logFile, logText, logLine, edit }) {
+  const assess = (...extra) => {
+    const result = requireSupercov(root, ["runs", latestRun(root), "assertions", "assess", "--json", ...extra], { env });
+    const envelope = JSON.parse(result.stdout);
+    if (envelope.ok !== true) throw new Error(`assertions failed: ${result.stdout}`);
+    return envelope.data;
+  };
+  requireSupercov(root, ["--", ...command], { env: binary });
 
+  const start = requests();
   const dry = assess("--dry-run");
-  if (dry.statements !== 11 || requests() !== 0) fail("a dry run estimates 11 statements and sends nothing", { dry, requests: requests() });
+  if (dry.statements !== 11 || requests() !== start) fail(`${name}: a dry run estimates 11 statements and sends nothing`, { dry, requests: requests() });
 
   const first = assess();
   const s = first.summary;
   if (s.statements !== 11 || s.asserted !== 10 || s.notAsserted !== 1 || s.requests === 0)
-    fail("expected 10 of 11 statements asserted after requests", first);
+    fail(`${name}: expected 10 of 11 statements asserted after requests`, first);
   const not = first.notAsserted[0];
-  if (not.file !== "src/cart.mjs" || !not.text.includes("console.log") || not.change !== "skipped")
-    fail("expected the console.log line as the one not asserted", first);
+  if (not.file !== logFile || !not.text.includes(logText) || not.change !== "skipped")
+    fail(`${name}: expected the ${logText} line as the one not asserted`, first);
   if (!existsSync(resolve(root, ".supercov/runs", latestRun(root), "assertion-coverage.json")))
-    fail("expected the run's saved result", first);
+    fail(`${name}: expected the run's saved result`, first);
 
   // Reading needs neither the network nor a key.
   const read = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", "--json"], { env: { ...binary, TYPESAFE_API_KEY: "", TYPESAFE_BASE_URL: "http://127.0.0.1:9" } }).stdout).data;
-  if (read.summary?.asserted !== 10 || read.notAsserted?.[0]?.line !== 9) fail("reading returns the saved result", read);
+  if (read.summary?.asserted !== 10 || read.notAsserted?.[0]?.line !== logLine) fail(`${name}: reading returns the saved result`, read);
 
   const sent = requests();
   const again = assess();
   if (again.summary.requests !== 0 || requests() !== sent || again.summary.asserted !== 10)
-    fail("a second pass over the same run reuses every answer", again);
+    fail(`${name}: a second pass over the same run reuses every answer`, again);
 
-  // One line of format.mjs changes: its statements are asked again, cart.mjs's
-  // answers are reused.
-  write("src/format.mjs", readFileSync(resolve(root, "src/format.mjs"), "utf8").replace("toUpperCase()", "toLocaleUpperCase()"));
-  requireSupercov(root, ["--", "npm", "test"], { env: binary });
+  // One line of the format module changes: its statements are asked again,
+  // the cart module's answers are reused.
+  const [file, from, to] = edit;
+  writeFileSync(resolve(root, file), readFileSync(resolve(root, file), "utf8").replace(from, to));
+  requireSupercov(root, ["--", ...command], { env: binary });
   const unassessed = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", "--json"], { env }).stdout).data;
   if (unassessed.assessed !== false || unassessed.lastAssessed?.percentage !== 90.9)
-    fail("a new run reads as not assessed and names the last assessment", unassessed);
+    fail(`${name}: a new run reads as not assessed and names the last assessment`, unassessed);
   const before = requests();
   const changed = assess();
   const asked = requests() - before;
   if (changed.summary.statements !== 11 || changed.summary.requests === 0 || changed.summary.answersReused < 7 || asked > 2)
-    fail(`after editing format.mjs only its questions are asked again (${asked} requests)`, changed);
-  console.log(`[assertions] 10 of 11 asserted, the console.log line not; a repeat pass sent nothing; editing format.mjs sent ${asked} requests and reused ${changed.summary.answersReused} answers`);
+    fail(`${name}: after editing ${file} only its questions are asked again (${asked} requests)`, changed);
+  console.log(`[assertions] ${name}: 10 of 11 asserted, the ${logText} line not; a repeat pass sent nothing; editing ${file} sent ${asked} requests and reused ${changed.summary.answersReused} answers`);
+}
+
+try {
+  scenario({ name: "JavaScript", root: js, command: ["npm", "test"], logFile: "src/cart.mjs", logText: "console.log", logLine: 9,
+    edit: ["src/format.mjs", "toUpperCase()", "toLocaleUpperCase()"] });
+  if (!javascriptOnly)
+    scenario({ name: "Python", root: py, command: [python, "-m", "unittest", "discover", "-s", "tests", "-t", "."], logFile: "src/cart.py", logText: "print", logLine: 7,
+      edit: ["src/format.py", "trimmed.upper()", "trimmed.upper().strip()"] });
 } finally {
   server.kill();
-  rmSync(root, { recursive: true, force: true });
+  rmSync(scratch, { recursive: true, force: true });
 }

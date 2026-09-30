@@ -34,7 +34,7 @@ ran and asks Jev whether the test would fail for each statement, then saves the
 result to the run. Answers are kept in .supercov/assertions/ and reused only
 when a question would be asked with exactly the same text, so after a change
 only the affected questions are asked again. Needs TYPESAFE_API_KEY for
-questions not yet answered. JavaScript and TypeScript runs.
+questions not yet answered. JavaScript, TypeScript and Python runs.
 
 --all         List every statement that is not asserted (default: 50).
 --limit N     List N statements that are not asserted.
@@ -331,14 +331,14 @@ fn salt(run: &StoredRun) -> String {
 
 fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, String> {
     let inputs = maps::load_inputs(root, run)?;
-    if inputs.inputs.language != "javascript" {
+    let Some(language) = coverage::Language::from_manifest(&inputs.inputs.language) else {
         return Err(format!(
-            "Assertions coverage supports JavaScript and TypeScript runs so far; this run is {}",
+            "Assertion coverage supports JavaScript, TypeScript and Python runs so far; this run is {}",
             inputs.inputs.language
         ));
-    }
+    };
     let report = maps::coverage(run)?;
-    let population = coverage::population(root, &report, &inputs.inputs.files)?;
+    let population = coverage::population(root, &report, &inputs.inputs.files, language)?;
     let n = population.statements.len();
     let mut pass = Pass {
         population: &population,
@@ -465,8 +465,11 @@ fn send_all(
         .collect()
 }
 
-fn change_name(change: Change) -> &'static str {
+fn change_name(change: Change, language: coverage::Language) -> &'static str {
+    let python = language == coverage::Language::Python;
     match change {
+        Change::ReturnUndefined if python => "returns None",
+        Change::ValueUndefined if python => "value becomes None",
         Change::Invert => "condition inverted",
         Change::ReturnUndefined => "returns undefined",
         Change::ValueUndefined => "value becomes undefined",
@@ -491,7 +494,7 @@ fn summary(
             let best = pass.answers[s].iter().cloned().fold(None, |m: Option<(usize, f64)>, a| match m { Some(m) if m.1 >= a.1 => Some(m), _ => Some(a) });
             json!({
                 "file": st.file, "line": st.line, "text": st.text.lines().next().unwrap_or("").trim(),
-                "change": change_name(st.change), "asserted": pass.asserted(s),
+                "change": change_name(st.change, population.language), "asserted": pass.asserted(s),
                 "answer": best.map(|b| b.1),
                 "test": best.map(|(t, _)| json!({"file": population.tests[t].file, "name": population.tests[t].name})),
                 "testsAsked": pass.answers[s].len(), "testsRunningIt": st.tests.len(),

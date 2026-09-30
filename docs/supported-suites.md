@@ -191,7 +191,8 @@ comprehensions, short-circuit operators, `match` cases and exception paths.
 Child interpreters, threads and thread pools can retain the calling test's
 identity. The report also distinguishes execution before a passing assertion
 from later execution. These phase records alone do not prove which values the
-assertion checks.
+assertion checks; [assertion coverage](assertions.md) measures which executed
+statements the pytest and unittest tests would catch breaking.
 
 Interpreters launched with `-I`, `-E` or `-S` ignore the required startup hook
 and are not measured. Code compiled from strings at runtime has no source
