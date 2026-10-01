@@ -17,7 +17,9 @@ import { basename, resolve } from "node:path";
 
 const root = resolve("tests/fixtures/generic-playwright");
 const launcher = resolve("bin/supercov.js");
-const rustBinary = resolve(
+const rustBinary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   "target/debug",
   `supercov${process.platform === "win32" ? ".exe" : ""}`,
 );

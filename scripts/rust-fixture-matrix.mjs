@@ -4,7 +4,9 @@ import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const binary = resolve(
+const binary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   "target/debug",
   process.platform === "win32" ? "supercov.exe" : "supercov",
 );

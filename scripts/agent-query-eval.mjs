@@ -25,7 +25,9 @@ cpSync(fixtureTemplate, fixture, {
 process.once("exit", () => rmSync(temporary, { recursive: true, force: true }));
 const cli = resolve("bin/supercov.js");
 const runsRoot = resolve(fixture, ".supercov/runs");
-const rustBinary = resolve(
+const rustBinary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   repository,
   "target/debug",
   `supercov${process.platform === "win32" ? ".exe" : ""}`,

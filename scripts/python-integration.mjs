@@ -78,6 +78,8 @@ function environmentFor(project, venv) {
   };
   delete environment.PYTHONPATH;
   delete environment.PYTEST_PLUGINS;
+  // The cache scenarios read the bytecode pytest writes.
+  delete environment.PYTHONDONTWRITEBYTECODE;
   return environment;
 }
 

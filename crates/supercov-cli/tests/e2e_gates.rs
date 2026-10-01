@@ -9,8 +9,11 @@
 //!
 //! They need the toolchains the scenarios use and take minutes, so they are
 //! ignored by default: `cargo test -p supercov --test e2e_gates --
-//! --include-ignored`.
+//! --include-ignored`. Several share fixture directories, and a coverage run
+//! gives each test its own process, so they take turns through a file lock
+//! rather than a mutex.
 
+use std::fs::File;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -22,6 +25,9 @@ fn repository() -> PathBuf {
 }
 
 fn gate(script: &str) {
+    let turn = File::create(std::env::temp_dir().join("supercov-e2e-gates.lock"))
+        .expect("the gate lock file");
+    turn.lock().expect("a turn at the gates");
     let output = Command::new("node")
         .arg(repository().join("scripts").join(script))
         .current_dir(repository())

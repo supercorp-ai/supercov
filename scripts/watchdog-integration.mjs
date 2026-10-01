@@ -4,7 +4,9 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = mkdtempSync(resolve(tmpdir(), "supercov-watchdog-"));
-const rustBinary = resolve(
+const rustBinary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   "target/debug",
   `supercov${process.platform === "win32" ? ".exe" : ""}`,
 );
