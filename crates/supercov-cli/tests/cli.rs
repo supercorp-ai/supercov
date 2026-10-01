@@ -715,3 +715,139 @@ fn a_function_shipped_as_text_runs_where_no_probe_exists() {
         .succeeds();
     assert!(!local.contains("NOT COVERED"), "{local}");
 }
+
+#[test]
+fn every_subcommand_explains_itself_and_names_a_mistake() {
+    let project = Project::cart("usage");
+    project.measure(&[]);
+    for (args, help) in [
+        (vec!["runs", "check", "--help"], "check [--min-lines <pct>]"),
+        (vec!["runs", "patch", "--help"], "patch --base <ref>"),
+        (
+            vec!["runs", "report", "--help"],
+            "--format lcov|cobertura|html",
+        ),
+        (
+            vec!["merge", "--help"],
+            "Usage: supercov merge <run-id> <run-id>",
+        ),
+        (
+            vec!["runs", "clean", "--help"],
+            "Saved quality assessments are never removed here",
+        ),
+    ] {
+        let output = project.supercov(&args).succeeds();
+        assert!(output.contains(help), "{args:?}: {output}");
+    }
+    for (args, message) in [
+        (
+            vec!["runs", "check", "--min-foo", "3"],
+            "unknown metric in --min-foo",
+        ),
+        (
+            vec!["runs", "check", "--min-lines"],
+            "--min-lines needs a percentage",
+        ),
+        (vec!["runs", "check", "--bogus"], "unknown option --bogus"),
+        (vec!["runs", "patch"], "patch needs --base <ref>"),
+        (vec!["runs", "patch", "--base"], "--base needs a value"),
+        (
+            vec!["runs", "patch", "--base", "HEAD", "--min-lines", "x"],
+            "is not a percentage",
+        ),
+        (
+            vec!["runs", "patch", "--base", "HEAD", "--annotate", "gitlab"],
+            "--annotate only supports github",
+        ),
+        (
+            vec!["runs", "patch", "--base", "HEAD", "--max-annotations", "x"],
+            "--max-annotations needs a whole number",
+        ),
+        (
+            vec!["runs", "patch", "--base", "HEAD", "--bogus"],
+            "unknown option --bogus",
+        ),
+        (vec!["runs", "report"], "report needs --format"),
+        (vec!["runs", "report", "--format"], "--format needs a value"),
+        (
+            vec!["runs", "report", "--format", "pdf"],
+            "unknown format pdf",
+        ),
+        (vec!["runs", "report", "--bogus"], "unknown option --bogus"),
+        (vec!["merge"], "Usage: supercov merge"),
+        (
+            vec!["merge", "run_0000000000000001", "run_0000000000000002"],
+            "run_0000000000000001: no such local run",
+        ),
+        (
+            vec!["runs", "clean", "--keep", "x"],
+            "--keep must be a non-negative integer",
+        ),
+        (
+            vec!["runs", "clean", "--bogus"],
+            "Unknown clean option: --bogus",
+        ),
+        (
+            vec!["docs", "cli", "assertions"],
+            "docs accepts at most one topic",
+        ),
+        (vec!["docs", "nosuch"], "unknown guide \"nosuch\""),
+    ] {
+        let output = project.supercov(&args).exits(2);
+        assert!(output.contains(message), "{args:?}: {output}");
+    }
+}
+
+#[test]
+fn a_command_supercov_cannot_measure_is_refused_with_the_reason() {
+    let empty = Project::empty("unknown");
+    let unknown = empty.supercov(&["--", "make", "test"]).exits(2);
+    assert!(
+        unknown.contains("could not recognize this project's language or test framework"),
+        "{unknown}"
+    );
+
+    let runner = empty.supercov(&["--", "phpunit"]).exits(2);
+    assert!(
+        runner.contains("This looks like a PHP test run (the test command runs `phpunit`)"),
+        "{runner}"
+    );
+
+    empty.write("composer.json", "{}");
+    let project = empty.supercov(&["--", "make", "test"]).exits(2);
+    assert!(
+        project.contains("This looks like a PHP project (composer.json is present)"),
+        "{project}"
+    );
+
+    let polyglot = empty
+        .supercov(&["--", "sh", "-c", "node --test && cargo test"])
+        .exits(2);
+    assert!(
+        polyglot.contains("launches multiple language frontends (javascript, rust)"),
+        "{polyglot}"
+    );
+}
+
+#[test]
+fn a_per_file_floor_names_where_a_file_falls_short() {
+    let project = Project::cart("per-file");
+    let mut untested = String::from("export function untested(kind) {\n");
+    for n in 0..14 {
+        untested.push_str(&format!("  if (kind === {n}) {{ return {n}; }}\n"));
+    }
+    untested.push_str("  return -1;\n}\n");
+    project.write("src/untested.js", &untested);
+    project.measure(&[]);
+    let failed = project
+        .supercov(&["runs", "check", "--min-lines", "50", "--per-file"])
+        .exits(1);
+    contains_all(
+        &failed,
+        &[
+            "src/untested.js: lines 0.00%  0/16 below 50%",
+            "uncovered lines: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, and 6 more",
+        ],
+    );
+    assert!(!failed.contains("src/cart.js: lines"), "{failed}");
+}

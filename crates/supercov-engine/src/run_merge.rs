@@ -132,7 +132,16 @@ pub fn merge_coverage_runs(
                 .runs
                 .iter()
                 .find(|run| run.id == *id)
-                .ok_or_else(|| format!("Cannot merge coverage run {id}: incomplete run"))
+                .ok_or_else(|| {
+                    // A run that never finished publishing is named as such;
+                    // anything else is simply not here.
+                    match inventory.rejected.iter().find(|run| run.entry == *id) {
+                        Some(rejected) => {
+                            format!("Cannot merge coverage run {id}: {}", rejected.reason)
+                        }
+                        None => format!("Cannot merge coverage run {id}: no such local run"),
+                    }
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let first = inputs[0];

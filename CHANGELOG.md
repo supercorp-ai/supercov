@@ -25,6 +25,7 @@
 
 **Fixed**
 
+- `supercov merge` names a run that is not there as "no such local run"; it said "incomplete run", which sent people looking for a run that had failed to publish.
 - A JavaScript function whose source the file reads by name -- `fn.toString()`, `String(fn)`, `` `${fn}` `` -- is left as written, as one read in place already was. Shipped as text to a worker, a `vm` context or a browser page, it carried a probe naming a global that does not exist there and failed with a `ReferenceError` under Supercov only. A template literal now counts as reading source in place too.
 - `quality clean` and `security clean` say what they removed or, with `--dry-run`, would remove. They printed "unknown quality view: quality.clean" whatever happened. `quality snapshots` no longer prints "null windowed" for a count no snapshot records.
 - A project kept inside a directory its enclosing repository ignores, such as another checkout's `tmp/` or `.supercov/`, finds its source. The enclosing repository's `.gitignore`, which says it tracks none of the project, was applied to every file, and the run stopped with "No application source files were discovered"; the project's own `.gitignore` files still apply.
