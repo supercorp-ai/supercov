@@ -935,6 +935,15 @@ fn transport_u64(bytes: &[u8], offset: usize) -> Option<u64> {
         .map(u64::from_le_bytes)
 }
 
+/// A field of a header whose length was checked: it cannot run past it.
+fn checked_u32(bytes: &[u8], offset: usize) -> u32 {
+    transport_u32(bytes, offset).expect("the header was checked to hold this field")
+}
+
+fn checked_u64(bytes: &[u8], offset: usize) -> u64 {
+    transport_u64(bytes, offset).expect("the header was checked to hold this field")
+}
+
 fn transport_checksum(payload: &[u8], version: u32) -> u32 {
     if version == TRANSPORT_VERSION_FNV {
         return payload.iter().fold(0x811c_9dc5_u32, |value, byte| {
@@ -975,25 +984,24 @@ fn parse_transport(
         return Err(invalid_transport("header or version does not match"));
     }
     let version = version.unwrap_or(TRANSPORT_VERSION);
-    let declared_capacity =
-        transport_u64(contents, 16).ok_or_else(|| invalid_transport("capacity is missing"))?;
+    let declared_capacity = checked_u64(contents, 16);
     if declared_capacity < TRANSPORT_HEADER_SIZE as u64 || declared_capacity > contents.len() as u64
     {
         return Err(invalid_transport(
             "declared capacity is outside the mapped file",
         ));
     }
-    let dropped =
-        transport_u64(contents, 24).ok_or_else(|| invalid_transport("drop counter is missing"))?;
+    let dropped = checked_u64(contents, 24);
     if dropped != 0 {
         return Err(PythonEvidenceError::DroppedRecords {
             file: name.into(),
             count: dropped,
         });
     }
-    let transport_pid = transport_u64(contents, 32)
-        .filter(|pid| *pid != 0)
-        .ok_or_else(|| invalid_transport("process id is missing"))?;
+    let transport_pid = checked_u64(contents, 32);
+    if transport_pid == 0 {
+        return Err(invalid_transport("process id is missing"));
+    }
     let mut records = Vec::new();
     let mut cursor = TRANSPORT_HEADER_SIZE;
     let mut record_index = 0;
@@ -1017,9 +1025,7 @@ fn parse_transport(
         {
             return Err(invalid("commit marker or reserved bytes are invalid"));
         }
-        let length = transport_u32(contents, cursor + 4)
-            .map(|value| value as usize)
-            .ok_or_else(|| invalid("payload length is missing"))?;
+        let length = checked_u32(contents, cursor + 4) as usize;
         if length == 0 || length > TRANSPORT_MAX_RECORD_SIZE {
             return Err(invalid("payload length is outside the transport bound"));
         }
@@ -1038,8 +1044,7 @@ fn parse_transport(
             return Err(invalid("frame padding is not zero"));
         }
         let payload = &contents[payload_start..payload_end];
-        let expected_checksum = transport_u32(contents, cursor + 8)
-            .ok_or_else(|| invalid("payload checksum is missing"))?;
+        let expected_checksum = checked_u32(contents, cursor + 8);
         if transport_checksum(payload, version) != expected_checksum {
             return Err(invalid("payload checksum does not match"));
         }
