@@ -1068,6 +1068,25 @@ fn class_of(test_name: &str) -> Option<&str> {
     test_name.split('#').next().filter(|name| !name.is_empty())
 }
 
+/// The test file that declares a class the framework named in full
+/// (`com.example.FooTest`, `com.example.FooTest$Nested`): the file whose path
+/// ends in the class's package path, else the only one with its name.
+///
+/// Keyed on the bare file name alone, no reported class ever matched -- JUnit
+/// names classes in full -- so no JVM test had a file, and `tests affected`
+/// had no tests to answer about.
+fn declaring_file(declared_in: &BTreeMap<String, String>, class: &str) -> Option<String> {
+    let top = class.split('$').next().unwrap_or(class);
+    let path = top.replace('.', "/");
+    let simple = top.rsplit('.').next().unwrap_or(top);
+    let by_path = declared_in.values().find(|file| {
+        file.rsplit_once('.').is_some_and(|(stem, _)| {
+            stem.ends_with(&path) && stem[..stem.len() - path.len()].ends_with('/') || stem == path
+        })
+    });
+    by_path.or_else(|| declared_in.get(simple)).cloned()
+}
+
 fn instrument_workspace(
     workspace: &Path,
     evidence_directory: &Path,
@@ -1674,8 +1693,7 @@ pub fn run_direct_jvm(
                     // already in the name the framework reported.
                     package: module.directory.clone(),
                     file: class_of(&test.name)
-                        .and_then(|class| instrumented.declared_in.get(class))
-                        .cloned(),
+                        .and_then(|class| declaring_file(&instrumented.declared_in, class)),
                     status: test.status.clone(),
                     // True while the suite runs its tests one at a time, which
                     // is what `--exact-attribution` asks for. Left to run as
@@ -2083,6 +2101,42 @@ mod tests {
 
     /// apache/commons-cli takes RAT from commons-parent, and RAT failed the
     /// copy on Supercov's own files before any test ran.
+    #[test]
+    fn a_test_class_named_in_full_finds_its_file() {
+        let declared_in = BTreeMap::from([
+            (
+                "AnnotationsTest".to_owned(),
+                "src/test/java/com/fasterxml/classmate/AnnotationsTest.java".to_owned(),
+            ),
+            (
+                "CalculatorSpec".to_owned(),
+                "src/test/kotlin/app/CalculatorSpec.kt".to_owned(),
+            ),
+        ]);
+        assert_eq!(
+            declaring_file(&declared_in, "com.fasterxml.classmate.AnnotationsTest").as_deref(),
+            Some("src/test/java/com/fasterxml/classmate/AnnotationsTest.java")
+        );
+        assert_eq!(
+            declaring_file(
+                &declared_in,
+                "com.fasterxml.classmate.AnnotationsTest$Nested"
+            )
+            .as_deref(),
+            Some("src/test/java/com/fasterxml/classmate/AnnotationsTest.java")
+        );
+        assert_eq!(
+            declaring_file(&declared_in, "app.CalculatorSpec").as_deref(),
+            Some("src/test/kotlin/app/CalculatorSpec.kt")
+        );
+        // A class reported without its package still finds its file by name.
+        assert_eq!(
+            declaring_file(&declared_in, "CalculatorSpec").as_deref(),
+            Some("src/test/kotlin/app/CalculatorSpec.kt")
+        );
+        assert_eq!(declaring_file(&declared_in, "org.other.Missing"), None);
+    }
+
     #[test]
     fn a_license_header_check_is_found_through_the_parent_pom() {
         let root = std::env::temp_dir().join(format!(

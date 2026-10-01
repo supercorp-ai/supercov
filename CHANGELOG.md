@@ -20,6 +20,7 @@
 
 **Fixed**
 
+- `tests affected` answers for Java and Kotlin projects. JUnit names a test's class in full and Supercov matched it to the file that declares it by its bare name, so no JVM test had a file, the run recorded what no test executed, and every change was reported as affecting "0 of 0 tests".
 - A Maven project that runs Apache RAT, as every Apache Commons project does through its parent pom, runs under Supercov: RAT failed the workspace copy on Supercov's own runtime and listener files, which carry no license header, before any test ran. The copy's command now skips RAT and says so; your own build still runs it.
 - A Kotlin file with a nested class whose primary constructor starts the line after its name (`class Options` / `private constructor(...)`, as in moshi's `JsonReader`) is measured; the parser read the constructor as one of the enclosing class and the file was left out.
 - A test that replaces `globalThis.Buffer`, as axios's `toFormData` tests do, no longer fails under Supercov: the runtime and the evidence journal keep the Buffer they loaded with.

@@ -459,6 +459,22 @@ fn a_gradle_junit_4_project_runs_on_the_platform_in_the_copy() {
             .any(|record| record.contains("CalculatorTest#bigWhenLoudAndLarge")),
         "{records:?}"
     );
+    // Each test is recorded with the file that declares it: JUnit names the
+    // class in full, and matching that on the bare file name left every JVM
+    // test without one -- and `tests affected` with nothing to answer about.
+    let executions: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(result.run_directory.join("test-executions.json"))
+            .expect("the run records what each test executed"),
+    )
+    .unwrap();
+    let tests = executions["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 2, "{executions}");
+    assert!(
+        tests
+            .iter()
+            .all(|t| t["test"]["file"] == "core/src/test/java/app/CalculatorTest.java"),
+        "{executions}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
