@@ -281,6 +281,15 @@ fn get_u64(source: &[u8], offset: usize) -> Option<u64> {
 /// A field the reader already bounded: the header was checked whole, and
 /// the file was checked to be exactly as long as its descriptors and payload
 /// need, so a field inside either cannot run past the file.
+/// An eight-byte field of a record whose length was checked.
+fn le_u64(field: &[u8]) -> u64 {
+    u64::from_le_bytes(
+        field
+            .try_into()
+            .expect("the record was checked to hold this field"),
+    )
+}
+
 fn bounded_u32(source: &[u8], offset: usize) -> u32 {
     get_u32(source, offset).expect("the file was checked to hold this field")
 }
@@ -563,11 +572,7 @@ pub fn read_rust_transport(
                 ordinal_hits.push(RustOrdinalHit {
                     process_id: pid,
                     context_id,
-                    ordinal: u64::from_le_bytes(
-                        values
-                            .try_into()
-                            .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                    ),
+                    ordinal: le_u64(values),
                 });
             }
             KIND_PHASE
@@ -576,16 +581,8 @@ pub fn read_rust_transport(
                     && values.len() == 16
                     && !matches!(context_id, 0 | u64::MAX) =>
             {
-                let parent_context_id = u64::from_le_bytes(
-                    values[..8]
-                        .try_into()
-                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                );
-                let invocation_nonce = u64::from_le_bytes(
-                    values[8..]
-                        .try_into()
-                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                );
+                let parent_context_id = le_u64(&values[..8]);
+                let invocation_nonce = le_u64(&values[8..]);
                 if matches!(parent_context_id, 0 | u64::MAX)
                     || rust_assertion_context_id(parent_context_id, id, invocation_nonce)?
                         != context_id
@@ -622,16 +619,8 @@ pub fn read_rust_transport(
                     && values.len() == 16
                     && !matches!(context_id, 0 | u64::MAX) =>
             {
-                let parent_context_id = u64::from_le_bytes(
-                    values[..8]
-                        .try_into()
-                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                );
-                let invocation_nonce = u64::from_le_bytes(
-                    values[8..]
-                        .try_into()
-                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                );
+                let parent_context_id = le_u64(&values[..8]);
+                let invocation_nonce = le_u64(&values[8..]);
                 if matches!(parent_context_id, 0 | u64::MAX)
                     || rust_thread_context_id(parent_context_id, invocation_nonce) != context_id
                 {
