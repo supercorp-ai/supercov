@@ -90,6 +90,13 @@ Run run_4f2a: 93.8% asserted (2731 of 2913 executed statements)
 A statement that is not asserted is a place to add a check: a test that runs it
 exists, but nothing it asserts depends on what the statement does.
 
+## Which tests check a change
+
+`npx supercov runs latest tests affected` uses the assessment to say which of
+the tests a change reaches were judged to catch it, and lists them first;
+`assertions assess --changed` asks every test that ran the changed code. See
+[Find the tests a change affects](cli.md#find-the-tests-a-change-affects).
+
 ## Later runs ask only about what changed
 
 Answers are kept in `.supercov/assertions/`. Each is stored under the exact text
@@ -123,8 +130,12 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   | google/uuid (Go) | 339 | 294 | 34 (26) | 90.0% / 81.4% |
   | dtolnay/semver (Rust) | 150 of a sample of 200 | 144 | 5 (1) | 96.7% / 98.0% |
   | apache/commons-cli (Java) | 196 of a sample of 200 | 167 | 49 (33) | 75.0% / 76.5% |
-  | dry-rb/dry-inflector (Ruby 3.4) | 157 | 136 | 25 (8) | 84.1% / 92.4% |
+  | dry-rb/dry-inflector (Ruby 3.4) | 157 | 141 | 20 (8) | 87.3% / 92.4% |
+  | hashicorp/go-version (Go, held out) | 257 | 245 | 29 (19) | 88.7% / 91.8% |
+  | sporkmonger/addressable (Ruby, held out) | 198 of a sample of 200 | 181 | 28 (15) | 85.9% / 90.4% |
 
+  The first five were used to shape how tests are shown to Jev; the held-out
+  ones were assessed before their ground truth was taken and not tuned on.
   A Rust change that falls back to `Default::default()` for a type without
   one cannot be made, so it cannot be checked this way; that was a quarter of
   semver's sample. Ruby 3.3 credits each line to the first test that runs it

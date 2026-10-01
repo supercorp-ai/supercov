@@ -19,7 +19,7 @@ use supercov_engine::{
 };
 
 const HELP: &str = r#"Usage: supercov runs <run> assertions [--all | --limit N] [--json]
-       supercov runs <run> assertions assess [--dry-run] [--workers N] [--all | --limit N] [--json]
+       supercov runs <run> assertions assess [--changed] [--dry-run] [--workers N] [--all | --limit N] [--json]
 
 How much of the executed code the tests assert: a statement counts as asserted
 when changing it would make at least one passing test that runs it fail. The
@@ -38,6 +38,10 @@ questions not yet answered. JavaScript, TypeScript, Python, Ruby, Go, Rust, Java
 
 --all         List every statement that is not asserted (default: 50).
 --limit N     List N statements that are not asserted.
+--changed     (assess) Only the statements in code changed since the run,
+              asked of every test that ran them rather than until one
+              catches the change: what `tests affected` reads to say which
+              tests check the change. Saved beside the run's assessment.
 --dry-run     (assess) Estimate the requests and cost; send nothing.
 --workers N   (assess) Requests in flight at once (default 8). More is faster
               and costs slightly more, since fewer questions stop early.
@@ -51,9 +55,18 @@ const MAX_FAILURES: usize = 20;
 
 /// The file in a run's directory holding its assessed result.
 pub const RESULT_FILE: &str = "assertion-coverage.json";
+/// The file in a run's directory holding `assess --changed`'s answers.
+pub const IMPACT_FILE: &str = "assertion-impact.json";
+/// The files an assessment rendered, as they were: `assess --changed` asks
+/// about the run's code after the checkout has moved on.
+pub const SNAPSHOT_FILE: &str = "assertion-sources.json.gz";
+/// Tests asked about one changed statement: every test that ran it, up to
+/// this many, chosen as the whole-app pass orders them.
+const IMPACT_TESTS: usize = 40;
 
 struct Options {
     assess: bool,
+    changed: bool,
     dry_run: bool,
     json: bool,
     limit: Option<usize>,
@@ -137,6 +150,7 @@ pub fn command(args: &[String]) -> ExitCode {
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut o = Options {
         assess: false,
+        changed: false,
         dry_run: false,
         json: false,
         limit: Some(50),
@@ -149,10 +163,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     while i < args.len() {
         match args[i].as_str() {
-            "--dry-run" | "--workers" if !o.assess => {
+            "--dry-run" | "--workers" | "--changed" if !o.assess => {
                 return Err(format!("{} belongs to `assertions assess`", args[i]));
             }
             "--dry-run" => o.dry_run = true,
+            "--changed" => o.changed = true,
             "--json" => o.json = true,
             "--all" => o.limit = None,
             "--limit" | "--workers" => {
@@ -330,6 +345,29 @@ fn salt(run: &StoredRun) -> String {
 }
 
 fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, String> {
+    if options.changed {
+        // The checkout has changed since the run: its code is the snapshot
+        // the run's assessment kept.
+        let snapshot = coverage::load_snapshot(&run.directory.join(SNAPSHOT_FILE)).ok_or(
+            "this run's sources were not kept; assess the run first (`supercov runs <run> assertions assess`) before changing its code",
+        )?;
+        let stored = maps::load_manifest(run)?;
+        let Some(language) = coverage::Language::from_manifest(&stored.manifest.language) else {
+            return Err(format!(
+                "unsupported language: {}",
+                stored.manifest.language
+            ));
+        };
+        let report = maps::coverage(run)?;
+        let sources = snapshot
+            .iter()
+            .filter(|(file, _)| stored.manifest.files.contains_key(*file))
+            .map(|(f, t)| (f.clone(), t.clone()))
+            .collect();
+        let population =
+            coverage::population(root, &report, &sources, language)?.with_files(snapshot);
+        return assess_changed(root, run, options, &population);
+    }
     let inputs = maps::load_inputs(root, run)?;
     let Some(language) = coverage::Language::from_manifest(&inputs.inputs.language) else {
         return Err(format!(
@@ -433,7 +471,162 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         run.directory.join(RESULT_FILE),
         serde_json::to_vec(&result).unwrap_or_default(),
     );
+    // Every file the questions rendered, and the run's sources, as verified.
+    let mut kept = population.files_read();
+    kept.extend(
+        inputs
+            .inputs
+            .files
+            .iter()
+            .map(|(f, t)| (f.clone(), t.clone())),
+    );
+    let _ = coverage::save_snapshot(&run.directory.join(SNAPSHOT_FILE), &kept);
     Ok(listing(result, options.limit))
+}
+
+/// `assess --changed`: every test that ran a statement in changed code is
+/// asked about it, with no early stop, so each affected test has its own
+/// answer. The questions are the whole-app pass's own, so their answers are
+/// shared through the cache both ways.
+fn assess_changed(
+    root: &Path,
+    run: &StoredRun,
+    options: &Options,
+    population: &Population,
+) -> Result<Value, String> {
+    let affected = maps::affected_tests(root, run)?;
+    let mut current = crate::tests_query::CurrentLines::new(root);
+    let mut changed = BTreeSet::new();
+    let mut seen_code = BTreeSet::new();
+    for test in affected["affected"].as_array().into_iter().flatten() {
+        for code in test["changedCode"].as_array().into_iter().flatten() {
+            if !seen_code.insert(code.to_string()) {
+                continue;
+            }
+            let file = code["file"].as_str().unwrap_or("");
+            let statements = population
+                .statements
+                .iter()
+                .enumerate()
+                .filter(|(_, st)| st.file == file)
+                .map(|(i, st)| json!({"index": i, "line": st.line, "text": st.text.lines().next().unwrap_or("").trim()}))
+                .collect::<Vec<_>>();
+            for statement in crate::tests_query::in_changed_code(&mut current, code, statements) {
+                if let Some(i) = statement["index"].as_u64() {
+                    changed.insert(i as usize);
+                }
+            }
+        }
+    }
+    let model = quality::model();
+    let salt = salt(run);
+    let mut cache = Cache::load(root);
+    let mut answers = BTreeMap::<usize, Vec<(usize, f64)>>::new();
+    let mut wanted = BTreeMap::<usize, Vec<usize>>::new(); // test -> statements
+    let mut keys = BTreeMap::<(usize, usize), String>::new();
+    let mut reused = 0;
+    for &s in &changed {
+        for t in population.order(s, IMPACT_TESTS) {
+            let key = population.pair_key(s, t, model, &salt);
+            match cache.answers.get(&key) {
+                Some(&p) => {
+                    answers.entry(s).or_default().push((t, p));
+                    reused += 1;
+                }
+                None => wanted.entry(t).or_default().push(s),
+            }
+            keys.insert((s, t), key);
+        }
+    }
+    let plan = wanted
+        .into_iter()
+        .flat_map(|(t, ss)| {
+            ss.chunks(MAX_QUESTIONS)
+                .map(|c| (t, c.to_vec()))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let bodies = plan
+        .iter()
+        .map(|(t, asked)| population.request(*t, asked, model))
+        .collect::<Vec<_>>();
+    if options.dry_run {
+        let tokens: usize = bodies
+            .iter()
+            .map(|b| {
+                serde_json::to_vec(b)
+                    .map(|b| quality::estimated_tokens(&b))
+                    .unwrap_or(0)
+            })
+            .sum();
+        return Ok(json!({
+            "run": run.id, "dryRun": true, "changed": changed.len(), "answeredFromCache": reused,
+            "firstRound": {"requests": plan.len(), "inputTokens": tokens, "costUsd": tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS},
+        }));
+    }
+    let (mut tokens, mut failed) = (0u64, 0usize);
+    if !plan.is_empty() {
+        let key = quality::setting("TYPESAFE_API_KEY")
+            .ok_or("set TYPESAFE_API_KEY to ask Jev, or use --dry-run for an estimate")?;
+        let endpoint = quality::endpoint()?;
+        let agent = quality::client();
+        let results = send_all(&agent, endpoint, &key, &bodies, options.workers);
+        for ((t, asked), result) in plan.iter().zip(results) {
+            let Ok(response) = result else {
+                failed += 1;
+                continue;
+            };
+            tokens += response.usage.input_tokens;
+            for (i, &s) in asked.iter().enumerate() {
+                let p = (0..2)
+                    .filter_map(|j| match response.answers.get(&format!("q{i}_{j}")) {
+                        Some(quality::Answer::Noul { noul }) => Some(*noul),
+                        _ => None,
+                    })
+                    .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))));
+                let Some(p) = p else { continue };
+                answers.entry(s).or_default().push((*t, p));
+                if let Some(k) = keys.get(&(s, *t)) {
+                    cache.answers.insert(k.clone(), p);
+                }
+            }
+        }
+        cache.save()?;
+    }
+    let statements = changed
+        .iter()
+        .map(|&s| {
+            let st = &population.statements[s];
+            let got = answers.get(&s).map_or(0, Vec::len);
+            json!({
+                "file": st.file, "line": st.line, "text": st.text.lines().next().unwrap_or("").trim(),
+                // Every test that ran it answered: one without an answer did
+                // not run it.
+                "complete": st.tests.len() <= IMPACT_TESTS && got >= st.tests.len(),
+                "answers": answers.get(&s).into_iter().flatten().map(|(t, p)| json!({
+                    "file": population.tests[*t].file, "name": population.tests[*t].name, "p": p,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let result = json!({
+        "run": run.id, "model": model, "changed": changed.len(),
+        "requests": plan.len(), "failedRequests": failed, "answersReused": reused,
+        "inputTokens": tokens, "costUsd": tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS,
+        "statements": statements,
+    });
+    let _ = std::fs::write(
+        run.directory.join(IMPACT_FILE),
+        serde_json::to_vec(&result).unwrap_or_default(),
+    );
+    Ok(json!({"run": run.id, "impact": true, "summary": result}))
+}
+
+/// `assess --changed`'s saved answers for a run, if any.
+pub(crate) fn impact(run: &StoredRun) -> Option<Value> {
+    std::fs::read(run.directory.join(IMPACT_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
 }
 
 fn send_all(
@@ -513,6 +706,11 @@ fn summary(
                 "answer": best.map(|b| b.1),
                 "test": best.map(|(t, _)| json!({"file": population.tests[t].file, "name": population.tests[t].name})),
                 "testsAsked": pass.answers[s].len(), "testsRunningIt": st.tests.len(),
+                // Each asked test's own answer: what `tests affected` reads
+                // to say which tests check a changed statement.
+                "answers": pass.answers[s].iter().map(|(t, p)| json!({
+                    "file": population.tests[*t].file, "name": population.tests[*t].name, "p": p,
+                })).collect::<Vec<_>>(),
             })
         })
         .collect::<Vec<_>>();
@@ -593,6 +791,29 @@ fn listing(mut result: Value, limit: Option<usize>) -> Value {
 }
 
 fn render(data: &Value) -> String {
+    if data["impact"] == true {
+        let s = &data["summary"];
+        return format!(
+            "Run {}: {} changed statement(s) asked of every test that ran them: {} requests, ${:.4}; {} answers reused.\n`supercov runs {} tests affected` now says which affected tests catch the change.\n",
+            data["run"].as_str().unwrap_or(""),
+            s["changed"],
+            s["requests"],
+            s["costUsd"].as_f64().unwrap_or(0.0),
+            s["answersReused"],
+            data["run"].as_str().unwrap_or(""),
+        );
+    }
+    if data["dryRun"] == true && data.get("changed").is_some() {
+        return format!(
+            "Run {}: {} changed statement(s), {} answers in the cache. {} requests, about {} input tokens, ${:.4}.\n",
+            data["run"].as_str().unwrap_or(""),
+            data["changed"],
+            data["answeredFromCache"],
+            data["firstRound"]["requests"],
+            data["firstRound"]["inputTokens"],
+            data["firstRound"]["costUsd"].as_f64().unwrap_or(0.0),
+        );
+    }
     if data["assessed"] == false {
         let mut out = format!(
             "Run {}: assertions not assessed for this run.\n",

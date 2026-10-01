@@ -688,6 +688,11 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     let mut unaffected = Vec::new();
     for record in &executions.tests {
         let mut reasons = Vec::new();
+        // The changed declarations this test ran, where: what they held in
+        // the run (their own lines, nested declarations aside) and where
+        // they are now, so a caller can say which of their statements the
+        // test is known to check.
+        let mut changed_code = Vec::new();
         if !record.passed {
             reasons.push("did not pass in the run".to_owned());
         }
@@ -737,6 +742,16 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                             .filter(|i| ran.contains(i))
                             .map(|i| &before.units[*i])
                             .collect::<Vec<_>>();
+                        let now = after.by_path();
+                        for index in diff.changed.iter().filter(|i| ran.contains(i)) {
+                            let unit = &before.units[*index];
+                            changed_code.push(json!({
+                                "file": file,
+                                "declaration": unit.path,
+                                "own": own_lines(before, *index),
+                                "now": now.get(unit.path.as_str()).map(|u| [u.line, u.end_line]),
+                            }));
+                        }
                         if !hit.is_empty() {
                             reasons
                                 .push(format!("{file}: {} changed (this test ran it)", named(hit)));
@@ -778,7 +793,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
             }
             continue;
         }
-        let entry = json!({"file":record.test.file,"name":record.test.name,"reasons":reasons});
+        let entry = json!({"file":record.test.file,"name":record.test.name,"reasons":reasons,"changedCode":changed_code});
         if reasons.is_empty() {
             unaffected.push(entry);
         } else {
@@ -807,6 +822,31 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         "meaning": "Tests whose recorded execution a change since the run could have reached, and those whose execution nothing recorded: a test that ran alongside others has no coverage of its own, so it is undetermined whenever a change reaches anything the run covered. Run both. A file the run never captured, a dependency or a configuration change is not seen here; see workingTree."
     }))
 }
+/// A declaration's own lines: its span without the spans of the
+/// declarations nested in it, as inclusive `[first, last]` ranges.
+fn own_lines(code: &crate::source_units::Code, index: usize) -> Vec<[usize; 2]> {
+    let unit = &code.units[index];
+    let mut children = code
+        .units
+        .iter()
+        .filter(|u| u.parent == Some(index))
+        .map(|u| (u.line, u.end_line))
+        .collect::<Vec<_>>();
+    children.sort_unstable();
+    let mut out = Vec::new();
+    let mut next = unit.line;
+    for (start, end) in children {
+        if start > next {
+            out.push([next, start - 1]);
+        }
+        next = next.max(end + 1);
+    }
+    if next <= unit.end_line {
+        out.push([next, unit.end_line]);
+    }
+    out
+}
+
 pub fn coverage(run: &StoredRun) -> Result<CoverageReport, String> {
     analyze_coverage_archive(&ArchiveReportRequest {
         archive_path: run.evidence_path.clone(),

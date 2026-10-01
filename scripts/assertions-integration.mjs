@@ -253,6 +253,27 @@ function scenario({ name, root, command, logFile, logText, logLine, edit }) {
   // the cart module's answers are reused.
   const [file, from, to] = edit;
   writeFileSync(resolve(root, file), readFileSync(resolve(root, file), "utf8").replace(from, to));
+
+  // Test impact against the assessed run, before the tests run again: the
+  // edited return is run by one test (the blank label returns early), and
+  // once `assess --changed` has asked every test that ran it, --asserting
+  // keeps exactly that one.
+  const run = latestRun(root);
+  const affected = () => JSON.parse(requireSupercov(root, ["runs", run, "tests", "affected", "--json"], { env }).stdout).data;
+  const coverageOnly = affected();
+  if (coverageOnly.assertions?.available !== true || coverageOnly.affected.length !== 2)
+    fail(`${name}: tests affected reads the assessment and lists both format tests`, coverageOnly);
+  requireSupercov(root, ["runs", run, "assertions", "assess", "--changed"], { env });
+  const impact = affected();
+  const verdicts = impact.affected.map((t) => t.assertion.verdict).sort();
+  if (impact.assertions.impact !== true || JSON.stringify(verdicts) !== JSON.stringify(["catches", "misses"]))
+    fail(`${name}: after assess --changed one format test catches the edit and the other missed it`, impact);
+  for (const flag of ["--ran-changed", "--asserting"]) {
+    const narrowed = requireSupercov(root, ["runs", run, "tests", "affected", "--names", flag], { env }).stdout.trim().split("\n");
+    if (narrowed.length !== 1 || !/upper/i.test(narrowed[0]))
+      fail(`${name}: ${flag} keeps only the test that runs the edited line`, narrowed);
+  }
+
   requireSupercov(root, ["--", ...command], { env: binary });
   const unassessed = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", "--json"], { env }).stdout).data;
   if (unassessed.assessed !== false || unassessed.lastAssessed?.percentage !== 90.9)
@@ -262,7 +283,7 @@ function scenario({ name, root, command, logFile, logText, logLine, edit }) {
   const asked = requests() - before;
   if (changed.summary.statements !== 11 || changed.summary.requests === 0 || changed.summary.answersReused < 7 || asked > 2)
     fail(`${name}: after editing ${file} only its questions are asked again (${asked} requests)`, changed);
-  console.log(`[assertions] ${name}: 10 of 11 asserted, the ${logText} line not; a repeat pass sent nothing; editing ${file} sent ${asked} requests and reused ${changed.summary.answersReused} answers`);
+  console.log(`[assertions] ${name}: 10 of 11 asserted, the ${logText} line not; a repeat pass sent nothing; tests affected kept the one test that runs the edit; editing ${file} sent ${asked} requests and reused ${changed.summary.answersReused} answers`);
 }
 
 try {

@@ -490,6 +490,64 @@ pub(super) fn helpers(root: &Path, from: &str, text: &str) -> Vec<String> {
     out
 }
 
+/// The support files a test names by constant: `Fixtures::Pluralize.cases`
+/// reads `spec/support/fixtures/pluralize.rb`. Data-driven specs keep their
+/// cases there, and a test's verdict depends on which cases it checks.
+pub(super) fn support_files(root: &Path, text: &str) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for token in text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')) {
+        for segment in token.split("::") {
+            if segment
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+            {
+                names.insert(snake(segment));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for dir in ["spec/support", "test/support", "features/support"] {
+        let base = root.join(dir);
+        if !base.is_dir() {
+            continue;
+        }
+        for entry in ignore::WalkBuilder::new(&base)
+            .build()
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("rb") {
+                continue;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if names.contains(stem)
+                && let Ok(relative) = path.strip_prefix(root)
+            {
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `CamelizeLower` -> `camelize_lower`
+fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

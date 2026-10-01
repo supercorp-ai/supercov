@@ -47,6 +47,9 @@ pub const MAX_QUESTIONS: usize = 150;
 pub const THRESHOLD: f64 = 0.5;
 const HEAD_LINES: usize = 10;
 const HELPER_CHARS: usize = 3000;
+/// The budget for data files a test names (Ruby spec support fixtures),
+/// beside the helpers': the cases a data-driven test checks are its asserts.
+const FIXTURE_CHARS: usize = 12000;
 const CONTEXT_LINES: usize = 2;
 const WINDOW_LINES: usize = 8;
 const CODE_CHARS: usize = 40000;
@@ -78,7 +81,7 @@ fn runtime(runner: &str) -> &'static str {
             "Cucumber; a step that raises (a failed expectation included) fails the scenario; a step with no definition leaves it undefined, not passed; Before hooks run for each scenario."
         }
         "go-test" => {
-            "go test; t.Error, t.Fatal and a panic fail the test; a test past the -timeout (default 10 minutes) fails; subtests run inside their parent; a nil pointer dereference panics."
+            "go test; t.Error, t.Fatal and a panic fail the test; a test past the -timeout (default 10 minutes) fails; subtests run inside their parent; a nil pointer dereference panics. A test catches a changed value only where one of its checks compares it, directly or through what it feeds: a byte, field or result that no check reads can change while the test still passes."
         }
         "rust-libtest" | "rust-nextest" | "nextest" => {
             "Rust tests; a panic fails the test (a failed assert!, assert_eq!, unwrap or expect included) unless it is marked #[should_panic], which then fails when nothing panics; there is no timeout."
@@ -575,6 +578,31 @@ fn describe(name: &str, separator: &str) -> String {
 }
 
 impl Population {
+    /// Read these files from here rather than the checkout: a run's sources
+    /// as they were assessed, once the checkout has moved on.
+    pub fn with_files(self, files: BTreeMap<String, String>) -> Self {
+        {
+            let mut cache = self
+                .files
+                .lock()
+                .expect("the file cache is only read and filled");
+            for (file, text) in files {
+                cache.insert(file, Some(text.into()));
+            }
+        }
+        self
+    }
+
+    /// Every file read so far, as it was read.
+    pub fn files_read(&self) -> BTreeMap<String, String> {
+        self.files
+            .lock()
+            .expect("the file cache is only read and filled")
+            .iter()
+            .filter_map(|(file, text)| text.as_ref().map(|t| (file.clone(), t.to_string())))
+            .collect()
+    }
+
     fn read(&self, file: &str) -> Option<std::sync::Arc<str>> {
         let mut files = self
             .files
@@ -910,6 +938,27 @@ impl Population {
                 break;
             }
         }
+        if self.language == Language::Ruby {
+            let mut used = 0;
+            for file in ruby::support_files(&self.root, &text) {
+                if out.contains_key(&file) || used >= FIXTURE_CHARS {
+                    continue;
+                }
+                let mut body = self.read(&file).map(|b| b.to_string()).unwrap_or_default();
+                if used + body.len() > FIXTURE_CHARS {
+                    let keep = FIXTURE_CHARS - used;
+                    let cut = body
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .take_while(|&i| i <= keep)
+                        .last()
+                        .unwrap_or(0);
+                    body = format!("{}\n... (cut)", &body[..cut]);
+                }
+                used += body.len();
+                out.insert(file, numbered(&body.split('\n').collect::<Vec<_>>()));
+            }
+        }
         out
     }
 
@@ -1243,6 +1292,29 @@ fn rust_question(line: &str, change: Change, replacement: &str) -> String {
             None => format!("`{line}`: the value it assigns becomes `{repl}`"),
         },
     }
+}
+
+/// Write files' text, compressed, to `path`.
+pub fn save_snapshot(path: &Path, files: &BTreeMap<String, String>) -> Result<(), String> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec(files).map_err(|e| e.to_string())?;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&bytes).map_err(|e| e.to_string())?;
+    let compressed = encoder.finish().map_err(|e| e.to_string())?;
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, compressed).map_err(|e| e.to_string())?;
+    std::fs::rename(&temp, path).map_err(|e| e.to_string())
+}
+
+/// Read files written by [`save_snapshot`].
+pub fn load_snapshot(path: &Path) -> Option<BTreeMap<String, String>> {
+    use std::io::Read;
+    let compressed = std::fs::read(path).ok()?;
+    let mut text = Vec::new();
+    flate2::read::GzDecoder::new(compressed.as_slice())
+        .read_to_end(&mut text)
+        .ok()?;
+    serde_json::from_slice(&text).ok()
 }
 
 /// Where a test sits in its file: its first line, its last, and lines that

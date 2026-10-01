@@ -388,6 +388,40 @@ toolchain change affects every test and is reported as such. A source file
 added since the run is outside every test's record; the working-tree check
 says so, and the suite should run in full.
 
+### Which affected tests check the change
+
+When the run has an [assertion assessment](assertions.md), `tests affected`
+also says, for each affected test, whether it was judged to catch a change to
+the statements that changed in code it ran, and lists those tests first. A run
+without an assessment answers from coverage alone, as above.
+
+```sh supercov
+npx supercov runs latest assertions assess              # once, on the run
+# ... edit code ...
+npx supercov runs latest assertions assess --changed    # ask every test that ran the changed code
+npx supercov runs latest tests affected --names --ran-changed
+```
+
+The assessment stops asking about a statement once one test catches it, so on
+its own it knows only some tests' answers. `assess --changed` asks, for the
+statements in code changed since the run, every test that ran them: typically
+a few requests per commit. After it, `--ran-changed` leaves out the affected
+tests that ran the changed declaration but none of the changed statements, and
+`--asserting` also those judged to catch no change to them. Tests whose own
+file changed or that did not pass stay, and so does any test never asked. With
+an assessment, `--names` and `--files` list the tests most likely to catch the
+change first.
+
+Measured by applying random changes and running the suite:
+
+| Project | Breaking changes (failing tests) | Coverage's set | `--ran-changed` | `--asserting` | A failing test in the first three |
+| --- | --- | --- | --- | --- | --- |
+| h11 (Python, 78 tests) | 23 (153) | all 153 in 28 tests | all 153 in 23.5 | 141 in 19.9 | 18 of 23 |
+| go-version (Go, 31 tests) | 36 (140) | all 140 in 10.1 | all 140 in 9.8 | 133 in 9.4 | 32 of 36 |
+
+`--ran-changed` never dropped a failing test; `--asserting` dropped 5 to 8% of
+them. `assess --changed` cost about a tenth of a cent per change.
+
 ## Combine shards
 
 ```sh supercov
