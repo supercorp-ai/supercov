@@ -125,11 +125,12 @@ pub(super) type Replacements = BTreeMap<usize, Vec<(String, String)>>;
 pub(super) fn replacements(file: &str, source: &str, signatures: &Signatures) -> Replacements {
     let root = parse(source).tree();
     let starts = line_starts(source);
-    let crate_view = Crate {
+    let mut crate_view = Crate {
         signatures,
         module: module_of(file),
         source,
         locals: BTreeMap::new(),
+        enclosing: None,
     };
     let mut out = Replacements::new();
     let text = |node: &ra_ap_syntax::SyntaxNode| node.text().to_string();
@@ -140,6 +141,12 @@ pub(super) fn replacements(file: &str, source: &str, signatures: &Signatures) ->
             .push((node.text().to_string(), replacement));
     };
     for list in root.syntax().descendants().filter_map(ast::StmtList::cast) {
+        crate_view.enclosing = list
+            .syntax()
+            .ancestors()
+            .find_map(ast::Fn::cast)
+            .and_then(|function| function.name())
+            .map(|name| name.text().to_string());
         for statement in list.statements() {
             match &statement {
                 ast::Stmt::LetStmt(s) => {
@@ -373,6 +380,10 @@ pub(super) struct Crate<'a> {
     module: String,
     source: &'a str,
     locals: BTreeMap<String, String>,
+    /// The function the statement is in. Its own value is never made by
+    /// calling it: `origin()` asked as returning `Point::origin()` only
+    /// recurses, which says nothing about what a test checks.
+    enclosing: Option<String>,
 }
 
 impl Crate<'_> {
@@ -1044,7 +1055,8 @@ fn other_variant(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String
 /// A struct literal with one field changed, typed by the struct's own
 /// definition.
 fn record(r: &ast::RecordExpr, crate_view: &Crate) -> Option<String> {
-    let path = r.path()?.syntax().text().to_string();
+    // `Self { .. }` in an impl names the impl's own type.
+    let path = resolve_self(&r.path()?.syntax().text().to_string(), r.syntax());
     let name = path.rsplit("::").next()?;
     let types = crate_view.signatures.structs.get(name)?;
     let list = r.record_expr_field_list()?;
@@ -1197,7 +1209,10 @@ fn value_of(ty: &str, crate_view: &Crate, depth: u8) -> Option<String> {
         return Some(format!("{}::{first}", crate_view.name(last)));
     }
     let mut makers = signatures.makers.get(last).cloned().unwrap_or_default();
-    makers.retain(|m| m.public || m.module == crate_view.module);
+    makers.retain(|m| {
+        (m.public || m.module == crate_view.module)
+            && crate_view.enclosing.as_deref() != Some(m.name.as_str())
+    });
     if makers.is_empty() {
         // No constructor: a literal, where every field can be set from here.
         let fields = signatures.structs.get(last).filter(|f| !f.is_empty())?;

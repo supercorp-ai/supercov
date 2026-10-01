@@ -906,3 +906,157 @@ fn security_beside_an_assessed_run_says_which_flagged_lines_a_test_catches() {
     );
     assert!(!report.contains("line 12: asserted"), "{report}");
 }
+
+const MORE_SHAPES: &str = r#"use std::cmp::Ordering;
+use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Point {
+    pub fn unit() -> Point {
+        Point::origin().shifted(1)
+    }
+
+    pub fn origin() -> Self {
+        Self { x: 0, y: 0 }
+    }
+
+    pub fn shifted(self, by: i32) -> Self {
+        Self { x: self.x + by, ..self }
+    }
+}
+
+impl fmt::Display for Point {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({}, {})", self.x, self.y)
+    }
+}
+
+pub fn raw(value: &mut u8) -> *mut u8 {
+    value as *mut u8
+}
+
+pub fn raw_const(value: &u8) -> *const u8 {
+    value as *const u8
+}
+
+pub fn order(a: f64, b: f64) -> Option<Ordering> {
+    a.partial_cmp(&b)
+}
+
+pub fn initial(name: &str) -> char {
+    name.chars().next().unwrap_or('?')
+}
+
+pub fn pair(a: u8, b: bool) -> (u8, bool) {
+    (a + 1, !b)
+}
+
+pub fn filled(n: usize) -> Vec<u8> {
+    vec![7; n]
+}
+
+pub fn label(n: u32) -> String {
+    let word = match n {
+        0 => "zero",
+        1 => "one",
+        _ => "many",
+    };
+    word.to_string()
+}
+
+pub fn pick(flag: bool) -> u16 {
+    let value = if flag { 10 } else { 20 };
+    value
+}
+
+pub fn lookup(map: &std::collections::HashMap<String, u32>, key: &str) -> Option<u32> {
+    map.get(key).copied()
+}
+"#;
+
+const MORE_SHAPES_TESTS: &str = r#"use more::*;
+
+#[test]
+fn points() {
+    assert_eq!(Point::origin().shifted(2), Point { x: 2, y: 0 });
+    assert_eq!(Point::unit(), Point { x: 1, y: 0 });
+    assert_eq!(Point { x: 1, y: 2 }.to_string(), "(1, 2)");
+}
+
+#[test]
+fn pointers_and_values() {
+    let mut v = 3u8;
+    assert!(!raw(&mut v).is_null());
+    assert!(!raw_const(&v).is_null());
+    assert_eq!(order(1.0, 2.0), Some(std::cmp::Ordering::Less));
+    assert_eq!(initial("ann"), 'a');
+    assert_eq!(pair(1, true), (2, false));
+    assert_eq!(filled(2), vec![7, 7]);
+    assert_eq!(label(1), "one");
+    assert_eq!(pick(true), 10);
+    let map = std::collections::HashMap::from([("a".to_string(), 1)]);
+    assert_eq!(lookup(&map, "a"), Some(1));
+}
+"#;
+
+#[test]
+fn rust_values_of_every_shape_are_asked_as_changes_of_their_own_type() {
+    let project = Project::empty("rust-more-changes");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"more\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write("src/lib.rs", MORE_SHAPES);
+    project.write("tests/more.rs", MORE_SHAPES_TESTS);
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test", "-q"]).succeeds();
+    let (base, seen) = gateway(MODEL, answer_no);
+    let assessed = project
+        .supercov_with(&["runs", "latest", "assertions", "assess"], &through(&base))
+        .succeeds();
+    let asked = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|(_, _, request)| {
+            request["questions"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter_map(|question| question["instructions"]["task"].as_str())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        assessed.contains("0% asserted (0 of 15 executed statements)"),
+        "{assessed}"
+    );
+    // `unit` is never asked as returning `Point::unit()`, a call to itself,
+    // and `Self { .. }` changes a field as `Point { .. }` would.
+    for change in [
+        "`Point::origin().shifted(1)` becomes `Point::origin()`",
+        "`Self { x: 0, y: 0 }` becomes `Point { x: 1, y: 0 }`",
+        "`Self { x: self.x + by, ..self }` becomes `Point { x: 0, ..self }`",
+        "`write!(f, \"({}, {})\", self.x, self.y)` becomes `Err(std::fmt::Error)`",
+        "`value as *mut u8` becomes `std::ptr::null_mut()`",
+        "`value as *const u8` becomes `std::ptr::null()`",
+        "`a.partial_cmp(&b)` becomes `None`",
+        "`name.chars().next().unwrap_or('?')` becomes `'\\0'`",
+        "`(a + 1, !b)` becomes `(0, !b)`",
+        "`vec![7; n]` becomes `Vec::new()`",
+        "`let word = match n {` becomes `let word = \"\";`",
+        "`word.to_string()` becomes `String::new()`",
+        "`10` becomes `0`",
+        "`value` becomes `0`",
+        "`map.get(key).copied()` becomes `None`",
+    ] {
+        assert!(asked.contains(change), "{change} not asked:\n{asked}");
+    }
+}
