@@ -2032,3 +2032,82 @@ fn every_listing_pages_and_names_its_next_page() {
     let listed = project.supercov(&["runs", "--limit", "1"]).succeeds();
     assert!(listed.contains("FAILED (exit 1)"), "{listed}");
 }
+
+#[test]
+fn the_html_report_says_what_it_could_not_embed() {
+    let project = Project::cart("html-edges");
+    let mut big = String::from("export function big(x) {\n  return x + 1;\n}\n");
+    big.push_str(&format!("// {}\n", "x".repeat(1024 * 1024)));
+    project.write("src/big.js", &big);
+    project.write(
+        "test/big.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { big } from \"../src/big.js\";\n\ntest(\"big adds one\", () => assert.equal(big(1), 2));\n",
+    );
+    project.commit("big");
+    project.measure(&[]);
+    project
+        .supercov(&["report", "--no-open", "--output", "fresh.html"])
+        .succeeds();
+    let fresh = report_data(&project.read("fresh.html"));
+    let run = &fresh["runs"][0];
+    assert_eq!(
+        run["omittedSources"],
+        serde_json::json!(["src/big.js"]),
+        "{run}"
+    );
+    assert_eq!(run["stale"], false);
+    assert!(
+        run["sources"]["src/cart.js"].is_object(),
+        "{}",
+        run["sources"]
+    );
+
+    // Source that changed since the run is not shown beside its lines.
+    project.edit("src/cart.js", "return 0;", "return 1;");
+    project
+        .supercov(&["report", "--no-open", "--output", "stale.html"])
+        .succeeds();
+    let stale = report_data(&project.read("stale.html"));
+    let run = &stale["runs"][0];
+    assert_eq!(run["stale"], true);
+    assert_eq!(
+        run["staleReasons"],
+        serde_json::json!(["instrumented source changed"])
+    );
+    assert_eq!(run["sources"], serde_json::json!({}), "{run}");
+
+    // A directory gets the report under its default name.
+    std::fs::create_dir(project.root.join("reports")).unwrap();
+    project
+        .supercov(&["report", "--no-open", "--output", "reports"])
+        .succeeds();
+    report_data(&project.read("reports/supercov-report.html"));
+
+    let empty = Project::empty("html-nothing");
+    empty.git(&["init", "-q"]);
+    let nothing = empty.supercov(&["report", "--no-open"]).exits(2);
+    assert!(
+        nothing.contains("no local coverage runs and no saved assessments to report"),
+        "{nothing}"
+    );
+}
+
+/// The data a report page renders from: gzip-compressed JSON, base64-encoded
+/// into its `report-data` script.
+fn report_data(html: &str) -> serde_json::Value {
+    use base64::Engine;
+    use std::io::Read;
+    let start = html
+        .find(r#"<script id="report-data" type="application/octet-stream">"#)
+        .expect("report data")
+        + r#"<script id="report-data" type="application/octet-stream">"#.len();
+    let end = start + html[start..].find("</script>").expect("report data end");
+    let compressed = base64::engine::general_purpose::STANDARD
+        .decode(&html[start..end])
+        .unwrap();
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(compressed.as_slice())
+        .read_to_string(&mut json)
+        .unwrap();
+    serde_json::from_str(&json).unwrap()
+}

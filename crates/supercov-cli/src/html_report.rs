@@ -1059,6 +1059,14 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
                 .map_err(|error| format!("could not read the working directory: {error}"))?
                 .join(path),
         };
+        // A directory gets the report under its default name, as
+        // `runs report --output <dir>` does; renaming onto it failed with
+        // "Invalid argument".
+        let output = if output.is_dir() {
+            output.join(DEFAULT_REPORT_NAME)
+        } else {
+            output
+        };
         write_atomic(&output, &html)?;
         Ok((output, html.len()))
     })();

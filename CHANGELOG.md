@@ -26,6 +26,7 @@
 
 **Fixed**
 
+- `supercov report --output <directory>` writes `supercov-report.html` into the directory, as `runs report --output <directory>` writes there. It failed with "Invalid argument".
 - Assessing Rust never asks about a function returning a call to itself. A constructor such as `Point::unit()` could be asked as returning `Point::unit()`, a change that only recurses, so whether a test failed under it said nothing about what the test checks. A `Self { .. }` value in an `impl` now has one of its fields changed, as `Point { .. }` already had.
 - `runs check`, `runs patch` and `runs report` count code that ran outside any test, as the run summary does. They read only what passing tests ran, which also dropped what ran as modules were imported and everything a run without per-test attribution recorded: a passing `supercov -- node script.js` run read 100% lines in its summary and 0% in `runs check` and in its lcov export, and a node:test run lost its imports and top-level constants. What a failed test ran is still left out.
 - A JavaScript project with a socket or a named pipe in its tree -- a running dev server's `tmp/dev.sock`, a database socket kept under the project -- is measured. Copying the project into its isolated workspace refused the whole run over the first one, though neither holds source.
