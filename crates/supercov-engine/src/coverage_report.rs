@@ -1022,17 +1022,11 @@ pub fn passing_coverage_results(raw_results: &[RawTestResult]) -> Vec<&RawTestRe
             (statuses.contains("passed") && !expected_failure).then_some((test, retry))
         })
         .collect::<BTreeSet<_>>();
-    // What ran outside any test -- a module's top level as it was imported,
-    // a server between requests, all of a run no runner attributes -- is no
-    // failed test's coverage, so it stays. Without it a passing run read 100%
-    // in its summary and 0% in `runs check` and its exported report.
     raw_results
         .iter()
         .filter(|raw| {
-            raw.role != "test"
-                || raw
-                    .retry
-                    .is_some_and(|retry| accepted.contains(&(raw_test_id(raw).into(), retry)))
+            raw.retry
+                .is_some_and(|retry| accepted.contains(&(raw_test_id(raw).into(), retry)))
         })
         .collect()
 }

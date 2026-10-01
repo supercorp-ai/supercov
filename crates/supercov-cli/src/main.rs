@@ -885,11 +885,22 @@ pub(crate) fn load_run_view(
     let comparison = current_integrity_for_run(&root, run)
         .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
     let report = analyze_stored_run(run)?;
+    let passed = run.metadata.test_exit_code == Some(0);
+    // A passing run is read whole, as its summary reads it: what passing
+    // tests ran alone leaves out what ran outside any test -- a module's top
+    // level as it was imported, and all of a run no runner attributes -- so
+    // a passing `supercov -- node script.js` read 100% in its summary and 0%
+    // in `runs check`. A failed run keeps to what its passing tests ran.
+    let view = if passed {
+        &report.view
+    } else {
+        &report.filters.passed
+    };
     supercov_engine::run_view::build(
         &run.id,
         &run.metadata.started_at,
-        &report.filters.passed,
-        run.metadata.test_exit_code == Some(0),
+        view,
+        passed,
         comparison.as_ref().is_some_and(|c| c.stale),
         comparison.map(|c| c.reasons).unwrap_or_default(),
     )
