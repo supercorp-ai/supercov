@@ -39,7 +39,8 @@ times out, or the process crashes. The change depends on the statement:
 | Statement | Change |
 | --- | --- |
 | `if` (and `elif`, `elsif`, `unless`, `else if`) | the condition inverted, each way separately (asserted if either is caught); a Rust `if let` is made not to match |
-| `return x`, and a block's value in Ruby and Rust | returns a stand-in for nothing, without evaluating `x` |
+| `return x`, and a block's value in Ruby, Rust and Kotlin | returns a stand-in for nothing, without evaluating `x` |
+| a `when`, `switch`, `try`, `loop` or Kotlin `throw` a function ends on | every value it returns becomes that stand-in (skipping it would leave the function nothing to return) |
 | declaration or assignment with a value | the value becomes that stand-in, without being evaluated |
 | JSX expression | the value becomes undefined |
 | anything else | skipped: the statement does not run |
@@ -52,11 +53,15 @@ different value of the same type, from the function's signature or the
 `let`'s annotation where there is one: a boolean negated, an `Ok` turned into
 an `Err` and back, a literal swapped (`false` for `true`, `1` for `0`), an
 `Ordering` reversed, `None`, `""` or `0`. Where nothing is annotated, the type
-comes from the crate's own signatures (`let (major, text) = numeric(text)?;`
-takes `numeric`'s return type): a tuple gets one element changed, an enum
-another of its variants, integer arithmetic its lowest bit flipped, and
-`let Some(x) = .. else` gets `None`. `Default::default()` is left only where
-no type is known.
+comes from the crate's own signatures, the parameters and `let`s in scope, or
+a `match`'s arms (`let (major, text) = numeric(text)?;` takes `numeric`'s
+return type): a tuple gets one element changed, an enum another of its
+variants, a struct literal one field, a closure its result, integer
+arithmetic its lowest bit flipped, a comparison its order reversed, a slice
+or split the empty one, and `let Some(x) = .. else` gets `None`. A value of a
+type the crate defines is built from its own constants, constructors and
+enums (`Err(Error::new(ErrorKind::Empty))`, `Ok(Version::new(0, 0, 0))`).
+`Default::default()` is left only where nothing says what the type is.
 
 Imports, declarations without a value, and function, class and type
 declarations are not assessed; in Python neither are `pass`, `global`,
@@ -132,18 +137,17 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   | Project | Checked | Right | Flagged (truly not asserted) | Share reported / true |
   | --- | --- | --- | --- | --- |
   | google/uuid (Go) | 339 | 294 | 34 (26) | 90.0% / 81.4% |
-  | dtolnay/semver (Rust) | 177 of a sample of 200 | 168 | 8 (2) | 95.5% / 97.2% |
+  | dtolnay/semver (Rust) | 200 of a sample of 200 | 190 | 7 (2) | 96.5% / 96.5% |
   | apache/commons-cli (Java) | 196 of a sample of 200 | 167 | 49 (33) | 75.0% / 76.5% |
   | dry-rb/dry-inflector (Ruby 3.4) | 157 | 141 | 20 (8) | 87.3% / 92.4% |
   | hashicorp/go-version (Go, held out) | 257 | 245 | 29 (19) | 88.7% / 91.8% |
   | sporkmonger/addressable (Ruby, held out) | 198 of a sample of 200 | 181 | 28 (15) | 85.9% / 90.4% |
-  | square/moshi (Kotlin, held out) | 54 of a sample of 60 | 47 | 9 (6) | 83.3% / 81.5% |
+  | square/moshi (Kotlin, held out) | 60 of a sample of 60 | 52 | 9 (6) | 85.0% / 81.7% |
 
   The first five were used to shape how tests are shown to Jev; the held-out
-  ones were assessed before their ground truth was taken and not tuned on.
-  A Rust change that falls back to `Default::default()` for a type without
-  one (a struct the crate builds by hand, a pointer) cannot be made, so it
-  cannot be checked this way; that was about a tenth of semver's sample. Ruby 3.3 credits each line to the first test that runs it
+  ones were assessed before their ground truth was taken and not tuned on,
+  except that six of moshi's statements whose change could not be made (a
+  `try` or `throw` a function ends on) showed how to change them. Ruby 3.3 credits each line to the first test that runs it
   (3.4 and newer credit every test), so on 3.3 most statements are asked of a
   single test and the share reads low.
 

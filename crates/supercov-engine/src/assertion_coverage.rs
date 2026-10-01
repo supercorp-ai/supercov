@@ -271,7 +271,7 @@ pub fn population(
             sources
                 .iter()
                 .filter(|(file, _)| file.ends_with(".rs"))
-                .map(|(_, source)| source.as_str()),
+                .map(|(file, source)| (file.as_str(), source.as_str())),
         )
     } else {
         rust_source::Signatures::default()
@@ -332,7 +332,7 @@ pub fn population(
             let first = first.trim_end_matches(';');
             replacements
                 .entry(file.clone())
-                .or_insert_with(|| rust_source::replacements(source, &signatures))
+                .or_insert_with(|| rust_source::replacements(file, source, &signatures))
                 .get(&line)
                 .and_then(|all| all.iter().find(|(t, _)| t.starts_with(first)))
                 .map(|(_, r)| r.clone())
@@ -1142,6 +1142,21 @@ impl Population {
             Change::ReturnUndefined if self.language == Language::Go => vec![format!(
                 "`{line}` returns the zero value of each result instead: nil for an error, pointer, slice, map or interface, 0, \"\" or false, or an empty struct (its expressions still run)"
             )],
+            // A `when`, `switch` or `try` ending a function returns from its
+            // branches.
+            Change::ReturnUndefined
+                if self.language == Language::Jvm
+                    && s.text.contains("return")
+                    && ["when", "switch", "try"].iter().any(|k| {
+                        line.strip_prefix(k)
+                            .is_some_and(|rest| rest.starts_with([' ', '(', '{']))
+                    }) =>
+            {
+                vec![format!(
+                    "every value `{line}` returns becomes {} instead (the returned expressions still run)",
+                    self.language.nothing()
+                )]
+            }
             Change::ReturnUndefined if self.language == Language::Jvm => vec![format!(
                 "`{line}` returns {} instead (its expression still runs)",
                 self.language.nothing()

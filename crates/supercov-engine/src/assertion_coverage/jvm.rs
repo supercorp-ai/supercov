@@ -142,8 +142,98 @@ fn change(node: Node, source: &str, kotlin: bool) -> Option<Option<Change>> {
         // when its `if`, `when` or `try` is used as one: skipping it would
         // not compile, and the change that means something is the value.
         _ if kotlin && yields_value(node) => Some(Change::ReturnUndefined),
+        // A `when`, `switch` or `try` that ends a function with a result
+        // returns from inside it: skipping it would leave the function
+        // without one, so what changes is the value it returns.
+        "when_expression"
+        | "try_expression"
+        | "switch_expression"
+        | "try_statement"
+        | "try_with_resources_statement"
+            if ends_a_function_with_a_result(node, source) =>
+        {
+            Some(Change::ReturnUndefined)
+        }
+        // A Kotlin `throw` the function would otherwise end on: not
+        // throwing leaves it nothing to return, so it returns the default.
+        "throw_expression" if kotlin && on_final_path(node, source) => {
+            Some(Change::ReturnUndefined)
+        }
         _ => Some(Change::Skip),
     })
+}
+
+/// Whether a statement is the last of a function body that has a result
+/// type other than `Unit` or `void`.
+fn ends_a_function_with_a_result(node: Node, source: &str) -> bool {
+    let Some(block) = node.parent().filter(|p| p.kind() == "block") else {
+        return false;
+    };
+    let mut cursor = block.walk();
+    let last = block
+        .named_children(&mut cursor)
+        .filter(|child| !child.kind().contains("comment"))
+        .last();
+    if last.map(|last| last.id()) != Some(node.id()) {
+        return false;
+    }
+    // Kotlin: block <- function_body <- function_declaration; Java:
+    // block <- method_declaration.
+    let function = match block.parent() {
+        Some(p) if p.kind() == "function_body" => p.parent(),
+        Some(p) if p.kind() == "method_declaration" => Some(p),
+        _ => None,
+    };
+    let Some(function) = function else {
+        return false;
+    };
+    if function.kind() == "method_declaration" {
+        return function
+            .child_by_field_name("type")
+            .is_some_and(|t| t.kind() != "void_type");
+    }
+    let mut cursor = function.walk();
+    let result = function
+        .named_children(&mut cursor)
+        .find(|c| c.kind().ends_with("_type"));
+    result.is_some_and(|t| {
+        source
+            .get(t.byte_range())
+            .is_some_and(|text| text.trim() != "Unit")
+    })
+}
+
+/// Whether a statement is where its function ends when it completes: the
+/// last of its block, whose `if`, `when`, `try` or `catch` is in turn the
+/// last of its block, up to the body of a function with a result.
+fn on_final_path(node: Node, source: &str) -> bool {
+    let mut node = node;
+    loop {
+        if ends_a_function_with_a_result(node, source) {
+            return true;
+        }
+        let Some(block) = node.parent().filter(|p| p.kind() == "block") else {
+            return false;
+        };
+        let mut cursor = block.walk();
+        let last = block
+            .named_children(&mut cursor)
+            .filter(|child| !child.kind().contains("comment"))
+            .last();
+        if last.map(|last| last.id()) != Some(node.id()) {
+            return false;
+        }
+        node = match block.parent() {
+            Some(p) if matches!(p.kind(), "if_expression" | "try_expression") => p,
+            Some(p) if matches!(p.kind(), "catch_block" | "when_entry" | "finally_block") => {
+                match p.parent() {
+                    Some(owner) => owner,
+                    None => return false,
+                }
+            }
+            _ => return false,
+        };
+    }
 }
 
 /// Whether a statement is the last in a block whose value is used: a branch
@@ -315,6 +405,50 @@ mod tests {
             change_at(&starts, 19, "y", j),
             Some(Change::ReturnUndefined)
         );
+    }
+
+    /// Forge's `parse`: a `when` that returns from every branch ends the
+    /// function, and skipping it would not compile.
+    #[test]
+    fn a_when_that_ends_a_function_changes_what_it_returns() {
+        let kotlin = "fun parse(json: Any): JSON {\n    when (json) {\n        is Int -> return a(json)\n        else -> return b()\n    }\n}\nfun log(json: Any) {\n    when (json) {\n        is Int -> println(json)\n    }\n}\nfun unit(json: Any): Unit {\n    when (json) {\n        is Int -> return\n    }\n}\n";
+        let starts = statement_starts("F.kt", kotlin);
+        let j = Language::Jvm;
+        assert_eq!(
+            change_at(&starts, 2, "when (json) {", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 8, "when (json) {", j),
+            Some(Change::Skip)
+        );
+        assert_eq!(
+            change_at(&starts, 13, "when (json) {", j),
+            Some(Change::Skip)
+        );
+        // moshi's `nextName` and `Moshi.adapter`: a `throw` the function
+        // would end on, directly or from a `catch`.
+        let throws = "fun name(): String {\n    if (a) {\n        return b\n    }\n    throw error(\"x\")\n}\nfun adapter(): A {\n    try {\n        return c()\n    } catch (e: Exception) {\n        throw wrap(e)\n    }\n}\nfun check() {\n    throw error(\"y\")\n}\n";
+        let starts = statement_starts("T.kt", throws);
+        assert_eq!(
+            change_at(&starts, 5, "throw error(\"x\")", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 11, "throw wrap(e)", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 15, "throw error(\"y\")", j),
+            Some(Change::Skip)
+        );
+        let java = "class A {\n    int f(int x) {\n        switch (x) {\n            case 1: return 2;\n            default: return 3;\n        }\n    }\n    void g(int x) {\n        switch (x) {\n            default: h();\n        }\n    }\n}\n";
+        let starts = statement_starts("A.java", java);
+        assert_eq!(
+            change_at(&starts, 3, "switch (x) {", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(change_at(&starts, 9, "switch (x) {", j), Some(Change::Skip));
     }
 
     #[test]
