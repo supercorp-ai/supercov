@@ -132,22 +132,41 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   the same way: 502 right; of the 67 not asserted it found 45, and 45 of the 53
   it flagged were truly not asserted. The share it reported was 90.0% against a
   true 87.4%, for about $0.04.
-- **Go, Rust and Java**, checked the same way:
+- **Go, Rust, Java, Ruby and Kotlin**, checked the same way. These were used
+  to shape how changes and tests are shown to Jev, so they are flattering:
 
   | Project | Checked | Right | Flagged (truly not asserted) | Share reported / true |
   | --- | --- | --- | --- | --- |
-  | google/uuid (Go) | 339 | 294 | 34 (26) | 90.0% / 81.4% |
+  | google/uuid (Go) | 339 | 298 | 34 (28) | 90.0% / 81.4% |
+  | hashicorp/go-version (Go) | 257 | 253 | 21 (19) | 91.8% / 91.8% |
   | dtolnay/semver (Rust) | 200 of a sample of 200 | 190 | 7 (2) | 96.5% / 96.5% |
   | apache/commons-cli (Java) | 196 of a sample of 200 | 167 | 49 (33) | 75.0% / 76.5% |
-  | dry-rb/dry-inflector (Ruby 3.4) | 157 | 141 | 20 (8) | 87.3% / 92.4% |
-  | hashicorp/go-version (Go, held out) | 257 | 245 | 29 (19) | 88.7% / 91.8% |
-  | sporkmonger/addressable (Ruby, held out) | 198 of a sample of 200 | 181 | 28 (15) | 85.9% / 90.4% |
-  | square/moshi (Kotlin, held out) | 60 of a sample of 60 | 52 | 9 (6) | 85.0% / 81.7% |
+  | dry-rb/dry-inflector (Ruby 3.4) | 157 | 148 | 13 (8) | 91.7% / 92.4% |
+  | sporkmonger/addressable (Ruby) | 198 of a sample of 200 | 182 | 25 (14) | 87.4% / 90.4% |
+  | square/moshi (Kotlin) | 60 of a sample of 60 | 52 | 9 (6) | 85.0% / 81.7% |
 
-  The first five were used to shape how tests are shown to Jev; the held-out
-  ones were assessed before their ground truth was taken and not tuned on,
-  except that six of moshi's statements whose change could not be made (a
-  `try` or `throw` a function ends on) showed how to change them.
+- **Held out:** five projects nothing was tuned on, each assessed once by the
+  shipped version and its verdicts frozen before any change was run, scored on
+  a pre-registered sample of 60 statements (and on every statement where the
+  suite is fast enough):
+
+  | Project | Checked | Right | Flagged (truly not asserted) | Share reported / true |
+  | --- | --- | --- | --- | --- |
+  | pallets/itsdangerous (Python) | 60 of 60 | 56 | 3 (2) | 95.0% / 91.7% |
+  | — every statement | 238 of 238 | 224 | 13 (9) | 94.5% / 92.0% |
+  | Masterminds/semver (Go) | 60 of 60 | 55 | 7 (7) | 88.3% / 80.0% |
+  | — every statement | 497 of 498 | 472 | 46 (44) | 90.7% / 86.5% |
+  | hashie/hashie (Ruby 3.4) | 60 of 60 | 57 | 3 (1) | 95.0% / 96.7% |
+  | — every statement | 700 of 701 | 655 | 26 (10) | 96.3% / 94.4% |
+  | FasterXML/java-classmate (Java) | 60 of 60 | 58 | 9 (7) | 85.0% / 88.3% |
+  | bluss/arrayvec (Rust) | 17 of 60 | 15 | 0 (0) | 100% / 88.2% |
+
+  Assessing all five (2,582 statements) cost $0.15, about 0.006 cents per
+  statement. Go reads high: Jev takes a dropped error (`return false,
+  fmt.Errorf(..)` becoming `return false, nil`) as caught where the tests check
+  only the boolean. Most of arrayvec's changes cannot be made at all: its code
+  is generic over the element type, and no value of an unknown `T` can be
+  written, so those statements are assessed but cannot be checked this way.
 
 The share is a good measure of a project; a single statement's verdict is a
 judgment worth checking before acting on it. Supercov does not run mutated code

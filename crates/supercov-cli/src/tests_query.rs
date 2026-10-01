@@ -115,7 +115,7 @@ pub fn command(args: &[String]) -> ExitCode {
     match result {
         Ok(data) => {
             if json_output {
-                match agent_json::success("runs.tests.affected", &data, None) {
+                match fitted(data) {
                     Ok(output) => print!("{output}"),
                     Err(size) => {
                         print!(
@@ -509,6 +509,68 @@ pub(crate) fn in_changed_code(
     }
 }
 
+/// The JSON envelope for `data`, made to fit one response: on a large suite
+/// the unaffected tests become a count, then each test keeps its first three
+/// reasons, then the lists keep their ranked head -- each step saying so, and
+/// `--names` always lists every test.
+fn fitted(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
+    let mut step = 0;
+    loop {
+        match agent_json::success("runs.tests.affected", &data, None) {
+            Ok(output) => return Ok(output),
+            Err(size) => {
+                let mut notes = Vec::new();
+                match step {
+                    0 => {
+                        let count = data["unaffected"].as_array().map_or(0, Vec::len);
+                        data["unaffected"] = json!([]);
+                        data["unaffectedCount"] = json!(count);
+                        notes.push("unaffected tests are counted, not listed");
+                    }
+                    1 => {
+                        for bucket in ["affected", "undetermined"] {
+                            for test in data[bucket].as_array_mut().into_iter().flatten() {
+                                if let Some(reasons) = test["reasons"].as_array_mut() {
+                                    reasons.truncate(3);
+                                }
+                            }
+                        }
+                        notes.push("each test keeps its first three reasons");
+                    }
+                    _ => {
+                        let mut shortened = false;
+                        for bucket in ["undetermined", "affected"] {
+                            let listed = data[bucket].as_array().map_or(0, Vec::len);
+                            if listed > 0 {
+                                let total = data[format!("{bucket}Count")]
+                                    .as_u64()
+                                    .unwrap_or(listed as u64);
+                                data[format!("{bucket}Count")] = json!(total);
+                                data[bucket] =
+                                    json!(data[bucket].as_array().unwrap()[..listed / 2]);
+                                shortened = true;
+                                break;
+                            }
+                        }
+                        if !shortened {
+                            return Err(size);
+                        }
+                        notes.push("the lists keep their first, highest-ranked tests; `--names` lists every one");
+                    }
+                }
+                step += 1;
+                let mut all = data["truncated"].as_array().cloned().unwrap_or_default();
+                for note in notes {
+                    if !all.iter().any(|n| n == note) {
+                        all.push(json!(note));
+                    }
+                }
+                data["truncated"] = json!(all);
+            }
+        }
+    }
+}
+
 /// The changed declarations each test ran are what the assertions are read
 /// against; once read they are detail no reader needs, and on a large suite
 /// they are most of the response.
@@ -698,6 +760,30 @@ fn render(data: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// dry-rb/dry-inflector, 1,128 examples, a change every test reached:
+    /// 364 KB of JSON and the command failed instead of answering.
+    #[test]
+    fn a_large_affected_set_is_shortened_to_fit_one_response() {
+        let test = |i: usize| json!({"file": "spec/unit/dry/inflector/pluralize_spec.rb", "name": format!("spec/unit/dry/inflector/pluralize_spec.rb[1:1:{i}]"), "reasons": ["lib/dry/inflector.rb: Inflector#pluralize (line 120) changed (this test ran code in this file)", "lib/dry/inflector/inflections.rb: top level changed", "lib/dry/inflector/rules.rb: Rules#apply_to (line 30) changed", "a fourth reason that is dropped"]});
+        let data = json!({
+            "affected": (0..1100).map(test).collect::<Vec<_>>(),
+            "unaffected": (0..1100).map(test).collect::<Vec<_>>(),
+            "undetermined": [],
+        });
+        let output = fitted(data).expect("shortened to fit");
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        let d = &parsed["data"];
+        assert_eq!(d["unaffectedCount"], 1100);
+        assert_eq!(d["affectedCount"], 1100);
+        assert!(d["affected"].as_array().unwrap().len() < 1100);
+        assert!(d["affected"][0]["reasons"].as_array().unwrap().len() <= 3);
+        assert_eq!(
+            d["affected"][0]["name"],
+            "spec/unit/dry/inflector/pluralize_spec.rb[1:1:0]"
+        );
+        assert!(d["truncated"].as_array().unwrap().len() >= 2);
+    }
 
     #[test]
     fn affected_tests_are_ranked_by_whether_they_catch_the_change() {
