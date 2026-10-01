@@ -2,8 +2,9 @@
 // question answered by rule (a console.log or print line is not asserted;
 // everything else is), so the verdicts, the answer cache and --dry-run are
 // checked without the network, for JavaScript, Python (unittest, so only an
-// interpreter is needed) and Go. --javascript-only skips the others where
-// they are not installed, as in the Alpine image.
+// interpreter is needed), Go, Ruby (Minitest), Rust and Java (Maven, offline).
+// --javascript-only
+// skips the others where they are not installed, as in the Alpine image.
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -182,6 +183,224 @@ func TestNamesABlankLabel(t *testing.T) {
 const hasGo = spawnSync("go", ["version"]).status === 0;
 if (!hasGo && process.env.SUPERCOV_REQUIRE_GO) throw new Error("SUPERCOV_REQUIRE_GO is set but go is not on PATH");
 
+// Ruby 3.3 or newer measures each test exactly; an older one is skipped.
+const rubyCandidates = process.env.SUPERCOV_RUBY ? [process.env.SUPERCOV_RUBY] : ["/opt/homebrew/opt/ruby/bin/ruby", "ruby"];
+const ruby = rubyCandidates.find((program) => {
+  const version = spawnSync(program, ["-e", "print RUBY_VERSION"], { encoding: "utf8" }).stdout ?? "";
+  const [major, minor] = version.split(".").map(Number);
+  return major > 3 || (major === 3 && minor >= 3);
+});
+const rb = join(scratch, "rb");
+write = writer(rb);
+write("lib/cart.rb", `module Cart
+  def self.total(items)
+    sum = 0
+    items.each do |item|
+      sum += item[:price] * item[:quantity]
+    end
+    if sum > 100
+      sum = sum * 9 / 10
+    end
+    puts "total #{sum}"
+    sum
+  end
+end
+`);
+write("lib/format.rb", `module Format
+  def self.label(name)
+    trimmed = name.strip
+    if trimmed.empty?
+      return "unknown"
+    end
+    trimmed.upcase
+  end
+end
+`);
+write("test/cart_test.rb", `require "minitest/autorun"
+require "cart"
+
+class CartTest < Minitest::Test
+  def test_adds_prices
+    assert_equal 20, Cart.total([{ price: 10, quantity: 2 }])
+  end
+
+  def test_discounts_big_carts
+    assert_equal 108, Cart.total([{ price: 60, quantity: 2 }])
+  end
+end
+`);
+write("test/format_test.rb", `require "minitest/autorun"
+require "format"
+
+class FormatTest < Minitest::Test
+  def test_upper_cases_a_name
+    assert_equal "AB", Format.label("  ab ")
+  end
+
+  def test_names_a_blank_label
+    assert_equal "unknown", Format.label("  ")
+  end
+end
+`);
+
+const rs = join(scratch, "rs");
+write = writer(rs);
+write("Cargo.toml", '[package]\nname = "shop"\nversion = "0.0.0"\nedition = "2021"\n');
+write("src/lib.rs", "pub mod cart;\npub mod format;\n");
+write("src/cart.rs", `pub struct Item {
+    pub price: u32,
+    pub quantity: u32,
+}
+
+pub fn total(items: &[Item]) -> u32 {
+    let mut sum = 0;
+    for item in items {
+        sum += item.price * item.quantity;
+    }
+    if sum > 100 {
+        sum = sum * 9 / 10;
+    }
+    println!("total {sum}");
+    sum
+}
+`);
+write("src/format.rs", `pub fn label(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_string();
+    }
+    trimmed.to_uppercase()
+}
+`);
+write("tests/cart.rs", `use shop::cart::{total, Item};
+
+#[test]
+fn adds_prices() {
+    assert_eq!(total(&[Item { price: 10, quantity: 2 }]), 20);
+}
+
+#[test]
+fn discounts_big_carts() {
+    assert_eq!(total(&[Item { price: 60, quantity: 2 }]), 108);
+}
+`);
+write("tests/format.rs", `use shop::format::label;
+
+#[test]
+fn upper_cases_a_name() {
+    assert_eq!(label("  ab "), "AB");
+}
+
+#[test]
+fn names_a_blank_label() {
+    assert_eq!(label("  "), "unknown");
+}
+`);
+const hasCargo = spawnSync("cargo", ["--version"]).status === 0;
+
+const jv = join(scratch, "java");
+write = writer(jv);
+write("pom.xml", `<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>example</groupId>
+  <artifactId>shop</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+`);
+write("src/main/java/shop/Cart.java", `package shop;
+
+public final class Cart {
+    public record Item(int price, int quantity) {}
+
+    public static int total(Item[] items) {
+        int sum = 0;
+        for (Item item : items) {
+            sum += item.price() * item.quantity();
+        }
+        if (sum > 100) {
+            sum = sum * 9 / 10;
+        }
+        System.out.println("total " + sum);
+        return sum;
+    }
+}
+`);
+write("src/main/java/shop/Format.java", `package shop;
+
+public final class Format {
+    public static String label(String name) {
+        String trimmed = name.strip();
+        if (trimmed.isEmpty()) {
+            return "unknown";
+        }
+        return trimmed.toUpperCase();
+    }
+}
+`);
+write("src/test/java/shop/CartTest.java", `package shop;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import org.junit.jupiter.api.Test;
+
+class CartTest {
+    @Test
+    void addsPrices() {
+        assertEquals(20, Cart.total(new Cart.Item[] {new Cart.Item(10, 2)}));
+    }
+
+    @Test
+    void discountsBigCarts() {
+        assertEquals(108, Cart.total(new Cart.Item[] {new Cart.Item(60, 2)}));
+    }
+}
+`);
+write("src/test/java/shop/FormatTest.java", `package shop;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import org.junit.jupiter.api.Test;
+
+class FormatTest {
+    @Test
+    void upperCasesAName() {
+        assertEquals("AB", Format.label("  ab "));
+    }
+
+    @Test
+    void namesABlankLabel() {
+        assertEquals("unknown", Format.label("  "));
+    }
+}
+`);
+// Maven resolves JUnit from the network on a cold cache; without either the
+// scenario is skipped.
+const hasMaven =
+  spawnSync("mvn", ["-q", "-o", "test"], { cwd: jv, encoding: "utf8" }).status === 0 &&
+  (rmSync(join(jv, "target"), { recursive: true, force: true }), true);
+
 // The stand-in: answers every noul question, 0.1 for a console.log or print
 // line and 0.9 otherwise, and counts requests in a file.
 const counter = join(scratch, "requests.txt");
@@ -196,11 +415,11 @@ const server = spawn(process.execPath, ["--input-type=module", "-e", `
       if (req.url !== "/v1/systemone" || req.headers.authorization !== "Bearer test-key") { res.writeHead(401).end(); return; }
       if (!request.state?.code_run || !request.state?.test_code || !request.state?.test?.name) { res.writeHead(400).end(); return; }
       // The test's own code, found by its title, not the file's head.
-      const title = request.state.test.name.split(/::| > /).pop().split("[")[0].split(".").pop();
+      const title = request.state.test.name.split(/::| > /).pop().split("[")[0].split(".").pop().split("#").pop();
       if (!request.state.test_code.includes(title)) { res.writeHead(400).end(); return; }
       appendFileSync(${JSON.stringify(counter)}, Object.keys(request.questions).length + "\\n");
       const answers = Object.fromEntries(Object.entries(request.questions).map(([id, q]) =>
-        [id, { type: "noul", noul: /console\\.log|print\\(|Println\\(/.test(q.instructions.task) ? 0.1 : 0.9 }]));
+        [id, { type: "noul", noul: /console\\.log|print\\(|Println\\(|println!\\(|puts |System\\.out\\.println\\(/.test(q.instructions.task) ? 0.1 : 0.9 }]));
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ model: request.model, answers, usage: { input_tokens: Math.ceil(body.length / 4), output_tokens: 1 } }));
     });
@@ -217,23 +436,25 @@ const fail = (message, data) => {
 
 // The same checks on each language: 10 of 11 asserted, the logging line not;
 // reading offline; a repeat pass sending nothing; one edited line asked again.
-function scenario({ name, root, command, logFile, logText, logLine, edit }) {
+function scenario({ name, root, command, logFile, logText, logLine, edit, statements = 11, runEnv = binary }) {
+  const asserted = statements - 1;
+  const share = Math.round((asserted / statements) * 1000) / 10;
   const assess = (...extra) => {
     const result = requireSupercov(root, ["runs", latestRun(root), "assertions", "assess", "--json", ...extra], { env });
     const envelope = JSON.parse(result.stdout);
     if (envelope.ok !== true) throw new Error(`assertions failed: ${result.stdout}`);
     return envelope.data;
   };
-  requireSupercov(root, ["--", ...command], { env: binary });
+  requireSupercov(root, ["--", ...command], { env: runEnv });
 
   const start = requests();
   const dry = assess("--dry-run");
-  if (dry.statements !== 11 || requests() !== start) fail(`${name}: a dry run estimates 11 statements and sends nothing`, { dry, requests: requests() });
+  if (dry.statements !== statements || requests() !== start) fail(`${name}: a dry run estimates ${statements} statements and sends nothing`, { dry, requests: requests() });
 
   const first = assess();
   const s = first.summary;
-  if (s.statements !== 11 || s.asserted !== 10 || s.notAsserted !== 1 || s.requests === 0)
-    fail(`${name}: expected 10 of 11 statements asserted after requests`, first);
+  if (s.statements !== statements || s.asserted !== asserted || s.notAsserted !== 1 || s.requests === 0)
+    fail(`${name}: expected ${asserted} of ${statements} statements asserted after requests`, first);
   const not = first.notAsserted[0];
   if (not.file !== logFile || !not.text.includes(logText) || not.change !== "skipped")
     fail(`${name}: expected the ${logText} line as the one not asserted`, first);
@@ -242,11 +463,11 @@ function scenario({ name, root, command, logFile, logText, logLine, edit }) {
 
   // Reading needs neither the network nor a key.
   const read = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", "--json"], { env: { ...binary, TYPESAFE_API_KEY: "", TYPESAFE_BASE_URL: "http://127.0.0.1:9" } }).stdout).data;
-  if (read.summary?.asserted !== 10 || read.notAsserted?.[0]?.line !== logLine) fail(`${name}: reading returns the saved result`, read);
+  if (read.summary?.asserted !== asserted || read.notAsserted?.[0]?.line !== logLine) fail(`${name}: reading returns the saved result`, read);
 
   const sent = requests();
   const again = assess();
-  if (again.summary.requests !== 0 || requests() !== sent || again.summary.asserted !== 10)
+  if (again.summary.requests !== 0 || requests() !== sent || again.summary.asserted !== asserted)
     fail(`${name}: a second pass over the same run reuses every answer`, again);
 
   // One line of the format module changes: its statements are asked again,
@@ -274,16 +495,16 @@ function scenario({ name, root, command, logFile, logText, logLine, edit }) {
       fail(`${name}: ${flag} keeps only the test that runs the edited line`, narrowed);
   }
 
-  requireSupercov(root, ["--", ...command], { env: binary });
+  requireSupercov(root, ["--", ...command], { env: runEnv });
   const unassessed = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", "--json"], { env }).stdout).data;
-  if (unassessed.assessed !== false || unassessed.lastAssessed?.percentage !== 90.9)
+  if (unassessed.assessed !== false || unassessed.lastAssessed?.percentage !== share)
     fail(`${name}: a new run reads as not assessed and names the last assessment`, unassessed);
   const before = requests();
   const changed = assess();
   const asked = requests() - before;
-  if (changed.summary.statements !== 11 || changed.summary.requests === 0 || changed.summary.answersReused < 7 || asked > 2)
+  if (changed.summary.statements !== statements || changed.summary.requests === 0 || changed.summary.answersReused < statements - 4 || asked > 2)
     fail(`${name}: after editing ${file} only its questions are asked again (${asked} requests)`, changed);
-  console.log(`[assertions] ${name}: 10 of 11 asserted, the ${logText} line not; a repeat pass sent nothing; tests affected kept the one test that runs the edit; editing ${file} sent ${asked} requests and reused ${changed.summary.answersReused} answers`);
+  console.log(`[assertions] ${name}: ${asserted} of ${statements} asserted, the ${logText} line not; a repeat pass sent nothing; tests affected kept the one test that runs the edit; editing ${file} sent ${asked} requests and reused ${changed.summary.answersReused} answers`);
 }
 
 try {
@@ -296,6 +517,23 @@ try {
     scenario({ name: "Go", root: go, command: ["go", "test", "./..."], logFile: "cart.go", logText: "Println", logLine: 15,
       edit: ["format.go", "strings.ToUpper(trimmed)", "strings.ToUpper(strings.TrimSpace(trimmed))"] });
   else if (!javascriptOnly) console.log("[assertions] Go: skipped, go is not on PATH");
+  if (!javascriptOnly && ruby) {
+    const bin = resolve(ruby, "..");
+    const runEnv = { ...binary, PATH: `${bin}:${process.env.PATH}`, RUBYOPT: "" };
+    scenario({ name: "Ruby", root: rb, runEnv,
+      command: [ruby, "-Ilib", "-Itest", "-e", 'Dir.glob("test/*_test.rb").sort.each { |f| require File.expand_path(f) }'],
+      logFile: "lib/cart.rb", logText: "puts", logLine: 10,
+      edit: ["lib/format.rb", "trimmed.upcase", "trimmed.upcase.strip"] });
+  } else if (!javascriptOnly) console.log("[assertions] Ruby: skipped, no Ruby 3.3 or newer");
+  if (!javascriptOnly && hasCargo)
+    scenario({ name: "Rust", root: rs, command: ["cargo", "test", "--quiet"], logFile: "src/cart.rs", logText: "println!", logLine: 14,
+      edit: ["src/format.rs", "trimmed.to_uppercase()", "trimmed.to_uppercase().trim().to_string()"] });
+  else if (!javascriptOnly) console.log("[assertions] Rust: skipped, cargo is not on PATH");
+  if (!javascriptOnly && hasMaven)
+    // The JVM frontend counts an `if` as a branch, not a statement.
+    scenario({ name: "Java", root: jv, statements: 8, command: ["mvn", "-q", "-o", "test"], logFile: "src/main/java/shop/Cart.java", logText: "System.out.println", logLine: 14,
+      edit: ["src/main/java/shop/Format.java", "trimmed.toUpperCase()", "trimmed.toUpperCase().strip()"] });
+  else if (!javascriptOnly) console.log("[assertions] Java: skipped, Maven cannot build offline here");
 } finally {
   server.kill();
   rmSync(scratch, { recursive: true, force: true });
