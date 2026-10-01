@@ -903,6 +903,12 @@ fn catalog_versions(catalog: &str) -> String {
     out
 }
 
+/// Whether a Maven build, through its own pom or a parent's, runs Apache RAT.
+fn checks_license_headers(workspace: &Path) -> bool {
+    fs::read_to_string(workspace.join("pom.xml"))
+        .is_ok_and(|pom| maven_effective(workspace, &pom).contains("apache-rat"))
+}
+
 /// A build file with its warnings-as-errors policy relaxed.
 ///
 /// A project is free to fail its build on any warning, and several good ones
@@ -1032,6 +1038,9 @@ struct InstrumentedWorkspace {
     /// What had to be relaxed in the copy's build files for instrumented code
     /// to compile, named so the user knows rather than infers.
     relaxed: Vec<&'static str>,
+    /// The build checks every file for a license header (Apache RAT), and
+    /// the copy holds Supercov's own runtime and listeners, which carry none.
+    license_check: bool,
     /// Modules Supercov instrumented but cannot attribute, and why they were
     /// left without a listener rather than broken by one.
     unmeasurable: Vec<String>,
@@ -1230,6 +1239,7 @@ fn instrument_workspace(
         write(&path, &updated)?;
     }
     relaxed.dedup();
+    let license_check = build == JvmBuild::Maven && checks_license_headers(workspace);
 
     // The platform listener is compiled from the project's own test sources,
     // so the launcher API it implements has to be on the compile classpath. A
@@ -1393,6 +1403,7 @@ fn instrument_workspace(
         concurrent,
         added_vintage,
         relaxed,
+        license_check,
         unmeasurable,
         modular,
     })
@@ -1570,7 +1581,18 @@ pub fn run_direct_jvm(
             .map_err(|error| error.to_string())?;
         }
 
-        let (command, note) = command_with_fresh_results(instrumented.build, &request.command);
+        let (mut command, note) = command_with_fresh_results(instrumented.build, &request.command);
+        // Apache RAT fails the build on a file without a license header, and
+        // Supercov's runtime and listeners in the copy are such files: every
+        // Apache Commons project stopped before its first test.
+        if instrumented.license_check && !command.iter().any(|a| a.contains("rat.skip")) {
+            command.push("-Drat.skip=true".into());
+            writeln!(
+                diagnostics,
+                "[supercov] added -Drat.skip=true: Apache RAT checks every file in the build for a license header, and the workspace copy holds Supercov's own runtime and listeners, which carry none. Your own build still runs the check."
+            )
+            .map_err(|error| error.to_string())?;
+        }
         if let Some(note) = note {
             writeln!(diagnostics, "[supercov] {note}").map_err(|error| error.to_string())?;
         }
@@ -2057,6 +2079,39 @@ mod tests {
             "the Kotlin DSL has no typed accessor inside allprojects:\n{updated}"
         );
         assert!(updated.contains("plugins.withId(\"java\")"), "{updated}");
+    }
+
+    /// apache/commons-cli takes RAT from commons-parent, and RAT failed the
+    /// copy on Supercov's own files before any test ran.
+    #[test]
+    fn a_license_header_check_is_found_through_the_parent_pom() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rat-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("parent")).unwrap();
+        fs::write(
+            root.join("parent/pom.xml"),
+            "<project><artifactId>parent</artifactId><build><plugins><plugin><groupId>org.apache.rat</groupId><artifactId>apache-rat-plugin</artifactId></plugin></plugins></build></project>",
+        )
+        .unwrap();
+        fs::write(
+            root.join("pom.xml"),
+            "<project><parent><groupId>g</groupId><artifactId>parent</artifactId><version>1</version><relativePath>parent/pom.xml</relativePath></parent></project>",
+        )
+        .unwrap();
+        assert!(checks_license_headers(&root));
+        fs::write(
+            root.join("pom.xml"),
+            "<project><artifactId>plain</artifactId></project>",
+        )
+        .unwrap();
+        assert!(!checks_license_headers(&root));
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

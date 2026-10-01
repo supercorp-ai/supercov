@@ -20,6 +20,7 @@
 
 **Fixed**
 
+- A Maven project that runs Apache RAT, as every Apache Commons project does through its parent pom, runs under Supercov: RAT failed the workspace copy on Supercov's own runtime and listener files, which carry no license header, before any test ran. The copy's command now skips RAT and says so; your own build still runs it.
 - A Kotlin file with a nested class whose primary constructor starts the line after its name (`class Options` / `private constructor(...)`, as in moshi's `JsonReader`) is measured; the parser read the constructor as one of the enclosing class and the file was left out.
 - A test that replaces `globalThis.Buffer`, as axios's `toFormData` tests do, no longer fails under Supercov: the runtime and the evidence journal keep the Buffer they loaded with.
 - A Python script that tests both import and run as `python path/script.py` keeps the lines its imports ran: the direct run made the whole file unmeasured, and one project lost 43 files and six points of line coverage to it. The file is flagged as a lower bound, and a file only ever run directly is still left out. Reported by [@maik-intellicoach](https://github.com/maik-intellicoach). (#40)
