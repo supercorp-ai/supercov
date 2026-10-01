@@ -422,6 +422,25 @@ Measured by applying random changes and running the suite:
 `--ran-changed` never dropped a failing test; `--asserting` dropped 5 to 8% of
 them. `assess --changed` cost about a tenth of a cent per change.
 
+Measured on real history: at each of a project's recent commits, the source
+the commit replaced was put back -- someone reintroducing what it fixed -- and
+the commit's own tests run against it:
+
+| Project | Commits (breaking) | Failing tests | Kept by coverage's set | Kept by `--asserting` | Tests selected (coverage / `--asserting`) of all |
+| --- | --- | --- | --- | --- | --- |
+| h11 (Python) | 60 (13) | 27 | 27 | 27 | 25.2 / 24.9 of 75 |
+| go-version (Go) | 24 (2) | 3 | 3 | 3 | 15.2 / 14.1 of 25 |
+| dry-inflector (Ruby) | 12 (7) | 26 | 26 | 26 | 813 / 718 of 1,109 |
+| uuid (TypeScript, node:test) | 4 (3) | 6 | 6 | 6 | 13.2 / 11.5 of 64 |
+| dtolnay/semver (Rust) | 20 (0) | 0 | -- | -- | 27.9 / 25.9 of 38 |
+| commons-cli (Java) | 15 (7) | 12 | 12 | 12 | 159 / 143 of 985 |
+
+No failing test was left out of the set to run. On real commits the
+assessment narrows little -- Jev judges most tests that ran a changed line to
+catch the change -- and its ranking seldom puts a failing test first (in the
+first three for 6 of 32 breaking commits). After a project's first
+assessment, each commit cost under a cent.
+
 ## Combine shards
 
 ```sh supercov

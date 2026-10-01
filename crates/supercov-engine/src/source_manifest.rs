@@ -683,37 +683,15 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         })
         .collect::<Vec<_>>();
 
-    // Code that runs once per process -- a static initializer, a module's
-    // top level -- is credited to the first test to reach it, so a test that
-    // only reads what it set up runs nothing recorded in that file. For a
-    // change to such code, a test whose own file names one of the file's
-    // top-level declarations is affected too.
-    let named_by_tests = changes
-        .iter()
-        .filter_map(|(file, change)| match change {
-            FileChange::Code {
-                before,
-                narrow: false,
-                ..
-            } => {
-                let stem = file.rsplit('/').next()?.split('.').next()?.to_owned();
-                let mut names = before
-                    .units
-                    .iter()
-                    .filter(|unit| unit.parent.is_none_or(|p| before.units[p].path.is_empty()))
-                    .filter_map(|unit| unit.path.rsplit('.').next().map(str::to_owned))
-                    .filter(|name| name.len() > 2)
-                    .collect::<BTreeSet<_>>();
-                if stem.len() > 2
-                    && !matches!(stem.as_str(), "mod" | "lib" | "main" | "index" | "__init__")
-                {
-                    names.insert(stem);
-                }
-                Some((*file, names))
-            }
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>();
+    // A JVM class's static initializer runs once per process and is credited
+    // to the first test to load the class, so a test that only reads a static
+    // field it set ran nothing recorded in that file. For a change to a
+    // class's declarations, a test whose own file names the class is affected
+    // too. (A module's top level in Python, Ruby, JavaScript or Go runs once
+    // as well, but replaying their histories missed no failing test there and
+    // the same rule grew dry-inflector's selection from 73% to 90% of its
+    // tests, so it is the JVM's alone.)
+    let named_by_tests = named_by_tests(&changes);
     let mut test_sources = BTreeMap::<&str, Option<String>>::new();
 
     let mut affected = Vec::new();
@@ -871,6 +849,44 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         "meaning": "Tests whose recorded execution a change since the run could have reached, and those whose execution nothing recorded: a test that ran alongside others has no coverage of its own, so it is undetermined whenever a change reaches anything the run covered. Run both. A file the run never captured, a dependency or a configuration change is not seen here; see workingTree."
     }))
 }
+/// For each changed JVM file whose declarations changed, the names a test
+/// file may use to reach it: its top-level classes and its own name.
+fn named_by_tests<'a>(
+    changes: &BTreeMap<&'a str, FileChange<'_>>,
+) -> BTreeMap<&'a str, BTreeSet<String>> {
+    changes
+        .iter()
+        .filter(|(file, _)| {
+            [".java", ".kt", ".kts", ".groovy", ".scala"]
+                .iter()
+                .any(|extension| file.ends_with(extension))
+        })
+        .filter_map(|(file, change)| match change {
+            FileChange::Code {
+                before,
+                narrow: false,
+                ..
+            } => {
+                let stem = file.rsplit('/').next()?.split('.').next()?.to_owned();
+                let mut names = before
+                    .units
+                    .iter()
+                    .filter(|unit| unit.parent.is_none_or(|p| before.units[p].path.is_empty()))
+                    .filter_map(|unit| unit.path.rsplit('.').next().map(str::to_owned))
+                    .filter(|name| name.len() > 2)
+                    .collect::<BTreeSet<_>>();
+                if stem.len() > 2
+                    && !matches!(stem.as_str(), "mod" | "lib" | "main" | "index" | "__init__")
+                {
+                    names.insert(stem);
+                }
+                Some((*file, names))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>()
+}
+
 /// Whether `text` holds `word` as a whole identifier.
 fn names_word(text: &str, word: &str) -> bool {
     text.match_indices(word).any(|(at, _)| {
@@ -1153,20 +1169,13 @@ mod tests {
                 .starts_with("test file changed"),
             "{report}"
         );
-        // Top-level code the test never ran a statement of -- it runs once,
-        // at import, credited to whoever imported first -- in a file the
-        // test names: affected, and it says why.
+        // Top-level code in a file the test names but never ran a statement
+        // of: outside the JVM, not affected (a JVM class's static initializer
+        // is the case the naming rule is for).
         fs::write(root.join("tests/app.test.js"), test).unwrap();
         fs::write(root.join("src/config.js"), config.replace("= 5", "= 6")).unwrap();
         let report = affected_tests(&root, &run).unwrap();
-        assert_eq!(names(&report, "affected"), ["test"], "{report}");
-        assert!(
-            report["affected"][0]["reasons"][0]
-                .as_str()
-                .unwrap()
-                .contains("the test file names config"),
-            "{report}"
-        );
+        assert!(names(&report, "affected").is_empty(), "{report}");
         fs::write(root.join("src/config.js"), config).unwrap();
         // A source file removed.
         fs::remove_file(root.join("src/app.js")).unwrap();
@@ -1176,6 +1185,41 @@ mod tests {
             "src/app.js removed (this test ran code in it)"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// apache/commons-cli's `Converter.CLASS`: a static field set in a
+    /// static initializer credited to whichever test loaded the class first.
+    /// Its tests are reached by the class's name; a JavaScript module's top
+    /// level is not.
+    #[test]
+    fn a_jvm_class_changed_in_its_declarations_is_reached_by_its_name() {
+        let java = "package app;\nclass Converter {\n    static final Object CLASS = null;\n    static int size(int n) {\n        return n;\n    }\n}\n";
+        let before = FileFingerprint::read("src/app/Converter.java", java);
+        let after = FileFingerprint::read(
+            "src/app/Converter.java",
+            &java.replace("CLASS = null", "CLASS = new Object()"),
+        );
+        let js = "export const LIMIT = 5;\n";
+        let js_before = FileFingerprint::read("src/config.js", js);
+        let js_after = FileFingerprint::read("src/config.js", &js.replace('5', "6"));
+        let changes = BTreeMap::from([
+            (
+                "src/app/Converter.java",
+                file_change(Some(&before), Some(&after), Some(&[])).unwrap(),
+            ),
+            (
+                "src/config.js",
+                file_change(Some(&js_before), Some(&js_after), Some(&[])).unwrap(),
+            ),
+        ]);
+        let named = named_by_tests(&changes);
+        assert_eq!(
+            named.get("src/app/Converter.java"),
+            Some(&BTreeSet::from(["Converter".to_owned()]))
+        );
+        assert!(!named.contains_key("src/config.js"));
+        assert!(names_word("assertEquals(Converter.CLASS, x)", "Converter"));
+        assert!(!names_word("ConverterTests", "Converter"));
     }
 
     #[test]
