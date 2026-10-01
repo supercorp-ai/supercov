@@ -3007,6 +3007,187 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn a_damaged_record_is_refused_with_what_is_wrong() {
+        // The runtime writes none of these. Another version of it, another
+        // run's leftovers or a damaged write can, and each is refused rather
+        // than read as evidence.
+        let source = "def f(a, b):\n    if a and b:\n        return 1\n    return 0\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let decision = obligations.plan.decisions[0].id.clone();
+        let process = json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]});
+        let phase = json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"t::a","retry":0,"phase":"call"});
+        let outcome = json!({"t":"outcome","worker":"main","test":"t::a","retry":0,"phase":"call","outcome":"passed","xfail":false});
+        let with = |record: &serde_json::Value, key: &str, value: serde_json::Value| {
+            let mut changed = record.clone();
+            changed[key] = value;
+            changed
+        };
+        let read = |name: &str, records: Vec<serde_json::Value>| {
+            let directory = temporary(name);
+            write_transport(&directory.join("main.1.mmap"), &records, 0);
+            let said = match build_python_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            ) {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => error.to_string(),
+            };
+            fs::remove_dir_all(directory).unwrap();
+            said
+        };
+        let exit = json!({"t":"exit","at":9});
+        assert_eq!(
+            read(
+                "record-valid",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    outcome.clone(),
+                    exit.clone()
+                ]
+            ),
+            "accepted"
+        );
+        for (name, records, reason) in [
+            (
+                "record-version",
+                vec![with(&process, "v", json!(2))],
+                "unsupported Python evidence version 2",
+            ),
+            (
+                "record-run",
+                vec![with(&process, "run", json!("run-0"))],
+                "belongs to run run-0, expected run-1",
+            ),
+            (
+                "record-pid",
+                vec![with(&process, "pid", json!(7))],
+                "does not match the transport owner",
+            ),
+            (
+                "record-python",
+                vec![with(&process, "python", json!("3.8.1"))],
+                "the test command ran Python 3.8.1",
+            ),
+            (
+                "record-context",
+                vec![process.clone(), with(&phase, "ctx", json!(0))],
+                "phase context 0 is reserved",
+            ),
+            (
+                "record-phase",
+                vec![process.clone(), with(&phase, "phase", json!("body"))],
+                "unknown pytest phase",
+            ),
+            (
+                "record-identity",
+                vec![process.clone(), with(&phase, "test", json!(" "))],
+                "must name a worker and test",
+            ),
+            (
+                "record-outcome-phase",
+                vec![process.clone(), with(&outcome, "phase", json!("body"))],
+                "unknown test outcome phase",
+            ),
+            (
+                "record-outcome",
+                vec![process.clone(), with(&outcome, "outcome", json!("maybe"))],
+                "unknown test outcome",
+            ),
+            (
+                "record-runner",
+                vec![process.clone(), with(&outcome, "runner", json!("nose"))],
+                "unknown Python test runner",
+            ),
+            (
+                "record-two-runners",
+                vec![
+                    process.clone(),
+                    outcome.clone(),
+                    with(&outcome, "runner", json!("unittest")),
+                ],
+                "one attempt was reported by two runners",
+            ),
+            (
+                "record-digits",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"dec","ctx":1,"id":decision,"v":"23","o":1}),
+                ],
+                "decision vector digits must be 0, 1 or 2",
+            ),
+            (
+                "record-decision-outcome",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"dec","ctx":1,"id":decision,"v":"22","o":2}),
+                ],
+                "decision outcome must be 0 or 1",
+            ),
+            (
+                "record-batch-digits",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"decs","ctx":1,"v":[[decision, "", 1]]}),
+                ],
+                "decision vector digits must be 0, 1 or 2",
+            ),
+            (
+                "record-batch-outcome",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"decs","ctx":1,"v":[[decision, "21", 3]]}),
+                ],
+                "decision outcome must be 0 or 1",
+            ),
+            (
+                "record-unknown-hit",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"hit","ctx":1,"id":"py:nowhere"}),
+                    outcome.clone(),
+                    exit.clone(),
+                ],
+                "unknown obligation: py:nowhere",
+            ),
+            (
+                "record-unknown-decision",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"dec","ctx":1,"id":"py:nodecision","v":"22","o":1}),
+                    outcome.clone(),
+                    exit.clone(),
+                ],
+                "unknown obligation: py:nodecision",
+            ),
+            (
+                "record-short-vector",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"dec","ctx":1,"id":decision,"v":"2","o":1}),
+                    outcome.clone(),
+                    exit.clone(),
+                ],
+                "reported 1 condition values, expected 2",
+            ),
+        ] {
+            let said = read(name, records);
+            assert!(said.contains(reason), "{name}: {said}");
+        }
+    }
+
     // Version 2 checksums with CRC-32, version 1 with FNV-1a. A runtime older
     // than this reader -- evidence kept from a failed run, say -- still reads,
     // by its own checksum; a payload that does not match its checksum, and a
