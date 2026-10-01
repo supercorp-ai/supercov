@@ -939,7 +939,7 @@ fn top_level_operands(e: &str) -> Vec<String> {
             _ if depth == 0 => {
                 if let Some(op) = [" - ", " * ", " / ", " % ", " + "]
                     .iter()
-                    .find(|op| e[i..].starts_with(**op))
+                    .find(|op| e.get(i..).is_some_and(|rest| rest.starts_with(**op)))
                 {
                     parts.push(e[last..i].trim().to_owned());
                     i += op.len();
@@ -1235,7 +1235,8 @@ fn integer_shaped(e: &str) -> bool {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
             _ if depth == 0 => {
-                let rest = &e[i..];
+                // A byte inside a multi-byte character starts no operator.
+                let Some(rest) = e.get(i..) else { continue };
                 if [" - ", " * ", " / ", " % ", " << ", " >> ", " + ", " ^ "]
                     .iter()
                     .any(|op| rest.starts_with(op))
@@ -1477,7 +1478,8 @@ fn boolean(e: &str) -> bool {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
             _ if depth == 0 => {
-                let rest = &e[i..];
+                // A byte inside a multi-byte character starts no operator.
+                let Some(rest) = e.get(i..) else { continue };
                 if ["==", "!=", "<=", ">=", "&&", "||", " < ", " > "]
                     .iter()
                     .any(|op| rest.starts_with(op))
@@ -1753,6 +1755,20 @@ mod replacement_tests {
             elsewhere[&2][0].1,
             "Err(Error::new(crate::error::ErrorKind::Empty))"
         );
+    }
+
+    /// Supercov's own test fixture `"é🚀x".repeat(700)`: reading an
+    /// expression byte by byte must not slice inside a character.
+    #[test]
+    fn an_expression_with_multibyte_text_is_read_without_slicing_a_character() {
+        let e = "\"é🚀x\".repeat(700) == text && n - 1 > 0";
+        assert!(boolean(e));
+        assert!(!integer_shaped("\"é🚀x\".repeat(700)"));
+        assert_eq!(
+            replacement("\"é🚀x\".repeat(700)", None),
+            "Default::default()"
+        );
+        assert_eq!(top_level_operands("\"é\".len() - 1"), ["\"é\".len()", "1"]);
     }
 
     #[test]
