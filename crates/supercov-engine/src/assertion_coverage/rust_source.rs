@@ -3,6 +3,7 @@
 use super::{Change, Located, Starts, line_of, line_starts};
 use ra_ap_syntax::{
     AstNode, Edition, SourceFile,
+    ast::HasName,
     ast::{self, BinaryOp},
 };
 use std::collections::BTreeMap;
@@ -113,7 +114,7 @@ pub(super) type Replacements = BTreeMap<usize, Vec<(String, String)>>;
 /// `Err` an `Ok`, a literal is swapped for another; the type comes from the
 /// function's signature or the `let`'s annotation, else from the
 /// expression's shape.
-pub(super) fn replacements(source: &str) -> Replacements {
+pub(super) fn replacements(source: &str, signatures: &Signatures) -> Replacements {
     let root = parse(source).tree();
     let starts = line_starts(source);
     let mut out = Replacements::new();
@@ -130,22 +131,27 @@ pub(super) fn replacements(source: &str) -> Replacements {
                 ast::Stmt::LetStmt(s) => {
                     if let Some(value) = s.initializer() {
                         let ty = s.ty().map(|t| text(t.syntax()));
-                        push(
-                            s.syntax(),
-                            replacement(&text(value.syntax()), ty.as_deref()),
-                        );
+                        let pattern = s.pat().map(|p| text(p.syntax())).unwrap_or_default();
+                        // `let Some(x) = e else { .. }`: the value that makes
+                        // the `else` run.
+                        let changed = if s.let_else().is_some() && pattern.starts_with("Some(") {
+                            "None".to_owned()
+                        } else {
+                            typed(&value, ty.as_deref(), signatures)
+                        };
+                        push(s.syntax(), changed);
                     }
                 }
                 ast::Stmt::ExprStmt(s) => {
                     if let Some(e) = s.expr() {
-                        value_change(&e, &mut push, None);
+                        value_change(&e, &mut push, None, signatures);
                     }
                 }
                 ast::Stmt::Item(_) => {}
             }
         }
         if let Some(tail) = list.tail_expr() {
-            value_change(&tail, &mut push, Some(&list));
+            value_change(&tail, &mut push, Some(&list), signatures);
         }
     }
     out
@@ -155,21 +161,18 @@ fn value_change(
     e: &ast::Expr,
     push: &mut impl FnMut(&ra_ap_syntax::SyntaxNode, String),
     tail_of: Option<&ast::StmtList>,
+    signatures: &Signatures,
 ) {
-    let text = |node: &ra_ap_syntax::SyntaxNode| node.text().to_string();
     match e {
         ast::Expr::ReturnExpr(r) => {
             if let Some(value) = r.expr() {
                 let ty = return_type(r.syntax());
-                push(
-                    r.syntax(),
-                    replacement(&text(value.syntax()), ty.as_deref()),
-                );
+                push(r.syntax(), typed(&value, ty.as_deref(), signatures));
             }
         }
         ast::Expr::BinExpr(b) if matches!(b.op_kind(), Some(BinaryOp::Assignment { op: None })) => {
             if let Some(rhs) = b.rhs() {
-                push(b.syntax(), replacement(&text(rhs.syntax()), None));
+                push(b.syntax(), typed(&rhs, None, signatures));
             }
         }
         ast::Expr::IfExpr(_)
@@ -179,10 +182,300 @@ fn value_change(
         _ => {
             if let Some(list) = tail_of {
                 let ty = tail_type(list);
-                push(e.syntax(), replacement(&text(e.syntax()), ty.as_deref()));
+                push(e.syntax(), typed(e, ty.as_deref(), signatures));
             }
         }
     }
+}
+
+/// What the crate itself says about types: each function's return type, by
+/// name, and each enum's unit variants. A name two functions share with
+/// different return types says nothing.
+#[derive(Debug, Default)]
+pub(super) struct Signatures {
+    returns: BTreeMap<String, Option<String>>,
+    enums: BTreeMap<String, Vec<String>>,
+}
+
+pub(super) fn signatures<'a>(sources: impl Iterator<Item = &'a str>) -> Signatures {
+    let mut out = Signatures::default();
+    for source in sources {
+        let root = parse(source).tree();
+        for node in root.syntax().descendants() {
+            if let Some(f) = ast::Fn::cast(node.clone()) {
+                let (Some(name), Some(ty)) = (f.name(), f.ret_type().and_then(|r| r.ty())) else {
+                    continue;
+                };
+                let mut ty = ty.syntax().text().to_string();
+                // `Self` is the type the impl is for.
+                if let Some(owner) = f
+                    .syntax()
+                    .ancestors()
+                    .find_map(ast::Impl::cast)
+                    .and_then(|i| i.self_ty())
+                {
+                    let owner = owner.syntax().text().to_string();
+                    ty = replace_word(&ty, "Self", &owner);
+                }
+                let ty = ty.split_whitespace().collect::<String>();
+                out.returns
+                    .entry(name.text().to_string())
+                    .and_modify(|known| {
+                        if known.as_deref() != Some(ty.as_str()) {
+                            *known = None;
+                        }
+                    })
+                    .or_insert(Some(ty));
+            } else if let Some(e) = ast::Enum::cast(node) {
+                let Some(name) = e.name() else { continue };
+                let units = e
+                    .variant_list()
+                    .map(|list| {
+                        list.variants()
+                            .filter(|v| v.field_list().is_none())
+                            .filter_map(|v| v.name().map(|n| n.text().to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                out.enums.insert(name.text().to_string(), units);
+            }
+        }
+    }
+    out
+}
+
+/// `text` with every whole-word `from` replaced by `to`.
+fn replace_word(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(from) {
+        let before = rest[..at].chars().last();
+        let after = rest[at + from.len()..].chars().next();
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        out.push_str(&rest[..at]);
+        out.push_str(if word(before) || word(after) {
+            from
+        } else {
+            to
+        });
+        rest = &rest[at + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The type of an expression, where the crate's own signatures say it: a
+/// call to one of its functions or methods, through `?`, parentheses and an
+/// `unsafe` block.
+fn infer(e: &ast::Expr, signatures: &Signatures) -> Option<String> {
+    let returns = |name: &str| signatures.returns.get(name).cloned().flatten();
+    match e {
+        ast::Expr::ParenExpr(p) => infer(&p.expr()?, signatures),
+        ast::Expr::TryExpr(t) => unwrap_try(&infer(&t.expr()?, signatures)?),
+        ast::Expr::CallExpr(c) => match c.expr()? {
+            ast::Expr::PathExpr(p) => returns(p.path()?.segment()?.name_ref()?.text()),
+            _ => None,
+        },
+        ast::Expr::MethodCallExpr(m) => returns(m.name_ref()?.text()),
+        ast::Expr::BlockExpr(b) => infer(&b.stmt_list()?.tail_expr()?, signatures),
+        _ => None,
+    }
+}
+
+/// `Result<T, E>` or `Option<T>` -> `T`: what `?` leaves.
+fn unwrap_try(ty: &str) -> Option<String> {
+    let open = ty.find('<')?;
+    let head = &ty[..open];
+    if !(head.ends_with("Result") || head.ends_with("Option")) || !ty.ends_with('>') {
+        return None;
+    }
+    top_level(&ty[open + 1..ty.len() - 1], ',')
+        .into_iter()
+        .next()
+}
+
+/// `text` split at each `separator` outside brackets.
+fn top_level(text: &str, separator: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+    for c in text.chars() {
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            _ => {}
+        }
+        if c == separator && depth == 0 {
+            parts.push(current.trim().to_owned());
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_owned());
+    }
+    parts
+}
+
+/// A tuple type or expression's elements, or nothing if it is not one.
+fn tuple(text: &str) -> Option<Vec<String>> {
+    let inner = text.trim().strip_prefix('(')?.strip_suffix(')')?;
+    // `(a)(b)` is not a tuple: the brackets must enclose the whole.
+    let mut depth = 0i32;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 && i < inner.len() {
+            return None;
+        }
+    }
+    let parts = top_level(inner, ',');
+    (parts.len() > 1).then_some(parts)
+}
+
+/// A value change for an expression: [`replacement`] where it knows the
+/// type, else from the crate's own signatures, a tuple's elements, an enum's
+/// other variants or an integer's shape.
+fn typed(e: &ast::Expr, ty: Option<&str>, signatures: &Signatures) -> String {
+    let text = e.syntax().text().to_string();
+    let first = replacement(&text, ty);
+    if first != "Default::default()" {
+        return first;
+    }
+    let inferred = ty.map(str::to_owned).or_else(|| infer(e, signatures));
+    if let Some(t) = &inferred {
+        let again = replacement(&text, Some(t));
+        if again != "Default::default()" {
+            return again;
+        }
+    }
+    other_value(&text, inferred.as_deref(), signatures).unwrap_or(first)
+}
+
+fn other_value(e: &str, ty: Option<&str>, signatures: &Signatures) -> Option<String> {
+    let e = e.trim();
+    let ty = ty.map(|t| t.split_whitespace().collect::<String>());
+    if let Some(variant) = other_variant(e, ty.as_deref(), signatures) {
+        return Some(variant);
+    }
+    let types = ty.as_deref().and_then(tuple);
+    // A tuple written out: one element changed in place.
+    if let Some(elements) = tuple(e) {
+        for (i, element) in elements.iter().enumerate() {
+            let element_ty = types
+                .as_ref()
+                .filter(|t| t.len() == elements.len())
+                .map(|t| t[i].as_str());
+            let changed = match replacement(element, element_ty) {
+                r if r != "Default::default()" && r != *element => Some(r),
+                _ => other_variant(element, element_ty, signatures),
+            };
+            if let Some(changed) = changed {
+                let mut out = elements.clone();
+                out[i] = changed;
+                return Some(format!("({})", out.join(", ")));
+            }
+        }
+        return None;
+    }
+    // A tuple computed: computed, then one element changed.
+    if let Some(types) = types {
+        for (i, element_ty) in types.iter().enumerate() {
+            let field = format!("v.{i}");
+            let changed = if INTEGERS.contains(&element_ty.as_str()) {
+                format!("{field} ^ 1")
+            } else {
+                replacement(&field, Some(element_ty))
+            };
+            if changed != "Default::default()" {
+                return Some(format!("{{ let mut v = {e}; v.{i} = {changed}; v }}"));
+            }
+        }
+        return None;
+    }
+    if ty.as_deref().is_some_and(|t| INTEGERS.contains(&t)) || integer_shaped(e) {
+        return Some(format!("({e}) ^ 1"));
+    }
+    None
+}
+
+/// `Op::Exact` -> `Op::Greater`: another unit variant of an enum the crate
+/// defines.
+fn other_variant(e: &str, ty: Option<&str>, signatures: &Signatures) -> Option<String> {
+    let (path, variant) = e.rsplit_once("::")?;
+    if !variant.chars().all(|c| c.is_alphanumeric() || c == '_')
+        || !path
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+    {
+        return None;
+    }
+    let name = path.rsplit("::").next()?;
+    let name = if name == "Self" { ty? } else { name };
+    let variants = signatures.enums.get(name)?;
+    if !variants.iter().any(|v| v == variant) {
+        return None;
+    }
+    let other = variants.iter().find(|v| *v != variant)?;
+    Some(format!("{path}::{other}"))
+}
+
+/// Whether an expression is integer arithmetic by its shape: an operator
+/// outside brackets, with a length, an integer literal or an integer cast
+/// among its operands, or an integer-only method.
+fn integer_shaped(e: &str) -> bool {
+    if e.contains('"') || e.contains('\'') || e.chars().any(|c| c == '.') && float_literal(e) {
+        return false;
+    }
+    let methods = [
+        ".wrapping_add(",
+        ".wrapping_sub(",
+        ".wrapping_mul(",
+        ".rotate_left(",
+        ".rotate_right(",
+        ".count_ones()",
+        ".leading_zeros()",
+        ".trailing_zeros()",
+    ];
+    if methods.iter().any(|m| e.contains(m)) {
+        return true;
+    }
+    let mut depth = 0i32;
+    let mut operator = false;
+    for (i, c) in e.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ if depth == 0 => {
+                let rest = &e[i..];
+                if [" - ", " * ", " / ", " % ", " << ", " >> ", " + ", " ^ "]
+                    .iter()
+                    .any(|op| rest.starts_with(op))
+                {
+                    operator = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    let evidence = e.contains(".len()")
+        || e.contains(".get()")
+        || INTEGERS.iter().any(|t| e.contains(&format!(" as {t}")))
+        || e.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|word| integer_literal(word).is_some());
+    operator && evidence
+}
+
+/// Whether an expression holds a float literal (`0.5`, `1e3`).
+fn float_literal(e: &str) -> bool {
+    let bytes = e.as_bytes();
+    bytes
+        .windows(3)
+        .any(|w| w[0].is_ascii_digit() && w[1] == b'.' && w[2].is_ascii_digit())
 }
 
 fn parse(source: &str) -> ra_ap_syntax::Parse<SourceFile> {
@@ -591,10 +884,37 @@ mod replacement_tests {
         assert_eq!(replacement("|x| x == 1", None), "Default::default()");
     }
 
+    /// dtolnay/semver's shapes that used to fall back to
+    /// `Default::default()`, for types that have none: the crate's own
+    /// signatures, tuples, enums, `let`-`else` and integer arithmetic.
+    #[test]
+    fn a_value_with_no_default_takes_one_from_the_crate() {
+        let lib =
+            "pub enum Op {\n    Exact,\n    Greater,\n    Wildcard,\n}\npub struct Version;\n";
+        let source = "fn numeric_identifier(input: &str, pos: Position) -> Result<(u64, &str), Error> {\n    todo!()\n}\nfn dot(input: &str, pos: Position) -> Result<&str, Error> {\n    todo!()\n}\nfn op(input: &str) -> (Op, &str) {\n    if input.starts_with('=') {\n        (Op::Exact, &input[1..])\n    } else {\n        (Op::Wildcard, input)\n    }\n}\nfn minor(text: &str, pos: Position) -> Result<(Option<u64>, &str), Error> {\n    let (major, text) = numeric_identifier(text, pos)?;\n    let text = dot(text, pos)?;\n    let Some(minor) = cmp.minor else {\n        return Ok((None, text));\n    };\n    let size = bytes_for_varint(len) + len.get();\n    let diff = modified.wrapping_sub(original as usize);\n    let v = Version::parse(text);\n    Ok((Some(minor), text))\n}\n";
+        let signatures = signatures([lib, source].into_iter());
+        let r = replacements(source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        // The tuple a call returns, one element changed after it runs.
+        assert_eq!(
+            at(15),
+            "{ let mut v = numeric_identifier(text, pos)?; v.0 = v.0 ^ 1; v }"
+        );
+        assert_eq!(at(16), "\"\"");
+        assert_eq!(at(17), "None");
+        // A tuple written out: an enum's other variant, in place.
+        assert_eq!(at(9), "(Op::Greater, &input[1..])");
+        assert_eq!(at(11), "(Op::Exact, input)");
+        assert_eq!(at(20), "(bytes_for_varint(len) + len.get()) ^ 1");
+        assert_eq!(at(21), "(modified.wrapping_sub(original as usize)) ^ 1");
+        // A struct the crate gives no value for stays as it was.
+        assert_eq!(at(22), "Default::default()");
+    }
+
     #[test]
     fn a_block_value_takes_the_function_type_only_when_it_is_returned() {
         let source = "fn f(x: u8) -> bool {\n    if x > 1 {\n        x == 2\n    } else {\n        false\n    }\n}\nfn g() -> u8 {\n    let y = {\n        3\n    };\n    y\n}\n";
-        let r = replacements(source);
+        let r = replacements(source, &Signatures::default());
         assert_eq!(r[&3][0].1, "!(x == 2)");
         assert_eq!(r[&5][0].1, "true");
         // A block assigned to `y` is not the function's value.

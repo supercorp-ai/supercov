@@ -266,6 +266,16 @@ pub fn population(
     }
     let mut changes = BTreeMap::<String, BTreeMap<usize, Vec<(String, Option<Change>)>>>::new();
     let mut replacements = BTreeMap::<String, rust_source::Replacements>::new();
+    let signatures = if language == Language::Rust {
+        rust_source::signatures(
+            sources
+                .iter()
+                .filter(|(file, _)| file.ends_with(".rs"))
+                .map(|(_, source)| source.as_str()),
+        )
+    } else {
+        rust_source::Signatures::default()
+    };
     let mut statements = Vec::new();
     let mut seen = BTreeSet::new();
     // Python and Ruby record an `elif`/`elsif`, and Go, Rust and the JVM
@@ -322,7 +332,7 @@ pub fn population(
             let first = first.trim_end_matches(';');
             replacements
                 .entry(file.clone())
-                .or_insert_with(|| rust_source::replacements(source))
+                .or_insert_with(|| rust_source::replacements(source, &signatures))
                 .get(&line)
                 .and_then(|all| all.iter().find(|(t, _)| t.starts_with(first)))
                 .map(|(_, r)| r.clone())

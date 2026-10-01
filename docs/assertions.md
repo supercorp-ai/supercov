@@ -51,8 +51,12 @@ in Java and Kotlin. Rust has no value that fits every type, so it takes a
 different value of the same type, from the function's signature or the
 `let`'s annotation where there is one: a boolean negated, an `Ok` turned into
 an `Err` and back, a literal swapped (`false` for `true`, `1` for `0`), an
-`Ordering` reversed, `None`, `""` or `0`; `Default::default()` only where no
-type is known.
+`Ordering` reversed, `None`, `""` or `0`. Where nothing is annotated, the type
+comes from the crate's own signatures (`let (major, text) = numeric(text)?;`
+takes `numeric`'s return type): a tuple gets one element changed, an enum
+another of its variants, integer arithmetic its lowest bit flipped, and
+`let Some(x) = .. else` gets `None`. `Default::default()` is left only where
+no type is known.
 
 Imports, declarations without a value, and function, class and type
 declarations are not assessed; in Python neither are `pass`, `global`,
@@ -128,7 +132,7 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   | Project | Checked | Right | Flagged (truly not asserted) | Share reported / true |
   | --- | --- | --- | --- | --- |
   | google/uuid (Go) | 339 | 294 | 34 (26) | 90.0% / 81.4% |
-  | dtolnay/semver (Rust) | 150 of a sample of 200 | 144 | 5 (1) | 96.7% / 98.0% |
+  | dtolnay/semver (Rust) | 177 of a sample of 200 | 168 | 8 (2) | 95.5% / 97.2% |
   | apache/commons-cli (Java) | 196 of a sample of 200 | 167 | 49 (33) | 75.0% / 76.5% |
   | dry-rb/dry-inflector (Ruby 3.4) | 157 | 141 | 20 (8) | 87.3% / 92.4% |
   | hashicorp/go-version (Go, held out) | 257 | 245 | 29 (19) | 88.7% / 91.8% |
@@ -138,8 +142,8 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   The first five were used to shape how tests are shown to Jev; the held-out
   ones were assessed before their ground truth was taken and not tuned on.
   A Rust change that falls back to `Default::default()` for a type without
-  one cannot be made, so it cannot be checked this way; that was a quarter of
-  semver's sample. Ruby 3.3 credits each line to the first test that runs it
+  one (a struct the crate builds by hand, a pointer) cannot be made, so it
+  cannot be checked this way; that was about a tenth of semver's sample. Ruby 3.3 credits each line to the first test that runs it
   (3.4 and newer credit every test), so on 3.3 most statements are asked of a
   single test and the share reads low.
 

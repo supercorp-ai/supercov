@@ -12,7 +12,7 @@ Measure code quality with npx supercov.
 
 Scoring needs a [TypeSafe AI](https://typesafe.ai) API key, and your coding agent will usually ask you for it. It costs about a cent per megabyte of source. Coverage needs no account, config file, import, custom reporter, or hosted service. Supercov is local, free, open source, and MIT licensed.
 
-[Website](https://supercov.com) · [Documentation](https://supercov.com/docs) · [npm](https://www.npmjs.com/package/supercov) · [GitHub](https://github.com/supercorp-ai/supercov)
+[Website](https://supercov.com) · [Documentation](https://supercov.com/docs) · [npm](https://www.npmjs.com/package/supercov) · [GitHub](https://github.com/supercorp-ai/supercov) · [Discord](https://discord.gg/CudcAH53yF)
 
 Supported languages: [JavaScript](https://supercov.com/docs/javascript) · [TypeScript](https://supercov.com/docs/javascript) · [Rust](https://supercov.com/docs/rust) · [Python](https://supercov.com/docs/python) · [Ruby](https://supercov.com/docs/ruby) · [Go](https://supercov.com/docs/go) · [Java](https://supercov.com/docs/java) · [Kotlin](https://supercov.com/docs/kotlin).
 
@@ -375,6 +375,10 @@ npx supercov runs clean             # remove all runs and the build cache
 ## Free and open source
 
 [MIT licensed](LICENSE). Inspect, extend, and run it anywhere.
+
+## Community
+
+Ask questions, share what you measured, and talk to the people building Supercov on [Discord](https://discord.gg/CudcAH53yF).
 
 ## Contributors
 
