@@ -2071,7 +2071,6 @@ type SpanKey = (u32, u32);
 #[derive(Default)]
 struct SafetyAnalysis {
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
     semantic_limitations: Vec<CandidateLimitation>,
     dynamic_limitations: Vec<CandidateLimitation>,
 }
@@ -2132,7 +2131,6 @@ struct SafetyScanner<'s> {
     file: &'s str,
     source_reads: HashSet<String>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
     function_limitations: Vec<CandidateLimitation>,
     with_limitations: Vec<CandidateLimitation>,
     dynamic_limitations: Vec<CandidateLimitation>,
@@ -2583,7 +2581,6 @@ impl<'s> SafetyScanner<'s> {
             file,
             source_reads: HashSet::new(),
             source_sensitive_functions: HashSet::new(),
-            with_statements: HashSet::new(),
             function_limitations: Vec::new(),
             with_limitations: Vec::new(),
             dynamic_limitations: Vec::new(),
@@ -2685,7 +2682,6 @@ impl<'a> Traverse<'a, ()> for SafetyScanner<'_> {
         node: &mut WithStatement<'a>,
         _context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.with_statements.insert(span_key(node.span));
         let limitation = self.limitation(
             node.span,
             "semantic-safety",
@@ -2757,7 +2753,6 @@ fn analyze_safety<'a>(
     semantic_limitations.extend(scanner.with_limitations);
     SafetyAnalysis {
         source_sensitive_functions: scanner.source_sensitive_functions,
-        with_statements: scanner.with_statements,
         semantic_limitations,
         dynamic_limitations: scanner.dynamic_limitations,
     }
@@ -2996,7 +2991,6 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
-        with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -3231,7 +3225,6 @@ fn instrument_candidate_with_binding(
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
-        with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -3454,7 +3447,6 @@ fn instrument_candidate_with_binding(
         probe_file_v2: probe_file_v2.clone(),
         targets: statement_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     statement_transformer.visit_program(&mut parsed.program);
     let mut function_transformer = FunctionProbeTransformer {
@@ -3479,7 +3471,6 @@ fn instrument_candidate_with_binding(
         probe_file_v2: probe_file_v2.clone(),
         targets: optional_member_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     optional_transformer.visit_program(&mut parsed.program);
     let mut call_transformer = OptionalCallTransformer::new(
@@ -3491,7 +3482,6 @@ fn instrument_candidate_with_binding(
         optional_call_sites,
         call_analysis.roots,
         safety.source_sensitive_functions.clone(),
-        safety.with_statements.clone(),
     );
     call_transformer.visit_program(&mut parsed.program);
     let mut default_transformer = DefaultTransformer {
@@ -3507,7 +3497,6 @@ fn instrument_candidate_with_binding(
         active_declaration: Vec::new(),
         parameter_pattern_depth: 0,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     default_transformer.visit_program(&mut parsed.program);
     let mut extended_transformer = ExtendedTransformer {
@@ -3520,7 +3509,6 @@ fn instrument_candidate_with_binding(
         names: CandidateNames::within(source, &namespace),
         scope_declarations: Vec::new(),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     extended_transformer.visit_program(&mut parsed.program);
     let mut transformer = ControlProbeV2Transformer {
@@ -3536,7 +3524,6 @@ fn instrument_candidate_with_binding(
         decision_index: 0,
         parameter_depth: 0,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     transformer.visit_program(&mut parsed.program);
     let mut logical_transformer = LogicalValueTransformer {
@@ -3553,7 +3540,6 @@ fn instrument_candidate_with_binding(
         logical_targets: selection_targets,
         assignment_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     logical_transformer.visit_program(&mut parsed.program);
     let mut switch_transformer = SwitchTransformer {
@@ -3562,7 +3548,6 @@ fn instrument_candidate_with_binding(
         targets: switch_analysis.targets,
         names: CandidateNames::within(source, &namespace),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     switch_transformer.visit_program(&mut parsed.program);
     let mut route_transformer = RouteRequestPhaseTransformer {
@@ -3578,7 +3563,6 @@ fn instrument_candidate_with_binding(
         with_request_phase: with_request_phase.clone(),
         used: route_transformer.used,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     request_transformer.visit_program(&mut parsed.program);
     let uses_request_phase = request_transformer.used;
@@ -3901,7 +3885,6 @@ struct StatementProbeTransformer<'a> {
     probe_file_v2: String,
     targets: HashMap<SpanKey, Vec<PointTarget>>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> StatementProbeTransformer<'a> {
@@ -3984,12 +3967,9 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
         self.wrap_bare(&mut statement.consequent);
@@ -4163,7 +4143,6 @@ struct OptionalMemberTransformer<'a> {
     /// The short and continued outcomes are two V2 points from this index.
     targets: HashMap<SpanKey, usize>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> OptionalMemberTransformer<'a> {
@@ -4219,12 +4198,9 @@ impl<'a> VisitMut<'a> for OptionalMemberTransformer<'a> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_computed_member_expression(&mut self, member: &mut ComputedMemberExpression<'a>) {
         self.instrument_target(member.span, &mut member.object);
@@ -4260,7 +4236,6 @@ struct OptionalCallTransformer<'a, 's> {
     sites: HashMap<SpanKey, OptionalCallSiteRuntime>,
     roots: HashMap<SpanKey, Vec<SpanKey>>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
     _source: std::marker::PhantomData<&'s str>,
 }
 
@@ -4275,7 +4250,6 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
         sites: HashMap<SpanKey, usize>,
         roots: HashMap<SpanKey, Vec<SpanKey>>,
         source_sensitive_functions: HashSet<SpanKey>,
-        with_statements: HashSet<SpanKey>,
     ) -> Self {
         let mut names = CandidateNames::new(source);
         let mut ordered = sites.into_iter().collect::<Vec<_>>();
@@ -4301,7 +4275,6 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
             sites,
             roots,
             source_sensitive_functions,
-            with_statements,
             _source: std::marker::PhantomData,
         }
     }
@@ -4434,6 +4407,14 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
                 wrapped.expression = self.instrument_callee(inner, site);
                 Expression::TSNonNullExpression(wrapped)
             }
+            // `a?.b()?.()`: the callee is what an earlier call in the same
+            // chain returned. It is reached only when that call goes ahead; a
+            // short-circuit before it never asked whether its result is
+            // nullish.
+            Expression::CallExpression(mut call) => {
+                call.arguments.insert(0, self.marker_spread(&site.frame, 1));
+                Expression::CallExpression(call)
+            }
             other => self.reached(&site.frame, other),
         }
     }
@@ -4441,8 +4422,12 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
     fn instrument_call(&self, call: &mut CallExpression<'a>, site: &OptionalCallSiteRuntime) {
         let callee = call.callee.take_in(self.ast.allocator);
         call.callee = self.instrument_callee(callee, site);
-        // `...(T = 2, file.none)` runs only when the call goes ahead, before its
-        // own arguments, and spreads nothing.
+        call.arguments.insert(0, self.marker_spread(&site.frame, 2));
+    }
+
+    /// `...(T = value, file.none)`: runs only when the call goes ahead, before
+    /// its own arguments, and spreads nothing.
+    fn marker_spread(&self, frame: &str, value: usize) -> Argument<'a> {
         let none = Expression::from(
             self.ast.member_expression_static(
                 Span::default(),
@@ -4452,17 +4437,14 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
                 false,
             ),
         );
-        let continued = self.ast.expression_sequence(
+        let marked = self.ast.expression_sequence(
             Span::default(),
             self.ast.vec_from_array([
-                assign_temporary(self.ast, &site.frame, numeric(self.ast, 2)),
+                assign_temporary(self.ast, frame, numeric(self.ast, value)),
                 none,
             ]),
         );
-        call.arguments.insert(
-            0,
-            Argument::SpreadElement(self.ast.alloc_spread_element(Span::default(), continued)),
-        );
+        Argument::SpreadElement(self.ast.alloc_spread_element(Span::default(), marked))
     }
 
     fn wrap_root(&mut self, expression: &mut Expression<'a>, site_keys: &[SpanKey]) {
@@ -4541,12 +4523,9 @@ impl<'a> VisitMut<'a> for OptionalCallTransformer<'a, '_> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
         walk_mut::walk_call_expression(self, call);
@@ -4585,7 +4564,6 @@ struct DefaultTransformer<'a> {
     active_declaration: Vec<SpanKey>,
     parameter_pattern_depth: usize,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> DefaultTransformer<'a> {
@@ -4841,12 +4819,9 @@ impl<'a> VisitMut<'a> for DefaultTransformer<'a> {
         }
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 }
 
 enum ExtendedKind {
@@ -4868,7 +4843,6 @@ struct ExtendedTransformer<'a, 's> {
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> ExtendedTransformer<'a, '_> {
@@ -5080,12 +5054,9 @@ impl<'a> VisitMut<'a> for ExtendedTransformer<'a, '_> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_statement(&mut self, statement: &mut Statement<'a>) {
         let Some((kind, key)) = Self::target(statement) else {
@@ -5130,7 +5101,6 @@ struct LogicalValueTransformer<'a, 's> {
     /// The same four points for `||=`, `&&=` and `??=`.
     assignment_targets: HashMap<SpanKey, usize>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> LogicalValueTransformer<'a, '_> {
@@ -5377,12 +5347,9 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
         let key = span_key(expression.span());
@@ -5409,7 +5376,6 @@ struct SwitchTransformer<'a, 's> {
     targets: HashMap<SpanKey, SwitchTarget>,
     names: CandidateNames<'s>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> SwitchTransformer<'a, '_> {
@@ -5551,12 +5517,9 @@ impl<'a> VisitMut<'a> for SwitchTransformer<'a, '_> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_statement(&mut self, statement: &mut Statement<'a>) {
         let Some(key) = Self::target(statement) else {
@@ -5863,7 +5826,6 @@ struct RequestPhaseTransformer<'a> {
     with_request_phase: String,
     used: bool,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> RequestPhaseTransformer<'a> {
@@ -5947,12 +5909,9 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
         walk_mut::walk_call_expression(self, call);
@@ -6053,7 +6012,6 @@ struct ControlProbeV2Transformer<'a, 's> {
     decision_index: usize,
     parameter_depth: usize,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 #[derive(Clone, Copy)]
@@ -6552,12 +6510,9 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         self.parameter_depth -= 1;
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
         let plan = decision_outcome_is_variable(&statement.test)
@@ -6630,7 +6585,6 @@ struct DecisionCollector<'s> {
     decision_vector_counts: Vec<usize>,
     decision_logical_nodes: HashSet<SpanKey>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
-    with_statements: &'s HashSet<SpanKey>,
 }
 
 impl DecisionCollector<'_> {
@@ -8208,12 +8162,9 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
         walk::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &WithStatement<'a>) {}
 
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
         if decision_outcome_is_variable(&statement.test) {

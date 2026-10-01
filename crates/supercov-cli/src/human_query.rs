@@ -1032,6 +1032,14 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     // limitation says why.
                     let state = if data.total_anchored == 0 && data.total_remaining == 0 {
                         "NOT MEASURED"
+                    } else if data.total_tests == 0
+                        && complete == 0
+                        && data.total_anchored > 0
+                        && data.total_limitations == 0
+                    {
+                        // Nothing anchored on the line was observed, by a test
+                        // or in the background: it never ran.
+                        "NOT COVERED"
                     } else if complete == data.total_anchored
                         && data.total_limitations == 0
                         && data.total_remaining == 0

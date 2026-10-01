@@ -1853,6 +1853,14 @@ pub fn coverage_file_detail_query(
             })
         })
         .collect::<Vec<_>>();
+    // A line ran when anything anchored on it was observed. A line inside a
+    // multi-line expression has no line obligation of its own, so this is
+    // what tells one that never ran from one that ran part of the way.
+    let observed_lines = metadata
+        .iter()
+        .filter(|point| point.file == file && selected_includes(&point.tests))
+        .map(|point| point.line)
+        .collect::<BTreeSet<_>>();
     let original_decisions = index.decision_details(options.view)?;
     let mut mcdc = Vec::new();
     for original in original_decisions
@@ -1959,9 +1967,18 @@ pub fn coverage_file_detail_query(
                     .iter()
                     .find_map(|value| compact_source(&value.source))
             });
-            let state = if obligations
-                .iter()
-                .any(|value| matches!(value, CoverageFileObligation::Line(_)))
+            // An MC/DC condition can be evaluated without anything on its own
+            // line being recorded, so only branch and point gaps can say a
+            // line never ran.
+            let never_ran = !observed_lines.contains(&line)
+                && !obligations.is_empty()
+                && obligations
+                    .iter()
+                    .all(|value| !matches!(value, CoverageFileObligation::Mcdc(_)));
+            let state = if never_ran
+                || obligations
+                    .iter()
+                    .any(|value| matches!(value, CoverageFileObligation::Line(_)))
             {
                 "missing"
             } else if !obligations.is_empty() {

@@ -1673,3 +1673,121 @@ test("product code launches the guest", async () => {
         ],
     );
 }
+
+#[test]
+fn optional_calls_through_typescript_wrappers_are_measured_alternative_by_alternative() {
+    let project = Project::empty("optional-calls");
+    project.write(
+        "package.json",
+        r#"{ "name": "calls", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/calls.ts",
+        r#"type Fn = (() => string) | undefined;
+
+export class Box {
+  #hook: Fn;
+  constructor(hook: Fn) {
+    this.#hook = hook;
+  }
+  hook(): string | undefined {
+    return this.#hook?.();
+  }
+}
+
+export function call(f: Fn, table?: Record<string, Fn>, key = "k", box?: { run?: Fn; make?: () => Fn }) {
+  return [
+    (f as Fn)?.(),
+    (f satisfies Fn)?.(),
+    f!?.(),
+    (f)?.(),
+    table?.[key]?.(),
+    box?.run?.(),
+    box?.run!?.(),
+    box?.make?.()?.(),
+    (box?.make?.())?.(),
+  ];
+}
+
+export function never(f: Fn) {
+  return [
+    f?.(),
+  ];
+}
+"#,
+    );
+    project.write(
+        "test/calls.test.ts",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { Box, call } from "../src/calls.ts";
+
+test("calls each shape when present", () => {
+  const f = () => "y";
+  assert.deepEqual(call(f, { k: f }, "k", { run: f, make: () => f }), Array(9).fill("y"));
+  assert.equal(new Box(f).hook(), "y");
+});
+
+test("skips each shape when absent", () => {
+  assert.deepEqual(call(undefined, undefined, "k", undefined), Array(9).fill(undefined));
+  assert.equal(new Box(undefined).hook(), undefined);
+});
+"#,
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let file = project
+        .supercov(&["runs", "latest", "file", "src/calls.ts"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "Branch outcomes not taken       9",
+            "key = \"k\"",
+            "table?.[key]?.()",
+            "box?.run?.()",
+            "box?.run!?.()",
+        ],
+    );
+    // A line inside an expression that never ran is not covered, though it
+    // has no line obligation of its own.
+    assert!(file.contains("   29  NOT COVERED   f?.()"), "{file}");
+    let never = project
+        .supercov(&["runs", "latest", "line", "src/calls.ts:29"])
+        .succeeds();
+    assert!(never.contains("Status\n  NOT COVERED"), "{never}");
+    // A chain that stops at `box?.` never asked whether `make()` returned
+    // nothing; parentheses end the chain, so there the call did see nothing.
+    let chained = project
+        .supercov(&["runs", "latest", "line", "src/calls.ts:22"])
+        .succeeds();
+    assert_eq!(
+        chained
+            .matches("Unobserved: nullish / short-circuited")
+            .count(),
+        2,
+        "{chained}"
+    );
+    let parenthesized = project
+        .supercov(&["runs", "latest", "line", "src/calls.ts:23"])
+        .succeeds();
+    assert_eq!(
+        parenthesized
+            .matches("Unobserved: nullish / short-circuited")
+            .count(),
+        1,
+        "{parenthesized}"
+    );
+
+    project.edit(
+        "test/calls.test.ts",
+        "test(\"skips each shape when absent\"",
+        "test(\"skips each shape whose own step is absent\", () => {\n  const f = () => \"y\";\n  assert.deepEqual(call(f, {}, undefined, {}), [\"y\", \"y\", \"y\", \"y\", undefined, undefined, undefined, undefined, undefined]);\n  assert.deepEqual(call(f, {}, undefined, { make: () => undefined }).slice(7), [undefined, undefined]);\n});\n\ntest(\"skips each shape when absent\"",
+    );
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Lines      77.78% (7/9)", "Branches   94.74% (36/38)"],
+    );
+}
