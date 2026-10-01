@@ -456,6 +456,134 @@ if (testUnit) {
     write(file, readFileSync(join(rb, file), "utf8").replace('require "minitest/autorun"', 'require "test/unit"').replace("Minitest::Test", "Test::Unit::TestCase"));
 }
 
+// pytest, installed into a virtual environment of its own; a conftest
+// fixture supplies one test's cart.
+const pt = join(scratch, "pytest");
+const venv = join(scratch, "venv");
+const venvPython = join(venv, process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+// The newest interpreter, as the Python gate picks it: an older pip may not
+// reach the index at all.
+const venvBase = ["python3.14", "python3.13", "python3.12", "python3.11", python].find(
+  (candidate) => spawnSync(candidate, ["--version"]).status === 0,
+);
+const hasPytest =
+  !javascriptOnly &&
+  spawnSync(venvBase, ["-m", "venv", venv]).status === 0 &&
+  spawnSync(venvPython, ["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "pytest"], { encoding: "utf8" }).status === 0;
+if (hasPytest) {
+  cpSync(join(py, "src"), join(pt, "src"), { recursive: true });
+  write = writer(pt);
+  write("tests/__init__.py", "");
+  write("tests/conftest.py", `import pytest
+
+
+@pytest.fixture
+def big_cart():
+    return [{"price": 60, "quantity": 2}]
+`);
+  write("tests/test_cart.py", `from src.cart import total
+
+
+def test_adds_prices():
+    assert total([{"price": 10, "quantity": 2}]) == 20
+
+
+def test_discounts_big_carts(big_cart):
+    assert total(big_cart) == 108
+`);
+  write("tests/test_format.py", `from src.format import label
+
+
+def test_upper_cases_a_name():
+    assert label("  ab ") == "AB"
+
+
+def test_names_a_blank_label():
+    assert label("  ") == "unknown"
+`);
+}
+
+// RSpec, installed into a gem directory of its own.
+const rs2 = join(scratch, "rspec");
+const gems = join(scratch, "gems");
+const gemProgram = ruby && join(resolve(ruby, ".."), process.platform === "win32" ? "gem.cmd" : "gem");
+const hasRspec =
+  !javascriptOnly && ruby &&
+  spawnSync(gemProgram, ["install", "--install-dir", gems, "--no-document", "--quiet", "rspec"], { encoding: "utf8" }).status === 0;
+if (hasRspec) {
+  cpSync(join(rb, "lib"), join(rs2, "lib"), { recursive: true });
+  write = writer(rs2);
+  write(".rspec", "--require spec_helper\n");
+  write("spec/spec_helper.rb", "$LOAD_PATH.unshift File.expand_path('../lib', __dir__)\n");
+  write("spec/cart_spec.rb", `require "cart"
+
+RSpec.describe Cart do
+  it "adds prices" do
+    expect(Cart.total([{ price: 10, quantity: 2 }])).to eq(20)
+  end
+
+  it "discounts big carts" do
+    expect(Cart.total([{ price: 60, quantity: 2 }])).to eq(108)
+  end
+end
+`);
+  write("spec/format_spec.rb", `require "format"
+
+RSpec.describe Format do
+  it "upper-cases a name" do
+    expect(Format.label("  ab ")).to eq("AB")
+  end
+
+  it "names a blank label" do
+    expect(Format.label("  ")).to eq("unknown")
+  end
+end
+`);
+}
+
+// TestNG through Maven, offline, from the Java sources.
+const tng = join(scratch, "testng");
+if (hasMaven) {
+  cpSync(join(jv, "src/main"), join(tng, "src/main"), { recursive: true });
+  write = writer(tng);
+  write("pom.xml", readFileSync(join(jv, "pom.xml"), "utf8")
+    .replace("<groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>",
+      "<groupId>org.testng</groupId>\n      <artifactId>testng</artifactId>\n      <version>7.10.2</version>"));
+  for (const [name, body] of [
+    ["CartTest", `    @Test
+    public void addsPrices() {
+        assertEquals(Cart.total(new Cart.Item[] {new Cart.Item(10, 2)}), 20);
+    }
+
+    @Test
+    public void discountsBigCarts() {
+        assertEquals(Cart.total(new Cart.Item[] {new Cart.Item(60, 2)}), 108);
+    }`],
+    ["FormatTest", `    @Test
+    public void upperCasesAName() {
+        assertEquals(Format.label("  ab "), "AB");
+    }
+
+    @Test
+    public void namesABlankLabel() {
+        assertEquals(Format.label("  "), "unknown");
+    }`],
+  ])
+    write(`src/test/java/shop/${name}.java`, `package shop;
+
+import static org.testng.Assert.assertEquals;
+
+import org.testng.annotations.Test;
+
+public class ${name} {
+${body}
+}
+`);
+}
+const hasTestng =
+  hasMaven && spawnSync("mvn", ["-q", "-o", "test"], { cwd: tng, encoding: "utf8" }).status === 0 &&
+  (rmSync(join(tng, "target"), { recursive: true, force: true }), true);
+
 // The stand-in: answers every noul question, 0.1 for a console.log or print
 // line and 0.9 otherwise, and counts requests in a file.
 const counter = join(scratch, "requests.txt");
@@ -471,7 +599,10 @@ const server = spawn(process.execPath, ["--input-type=module", "-e", `
       if (!request.state?.code_run || !request.state?.test_code || !request.state?.test?.name) { console.error("[stand-in] incomplete state for " + request.state?.test?.name + ": " + Object.keys(request.state ?? {}).filter((k) => !request.state[k]).join(",")); res.writeHead(400).end(); return; }
       // The test's own code, found by its title, not the file's head.
       const title = request.state.test.name.split(/::| > /).pop().split("[")[0].split(".").pop().split("#").pop();
-      if (!/\\(line \\d+\\)/.test(request.state.test.name) && !request.state.test_code.includes(title)) { console.error("[stand-in] " + request.state.test.name + ": test code without " + title); res.writeHead(400).end(); return; }
+      // A doctest and an RSpec example are named by position, not by a title
+      // their code contains.
+      const positional = /\\(line \\d+\\)|\\[\\d+(:\\d+)*\\]$/.test(request.state.test.name);
+      if (!positional && !request.state.test_code.includes(title)) { console.error("[stand-in] " + request.state.test.name + ": test code without " + title); res.writeHead(400).end(); return; }
       appendFileSync(${JSON.stringify(counter)}, Object.keys(request.questions).length + "\\n");
       const answers = Object.fromEntries(Object.entries(request.questions).map(([id, q]) =>
         [id, { type: "noul", noul: /console\\.log|print\\(|Println\\(|println!\\(|puts |System\\.out\\.println\\(/.test(q.instructions.task) ? 0.1 : 0.9 }]));
@@ -491,7 +622,7 @@ const fail = (message, data) => {
 
 // The same checks on each language: 10 of 11 asserted, the logging line not;
 // reading offline; a repeat pass sending nothing; one edited line asked again.
-function scenario({ name, root, command, logFile, logText, logLine, edit, statements = 11, runEnv = binary }) {
+function scenario({ name, root, command, logFile, logText, logLine, edit, statements = 11, runEnv = binary, upper = /upper/i }) {
   const asserted = statements - 1;
   const share = Math.round((asserted / statements) * 1000) / 10;
   const assess = (...extra) => {
@@ -546,7 +677,7 @@ function scenario({ name, root, command, logFile, logText, logLine, edit, statem
     fail(`${name}: after assess --changed one format test catches the edit and the other missed it`, impact);
   for (const flag of ["--ran-changed", "--asserting"]) {
     const narrowed = requireSupercov(root, ["runs", run, "tests", "affected", "--names", flag], { env }).stdout.trim().split("\n");
-    if (narrowed.length !== 1 || !/upper/i.test(narrowed[0]))
+    if (narrowed.length !== 1 || !upper.test(narrowed[0]))
       fail(`${name}: ${flag} keeps only the test that runs the edited line`, narrowed);
   }
 
@@ -595,6 +726,22 @@ try {
   if (jestRoot)
     scenario({ name: "Jest", root: jestRoot, command: ["npx", "jest"], logFile: "src/cart.mjs", logText: "console.log", logLine: 9, edit: jsEdit,
       runEnv: { ...binary, NODE_OPTIONS: "--experimental-vm-modules" } });
+  if (hasPytest)
+    scenario({ name: "pytest", root: pt, runEnv: { ...binary, PATH: `${join(venv, "bin")}:${process.env.PATH}` },
+      command: [venvPython, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"], logFile: "src/cart.py", logText: "print", logLine: 7,
+      edit: ["src/format.py", "trimmed.upper()", "trimmed.upper().strip()"] });
+  else if (!javascriptOnly) console.log("[assertions] pytest: skipped, it could not be installed");
+  if (hasRspec) {
+    const bin = resolve(ruby, "..");
+    scenario({ name: "RSpec", root: rs2, runEnv: { ...binary, GEM_PATH: gems, PATH: `${join(gems, "bin")}:${bin}:${process.env.PATH}`, RUBYOPT: "" },
+      // RSpec names an example by its place: the format spec's first.
+      command: [join(gems, "bin", "rspec")], logFile: "lib/cart.rb", logText: "puts", logLine: 10, upper: /format_spec\.rb\[1:1\]/,
+      edit: ["lib/format.rb", "trimmed.upcase", "trimmed.upcase.strip"] });
+  } else if (!javascriptOnly) console.log("[assertions] RSpec: skipped, it could not be installed");
+  if (hasTestng)
+    scenario({ name: "TestNG", root: tng, statements: 8, command: ["mvn", "-q", "-o", "test"], logFile: "src/main/java/shop/Cart.java", logText: "System.out.println", logLine: 14,
+      edit: ["src/main/java/shop/Format.java", "trimmed.toUpperCase()", "trimmed.toUpperCase().strip()"] });
+  else if (!javascriptOnly) console.log("[assertions] TestNG: skipped, Maven cannot build it offline here");
   if (testUnit) {
     const bin = resolve(ruby, "..");
     scenario({ name: "test-unit", root: tu, runEnv: { ...binary, PATH: `${bin}:${process.env.PATH}`, RUBYOPT: "" },
