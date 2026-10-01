@@ -1158,12 +1158,6 @@ pub(crate) enum Answer {
         probabilities: BTreeMap<String, f64>,
         confidence: f64,
     },
-    Score {
-        score: f64,
-        legend: BTreeMap<String, String>,
-        probabilities: BTreeMap<String, f64>,
-        confidence: f64,
-    },
 }
 
 fn probability(value: f64) -> bool {
@@ -1212,38 +1206,6 @@ fn validate(response: &ApiResponse, request: &Value) -> Result<(), String> {
                     keys.contains(choice)
                         && probability(*confidence)
                         && distribution(probabilities, keys)
-                })
-            }
-            Answer::Score {
-                score,
-                legend,
-                probabilities,
-                confidence,
-            } => {
-                let levels = question["criteria"]
-                    .as_array()
-                    .filter(|_| question["type"] == "score");
-                levels.is_some_and(|levels| {
-                    let keys = (0..levels.len()).map(|i| i.to_string()).collect();
-                    let expected: f64 = (0..levels.len())
-                        .map(|i| {
-                            i as f64 * probabilities.get(&i.to_string()).copied().unwrap_or(0.0)
-                        })
-                        .sum();
-                    // The provider rounds the score and each probability
-                    // independently. Bound both errors, including float noise.
-                    let rounding_error =
-                        0.005 * (1 + (0..levels.len()).sum::<usize>()) as f64 + 1e-9;
-                    score.is_finite()
-                        && *score >= 0.0
-                        && *score <= (levels.len() - 1) as f64
-                        && probability(*confidence)
-                        && distribution(probabilities, keys)
-                        && (*score - expected).abs() <= rounding_error
-                        && legend.len() == levels.len()
-                        && levels.iter().enumerate().all(|(i, level)| {
-                            legend.get(&i.to_string()).map(String::as_str) == level.as_str()
-                        })
                 })
             }
         };

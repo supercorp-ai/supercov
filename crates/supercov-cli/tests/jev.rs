@@ -771,3 +771,91 @@ fn a_patch_review_reads_only_changed_source_and_says_what_it_skipped() {
         .map(|(path, reason)| (path.to_owned(), reason.to_owned()))
     );
 }
+
+/// A probability above one, which no model can mean.
+fn answer_beyond_one(id: &str, question: &serde_json::Value) -> serde_json::Value {
+    if question["type"] == "noul" {
+        serde_json::json!({ "type": "noul", "noul": 1.5 })
+    } else {
+        answer_no(id, question)
+    }
+}
+
+/// A choice whose probabilities do not add up to one.
+fn answer_lopsided(id: &str, question: &serde_json::Value) -> serde_json::Value {
+    if question["type"] == "choice" {
+        let options = question["criteria"].as_object().unwrap();
+        let probabilities = options
+            .keys()
+            .map(|option| (option.clone(), serde_json::json!(0.9)))
+            .collect::<serde_json::Map<_, _>>();
+        let chosen = options.keys().next().unwrap().clone();
+        serde_json::json!({ "type": "choice", "choice": chosen, "probabilities": probabilities, "confidence": 1.0 })
+    } else {
+        answer_no(id, question)
+    }
+}
+
+#[test]
+fn a_large_assessment_reads_its_tree_and_names_every_failure() {
+    let project = Project::empty("many");
+    project.write("package.json", r#"{"name":"many","type":"module"}"#);
+    for i in 0..12 {
+        project.write(
+            &format!("src/m{i}.js"),
+            &format!("export const v{i} = (a) => a + {i};\n"),
+        );
+    }
+    project.write("tools/gen.js", "export const g = 1;\n");
+    project.write("scripts/build.js", "export const b = 2;\n");
+    project.git(&["init", "-q"]);
+
+    // A file under no source root is put to the model, by path only, before
+    // anything is assessed; the one it reads as shipping is assessed too.
+    let (base, seen) = gateway(MODEL, answer_yes);
+    let assessed = project
+        .supercov_with(&["quality"], &through(&base))
+        .succeeds();
+    contains_all(
+        &assessed,
+        &[
+            "Quality weak (1.0/10) over 13 files.",
+            "1 files under no source root were read by the model from the tree: 1 ship, 0 do not.",
+        ],
+    );
+    let first = seen.lock().unwrap()[0].2.clone();
+    assert_eq!(first["questions"].as_object().unwrap().len(), 1);
+    assert!(
+        first["questions"]["f0"]["instructions"]["task"]
+            .as_str()
+            .unwrap()
+            .contains("tools/gen.js")
+    );
+
+    let (down, _) = gateway_with(MODEL, answer_no, |_| Some((500, "{}")));
+    let failed = project
+        .supercov_with(&["quality", "src/", "--refresh"], &through(&down))
+        .exits(2);
+    contains_all(
+        &failed,
+        &[
+            "error  src/m0.js  (127.0.0.1 HTTP 500",
+            "... and 7 more errors",
+        ],
+    );
+
+    let (refused, _) = gateway_with(MODEL, answer_no, |_| Some((413, "{}")));
+    let large = project
+        .supercov_with(&["quality", "src/m1.js", "--refresh"], &through(&refused))
+        .exits(2);
+    assert!(large.contains("HTTP 413: the request was refused, most often because it is larger than the model accepts"), "{large}");
+
+    // Security asks choices as well as yes/no questions; both are checked.
+    for answerer in [answer_beyond_one as common::Answerer, answer_lopsided] {
+        let (base, _) = gateway(MODEL, answerer);
+        let invalid = project
+            .supercov_with(&["security", "src/m2.js", "--refresh"], &through(&base))
+            .exits(2);
+        assert!(invalid.contains("invalid answer for "), "{invalid}");
+    }
+}
