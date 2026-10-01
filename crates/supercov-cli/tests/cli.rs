@@ -2292,3 +2292,60 @@ fn phase_timing_says_where_setup_went_when_asked() {
     let quiet = project.supercov(&["--", "node", "--test"]).exits(0);
     assert!(!quiet.contains("setup detail"), "{quiet}");
 }
+
+#[test]
+fn a_pnpm_workspace_finds_the_source_of_each_package_it_lists() {
+    let project = Project::empty("pnpm-workspace");
+    project.write(
+        "package.json",
+        r#"{ "name": "mono", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "pnpm-workspace.yaml",
+        "packages:\n  - \"packages/*\"\n  - 'tools/cli'\n  - \"!packages/ignored\"\n  - \"apps/**\"\n# the rest is not packages\ncatalog:\n  left-pad: 1.0.0\n",
+    );
+    project.write(
+        "packages/a/package.json",
+        r#"{ "name": "a", "type": "module", "exports": { ".": ["./entry/index.js"] } }"#,
+    );
+    project.write(
+        "packages/a/entry/index.js",
+        "export const a = (x) => x + 1;\n",
+    );
+    project.write(
+        "packages/a/entry/types.d.ts",
+        "export declare const a: (x: number) => number;\n",
+    );
+    project.write(
+        "tools/cli/package.json",
+        r#"{ "name": "cli", "type": "module" }"#,
+    );
+    project.write("tools/cli/main.js", "export const run = () => \"ran\";\n");
+    project.write(
+        "apps/web/package.json",
+        r#"{ "name": "web", "type": "module" }"#,
+    );
+    project.write("apps/web/page.js", "export const page = () => 1;\n");
+    project.write(
+        "test/all.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { a } from \"../packages/a/entry/index.js\";\nimport { run } from \"../tools/cli/main.js\";\n\ntest(\"both packages\", () => {\n  assert.equal(a(1), 2);\n  assert.equal(run(), \"ran\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let scope = project
+        .supercov(&["runs", "latest", "scope", "--limit", "50"])
+        .succeeds();
+    contains_all(
+        &scope,
+        &[
+            // An array of export targets names the entry file; a package
+            // with no conventional source directory is its own root.
+            "INCLUDED  packages/a/entry/index.js  discovered package source root  [package packages/a]",
+            "INCLUDED  tools/cli/main.js  discovered package source root  [package tools/cli]",
+            "INCLUDED  apps/web/page.js  discovered package source root  [package apps/web]",
+            "EXCLUDED  packages/a/entry/types.d.ts  TypeScript declaration",
+        ],
+    );
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("Lines      66.67% (2/3)"), "{summary}");
+}
