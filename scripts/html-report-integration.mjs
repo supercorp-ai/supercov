@@ -18,7 +18,7 @@ import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const binary = resolve(repository, "target/debug/supercov");
+const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, "target/debug/supercov"));
 const project = mkdtempSync(resolve(tmpdir(), "supercov-html-report-"));
 
 try {

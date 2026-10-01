@@ -30,7 +30,7 @@ const wrapper = join(
   root,
   `spikes/rustc-backend/target/debug/supercov-rustc-backend-spike${process.platform === 'win32' ? '.exe' : ''}`,
 );
-const supercov = join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
+const supercov = (process.env.SUPERCOV_BINARY ?? join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`));
 const scratch = mkdtempSync(join(tmpdir(), 'supercov-rustc-spike-'));
 const rustcTargetLibdirResult = spawnSync('rustc', ['--print', 'target-libdir'], {
   encoding: 'utf8',

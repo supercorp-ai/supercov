@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixture = join(root, 'spikes/rustc-backend/async-attribution-fixture');
-const supercov = join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
+const supercov = (process.env.SUPERCOV_BINARY ?? join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`));
 const companion = join(
   root,
   `spikes/rustc-backend/target/debug/supercov-rustc-backend-spike${process.platform === 'win32' ? '.exe' : ''}`,

@@ -13,7 +13,7 @@ try {
   const executableName = process.platform === "win32" ? "supercov.exe" : "supercov";
   const executable = resolve(temporary, "bin", executableName);
   cpSync(
-    resolve(repository, "target", "debug", executableName),
+    process.env.SUPERCOV_BINARY ?? resolve(repository, "target", "debug", executableName),
     executable,
     { recursive: false },
   );

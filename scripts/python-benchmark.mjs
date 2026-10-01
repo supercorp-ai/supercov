@@ -92,7 +92,7 @@ try {
   const environment = {
     ...process.env,
     PATH: `${resolve(venv, process.platform === 'win32' ? 'Scripts' : 'bin')}${delimiter}${process.env.PATH}`,
-    SUPERCOV_RUST_BINARY: resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`),
+    SUPERCOV_RUST_BINARY: (process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`)),
     SUPERCOV_VERBOSE: '1',
   };
   // Three of each, alternating, and the fastest of each compared. A shared CI

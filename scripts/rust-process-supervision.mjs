@@ -10,7 +10,9 @@ import { resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(
+const binary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   repository,
   `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`,
 );

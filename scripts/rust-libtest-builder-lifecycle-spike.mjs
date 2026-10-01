@@ -16,7 +16,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {fileURLToPath} from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const supercov = join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
+const supercov = (process.env.SUPERCOV_BINARY ?? join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`));
 const sourceCompanion = join(
   root,
   `spikes/rustc-backend/target/debug/supercov-rustc-backend-spike${process.platform === 'win32' ? '.exe' : ''}`,

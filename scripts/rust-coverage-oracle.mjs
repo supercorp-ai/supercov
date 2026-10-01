@@ -76,7 +76,7 @@ const only = option("--only")?.split(",").filter(Boolean);
 const work = resolve(option("--work") ?? resolve(tmpdir(), "supercov-rust-oracle"));
 const keepTargets = argv.includes("--keep-targets");
 const releaseBinary = resolve(repository, "target/release/supercov");
-const debugBinary = resolve(repository, "target/debug/supercov");
+const debugBinary = (process.env.SUPERCOV_BINARY ?? resolve(repository, "target/debug/supercov"));
 const binary = resolve(
   option("--binary") ?? (existsSync(releaseBinary) ? releaseBinary : debugBinary),
 );

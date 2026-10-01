@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(
+const binary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   repository,
   `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`,
 );

@@ -11,7 +11,7 @@ import { delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
+const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`));
 const launcher = resolve(repository, 'bin/supercov.js');
 const fixture = resolve(repository, 'tests/fixtures/ruby-coverage');
 // The runner spells TEMP as an 8.3 short name; the product resolves paths
