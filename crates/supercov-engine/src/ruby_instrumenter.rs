@@ -1952,6 +1952,30 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// A `case ... in` with no `else` raises NoMatchingPatternError -- or
+    /// its NoMatchingPatternKeyError subclass -- naming the last pattern it
+    /// tried. An inserted `else` would swallow that and return nil, so the
+    /// case is wrapped instead: the original exception is re-raised as it
+    /// was, and counted as "no pattern matched" only when this case raised
+    /// it, at its own line, rather than a nested one.
+    fn no_match_rescue(&mut self, id: &str, clauses: &[String], start: usize, end: usize) {
+        let mut ids = vec![format!("{id}:unmatched")];
+        ids.extend(clauses.iter().map(|clause| format!("{clause}:missed")));
+        let key = self.probe_key(ProbeTarget::Hits { ids });
+        let (line, _) = self.line_column(start);
+        self.edit(start, EditRank::Opener, "begin; ".into(), end);
+        self.edit(
+            end,
+            EditRank::Closer,
+            format!(
+                "; rescue ::NoMatchingPatternError; {RUBY_PROBE_RECEIVER}.hs({key}) if \
+                 $!.backtrace_locations&.first&.then {{ |l| l.lineno == {line} && l.path == __FILE__ }}; \
+                 raise; end"
+            ),
+            start,
+        );
+    }
+
     fn case_match_node(&mut self, node: &CaseMatchNode<'_>) {
         let node_span = self.location_span(&node.location());
         let (start, end) = (node.location().start_offset(), node.location().end_offset());
@@ -2080,7 +2104,7 @@ impl<'a> Collector<'a> {
                         KeyKind::Node,
                         vec![format!("{id}:unmatched")],
                     );
-                    self.no_match_probe(&id, &clause_ids, node.end_keyword_loc().start_offset());
+                    self.no_match_rescue(&id, &clause_ids, start, end);
                     CaseNoMatchPlan {
                         key: self.branches[key_index].key.clone(),
                         matched: format!("{id}:matched"),

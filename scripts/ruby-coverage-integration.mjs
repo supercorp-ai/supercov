@@ -215,6 +215,23 @@ try {
     assert.match(JSON.stringify(declared), /ruby-file-not-instrumented/);
   }
 
+  // Control flow Ruby raises through. An unmatched `case ... in` raises
+  // NoMatchingPatternError naming the pattern it last tried, and code that
+  // rescues it must see exactly that under Supercov; the instrumented case
+  // still records that no pattern matched. The tests leave three outcomes
+  // unexercised, and those are the only gaps.
+  if (probes) {
+    const flow = resolve(temporary, 'flow');
+    cpSync(resolve(repository, 'tests/fixtures/ruby-flow'), flow, { recursive: true });
+    run('git', ['init', '-q', '.'], { cwd: flow });
+    const measured = supercov(['--', 'ruby', '-Ilib', '-Itest', 'test/flow_test.rb'], environment, flow);
+    assert.equal(measured.status, 0, `${measured.stdout}\n${measured.stderr}`);
+    assert.match(measured.stdout, /17 assertions, 0 failures, 0 errors/);
+    const gaps = query(['runs', 'latest', 'file', 'lib/flow.rb'], environment, flow);
+    assert.deepEqual(gaps.gapLines.map((line) => line.line), [21, 28, 38], JSON.stringify(gaps.gapLines));
+    assert.deepEqual([gaps.counts.uncoveredLines, gaps.counts.missingBranches, gaps.totalLimitations], [0, 3, 0], JSON.stringify(gaps.counts));
+  }
+
   const minitest = supercov(['--', 'ruby', '-Itest', 'test/shapes_test.rb'], environment);
   assert.equal(minitest.status, 0, `${minitest.stdout}\n${minitest.stderr}`);
   assert.match(minitest.stderr, /3 test\(s\) across 1 source file\(s\)/);

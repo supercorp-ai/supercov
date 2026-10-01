@@ -25,6 +25,7 @@
 
 **Fixed**
 
+- A Ruby `case ... in` with no `else` raises `NoMatchingPatternError` under Supercov as it does without it. Supercov added an `else` of its own to record that no pattern matched, which swallowed the error, so the `case` returned `nil` and code rescuing the error never saw it. The `case` is now wrapped instead: Ruby's own exception, with its class and message, is re-raised, and the outcome is recorded only when this `case` raised it.
 - `supercov merge` names a run that is not there as "no such local run"; it said "incomplete run", which sent people looking for a run that had failed to publish.
 - A JavaScript function whose source the file reads by name -- `fn.toString()`, `String(fn)`, `` `${fn}` `` -- is left as written, as one read in place already was. Shipped as text to a worker, a `vm` context or a browser page, it carried a probe naming a global that does not exist there and failed with a `ReferenceError` under Supercov only. A template literal now counts as reading source in place too.
 - `quality clean` and `security clean` say what they removed or, with `--dry-run`, would remove. They printed "unknown quality view: quality.clean" whatever happened. `quality snapshots` no longer prints "null windowed" for a count no snapshot records.
