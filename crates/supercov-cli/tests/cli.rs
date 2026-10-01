@@ -1511,6 +1511,24 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
             "{name}"
         );
     }
+    // A command still running is reported at each interval, in ms then s.
+    let slow = project
+        .supercov_with(
+            &["__supervise", "--", "sleep", "2.5"],
+            &[("SUPERCOV_DIAGNOSTIC_INTERVAL_MS", "400")],
+        )
+        .exits(0);
+    let reports = slow
+        .lines()
+        .filter(|line| line.starts_with("[supercov] command still running after "))
+        .collect::<Vec<_>>();
+    assert!(reports.iter().any(|line| line.ends_with("ms")), "{slow}");
+    assert!(
+        reports
+            .iter()
+            .any(|line| line.ends_with('s') && !line.ends_with("ms")),
+        "{slow}"
+    );
     project.supercov(&["__sweep-trash"]).exits(2);
     project.supercov(&["__sweep-trash", root]).succeeds();
 }
