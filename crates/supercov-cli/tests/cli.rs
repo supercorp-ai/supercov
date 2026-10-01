@@ -1010,3 +1010,68 @@ fn a_run_of_two_test_kinds_narrows_pages_and_groups() {
         "{summary}"
     );
 }
+
+#[test]
+fn the_report_compares_two_runs_and_names_a_mistake() {
+    let project = Project::cart("report-compare");
+    let older = project.measure(&["--test-name-pattern=total"]);
+    let newer = project.measure(&[]);
+    let help = project.supercov(&["report", "--help"]).succeeds();
+    contains_all(&help, &["--compare <run-id>", "--no-open"]);
+    for (args, message) in [
+        (vec!["report", "--compare"], "--compare requires a run ID"),
+        (vec!["report", "--output"], "--output requires a path"),
+        (
+            vec!["report", "--output", ""],
+            "--output requires a non-empty path",
+        ),
+    ] {
+        let output = project.supercov(&args).exits(2);
+        assert!(output.contains(message), "{args:?}: {output}");
+    }
+    project
+        .supercov(&[
+            "report",
+            &newer,
+            "--compare",
+            &older,
+            "--runs",
+            "2",
+            "--output",
+            "compare.html",
+            "--no-open",
+        ])
+        .exits(0);
+    // The page carries its data gzipped and base64-encoded, so it needs no
+    // server; both runs are in it.
+    let html = project.read("compare.html");
+    let encoded = html
+        .split(|character: char| !(character.is_ascii_alphanumeric() || "+/=".contains(character)))
+        .max_by_key(|run| run.len())
+        .unwrap();
+    use base64::Engine as _;
+    use std::io::Read as _;
+    let compressed = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    let mut payload = String::new();
+    flate2::read::GzDecoder::new(compressed.as_slice())
+        .read_to_string(&mut payload)
+        .unwrap();
+    assert!(
+        payload.contains(&older) && payload.contains(&newer),
+        "both runs are in the report"
+    );
+    let missing = project
+        .supercov(&[
+            "report",
+            &newer,
+            "--compare",
+            "run_0000000000000009",
+            "--no-open",
+            "--output",
+            "x.html",
+        ])
+        .exits(2);
+    assert!(missing.contains("run_0000000000000009"), "{missing}");
+}
