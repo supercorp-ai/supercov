@@ -5,7 +5,8 @@
 mod common;
 
 use common::{
-    Project, answer_no, answer_reviewer, answer_yes, contains_all, gateway, gateway_with, through,
+    Project, answer_no, answer_reviewer, answer_taint, answer_yes, contains_all, gateway,
+    gateway_with, through,
 };
 
 const MODEL: &str = "typesafe/jev-1.13-20260917";
@@ -645,4 +646,52 @@ fn rust_statements_are_asked_as_changes_of_their_own_type() {
     ] {
         assert!(asked.contains(change), "{change} not asked:\n{asked}");
     }
+}
+
+#[test]
+fn security_follows_outside_data_across_an_import() {
+    let project = Project::empty("security-paths");
+    project.write("package.json", r#"{"name":"orders","type":"module"}"#);
+    project.write(
+        "src/handler.js",
+        "import { findOrders } from \"./db.js\";\n\nexport async function handler(req, db) {\n  const rows = await findOrders(db, req.query.customer);\n  return { count: rows.length };\n}\n",
+    );
+    project.write(
+        "src/db.js",
+        "export function findOrders(db, customer) {\n  return db.query(\"SELECT * FROM orders WHERE customer = '\" + customer + \"'\");\n}\n",
+    );
+    // `route` is handed `findOrders` rather than importing it: only a test
+    // that runs both shows the path.
+    project.write(
+        "src/router.js",
+        "export async function route(req, deps) {\n  return deps.findOrders(deps.db, req.params.id);\n}\n",
+    );
+    project.write(
+        "test/router.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { route } from \"../src/router.js\";\nimport { findOrders } from \"../src/db.js\";\n\ntest(\"routes to the orders query\", async () => {\n  const db = { query: async () => [1] };\n  assert.deepEqual(await route({ params: { id: \"7\" } }, { db, findOrders }), [1]);\n});\n",
+    );
+    project.write(
+        "test/handler.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { handler } from \"../src/handler.js\";\n\ntest(\"counts a customer's orders\", async () => {\n  const db = { query: async () => [1, 2] };\n  assert.deepEqual(await handler({ query: { customer: \"ann\" } }, db), { count: 2 });\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+    let (base, seen) = gateway(MODEL, answer_taint);
+    let report = project
+        .supercov_with(&["security", "src/", "--run", "latest"], &through(&base))
+        .succeeds();
+    contains_all(
+        &report,
+        &[
+            "Cross-file paths confirmed: 2",
+            "injection_sink  src/handler.js:4 handler -> src/db.js:1 findOrders",
+            "injection_sink (observed in a test)  src/router.js:1 route -> src/db.js:1 findOrders",
+        ],
+    );
+    let asked_path = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, _, request)| request["questions"].get("path").is_some());
+    assert!(asked_path, "the pair was confirmed with one question");
 }

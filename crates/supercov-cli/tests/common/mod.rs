@@ -391,6 +391,51 @@ pub fn answer_reviewer(id: &str, question: &Value) -> Value {
     choose(question, check)
 }
 
+/// A reviewer tracing data through the two-file shop in `tests/jev.rs`:
+/// `handler` and `route` take caller-supplied data, `findOrders` puts a parameter into
+/// a query unprotected, nothing sanitises, and the path between them is
+/// confirmed; every other question as `answer_reviewer` answers it.
+pub fn answer_taint(id: &str, question: &Value) -> Value {
+    let task = question["instructions"]["task"]
+        .as_str()
+        .unwrap_or_default();
+    let function = task.split('`').nth(1).unwrap_or_default();
+    let yes = json!({ "type": "noul", "noul": 0.9 });
+    let no = json!({ "type": "noul", "noul": 0.1 });
+    if id == "path" {
+        return yes;
+    }
+    if let Some((_, label)) = id.split_once('_').filter(|_| id.starts_with('f')) {
+        return match label {
+            "takes_outside" => {
+                if function == "handler" || function == "route" {
+                    yes
+                } else {
+                    no
+                }
+            }
+            "reaches_sink" => {
+                if function == "findOrders" {
+                    yes
+                } else {
+                    no
+                }
+            }
+            "sanitises" => no,
+            "sink_kind" => choose(
+                question,
+                if function == "findOrders" {
+                    "injection_sink"
+                } else {
+                    "none"
+                },
+            ),
+            _ => answer_reviewer(id, question),
+        };
+    }
+    answer_reviewer(id, question)
+}
+
 fn choose(question: &Value, preferred: &str) -> Value {
     let options: Vec<&String> = question["criteria"].as_object().unwrap().keys().collect();
     let chosen = options
