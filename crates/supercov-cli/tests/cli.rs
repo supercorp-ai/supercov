@@ -1121,3 +1121,58 @@ fn a_source_file_that_does_not_parse_runs_as_written_and_is_declared() {
     assert_eq!(under.code(), plain.status.code().unwrap());
     assert!(under.stdout().contains("fail 1"), "{}", under.stdout());
 }
+
+#[cfg(unix)]
+#[test]
+fn links_inside_the_project_are_carried_and_ones_leaving_it_are_not() {
+    use std::os::unix::fs::symlink;
+    let project = Project::cart("links");
+    let outside = Project::empty("links-outside");
+    outside.write("shared.js", "export const shared = 1;\n");
+    symlink(
+        outside.root.join("shared.js"),
+        project.root.join("src/escaping.js"),
+    )
+    .unwrap();
+    symlink("cart.js", project.root.join("src/alias.js")).unwrap();
+    symlink("nowhere.js", project.root.join("src/dangling.js")).unwrap();
+    std::fs::create_dir(project.root.join("data")).unwrap();
+    symlink("../src", project.root.join("data/sources")).unwrap();
+
+    let measured = project.supercov(&["--", "node", "--test"]).succeeds();
+    assert!(measured.contains("pass 3"), "{measured}");
+    let said = project.supercov(&["--", "node", "--test"]).stderr();
+    assert!(
+        said.contains("omitting symlink outside the isolated project"),
+        "{said}"
+    );
+    assert!(said.contains("src/escaping.js"), "{said}");
+    // The author's links are left as they were.
+    assert!(
+        std::fs::symlink_metadata(project.root.join("src/escaping.js"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("Lines      76.92% (10/13)"), "{summary}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_store_that_is_a_link_elsewhere_is_refused() {
+    let project = Project::cart("store-link");
+    let elsewhere = Project::empty("store-elsewhere");
+    std::os::unix::fs::symlink(&elsewhere.root, project.root.join(".supercov")).unwrap();
+    let refused = project.supercov(&["--", "node", "--test"]);
+    assert_ne!(refused.code(), 0);
+    assert!(
+        refused.stderr().contains("unsafe Supercov storage path"),
+        "{}",
+        refused.stderr()
+    );
+    assert!(
+        std::fs::read_dir(&elsewhere.root).unwrap().next().is_none(),
+        "nothing written through the link"
+    );
+}
