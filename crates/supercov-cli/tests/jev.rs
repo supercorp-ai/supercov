@@ -4,7 +4,9 @@
 
 mod common;
 
-use common::{Project, answer_no, answer_yes, contains_all, gateway, through};
+use common::{
+    Project, answer_no, answer_reviewer, answer_yes, contains_all, gateway, gateway_with, through,
+};
 
 const MODEL: &str = "typesafe/jev-1.13-20260917";
 
@@ -348,4 +350,151 @@ fn tests_judged_not_to_catch_a_change_are_left_out_when_asked() {
         "",
         "no affected test is judged to catch it"
     );
+}
+
+const HANDLER: &str = r#"import { exec } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { findUser } from "./users.js";
+
+const adminPassword = "correct-horse-battery";
+
+export async function handler(req, res, db) {
+  const user = findUser(req.query.id);
+  const rows = await db.query("SELECT * FROM orders WHERE user = " + req.query.id);
+  exec("convert " + req.query.file + " out.png");
+  const page = await readFile("/srv/pages/" + req.params.name, "utf8");
+  res.send("<h1>" + req.query.title + "</h1>" + page + rows.length + user.name);
+}
+"#;
+
+fn shop(label: &str) -> Project {
+    let project = Project::empty(label);
+    project.write("package.json", r#"{"name":"shop","type":"module"}"#);
+    project.write("src/handler.js", HANDLER);
+    project.write(
+        "src/users.js",
+        "export function findUser(id) {\n  return { name: String(id) };\n}\n",
+    );
+    project
+}
+
+#[test]
+fn security_confirms_each_finding_at_the_line_that_holds_it() {
+    let project = shop("security-lines");
+    let (base, _) = gateway(MODEL, answer_reviewer);
+    let report = project
+        .supercov_with(&["security", "src/handler.js"], &through(&base))
+        .succeeds();
+    contains_all(
+        &report,
+        &[
+            "Security: 1 of 1 files flagged, 0 clean; 1 confirmed at a line.",
+            "line 11  0.90  readFile(\"/srv/pages/\" + req.params.name, \"utf8\")",
+            "line 12  0.90  res.send(",
+        ],
+    );
+    // The query and the command are one injection to fix: one finding per
+    // check per ten lines, the first of equally strong lines shown.
+    assert!(report.contains("line 9  0.90  db.query("), "{report}");
+    assert!(!report.contains("line 10  0.90  exec("), "{report}");
+    assert!(
+        report.contains("0.90  weak_cryptography  (file-level only)"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_file_too_large_for_one_request_is_read_in_windows() {
+    let project = Project::empty("windows");
+    project.write("package.json", r#"{"name":"big","type":"module"}"#);
+    let mut source = String::new();
+    for i in 0..1600 {
+        source.push_str(&format!(
+            "export function f{i}(a, b) {{\n  if (a > {i} && b < {i}) {{\n    return a * b + {i};\n  }}\n  return eval(\"a\" + b);\n}}\n\n"
+        ));
+    }
+    project.write("src/big.js", &source);
+    let (base, seen) = gateway(MODEL, answer_yes);
+    for command in ["quality", "security"] {
+        let report = project
+            .supercov_with(&[command, "src/big.js"], &through(&base))
+            .succeeds();
+        assert!(report.contains("src/big.js"), "{command}: {report}");
+    }
+    let seen = seen.lock().unwrap();
+    let largest = seen
+        .iter()
+        .filter_map(|(_, _, request)| request["state"]["file"]["source"].as_str())
+        .map(str::len)
+        .max()
+        .unwrap();
+    assert!(seen.len() > 10, "{} requests", seen.len());
+    assert!(
+        largest < source.len() / 2,
+        "no request carried the whole {}-byte file ({largest})",
+        source.len()
+    );
+}
+
+#[test]
+fn a_busy_gateway_is_waited_for_and_a_broken_one_is_named() {
+    let project = shop("faults");
+    let quality = |faults: common::Faults| {
+        let (base, seen) = gateway_with(MODEL, answer_no, faults);
+        let ran = project.supercov_with(&["quality", "src/users.js", "--refresh"], &through(&base));
+        let requests = seen.lock().unwrap().len();
+        (ran, requests)
+    };
+
+    let (busy, requests) = quality(|n| (n == 0).then_some((429, "{}")));
+    assert!(busy.succeeds().contains("Quality good"));
+    assert_eq!(requests, 2, "asked once more after the 429");
+
+    let (down, requests) = quality(|_| Some((500, "{}")));
+    assert!(
+        down.exits(2)
+            .contains("error  src/users.js  (127.0.0.1 HTTP 500")
+    );
+    assert_eq!(requests, 4, "three retries, then the failure");
+
+    for (faults, message) in [
+        (
+            (|_| Some((401, r#"{"error":"bad key"}"#))) as common::Faults,
+            "HTTP 401: the key was refused; check TYPESAFE_API_KEY",
+        ),
+        (
+            |_| Some((200, "not json")),
+            "returned an invalid response schema",
+        ),
+        (
+            |_| {
+                Some((
+                    200,
+                    r#"{"model":"typesafe/jev-1.13-20260917","answers":{},"usage":{"input_tokens":1,"output_tokens":0}}"#,
+                ))
+            },
+            "response question IDs do not match request",
+        ),
+    ] {
+        let (ran, _) = quality(faults);
+        let output = ran.exits(2);
+        assert!(output.contains(message), "{message}: {output}");
+    }
+
+    // Assessing assertion coverage waits the same way and gives up the same way.
+    let cart = Project::cart("assess-faults");
+    let run = cart.measure(&[]);
+    let (base, _) = gateway_with(MODEL, answer_no, |_| Some((500, "{}")));
+    let stopped = cart
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .exits(2);
+    assert!(
+        stopped.contains("failed requests: 127.0.0.1 HTTP 500"),
+        "{stopped}"
+    );
+    let (base, _) = gateway_with(MODEL, answer_no, |n| (n == 0).then_some((429, "{}")));
+    let assessed = cart
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    assert!(assessed.contains("0% asserted (0 of 8"), "{assessed}");
 }

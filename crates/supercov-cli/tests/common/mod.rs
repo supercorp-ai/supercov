@@ -248,8 +248,17 @@ pub type Seen = Arc<Mutex<Vec<(String, String, Value)>>>;
 /// Decides one answer: the question's id and the question.
 pub type Answerer = fn(&str, &Value) -> Value;
 
+/// Replaces the answer to the request with this number (from 0) with a
+/// status and a body, sent with `retry-after: 0`.
+pub type Faults = fn(usize) -> Option<(u16, &'static str)>;
+
 /// A local server answering every question as `model`, recording each request.
 pub fn gateway(model: &'static str, answerer: Answerer) -> (String, Seen) {
+    gateway_with(model, answerer, |_| None)
+}
+
+/// `gateway`, with some requests answered by `faults` instead.
+pub fn gateway_with(model: &'static str, answerer: Answerer, faults: Faults) -> (String, Seen) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!(
         "http://127.0.0.1:{}/api",
@@ -287,12 +296,22 @@ pub fn gateway(model: &'static str, answerer: Answerer) -> (String, Seen) {
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
                 let request: Value = serde_json::from_slice(&body).unwrap();
-                let reply = serde_json::to_vec(&answer(&request, model, answerer)).unwrap();
-                record.lock().unwrap().push((path, authorization, request));
+                let number = {
+                    let mut seen = record.lock().unwrap();
+                    seen.push((path, authorization, request.clone()));
+                    seen.len() - 1
+                };
+                let (status, reply) = match faults(number) {
+                    Some((status, body)) => (status, body.as_bytes().to_vec()),
+                    None => (
+                        200,
+                        serde_json::to_vec(&answer(&request, model, answerer)).unwrap(),
+                    ),
+                };
                 write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                     retry-after: 0\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     reply.len()
                 )
                 .unwrap();
@@ -334,6 +353,42 @@ pub fn answer_yes(_: &str, question: &Value) -> Value {
     } else {
         json!({ "type": "noul", "noul": 0.9 })
     }
+}
+
+/// Yes to each question but the ones that dismiss a finding (`t0`, `t1`..):
+/// what a reviewer says of code that does what it looks like it does.
+pub fn answer_findings(id: &str, question: &Value) -> Value {
+    let dismisses = id
+        .strip_prefix('t')
+        .is_some_and(|rest| rest.parse::<usize>().is_ok());
+    if dismisses {
+        answer_no(id, question)
+    } else {
+        answer_yes(id, question)
+    }
+}
+
+/// A reviewer of the shop handler in `tests/jev.rs`: names the weakness a
+/// line shows from what is on it, confirms it, and dismisses nothing.
+pub fn answer_reviewer(id: &str, question: &Value) -> Value {
+    if question["type"] != "choice" || !id.starts_with('n') {
+        return answer_findings(id, question);
+    }
+    let task = question["instructions"]["task"]
+        .as_str()
+        .unwrap_or_default();
+    // "Line 9 of `file.source` reads: `db.query(..)`": the second quoted part.
+    let line = task.split('`').nth(3).unwrap_or_default();
+    let check = if line.contains(".query(") || line.starts_with("exec(") {
+        "injection_sink"
+    } else if line.contains("readFile(") {
+        "path_from_input"
+    } else if line.contains(".send(") {
+        "unescaped_output"
+    } else {
+        "none"
+    };
+    choose(question, check)
 }
 
 fn choose(question: &Value, preferred: &str) -> Value {
