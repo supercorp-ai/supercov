@@ -159,14 +159,14 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   | hashie/hashie (Ruby 3.4) | 60 of 60 | 57 | 3 (1) | 95.0% / 96.7% |
   | — every statement | 700 of 701 | 655 | 26 (10) | 96.3% / 94.4% |
   | FasterXML/java-classmate (Java) | 60 of 60 | 58 | 9 (7) | 85.0% / 88.3% |
-  | bluss/arrayvec (Rust) | 17 of 60 | 15 | 0 (0) | 100% / 88.2% |
+  | bluss/arrayvec (Rust) | 54 of 60 | 48 | 1 (1) | 98.1% / 87.0% |
 
   Assessing all five (2,582 statements) cost $0.15, about 0.006 cents per
   statement. Go reads high: Jev takes a dropped error (`return false,
   fmt.Errorf(..)` becoming `return false, nil`) as caught where the tests check
-  only the boolean. Most of arrayvec's changes cannot be made at all: its code
-  is generic over the element type, and no value of an unknown `T` can be
-  written, so those statements are assessed but cannot be checked this way.
+  only the boolean. Rust reads high too on arrayvec, whose code is generic over
+  its element type; six of its sampled changes cannot be made, because no value
+  of an unknown `T` can be written.
 
 The share is a good measure of a project; a single statement's verdict is a
 judgment worth checking before acting on it. Supercov does not run mutated code
