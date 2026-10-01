@@ -253,7 +253,7 @@ pub struct ExplicitSourceRoots {
 impl ExplicitSourceRoots {
     pub fn resolve(root: &Path, configured: &[String]) -> Result<Self, SourceDiscoveryError> {
         let root = lexical_normalize(root);
-        let roots = existing_roots(configured.iter().map(|value| resolve(&root, value)))?;
+        let roots = existing_roots(configured.iter().map(|value| resolve(&root, value)), true)?;
         Ok(Self {
             root,
             roots,
@@ -415,9 +415,13 @@ impl ExplicitSourceRoots {
 
 /// The configured or discovered roots that exist, each a regular file or
 /// directory. Shared by explicit and automatic discovery so the two cannot
-/// disagree about what counts as a root.
+/// disagree about what counts as a root. A root someone named that is
+/// anything else is refused; a conventional one discovery merely guessed
+/// (`lib` linked to `src`, a `main` entry linked into `dist/`) is passed
+/// over, as the copy the run measures passes over a link out of the project.
 fn existing_roots(
     candidates: impl IntoIterator<Item = PathBuf>,
+    named: bool,
 ) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
     let mut existing = BTreeSet::new();
     for path in candidates {
@@ -425,6 +429,7 @@ fn existing_roots(
             Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_dir() => {
                 existing.insert(path);
             }
+            Ok(_) if !named => {}
             Ok(_) => return Err(SourceDiscoveryError::InvalidRoot(path)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(io_error(&path, error)),
@@ -1135,7 +1140,7 @@ pub fn discover_source_scope(
             })
             .collect()
     };
-    let existing_roots = existing_roots(include_roots)?;
+    let existing_roots = existing_roots(include_roots, explicit)?;
     let mut all_files = Vec::new();
     files_under(&root, &root, &mut all_files)?;
     all_files.sort();

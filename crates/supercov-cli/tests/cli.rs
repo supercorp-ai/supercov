@@ -1791,3 +1791,84 @@ test("skips each shape when absent", () => {
         &["Lines      77.78% (7/9)", "Branches   94.74% (36/38)"],
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_project_with_links_sockets_and_pipes_is_measured_through_them() {
+    let outside = Project::empty("links-outside");
+    outside.write("secret.js", "export const secret = 1;\n");
+    outside.write(
+        "store/fake-pkg/package.json",
+        r#"{ "name": "fake-pkg", "type": "module", "exports": "./index.js" }"#,
+    );
+    outside.write(
+        "store/fake-pkg/index.js",
+        "export const triple = (x) => x * 3;\n",
+    );
+    let project = Project::empty("links");
+    project.write(
+        "package.json",
+        r#"{ "name": "links", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/math.js",
+        "export function double(x) {\n  return x * 2;\n}\n",
+    );
+    let link = |target: &std::path::Path, name: &str| {
+        std::os::unix::fs::symlink(target, project.root.join(name)).unwrap();
+    };
+    // `lib` is a conventional source directory name; here it is a link.
+    link(std::path::Path::new("src"), "lib");
+    link(&project.root.join("src"), "abs-lib");
+    link(std::path::Path::new("nowhere.js"), "dangling");
+    link(&project.root.join("nowhere.js"), "abs-dangling");
+    link(&outside.root, "escape");
+    // pnpm keeps the root node_modules in a store elsewhere.
+    link(&outside.root.join("store"), "node_modules");
+    // A running dev server's socket and a pipe hold no source.
+    std::fs::create_dir(project.root.join("tmp")).unwrap();
+    // A socket path is limited to about a hundred bytes, so it is bound
+    // short and moved in.
+    let short = std::env::temp_dir().join(format!("supercov-{}.sock", std::process::id()));
+    let _listener = std::os::unix::net::UnixListener::bind(&short).unwrap();
+    std::fs::rename(&short, project.root.join("tmp/dev.sock")).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(project.root.join("tmp/pipe"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    project.write(
+        "test/links.test.js",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, lstatSync } from "node:fs";
+import { double } from "../lib/math.js";
+import { double as absDouble } from "../abs-lib/math.js";
+import { triple } from "fake-pkg";
+
+test("links inside the project resolve in the copy", () => {
+  assert.equal(double(2), 4);
+  assert.equal(absDouble(3), 6);
+  assert.equal(triple(2), 6);
+});
+
+test("dangling links stay, a link out of the project does not", () => {
+  assert.ok(lstatSync("dangling").isSymbolicLink());
+  assert.ok(lstatSync("abs-dangling").isSymbolicLink());
+  assert.equal(existsSync("escape"), false);
+});
+"#,
+    );
+    project.git(&["init", "-q"]);
+    let measured = project.supercov(&["--", "node", "--test"]);
+    assert!(
+        measured
+            .exits(0)
+            .contains("omitting symlink outside the isolated project"),
+        "the link out of the project is named"
+    );
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Lines      100.00% (2/2)", "Passed      2"]);
+}

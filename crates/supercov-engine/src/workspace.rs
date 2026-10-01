@@ -925,9 +925,11 @@ fn copy_tree<Operations: WorkspaceOperations>(
                 .map_err(|error| io_error(&to, error))?;
         } else if metadata.file_type().is_file() {
             operations.copy_file(&from, &to)?;
-        } else {
-            return Err(WorkspaceError::UnsupportedEntry(from));
         }
+        // A socket or FIFO -- a dev server's `tmp/puma.sock`, a database
+        // socket kept under the project -- cannot be copied and holds no
+        // source. Refusing it stopped the run over a file no test reads by
+        // copy.
     }
     Ok(())
 }

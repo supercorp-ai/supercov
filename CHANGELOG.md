@@ -26,6 +26,8 @@
 
 **Fixed**
 
+- A JavaScript project with a socket or a named pipe in its tree -- a running dev server's `tmp/dev.sock`, a database socket kept under the project -- is measured. Copying the project into its isolated workspace refused the whole run over the first one, though neither holds source.
+- A project where a conventional source directory or a `package.json` entry is a symlink, `lib` linked to `src` say, is measured. Discovery refused the link as a source root and the run stopped; it is now passed over, and the files are measured where the link points when that is inside the project. A root named in `SUPERCOV_SOURCE_ROOTS` that is a symlink is still refused.
 - A line inside an expression that never ran reads NOT COVERED in `runs <run> file` and `runs <run> line`. A line with no statement of its own, such as one element of a multi-line array or call, read PARTIAL, which says the line ran, whenever anything on it was left untested.
 - An optional call on what an earlier call in the same chain returned, `box?.make?.()?.()`, has its nullish outcome recorded only when that call returned nothing. A test where `box` was `undefined` stopped the chain before `make()` ran and was counted as covering it, so the outcome read covered with no test checking it. `(box?.make?.())?.()`, where the parentheses end the chain, still counts it.
 - `supercov -- cargo test --target-dir <dir>` and `--message-format <format>` measure as without them. Supercov builds into its own target directory and reads Cargo's JSON, so the build failed on two `--message-format` arguments, or on test binaries found outside the directory it was reading. `--no-run`, which runs no test, is refused with that reason instead of Cargo's complaint about a repeated argument.
