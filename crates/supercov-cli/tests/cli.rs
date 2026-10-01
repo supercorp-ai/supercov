@@ -888,3 +888,125 @@ fn a_platform_gated_item_counts_only_where_it_compiles() {
     assert_eq!(lines, [16, 17], "{gaps}");
     assert!(!lines.contains(&absent));
 }
+
+#[test]
+fn a_run_of_two_test_kinds_narrows_pages_and_groups() {
+    let project = Project::cart("views");
+    project.write(
+        "src/tax.js",
+        "export function tax(c) {\n  return c === \"LT\" || c === \"LV\" ? 0.21 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { tax } from \"../src/tax.js\";\ntest(\"tax in LT\", () => { assert.equal(tax(\"LT\"), 0.21); });\n",
+    );
+    project.commit("tax");
+    project
+        .supercov_with(
+            &["--", "node", "--test", "test/cart.test.js"],
+            &[("SUPERCOV_TEST_KIND", "unit")],
+        )
+        .succeeds();
+    let unit = project.latest();
+    project
+        .supercov_with(
+            &["--", "node", "--test", "test/tax.test.js"],
+            &[("SUPERCOV_TEST_KIND", "e2e")],
+        )
+        .succeeds();
+    let e2e = project.latest();
+    project.supercov(&["merge", &unit, &e2e]).exits(0);
+
+    let kinds = project.supercov(&["runs", "latest", "kinds"]).succeeds();
+    contains_all(&kinds, &["e2e  1 test(s)", "unit  3 test(s)"]);
+    let narrowed = project
+        .supercov(&["runs", "latest", "gaps", "--kind", "e2e"])
+        .succeeds();
+    contains_all(
+        &narrowed,
+        &[
+            "Projection: kind e2e",
+            "[covered elsewhere: 22; nowhere: 12]",
+            "file --kind 'e2e'",
+        ],
+    );
+    let runner = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "files",
+            "--runner",
+            "node:test",
+            "--limit",
+            "1",
+        ])
+        .succeeds();
+    contains_all(
+        &runner,
+        &["showing 1-1 of 2", "next page:", "--offset 1 --limit 1"],
+    );
+    let second = project
+        .supercov(&["runs", "latest", "files", "--offset", "1", "--limit", "1"])
+        .succeeds();
+    assert!(second.contains("showing 2-2 of 2"), "{second}");
+
+    let grouped = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--sort",
+            "missing",
+        ])
+        .succeeds();
+    contains_all(
+        &grouped,
+        &[
+            "MC/DC by decision",
+            "decisions 3, with missing conditions 3",
+            "missing 2/2  express || sum < 50",
+        ],
+    );
+    let refused = project
+        .supercov(&["runs", "latest", "file", "src/cart.js", "--sort", "missing"])
+        .exits(2);
+    assert!(
+        refused.contains("--sort requires --group decision"),
+        "{refused}"
+    );
+    let decision = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "decision",
+            "src/tax.js:2",
+            "--kind",
+            "e2e",
+        ])
+        .succeeds();
+    contains_all(&decision, &["C2 MISSING: c === \"LV\"", "T- -> T  tests=1"]);
+    let line = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:13",
+            "--kind",
+            "unit",
+            "--limit",
+            "1",
+        ])
+        .succeeds();
+    assert!(line.contains("PARTIAL"), "{line}");
+
+    // After an edit, the summary says the run is stale.
+    project.edit("src/tax.js", "0.21", "0.2");
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(
+        summary.contains("[STALE: instrumented source changed"),
+        "{summary}"
+    );
+}
