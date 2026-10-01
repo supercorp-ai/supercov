@@ -14,7 +14,7 @@ use std::{
     path::{Component, Path},
 };
 
-use memmap2::{Mmap, MmapOptions};
+use memmap2::MmapOptions;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -379,7 +379,7 @@ fn checked_u64(bytes: &[u8], offset: usize) -> u64 {
 
 fn read_evidence_file(
     name: &str,
-    contents: &Mmap,
+    contents: &[u8],
     run_id: &str,
     evidence: &mut Evidence,
 ) -> Result<(), RubyEvidenceError> {
@@ -1495,6 +1495,70 @@ mod tests {
         bytes[32..40].copy_from_slice(&7u64.to_le_bytes());
         bytes.extend(body);
         bytes
+    }
+
+    #[test]
+    fn a_damaged_transport_is_refused_with_what_is_wrong() {
+        // A killed interpreter, a full disk or another process writing into
+        // the evidence directory each leave a transport like one of these.
+        let process = serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]});
+        let exit = serde_json::json!({"t":"exit","at":9});
+        let valid = transport(&[process.clone(), exit.clone()]);
+        let read = |bytes: &[u8]| match read_evidence_file(
+            "main.7.a.mmap",
+            bytes,
+            "run-1",
+            &mut Evidence::default(),
+        ) {
+            Ok(()) => "accepted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(read(&valid), "accepted");
+        // The first frame's header is at 64 and its payload at 80.
+        let payload_end = 80 + process.to_string().len();
+        assert_ne!(payload_end % 8, 0, "the frame has padding to corrupt");
+        let set = |at: usize, value: &[u8]| {
+            let mut bytes = valid.clone();
+            bytes[at..at + value.len()].copy_from_slice(value);
+            bytes
+        };
+        let mut truncated = valid[..payload_end].to_vec();
+        truncated[16..24].copy_from_slice(&(payload_end as u64).to_le_bytes());
+        let other_owner = transport(&[
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":8,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]}),
+        ]);
+        let other_run = transport(&[
+            serde_json::json!({"t":"process","v":1,"run":"run-2","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]}),
+        ]);
+        for (bytes, reason) in [
+            (set(0, b"X"), "header or version does not match"),
+            (
+                set(16, &8_u64.to_le_bytes()),
+                "declared capacity is outside the mapped file",
+            ),
+            (set(24, &3_u64.to_le_bytes()), "3"),
+            (set(32, &0_u64.to_le_bytes()), "process id is missing"),
+            (set(64, &[2]), "commit marker or reserved bytes are invalid"),
+            (
+                set(68, &0_u32.to_le_bytes()),
+                "payload length is outside the transport bound",
+            ),
+            (
+                set(68, &4096_u32.to_le_bytes()),
+                "payload extends past the mapped file",
+            ),
+            (truncated, "aligned frame extends past the mapped file"),
+            (set(payload_end, &[1]), "frame padding is not zero"),
+            (
+                set(72, &0_u32.to_le_bytes()),
+                "payload checksum does not match",
+            ),
+            (other_owner, "does not match the transport owner"),
+            (other_run, "run-2"),
+        ] {
+            let said = read(&bytes);
+            assert!(said.contains(reason), "{reason}: {said}");
+        }
     }
 
     fn temporary(name: &str) -> std::path::PathBuf {

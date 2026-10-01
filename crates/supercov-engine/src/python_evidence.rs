@@ -2158,6 +2158,95 @@ mod tests {
         path
     }
 
+    /// One transport in memory, a frame per payload.
+    fn transport_bytes(payloads: &[&[u8]]) -> Vec<u8> {
+        let capacity = payloads
+            .iter()
+            .fold(TRANSPORT_HEADER_SIZE, |cursor, payload| {
+                align_transport(cursor + TRANSPORT_RECORD_HEADER_SIZE + payload.len()).unwrap()
+            });
+        let mut bytes = vec![0_u8; capacity];
+        bytes[..8].copy_from_slice(TRANSPORT_MAGIC);
+        bytes[8..12].copy_from_slice(&TRANSPORT_VERSION.to_le_bytes());
+        bytes[12..16].copy_from_slice(&(TRANSPORT_HEADER_SIZE as u32).to_le_bytes());
+        bytes[16..24].copy_from_slice(&(capacity as u64).to_le_bytes());
+        bytes[32..40].copy_from_slice(&1_u64.to_le_bytes());
+        let mut cursor = TRANSPORT_HEADER_SIZE;
+        for payload in payloads {
+            let start = cursor + TRANSPORT_RECORD_HEADER_SIZE;
+            bytes[start..start + payload.len()].copy_from_slice(payload);
+            bytes[cursor + 4..cursor + 8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes[cursor + 8..cursor + 12].copy_from_slice(&crc32fast::hash(payload).to_le_bytes());
+            bytes[cursor] = 1;
+            cursor = align_transport(start + payload.len()).unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_damaged_transport_is_refused_with_what_is_wrong() {
+        // A killed writer, a full disk or another process writing into the
+        // evidence directory each leave a transport like one of these. Each
+        // is refused, never read as evidence.
+        let exit: &[u8] = br#"{"t":"exit","at":9}"#;
+        let valid = transport_bytes(&[exit]);
+        let read = |bytes: &[u8]| match parse_transport("main.1.mmap", bytes, &[], None) {
+            Ok(_) => "accepted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(read(&valid), "accepted");
+        // The first frame's header starts at 64, its payload at 80 and ends at
+        // 99, and its padding runs to 104.
+        let set = |at: usize, value: &[u8]| {
+            let mut bytes = valid.clone();
+            bytes[at..at + value.len()].copy_from_slice(value);
+            bytes
+        };
+        let mut truncated = valid[..99].to_vec();
+        truncated[16..24].copy_from_slice(&99_u64.to_le_bytes());
+        for (bytes, reason) in [
+            (set(0, b"X"), "header or version does not match"),
+            (
+                set(8, &99_u32.to_le_bytes()),
+                "header or version does not match",
+            ),
+            (
+                set(16, &8_u64.to_le_bytes()),
+                "declared capacity is outside the mapped file",
+            ),
+            (set(24, &3_u64.to_le_bytes()), "3"),
+            (set(32, &0_u64.to_le_bytes()), "process id is missing"),
+            (set(64, &[2]), "commit marker or reserved bytes are invalid"),
+            (
+                set(68, &0_u32.to_le_bytes()),
+                "payload length is outside the transport bound",
+            ),
+            (
+                set(68, &64_u32.to_le_bytes()),
+                "payload extends past the mapped file",
+            ),
+            (truncated, "aligned frame extends past the mapped file"),
+            (set(100, &[1]), "frame padding is not zero"),
+            (
+                set(72, &0_u32.to_le_bytes()),
+                "payload checksum does not match",
+            ),
+            (transport_bytes(&[b"{not json"]), "key must be a string"),
+            (
+                transport_bytes(&[br#"{"t":"runs","ctx":1,"r":[]}"#]),
+                "slot runs arrived without the run's slot layout",
+            ),
+        ] {
+            let said = read(&bytes);
+            assert!(said.contains(reason), "{reason}: {said}");
+        }
+        // A frame whose commit byte never landed ends the transport there,
+        // as a killed writer leaves it.
+        let mut uncommitted = transport_bytes(&[exit, exit]);
+        uncommitted[104] = 0;
+        assert_eq!(read(&uncommitted), "accepted");
+    }
+
     fn write_transport(path: &Path, records: &[serde_json::Value], dropped: u64) {
         write_transport_version(path, records, dropped, TRANSPORT_VERSION, None);
     }
