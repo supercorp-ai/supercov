@@ -187,6 +187,9 @@ pub struct Statement {
     pub line: usize,
     pub text: String,
     pub change: Change,
+    /// The value that replaces the statement's where the language chooses one
+    /// by type (Rust), rather than a stand-in for nothing.
+    pub replacement: Option<String>,
     /// Indexes into `Population::tests`: the passing tests that executed it.
     pub tests: Vec<usize>,
 }
@@ -259,6 +262,7 @@ pub fn population(
         });
     }
     let mut changes = BTreeMap::<String, BTreeMap<usize, Vec<(String, Option<Change>)>>>::new();
+    let mut replacements = BTreeMap::<String, rust_source::Replacements>::new();
     let mut statements = Vec::new();
     let mut seen = BTreeSet::new();
     // Python and Ruby record an `elif`/`elsif`, and Go, Rust and the JVM
@@ -308,11 +312,25 @@ pub fn population(
         if decision && change != Change::Invert {
             continue;
         }
+        let replacement = (language == Language::Rust
+            && matches!(change, Change::ReturnUndefined | Change::ValueUndefined))
+        .then(|| {
+            let first = prefix(text.lines().next().unwrap_or("").trim(), 30);
+            let first = first.trim_end_matches(';');
+            replacements
+                .entry(file.clone())
+                .or_insert_with(|| rust_source::replacements(source))
+                .get(&line)
+                .and_then(|all| all.iter().find(|(t, _)| t.starts_with(first)))
+                .map(|(_, r)| r.clone())
+        })
+        .flatten();
         statements.push(Statement {
             file: file.clone(),
             line,
             text: text.clone(),
             change,
+            replacement,
             tests: ids,
         });
     }
@@ -1044,7 +1062,22 @@ impl Population {
     pub fn questions(&self, statement: usize) -> Vec<String> {
         let s = &self.statements[statement];
         let line = s.text.lines().next().unwrap_or("").trim();
-        let changes = match s.change {
+        let changes = match (s.change, &s.replacement) {
+            (Change::ReturnUndefined | Change::ValueUndefined, Some(r))
+                if self.language == Language::Rust =>
+            {
+                vec![rust_question(line, s.change, r)]
+            }
+            _ => self.default_questions(s, line),
+        };
+        changes
+            .into_iter()
+            .map(|c| format!("{}:{}: {c}.", s.file, s.line))
+            .collect()
+    }
+
+    fn default_questions(&self, s: &Statement, line: &str) -> Vec<String> {
+        match s.change {
             // Go and the JVM languages replace a value after it is computed,
             // as their mutation testers do: the expression still runs.
             Change::ReturnUndefined if self.language == Language::Go => vec![format!(
@@ -1126,8 +1159,7 @@ impl Population {
                 // succeed: its bindings would have no value.
                 if c.starts_with("let ") {
                     return vec![format!(
-                        "{}:{}: `{line}`: whenever the pattern `{c}` matches it is treated as not matching (the branch it would enter is skipped).",
-                        s.file, s.line
+                        "`{line}`: whenever the pattern `{c}` matches it is treated as not matching (the branch it would enter is skipped)"
                     )];
                 }
                 vec![
@@ -1139,11 +1171,7 @@ impl Population {
                     ),
                 ]
             }
-        };
-        changes
-            .into_iter()
-            .map(|c| format!("{}:{}: {c}.", s.file, s.line))
-            .collect()
+        }
     }
 
     /// The request for one test and the statements asked about it.
@@ -1197,6 +1225,23 @@ impl Population {
             "{:x}",
             Sha256::digest(serde_json::to_vec(&parts).expect("serializable key"))
         )
+    }
+}
+
+/// A Rust return or assignment's change, as the line it becomes.
+fn rust_question(line: &str, change: Change, replacement: &str) -> String {
+    let repl = replacement.split_whitespace().collect::<Vec<_>>().join(" ");
+    match change {
+        Change::ReturnUndefined if line.starts_with("return") => {
+            format!("`{line}` becomes `return {repl};`")
+        }
+        Change::ReturnUndefined => {
+            format!("`{line}` becomes `{repl}` (it is the value the enclosing block produces)")
+        }
+        _ => match split_initializer(line) {
+            Some(head) => format!("`{line}` becomes `{head} {repl};`"),
+            None => format!("`{line}`: the value it assigns becomes `{repl}`"),
+        },
     }
 }
 

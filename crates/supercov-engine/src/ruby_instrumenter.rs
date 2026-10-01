@@ -393,6 +393,12 @@ pub struct RubyFilePlan {
     /// load-time probes either (see [`RACTOR_BLOCK_LIMITATION`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ractor_blocks: Vec<[usize; 2]>,
+    /// Byte ranges of `refine` blocks. A refinement is active inside its own
+    /// block, so an operator the block refines -- `Hash#[]=` among them --
+    /// is not the one a table probe means; statements there take the
+    /// method-call probe instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refine_blocks: Vec<[usize; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -713,6 +719,8 @@ struct Collector<'a> {
     begin_unmeasured: Vec<(String, usize)>,
     /// Byte ranges of `Ractor.new` blocks; no insertion may land inside.
     ractor_blocks: Vec<(usize, usize)>,
+    /// Byte ranges of `refine` blocks (see [`RubyFilePlan::refine_blocks`]).
+    refine_blocks: Vec<[usize; 2]>,
     error: Option<RubyInstrumenterError>,
 }
 
@@ -759,6 +767,7 @@ impl<'a> Collector<'a> {
             depth: 0,
             begin_unmeasured: Vec::new(),
             ractor_blocks: Vec::new(),
+            refine_blocks: Vec::new(),
             error: None,
         }
     }
@@ -2943,6 +2952,7 @@ impl<'a> Collector<'a> {
         RubyFileObligations {
             manifest: self.manifest,
             plan: RubyFilePlan {
+                refine_blocks: std::mem::take(&mut self.refine_blocks),
                 ractor_blocks: ractor_blocks
                     .iter()
                     .map(|(start, end)| [*start, *end])
@@ -3187,6 +3197,15 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             let location = block.location();
             self.ractor_blocks
                 .push((location.start_offset(), location.end_offset()));
+        }
+        if node.name().as_slice() == b"refine"
+            && node.receiver().is_none()
+            && let Some(block) = node.block()
+            && block.as_block_node().is_some()
+        {
+            let location = block.location();
+            self.refine_blocks
+                .push([location.start_offset(), location.end_offset()]);
         }
         if node.is_safe_navigation() {
             self.safe_navigation(node);

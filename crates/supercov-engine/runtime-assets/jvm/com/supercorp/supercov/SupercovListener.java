@@ -112,7 +112,7 @@ public final class SupercovListener implements TestExecutionListener {
    * coverage report against a test report should not have to translate.
    */
   private String name(TestIdentifier identifier) {
-    StringBuilder qualified = new StringBuilder(identifier.getDisplayName());
+    StringBuilder qualified = new StringBuilder(invocation(identifier));
     TestIdentifier current = identifier;
     while (plan != null) {
       TestIdentifier parent = plan.getParent(current).orElse(null);
@@ -123,7 +123,72 @@ public final class SupercovListener implements TestExecutionListener {
       qualified.insert(0, containerName(parent) + "#");
       current = parent;
     }
-    return qualified.toString();
+    return printable(qualified.toString());
+  }
+
+  /**
+   * A name with its control characters written out.
+   *
+   * <p>A display name carries its arguments, and an argument may be a tab, a
+   * newline or a NUL: commons-cli's parameterized tests pass exactly those to
+   * see how they are handled. A test identity that holds one cannot be read
+   * back as a single line, and the run was refused. {@code \n}, {@code \t}
+   * and {@code \\uXXXX} say the same thing in text that can be.
+   */
+  static String printable(String name) {
+    StringBuilder out = null;
+    for (int i = 0; i < name.length(); i++) {
+      char c = name.charAt(i);
+      if (!Character.isISOControl(c)) {
+        if (out != null) {
+          out.append(c);
+        }
+        continue;
+      }
+      if (out == null) {
+        out = new StringBuilder(name.length() + 8).append(name, 0, i);
+      }
+      switch (c) {
+        case '\n':
+          out.append("\\n");
+          break;
+        case '\t':
+          out.append("\\t");
+          break;
+        case '\r':
+          out.append("\\r");
+          break;
+        default:
+          out.append(String.format("\\u%04x", (int) c));
+      }
+    }
+    return out == null ? name : out.toString();
+  }
+
+  /**
+   * A display name that tells one invocation from another.
+   *
+   * <p>A parameterized or dynamic test is one method run many times, and its
+   * author may name every run the same ({@code @ParameterizedTest(name =
+   * "testing: {0}")} over arguments that print alike). Those are different
+   * tests with different outcomes and different coverage, so each keeps the
+   * index the platform gave it -- {@code [3]}, as JUnit's own default names
+   * read -- which is stable from run to run, unlike a counter of repeats.
+   */
+  private static String invocation(TestIdentifier identifier) {
+    String display = identifier.getDisplayName();
+    String id = identifier.getUniqueId();
+    int segment = id.lastIndexOf("/[");
+    if (segment < 0) {
+      return display;
+    }
+    String last = id.substring(segment + 2, id.length() - (id.endsWith("]") ? 1 : 0));
+    int colon = last.indexOf(":#");
+    if (colon < 0) {
+      return display;
+    }
+    String index = "[" + last.substring(colon + 2) + "]";
+    return display.startsWith(index) ? display : index + " " + display;
   }
 
   /**

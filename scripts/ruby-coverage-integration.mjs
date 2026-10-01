@@ -156,6 +156,23 @@ try {
 
     const rescue = query(['runs', 'latest', 'line', 'lib/shapes.rb:66'], environment);
     assert.doesNotMatch(JSON.stringify(rescue), /not observed: body completed/, 'begin completion is observed through the probe');
+
+    // Every test that runs a line is credited with it, not only the first:
+    // Ruby's one-shot lines fire once per process, and the statement probes
+    // are what give each test its own line set.
+    writeFileSync(
+      resolve(project, 'twice_spec.rb'),
+      'require_relative "lib/shapes"\n' +
+        'RSpec.describe Shapes do\n' +
+        '  it("first") { expect(Shapes.classify(true, true, false)).to eq(:yes) }\n' +
+        '  it("second") { expect(Shapes.classify(true, false, true)).to eq(:yes) }\n' +
+        'end\n',
+    );
+    const twice = supercov(['--', 'rspec', 'twice_spec.rb'], environment);
+    assert.equal(twice.status, 0, `${twice.stdout}\n${twice.stderr}`);
+    const both = query(['runs', 'latest', 'line', 'lib/shapes.rb:9'], environment);
+    assert.equal(both.totalTests, 2, `both examples ran :yes: ${JSON.stringify(both.tests)}`);
+    rmSync(resolve(project, 'twice_spec.rb'));
   } else {
     const file = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
     assert.match(JSON.stringify(file), /ruby-probe-obligations-need-3\.4/, 'Ruby 3.3 declares probe obligations unmeasured');

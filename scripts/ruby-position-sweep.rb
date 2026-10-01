@@ -2,7 +2,7 @@
 
 # Development gate for the Ruby frontend. For every file in a corpus it
 # applies the plan's insertions the way the runtime does, adds the runtime's
-# own load-time probes for lines this interpreter will not count, and checks
+# own load-time probe before every statement, and checks
 # against Ruby itself that
 #   1. the transformed source compiles and keeps its line count,
 #   2. every stdlib branch key the plan expects exists in the untouched
@@ -41,14 +41,11 @@ class SweptFile
     @path = path
     @plan = plan
     @source = File.binread(path)
-    stub = begin
-      Coverage.line_stub(path)
-    rescue StandardError
-      []
-    end
+    # As the runtime does on 3.4+: every statement gets a table probe.
     lines = plan["lines"].to_h { |line, id| [line.to_i, id] }
     extra, probes = Supercov::LoadTime.statement_probes(
-      "$__supercov", 1 << 40, lines, plan["statementOffsets"] || {}, stub
+      "$__supercov", 1 << 40, lines, plan["statementOffsets"] || {}, [],
+      plan["ractorBlocks"] || [], Supercov::LINE_TABLE, plan["refineBlocks"] || [], @source
     )
     @probed_lines = probes.each_value.to_h { |target| [target["id"], true] }
     @edits = Supercov::LoadTime.merge_edits(plan["edits"], extra)
@@ -112,6 +109,7 @@ def load_one(plan_path, path, probed)
   file = SweptFile.new(path, plans.fetch(path))
   synthetic = "/supercov-sweep/#{File.basename(path)}"
   $__supercov = StubProbe.new
+  $__supercov_lines = {}
   Coverage.start(lines: true, branches: true, methods: true)
   begin
     source = probed ? file.transformed : file.source.dup.force_encoding(Encoding::UTF_8)
@@ -240,7 +238,7 @@ plans.each do |path, plan|
   puts "         ... #{missing.length - 8} more" if missing.length > 8
 end
 
-summary = "#{files} file(s), #{failures} failing, #{probed_at_runtime} statement line(s) probed at load time because Ruby does not count them"
+summary = "#{files} file(s), #{failures} failing, #{probed_at_runtime} statement line(s) probed at load time"
 summary += ", #{loaded} file(s) loaded and #{methods_seen} method key(s) checked" if load_mode
 puts summary
 exit(failures.zero? ? 0 : 1)

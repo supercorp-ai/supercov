@@ -44,11 +44,15 @@ times out, or the process crashes. The change depends on the statement:
 | JSX expression | the value becomes undefined |
 | anything else | skipped: the statement does not run |
 
-The stand-in is `undefined` in JavaScript and TypeScript, `None` in Python,
-`nil` in Ruby and `Default::default()` in Rust (`Ok(Default::default())` for an
-`Ok` or `Err`). Go and the JVM languages replace a value after it is computed,
+The stand-in is `undefined` in JavaScript and TypeScript, `None` in Python and
+`nil` in Ruby. Go and the JVM languages replace a value after it is computed,
 as their mutation testers do: the zero value in Go, and `null`, `0` or `false`
-in Java and Kotlin.
+in Java and Kotlin. Rust has no value that fits every type, so it takes a
+different value of the same type, from the function's signature or the
+`let`'s annotation where there is one: a boolean negated, an `Ok` turned into
+an `Err` and back, a literal swapped (`false` for `true`, `1` for `0`), an
+`Ordering` reversed, `None`, `""` or `0`; `Default::default()` only where no
+type is known.
 
 Imports, declarations without a value, and function, class and type
 declarations are not assessed; in Python neither are `pass`, `global`,
@@ -117,14 +121,15 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   | Project | Checked | Right | Flagged (truly not asserted) | Share reported / true |
   | --- | --- | --- | --- | --- |
   | google/uuid (Go) | 339 | 294 | 34 (26) | 90.0% / 81.4% |
-  | dtolnay/semver (Rust) | 136 of a sample of 200 | 124 | 11 (10) | 91.9% / 84.6% |
+  | dtolnay/semver (Rust) | 150 of a sample of 200 | 144 | 5 (1) | 96.7% / 98.0% |
   | apache/commons-cli (Java) | 196 of a sample of 200 | 167 | 49 (33) | 75.0% / 76.5% |
+  | dry-rb/dry-inflector (Ruby 3.4) | 157 | 136 | 25 (8) | 84.1% / 92.4% |
 
-  In Rust, a change to a value whose type has no default cannot be made, so it
-  cannot be checked this way; that was a third of semver's sample.
-- **Ruby:** Ruby runs credit each line to the first test that runs it, so most
-  statements are asked of a single test and the share reads low: on
-  dry-rb/dry-inflector it reported 43.9% against a true 92.4%.
+  A Rust change that falls back to `Default::default()` for a type without
+  one cannot be made, so it cannot be checked this way; that was a quarter of
+  semver's sample. Ruby 3.3 credits each line to the first test that runs it
+  (3.4 and newer credit every test), so on 3.3 most statements are asked of a
+  single test and the share reads low.
 
 The share is a good measure of a project; a single statement's verdict is a
 judgment worth checking before acting on it. Supercov does not run mutated code

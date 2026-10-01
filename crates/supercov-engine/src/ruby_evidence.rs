@@ -65,9 +65,19 @@ enum Record {
         ruby: String,
         executable: String,
         argv: Vec<String>,
+        /// `exact` when every statement of an instrumented file is probed
+        /// test by test (Ruby 3.4+); absent or `first` when lines come from
+        /// Coverage's one-shot lines, credited to the first test only.
+        #[serde(default)]
+        lines: Option<String>,
     },
     Worker {
         worker: String,
+    },
+    /// A file fell back to Coverage's one-shot lines mid-run: from here its
+    /// lines are credited to the first test that runs them.
+    Lines {
+        mode: String,
     },
     Phase {
         ctx: u64,
@@ -94,6 +104,17 @@ enum Record {
     Hit {
         ctx: u64,
         id: String,
+    },
+    /// Names for the numbers `hits` records use, in order from `first`: the
+    /// runtime writes each id once per process and a number after that.
+    Ids {
+        first: usize,
+        names: Vec<String>,
+    },
+    /// One context's hits since the last boundary, by number.
+    Hits {
+        ctx: u64,
+        n: Vec<usize>,
     },
     Dec {
         ctx: u64,
@@ -280,6 +301,8 @@ struct Evidence {
     runners: RunnersByAttempt,
     test_files: TestFilesByAttempt,
     limitations: Vec<RuntimeLimitation>,
+    /// Some process credited a line to the first test that ran it only.
+    first_sighting: bool,
 }
 
 fn read_evidence_directory(directory: &Path, run_id: &str) -> Result<Evidence, RubyEvidenceError> {
@@ -386,6 +409,8 @@ fn read_evidence_file(
     // marker moves it to the phase's assertion identity.
     let mut before_assertion = BTreeMap::<u64, Observations>::new();
     let mut process_worker: Option<String> = None;
+    // The process's id names, by the number its `hits` records use.
+    let mut interned = Vec::<String>::new();
     let mut process_started = false;
     let mut process_reported = false;
     let mut cursor = TRANSPORT_HEADER_SIZE;
@@ -449,8 +474,12 @@ fn read_evidence_file(
                 pid,
                 worker,
                 ruby,
+                lines,
                 ..
             } => {
+                if lines.as_deref() != Some("exact") {
+                    evidence.first_sighting = true;
+                }
                 if v != RUBY_EVIDENCE_VERSION {
                     return Err(RubyEvidenceError::UnsupportedVersion(v));
                 }
@@ -478,6 +507,11 @@ fn read_evidence_file(
                 process_worker = Some(worker);
             }
             Record::Worker { worker } => process_worker = Some(worker),
+            Record::Lines { mode } => {
+                if mode != "exact" {
+                    evidence.first_sighting = true;
+                }
+            }
             Record::Phase {
                 ctx,
                 worker,
@@ -564,6 +598,32 @@ fn read_evidence_file(
                 )?
                 .hits
                 .insert(id);
+            }
+            Record::Ids { first, names } => {
+                if first != interned.len() {
+                    return Err(invalid("id names must continue where the last ones ended"));
+                }
+                interned.extend(names);
+            }
+            Record::Hits { ctx, n } => {
+                let ids = n
+                    .iter()
+                    .map(|&number| interned.get(number).cloned())
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| invalid("hit number has no name"))?;
+                if let Some(before) = before_assertion.get_mut(&ctx) {
+                    before.hits.extend(ids.iter().cloned());
+                }
+                observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .hits
+                .extend(ids);
             }
             Record::Dec { ctx, id, v, o } => {
                 if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
@@ -968,7 +1028,13 @@ pub fn build_ruby_frontend_run(
         runners,
         test_files,
         limitations,
+        first_sighting,
     } = evidence;
+    let attribution = if first_sighting {
+        crate::coverage_report::ATTRIBUTION_PARTIAL
+    } else {
+        crate::coverage_report::ATTRIBUTION_EXACT
+    };
     let mut manifest = manifest.clone();
     let index = ManifestIndex::new(&manifest);
 
@@ -1127,14 +1193,12 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
-            // What a Ruby test is recorded as reaching is its own and is not
-            // all of it. The runtime asks Ruby's Coverage for one-shot lines,
-            // which report a line the first time it executes in the process
-            // and never again -- so the first test to reach a line is credited
-            // with it and every later test that runs the same line is recorded
-            // as having reached nothing there. Cheap to collect, and it makes
-            // a test's hits a lower bound rather than a description.
-            attribution: crate::coverage_report::ATTRIBUTION_PARTIAL.into(),
+            // Ruby 3.4+ probes every statement, so what a test is recorded as
+            // reaching is all of it. On 3.3 lines come from Coverage's one-shot
+            // lines, which report a line the first time it executes in the
+            // process and never again: the first test to reach a line is
+            // credited with it, and a test's hits are a lower bound.
+            attribution: attribution.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1194,14 +1258,12 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
-            // What a Ruby test is recorded as reaching is its own and is not
-            // all of it. The runtime asks Ruby's Coverage for one-shot lines,
-            // which report a line the first time it executes in the process
-            // and never again -- so the first test to reach a line is credited
-            // with it and every later test that runs the same line is recorded
-            // as having reached nothing there. Cheap to collect, and it makes
-            // a test's hits a lower bound rather than a description.
-            attribution: crate::coverage_report::ATTRIBUTION_PARTIAL.into(),
+            // Ruby 3.4+ probes every statement, so what a test is recorded as
+            // reaching is all of it. On 3.3 lines come from Coverage's one-shot
+            // lines, which report a line the first time it executes in the
+            // process and never again: the first test to reach a line is
+            // credited with it, and a test's hits are a lower bound.
+            attribution: attribution.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1358,23 +1420,21 @@ pub fn build_ruby_frontend_run(
                             scopes: vec![FrontendLimitationScope::Action],
                             reason: format!("{runner} exposes no general action lifecycle"),
                         },
-                        // Declared because it was not, and the declaration is
-                        // what a reader checks a number against. Ruby's
-                        // Coverage reports a line the first time it executes
-                        // in the process and never again, which is what makes
-                        // collecting it cheap: the first test to reach a line
-                        // is credited with it and every later test that runs
-                        // the same line is recorded against none of it. What a
-                        // test is credited with is its own; what it is not
-                        // credited with is not evidence it did not run.
-                        FrontendLimitation {
-                            id: format!("ruby-{runner}-first-sighting-lines"),
-                            scopes: vec![FrontendLimitationScope::Test],
-                            reason:
-                                "Ruby records a line for the first test that reaches it, so a test's coverage is a lower bound and the run's is its upper one"
-                                    .into(),
-                        },
-                    ],
+                    ]
+                    .into_iter()
+                    // Declared because the declaration is what a reader checks
+                    // a number against. On 3.3 Ruby's Coverage reports a line
+                    // the first time it executes in the process and never
+                    // again: what a test is credited with is its own; what it
+                    // is not credited with is not evidence it did not run.
+                    .chain(first_sighting.then(|| FrontendLimitation {
+                        id: format!("ruby-{runner}-first-sighting-lines"),
+                        scopes: vec![FrontendLimitationScope::Test],
+                        reason:
+                            "Ruby 3.3 records a line for the first test that reaches it, so a test's coverage is a lower bound and the run's is its upper one; Ruby 3.4 or newer records every test"
+                                .into(),
+                    }))
+                    .collect(),
                 })
                 .collect(),
             structural_limitations,

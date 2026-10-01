@@ -41,6 +41,8 @@ module Supercov
   SKIP_PROBES = ENV["SUPERCOV_RUBY_SKIP_PROBES"].to_s.split(",").map(&:strip).reject(&:empty?)
 
   TRANSPORT_MAGIC = "SCVRUBY1".b
+  # The global Hash statement probes store into (see LoadTime.statement_probes).
+  LINE_TABLE = "$__supercov_lines"
   TRANSPORT_VERSION = 1
   TRANSPORT_HEADER_SIZE = 64
   TRANSPORT_RECORD_HEADER_SIZE = 16
@@ -133,7 +135,20 @@ module Supercov
     # the insertions and the probe targets they need, numbered from `first_key`.
     # `blocked` ranges (Ractor blocks, where no probe may run) get no probe;
     # their statements come back in the third element for the caller to declare.
-    def statement_probes(receiver, first_key, lines, statement_offsets, stub, blocked = [])
+    #
+    # With `table`, every probe is a store into that global Hash rather than a
+    # method call -- no frame, no allocation -- and the runtime harvests the
+    # table at each phase boundary: the line-level attribution per test that
+    # Coverage's oneshot lines cannot give, at the price of one hash store per
+    # executed statement.
+    #
+    # Inside `calls_only` ranges (`refine` blocks, where a refined `Hash#[]=`
+    # would answer the store) the method-call probe is used even with `table`.
+    #
+    # An endless method's body (`def m(...) = super`) follows its `=`
+    # directly; a prefix there would end the method before the body, so that
+    # probe wraps the body instead (`= (probe; super)`). `source` shows it.
+    def statement_probes(receiver, first_key, lines, statement_offsets, stub, blocked = [], table = nil, calls_only = [], source = nil)
       edits = []
       probes = {}
       skipped = []
@@ -150,7 +165,15 @@ module Supercov
         end
 
         probes[key] = { "kind" => "statement", "id" => id }
-        edits << { "offset" => span[0], "text" => "#{receiver}.s(#{key}); ", "rank" => "statement", "scope" => span[1] }
+        refined = calls_only.any? { |start, finish| span[0] >= start && span[0] < finish }
+        text = table && !refined ? "#{table}[#{key}] = true; " : "#{receiver}.s(#{key}); "
+        before = source && source.byteslice([span[0] - 256, 0].max, [span[0], 256].min)
+        if before&.match?(/(?<![=!<>])=\s*\z/)
+          edits << { "offset" => span[0], "text" => "(#{text}", "rank" => "opener", "scope" => span[1] }
+          edits << { "offset" => span[1], "text" => ")", "rank" => "closer", "scope" => span[0] }
+        else
+          edits << { "offset" => span[0], "text" => text, "rank" => "statement", "scope" => span[1] }
+        end
         key += 1
       end
       [edits, probes, skipped]
@@ -365,6 +388,12 @@ module Supercov
       @next_context = 1
       @identities = {}
       @seen_hits = {}
+      @compiled = {}
+      @unprobed_lines = {}
+      @features_seen = 0
+      @pending_hits = {}
+      @id_numbers = {}
+      @line_ids = {}
       @seen_vectors = {}
       @vector_counts = {}
       @open = {}
@@ -384,6 +413,7 @@ module Supercov
       # Coverage's branch and method keys are read only where probes cannot
       # stand in for them.
       @stdlib_keys = !@probes_supported
+      @stdlib_every_phase = @stdlib_keys
       compile_file_plans
     end
 
@@ -491,7 +521,9 @@ module Supercov
       return nil if edits.empty?
 
       transformed = LoadTime.apply_edits(source, edits)
-      RubyVM::InstructionSequence.compile(transformed, path, path, 1)
+      iseq = RubyVM::InstructionSequence.compile(transformed, path, path, 1)
+      @compiled[absolute] = true
+      iseq
     rescue SyntaxError, StandardError => error
       # Measuring must never break the program: this file loads unmodified,
       # and everything only a probe could have proven there is declared.
@@ -508,6 +540,11 @@ module Supercov
     # positions in that source and its probe obligations are declared.
     def uninstrumented(absolute, reason)
       return if absolute.nil? || @edits_by_file.delete(absolute).nil?
+
+      # Its lines are Coverage's to report now, phase by phase, and a one-shot
+      # line goes to the first test that runs it.
+      @stdlib_every_phase = true
+      record("t" => "lines", "mode" => "first")
 
       file_plan = @files[relative(absolute)]
       return if file_plan.nil?
@@ -571,13 +608,23 @@ module Supercov
       offsets = @statement_offsets_by_file[absolute]
       return edits if lines.nil? || lines.empty? || offsets.nil?
 
-      stub = begin
-        Coverage.line_stub(absolute)
-      rescue StandardError
-        return edits
+      # Every statement gets a table probe: Coverage's oneshot lines fire once
+      # per process, which credits a line to the first test that ran it and
+      # to no other, and a test's line set is what test impact and assertion
+      # coverage read.
+      stub = []
+      file_plan = @files[relative(absolute)]
+      blocked = file_plan["ractorBlocks"] || []
+      refined = file_plan["refineBlocks"] || []
+      extra, probes, skipped = LoadTime.statement_probes(@receiver, @dynamic_key, lines, offsets, stub, blocked, LINE_TABLE, refined, source)
+      unless skipped.empty?
+        # A statement in a Ractor block takes no probe: Coverage's one-shot
+        # line reports it, phase by phase, to the first test that runs it.
+        by_id = lines.to_h { |line, id| [id, line] }
+        @unprobed_lines[absolute] = skipped.filter_map { |id| by_id[id] }.to_h { |line| [line, true] }
+        @stdlib_every_phase = true
+        record("t" => "lines", "mode" => "first")
       end
-      blocked = @files[relative(absolute)]["ractorBlocks"] || []
-      extra, probes, skipped = LoadTime.statement_probes(@receiver, @dynamic_key, lines, offsets, stub, blocked)
       skipped.each do |id|
         limitation(
           "ruby-line-not-countable",
@@ -589,6 +636,7 @@ module Supercov
       return edits if extra.empty?
 
       @probes.merge!(probes)
+      probes.each { |key, target| @line_ids[key] = target["id"] }
       @dynamic_key += probes.size
       merged = LoadTime.merge_edits(edits, extra)
       reshift_keys(absolute, source, merged)
@@ -796,14 +844,36 @@ module Supercov
 
     # -- stdlib coverage deltas ---------------------------------------------
 
-    def collect_stdlib(context)
+    def collect_stdlib(context, final: false)
+      collect_observations(context, final)
+      flush_hits
+    end
+
+    def collect_observations(context, final)
+      table = $__supercov_lines
+      harvest_lines(context, table.keys) unless table.empty?
+      table.clear
+      # Ruby 3.4+ probes every statement of an instrumented file, so reading
+      # Coverage -- a hash of every file it tracks, gems included, at every
+      # phase boundary -- adds nothing for them. It is read per phase only
+      # once a measured file has been loaded without probes, and always at
+      # exit for whatever remains.
+      return unless final || @stdlib_every_phase || features_without_probes?
+
       result = Coverage.result(stop: false, clear: true)
       result.each do |path, data|
         lines = @lines_by_file[path]
+        # A file compiled with probes has every statement probed, test by
+        # test; its oneshot lines would only credit the run with them again.
         next if lines.nil?
+
+        unprobed = @compiled[path] && (@unprobed_lines[path] || {})
+        next if unprobed && unprobed.empty?
 
         executed = data[:oneshot_lines] || []
         executed.each do |line|
+          next if unprobed && !unprobed[line]
+
           id = lines[line]
           hit(context, id) if id
         end
@@ -871,17 +941,82 @@ module Supercov
 
     # -- observations -------------------------------------------------------
 
+    # First sightings are queued per context and written at the next
+    # boundary as one record (see flush_hits): a test reaches hundreds of
+    # statements, and a record apiece cost more than the tests themselves.
     def hit(context, id)
-      key = [context, id]
-      return if @seen_hits[key]
+      seen = @seen_hits[context] ||= {}
+      return if seen[id]
 
       @seen_lock.synchronize do
-        return if @seen_hits[key]
+        return if seen[id]
 
-        @seen_hits[key] = true
+        seen[id] = true
+        (@pending_hits[context] ||= []) << id
       end
-      record("t" => "hit", "ctx" => context, "id" => id)
       imply(context, id)
+    end
+
+    # The statements a phase's probes stored, as first sightings: one lock
+    # for the batch rather than one per statement.
+    def harvest_lines(context, keys)
+      seen = @seen_hits[context] ||= {}
+      fresh = nil
+      @seen_lock.synchronize do
+        keys.each do |key|
+          id = @line_ids[key]
+          next if id.nil? || seen[id]
+
+          seen[id] = true
+          (fresh ||= []) << id
+        end
+        (@pending_hits[context] ||= []).concat(fresh) if fresh
+      end
+      fresh&.each { |id| imply(context, id) }
+    end
+
+    # Whether a measured file was required without passing through the
+    # probe compiler (loaded before the hook, or by a loader that bypasses
+    # it). Checked only when the loaded-features list has grown.
+    def features_without_probes?
+      features = $LOADED_FEATURES
+      return false if features.size == @features_seen
+
+      fresh = features[@features_seen..] || []
+      @features_seen = features.size
+      fresh.each do |feature|
+        absolute = realpath(feature)
+        next unless absolute && @lines_by_file.key?(absolute) && !@compiled[absolute]
+
+        @stdlib_every_phase = true
+      end
+      @stdlib_every_phase
+    end
+
+    # The queued hits, one record per context; each id is named once per
+    # process and numbered after that.
+    def flush_hits
+      pending = @seen_lock.synchronize do
+        taken = @pending_hits
+        @pending_hits = {}
+        taken
+      end
+      return if pending.empty?
+
+      # Open (or, in a forked child, reopen) the evidence file first: that
+      # decides which numbers the file has already named.
+      ensure_transport
+      pending.each do |context, ids|
+        fresh = []
+        numbers = ids.map do |id|
+          @id_numbers[id] ||= begin
+            fresh << id
+            @id_numbers.size
+          end
+        end
+        record("t" => "ids", "first" => @id_numbers.size - fresh.size, "names" => fresh) unless fresh.empty?
+        record("t" => "hits", "ctx" => context, "n" => numbers)
+      end
     end
 
     # What one observation proves besides itself: the branch alternatives and
@@ -1150,6 +1285,8 @@ module Supercov
       @worker = worker
       @transport = Transport.new(@evidence_dir, worker, pid)
       @transport_pid = pid
+      # A forked child's evidence file names its ids afresh.
+      @id_numbers = {} if forked
       @transport.write(
         "t" => "process",
         "v" => EVIDENCE_VERSION,
@@ -1159,6 +1296,7 @@ module Supercov
         "ruby" => RUBY_VERSION,
         "executable" => RbConfig.ruby,
         "argv" => ARGV.dup,
+        "lines" => @probes_supported ? "exact" : "first",
       )
       identity = @identities[@context]
       @transport.write({ "t" => "phase", "ctx" => @context, "at" => now_ms }.merge(identity)) if forked && @context != 0 && identity
@@ -1169,7 +1307,7 @@ module Supercov
         return if @closed
 
         settle_arrivals(@context)
-        collect_stdlib(@context)
+        collect_stdlib(@context, final: true)
         @closed = true
         record("t" => "exit", "at" => now_ms)
         @transport&.close
@@ -1324,6 +1462,7 @@ module Supercov
     end
     keys = (RUBY_VERSION.split(".").first(2).map(&:to_i) <=> [3, 4]).negative?
     Coverage.start(oneshot_lines: true, **(keys ? { branches: true, methods: true } : {}))
+    $__supercov_lines = {}
     runtime = Runtime.new(plan_path, evidence_dir, run_id, worker)
     $__supercov = Probe.new(runtime)
     RubyVM::InstructionSequence.singleton_class.prepend(Loader)

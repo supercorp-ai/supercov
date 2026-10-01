@@ -135,7 +135,14 @@ pub(super) fn condition(line: &str) -> String {
 /// A test by method name (`pkg.Class#method(String)` or a Kotlin display
 /// name), with its annotations and class line.
 pub(super) fn locate(lines: &[&str], name: &str) -> Option<Located> {
-    let method = name.rsplit_once('#').map_or(name, |(_, m)| m);
+    // `pkg.Class#method(String)#[3] display`: the method is the segment with
+    // its parameter list; an invocation of it follows.
+    let method = name
+        .split('#')
+        .skip(1)
+        .find(|segment| segment.contains('('))
+        .or_else(|| name.rsplit_once('#').map(|(_, m)| m))
+        .unwrap_or(name);
     let method = method.split('(').next().unwrap_or(method).trim();
     if method.is_empty() {
         return None;
@@ -242,6 +249,8 @@ mod tests {
         let suite = "class CTest {\n    @Test\n    fun `big when large`() {\n        assertEquals(\"big\", C.f(20))\n    }\n}\n";
         let lines = suite.split('\n').collect::<Vec<_>>();
         let found = locate(&lines, "app.CTest#big when large()").unwrap();
+        let invocation = locate(&lines, "app.CTest#big when large()#[2] big (x)").unwrap();
+        assert_eq!(invocation.start, 2);
         assert_eq!(
             (found.context.clone(), found.start, found.end),
             (vec![0, 1], 2, 4)

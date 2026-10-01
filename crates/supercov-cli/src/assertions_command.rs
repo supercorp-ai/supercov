@@ -474,8 +474,8 @@ fn change_name(change: Change, language: coverage::Language) -> &'static str {
         (Change::ValueUndefined, Ruby) => "value becomes nil",
         (Change::ReturnUndefined, Go) => "returns zero values",
         (Change::ValueUndefined, Go) => "value becomes the zero value",
-        (Change::ReturnUndefined, Rust) => "returns the default",
-        (Change::ValueUndefined, Rust) => "value becomes the default",
+        (Change::ReturnUndefined, Rust) => "returns a different value",
+        (Change::ValueUndefined, Rust) => "value replaced",
         (Change::ReturnUndefined, Jvm) => "returns the default",
         (Change::ValueUndefined, Jvm) => "value becomes the default",
         (change, _) => change_name_js(change),
@@ -508,7 +508,8 @@ fn summary(
             let best = pass.answers[s].iter().cloned().fold(None, |m: Option<(usize, f64)>, a| match m { Some(m) if m.1 >= a.1 => Some(m), _ => Some(a) });
             json!({
                 "file": st.file, "line": st.line, "text": st.text.lines().next().unwrap_or("").trim(),
-                "change": change_name(st.change, population.language), "asserted": pass.asserted(s),
+                "change": change_name(st.change, population.language), "replacement": st.replacement,
+                "asserted": pass.asserted(s),
                 "answer": best.map(|b| b.1),
                 "test": best.map(|(t, _)| json!({"file": population.tests[t].file, "name": population.tests[t].name})),
                 "testsAsked": pass.answers[s].len(), "testsRunningIt": st.tests.len(),

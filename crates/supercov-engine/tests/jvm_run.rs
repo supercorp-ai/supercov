@@ -99,9 +99,19 @@ const SUITE: &str = r#"package app;
 
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class CalculatorTest {
+    // Two invocations named alike, and one whose name holds a tab: each is
+    // its own test, under a name that reads back as one line.
+    @ParameterizedTest(name = "value {0}")
+    @ValueSource(strings = {"x", "x", "a\tb"})
+    void named(String value) {
+        assertEquals("small", Calculator.size(value.length(), false));
+    }
+
     @Test
     void bigWhenLoudAndLarge() {
         assertEquals("BIG", Calculator.size(20, true));
@@ -198,7 +208,7 @@ fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reach
     assert_eq!(result.source_files, 1);
     // The disabled one included: a test the suite declared and did not run is
     // a fact worth reporting, not an absence worth hiding.
-    assert_eq!(result.tests, 3);
+    assert_eq!(result.tests, 6);
 
     let archive = result.run_directory.join("evidence.raw.gz");
     let entries =
@@ -215,7 +225,7 @@ fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reach
             .iter()
             .filter(|path| path.ends_with("mcdc.json"))
             .count(),
-        3,
+        6,
         "one record per test: {named:?}"
     );
 
@@ -235,6 +245,12 @@ fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reach
             .any(|record| record.contains("CalculatorTest#bigWhenLoudAndLarge()")),
         "tests carry the names the framework itself chose"
     );
+    for invocation in ["#[1] value x", "#[2] value x", "#[3] value a\\\\tb"] {
+        assert!(
+            records.iter().any(|record| record.contains(invocation)),
+            "{invocation} in {records:?}"
+        );
+    }
     assert!(
         records
             .iter()
@@ -332,7 +348,8 @@ fn a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reac
     );
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.build, JvmBuild::Gradle);
-    assert_eq!(result.tests, 3);
+    // The shared suite: two tests, a disabled one, three invocations.
+    assert_eq!(result.tests, 6);
     std::fs::remove_dir_all(root).ok();
 }
 
