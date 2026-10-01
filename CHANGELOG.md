@@ -22,6 +22,7 @@
 
 **Fixed**
 
+- `cargo test -q` measures a crate with doctests. Quiet output prints a dot for each test, and Supercov reads each doctest pass by the name libtest prints, so every pass read as running nothing and the run failed; the passes now print names whatever the command asked for.
 - `tests affected` no longer misses a Java or Kotlin test that only uses what a static initializer set up. It runs once per process and is credited to the first test to load the class, so a test reading a changed static field ran nothing recorded in its file; a change to a class's declarations now also affects the tests whose files name the class. Replaying apache/commons-cli's history, the three failing tests a reverted `Converter.CLASS` change had missed are selected (12 of 12 instead of 9), for about 15% more tests selected.
 - `tests affected` answers for Java and Kotlin projects. JUnit names a test's class in full and Supercov matched it to the file that declares it by its bare name, so no JVM test had a file, the run recorded what no test executed, and every change was reported as affecting "0 of 0 tests".
 - A Maven project that runs Apache RAT, as every Apache Commons project does through its parent pom, runs under Supercov: RAT failed the workspace copy on Supercov's own runtime and listener files, which carry no license header, before any test ran. The copy's command now skips RAT and says so; your own build still runs it.

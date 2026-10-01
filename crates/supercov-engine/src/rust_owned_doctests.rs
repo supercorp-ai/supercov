@@ -371,6 +371,12 @@ fn parse_harness_arguments(arguments: &[String]) -> HarnessArguments {
                 parsed.skips.push(pattern.clone());
                 index += 1;
             }
+        } else if matches!(argument.as_str(), "-q" | "--quiet") || argument.starts_with("--format=")
+        {
+            // How results print, not which run: each pass is read by the
+            // name libtest prints, and `cargo test -q` would print a dot.
+        } else if argument == "--format" {
+            index += 1;
         } else if argument == "--exact" {
             parsed.exact = true;
         } else if argument == "--list" {
@@ -1153,6 +1159,18 @@ mod tests {
         assert!(exact.selects("src/lib.rs - doubled (line 12)"));
         assert!(!exact.selects("src/lib.rs - doubled (line 120)"));
         assert!(parse_harness_arguments(&[]).selects("anything"));
+        // `cargo test -q` passes `--quiet`: dots instead of the names each
+        // pass is checked by, so every doctest pass read as running none.
+        let quiet = parse_harness_arguments(&[
+            "--quiet".into(),
+            "-q".into(),
+            "--format".into(),
+            "terse".into(),
+            "--format=pretty".into(),
+            "--nocapture".into(),
+        ]);
+        assert_eq!(quiet.passthrough, ["--nocapture"]);
+        assert!(quiet.filters.is_empty());
     }
 
     #[test]
