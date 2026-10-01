@@ -2274,3 +2274,21 @@ fn a_selector_that_matches_nothing_or_several_says_so() {
         "{minimized}"
     );
 }
+
+#[test]
+fn phase_timing_says_where_setup_went_when_asked() {
+    let project = Project::cart("phase-timing");
+    let timed = project
+        .supercov_with(&["--", "node", "--test"], &[("SUPERCOV_PHASE_TIMING", "1")])
+        .exits(0);
+    contains_all(
+        &timed,
+        &[
+            "[supercov] setup detail runtime=",
+            "| files=",
+            "[supercov] timings initialization=",
+        ],
+    );
+    let quiet = project.supercov(&["--", "node", "--test"]).exits(0);
+    assert!(!quiet.contains("setup detail"), "{quiet}");
+}
