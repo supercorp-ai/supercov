@@ -133,6 +133,7 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   | dry-rb/dry-inflector (Ruby 3.4) | 157 | 141 | 20 (8) | 87.3% / 92.4% |
   | hashicorp/go-version (Go, held out) | 257 | 245 | 29 (19) | 88.7% / 91.8% |
   | sporkmonger/addressable (Ruby, held out) | 198 of a sample of 200 | 181 | 28 (15) | 85.9% / 90.4% |
+  | square/moshi (Kotlin, held out) | 54 of a sample of 60 | 47 | 9 (6) | 83.3% / 81.5% |
 
   The first five were used to shape how tests are shown to Jev; the held-out
   ones were assessed before their ground truth was taken and not tuned on.
