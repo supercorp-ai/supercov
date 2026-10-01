@@ -85,4 +85,12 @@ gates! {
     rust_generic_build_matrix => "rust-generic-build-matrix.mjs",
     rust_vite_playwright => "rust-vite-playwright-integration.mjs",
     rust_vitest_projects => "rust-vitest-projects-integration.mjs",
+    opaque_runner => "opaque-runner-integration.mjs",
+    opaque_esm => "opaque-esm-integration.mjs",
+    distributed_merge => "distributed-merge-integration.mjs",
+    generic_build => "generic-build-integration.mjs",
+    next => "next-integration.mjs",
+    node_test => "node-test-integration.mjs",
+    workspaces_attribution => "workspaces-attribution-integration.mjs",
+    agent_query_eval => "agent-query-eval.mjs",
 }
