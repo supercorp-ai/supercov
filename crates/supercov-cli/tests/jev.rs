@@ -1060,3 +1060,91 @@ fn rust_values_of_every_shape_are_asked_as_changes_of_their_own_type() {
         assert!(asked.contains(change), "{change} not asked:\n{asked}");
     }
 }
+
+#[test]
+fn tests_affected_and_assertions_name_a_mistake_and_estimate_a_change() {
+    let project = Project::cart("affected-mistakes");
+    let run = project.measure(&[]);
+    let on_run = |args: &[&str]| {
+        let mut all = vec!["runs", run.as_str()];
+        all.extend_from_slice(args);
+        project.supercov(&all)
+    };
+    let help = on_run(&["tests", "affected", "--help"]).succeeds();
+    assert!(
+        help.starts_with("Usage: supercov runs <run> tests affected"),
+        "{help}"
+    );
+    for (args, message) in [
+        (
+            vec!["tests", "affected", "--json", "--names"],
+            "Choose one of --json, --names or --files",
+        ),
+        (
+            vec!["tests", "affected", "--asserting"],
+            "--asserting and --ran-changed narrow --names or --files",
+        ),
+        (
+            vec![
+                "tests",
+                "affected",
+                "--ran-changed",
+                "--asserting",
+                "--names",
+            ],
+            "Choose one of --ran-changed or --asserting",
+        ),
+        (
+            vec!["tests", "affected", "--names", "--names"],
+            "Duplicate option: --names",
+        ),
+        (
+            vec!["assertions", "--changed"],
+            "--changed belongs to `assertions assess`",
+        ),
+        (
+            vec!["assertions", "assess", "--frob"],
+            "Unknown option: --frob",
+        ),
+        // A change is assessed against sources an assessment kept.
+        (
+            vec!["assertions", "assess", "--changed", "--dry-run"],
+            "this run's sources were not kept; assess the run first",
+        ),
+    ] {
+        let refused = on_run(&args).exits(2);
+        assert!(refused.contains(message), "{args:?}: {refused}");
+    }
+    let unchanged = on_run(&["tests", "affected"]).succeeds();
+    contains_all(
+        &unchanged,
+        &[
+            "0 of 3 tests affected",
+            "No captured file has changed.",
+            "Working tree: matches the run.",
+        ],
+    );
+    let json = on_run(&["tests", "affected", "--json"]).json();
+    assert_eq!(json["data"]["summary"]["unaffected"], 3, "{json}");
+
+    let (base, _) = gateway(MODEL, answer_yes);
+    let mut assess = vec!["runs", run.as_str(), "assertions", "assess"];
+    project.supercov_with(&assess, &through(&base)).succeeds();
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    assess.extend(["--changed", "--dry-run"]);
+    let estimate = project.supercov(&assess).succeeds();
+    assert!(
+        estimate.contains("2 changed statement(s), 0 answers in the cache. 1 requests"),
+        "{estimate}"
+    );
+    assess.pop();
+    let keyless = project.supercov(&assess).exits(2);
+    assert!(
+        keyless.contains("set TYPESAFE_API_KEY to ask Jev"),
+        "{keyless}"
+    );
+}
