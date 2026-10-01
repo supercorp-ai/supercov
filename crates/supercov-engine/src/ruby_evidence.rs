@@ -1193,8 +1193,8 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
-            // Ruby 3.4+ probes every statement, so what a test is recorded as
-            // reaching is all of it. On 3.3 lines come from Coverage's one-shot
+            // Ruby 3.3+ probes every statement, so what a test is recorded as
+            // reaching is all of it. Unprobed lines come from Coverage's one-shot
             // lines, which report a line the first time it executes in the
             // process and never again: the first test to reach a line is
             // credited with it, and a test's hits are a lower bound.
@@ -1258,8 +1258,8 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
-            // Ruby 3.4+ probes every statement, so what a test is recorded as
-            // reaching is all of it. On 3.3 lines come from Coverage's one-shot
+            // Ruby 3.3+ probes every statement, so what a test is recorded as
+            // reaching is all of it. Unprobed lines come from Coverage's one-shot
             // lines, which report a line the first time it executes in the
             // process and never again: the first test to reach a line is
             // credited with it, and a test's hits are a lower bound.
@@ -1423,15 +1423,17 @@ pub fn build_ruby_frontend_run(
                     ]
                     .into_iter()
                     // Declared because the declaration is what a reader checks
-                    // a number against. On 3.3 Ruby's Coverage reports a line
-                    // the first time it executes in the process and never
-                    // again: what a test is credited with is its own; what it
-                    // is not credited with is not evidence it did not run.
+                    // a number against. Where lines come from Ruby's one-shot
+                    // Coverage (a file loaded without probes, a Ractor block),
+                    // a line is reported the first time it executes in the
+                    // process and never again: what a test is credited with is
+                    // its own; what it is not credited with is not evidence it
+                    // did not run.
                     .chain(first_sighting.then(|| FrontendLimitation {
                         id: format!("ruby-{runner}-first-sighting-lines"),
                         scopes: vec![FrontendLimitationScope::Test],
                         reason:
-                            "Ruby 3.3 records a line for the first test that reaches it, so a test's coverage is a lower bound and the run's is its upper one; Ruby 3.4 or newer records every test"
+                            "some lines came from Ruby's one-shot line coverage (code loaded without Supercov's probes), which records a line for the first test that reaches it, so a test's coverage is a lower bound and the run's is its upper one"
                                 .into(),
                     }))
                     .collect(),

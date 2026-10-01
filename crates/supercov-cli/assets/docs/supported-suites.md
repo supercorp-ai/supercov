@@ -220,14 +220,15 @@ npx supercov -- python -m unittest
 | Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
 | Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
 
-On Ruby 3.4 and newer every test is credited with every line it runs. Ruby
-3.3 reports a line the first time it executes and never again, so there a test
-is credited with the lines it was first to reach and a later test running the
-same lines with none of them: what a test is credited with is its own, and what
-it is not credited with is not evidence it did not run the code. Totals are
-unaffected; per-test numbers on 3.3 read "at least", and `tests affected`
-reports a test whose own record cannot settle the question as
-**undetermined**, so `--names` includes it in the set to run.
+Every test is credited with every line it runs: each statement of an
+instrumented file carries a probe. Code Supercov cannot instrument -- a file
+it could not compile with its probes, or a `Ractor.new` block, where no probe
+can run -- falls back to Ruby's one-shot line coverage, which reports a line
+the first time it executes and never again. There a test is credited with the
+lines it was first to reach; what it is not credited with is not evidence it
+did not run the code. The run says so, per-test numbers there read "at least",
+and `tests affected` reports a test whose own record cannot settle the
+question as **undetermined**, so `--names` includes it in the set to run.
 
 Your project runs in place with its own interpreter and bundle. Supercov loads
 through `RUBYOPT`; application files on disk and their backtrace line numbers
@@ -235,11 +236,9 @@ stay unchanged. RSpec, Minitest and test-unit assertions can identify execution
 before a passing assertion. That timing evidence alone does not show which
 values the assertion checks.
 
-Ruby 3.4 and newer support statement, method, branch and MC/DC measurement,
+Ruby 3.3 and newer support statement, method, branch and MC/DC measurement,
 including loops, iterator blocks, short-circuit operators, pattern matching,
-optional calls and exception paths. Ruby 3.3 supplies Ruby's own line, method
-and branch coverage; obligations requiring additional instrumentation are
-reported as measurement limits.
+optional calls and exception paths.
 
 Some constructs have narrower coverage. Code in a non-main Ractor keeps line
 coverage but may lack other observations. Certain nested-return expressions

@@ -110,7 +110,8 @@ function assertFixtureTotals(summary) {
 try {
   const ruby = findInterpreter();
   const version = interpreterVersion(ruby);
-  const probes = version.major > 3 || version.minor >= 4;
+  // Ruby 3.3+ compiles instrumented files with a probe on every statement.
+  const probes = version.major > 3 || version.minor >= 3;
   const assertTotals = probes ? assertFixtureTotals : assertStdlibOnlyTotals;
   const rubyDirectory = interpreterBindir(ruby);
   const gems = resolve(temporary, 'gems');
@@ -189,9 +190,11 @@ try {
     assert.equal(skipped.status, 0, `${skipped.stdout}\n${skipped.stderr}`);
     assert.match(skipped.stderr, /12 test\(s\) across 1 source file\(s\)/, 'the suite still runs unmodified');
     const stdlibOnly = query(['runs', 'latest'], environment);
+    // Without probes Ruby's own line events decide, and 3.3 has none for one
+    // of these lines (declared unmeasured, so it leaves the total).
     assert.deepEqual(
       [stdlibOnly.coverage.lines.covered, stdlibOnly.coverage.lines.total],
-      [66, 67],
+      version.major > 3 || version.minor >= 4 ? [66, 67] : [65, 66],
       JSON.stringify(stdlibOnly.coverage),
     );
     assert.deepEqual(
@@ -199,9 +202,12 @@ try {
       [8, 8],
       JSON.stringify(stdlibOnly.coverage),
     );
+    // A method whose body starts on a line with no line event (one here, a
+    // second on 3.3) cannot be observed without probes, so it is declared
+    // rather than left as a gap no test could close.
     assert.deepEqual(
       [stdlibOnly.coverage.functions.covered, stdlibOnly.coverage.functions.total],
-      [15, 16],
+      version.major > 3 || version.minor >= 4 ? [15, 15] : [14, 14],
       'methods whose body starts on a line of its own stay measured without probes',
     );
     const declared = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);

@@ -147,9 +147,7 @@ Measured on four JavaScript and TypeScript projects (7,393 executed statements):
   The first five were used to shape how tests are shown to Jev; the held-out
   ones were assessed before their ground truth was taken and not tuned on,
   except that six of moshi's statements whose change could not be made (a
-  `try` or `throw` a function ends on) showed how to change them. Ruby 3.3 credits each line to the first test that runs it
-  (3.4 and newer credit every test), so on 3.3 most statements are asked of a
-  single test and the share reads low.
+  `try` or `throw` a function ends on) showed how to change them.
 
 The share is a good measure of a project; a single statement's verdict is a
 judgment worth checking before acting on it. Supercov does not run mutated code

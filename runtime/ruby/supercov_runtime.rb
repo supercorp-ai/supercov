@@ -7,12 +7,13 @@
 # things and nothing else:
 #
 # 1. Starts Ruby's own Coverage module and turns its per-phase deltas into
-#    first-sighting hits. On Ruby 3.4+ it asks for line events alone: a
+#    first-sighting hits. On Ruby 3.3+ it asks for line events alone: a
 #    statement that starts a branch body or method body proves the branch,
 #    the method and the decision outcome (the plan's `implied` map), and the
 #    rest is probed. Asking for `branches` and `methods` too made every sample
 #    rebuild both tables for every loaded file -- 80% of the runtime's cost.
-#    Ruby 3.3 cannot apply probes, so it keeps matching the plan's keys.
+#    Ruby 3.3 takes the same path: it does not apply Coverage to a file
+#    compiled through the hook, and every statement there carries a probe.
 # 2. Installs a RubyVM::InstructionSequence.load_iseq hook that splices the
 #    plan's probe calls into application sources in memory as they load. The
 #    files on disk are never touched; no insertion contains a newline.
@@ -406,10 +407,11 @@ module Supercov
       @realpath_cache = {}
       @saw_file = false
       @matched_file = false
-      # Ruby 3.4 applies Coverage to iseqs compiled through a load hook;
-      # 3.3 does not, so it runs on stdlib coverage alone and declares every
-      # probe-only obligation unmeasured.
-      @probes_supported = (RUBY_VERSION.split(".").first(2).map(&:to_i) <=> [3, 4]) >= 0
+      # Every statement of an instrumented file carries a probe, so a file
+      # compiled through the load hook needs nothing from Coverage -- which
+      # 3.3 does not apply to such files. Older Rubies run on stdlib coverage
+      # alone and declare every probe-only obligation unmeasured.
+      @probes_supported = Supercov.probes_supported?
       # Coverage's branch and method keys are read only where probes cannot
       # stand in for them.
       @stdlib_keys = !@probes_supported
@@ -560,14 +562,14 @@ module Supercov
       # Ruby 3.4+ reads no branch or method keys, so what only a key proved
       # in this file, and no line-owned statement implies, is declared too.
       if @probes_supported
-        key_only_obligations(file_plan).each do |id|
+        key_only_obligations(file_plan, absolute).each do |id|
           limitation("ruby-file-not-instrumented", reason, relative(absolute), id)
         end
       end
       declare_uncountable_lines_for(absolute)
     end
 
-    def key_only_obligations(file_plan)
+    def key_only_obligations(file_plan, absolute)
       keyed = []
       file_plan["branches"].each do |branch|
         keyed.concat(branch["hits"])
@@ -583,8 +585,15 @@ module Supercov
       end
       file_plan["methods"].each { |method| keyed << method["id"] }
       # Implications whose statement Ruby's own line table observes still
-      # hold in an untouched file; those behind a probe do not.
-      line_owned = file_plan["lines"].values
+      # hold in an untouched file; those behind a probe do not, and nor do
+      # those of a statement on a line this interpreter never counts (3.3
+      # has no line event for `case ... in`, `x = begin` and the like).
+      stub = begin
+        Coverage.line_stub(absolute)
+      rescue StandardError
+        []
+      end
+      line_owned = file_plan["lines"].filter_map { |line, id| id unless stub[line.to_i - 1].nil? }
       implied = (file_plan["implied"] || {}).flat_map do |id, plan|
         next [] unless line_owned.include?(id)
 
@@ -1443,6 +1452,12 @@ module Supercov
 
   @runtime = nil
 
+  # Ruby 3.3 and newer compile instrumented files through the load hook with a
+  # probe on every statement; each test is credited with every line it runs.
+  def self.probes_supported?
+    (RUBY_VERSION.split(".").first(2).map(&:to_i) <=> [3, 3]) >= 0
+  end
+
   def self.runtime
     @runtime
   end
@@ -1460,7 +1475,7 @@ module Supercov
       number = ENV["TEST_ENV_NUMBER"].to_s
       worker = number.empty? ? "main" : "worker-#{number}"
     end
-    keys = (RUBY_VERSION.split(".").first(2).map(&:to_i) <=> [3, 4]).negative?
+    keys = !Supercov.probes_supported?
     Coverage.start(oneshot_lines: true, **(keys ? { branches: true, methods: true } : {}))
     $__supercov_lines = {}
     runtime = Runtime.new(plan_path, evidence_dir, run_id, worker)
