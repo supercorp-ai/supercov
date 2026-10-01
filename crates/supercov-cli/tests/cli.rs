@@ -1075,3 +1075,49 @@ fn the_report_compares_two_runs_and_names_a_mistake() {
         .exits(2);
     assert!(missing.contains("run_0000000000000009"), "{missing}");
 }
+
+#[test]
+fn a_source_file_that_does_not_parse_runs_as_written_and_is_declared() {
+    let project = Project::cart("unparsable");
+    project.write(
+        "src/broken.js",
+        "export function broken( {\n  return 1;\n}\n",
+    );
+    // The suite never loads it, and passes with or without Supercov.
+    let measured = project.supercov(&["--", "node", "--test"]).succeeds();
+    assert!(measured.contains("pass 3"), "{measured}");
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "Lines      76.92% (10/13)",
+            "Incomplete — 1 blocking limitation(s) in 1 file(s)",
+        ],
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/broken.js:1"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "NOT MEASURED",
+            "Supercov could not parse this file (Expected `:` but found `decimal` at line 2, column 11)",
+            "(read from the current working tree)",
+        ],
+    );
+
+    // A test file that does not parse fails in its runner, exactly as it
+    // does without Supercov.
+    project.write(
+        "test/broken.test.js",
+        "import test from \"node:test\";\ntest(\"broken\", () => {\n",
+    );
+    let plain = std::process::Command::new("node")
+        .args(["--test"])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    let under = project.supercov(&["--", "node", "--test"]);
+    assert_eq!(under.code(), plain.status.code().unwrap());
+    assert!(under.stdout().contains("fail 1"), "{}", under.stdout());
+}

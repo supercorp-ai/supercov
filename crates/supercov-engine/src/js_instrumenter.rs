@@ -495,7 +495,7 @@ fn shift_source_map(
             )
         })
         .collect::<Vec<_>>();
-    let mut shifted = oxc_sourcemap::SourceMap::new(
+    oxc_sourcemap::SourceMap::new(
         map.get_file().cloned(),
         map.get_names().cloned().collect::<Vec<Arc<str>>>(),
         map.get_source_root().map(str::to_string),
@@ -505,14 +505,7 @@ fn shift_source_map(
             .collect::<Vec<Option<Arc<str>>>>(),
         tokens.into_boxed_slice(),
         None,
-    );
-    if let Some(ignore_list) = map.get_x_google_ignore_list() {
-        shifted.set_x_google_ignore_list(ignore_list.to_vec());
-    }
-    if let Some(debug_id) = map.get_debug_id() {
-        shifted.set_debug_id(debug_id);
-    }
-    shifted
+    )
 }
 
 /// Where a statement Supercov generated inside a function or block starts, in
@@ -653,7 +646,7 @@ fn unmap_generated_statements(
             }
         })
         .collect::<Vec<_>>();
-    let mut unmapped = oxc_sourcemap::SourceMap::new(
+    oxc_sourcemap::SourceMap::new(
         map.get_file().cloned(),
         map.get_names().cloned().collect::<Vec<Arc<str>>>(),
         map.get_source_root().map(str::to_string),
@@ -663,14 +656,7 @@ fn unmap_generated_statements(
             .collect::<Vec<Option<Arc<str>>>>(),
         tokens.into_boxed_slice(),
         None,
-    );
-    if let Some(ignore_list) = map.get_x_google_ignore_list() {
-        unmapped.set_x_google_ignore_list(ignore_list.to_vec());
-    }
-    if let Some(debug_id) = map.get_debug_id() {
-        unmapped.set_debug_id(debug_id);
-    }
-    unmapped
+    )
 }
 
 /// A line of the instrumented copy starting with a closing brace Supercov
@@ -760,7 +746,7 @@ fn map_closing_lines(
     if !added {
         return map;
     }
-    let mut closed = oxc_sourcemap::SourceMap::new(
+    oxc_sourcemap::SourceMap::new(
         map.get_file().cloned(),
         map.get_names().cloned().collect::<Vec<Arc<str>>>(),
         map.get_source_root().map(str::to_string),
@@ -770,14 +756,7 @@ fn map_closing_lines(
             .collect::<Vec<Option<Arc<str>>>>(),
         patched.into_boxed_slice(),
         None,
-    );
-    if let Some(ignore_list) = map.get_x_google_ignore_list() {
-        closed.set_x_google_ignore_list(ignore_list.to_vec());
-    }
-    if let Some(debug_id) = map.get_debug_id() {
-        closed.set_debug_id(debug_id);
-    }
-    closed
+    )
 }
 
 fn generate_candidate(
@@ -851,6 +830,36 @@ pub enum CandidateError {
         actual: usize,
         detail: String,
     },
+}
+
+impl std::fmt::Display for CandidateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownSourceType(file) => {
+                write!(formatter, "no JavaScript source type for {file}")
+            }
+            Self::Parse(messages) => write!(formatter, "{}", messages.join("; ")),
+            Self::CommentPreservation {
+                expected,
+                actual,
+                detail,
+            } => write!(
+                formatter,
+                "{expected} comments in the source, {actual} after instrumenting: {detail}"
+            ),
+        }
+    }
+}
+
+/// A parser error as a person reads it: the message, and where.
+fn parse_message(source: &str, message: &str, offset: Option<usize>) -> String {
+    match offset.filter(|offset| *offset <= source.len()) {
+        Some(offset) => {
+            let (line, column) = line_and_utf16_column(source, offset);
+            format!("{message} at line {line}, column {}", column + 1)
+        }
+        None => message.to_owned(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2935,8 +2944,18 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         return Err(CandidateError::Parse(
             parsed
                 .errors
-                .into_iter()
-                .map(|error| format!("{error:?}"))
+                .iter()
+                .map(|error| {
+                    parse_message(
+                        source,
+                        &error.message,
+                        error
+                            .labels
+                            .as_ref()
+                            .and_then(|labels| labels.first())
+                            .map(|label| label.offset()),
+                    )
+                })
                 .collect(),
         ));
     }
@@ -3160,8 +3179,18 @@ fn instrument_candidate_with_binding(
         return Err(CandidateError::Parse(
             parsed
                 .errors
-                .into_iter()
-                .map(|error| format!("{error:?}"))
+                .iter()
+                .map(|error| {
+                    parse_message(
+                        source,
+                        &error.message,
+                        error
+                            .labels
+                            .as_ref()
+                            .and_then(|labels| labels.first())
+                            .map(|label| label.offset()),
+                    )
+                })
                 .collect(),
         ));
     }

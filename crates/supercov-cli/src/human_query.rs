@@ -1028,10 +1028,9 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             match data.as_ref() {
                 CoverageCoversData::Anchors(data) => {
                     let complete = data.covered_anchored;
-                    let state = if data.total_anchored == 0
-                        && data.total_limitations == 0
-                        && data.total_remaining == 0
-                    {
+                    // A line nothing measured is not measured, whatever
+                    // limitation says why.
+                    let state = if data.total_anchored == 0 && data.total_remaining == 0 {
                         "NOT MEASURED"
                     } else if complete == data.total_anchored
                         && data.total_limitations == 0

@@ -179,7 +179,7 @@ impl std::fmt::Display for JavascriptFrontendError {
         match self {
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
             Self::Instrument { file, source } => {
-                write!(formatter, "failed to instrument {file}: {source:?}")
+                write!(formatter, "failed to instrument {file}: {source}")
             }
             Self::MissingRuntimeMarker => write!(
                 formatter,
@@ -1526,7 +1526,7 @@ pub fn prepare_javascript_frontend(
             command,
             &project.build_command,
         );
-        let mut output = timed(&SETUP.instrument_ns, || {
+        let instrumented = timed(&SETUP.instrument_ns, || {
             instrument_with_import_policy(
                 &source,
                 file,
@@ -1534,11 +1534,35 @@ pub fn prepare_javascript_frontend(
                 project.build_adapter == BuildAdapter::Direct,
                 elide,
             )
-        })
-        .map_err(|source| JavascriptFrontendError::Instrument {
-            file: file.clone(),
-            source,
-        })?;
+        });
+        let mut output = match instrumented {
+            Ok(output) => output,
+            // A file the parser rejects runs as written: the suite may never
+            // load it, and one that does fails there as it would without
+            // Supercov. Nothing in it is measured, and the run says so.
+            Err(crate::js_instrumenter::CandidateError::Parse(messages)) => {
+                let limitation = CandidateLimitation {
+                    id: format!("javascript-file-not-parsed#{file}"),
+                    kind: "source-scope".into(),
+                    file: file.clone(),
+                    line: 1,
+                    column: 0,
+                    source: String::new(),
+                    reason: format!(
+                        "Supercov could not parse this file ({}); it runs as written and nothing in it is measured",
+                        messages.join("; ")
+                    ),
+                };
+                limitations.insert(limitation.id.clone(), limitation);
+                continue;
+            }
+            Err(source) => {
+                return Err(JavascriptFrontendError::Instrument {
+                    file: file.clone(),
+                    source,
+                });
+            }
+        };
         if project.build_adapter == BuildAdapter::Generic {
             let runtime = generic_runtime_binding(workspace, project, &path, &generated)?;
             output.code = output.code.replace("virtual:supercov-runtime", &runtime);
@@ -1614,17 +1638,25 @@ pub fn prepare_javascript_frontend(
             .then(|| runtime_specifier(&entry.file, "capability.mjs"))
             .transpose()?;
         let assertion_runtime = runtime_specifier(&entry.file, "runtime.mjs")?;
-        let output = crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
-            &source,
-            &entry.file,
-            std::slice::from_ref(&project.playwright_module),
-            capability_wrapper.as_deref(),
-            Some(&assertion_runtime),
-        )
-        .map_err(|source| JavascriptFrontendError::Instrument {
-            file: entry.file.clone(),
-            source,
-        })?;
+        let output =
+            match crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
+                &source,
+                &entry.file,
+                std::slice::from_ref(&project.playwright_module),
+                capability_wrapper.as_deref(),
+                Some(&assertion_runtime),
+            ) {
+                Ok(output) => output,
+                // A test file the parser rejects is left as written; its runner
+                // reports it, and it has no assertions to track.
+                Err(crate::js_instrumenter::CandidateError::Parse(_)) => continue,
+                Err(source) => {
+                    return Err(JavascriptFrontendError::Instrument {
+                        file: entry.file.clone(),
+                        source,
+                    });
+                }
+            };
         let coverage_transformed_by_vite = project.build_adapter == BuildAdapter::Vite
             && project.source_files.contains(&entry.file);
         if (output.assertions > 0 || output.capability_imports > 0) && !coverage_transformed_by_vite
