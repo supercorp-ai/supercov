@@ -252,6 +252,22 @@ try {
     const writesGaps = query(['runs', 'latest', 'file', 'lib/writes.rb'], environment, flow);
     assert.deepEqual(writesGaps.gapLines.map((line) => line.line), [4, 64], JSON.stringify(writesGaps.gapLines));
     assert.deepEqual([writesGaps.counts.uncoveredLines, writesGaps.counts.missingBranches], [0, 2], JSON.stringify(writesGaps.counts));
+
+    // The last statement of a begin body whose arms leave through `return`:
+    // unless, case, case/in, a nested begin, an if/elsif chain and a
+    // parenthesised ternary are probed arm by arm, and so is `return x
+    // rescue y`. An arm with nowhere to fall through (`unless` without
+    // `else`) leaves the body's completion unobservable, which is declared.
+    const jumps = supercov(['--', 'ruby', '-Ilib', '-Itest', 'test/jumps_test.rb'], environment, flow);
+    assert.equal(jumps.status, 0, `${jumps.stdout}\n${jumps.stderr}`);
+    assert.match(jumps.stdout, /31 assertions, 0 failures, 0 errors/);
+    const jumpGaps = query(['runs', 'latest', 'file', 'lib/jumps.rb'], environment, flow);
+    assert.deepEqual(jumpGaps.gapLines.map((line) => line.line), [75], JSON.stringify(jumpGaps.gapLines));
+    assert.deepEqual(
+      [jumpGaps.counts.uncoveredLines, jumpGaps.counts.missingBranches, jumpGaps.totalLimitations],
+      [0, 0, 1],
+      JSON.stringify(jumpGaps.counts),
+    );
   }
 
   const minitest = supercov(['--', 'ruby', '-Itest', 'test/shapes_test.rb'], environment);
