@@ -1257,6 +1257,7 @@ impl RustCompilerManifest {
                         "generatedFiles": generated_source_files,
                     },
                 })),
+                assertion_sites: Vec::new(),
             },
             hit_obligations_by_ordinal: hit_obligations_by_ordinal
                 .into_iter()

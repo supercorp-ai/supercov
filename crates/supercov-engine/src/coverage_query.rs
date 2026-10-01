@@ -3376,6 +3376,7 @@ mod tests {
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: std::mem::take(&mut results),
             generated_at: "time".into(),

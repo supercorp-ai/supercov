@@ -409,6 +409,7 @@ mod tests {
                     "reason": "Runtime source has no stable denominator"
                 })],
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: vec![RawTestResult {
                 test_id: Some("test".into()),

@@ -410,6 +410,8 @@ struct RustObligationCollector<'a> {
     /// Where each obligation sits, so the ones no probe can reach can be
     /// declined once the whole file has been read.
     obligation_ranges: Vec<(String, TextRange)>,
+    /// Test code in this file, which is not measured.
+    tests: Vec<TextRange>,
     error: Option<RustInstrumenterError>,
 }
 
@@ -425,14 +427,50 @@ impl<'a> RustObligationCollector<'a> {
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             point_ids: BTreeSet::new(),
             decision_ids: BTreeSet::new(),
             branch_ids: BTreeSet::new(),
             site_limitations: BTreeSet::new(),
             obligation_ranges: Vec::new(),
+            tests: Vec::new(),
             error: None,
         }
+    }
+
+    fn leaving_out(mut self, tests: Vec<TextRange>) -> Self {
+        self.tests = tests;
+        self
+    }
+
+    /// Test code is not measured, as the usual Rust coverage tools leave it
+    /// out by default. Its obligations go, and its statements stay only as the places an
+    /// assertion marker may name.
+    fn leave_out_test_code(&mut self) {
+        let inside = self
+            .obligation_ranges
+            .iter()
+            .filter(|(_, range)| in_test_code(&self.tests, *range))
+            .map(|(id, _)| id.clone())
+            .collect::<BTreeSet<_>>();
+        if inside.is_empty() {
+            return;
+        }
+        for point in std::mem::take(&mut self.manifest.points) {
+            if !inside.contains(&point.id) {
+                self.manifest.points.push(point);
+            } else if point.kind == PointKind::Statement {
+                self.manifest.assertion_sites.push(point);
+            }
+        }
+        self.manifest
+            .decisions
+            .retain(|decision| !inside.contains(&decision.id));
+        self.manifest
+            .branches
+            .retain(|branch| !inside.contains(&branch.id));
+        self.manifest.unmeasured.retain(|id| !inside.contains(id));
     }
 
     fn location_source(&mut self, range: TextRange) -> Option<(usize, usize, String)> {
@@ -643,7 +681,7 @@ impl<'a> RustObligationCollector<'a> {
     /// index knows for code outside the measured denominator; anything else
     /// it renders as "unknown".
     fn site_limitation(&mut self, id: &'static str, range: TextRange, reason: String) {
-        if self.site_limitations.contains(id) {
+        if self.site_limitations.contains(id) || in_test_code(&self.tests, range) {
             return;
         }
         let Some((line, column, source)) = self.location_source(range) else {
@@ -896,6 +934,7 @@ impl<'a> RustObligationCollector<'a> {
         }
 
         self.decline_unreachable_obligations(root);
+        self.leave_out_test_code();
 
         if let Some(error) = self.error {
             return Err(error);
@@ -1253,16 +1292,80 @@ fn standalone_matches(
         .collect()
 }
 
+/// Whether a file is test code by where it sits, as the usual Rust coverage
+/// tools decide by default: under a `tests`, `examples` or `benches` directory, or named
+/// `tests.rs`, `*_tests.rs` or `*-tests.rs`.
+pub fn test_code_path(file: &str) -> bool {
+    let mut parts = file.split(['/', '\\']).collect::<Vec<_>>();
+    let name = parts.pop().unwrap_or_default();
+    parts
+        .iter()
+        .any(|directory| matches!(*directory, "tests" | "examples" | "benches"))
+        || name == "tests.rs"
+        || name
+            .strip_suffix("tests.rs")
+            .and_then(|stem| stem.strip_suffix(['_', '-']))
+            .is_some_and(|stem| {
+                !stem.is_empty()
+                    && stem.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "_-".contains(character)
+                    })
+            })
+}
+
+/// Whether an item is test code: gated on `cfg(test)`, alone or first in an
+/// `all(..)`, or a test or benchmark function (`#[test]`, `#[tokio::test]`).
+pub(crate) fn test_item(node: &ra_ap_syntax::SyntaxNode) -> bool {
+    let Some(item) = ast::Item::cast(node.clone()) else {
+        return false;
+    };
+    item.attrs().any(|attribute| {
+        // This grammar parses `cfg(..)` as a keyword and predicate rather
+        // than a path, so the meta's text is read.
+        attribute.meta().is_some_and(|meta| {
+            let text = meta
+                .syntax()
+                .text()
+                .to_string()
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            let path = text
+                .chars()
+                .take_while(|character| character.is_alphanumeric() || "_:".contains(*character))
+                .collect::<String>();
+            matches!(path.rsplit("::").next(), Some("test" | "bench"))
+                || text == "cfg(test)"
+                || text.starts_with("cfg(all(test,")
+                || text.starts_with("cfg(all(test)")
+        })
+    })
+}
+
+/// The test code in a file: all of it, or its test items.
+fn test_code_ranges(root: &ra_ap_syntax::SyntaxNode, test_file: bool) -> Vec<TextRange> {
+    if test_file {
+        return vec![root.text_range()];
+    }
+    root.descendants()
+        .filter(test_item)
+        .map(|node| node.text_range())
+        .collect()
+}
+
+fn in_test_code(tests: &[TextRange], range: TextRange) -> bool {
+    tests.iter().any(|test| test.contains_range(range))
+}
+
 pub fn build_rust_manifest(
     file: &str,
     source: &str,
 ) -> Result<CoverageManifest, RustInstrumenterError> {
     let parsed = parse_for_instrumentation(source)?;
-    RustObligationCollector::new(file, source).collect(
-        &parsed.tree,
-        &parsed.assertions,
-        &parsed.matches,
-    )
+    let tests = test_code_ranges(parsed.tree.syntax(), test_code_path(file));
+    RustObligationCollector::new(file, source)
+        .leaving_out(tests)
+        .collect(&parsed.tree, &parsed.assertions, &parsed.matches)
 }
 
 fn block_entry_offset(block: &ast::BlockExpr) -> Option<usize> {
@@ -1654,6 +1757,18 @@ pub fn instrument_rust_source(
     source: &str,
     runtime_path: &str,
 ) -> Result<RustInstrumentedSource, RustInstrumenterError> {
+    instrument_rust_file(file, source, runtime_path, test_code_path(file))
+}
+
+/// `instrument_rust_source` for a file whose test status is known from how
+/// the crate reaches it: a module only `#[cfg(test)]` declares is test code
+/// whatever its name. Test code keeps only its assertion markers.
+pub fn instrument_rust_file(
+    file: &str,
+    source: &str,
+    runtime_path: &str,
+    test_file: bool,
+) -> Result<RustInstrumentedSource, RustInstrumenterError> {
     if !valid_runtime_path(runtime_path) {
         return Err(RustInstrumenterError::InvalidRuntimePath);
     }
@@ -1663,11 +1778,10 @@ pub fn instrument_rust_source(
     // editions in turn and then rewrites the expression view to a fixpoint,
     // re-parsing each round.
     let parsed = parse_for_instrumentation(source)?;
-    let mut manifest = RustObligationCollector::new(file, source).collect(
-        &parsed.tree,
-        &parsed.assertions,
-        &parsed.matches,
-    )?;
+    let tests = test_code_ranges(parsed.tree.syntax(), test_file);
+    let mut manifest = RustObligationCollector::new(file, source)
+        .leaving_out(tests.clone())
+        .collect(&parsed.tree, &parsed.assertions, &parsed.matches)?;
     let ParsedSource {
         tree,
         assertions,
@@ -2262,7 +2376,43 @@ pub fn instrument_rust_source(
         );
     }
 
-    if skipped_attributed_statement {
+    // Only the assertion markers survive in test code, and only the sites
+    // they name stay in the manifest.
+    if !tests.is_empty() {
+        let inside = |offset: usize| {
+            tests.iter().any(|test| {
+                usize::from(test.start()) <= offset && offset <= usize::from(test.end())
+            })
+        };
+        let markers = manifest
+            .assertion_sites
+            .iter()
+            .map(|site| {
+                (
+                    format!("{runtime_path}::assertion({:?});", site.id),
+                    site.id.clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut marked = BTreeSet::new();
+        insertions.retain(|insertion| {
+            if !inside(insertion.offset) {
+                return true;
+            }
+            match markers.get(&insertion.text) {
+                Some(id) => {
+                    marked.insert(id.clone());
+                    true
+                }
+                None => false,
+            }
+        });
+        manifest
+            .assertion_sites
+            .retain(|site| marked.contains(&site.id));
+    }
+
+    if skipped_attributed_statement && !test_file {
         add_manifest_limitation(
             &mut manifest,
             file,
@@ -2371,6 +2521,92 @@ mod __supercov_runtime_v1 {
         let output = Command::new(&binary).output().unwrap();
         fs::remove_dir_all(directory).unwrap();
         output
+    }
+
+    #[test]
+    fn test_code_is_known_by_where_it_sits() {
+        for file in [
+            "tests/it.rs",
+            "tests/common/mod.rs",
+            "crates/a/tests/it.rs",
+            "examples/demo.rs",
+            "benches/speed.rs",
+            "src/tests.rs",
+            "src/parser_tests.rs",
+            "src/parser-tests.rs",
+        ] {
+            assert!(test_code_path(file), "{file}");
+        }
+        for file in [
+            "src/lib.rs",
+            "src/attests.rs",
+            "src/_tests.rs",
+            "crates/foo-tests/src/lib.rs",
+            "src/testing.rs",
+        ] {
+            assert!(!test_code_path(file), "{file}");
+        }
+    }
+
+    #[test]
+    fn test_items_keep_only_their_assertion_markers() {
+        let source = r#"pub fn add(a: i32, b: i32) -> i32 {
+    if a > 0 && b > 0 { a + b } else { 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn adds() {
+        let total = add(1, 2);
+        assert_eq!(total, 3);
+    }
+}
+
+#[cfg(all(test, feature = "slow"))]
+fn slow_helper() -> bool { true || false }
+
+#[tokio::test]
+async fn async_adds() {
+    assert!(add(2, 2) == 4);
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let manifest = &transformed.manifest;
+        assert!(
+            manifest.points.iter().all(|point| point.line <= 3),
+            "{:?}",
+            manifest.points
+        );
+        assert!(manifest.decisions.iter().all(|decision| decision.line == 2));
+        assert!(manifest.branches.iter().all(|branch| branch.line == 2));
+        assert_eq!(manifest.decisions.len(), 1);
+        let sites = manifest
+            .assertion_sites
+            .iter()
+            .map(|site| site.source.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            sites,
+            BTreeSet::from(["assert!(add(2, 2) == 4);", "assert_eq!(total, 3);"])
+        );
+        let tests = &transformed.code[transformed.code.find("#[cfg(test)]").unwrap()..];
+        assert_eq!(tests.matches("::assertion(").count(), 2, "{tests}");
+        assert!(!tests.contains("::hit("), "{tests}");
+        assert!(!tests.contains("::logical("), "{tests}");
+
+        // A whole test file the same way.
+        let file = instrument_rust_source(
+            "tests/it.rs",
+            "#[test]\nfn it() {\n    let x = 1;\n    assert_eq!(x, 1);\n}\n",
+            "crate::__supercov_runtime_v1",
+        )
+        .unwrap();
+        assert!(file.manifest.points.is_empty());
+        assert_eq!(file.manifest.assertion_sites.len(), 1);
+        assert!(!file.code.contains("::hit("));
     }
 
     #[test]

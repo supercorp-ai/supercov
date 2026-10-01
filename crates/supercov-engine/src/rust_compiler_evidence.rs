@@ -357,6 +357,7 @@ mod tests {
                 }],
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             hit_obligations_by_ordinal: BTreeMap::from([
                 (10, vec!["rs:statement:111111111111111111111111".into()]),

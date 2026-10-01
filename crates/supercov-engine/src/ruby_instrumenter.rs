@@ -744,6 +744,7 @@ impl<'a> Collector<'a> {
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             lines: BTreeMap::new(),
             statement_offsets: BTreeMap::new(),

@@ -247,6 +247,7 @@ mod tests {
             branches: Vec::new(),
             limitations: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         }
     }
 

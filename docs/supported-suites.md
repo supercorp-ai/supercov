@@ -160,6 +160,13 @@ modules. Statements, functions, branches, boolean decisions, loops and error
 propagation are measured. Const contexts and macro expansions remain visible
 with explicit measurement limitations.
 
+Test code is not measured, as cargo-llvm-cov and cargo-tarpaulin leave it out:
+files under a `tests`, `examples` or `benches` directory, files named
+`tests.rs`, `*_tests.rs` or `*-tests.rs`, everything a test target or a
+`#[cfg(test)]` module declares, and items marked `#[cfg(test)]`, `#[test]` or
+`#[bench]`. Its assertions still mark which evidence a passing assertion
+witnessed.
+
 Use the repository's normal flags after the wrapped command:
 
 ```sh

@@ -933,6 +933,7 @@ mod tests {
             limitations: Vec::new(),
             unmeasured: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         };
         assert_eq!(
             build_frontend_run(OwnedRunInputs {
@@ -980,6 +981,7 @@ mod tests {
             limitations: Vec::new(),
             unmeasured: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let probes = BTreeMap::from([(
             0_u64,
@@ -1104,6 +1106,7 @@ mod tests {
             limitations: Vec::new(),
             unmeasured: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let probes = BTreeMap::from([
             (
@@ -1219,6 +1222,7 @@ mod tests {
             limitations: Vec::new(),
             unmeasured: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let run = build_frontend_run(OwnedRunInputs {
             declaration: go_declaration(),

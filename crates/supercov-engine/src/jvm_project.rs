@@ -304,6 +304,7 @@ pub fn prepare_jvm_project(
         limitations: Vec::new(),
         unmeasured: Vec::new(),
         scope: None,
+        assertion_sites: Vec::new(),
     };
     let mut probes = std::collections::BTreeMap::new();
     let mut widths = Vec::new();

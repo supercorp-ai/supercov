@@ -211,6 +211,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
         }],
         limitations: vec![],
         scope: None,
+        assertion_sites: Vec::new(),
     };
     let result = RawTestResult {
         test_id: Some("test".into()),

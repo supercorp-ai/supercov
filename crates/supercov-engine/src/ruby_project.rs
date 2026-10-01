@@ -188,6 +188,7 @@ pub fn prepare_ruby_project(
         branches: Vec::new(),
         limitations: Vec::new(),
         scope: None,
+        assertion_sites: Vec::new(),
     };
     let mut plan_files = BTreeMap::<String, RubyFilePlan>::new();
     let mut probes = BTreeMap::new();

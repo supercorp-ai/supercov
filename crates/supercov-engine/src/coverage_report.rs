@@ -79,6 +79,11 @@ pub struct CoverageManifest {
     pub unmeasured: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<Value>,
+    /// Statements in test code that carry an assertion marker. Test code is
+    /// not measured, so these are no obligation; they say where a passing
+    /// assertion stood.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertion_sites: Vec<PointMeta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3127,6 +3132,7 @@ mod tests {
             limitations: vec![],
             unmeasured: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let with_declined = CoverageManifest {
             decisions: vec![],
@@ -3135,6 +3141,7 @@ mod tests {
             limitations: vec![],
             unmeasured: vec!["declined".into()],
             scope: None,
+            assertion_sites: Vec::new(),
         };
 
         let baseline =
@@ -3197,6 +3204,7 @@ mod tests {
             limitations: vec![],
             unmeasured: vec!["declined".into()],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let view = create_coverage_view(
             &manifest,
@@ -3229,6 +3237,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let view =
             create_coverage_view(&manifest, &[raw("test", 0, "passed", &[])], "time").unwrap();
@@ -3254,6 +3263,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let mut attempt = raw("test", 0, "passed", &[]);
         attempt.runtime[0].decisions.push(DecisionSnapshot {
@@ -3298,6 +3308,7 @@ mod tests {
             scope: Some(serde_json::json!({
                 "entries": [{ "file": "src/empty.js", "status": "included" }]
             })),
+            assertion_sites: Vec::new(),
         };
         let vector = McdcVector {
             values: vec![Some(true), Some(true)],
@@ -3343,6 +3354,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let phase = CoveragePhase {
             id: "assertion".into(),
@@ -3385,6 +3397,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let failed = raw("flaky", 0, "failed", &["failed"]);
         let mut passed = raw("flaky", 1, "passed", &["passed"]);
@@ -3432,6 +3445,7 @@ mod tests {
                 branches: vec![],
                 limitations: vec![],
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: vec![companion, expected],
             generated_at: "time".into(),
@@ -3460,6 +3474,7 @@ mod tests {
                 branches: vec![],
                 limitations: vec![],
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: vec![unstarted],
             generated_at: "time".into(),
@@ -3544,6 +3559,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         // Declare exactly the observed runners: the journal's node:test and the
         // synthesized background runner, shaped as the JavaScript run declares it.
@@ -3641,6 +3657,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         // Declare exactly the observed runners: the journal's node:test and the
         // synthesized background runner, shaped as the JavaScript run declares it.
@@ -3744,6 +3761,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let mut result = raw("test", 0, "passed", &[]);
         result.scope = Some(ExecutionScope {
@@ -3807,6 +3825,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let path = archive(vec![
             EvidenceArchiveEntry {
@@ -3861,6 +3880,7 @@ mod tests {
                     "generatedFiles": 1,
                 },
             })),
+            assertion_sites: Vec::new(),
         };
         validate_rust_compiler_scope(&manifest).unwrap();
 

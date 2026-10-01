@@ -3927,6 +3927,7 @@ mod tests {
                     "reason": "dynamic source"
                 })],
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: vec![RawTestResult {
                 test_id: Some("test".into()),
@@ -4238,6 +4239,7 @@ mod tests {
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: vec![RawTestResult {
                 test_id: Some("unstarted".into()),

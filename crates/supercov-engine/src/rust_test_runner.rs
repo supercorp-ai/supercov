@@ -1054,6 +1054,13 @@ pub(crate) fn snapshot(
         .iter()
         .map(|point| (point.id.as_str(), point))
         .collect::<BTreeMap<_, _>>();
+    // An assertion in test code, which is not measured, names a site instead.
+    let asserting = manifest
+        .points
+        .iter()
+        .chain(&manifest.assertion_sites)
+        .map(|point| (point.id.as_str(), point))
+        .collect::<BTreeMap<_, _>>();
     let alternatives = manifest
         .branches
         .iter()
@@ -1139,9 +1146,9 @@ pub(crate) fn snapshot(
                     });
                 }
                 RustProbeObservation::Assertion { id } => {
-                    // The marker names the statement that asserts, which is
-                    // a point of this manifest.
-                    let Some(point) = points.get(id.as_str()) else {
+                    // The marker names the statement that asserts: a point
+                    // of this manifest, or an assertion site in test code.
+                    let Some(point) = asserting.get(id.as_str()) else {
                         return Err(RustTestRunnerError::UnknownProbe(id));
                     };
                     let witnessed = pending.remove(&thread).unwrap_or_default();

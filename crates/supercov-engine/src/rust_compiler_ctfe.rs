@@ -670,6 +670,7 @@ mod tests {
                 branches: vec![branch],
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             hit_obligations_by_ordinal: BTreeMap::from([
                 (101, vec!["function".into()]),

@@ -921,6 +921,7 @@ pub fn build_go_obligations_with_alias(
             limitations: collector.limitations,
             unmeasured: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         },
         probes: collector.probes,
         edits,

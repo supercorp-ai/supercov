@@ -859,6 +859,7 @@ pub fn import_python_coverage_json(
                 branches,
                 limitations,
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results,
             generated_at: generated_at.into(),
