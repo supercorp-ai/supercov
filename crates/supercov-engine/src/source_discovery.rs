@@ -650,6 +650,38 @@ fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, SourceDiscoveryError
     Ok(entries)
 }
 
+/// Whether the repository around a project ignores the project's own
+/// directory: a copy kept under another checkout's `tmp/` or `.supercov/`.
+/// That repository's `.gitignore` files describe what it does not track, which
+/// is all of this project; applying them left the project with no source.
+fn ignored_by_enclosing_repository(root: &Path) -> bool {
+    if root.join(".git").exists() {
+        return false;
+    }
+    let Some(repository) = root
+        .ancestors()
+        .skip(1)
+        .position(|ancestor| ancestor.join(".git").exists())
+    else {
+        return false;
+    };
+    // Outermost first, so a deeper file's decision wins as it does in git.
+    root.ancestors()
+        .skip(1)
+        .take(repository + 1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .fold(false, |ignored, directory| {
+            let (rules, _) = ignore::gitignore::Gitignore::new(directory.join(".gitignore"));
+            match rules.matched_path_or_any_parents(root, true) {
+                ignore::Match::Ignore(_) => true,
+                ignore::Match::Whitelist(_) => false,
+                ignore::Match::None => ignored,
+            }
+        })
+}
+
 /// Source files under a root, in name order.
 ///
 /// A file the project's own `.gitignore` excludes is not its source: recording
@@ -671,7 +703,7 @@ fn files_under(
     let walker = ignore::WalkBuilder::new(directory)
         .standard_filters(false)
         .git_ignore(true)
-        .parents(true)
+        .parents(!ignored_by_enclosing_repository(directory))
         .require_git(true)
         .follow_links(false)
         .sort_by_file_name(|left, right| left.cmp(right))
@@ -1272,6 +1304,30 @@ mod tests {
                 .any(|entry| entry.file.contains("lib-dist"))
         );
         fs::remove_dir_all(plain).unwrap();
+    }
+
+    #[test]
+    fn a_project_kept_where_an_enclosing_repository_ignores_it_keeps_its_source() {
+        let files = [
+            // What Supercov's own store writes, so nothing inside is tracked.
+            ("scratch/.gitignore", "*\n"),
+            ("scratch/app/package.json", r#"{"name":"app"}"#),
+            ("scratch/app/.gitignore", "dist\n"),
+            ("scratch/app/src/index.js", "export const a = 1;"),
+            ("scratch/app/dist/bundle.js", "var bundled = 1;"),
+        ];
+        let repository_root = repository("enclosing-ignore", &files);
+        fs::create_dir_all(repository_root.join(".git")).unwrap();
+        let discovered = discover_source_scope(&repository_root.join("scratch/app"), None).unwrap();
+        assert_eq!(discovered.source_files, ["src/index.js"]);
+
+        // A project the enclosing repository tracks still follows its rules.
+        fs::remove_file(repository_root.join("scratch/.gitignore")).unwrap();
+        fs::write(repository_root.join(".gitignore"), "*.gen.js\n").unwrap();
+        fs::write(repository_root.join("scratch/app/src/api.gen.js"), "var a;").unwrap();
+        let discovered = discover_source_scope(&repository_root.join("scratch/app"), None).unwrap();
+        assert_eq!(discovered.source_files, ["src/index.js"]);
+        fs::remove_dir_all(repository_root).unwrap();
     }
 
     #[test]
