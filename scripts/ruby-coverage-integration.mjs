@@ -241,6 +241,17 @@ try {
     assert.match(more.stdout, /23 assertions, 0 failures, 0 errors/);
     const moreGaps = query(['runs', 'latest', 'file', 'lib/more.rb'], environment, flow);
     assert.deepEqual(moreGaps.gapLines.map((line) => line.line), [5], JSON.stringify(moreGaps.gapLines));
+
+    // `||=` and `&&=` on locals, globals, attributes, indexes and constants,
+    // and arms that leave through `return` or `break`. Two outcomes stay
+    // open: a constant assigned once at load is never found already set, and
+    // the rescue never sees an error it does not match.
+    const writes = supercov(['--', 'ruby', '-Ilib', '-Itest', 'test/writes_test.rb'], environment, flow);
+    assert.equal(writes.status, 0, `${writes.stdout}\n${writes.stderr}`);
+    assert.match(writes.stdout, /27 assertions, 0 failures, 0 errors/);
+    const writesGaps = query(['runs', 'latest', 'file', 'lib/writes.rb'], environment, flow);
+    assert.deepEqual(writesGaps.gapLines.map((line) => line.line), [4, 64], JSON.stringify(writesGaps.gapLines));
+    assert.deepEqual([writesGaps.counts.uncoveredLines, writesGaps.counts.missingBranches], [0, 2], JSON.stringify(writesGaps.counts));
   }
 
   const minitest = supercov(['--', 'ruby', '-Itest', 'test/shapes_test.rb'], environment);
