@@ -2172,8 +2172,13 @@ fn a_lock_another_process_holds_is_named_and_one_left_behind_is_taken_over() {
         .unwrap();
     project.supercov(&["--", "node", "--test"]).succeeds();
 
-    // The trash sweeper keeps the same rules for its own lock.
+    // The trash sweeper keeps the same rules for its own lock. The runs above
+    // each started one in the background; it is let finish first.
     let trash = project.root.join(".supercov/.trash");
+    let started = std::time::Instant::now();
+    while trash.join(".deleter.lock").exists() && started.elapsed().as_secs() < 30 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let root = project.root.to_str().unwrap();
     let sweep = |deleter: &str, modified: Option<std::time::SystemTime>| {
         std::fs::create_dir_all(trash.join("left")).unwrap();

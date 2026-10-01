@@ -686,8 +686,13 @@ fn assess_changed(
             })
         })
         .collect::<Vec<_>>();
+    // A statement more than IMPACT_TESTS tests ran is asked of that many.
+    let capped = changed
+        .iter()
+        .filter(|&&s| population.statements[s].tests.len() > IMPACT_TESTS)
+        .count();
     let result = json!({
-        "run": run.id, "model": model, "changed": changed.len(),
+        "run": run.id, "model": model, "changed": changed.len(), "capped": capped,
         "requests": plan.len(), "failedRequests": failed, "answersReused": reused,
         "inputTokens": tokens, "costUsd": tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS,
         "statements": statements,
@@ -904,8 +909,16 @@ fn fitted_json(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> 
 fn render(data: &Value) -> String {
     if data["impact"] == true {
         let s = &data["summary"];
+        let capped = s["capped"].as_u64().unwrap_or(0);
+        let asked = if capped == 0 {
+            "asked of every test that ran them".to_owned()
+        } else {
+            format!(
+                "asked of the tests that ran them, {IMPACT_TESTS} at most each ({capped} ran under more)"
+            )
+        };
         return format!(
-            "Run {}: {} changed statement(s) asked of every test that ran them: {} requests, ${:.4}; {} answers reused.\n`supercov runs {} tests affected` now says which affected tests catch the change.\n",
+            "Run {}: {} changed statement(s) {asked}: {} requests, ${:.4}; {} answers reused.\n`supercov runs {} tests affected` now says which affected tests catch the change.\n",
             data["run"].as_str().unwrap_or(""),
             s["changed"],
             s["requests"],

@@ -1148,3 +1148,68 @@ fn tests_affected_and_assertions_name_a_mistake_and_estimate_a_change() {
         "{keyless}"
     );
 }
+
+#[test]
+fn a_change_more_tests_ran_than_are_asked_says_so() {
+    let project = Project::empty("many-tests");
+    project.write("package.json", r#"{"name":"many","type":"module"}"#);
+    project.write(
+        "src/fee.js",
+        "export function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\n",
+    );
+    for file in ["fee", "checkout", "refund"] {
+        let mut body = String::from(
+            "import { describe, test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { fee } from \"../src/fee.js\";\n\n",
+        );
+        for group in ["small", "large", "edge"] {
+            body.push_str(&format!("describe(\"{group}\", () => {{\n"));
+            for n in 0..5 {
+                body.push_str(&format!(
+                    "  test(\"{file} {group} {n}\", () => assert.equal(fee({}), {}));\n",
+                    n * 50,
+                    if n * 50 > 100 { 0 } else { 5 }
+                ));
+            }
+            body.push_str("});\n");
+        }
+        project.write(&format!("test/{file}.test.js"), &body);
+    }
+    project.git(&["init", "-q"]);
+    let run = project.measure(&[]);
+    let (base, seen) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let before = seen.lock().unwrap().len();
+    project.edit("src/fee.js", "? 0 : 5", "? 0 : 6");
+    let changed = project
+        .supercov_with(
+            &["runs", &run, "assertions", "assess", "--changed"],
+            &through(&base),
+        )
+        .succeeds();
+    assert!(
+        changed.contains("asked of the tests that ran them, 40 at most each (1 ran under more)"),
+        "{changed}"
+    );
+    // Forty of the 45 are asked, every test file among them.
+    let asked = seen.lock().unwrap()[before..]
+        .iter()
+        .filter_map(|(_, _, request)| request["state"]["test"]["file"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        asked.len(),
+        39,
+        "one of the forty was answered before the change"
+    );
+    for file in [
+        "test/fee.test.js",
+        "test/checkout.test.js",
+        "test/refund.test.js",
+    ] {
+        assert!(
+            asked.iter().any(|asked| asked == file),
+            "{file} not asked: {asked:?}"
+        );
+    }
+}

@@ -26,6 +26,7 @@
 
 **Fixed**
 
+- `assertions assess --changed` says when a changed statement ran under more tests than it asks: "asked of the tests that ran them, 40 at most each (1 ran under more)". It said "asked of every test that ran them" though only 40 were asked.
 - `supercov report --output <directory>` writes `supercov-report.html` into the directory, as `runs report --output <directory>` writes there. It failed with "Invalid argument".
 - Assessing Rust never asks about a function returning a call to itself. A constructor such as `Point::unit()` could be asked as returning `Point::unit()`, a change that only recurses, so whether a test failed under it said nothing about what the test checks. A `Self { .. }` value in an `impl` now has one of its fields changed, as `Point { .. }` already had.
 - `runs check`, `runs patch` and `runs report` count code that ran outside any test, as the run summary does. They read only what passing tests ran, which also dropped what ran as modules were imported and everything a run without per-test attribution recorded: a passing `supercov -- node script.js` run read 100% lines in its summary and 0% in `runs check` and in its lcov export, and a node:test run lost its imports and top-level constants. A passing run is now read whole; a failed run's report still keeps to what its passing tests ran.

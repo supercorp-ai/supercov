@@ -291,13 +291,24 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
         if entry.file_name() == ".deleter.lock" {
             continue;
         }
-        let metadata = fs::symlink_metadata(&path).map_err(|source| io_error(&path, source))?;
-        if metadata.file_type().is_dir() {
-            fs::remove_dir_all(&path).map_err(|source| io_error(&path, source))?;
+        // An entry already gone -- removed by hand, or by a sweeper whose
+        // lock was replaced -- is as swept as one removed here.
+        let gone = |error: &io::Error| error.kind() == io::ErrorKind::NotFound;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if gone(&error) => continue,
+            Err(source) => return Err(io_error(&path, source)),
+        };
+        let removal = if metadata.file_type().is_dir() {
+            fs::remove_dir_all(&path)
         } else {
-            fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+            fs::remove_file(&path)
+        };
+        match removal {
+            Ok(()) => removed += 1,
+            Err(error) if gone(&error) => {}
+            Err(source) => return Err(io_error(&path, source)),
         }
-        removed += 1;
     }
     Ok(removed)
 }
