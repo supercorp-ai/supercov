@@ -2185,3 +2185,92 @@ fn a_lock_another_process_holds_is_named_and_one_left_behind_is_taken_over() {
     );
     assert!(sweep("", Some(old)), "an old unowned lock is taken over");
 }
+
+#[test]
+fn a_selector_that_matches_nothing_or_several_says_so() {
+    let project = Project::cart("selectors");
+    project.write(
+        "src/pick.js",
+        "export const pick = (a, b) => (a ? 1 : 2) + (b ? 3 : 4);\n",
+    );
+    project.write(
+        "test/pick.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { pick } from \"../src/pick.js\";\n\ntest(\"picks\", () => assert.equal(pick(true, false), 5));\n",
+    );
+    project.commit("pick");
+    project.measure(&[]);
+    for (args, message) in [
+        (
+            vec!["runs", "latest", "gaps", "--kind", "e2e"],
+            "No tests match kind=e2e",
+        ),
+        (
+            vec!["runs", "latest", "gaps", "--runner", "jest"],
+            "No tests match runner=jest",
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js", "--kind", "e2e"],
+            "No tests match kind=e2e",
+        ),
+        (
+            vec!["runs", "latest", "minimize", "--target", "150"],
+            "--target must be between 0 and 100",
+        ),
+        (
+            vec!["runs", "latest", "test", "nosuch"],
+            "Test not found: nosuch",
+        ),
+        (
+            vec!["runs", "latest", "decision", "src/cart.js:99"],
+            "Decision not found: src/cart.js:99",
+        ),
+        (
+            vec!["runs", "latest", "test", "total", "--limit", "0"],
+            "--limit must be a positive integer",
+        ),
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(refused.contains(message), "{args:?}: {refused}");
+    }
+    // A selector two tests or two decisions answer to lists them to choose from.
+    let tests = project
+        .supercov(&["runs", "latest", "test", "total"])
+        .succeeds();
+    contains_all(
+        &tests,
+        &[
+            "total adds prices [",
+            "total applies a coupon [",
+            "showing 1-2 of 2 matching tests",
+        ],
+    );
+    let decisions = project
+        .supercov(&["runs", "latest", "decision", "src/pick.js:1"])
+        .succeeds();
+    contains_all(
+        &decisions,
+        &[
+            "src/pick.js:1:32  a",
+            "src/pick.js:1:46  b",
+            "showing 1-2 of 2 matching decisions",
+        ],
+    );
+    // Minimizing over one runner's tests.
+    let minimized = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "minimize",
+            "--runner",
+            "node:test",
+            "--target",
+            "50",
+            "--metric",
+            "lines",
+        ])
+        .succeeds();
+    assert!(
+        minimized.contains("exact minimum 1/4 test(s) for 50% lines"),
+        "{minimized}"
+    );
+}
