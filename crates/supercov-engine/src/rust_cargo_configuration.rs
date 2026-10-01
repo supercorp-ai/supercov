@@ -850,12 +850,72 @@ fn runner_program(
     )))
 }
 
+/// What a test command builds with: its resolved configuration, compiler
+/// command and targets.
+struct ResolvedTargets {
+    root: PathBuf,
+    execution_root: PathBuf,
+    model: CargoConfigValue,
+    compiler: RustCargoCompilerCommandPlan,
+    targets: Vec<ModelTarget>,
+}
+
 fn resolve_with_inputs(
     root: &Path,
     execution_root: &Path,
     invocation: &CargoTestInvocation,
     model_inputs: CargoModelInputs,
 ) -> Result<RustCargoRunnerPlan, RustCargoConfigurationError> {
+    let ResolvedTargets {
+        root,
+        execution_root,
+        model,
+        compiler,
+        targets,
+    } = resolve_targets(root, execution_root, invocation, &model_inputs)?;
+    let targets = targets
+        .iter()
+        .map(|target| {
+            Ok(RustCargoTargetRunnerPlan {
+                target: target.name.clone(),
+                underlying_runner: model_runner(
+                    &root,
+                    &execution_root,
+                    &model,
+                    &compiler,
+                    target,
+                    &model_inputs,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, RustCargoConfigurationError>>()?;
+    Ok(RustCargoRunnerPlan { compiler, targets })
+}
+
+/// The cfg values of the one target a test command builds for: what decides
+/// which `#[cfg(..)]` items the compiler leaves out. None when the command
+/// builds for several targets or they cannot be read, so nothing is assumed.
+pub(crate) fn active_target_cfg(root: &Path, invocation: &CargoTestInvocation) -> Option<Vec<Cfg>> {
+    let inputs = CargoModelInputs::ambient(root);
+    let resolved = resolve_targets(root, root, invocation, &inputs).ok()?;
+    let [target] = resolved.targets.as_slice() else {
+        return None;
+    };
+    target_cfg(
+        &resolved.root,
+        &resolved.execution_root,
+        &resolved.compiler,
+        target,
+    )
+    .ok()
+}
+
+fn resolve_targets(
+    root: &Path,
+    execution_root: &Path,
+    invocation: &CargoTestInvocation,
+    model_inputs: &CargoModelInputs,
+) -> Result<ResolvedTargets, RustCargoConfigurationError> {
     let root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
     let execution_root =
         fs::canonicalize(execution_root).map_err(|error| io_error(execution_root, error))?;
@@ -885,30 +945,20 @@ fn resolve_with_inputs(
             value: format!("rustc{}", std::env::consts::EXE_SUFFIX),
         }
     };
-    let compiler = compiler_command_plan(&root, &model, default_rustc, &model_inputs)?;
+    let compiler = compiler_command_plan(&root, &model, default_rustc, model_inputs)?;
     let host = model_inputs
         .host_override
         .clone()
         .map(Ok)
         .unwrap_or_else(|| compiler_host(&execution_root, &compiler))?;
-    let targets = model_targets(&root, &model, command_targets, &host, &model_inputs)?;
-    let targets = targets
-        .iter()
-        .map(|target| {
-            Ok(RustCargoTargetRunnerPlan {
-                target: target.name.clone(),
-                underlying_runner: model_runner(
-                    &root,
-                    &execution_root,
-                    &model,
-                    &compiler,
-                    target,
-                    &model_inputs,
-                )?,
-            })
-        })
-        .collect::<Result<Vec<_>, RustCargoConfigurationError>>()?;
-    Ok(RustCargoRunnerPlan { compiler, targets })
+    let targets = model_targets(&root, &model, command_targets, &host, model_inputs)?;
+    Ok(ResolvedTargets {
+        root,
+        execution_root,
+        model,
+        compiler,
+        targets,
+    })
 }
 
 pub(crate) fn resolve_cargo_runner_plan(

@@ -21,7 +21,7 @@ use crate::{
     rust_build_cache::{
         read_rust_build_cache, rust_build_cache_key, rust_target_directory, write_rust_build_cache,
     },
-    rust_project::{PreparedRustProject, prepare_rust_project},
+    rust_project::{PreparedRustProject, prepare_rust_project_for},
     rust_test_runner::run_prepared_rust_tests,
     workspace::{cached_workspace_path, prepare_cached_workspace, recover_cached_workspace},
 };
@@ -283,7 +283,16 @@ pub fn run_direct_rust(
                 &root, &workspace, &ambient,
             )
             .map_err(|error| error.to_string())?;
-            prepare_rust_project(&workspace, roots.as_ref()).map_err(|error| error.to_string())?
+            // The target the command builds for decides which `#[cfg]` items
+            // exist; when it cannot be read, every item is measured.
+            let cfg = crate::rust_test_runner::cargo_invocation(&workspace, &request.command)
+                .ok()
+                .and_then(|invocation| {
+                    crate::rust_cargo_configuration::active_target_cfg(&workspace, &invocation)
+                })
+                .map(|values| crate::rust_instrumenter::TargetCfg::new(&values));
+            prepare_rust_project_for(&workspace, roots.as_ref(), cfg.as_ref())
+                .map_err(|error| error.to_string())?
         };
         project.target_directory = target_directory;
         fs::create_dir_all(&project.target_directory).map_err(|error| error.to_string())?;

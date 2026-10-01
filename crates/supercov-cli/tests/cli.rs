@@ -851,3 +851,40 @@ fn a_per_file_floor_names_where_a_file_falls_short() {
     );
     assert!(!failed.contains("src/cart.js: lines"), "{failed}");
 }
+
+#[test]
+fn a_platform_gated_item_counts_only_where_it_compiles() {
+    let project = Project::empty("cfg");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"platform\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nextra = []\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn platform() -> &'static str {\n    native()\n}\n\n#[cfg(unix)]\nfn native() -> &'static str {\n    \"unix\"\n}\n\n#[cfg(windows)]\nfn native() -> &'static str {\n    \"windows\"\n}\n\n#[cfg(feature = \"extra\")]\npub fn extra() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn names_the_platform() {\n        assert!(!super::platform().is_empty());\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+    // The variant this host compiles is measured and covered; the other one
+    // no test here could ever reach, and it is not counted.
+    let (built, absent) = if cfg!(windows) { (11, 6) } else { (6, 11) };
+    let covered = project
+        .supercov(&["runs", "latest", "line", &format!("src/lib.rs:{built}")])
+        .succeeds();
+    assert!(
+        covered.contains("COVERED") && !covered.contains("NOT COVERED"),
+        "{covered}"
+    );
+    let gaps = project
+        .supercov(&["runs", "latest", "file", "src/lib.rs", "--json"])
+        .json();
+    let lines = gaps["data"]["gapLines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| line["line"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    // A feature is not the target's to settle, so `extra` stays counted.
+    assert_eq!(lines, [16, 17], "{gaps}");
+    assert!(!lines.contains(&absent));
+}

@@ -776,6 +776,16 @@ pub fn prepare_rust_project(
     workspace: &Path,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<PreparedRustProject, RustProjectError> {
+    prepare_rust_project_for(workspace, roots, None)
+}
+
+/// `prepare_rust_project` for a build whose target cfg values are known:
+/// items its `#[cfg(..)]` leaves uncompiled are not measured.
+pub fn prepare_rust_project_for(
+    workspace: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+    cfg: Option<&crate::rust_instrumenter::TargetCfg>,
+) -> Result<PreparedRustProject, RustProjectError> {
     // Named apart from the crate roots below, which reuse `roots`.
     let source_roots = roots;
     let elapsed = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
@@ -862,7 +872,7 @@ pub fn prepare_rust_project(
     };
     for (relative, source) in &sources {
         let test_file = tests.contains(relative) || test_code_path(relative);
-        let transformed = instrument_rust_file(relative, source, &runtime_path, test_file)
+        let transformed = instrument_rust_file(relative, source, &runtime_path, test_file, cfg)
             .map_err(|error| RustProjectError::Instrument {
                 file: relative.clone(),
                 reason: error.to_string(),

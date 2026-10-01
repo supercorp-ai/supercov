@@ -167,6 +167,12 @@ files under a `tests`, `examples` or `benches` directory, files named
 `#[bench]`. Its assertions still mark which evidence a passing assertion
 witnessed.
 
+Neither is code the compiler never builds for the target: a `#[cfg(windows)]`
+function on Linux, or one behind `#[cfg(not(target_os = "macos"))]` on a Mac,
+is not counted. Only predicates the target settles (`unix`, `windows`,
+`target_*`) are decided; an item behind a feature or a custom cfg is counted
+either way.
+
 Use the repository's normal flags after the wrapped command:
 
 ```sh

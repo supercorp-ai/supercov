@@ -412,6 +412,8 @@ struct RustObligationCollector<'a> {
     obligation_ranges: Vec<(String, TextRange)>,
     /// Test code in this file, which is not measured.
     tests: Vec<TextRange>,
+    /// Items the target's cfg leaves uncompiled, which no test can reach.
+    compiled_out: Vec<TextRange>,
     error: Option<RustInstrumenterError>,
 }
 
@@ -435,12 +437,14 @@ impl<'a> RustObligationCollector<'a> {
             site_limitations: BTreeSet::new(),
             obligation_ranges: Vec::new(),
             tests: Vec::new(),
+            compiled_out: Vec::new(),
             error: None,
         }
     }
 
-    fn leaving_out(mut self, tests: Vec<TextRange>) -> Self {
+    fn leaving_out(mut self, tests: Vec<TextRange>, compiled_out: Vec<TextRange>) -> Self {
         self.tests = tests;
+        self.compiled_out = compiled_out;
         self
     }
 
@@ -448,11 +452,20 @@ impl<'a> RustObligationCollector<'a> {
     /// out by default. Its obligations go, and its statements stay only as the places an
     /// assertion marker may name.
     fn leave_out_test_code(&mut self) {
+        // Code the compiler never builds goes with no trace: nothing in it
+        // runs, its assertions included.
+        let uncompiled = self
+            .obligation_ranges
+            .iter()
+            .filter(|(_, range)| in_test_code(&self.compiled_out, *range))
+            .map(|(id, _)| id.clone())
+            .collect::<BTreeSet<_>>();
         let inside = self
             .obligation_ranges
             .iter()
             .filter(|(_, range)| in_test_code(&self.tests, *range))
             .map(|(id, _)| id.clone())
+            .chain(uncompiled.iter().cloned())
             .collect::<BTreeSet<_>>();
         if inside.is_empty() {
             return;
@@ -460,7 +473,7 @@ impl<'a> RustObligationCollector<'a> {
         for point in std::mem::take(&mut self.manifest.points) {
             if !inside.contains(&point.id) {
                 self.manifest.points.push(point);
-            } else if point.kind == PointKind::Statement {
+            } else if point.kind == PointKind::Statement && !uncompiled.contains(&point.id) {
                 self.manifest.assertion_sites.push(point);
             }
         }
@@ -681,7 +694,10 @@ impl<'a> RustObligationCollector<'a> {
     /// index knows for code outside the measured denominator; anything else
     /// it renders as "unknown".
     fn site_limitation(&mut self, id: &'static str, range: TextRange, reason: String) {
-        if self.site_limitations.contains(id) || in_test_code(&self.tests, range) {
+        if self.site_limitations.contains(id)
+            || in_test_code(&self.tests, range)
+            || in_test_code(&self.compiled_out, range)
+        {
             return;
         }
         let Some((line, column, source)) = self.location_source(range) else {
@@ -1292,6 +1308,109 @@ fn standalone_matches(
         .collect()
 }
 
+/// The cfg values of the target a build compiles for. A `#[cfg(..)]`
+/// predicate over them is decided; any other key -- a feature, `test`, a
+/// custom `--cfg` -- is unknown. An item is left out only when its predicate
+/// is decidedly false: the compiler never builds it, so no test can reach it,
+/// and the usual Rust coverage tools do not count it either.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TargetCfg {
+    names: BTreeSet<String>,
+    pairs: BTreeSet<(String, String)>,
+}
+
+impl TargetCfg {
+    pub fn new(values: &[cargo_platform::Cfg]) -> Self {
+        let mut cfg = Self::default();
+        for value in values {
+            match value {
+                cargo_platform::Cfg::Name(name) => {
+                    cfg.names.insert(name.name.clone());
+                }
+                cargo_platform::Cfg::KeyPair(key, value) => {
+                    cfg.pairs.insert((key.name.clone(), value.clone()));
+                }
+            }
+        }
+        cfg
+    }
+
+    /// The keys `rustc --print cfg` settles for a target.
+    fn decides(key: &str) -> bool {
+        matches!(key, "unix" | "windows" | "panic") || key.starts_with("target_")
+    }
+
+    fn evaluate(&self, expression: &cargo_platform::CfgExpr) -> Option<bool> {
+        use cargo_platform::{Cfg, CfgExpr};
+        match expression {
+            CfgExpr::True => Some(true),
+            CfgExpr::False => Some(false),
+            CfgExpr::Not(inner) => self.evaluate(inner).map(|value| !value),
+            CfgExpr::All(items) => {
+                let values = items
+                    .iter()
+                    .map(|item| self.evaluate(item))
+                    .collect::<Vec<_>>();
+                if values.contains(&Some(false)) {
+                    Some(false)
+                } else {
+                    values.iter().all(Option::is_some).then_some(true)
+                }
+            }
+            CfgExpr::Any(items) => {
+                let values = items
+                    .iter()
+                    .map(|item| self.evaluate(item))
+                    .collect::<Vec<_>>();
+                if values.contains(&Some(true)) {
+                    Some(true)
+                } else {
+                    values.iter().all(Option::is_some).then_some(false)
+                }
+            }
+            CfgExpr::Value(Cfg::Name(name)) => {
+                Self::decides(&name.name).then(|| self.names.contains(&name.name))
+            }
+            CfgExpr::Value(Cfg::KeyPair(key, value)) => Self::decides(&key.name)
+                .then(|| self.pairs.contains(&(key.name.clone(), value.clone()))),
+        }
+    }
+
+    /// Whether an item's `#[cfg(..)]` keeps the compiler from building it.
+    fn compiles_out(&self, node: &ra_ap_syntax::SyntaxNode) -> bool {
+        item_attributes(node).iter().any(|text| {
+            text.strip_prefix("cfg(")
+                .and_then(|inner| inner.strip_suffix(')'))
+                .and_then(|inner| inner.parse::<cargo_platform::CfgExpr>().ok())
+                .is_some_and(|expression| self.evaluate(&expression) == Some(false))
+        })
+    }
+}
+
+/// The outer attributes of an item, or of one inside an `impl` or a trait,
+/// each as its meta text with whitespace removed: `cfg(test)`, `test`.
+fn item_attributes(node: &ra_ap_syntax::SyntaxNode) -> Vec<String> {
+    let attributes = if let Some(item) = ast::Item::cast(node.clone()) {
+        item.attrs().collect::<Vec<_>>()
+    } else if let Some(item) = ast::AssocItem::cast(node.clone()) {
+        item.attrs().collect::<Vec<_>>()
+    } else {
+        return Vec::new();
+    };
+    attributes
+        .iter()
+        .filter_map(|attribute| attribute.meta())
+        .map(|meta| {
+            meta.syntax()
+                .text()
+                .to_string()
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect()
+        })
+        .collect()
+}
+
 /// Whether a file is test code by where it sits, as the usual Rust coverage
 /// tools decide by default: under a `tests`, `examples` or `benches` directory, or named
 /// `tests.rs`, `*_tests.rs` or `*-tests.rs`.
@@ -1316,30 +1435,27 @@ pub fn test_code_path(file: &str) -> bool {
 /// Whether an item is test code: gated on `cfg(test)`, alone or first in an
 /// `all(..)`, or a test or benchmark function (`#[test]`, `#[tokio::test]`).
 pub(crate) fn test_item(node: &ra_ap_syntax::SyntaxNode) -> bool {
-    let Some(item) = ast::Item::cast(node.clone()) else {
-        return false;
-    };
-    item.attrs().any(|attribute| {
-        // This grammar parses `cfg(..)` as a keyword and predicate rather
-        // than a path, so the meta's text is read.
-        attribute.meta().is_some_and(|meta| {
-            let text = meta
-                .syntax()
-                .text()
-                .to_string()
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect::<String>();
-            let path = text
-                .chars()
-                .take_while(|character| character.is_alphanumeric() || "_:".contains(*character))
-                .collect::<String>();
-            matches!(path.rsplit("::").next(), Some("test" | "bench"))
-                || text == "cfg(test)"
-                || text.starts_with("cfg(all(test,")
-                || text.starts_with("cfg(all(test)")
-        })
+    item_attributes(node).iter().any(|text| {
+        let path = text
+            .chars()
+            .take_while(|character| character.is_alphanumeric() || "_:".contains(*character))
+            .collect::<String>();
+        matches!(path.rsplit("::").next(), Some("test" | "bench"))
+            || text == "cfg(test)"
+            || text.starts_with("cfg(all(test,")
+            || text.starts_with("cfg(all(test)")
     })
+}
+
+/// The items the target's cfg leaves uncompiled.
+fn compiled_out_ranges(root: &ra_ap_syntax::SyntaxNode, cfg: Option<&TargetCfg>) -> Vec<TextRange> {
+    let Some(cfg) = cfg else {
+        return Vec::new();
+    };
+    root.descendants()
+        .filter(|node| cfg.compiles_out(node))
+        .map(|node| node.text_range())
+        .collect()
 }
 
 /// The test code in a file: all of it, or its test items.
@@ -1364,7 +1480,7 @@ pub fn build_rust_manifest(
     let parsed = parse_for_instrumentation(source)?;
     let tests = test_code_ranges(parsed.tree.syntax(), test_code_path(file));
     RustObligationCollector::new(file, source)
-        .leaving_out(tests)
+        .leaving_out(tests, Vec::new())
         .collect(&parsed.tree, &parsed.assertions, &parsed.matches)
 }
 
@@ -1757,17 +1873,19 @@ pub fn instrument_rust_source(
     source: &str,
     runtime_path: &str,
 ) -> Result<RustInstrumentedSource, RustInstrumenterError> {
-    instrument_rust_file(file, source, runtime_path, test_code_path(file))
+    instrument_rust_file(file, source, runtime_path, test_code_path(file), None)
 }
 
 /// `instrument_rust_source` for a file whose test status is known from how
 /// the crate reaches it: a module only `#[cfg(test)]` declares is test code
-/// whatever its name. Test code keeps only its assertion markers.
+/// whatever its name. Test code keeps only its assertion markers; an item
+/// `cfg` leaves uncompiled for the target keeps nothing.
 pub fn instrument_rust_file(
     file: &str,
     source: &str,
     runtime_path: &str,
     test_file: bool,
+    cfg: Option<&TargetCfg>,
 ) -> Result<RustInstrumentedSource, RustInstrumenterError> {
     if !valid_runtime_path(runtime_path) {
         return Err(RustInstrumenterError::InvalidRuntimePath);
@@ -1779,8 +1897,9 @@ pub fn instrument_rust_file(
     // re-parsing each round.
     let parsed = parse_for_instrumentation(source)?;
     let tests = test_code_ranges(parsed.tree.syntax(), test_file);
+    let compiled_out = compiled_out_ranges(parsed.tree.syntax(), cfg);
     let mut manifest = RustObligationCollector::new(file, source)
-        .leaving_out(tests.clone())
+        .leaving_out(tests.clone(), compiled_out.clone())
         .collect(&parsed.tree, &parsed.assertions, &parsed.matches)?;
     let ParsedSource {
         tree,
@@ -2376,6 +2495,16 @@ pub fn instrument_rust_file(
         );
     }
 
+    // Nothing survives in code the compiler leaves out; a probe there would
+    // name an obligation the manifest no longer has, if the item were built.
+    if !compiled_out.is_empty() {
+        insertions.retain(|insertion| {
+            !compiled_out.iter().any(|range| {
+                usize::from(range.start()) <= insertion.offset
+                    && insertion.offset <= usize::from(range.end())
+            })
+        });
+    }
     // Only the assertion markers survive in test code, and only the sites
     // they name stay in the manifest.
     if !tests.is_empty() {
@@ -2521,6 +2650,61 @@ mod __supercov_runtime_v1 {
         let output = Command::new(&binary).output().unwrap();
         fs::remove_dir_all(directory).unwrap();
         output
+    }
+
+    #[test]
+    fn a_target_cfg_decides_only_what_the_target_settles() {
+        let cfg = TargetCfg::new(
+            &[
+                "unix",
+                "target_os=\"linux\"",
+                "target_family=\"unix\"",
+                "target_pointer_width=\"64\"",
+                "debug_assertions",
+            ]
+            .map(|value| value.parse::<cargo_platform::Cfg>().unwrap()),
+        );
+        let decide = |expression: &str| cfg.evaluate(&expression.parse().unwrap());
+        assert_eq!(decide("unix"), Some(true));
+        assert_eq!(decide("windows"), Some(false));
+        assert_eq!(decide("target_os = \"macos\""), Some(false));
+        assert_eq!(decide("not(target_os = \"linux\")"), Some(false));
+        assert_eq!(
+            decide("all(unix, target_pointer_width = \"64\")"),
+            Some(true)
+        );
+        assert_eq!(decide("any(windows, target_os = \"wasi\")"), Some(false));
+        // A feature, `test` or a custom cfg is not the target's to settle.
+        assert_eq!(decide("feature = \"extra\""), None);
+        assert_eq!(decide("not(feature = \"extra\")"), None);
+        assert_eq!(decide("debug_assertions"), None);
+        assert_eq!(decide("all(windows, feature = \"extra\")"), Some(false));
+        assert_eq!(decide("any(unix, feature = \"extra\")"), Some(true));
+        assert_eq!(decide("any(windows, feature = \"extra\")"), None);
+
+        let source = "pub fn a() -> u8 { b() }\n#[cfg(windows)]\nfn b() -> u8 { 1 }\n#[cfg(unix)]\nfn b() -> u8 { 2 }\n#[cfg(feature = \"x\")]\nfn c() -> u8 { 3 }\n";
+        let instrumented = instrument_rust_file(
+            "src/lib.rs",
+            source,
+            "crate::__supercov_runtime_v1",
+            false,
+            Some(&cfg),
+        )
+        .unwrap();
+        let lines = instrumented
+            .manifest
+            .points
+            .iter()
+            .map(|point| point.line)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !lines.contains(&3),
+            "the windows item is left out: {lines:?}"
+        );
+        assert!(lines.contains(&5) && lines.contains(&7), "{lines:?}");
+        let windows = &instrumented.code[instrumented.code.find("#[cfg(windows)]").unwrap()
+            ..instrumented.code.find("#[cfg(unix)]").unwrap()];
+        assert!(!windows.contains("__supercov_runtime_v1"), "{windows}");
     }
 
     #[test]
