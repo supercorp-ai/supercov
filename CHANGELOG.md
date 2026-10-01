@@ -18,6 +18,8 @@
 - Under tap, AVA, Mocha and the other runners Supercov measures in aggregate, a probe's first hit is written to disk once per event-loop turn, and on exit and on a terminating signal, as a test's own records already were, instead of one directory creation, open, append and close per record. lru-cache's 10 ms TTL test, whose window records 132 first hits, runs that window in 1.6–2.2 ms instead of 5–7.7 ms (0.55 ms without Supercov). A process killed in the middle of a turn loses that turn's records.
 - Gradle JUnit 4 projects are measured like Maven ones: the copy adds `junit-vintage-engine` and runs each JUnit 4 module's tests on the JUnit Platform, where they used to be named in the output and left unattributed. kittinunf/Forge (51 tests) and square/moshi (1,292) are attributed with no change to their builds.
 
+- `tests affected` lists first the tests whose own file or name shares words with a changed file, with or without an assessment; assertion verdicts break ties. Replaying real commits, this put a failing test in the first three for 23 of 57 breaking commits, against 13 for file order and fewer for the verdicts alone.
+
 **Fixed**
 
 - `tests affected` no longer misses a Java or Kotlin test that only uses what a static initializer set up. It runs once per process and is credited to the first test to load the class, so a test reading a changed static field ran nothing recorded in its file; a change to a class's declarations now also affects the tests whose files name the class. Replaying apache/commons-cli's history, the three failing tests a reverted `Converter.CLASS` change had missed are selected (12 of 12 instead of 9), for about 15% more tests selected.

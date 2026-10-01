@@ -303,10 +303,20 @@ fn apply_assertions(
             test,
         ));
     }
+    // A test with a change of its own first; then the name match the
+    // coverage order already uses, which predicted failing tests better than
+    // the verdicts on replayed commits; the verdicts break its ties.
     ranked.sort_by(|a, b| {
-        (a.0, a.1, a.2["file"].as_str(), a.2["name"].as_str()).cmp(&(
-            b.0,
-            b.1,
+        let key = |r: &(u8, std::cmp::Reverse<i64>, Value)| {
+            (
+                r.0 != 0,
+                std::cmp::Reverse(r.2["nameMatch"].as_u64().unwrap_or(0)),
+                r.0,
+                r.1,
+            )
+        };
+        (key(a), a.2["file"].as_str(), a.2["name"].as_str()).cmp(&(
+            key(b),
             b.2["file"].as_str(),
             b.2["name"].as_str(),
         ))

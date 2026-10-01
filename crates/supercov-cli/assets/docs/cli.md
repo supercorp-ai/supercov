@@ -409,8 +409,9 @@ a few requests per commit. After it, `--ran-changed` leaves out the affected
 tests that ran the changed declaration but none of the changed statements, and
 `--asserting` also those judged to catch no change to them. Tests whose own
 file changed or that did not pass stay, and so does any test never asked. With
-an assessment, `--names` and `--files` list the tests most likely to catch the
-change first.
+an assessment or without, `--names` and `--files` list first the tests whose
+own file or name shares words with a changed file (`test_receivebuffer.py` for
+`_receivebuffer.py`), the verdicts breaking ties.
 
 Measured by applying random changes and running the suite:
 
@@ -437,8 +438,11 @@ the commit's own tests run against it:
 
 No failing test was left out of the set to run. On real commits the
 assessment narrows little -- Jev judges most tests that ran a changed line to
-catch the change -- and its ranking seldom puts a failing test first (in the
-first three for 6 of 32 breaking commits). After a project's first
+catch the change -- and its verdicts ranked a failing test in the first three
+for only 6 of 32 breaking commits. Ranking by name instead put one there for
+10 of those 32, and for 13 of 25 breaking commits in four projects it was not
+designed on (hashie, Masterminds/semver, itsdangerous, java-classmate), where
+file order managed 11; it needs no assessment. After a project's first
 assessment, each commit cost under a cent.
 
 ## Combine shards
