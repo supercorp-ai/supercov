@@ -57,6 +57,51 @@ const MAX_FAILURES: usize = 20;
 /// Requests planned per round of the assessment pass.
 const ROUND_REQUESTS: usize = 40;
 
+/// Jev 1.13.0 takes 32k tokens of state plus the longest question and 64k of
+/// state plus every question; these leave room for the estimate to be low.
+const STATE_AND_QUESTION_TOKENS: usize = 30_000;
+const STATE_AND_QUESTIONS_TOKENS: usize = 60_000;
+
+fn tokens(value: &Value) -> usize {
+    quality::estimated_tokens(&serde_json::to_vec(value).unwrap_or_default())
+}
+
+/// The planned requests, each within Jev's limits: one over them is split by
+/// its questions, and a test whose request is over even with one question is
+/// not asked about that statement. Supercov's own suite, whose tests hold
+/// long inline fixtures, had every request refused and the pass stopped.
+fn within_limits(
+    population: &Population,
+    pass: &mut Pass,
+    batch: Vec<(usize, Vec<usize>)>,
+) -> Vec<(usize, Vec<usize>)> {
+    let mut out = Vec::new();
+    let mut pending = batch;
+    while let Some((t, asked)) = pending.pop() {
+        let request = population.request(t, &asked, pass.model);
+        let state = tokens(&request["state"]);
+        let longest = request["questions"]
+            .as_object()
+            .into_iter()
+            .flat_map(|q| q.values())
+            .map(tokens)
+            .max()
+            .unwrap_or(0);
+        if state + longest <= STATE_AND_QUESTION_TOKENS
+            && tokens(&request) <= STATE_AND_QUESTIONS_TOKENS
+        {
+            out.push((t, asked));
+        } else if asked.len() > 1 {
+            let (left, right) = asked.split_at(asked.len() / 2);
+            pending.push((t, left.to_vec()));
+            pending.push((t, right.to_vec()));
+        } else if let Some(&s) = asked.first() {
+            pass.refused.insert((s, t));
+        }
+    }
+    out
+}
+
 /// The file in a run's directory holding its assessed result.
 pub const RESULT_FILE: &str = "assertion-coverage.json";
 /// The file in a run's directory holding `assess --changed`'s answers.
@@ -237,6 +282,9 @@ struct Pass<'p> {
     orders: Vec<Vec<usize>>,
     wide: bool,
     keys: BTreeMap<(usize, usize), String>,
+    /// (statement, test) pairs whose request is over Jev's limit even with
+    /// that one question: the test is not asked about the statement.
+    refused: BTreeSet<(usize, usize)>,
 }
 
 impl Pass<'_> {
@@ -258,7 +306,11 @@ impl Pass<'_> {
             .min(self.population.statements[statement].tests.len())
     }
     fn undecided(&self, statement: usize) -> bool {
-        !self.asserted(statement) && self.answers[statement].len() < self.limit(statement)
+        let refused = self
+            .refused
+            .range((statement, 0)..=(statement, usize::MAX))
+            .count();
+        !self.asserted(statement) && self.answers[statement].len() + refused < self.limit(statement)
     }
     /// Cached answers first: a statement asked this exact question before is
     /// answered without a request.
@@ -301,7 +353,8 @@ impl Pass<'_> {
                 continue;
             }
             for &t in &self.orders[s] {
-                if !self.answers[s].iter().any(|(x, _)| *x == t) {
+                if !self.answers[s].iter().any(|(x, _)| *x == t) && !self.refused.contains(&(s, t))
+                {
                     eligible.entry(t).or_default().push(s);
                 }
             }
@@ -390,6 +443,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         orders: (0..n).map(|s| population.order(s, FIRST_TESTS)).collect(),
         wide: false,
         keys: BTreeMap::new(),
+        refused: BTreeSet::new(),
     };
     let mut cache = Cache::load(root);
     let mut reused = pass.seed(&cache);
@@ -433,7 +487,21 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         let key = key
             .as_deref()
             .ok_or("set TYPESAFE_API_KEY to ask Jev, or use --dry-run for an estimate")?;
-        let batch = pass.plan(batch_size);
+        let planned = pass.plan(batch_size);
+        if planned.is_empty() {
+            // Undecided statements no test is left to ask about (the rest
+            // were over Jev's limit): widen once, then stop.
+            if pass.wide {
+                break;
+            }
+            pass.widen();
+            reused += pass.seed(&cache);
+            continue;
+        }
+        let batch = within_limits(&population, &mut pass, planned);
+        if batch.is_empty() {
+            continue;
+        }
         let bodies = batch
             .iter()
             .map(|(t, asked)| population.request(*t, asked, pass.model))
@@ -730,7 +798,7 @@ fn summary(
         "summary": {
             "statements": total, "asserted": asserted, "notAsserted": total - asserted,
             "percentage": if total == 0 { Value::Null } else { json!((asserted as f64 * 1000.0 / total as f64).round() / 10.0) },
-            "requests": requests, "answersReused": reused, "inputTokens": tokens,
+            "requests": requests, "answersReused": reused, "inputTokens": tokens, "pairsOverLimit": pass.refused.len(),
             "costUsd": tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS,
         },
         "basis": "Jev, from what each test ran; a statement is asserted when some test that runs it is judged to fail if it changes",
