@@ -2349,3 +2349,37 @@ fn a_pnpm_workspace_finds_the_source_of_each_package_it_lists() {
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     assert!(summary.contains("Lines      66.67% (2/3)"), "{summary}");
 }
+
+#[test]
+fn absolute_source_roots_name_the_same_rust_code_in_the_workspace() {
+    let project = Project::empty("rust-roots");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"roots\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub mod extra;\n\npub fn double(x: u32) -> u32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+    );
+    project.write(
+        "src/extra.rs",
+        "pub fn half(x: u32) -> u32 {\n    x / 2\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let measured = |roots: &str| {
+        project
+            .supercov_with(
+                &["--", "cargo", "test"],
+                &[("SUPERCOV_SOURCE_ROOTS", roots)],
+            )
+            .succeeds();
+        project.supercov(&["runs", "latest"]).succeeds()
+    };
+    // The run measures a copy; a root written as the project's absolute path
+    // names the same file there.
+    let file = project.root.join("src/lib.rs");
+    let one = measured(file.to_str().unwrap());
+    assert!(one.contains("Lines      100.00% (2/2)"), "{one}");
+    let whole = measured(project.root.to_str().unwrap());
+    assert!(whole.contains("Lines      50.00% (2/4)"), "{whole}");
+}
