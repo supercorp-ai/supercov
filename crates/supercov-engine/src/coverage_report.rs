@@ -2616,72 +2616,6 @@ fn is_mcdc_journal(path: &str) -> bool {
     path == "mcdc.jsonl" || path.ends_with(".mcdc.jsonl")
 }
 
-fn validate_rust_compiler_scope(manifest: &CoverageManifest) -> Result<(), ReportError> {
-    let scope = manifest
-        .scope
-        .as_ref()
-        .and_then(Value::as_object)
-        .ok_or_else(|| ReportError::InvalidArchive("missing Rust compiler source scope".into()))?;
-    let mut expected = BTreeSet::from([
-        "crate",
-        "language",
-        "measurementComplete",
-        "model",
-        "sourceFingerprint",
-    ]);
-    // Historical experimental metadata is ignored, never used for credit.
-    if scope.contains_key("assertionIdentities") {
-        expected.insert("assertionIdentities");
-    }
-    if scope.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected
-        || scope.get("language").and_then(Value::as_str) != Some("rust")
-        || scope.get("model").and_then(Value::as_str) != Some("rust-source-v1")
-        || scope
-            .get("crate")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
-        || !scope
-            .get("measurementComplete")
-            .is_some_and(Value::is_boolean)
-    {
-        return Err(ReportError::InvalidArchive(
-            "malformed Rust compiler source scope".into(),
-        ));
-    }
-    let fingerprint = scope
-        .get("sourceFingerprint")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            ReportError::InvalidArchive("missing Rust compiler source fingerprint".into())
-        })?;
-    let expected_fingerprint = BTreeSet::from(["algorithm", "digest", "files", "generatedFiles"]);
-    let digest = fingerprint.get("digest").and_then(Value::as_str);
-    let files = fingerprint.get("files").and_then(Value::as_u64);
-    let generated = fingerprint.get("generatedFiles").and_then(Value::as_u64);
-    if fingerprint
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>()
-        != expected_fingerprint
-        || fingerprint.get("algorithm").and_then(Value::as_str) != Some("sha256")
-        || !digest.is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-        || files.is_none_or(|files| files == 0)
-        || generated
-            .zip(files)
-            .is_none_or(|(generated, files)| generated > files)
-    {
-        return Err(ReportError::InvalidArchive(
-            "malformed Rust compiler source fingerprint".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
@@ -2798,9 +2732,6 @@ pub fn analyze_coverage_archive(
             "frontend language {} differs from coverage model language {}",
             frontend.language, coverage_model.language
         )));
-    }
-    if frontend.frontend_version == "rust-compiler-v1" {
-        validate_rust_compiler_scope(&manifest)?;
     }
     separate_repeated_executions(&mut raw_results);
     release_leaked_phases(&mut raw_results);
@@ -3858,52 +3789,6 @@ mod tests {
                 if reason.contains("javascript differs from coverage model language rust")
         ));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn rust_compiler_scope_requires_an_exact_full_source_fingerprint() {
-        let mut manifest = CoverageManifest {
-            unmeasured: Vec::new(),
-            decisions: vec![],
-            points: vec![],
-            branches: vec![],
-            limitations: vec![],
-            scope: Some(serde_json::json!({
-                "language": "rust",
-                "model": "rust-source-v1",
-                "crate": "fixture",
-                "measurementComplete": false,
-                "sourceFingerprint": {
-                    "algorithm": "sha256",
-                    "digest": "1".repeat(64),
-                    "files": 2,
-                    "generatedFiles": 1,
-                },
-            })),
-            assertion_sites: Vec::new(),
-        };
-        validate_rust_compiler_scope(&manifest).unwrap();
-
-        // The optional extension does not open the scope to arbitrary keys or
-        // unvalidated records, and legacy archives still need no such field.
-        let mut extended = manifest.clone();
-        extended.scope.as_mut().unwrap()["assertionIdentities"] = serde_json::json!({
-            "schema":"supercov-rust-assertion-identities-v1", "records":[]
-        });
-        validate_rust_compiler_scope(&extended).unwrap();
-
-        manifest.scope.as_mut().unwrap()["sourceFingerprint"]["digest"] =
-            Value::String("not-a-digest".into());
-        assert!(matches!(
-            validate_rust_compiler_scope(&manifest),
-            Err(ReportError::InvalidArchive(reason))
-                if reason == "malformed Rust compiler source fingerprint"
-        ));
-
-        manifest.scope.as_mut().unwrap()["sourceFingerprint"]["digest"] =
-            Value::String("1".repeat(64));
-        manifest.scope.as_mut().unwrap()["sourceFingerprint"]["unexpected"] = Value::Bool(true);
-        assert!(validate_rust_compiler_scope(&manifest).is_err());
     }
 
     #[test]

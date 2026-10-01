@@ -19,9 +19,8 @@ use crate::{
         IndexedSourceScope, IndexedSummaryConfidence, IndexedTestSummary,
     },
     coverage_report::{
-        CoverageConfidence, CoverageReportRequest, CoverageView, DecisionMeta, ReportError,
-        SourceLine, TestAttempt, TestProvenance, TransportStats, analyze_coverage_results,
-        coverage_summary_for_tests,
+        CoverageConfidence, CoverageView, DecisionMeta, ReportError, SourceLine, TestAttempt,
+        TestProvenance, TransportStats, coverage_summary_for_tests,
     },
 };
 use supercov_contracts::AgentPagination;
@@ -48,42 +47,6 @@ pub struct MinimumTestSetResult {
     pub expanded: Vec<String>,
     pub summary: CoverageSummary,
     pub explored_states: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MinimumTestSetRequest {
-    pub coverage: CoverageReportRequest,
-    #[serde(default = "default_target")]
-    pub target: f64,
-    #[serde(default = "default_metric")]
-    pub metric: MinimizeMetric,
-    #[serde(default = "default_max_states")]
-    pub max_states: usize,
-}
-
-fn default_target() -> f64 {
-    100.0
-}
-
-fn default_metric() -> MinimizeMetric {
-    MinimizeMetric::All
-}
-
-fn default_max_states() -> usize {
-    5_000
-}
-
-pub fn minimum_test_set_for_request(
-    request: &MinimumTestSetRequest,
-) -> Result<MinimumTestSetResult, QueryError> {
-    let report = analyze_coverage_results(&request.coverage)?;
-    minimum_test_set(
-        &report.view,
-        request.target,
-        request.metric,
-        request.max_states,
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1404,23 +1367,6 @@ fn selected_decision(
     }
 }
 
-/// Reconstruct the exact decision view used by provenance-filtered queries.
-/// Project filters are applied against the immutable query index.
-pub fn filtered_decisions(
-    index: &CoverageIndex<'_>,
-    view: CoverageViewId,
-    kind: Option<&str>,
-    runner: Option<&str>,
-) -> Result<Vec<crate::coverage_report::DecisionResult>, QueryError> {
-    let tests = index.test_summaries(view)?;
-    let selected = selected_test_ids(&tests, kind, runner)?;
-    index
-        .decision_details(view)?
-        .into_iter()
-        .map(|decision| Ok(selected_decision(decision, selected.as_ref())))
-        .collect()
-}
-
 pub fn coverage_decision_query(
     index: &CoverageIndex<'_>,
     options: CoverageDecisionQueryOptions<'_>,
@@ -1633,13 +1579,6 @@ impl CoverageFileObligation {
             Self::Mcdc(value) => &value.kind,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CoverageFileTest {
-    pub id: String,
-    pub name: String,
-    pub provenance: TestProvenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

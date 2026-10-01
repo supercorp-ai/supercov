@@ -3113,20 +3113,6 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     instrument_candidate_with_binding(source, file, RuntimeBinding::ModuleImport, None, false)
 }
 
-pub fn instrument_candidate_with_runtime_hooks(
-    source: &str,
-    file: &str,
-    capability_wrapper: &str,
-) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(
-        source,
-        file,
-        RuntimeBinding::ModuleImport,
-        Some(capability_wrapper),
-        false,
-    )
-}
-
 /// Emit code for an isolated source-executing workspace. Unlike the module-
 /// import form, this has no virtual module dependency: the generated
 /// Node preload installs the frozen runtime on this global before user modules
@@ -3136,20 +3122,6 @@ pub fn instrument_direct_candidate(
     file: &str,
 ) -> Result<CandidateOutput, CandidateError> {
     instrument_candidate_with_binding(source, file, RuntimeBinding::DirectGlobal, None, false)
-}
-
-pub fn instrument_direct_candidate_with_runtime_hooks(
-    source: &str,
-    file: &str,
-    capability_wrapper: &str,
-) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(
-        source,
-        file,
-        RuntimeBinding::DirectGlobal,
-        Some(capability_wrapper),
-        false,
-    )
 }
 
 pub fn instrument_with_import_policy(

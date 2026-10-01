@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     coverage_report::{ExecutionScope, RawTestResult, TestProvenance},
     rust_cargo_configuration::{RustCargoResolvedRunner, resolve_cargo_runner_plan},
-    rust_compiler_orchestration::{CargoMetadataOutput, cargo_metadata_arguments},
     rust_project::PreparedRustProject,
     rust_runner_attempt::{
         RustRunnerInvocationIdentity, classify_rust_runner_environment,
@@ -171,12 +170,10 @@ pub(crate) fn run_nextest(
         TestListSummary::parse_json(String::from_utf8_lossy(&listed.stdout)).map_err(|error| {
             RustTestRunnerError::CargoJson(format!("invalid nextest test listing: {error}"))
         })?;
-    let metadata = cargo(
-        &cargo_metadata_arguments(invocation)
-            .map_err(|error| RustTestRunnerError::Context(error.to_string()))?,
-    )
-    .output()
-    .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
+    let metadata =
+        cargo(&cargo_metadata_arguments(invocation).map_err(RustTestRunnerError::Context)?)
+            .output()
+            .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !metadata.status.success() {
         return Err(RustTestRunnerError::CargoFailed(combined_output(
             &metadata.stdout,
@@ -588,6 +585,77 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
         }
     }
     1
+}
+
+/// What `cargo metadata` says of the workspace members: enough to find the
+/// source file behind each test binary nextest lists.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CargoMetadataOutput {
+    pub(crate) packages: Vec<CargoMetadataPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CargoMetadataPackage {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) targets: Vec<CargoMetadataTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CargoMetadataTarget {
+    pub(crate) name: String,
+    pub(crate) kind: Vec<String>,
+    pub(crate) src_path: PathBuf,
+}
+
+/// The `cargo metadata` command for the workspace a test command selects:
+/// its toolchain override and the options that choose the manifest, the
+/// configuration and how Cargo may resolve.
+pub(crate) fn cargo_metadata_arguments(
+    invocation: &crate::rust_test_runner::CargoTestInvocation,
+) -> Result<Vec<String>, String> {
+    let command = invocation
+        .command_position()
+        .ok_or("the Cargo invocation lost its test subcommand")?;
+    let mut arguments = invocation.arguments[..command]
+        .iter()
+        .filter(|argument| argument.starts_with('+'))
+        .cloned()
+        .collect::<Vec<_>>();
+    arguments.extend([
+        "metadata".into(),
+        "--format-version=1".into(),
+        "--no-deps".into(),
+    ]);
+    let command_width = match invocation.kind {
+        crate::rust_test_runner::RustCargoCommandKind::CargoTest => 1,
+        crate::rust_test_runner::RustCargoCommandKind::NextestRun => 2,
+    };
+    let mut index = command + command_width;
+    while index < invocation.arguments.len() {
+        let argument = &invocation.arguments[index];
+        let name = argument
+            .split_once('=')
+            .map_or(argument.as_str(), |(name, _)| name);
+        let takes_value = match name {
+            "--manifest-path" | "--config" | "-Z" => Some(!argument.contains('=')),
+            "--frozen" | "--locked" | "--offline" | "--ignore-rust-version" => Some(false),
+            _ => None,
+        };
+        if let Some(takes_value) = takes_value {
+            arguments.push(argument.clone());
+            if takes_value {
+                index += 1;
+                let value = invocation
+                    .arguments
+                    .get(index)
+                    .ok_or_else(|| format!("Cargo option {argument} has no value"))?;
+                arguments.push(value.clone());
+            }
+        }
+        index += 1;
+    }
+    Ok(arguments)
 }
 
 #[cfg(test)]

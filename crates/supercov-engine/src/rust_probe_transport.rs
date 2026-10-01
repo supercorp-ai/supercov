@@ -21,8 +21,6 @@ use crate::rust_runtime::{RustProbeObservation, valid_probe_id};
 pub const RUST_TRANSPORT_ENV: &str = "SUPERCOV_RUST_TRANSPORT_FILE";
 pub const RUST_TRANSPORT_TOKEN_ENV: &str = "SUPERCOV_RUST_TRANSPORT_TOKEN";
 pub const RUST_CONTEXT_ENV: &str = "SUPERCOV_RUST_CONTEXT_ID";
-pub const DEFAULT_DESCRIPTOR_CAPACITY: u32 = 32_768;
-pub const DEFAULT_PAYLOAD_CAPACITY: u32 = 4 * 1024 * 1024;
 
 const MAGIC: &[u8; 8] = b"SCVRUST3";
 const VERSION: u32 = 3;

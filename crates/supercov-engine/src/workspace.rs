@@ -1297,16 +1297,6 @@ fn recover_cargo_workspace_at(
     })
 }
 
-pub fn recover_cargo_cached_workspace(
-    root: &Path,
-    lock: &ProjectLock,
-) -> Result<CacheRecoveryResult, WorkspaceError> {
-    require_lock(root, lock)?;
-    let container = ensure_cargo_container(root)?;
-    let workspace = cargo_cached_workspace_path(root)?;
-    recover_cargo_workspace_at(root, &container, &workspace)
-}
-
 pub fn prepare_cargo_cached_workspace(
     root: &Path,
     lock: &ProjectLock,

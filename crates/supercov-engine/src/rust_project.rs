@@ -572,46 +572,6 @@ fn test_target_roots(packages: &[CargoPackage]) -> BTreeSet<PathBuf> {
         .collect()
 }
 
-/// Read-only Cargo workspace source discovery used by integrity checks. This
-/// deliberately shares the same path policy as transformation preparation.
-pub fn discover_rust_source_files(workspace: &Path) -> Result<Vec<String>, RustProjectError> {
-    let workspace = canonical_directory(workspace)?;
-    let metadata = cargo_metadata(&workspace)?;
-    let metadata_root = canonical_directory(&metadata.workspace_root)?;
-    if metadata_root != workspace {
-        return Err(RustProjectError::UnsafePath(
-            metadata.workspace_root.display().to_string(),
-        ));
-    }
-    let members = metadata
-        .workspace_members
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let packages = metadata
-        .packages
-        .into_iter()
-        .filter(|package| members.contains(&package.id))
-        .collect::<Vec<_>>();
-    if packages.is_empty() {
-        return Err(RustProjectError::NoWorkspacePackages);
-    }
-    let mut files = BTreeSet::new();
-    resolve_module_tree(
-        &workspace,
-        &crate_roots(&workspace, &packages)?,
-        &BTreeSet::new(),
-        &mut files,
-        &mut BTreeSet::new(),
-    )?;
-    if files.is_empty() {
-        return Err(RustProjectError::NoSourceFiles);
-    }
-    files
-        .into_iter()
-        .map(|path| confined_relative(&workspace, &path))
-        .collect()
-}
-
 fn runtime_module_name(sources: &BTreeMap<String, String>) -> String {
     let mut suffix = 0_usize;
     loop {
