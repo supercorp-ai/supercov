@@ -26,6 +26,7 @@
 
 **Fixed**
 
+- `supercov quality` and `supercov security` keep their saved assessments out of Git, as a coverage run keeps its runs: the first write adds `.supercov/.gitignore`. In a project with no coverage run, `.supercov/` appeared in `git status` and `git add -A` committed the answer cache.
 - Assessing a Rust function that returns a closure as `impl Fn(..) -> T` asks about the closure returning another `T` (`|x| 0`). The closure itself was taken for a `T` and asked about as `(|x| x * 3) ^ 1`, a change that does not compile.
 - A Ruby `case ... in` with no `else` raises `NoMatchingPatternError` under Supercov as it does without it. Supercov added an `else` of its own to record that no pattern matched, which swallowed the error, so the `case` returned `nil` and code rescuing the error never saw it. The `case` is now wrapped instead: Ruby's own exception, with its class and message, is re-raised, and the outcome is recorded only when this `case` raised it.
 - `supercov merge` names a run that is not there as "no such local run"; it said "incomplete run", which sent people looking for a run that had failed to publish.

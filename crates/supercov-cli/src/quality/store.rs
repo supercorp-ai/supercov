@@ -75,11 +75,34 @@ pub fn is_snapshot_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Make Git ignore the `.supercov` directory `path` sits in, as a coverage
+/// run does, so an assessment never shows up in `git status` or a commit.
+/// An ignore file already there, the user's own rules included, is kept.
+fn ignore_store(path: &Path) -> Result<(), String> {
+    let Some(store) = path
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".supercov"))
+    else {
+        return Ok(());
+    };
+    let ignore = store.join(".gitignore");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&ignore)
+    {
+        Ok(mut file) => file.write_all(b"*\n").map_err(|e| e.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(format!("{}: {error}", ignore.display())),
+    }
+}
+
 /// Write bytes where nothing was, or replace what is there in one step. A
 /// reader sees either the whole previous content or the whole new content.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let directory = path.parent().ok_or("invalid path")?;
     fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+    ignore_store(path)?;
     let temp = path.with_extension(format!("{}.tmp", std::process::id()));
     let result = (|| -> Result<(), String> {
         let mut file = fs::OpenOptions::new()

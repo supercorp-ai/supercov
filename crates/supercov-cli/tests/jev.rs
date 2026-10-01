@@ -695,3 +695,79 @@ fn security_follows_outside_data_across_an_import() {
         .any(|(_, _, request)| request["questions"].get("path").is_some());
     assert!(asked_path, "the pair was confirmed with one question");
 }
+
+#[test]
+fn a_patch_review_reads_only_changed_source_and_says_what_it_skipped() {
+    let project = Project::cart("patch-edges");
+    project.write("src/extra.js", "export const e = (a) => a + 1;\n");
+    project.write("src/old.js", "export const o = 1;\n");
+    project.commit("more");
+    let (base, _) = gateway(MODEL, answer_no);
+    let jev = through(&base);
+
+    let nothing = project
+        .supercov_with(&["quality", "patch"], &jev)
+        .succeeds();
+    assert!(
+        nothing.contains("No changed source files to review."),
+        "{nothing}"
+    );
+    // An assessment never shows up as a change of its own.
+    assert_eq!(
+        project.git(&["status", "--porcelain"]),
+        "",
+        "the store is ignored"
+    );
+
+    project.git(&["rm", "-q", "src/old.js"]);
+    project.git(&["mv", "src/extra.js", "src/renamed.js"]);
+    project.write("README.md", "# cart\n");
+    project.write("dist/bundle.js", "var x=1;\n");
+    project.edit("test/cart.test.js", "20);", "20 );");
+    project.edit("src/cart.js", "return 0;", "return 0 ;");
+    let unstaged = project
+        .supercov_with(&["quality", "patch"], &jev)
+        .succeeds();
+    contains_all(
+        &unstaged,
+        &[
+            "Reviewing unstaged changes.",
+            "Nothing introduced across 1 changed files.",
+            "3 changed files not reviewed.",
+        ],
+    );
+
+    project.commit("changes");
+    let reviewed = project
+        .supercov_with(&["quality", "patch", "--base", "HEAD~1", "--json"], &jev)
+        .json();
+    let files = reviewed["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(files, ["src/cart.js", "src/renamed.js"]);
+    let skipped = reviewed["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| {
+            (
+                file["path"].as_str().unwrap().to_owned(),
+                file["reason"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        skipped,
+        [
+            ("README.md", "not a source file"),
+            ("dist/bundle.js", "unclassified first-party source"),
+            ("src/extra.js", "a deletion cannot introduce anything"),
+            ("src/old.js", "a deletion cannot introduce anything"),
+            ("test/cart.test.js", "test"),
+        ]
+        .map(|(path, reason)| (path.to_owned(), reason.to_owned()))
+    );
+}
