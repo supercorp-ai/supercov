@@ -1176,3 +1176,59 @@ fn a_store_that_is_a_link_elsewhere_is_refused() {
         "nothing written through the link"
     );
 }
+
+#[test]
+fn cargo_flags_the_build_owns_are_left_to_it_and_runs_with_no_test_are_refused() {
+    let project = Project::empty("cargo-flags");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"flags\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn double(x: u32) -> u32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    // The build reads Cargo's JSON into its own target directory; a command
+    // asking for another format or directory still measures.
+    for flags in [
+        vec!["--message-format", "json"],
+        vec!["--message-format=short"],
+        vec!["--target-dir", "elsewhere"],
+        vec!["--target-dir=elsewhere"],
+    ] {
+        let mut args = vec!["--", "cargo", "test"];
+        args.extend(flags.iter().copied());
+        let measured = project.supercov(&args).succeeds();
+        let said = format!(
+            "{measured}{}",
+            project.supercov(&["runs", "latest"]).succeeds()
+        );
+        assert!(
+            said.contains("Lines      100.00% (2/2)"),
+            "{flags:?}: {said}"
+        );
+    }
+    for (args, message) in [
+        (
+            vec!["--", "cargo", "test", "--no-run"],
+            "`--no-run` builds the tests without running any",
+        ),
+        (
+            vec!["--", "cargo", "test", "--", "--list"],
+            "libtest --list does not execute a test suite",
+        ),
+        (
+            vec!["--", "cargo", "bench"],
+            "requires `cargo test` or `cargo nextest run`",
+        ),
+    ] {
+        let refused = project.supercov(&args);
+        assert_ne!(refused.code(), 0, "{args:?}");
+        assert!(
+            refused.stderr().contains(message),
+            "{args:?}: {}",
+            refused.stderr()
+        );
+    }
+}

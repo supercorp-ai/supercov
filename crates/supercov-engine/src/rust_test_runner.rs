@@ -887,11 +887,41 @@ pub(crate) fn relative_source(root: &Path, path: &Path) -> Result<String, RustTe
     Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
+/// The build step decides three things for itself: it builds without running,
+/// reads Cargo's JSON, and builds into Supercov's own target directory. The
+/// command's own `--message-format` and `--target-dir` would collide with
+/// those, so they are left out of the build; `--no-run` asks for no test at
+/// all, which leaves nothing to measure.
+fn build_owned_arguments(arguments: Vec<String>) -> Result<Vec<String>, RustTestRunnerError> {
+    let mut kept = Vec::with_capacity(arguments.len());
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        let name = argument
+            .split_once('=')
+            .map_or(argument.as_str(), |(name, _)| name);
+        match name {
+            "--no-run" => {
+                return Err(RustTestRunnerError::UnsupportedCommand(
+                    "`--no-run` builds the tests without running any, so there is nothing to measure; run the command without it".into(),
+                ));
+            }
+            "--message-format" | "--target-dir" => {
+                if !argument.contains('=') {
+                    arguments.next();
+                }
+            }
+            _ => kept.push(argument),
+        }
+    }
+    Ok(kept)
+}
+
 fn build_test_artifacts(
     project: &PreparedRustProject,
     command: &[String],
 ) -> Result<Vec<TestArtifact>, RustTestRunnerError> {
     let mut invocation = cargo_invocation(&project.workspace_root, command)?;
+    invocation.arguments = build_owned_arguments(invocation.arguments)?;
     invocation
         .arguments
         .extend(["--no-run".into(), "--message-format=json".into()]);
