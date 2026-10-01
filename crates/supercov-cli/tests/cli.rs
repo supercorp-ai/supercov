@@ -2111,3 +2111,77 @@ fn report_data(html: &str) -> serde_json::Value {
         .unwrap();
     serde_json::from_str(&json).unwrap()
 }
+
+#[test]
+fn a_lock_another_process_holds_is_named_and_one_left_behind_is_taken_over() {
+    let project = Project::cart("locks");
+    let lock = project.root.join(".supercov/locks/active.json");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let owner = |pid: u32| {
+        format!(r#"{{"runId":"run_other","pid":{pid},"startedAt":"2026-10-02T00:00:00Z"}}"#)
+    };
+    // This test process is alive, so its pid holds the lock.
+    std::fs::write(&lock, owner(std::process::id())).unwrap();
+    let held = project.supercov(&["--", "node", "--test"]);
+    assert_ne!(held.code(), 0);
+    assert!(
+        held.stderr()
+            .contains("coverage run run_other is already active in this project"),
+        "{}",
+        held.stderr()
+    );
+    // A lock still being written has no owner yet.
+    std::fs::write(&lock, "{").unwrap();
+    let acquiring = project.supercov(&["--", "node", "--test"]);
+    assert_ne!(acquiring.code(), 0);
+    assert!(
+        acquiring
+            .stderr()
+            .contains("a coverage run is currently acquiring the project lock"),
+        "{}",
+        acquiring.stderr()
+    );
+    // One whose owner is gone, or that never got one and is old, is taken over.
+    std::fs::write(&lock, owner(u32::MAX - 1)).unwrap();
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    std::fs::write(&lock, "{").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&lock)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    project.supercov(&["--", "node", "--test"]).succeeds();
+
+    // The trash sweeper keeps the same rules for its own lock.
+    let trash = project.root.join(".supercov/.trash");
+    let root = project.root.to_str().unwrap();
+    let sweep = |deleter: &str, modified: Option<std::time::SystemTime>| {
+        std::fs::create_dir_all(trash.join("left")).unwrap();
+        let path = trash.join(".deleter.lock");
+        std::fs::write(&path, deleter).unwrap();
+        if let Some(modified) = modified {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        }
+        project.supercov(&["__sweep-trash", root]).succeeds();
+        let swept = !trash.join("left").exists();
+        let _ = std::fs::remove_file(&path);
+        swept
+    };
+    assert!(
+        !sweep(&std::process::id().to_string(), None),
+        "a live sweeper is left to it"
+    );
+    assert!(!sweep("", None), "a sweeper starting up is left to it");
+    assert!(
+        sweep(&(u32::MAX - 1).to_string(), None),
+        "a dead sweeper's lock is taken over"
+    );
+    assert!(sweep("", Some(old)), "an old unowned lock is taken over");
+}
