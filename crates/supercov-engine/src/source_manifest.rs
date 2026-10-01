@@ -830,7 +830,8 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     // Most likely to fail first: a test whose own file or name shares words
     // with a changed file (`test_receivebuffer.py` for `_receivebuffer.py`).
     // Replaying real commits in nine projects, this put a failing test in the
-    // first three for 23 of 57 breaking commits where file order managed 13.
+    // first three for 20 of 57 breaking commits where file order managed 13
+    // (25 with assertion verdicts breaking its ties).
     let changed_words = changes
         .iter()
         .filter(|(_, change)| !matches!(change, FileChange::Same | FileChange::CommentsOnly))
