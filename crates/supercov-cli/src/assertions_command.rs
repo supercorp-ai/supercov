@@ -99,7 +99,7 @@ pub fn command(args: &[String]) -> ExitCode {
     match result {
         Ok(data) => {
             if options.json {
-                match agent_json::success("runs.assertions", &data, None) {
+                match fitted_json(data) {
                     Ok(output) => print!("{output}"),
                     Err(size) => {
                         print!(
@@ -784,10 +784,44 @@ fn listing(mut result: Value, limit: Option<usize>) -> Value {
         .cloned()
         .collect::<Vec<_>>();
     let shown = limit.map_or(not.len(), |l| l.min(not.len()));
-    result["notAsserted"] = json!(not[..shown]);
+    // Each statement's per-test answers stay in assertion-coverage.json;
+    // the listing names the test that came closest to catching it.
+    let slim = not[..shown]
+        .iter()
+        .map(|s| {
+            let mut s = s.clone();
+            if let Some(object) = s.as_object_mut() {
+                object.remove("answers");
+            }
+            s
+        })
+        .collect::<Vec<_>>();
+    result["notAsserted"] = json!(slim);
     result["notAssertedShown"] = json!(shown);
     result.as_object_mut().unwrap().remove("statements");
     result
+}
+
+/// The JSON envelope for `data`, listing fewer statements when the full
+/// listing would not fit in one response, and saying so.
+fn fitted_json(mut data: Value) -> Result<String, agent_json::ResponseTooLarge> {
+    loop {
+        match agent_json::success("runs.assertions", &data, None) {
+            Ok(output) => return Ok(output),
+            Err(size) => {
+                let listed = data["notAsserted"].as_array().map_or(0, Vec::len);
+                if listed == 0 {
+                    return Err(size);
+                }
+                let keep = listed / 2;
+                data["notAsserted"] = json!(data["notAsserted"].as_array().unwrap()[..keep]);
+                data["notAssertedShown"] = json!(keep);
+                data["truncated"] = json!(
+                    "the listing was shortened to fit one response; every statement is in the run's assertion-coverage.json"
+                );
+            }
+        }
+    }
 }
 
 fn render(data: &Value) -> String {
@@ -890,4 +924,30 @@ fn render(data: &Value) -> String {
         s["requests"], s["inputTokens"], s["costUsd"].as_f64().unwrap_or(0.0), s["answersReused"]
     ));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// square/moshi: 222 statements not asserted, each with up to 15 tests'
+    /// answers, came to 94 KB and the listing failed outright.
+    #[test]
+    fn a_long_listing_is_slimmed_and_shortened_to_fit_one_response() {
+        let answers = (0..15)
+            .map(|i| json!({"file": "src/test/AVeryLongTestFileName.java", "name": format!("com.example.SomeTest#aDescriptiveTestName{i}[Utf8]"), "p": 0.3}))
+            .collect::<Vec<_>>();
+        let statements = (0..400)
+            .map(|line| json!({"file": "src/main/Reader.kt", "line": line, "text": "x".repeat(150), "asserted": false, "answer": 0.3, "answers": answers}))
+            .collect::<Vec<_>>();
+        let result = json!({"run": "run_x", "summary": {}, "statements": statements});
+        let listed = listing(result.clone(), Some(50));
+        assert!(listed["notAsserted"][0].get("answers").is_none());
+        assert!(fitted_json(listed).is_ok());
+        let everything = listing(result, None);
+        let output = fitted_json(everything).expect("shortened to fit");
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed["data"]["notAssertedShown"].as_u64().unwrap() < 400);
+        assert!(parsed["data"]["truncated"].is_string());
+    }
 }

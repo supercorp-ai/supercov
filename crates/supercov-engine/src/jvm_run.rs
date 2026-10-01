@@ -200,6 +200,74 @@ fn frameworks(build_file: &str) -> Frameworks {
     }
 }
 
+/// The modules a test command names, by directory, when it names any:
+/// Gradle's project-qualified tasks (`:moshi:test`), Maven's `-pl a,b`.
+/// Nothing when the command runs every module, as `gradle test` and
+/// `mvn test` do.
+fn named_modules(build: JvmBuild, command: &[String]) -> Option<BTreeSet<String>> {
+    let arguments = command.get(1..).unwrap_or_default();
+    match build {
+        JvmBuild::Gradle => {
+            let mut named = BTreeSet::new();
+            let mut skip = false;
+            for argument in arguments {
+                if std::mem::take(&mut skip) {
+                    continue;
+                }
+                if argument.starts_with('-') {
+                    // Flags whose value is the next argument; `-x :a:test`
+                    // excludes a task rather than asking for it.
+                    skip = matches!(
+                        argument.as_str(),
+                        "-x" | "--exclude-task"
+                            | "--tests"
+                            | "-p"
+                            | "--project-dir"
+                            | "-c"
+                            | "--settings-file"
+                            | "-I"
+                            | "--init-script"
+                            | "-g"
+                            | "--gradle-user-home"
+                    );
+                    continue;
+                }
+                // An unqualified task runs in every project; `:test` is the
+                // root project's own.
+                let qualified = argument.strip_prefix(':')?;
+                let project = qualified.rsplit_once(':').map_or("", |(p, _)| p);
+                named.insert(if project.is_empty() {
+                    ".".to_owned()
+                } else {
+                    project.replace(':', "/")
+                });
+            }
+            (!named.is_empty()).then_some(named)
+        }
+        JvmBuild::Maven => {
+            let at = arguments
+                .iter()
+                .position(|a| a == "-pl" || a == "--projects")?;
+            let list = arguments.get(at + 1)?;
+            let named = list
+                .split(',')
+                .map(|m| {
+                    m.trim()
+                        .trim_start_matches("./")
+                        .trim_end_matches('/')
+                        .to_owned()
+                })
+                .collect::<BTreeSet<_>>();
+            // `:artifactId` names a module by artifact, not by directory.
+            (!named
+                .iter()
+                .any(|m| m.starts_with(':') || m.starts_with('!')))
+            .then_some(named)
+        }
+        JvmBuild::Plain => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DirectJvmRunRequest {
@@ -1537,6 +1605,7 @@ pub fn run_direct_jvm(
         let mut parts = Vec::new();
         let mut outcomes = Vec::new();
         let mut silent = Vec::new();
+        let named = named_modules(instrumented.build, &request.command);
         for module in instrumented
             .modules
             .iter()
@@ -1554,7 +1623,14 @@ pub fn run_direct_jvm(
                 .unwrap_or_default();
             written.sort();
             if written.is_empty() {
-                silent.push(module.directory.clone());
+                // A module the command never asked to run has nothing to
+                // say for itself.
+                if named
+                    .as_ref()
+                    .is_none_or(|named| named.contains(&module.directory))
+                {
+                    silent.push(module.directory.clone());
+                }
                 continue;
             }
             let mut forked = Vec::new();
@@ -1981,6 +2057,42 @@ mod tests {
             "the Kotlin DSL has no typed accessor inside allprojects:\n{updated}"
         );
         assert!(updated.contains("plugins.withId(\"java\")"), "{updated}");
+    }
+
+    #[test]
+    fn only_the_modules_a_command_names_are_expected_to_write_evidence() {
+        let words = |c: &str| c.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            named_modules(
+                JvmBuild::Gradle,
+                &words("./gradlew :moshi:test --tests *Reader*")
+            ),
+            Some(BTreeSet::from(["moshi".to_owned()]))
+        );
+        assert_eq!(
+            named_modules(
+                JvmBuild::Gradle,
+                &words("gradle :moshi:records-tests:test :test")
+            ),
+            Some(BTreeSet::from([
+                "moshi/records-tests".to_owned(),
+                ".".to_owned()
+            ]))
+        );
+        assert_eq!(named_modules(JvmBuild::Gradle, &words("gradle test")), None);
+        assert_eq!(
+            named_modules(JvmBuild::Gradle, &words("gradle test -x :slow:test")),
+            None
+        );
+        assert_eq!(
+            named_modules(JvmBuild::Maven, &words("mvn -pl core,api/ test")),
+            Some(BTreeSet::from(["core".to_owned(), "api".to_owned()]))
+        );
+        assert_eq!(
+            named_modules(JvmBuild::Maven, &words("mvn -pl :core test")),
+            None
+        );
+        assert_eq!(named_modules(JvmBuild::Maven, &words("mvn test")), None);
     }
 
     #[test]
