@@ -498,3 +498,98 @@ fn a_busy_gateway_is_waited_for_and_a_broken_one_is_named() {
         .succeeds();
     assert!(assessed.contains("0% asserted (0 of 8"), "{assessed}");
 }
+
+#[test]
+fn quality_names_a_mistake_before_asking_anything() {
+    let project = Project::cart("quality-mistakes");
+    project.write("notes.txt", "not source\n");
+    let key = [("TYPESAFE_API_KEY", "sk-unused")];
+    for (args, message) in [
+        (
+            vec!["quality", "patch", "--annotate", "gitlab"],
+            "--annotate does not know gitlab; use github",
+        ),
+        (
+            vec!["quality", "patch", "--limit", "x"],
+            "--limit needs a number",
+        ),
+        (
+            vec!["quality", "clean", "--keep", "1", "--keep", "2"],
+            "--keep may only be specified once",
+        ),
+        (
+            vec!["quality", "clean", "--bogus"],
+            "unknown quality clean option: --bogus",
+        ),
+        (
+            vec!["quality", "diff"],
+            "quality diff requires two snapshots to compare",
+        ),
+        (
+            vec!["quality", "diff", "q_1"],
+            "quality diff requires a second snapshot to compare",
+        ),
+        (vec!["quality", "file"], "quality file requires a file path"),
+        (
+            vec!["quality", "file", "src/cart.js", "--limit", "3"],
+            "quality file shows one thing and takes no --limit",
+        ),
+        (
+            vec!["quality", "gaps", "--bogus"],
+            "unknown quality gaps option: --bogus",
+        ),
+        (
+            vec!["quality", "snapshots", "--limit", "x"],
+            "--limit requires a row count",
+        ),
+        (
+            vec!["quality", "nosuchdir"],
+            "nosuchdir: No such file or directory",
+        ),
+        (
+            vec!["quality", "notes.txt"],
+            "unsupported source extension: notes.txt",
+        ),
+        (vec!["quality", "show"], "no quality snapshot here yet"),
+    ] {
+        let output = project.supercov_with(&args, &key).exits(2);
+        assert!(output.contains(message), "{args:?}: {output}");
+    }
+}
+
+#[test]
+fn a_corrupt_saved_answer_is_named_and_refresh_replaces_it() {
+    let project = Project::cart("quality-cache");
+    let (base, seen) = gateway(MODEL, answer_no);
+    let jev = through(&base);
+    project
+        .supercov_with(&["quality", "src/cart.js"], &jev)
+        .succeeds();
+    let requests = project.root.join(".supercov/quality/requests");
+    let saved = std::fs::read_dir(&requests)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    std::fs::write(&saved[0], "{ not json").unwrap();
+
+    let refused = project
+        .supercov_with(&["quality", "src/cart.js"], &jev)
+        .exits(2);
+    assert!(
+        refused.contains("invalid quality cache; use --refresh"),
+        "{refused}"
+    );
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "nothing is asked over a corrupt answer"
+    );
+
+    let refreshed = project
+        .supercov_with(&["quality", "src/cart.js", "--refresh"], &jev)
+        .succeeds();
+    assert!(refreshed.contains("Quality good"), "{refreshed}");
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert!(std::fs::read_to_string(&saved[0]).unwrap().starts_with('{'));
+}
