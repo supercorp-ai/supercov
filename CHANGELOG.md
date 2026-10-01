@@ -20,6 +20,8 @@
 
 - `tests affected` lists first the tests whose own file or name shares words with a changed file, with or without an assessment; assertion verdicts break ties. Replaying real commits, this put a failing test in the first three for 23 of 57 breaking commits, against 13 for file order and fewer for the verdicts alone.
 
+- Assessing assertion coverage costs about 30% less and takes about half as long: Jev is shown four lines around each asked statement instead of the whole neighbourhood of everything a test ran, and 24 requests are in flight instead of 8. Over 14 projects in six languages, 3,294 of 3,532 checked verdicts were right (3,288 before), for $0.48 instead of $0.68; the reported share moved up by about 0.3 points against the truth.
+
 **Fixed**
 
 - `cargo test -q` measures a crate with doctests. Quiet output prints a dot for each test, and Supercov reads each doctest pass by the name libtest prints, so every pass read as running nothing and the run failed; the passes now print names whatever the command asked for.

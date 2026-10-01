@@ -118,12 +118,15 @@ dozen questions are asked; the rest are reused.
 
 ## Cost, speed and accuracy
 
+- **Cost:** about 0.006 cents per statement for a first assessment: 14 projects
+  in six languages (8,356 statements) cost $0.48 together. A project of 3,000
+  statements costs about $0.18; a later commit usually well under a cent.
+- **Speed:** about 20 seconds for 1,500 statements with 24 requests in flight
+  (`--workers`, default 24; it changes how long a pass takes, not what it
+  costs).
+
 Measured on four JavaScript and TypeScript projects (7,393 executed statements):
 
-- **Cost:** about 0.007 cents per statement for a first assessment. A project of
-  3,000 statements costs about $0.25; a later commit usually well under a cent.
-- **Speed:** about a minute for 3,000 statements; `--workers` raises the
-  requests in flight (default 8) for a faster, slightly costlier pass.
 - **Accuracy:** against ground truth from applying each change and running the
   tests, on a fresh sample of 78 statements: 69 right; of the 13 not asserted it
   found 8, and 8 of the 12 it flagged were truly not asserted. The share it

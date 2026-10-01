@@ -50,9 +50,9 @@ const HELPER_CHARS: usize = 3000;
 /// The budget for data files a test names (Ruby spec support fixtures),
 /// beside the helpers': the cases a data-driven test checks are its asserts.
 const FIXTURE_CHARS: usize = 12000;
-const CONTEXT_LINES: usize = 2;
-const WINDOW_LINES: usize = 8;
-const CODE_CHARS: usize = 40000;
+const CONTEXT_LINES: usize = 0;
+const WINDOW_LINES: usize = 4;
+const CODE_CHARS: usize = 10000;
 const BODY_LINES: usize = 150;
 
 pub const INSTRUCTIONS: &str = "Each question describes exactly one change to the program, made alone. The test passes on the code as written and executes the changed line. Question: with that change, does this test fail (an assertion fails, test or helper code throws, the test times out, or the process crashes)? Follow what the changed line computes to what the test checks; do not guess from names. In `code_run`, lines marked ▶ start statements this test ran.";
@@ -1047,11 +1047,14 @@ impl Population {
         candidates.into_iter().find(|c| self.root.join(c).is_file())
     }
 
-    /// The source this test ran: every statement it executed marked ▶ with two
-    /// code lines around it, eight around each asked statement, comment lines
-    /// left out, within a budget that grows with the number of questions.
+    /// The source this test ran: every statement it executed marked ▶, four
+    /// code lines around each asked statement, comment lines left out, within
+    /// a budget that grows with the number of questions. Two lines around
+    /// every executed statement and eight around each asked one, in a budget
+    /// four times this, cost 28% more over 3,532 checked statements in 14
+    /// projects and were no more accurate.
     pub fn code_run(&self, test: usize, asked: &[usize]) -> BTreeMap<String, String> {
-        let budget = CODE_CHARS.min(3000 + 1500 * asked.len());
+        let budget = CODE_CHARS.min(1000 + 400 * asked.len());
         let ran = &self.ran[test];
         let mut want = BTreeMap::<String, BTreeSet<usize>>::new();
         for &a in asked {

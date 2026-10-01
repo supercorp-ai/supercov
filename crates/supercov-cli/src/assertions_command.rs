@@ -43,8 +43,9 @@ questions not yet answered. JavaScript, TypeScript, Python, Ruby, Go, Rust, Java
               catches the change: what `tests affected` reads to say which
               tests check the change. Saved beside the run's assessment.
 --dry-run     (assess) Estimate the requests and cost; send nothing.
---workers N   (assess) Requests in flight at once (default 8). More is faster
-              and costs slightly more, since fewer questions stop early.
+--workers N   (assess) Requests in flight at once (default 24). Each round
+              plans the same requests whatever this is, so it changes only
+              how long the pass takes.
 --json        Structured output for integrations.
 "#;
 
@@ -52,6 +53,9 @@ const CACHE_VERSION: u32 = 1;
 /// Consecutive failed requests after which the pass stops rather than keep
 /// spending: an exhausted account or an outage fails every request alike.
 const MAX_FAILURES: usize = 20;
+
+/// Requests planned per round of the assessment pass.
+const ROUND_REQUESTS: usize = 40;
 
 /// The file in a run's directory holding its assessed result.
 pub const RESULT_FILE: &str = "assertion-coverage.json";
@@ -154,7 +158,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         dry_run: false,
         json: false,
         limit: Some(50),
-        workers: 8,
+        workers: 24,
     };
     let mut i = 0;
     if args.first().is_some_and(|a| a == "assess") {
@@ -411,7 +415,12 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     }
     let endpoint = quality::endpoint()?;
     let agent = quality::client();
-    let batch_size = options.workers * 5;
+    // A round's requests are planned from the answers so far, so its size
+    // decides how many questions early stopping saves; how many are in
+    // flight decides only the wait. 40 is what eight workers planned; with
+    // 24 in flight the three largest measured projects took half the time
+    // for the same cost.
+    let batch_size = ROUND_REQUESTS;
     loop {
         if (0..n).all(|s| !pass.undecided(s)) {
             if pass.wide {
