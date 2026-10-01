@@ -89,6 +89,168 @@ fn change(node: Node) -> Option<Option<Change>> {
     })
 }
 
+/// The line a value change turns a statement into, with the zero values
+/// written out: `return true` -> `return false`, `return uuid, nil` ->
+/// `return UUID{}, nil` (from the function's result types), `x := &T{}` ->
+/// `x := nil`. Nothing where a zero value cannot be written down.
+pub(super) fn rewrite(source: &str, line: usize, change: Change) -> Option<String> {
+    let mut parser = Parser::new();
+    parser.set_language(&tree_sitter_go::LANGUAGE.into()).ok()?;
+    let tree = parser.parse(source, None)?;
+    let starts = line_starts(source);
+    let text = |n: Node| source.get(n.byte_range()).unwrap_or("").to_owned();
+    let node = find_statement(tree.root_node(), &starts, line, &|n| match change {
+        Change::ReturnUndefined => n.kind() == "return_statement",
+        Change::ValueUndefined => {
+            matches!(n.kind(), "short_var_declaration" | "assignment_statement")
+        }
+        _ => false,
+    })?;
+    match change {
+        Change::ReturnUndefined => {
+            let results = result_types(node, source)?;
+            let zeros = results.iter().map(|t| zero_of_type(t)).collect::<Vec<_>>();
+            Some(format!("return {}", zeros.join(", ")))
+        }
+        Change::ValueUndefined => {
+            let left = text(node.child_by_field_name("left")?);
+            let right = node.child_by_field_name("right")?;
+            let operator = if node.kind() == "short_var_declaration" {
+                ":="
+            } else {
+                "="
+            };
+            let mut cursor = right.walk();
+            let zeros = right
+                .named_children(&mut cursor)
+                .map(|value| zero_of_value(&text(value)))
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("{left} {operator} {}", zeros.join(", ")))
+        }
+        _ => None,
+    }
+}
+
+/// The statement starting on `line` that `wanted` accepts.
+fn find_statement<'a>(
+    node: Node<'a>,
+    starts: &[usize],
+    line: usize,
+    wanted: &dyn Fn(Node) -> bool,
+) -> Option<Node<'a>> {
+    if wanted(node) && line_of(starts, node.start_byte()) == line {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    let children = node.children(&mut cursor).collect::<Vec<_>>();
+    children.into_iter().find_map(|child| {
+        let (first, last) = (
+            line_of(starts, child.start_byte()),
+            line_of(starts, child.end_byte()),
+        );
+        (first <= line && line <= last)
+            .then(|| find_statement(child, starts, line, wanted))
+            .flatten()
+    })
+}
+
+/// The result types of the function a `return` leaves, one per value.
+fn result_types(node: Node, source: &str) -> Option<Vec<String>> {
+    let function = std::iter::successors(node.parent(), |n| n.parent()).find(|n| {
+        matches!(
+            n.kind(),
+            "function_declaration" | "method_declaration" | "func_literal"
+        )
+    })?;
+    let result = function.child_by_field_name("result")?;
+    let text = |n: Node| source.get(n.byte_range()).unwrap_or("").to_owned();
+    if result.kind() != "parameter_list" {
+        return Some(vec![text(result)]);
+    }
+    let mut out = Vec::new();
+    let mut cursor = result.walk();
+    for declaration in result.named_children(&mut cursor) {
+        let ty = text(declaration.child_by_field_name("type")?);
+        let mut names = declaration.walk();
+        let count = declaration
+            .children_by_field_name("name", &mut names)
+            .count()
+            .max(1);
+        out.extend(std::iter::repeat_n(ty, count));
+    }
+    Some(out)
+}
+
+const GO_NUMBERS: &[&str] = &[
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uintptr",
+    "byte",
+    "rune",
+    "float32",
+    "float64",
+    "complex64",
+    "complex128",
+];
+
+fn zero_of_type(ty: &str) -> String {
+    let ty = ty.trim();
+    if ty == "error"
+        || ty == "any"
+        || ["*", "[]", "map[", "chan ", "<-chan", "func", "interface"]
+            .iter()
+            .any(|p| ty.starts_with(p))
+    {
+        "nil".into()
+    } else if ty == "bool" {
+        "false".into()
+    } else if ty == "string" {
+        "\"\"".into()
+    } else if GO_NUMBERS.contains(&ty) {
+        "0".into()
+    } else {
+        format!("{ty}{{}}")
+    }
+}
+
+/// The zero value of an expression's type, where its shape says the type.
+fn zero_of_value(value: &str) -> Option<String> {
+    let v = value.trim();
+    if v == "nil"
+        || ["&", "[]", "map[", "make(", "append(", "new(", "func("]
+            .iter()
+            .any(|p| v.starts_with(p))
+        || v.starts_with("errors.New(")
+        || v.starts_with("fmt.Errorf(")
+    {
+        return Some("nil".into());
+    }
+    if v == "true" || v == "false" {
+        return Some("false".into());
+    }
+    if v.starts_with('"') || v.starts_with('`') {
+        return Some("\"\"".into());
+    }
+    if v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return Some("0".into());
+    }
+    // `T{...}`: a composite literal of a named type.
+    let (head, _) = v.split_once('{')?;
+    (v.ends_with('}')
+        && head
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.'))
+    .then(|| format!("{head}{{}}"))
+}
+
 /// `if c {`, `} else if x := f(); c {` -> the condition as written.
 pub(super) fn condition(line: &str) -> String {
     let t = line.trim();
@@ -160,6 +322,37 @@ pub(super) fn helpers(root: &Path, from: &str, text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// hashicorp/go-version's `return true` and google/uuid's
+    /// `return uuid, nil`: the zero values written out from the result types.
+    #[test]
+    fn a_value_change_is_written_as_the_line_it_becomes() {
+        let source = "package v\n\nfunc Less(a int) bool {\n\treturn true\n}\n\nfunc New() (UUID, error) {\n\tuuid := &UUID{}\n\tvar err error\n\treturn *uuid, nil\n}\n\nfunc parts() (n int, s []string, err error) {\n\tsegments := append(s, \"x\")\n\tcount, name := 3, \"a\"\n\treturn len(segments), segments, nil\n}\n";
+        assert_eq!(
+            rewrite(source, 4, Change::ReturnUndefined).as_deref(),
+            Some("return false")
+        );
+        assert_eq!(
+            rewrite(source, 8, Change::ValueUndefined).as_deref(),
+            Some("uuid := nil")
+        );
+        assert_eq!(
+            rewrite(source, 10, Change::ReturnUndefined).as_deref(),
+            Some("return UUID{}, nil")
+        );
+        assert_eq!(
+            rewrite(source, 14, Change::ValueUndefined).as_deref(),
+            Some("segments := nil")
+        );
+        assert_eq!(
+            rewrite(source, 15, Change::ValueUndefined).as_deref(),
+            Some("count, name := 0, \"\"")
+        );
+        assert_eq!(
+            rewrite(source, 16, Change::ReturnUndefined).as_deref(),
+            Some("return 0, nil, nil")
+        );
+    }
+
     use super::*;
     use crate::assertion_coverage::{Language, change_at};
 

@@ -325,19 +325,25 @@ pub fn population(
         if decision && change != Change::Invert {
             continue;
         }
-        let replacement = (language == Language::Rust
-            && matches!(change, Change::ReturnUndefined | Change::ValueUndefined))
-        .then(|| {
-            let first = prefix(text.lines().next().unwrap_or("").trim(), 30);
-            let first = first.trim_end_matches(';');
-            replacements
-                .entry(file.clone())
-                .or_insert_with(|| rust_source::replacements(file, source, &signatures))
-                .get(&line)
-                .and_then(|all| all.iter().find(|(t, _)| t.starts_with(first)))
-                .map(|(_, r)| r.clone())
-        })
-        .flatten();
+        let valued = matches!(change, Change::ReturnUndefined | Change::ValueUndefined);
+        let replacement = match language {
+            Language::Rust if valued => {
+                let first = prefix(text.lines().next().unwrap_or("").trim(), 30);
+                let first = first.trim_end_matches(';');
+                replacements
+                    .entry(file.clone())
+                    .or_insert_with(|| rust_source::replacements(file, source, &signatures))
+                    .get(&line)
+                    .and_then(|all| all.iter().find(|(t, _)| t.starts_with(first)))
+                    .map(|(_, r)| r.clone())
+            }
+            // Go: the line the change turns it into, zero values written out
+            // from the result types. (Writing the JVM's `null` out the same
+            // way measured no better on commons-cli and moved the share away
+            // from the truth, so the JVM keeps its description.)
+            Language::Go if valued => go::rewrite(source, line, change),
+            _ => None,
+        };
         statements.push(Statement {
             file: file.clone(),
             line,
@@ -1127,6 +1133,18 @@ impl Population {
             {
                 vec![rust_question(line, s.change, r)]
             }
+            // The value is replaced after it is computed, as Go's mutation
+            // testers do.
+            (Change::ReturnUndefined, Some(r)) if self.language == Language::Go => {
+                vec![format!(
+                    "`{line}` becomes `{r}` (the original expression is still evaluated first)"
+                )]
+            }
+            (Change::ValueUndefined, Some(r)) if self.language == Language::Go => {
+                vec![format!(
+                    "`{line}` becomes `{r}` (the original value is still computed first)"
+                )]
+            }
             _ => self.default_questions(s, line),
         };
         changes
@@ -1175,8 +1193,10 @@ impl Population {
                 vec![if line.starts_with("return") {
                     format!("`{line}` returns {nothing} instead (the expression is not evaluated)")
                 } else {
+                    // Often a call made for what it does, not what it gives
+                    // back: saying only "the value becomes nil" hides that.
                     format!(
-                        "`{line}`, the value the enclosing block or method produces, becomes {nothing} (it is not evaluated)"
+                        "`{line}` becomes {nothing}: it is not evaluated, so nothing it does happens (no call it makes, no value it stores), and the enclosing block or method produces {nothing}"
                     )
                 }]
             }
@@ -1216,7 +1236,18 @@ impl Population {
                 ),
                 None => format!("`{line}`: the declared value becomes undefined"),
             }],
-            Change::Skip => vec![format!("`{line}` is deleted (it never runs)")],
+            Change::Skip => {
+                let word = line.trim_end_matches(';').trim();
+                vec![match word {
+                    "break" => format!(
+                        "`{line}` is deleted: execution does not leave the enclosing loop or switch here, and carries on with what follows it"
+                    ),
+                    "continue" | "next" => format!(
+                        "`{line}` is deleted: the rest of the loop body runs in this iteration"
+                    ),
+                    _ => format!("`{line}` is deleted (it never runs)"),
+                }]
+            }
             Change::ExpressionUndefined => vec![format!(
                 "the expression `{line}` evaluates to undefined instead (it is not evaluated)"
             )],
