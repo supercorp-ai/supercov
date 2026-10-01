@@ -701,12 +701,18 @@ fn typed(e: &ast::Expr, ty: Option<&str>, crate_view: &Crate) -> String {
         .map(|t| resolve_self(&t.split_whitespace().collect::<String>(), e.syntax()))
         .or_else(|| infer(e, crate_view));
     let text = e.syntax().text().to_string();
+    // A closure's type is a callable one, `impl Fn(u32) -> u32`; its value is
+    // what its body returns, never the closure itself.
+    if let ast::Expr::ClosureExpr(c) = e
+        && let Some(changed) = closure(c, ty.as_deref().and_then(callable_output), crate_view)
+    {
+        return changed;
+    }
     if let Some(changed) = changed(&text, ty.as_deref(), crate_view) {
         return changed;
     }
     let structural = match e {
         ast::Expr::RecordExpr(r) => record(r, crate_view),
-        ast::Expr::ClosureExpr(c) => closure(c, crate_view),
         _ => None,
     };
     structural
@@ -1084,13 +1090,32 @@ fn record(r: &ast::RecordExpr, crate_view: &Crate) -> Option<String> {
     None
 }
 
-/// A closure that returns a different value.
-fn closure(c: &ast::ClosureExpr, crate_view: &Crate) -> Option<String> {
+/// What a callable type returns: `T` of `impl Fn(A) -> T` or
+/// `Box<dyn FnMut() -> T>`, whitespace already removed.
+fn callable_output(ty: &str) -> Option<&str> {
+    if !["Fn(", "FnMut(", "FnOnce("]
+        .iter()
+        .any(|callable| ty.contains(callable))
+    {
+        return None;
+    }
+    let mut output = ty.rsplit_once("->")?.1;
+    // `Box<dynFn()->T>` leaves the box's own closing bracket behind.
+    while output.matches('>').count() > output.matches('<').count() {
+        output = &output[..output.len() - 1];
+    }
+    (!output.is_empty()).then_some(output)
+}
+
+/// A closure that returns a different value: of its declared return type,
+/// else of `output`, what the callable type it is given as returns.
+fn closure(c: &ast::ClosureExpr, output: Option<&str>, crate_view: &Crate) -> Option<String> {
     let body = c.body()?;
     let ty = c
         .ret_type()
         .and_then(|r| r.ty())
-        .map(|t| t.syntax().text().to_string());
+        .map(|t| t.syntax().text().to_string())
+        .or_else(|| output.map(str::to_owned));
     let head_end = usize::from(body.syntax().text_range().start())
         - usize::from(c.syntax().text_range().start());
     let head = c.syntax().text().to_string()[..head_end].to_owned();

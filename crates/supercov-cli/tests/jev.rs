@@ -593,3 +593,56 @@ fn a_corrupt_saved_answer_is_named_and_refresh_replaces_it() {
     assert_eq!(seen.lock().unwrap().len(), 2);
     assert!(std::fs::read_to_string(&saved[0]).unwrap().starts_with('{'));
 }
+
+const SHAPES: &str = "#[derive(Debug, Clone, Copy, PartialEq)]\npub enum Size {\n    Small,\n    Large,\n}\n\n#[derive(Debug, PartialEq)]\npub struct Box2 {\n    pub width: u32,\n    pub height: u32,\n}\n\npub const LIMIT: u32 = 100;\n\npub fn size(area: u32) -> Size {\n    if area > LIMIT {\n        return Size::Large;\n    }\n    Size::Small\n}\n\npub fn parse(text: &str) -> Result<u32, String> {\n    let value = text.trim().parse::<u32>().map_err(|e| e.to_string())?;\n    Ok(value)\n}\n\npub fn first_even(values: &[u32]) -> Option<u32> {\n    values.iter().copied().find(|v| v % 2 == 0)\n}\n\npub fn grow(b: &Box2) -> Box2 {\n    Box2 { width: b.width * 2, height: b.height }\n}\n\npub fn tagged(name: &str) -> (bool, String) {\n    let label = name.to_uppercase();\n    (label.is_empty(), label)\n}\n\npub fn scale() -> impl Fn(u32) -> u32 {\n    |x| x * 3\n}\n";
+
+const SHAPES_TESTS: &str = "use shapes::*;\n\n#[test]\nfn sizes() {\n    assert_eq!(size(200), Size::Large);\n    assert_eq!(size(10), Size::Small);\n}\n\n#[test]\nfn parses() {\n    assert_eq!(parse(\" 7 \"), Ok(7));\n    assert!(parse(\"x\").is_err());\n}\n\n#[test]\nfn evens_and_boxes() {\n    assert_eq!(first_even(&[1, 4]), Some(4));\n    assert_eq!(grow(&Box2 { width: 1, height: 2 }), Box2 { width: 2, height: 2 });\n    assert_eq!(tagged(\"ab\"), (false, \"AB\".to_string()));\n    assert_eq!(scale()(2), 6);\n}\n";
+
+#[test]
+fn rust_statements_are_asked_as_changes_of_their_own_type() {
+    let project = Project::empty("rust-changes");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"shapes\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write("src/lib.rs", SHAPES);
+    project.write("tests/shapes.rs", SHAPES_TESTS);
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test", "-q"]).succeeds();
+    let (base, seen) = gateway(MODEL, answer_no);
+    let assessed = project
+        .supercov_with(&["runs", "latest", "assertions", "assess"], &through(&base))
+        .succeeds();
+    assert!(
+        assessed.contains("0% asserted (0 of 10 executed statements)"),
+        "{assessed}"
+    );
+    let asked = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|(_, _, request)| {
+            request["questions"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter_map(|question| question["instructions"]["task"].as_str())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for change in [
+        "`return Size::Large;` becomes `return Size::Small;`",
+        "`Size::Small` becomes `Size::Large`",
+        "`Ok(value)` becomes `Err(String::new())`",
+        "`values.iter().copied().find(|v| v % 2 == 0)` becomes `None`",
+        "`Box2 { width: b.width * 2, height: b.height }` becomes `Box2 { width: 0, height: b.height }`",
+        "`(label.is_empty(), label)` becomes `(!(label.is_empty()), label)`",
+        // A closure returned as `impl Fn(u32) -> u32` returns another u32.
+        "`|x| x * 3` becomes `|x| 0`",
+        "whenever the condition `area > LIMIT` is true it is treated as false",
+    ] {
+        assert!(asked.contains(change), "{change} not asked:\n{asked}");
+    }
+}
