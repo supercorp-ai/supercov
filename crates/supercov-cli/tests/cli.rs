@@ -1232,3 +1232,285 @@ fn cargo_flags_the_build_owns_are_left_to_it_and_runs_with_no_test_are_refused()
         );
     }
 }
+
+#[test]
+fn a_rust_command_supercov_cannot_select_tests_from_is_refused_with_why() {
+    let project = Project::empty("cargo-refusals");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"refusals\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn double(x: u32) -> u32 {\n    x * 2\n}\n\npub fn half(x: u32) -> u32 {\n    x / 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n\n    #[test]\n    fn halves() {\n        assert_eq!(super::half(4), 2);\n    }\n}\n",
+    );
+    project.write(
+        "package.json",
+        "{\"scripts\":{\"test\":\"cargo test 'unclosed\",\"chained\":\"cargo test && echo done\"}}\n",
+    );
+    project.git(&["init", "-q"]);
+    // A package script is expanded and split the way a shell would.
+    for (args, message) in [
+        (
+            vec!["--", "npm", "test"],
+            "contains an incomplete quote or escape",
+        ),
+        (
+            vec!["--", "npm", "run", "chained"],
+            "the Cargo test command contains an unsupported shell boundary",
+        ),
+    ] {
+        let refused = project.supercov(&args);
+        assert_ne!(refused.code(), 0, "{args:?}");
+        assert!(
+            refused.stderr().contains(message),
+            "{args:?}: {}",
+            refused.stderr()
+        );
+    }
+    std::fs::remove_file(project.root.join("package.json")).unwrap();
+    for (args, message) in [
+        (
+            vec!["--", "sh", "-c", "cargo build && cargo test"],
+            "contains a shell boundary before `test`",
+        ),
+        (
+            vec!["--", "make", "test"],
+            "does not expose a stable Cargo invocation",
+        ),
+        (
+            vec!["--", "cargo", "test", "nextest", "run"],
+            "ambiguously contains both test and nextest run",
+        ),
+        (
+            vec!["--", "cargo", "test", "--frobnicate"],
+            "does not recognize option --frobnicate",
+        ),
+        (
+            vec!["--", "cargo", "test", "--package"],
+            "Cargo option --package has no value",
+        ),
+        (
+            vec!["--", "cargo", "test", "--doc", "--lib"],
+            "--doc cannot be combined with another explicit target selection",
+        ),
+        (
+            vec!["--", "cargo", "test", "doubles", "halves"],
+            "unexpected argument 'halves' found",
+        ),
+        (
+            vec!["--", "cargo", "test", "--", "--skip"],
+            "libtest --skip has no filter value",
+        ),
+        (
+            vec!["--", "cargo", "test", "--", "--test-threads"],
+            "libtest --test-threads has no value",
+        ),
+        (
+            vec!["--", "cargo", "test", "--", "--test-threads", "0"],
+            "must not be 0",
+        ),
+        (
+            vec!["--", "cargo", "test", "--", "--test-threads=many"],
+            "must be a number > 0",
+        ),
+        (
+            vec![
+                "--",
+                "cargo",
+                "test",
+                "--",
+                "--test-threads",
+                "2",
+                "--test-threads=3",
+            ],
+            "was provided more than once",
+        ),
+        (
+            vec![
+                "--",
+                "cargo",
+                "test",
+                "--",
+                "--test-threads=2",
+                "--test-threads",
+                "3",
+            ],
+            "was provided more than once",
+        ),
+        (
+            vec!["--", "cargo", "test", "--", "-Z"],
+            "libtest -Z has no feature value",
+        ),
+        (
+            vec!["--", "cargo", "test", "--", "--format"],
+            "libtest --format has no value",
+        ),
+        (
+            vec!["--", "cargo", "test", "--", "-h"],
+            "libtest -h does not execute a test suite",
+        ),
+        (
+            vec!["--", "cargo", "test", "--", "--frobnicate"],
+            "libtest discovery contract does not recognize option --frobnicate",
+        ),
+    ] {
+        let refused = project.supercov(&args);
+        assert_ne!(refused.code(), 0, "{args:?}");
+        assert!(
+            refused.stderr().contains(message),
+            "{args:?}: {}",
+            refused.stderr()
+        );
+    }
+    // Selections libtest understands narrow the run to the tests they name.
+    for (args, tests) in [
+        (
+            vec!["--", "cargo", "test", "--", "--exact", "tests::doubles"],
+            1,
+        ),
+        (vec!["--", "cargo", "test", "--", "--skip", "halves"], 1),
+        (
+            vec![
+                "--",
+                "cargo",
+                "test",
+                "--",
+                "--skip=doubles",
+                "--format",
+                "terse",
+            ],
+            1,
+        ),
+        (
+            vec![
+                "--",
+                "cargo",
+                "test",
+                "-j",
+                "2",
+                "--",
+                "--test-threads",
+                "1",
+            ],
+            2,
+        ),
+    ] {
+        project.supercov(&args).succeeds();
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        assert!(
+            summary.contains(&format!("Passed      {tests}")),
+            "{args:?}: {summary}"
+        );
+    }
+}
+
+#[test]
+fn the_harness_commands_refuse_input_they_cannot_read() {
+    let project = Project::cart("harness-commands");
+    let run = project.measure(&[]);
+    let input = project.root.join("input.json");
+    let input_path = input.to_str().unwrap();
+    let feed = |command: &str, bytes: &[u8]| {
+        std::fs::write(&input, bytes).unwrap();
+        project.supercov_with(&[command], &[("SUPERCOV_INTERNAL_INPUT_FILE", input_path)])
+    };
+    for (command, invalid) in [
+        ("__run-js-direct", "invalid direct JavaScript run input"),
+        ("__benchmark-js-transform", "invalid Rust benchmark input"),
+        ("__instrument-js", "invalid Rust instrumenter input"),
+        ("__query-stored-run", "invalid stored query input"),
+    ] {
+        let missing = project.supercov_with(
+            &[command],
+            &[("SUPERCOV_INTERNAL_INPUT_FILE", "no-such-input.json")],
+        );
+        assert!(
+            missing
+                .exits(2)
+                .contains("failed to read Rust engine input"),
+            "{command}"
+        );
+        assert!(
+            feed(command, b"\xff\xfe").exits(2).contains("is not UTF-8"),
+            "{command}"
+        );
+        assert!(feed(command, b"{").exits(2).contains(invalid), "{command}");
+    }
+
+    let source = r#"[{"file":"a.js","source":"export const f = (x) => x ? 1 : 2;\n"}]"#;
+    let timed = feed("__benchmark-js-transform", source.as_bytes()).json();
+    assert_eq!(timed["files"], 1);
+    let instrumented = feed("__instrument-js", source.as_bytes()).json();
+    assert_eq!(instrumented.as_array().unwrap().len(), 1);
+    let broken = r#"[{"file":"broken.js","source":"let = ;"}]"#;
+    for command in ["__benchmark-js-transform", "__instrument-js"] {
+        assert!(
+            feed(command, broken.as_bytes())
+                .exits(2)
+                .contains("broken.js"),
+            "{command}"
+        );
+    }
+
+    let root = project.root.to_str().unwrap();
+    let query = |run_id: &str, command: &str, newer: Option<&str>| {
+        serde_json::json!({
+            "root": root,
+            "query": {"runId": run_id, "filter": "passed", "command": command, "target": 20.0},
+            "newerRunId": newer,
+        })
+        .to_string()
+    };
+    let minimized = feed(
+        "__query-stored-run",
+        query(&run, "minimize", None).as_bytes(),
+    )
+    .json();
+    assert_eq!(minimized["ok"], true, "{minimized}");
+    let diffed = feed(
+        "__query-stored-run",
+        query(&run, "diff", Some(&run)).as_bytes(),
+    )
+    .json();
+    assert_eq!(diffed["ok"], true, "{diffed}");
+    for (request, message) in [
+        (
+            query(&run, "diff", None),
+            "stored diff requires a newer run ID",
+        ),
+        (query("no-such-run", "summary", None), "stored query failed"),
+    ] {
+        assert!(
+            feed("__query-stored-run", request.as_bytes())
+                .exits(2)
+                .contains(message),
+            "{request}"
+        );
+    }
+
+    // The supervisor runs a command and passes its exit code on.
+    assert!(
+        project
+            .supercov(&["__supervise"])
+            .exits(2)
+            .contains("test command must not be empty")
+    );
+    project
+        .supercov(&["__supervise", "--", "sh", "-c", "exit 3"])
+        .exits(3);
+    for name in [
+        "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
+        "SUPERCOV_COMMAND_TIMEOUT_MS",
+    ] {
+        assert!(
+            project
+                .supercov_with(&["__supervise", "--", "true"], &[(name, "soon")])
+                .exits(2)
+                .contains(name),
+            "{name}"
+        );
+    }
+    project.supercov(&["__sweep-trash"]).exits(2);
+    project.supercov(&["__sweep-trash", root]).succeeds();
+}

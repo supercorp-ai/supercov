@@ -113,7 +113,7 @@ pub(crate) fn run_nextest(
 
     // The identity contract is pinned to the nextest versions it was verified
     // against; anything else fails before a test runs.
-    let version = cargo(&nextest_version_arguments(invocation)?)
+    let version = cargo(&nextest_version_arguments(invocation))
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !version.status.success() {
@@ -187,11 +187,7 @@ pub(crate) fn run_nextest(
     let artifacts = nextest_artifacts(project, &catalog, &metadata)?;
 
     // The run itself, streaming nextest's own output.
-    let command = invocation.command_position().ok_or_else(|| {
-        RustTestRunnerError::UnsupportedCommand(
-            "the expanded Cargo invocation lost its nextest run subcommand".into(),
-        )
-    })?;
+    let command = invocation.command_position();
     let mut run_arguments = invocation.arguments[..command + 2].to_vec();
     run_arguments.extend(runner_configuration.iter().cloned());
     run_arguments.extend(invocation.arguments[command + 2..].iter().cloned());
@@ -614,9 +610,7 @@ pub(crate) struct CargoMetadataTarget {
 pub(crate) fn cargo_metadata_arguments(
     invocation: &crate::rust_test_runner::CargoTestInvocation,
 ) -> Result<Vec<String>, String> {
-    let command = invocation
-        .command_position()
-        .ok_or("the Cargo invocation lost its test subcommand")?;
+    let command = invocation.command_position();
     let mut arguments = invocation.arguments[..command]
         .iter()
         .filter(|argument| argument.starts_with('+'))
