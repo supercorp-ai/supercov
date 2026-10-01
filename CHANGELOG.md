@@ -24,6 +24,7 @@
 
 **Fixed**
 
+- `quality clean` and `security clean` say what they removed or, with `--dry-run`, would remove. They printed "unknown quality view: quality.clean" whatever happened. `quality snapshots` no longer prints "null windowed" for a count no snapshot records.
 - A project kept inside a directory its enclosing repository ignores, such as another checkout's `tmp/` or `.supercov/`, finds its source. The enclosing repository's `.gitignore`, which says it tracks none of the project, was applied to every file, and the run stopped with "No application source files were discovered"; the project's own `.gitignore` files still apply.
 - `cargo test -q` measures a crate with doctests. Quiet output prints a dot for each test, and Supercov reads each doctest pass by the name libtest prints, so every pass read as running nothing and the run failed; the passes now print names whatever the command asked for.
 - `tests affected` no longer misses a Java or Kotlin test that only uses what a static initializer set up. It runs once per process and is credited to the first test to load the class, so a test reading a changed static field ran nothing recorded in its file; a change to a class's declarations now also affects the tests whose files name the class. Replaying apache/commons-cli's history, the three failing tests a reverted `Converter.CLASS` change had missed are selected (12 of 12 instead of 9), for about 15% more tests selected.
