@@ -1035,7 +1035,7 @@ mod tests {
                 report.filters.failed.summary.lines.covered,
                 report.filters.failed.summary.branches.covered,
             ),
-            (3, 2, 7, 5)
+            (5, 2, 7, 5)
         );
         assert!(!report.execution.as_ref().unwrap().valid);
         let outcomes = report
@@ -1059,13 +1059,14 @@ mod tests {
                 .iter()
                 .all(|test| !test.name.contains("expected_failure"))
         );
+        // What ran as modules were imported is no failed test's coverage.
         assert!(
             report
                 .filters
                 .passed
                 .tests
                 .iter()
-                .all(|test| test.role != "background")
+                .any(|test| test.role == "background")
         );
         assert!(
             report
@@ -1122,7 +1123,7 @@ mod tests {
                 report.filters.failed.summary.lines.covered,
                 report.filters.failed.summary.branches.covered,
             ),
-            (6, 3, 3, 2, 2, 1)
+            (6, 3, 5, 2, 2, 1)
         );
         let attempts = imported
             .request
@@ -1222,7 +1223,7 @@ mod tests {
                 report.filters.failed.summary.lines.covered,
                 report.filters.failed.summary.branches.covered,
             ),
-            (6, 3, 3, 2, 2, 1)
+            (6, 3, 5, 2, 2, 1)
         );
         let attempts = imported
             .request

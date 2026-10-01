@@ -26,6 +26,7 @@
 
 **Fixed**
 
+- `runs check`, `runs patch` and `runs report` count code that ran outside any test, as the run summary does. They read only what passing tests ran, which also dropped what ran as modules were imported and everything a run without per-test attribution recorded: a passing `supercov -- node script.js` run read 100% lines in its summary and 0% in `runs check` and in its lcov export, and a node:test run lost its imports and top-level constants. What a failed test ran is still left out.
 - A JavaScript project with a socket or a named pipe in its tree -- a running dev server's `tmp/dev.sock`, a database socket kept under the project -- is measured. Copying the project into its isolated workspace refused the whole run over the first one, though neither holds source.
 - A project where a conventional source directory or a `package.json` entry is a symlink, `lib` linked to `src` say, is measured. Discovery refused the link as a source root and the run stopped; it is now passed over, and the files are measured where the link points when that is inside the project. A root named in `SUPERCOV_SOURCE_ROOTS` that is a symlink is still refused.
 - A line inside an expression that never ran reads NOT COVERED in `runs <run> file` and `runs <run> line`. A line with no statement of its own, such as one element of a multi-line array or call, read PARTIAL, which says the line ran, whenever anything on it was left untested.

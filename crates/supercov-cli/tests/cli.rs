@@ -1872,3 +1872,52 @@ test("dangling links stay, a link out of the project does not", () => {
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     contains_all(&summary, &["Lines      100.00% (2/2)", "Passed      2"]);
 }
+
+#[test]
+fn the_gate_and_the_export_count_what_ran_outside_a_test_as_the_summary_does() {
+    // A script no runner attributes test by test: everything it runs is
+    // background coverage.
+    let script = Project::empty("aggregate-gate");
+    script.write("package.json", r#"{ "name": "agg", "type": "module" }"#);
+    script.write(
+        "src/math.js",
+        "export function double(x) {\n  return x * 2;\n}\n",
+    );
+    script.write(
+        "run.mjs",
+        "import { double } from \"./src/math.js\";\nif (double(2) !== 4) process.exit(1);\n",
+    );
+    script.git(&["init", "-q"]);
+    script.supercov(&["--", "node", "run.mjs"]).succeeds();
+    let summary = script.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("Lines      100.00% (2/2)"), "{summary}");
+    let gate = script
+        .supercov(&["runs", "latest", "check", "--min-lines", "100"])
+        .succeeds();
+    assert!(gate.contains("lines        100.00%  2/2"), "{gate}");
+    script
+        .supercov(&["runs", "report", "--format", "lcov", "--output", "out.lcov"])
+        .succeeds();
+    let lcov = script.read("out.lcov");
+    contains_all(&lcov, &["LF:2", "LH:2"]);
+
+    // A module's top level runs as it is imported, before any test starts.
+    let tests = Project::empty("import-gate");
+    tests.write("package.json", r#"{ "name": "imp", "type": "module" }"#);
+    tests.write(
+        "src/pages.js",
+        "const prefix = \"/pages/\";\n\nexport function page(name) {\n  return prefix + name;\n}\n",
+    );
+    tests.write(
+        "test/pages.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { page } from \"../src/pages.js\";\n\ntest(\"names a page\", () => assert.equal(page(\"a\"), \"/pages/a\"));\n",
+    );
+    tests.git(&["init", "-q"]);
+    tests.supercov(&["--", "node", "--test"]).succeeds();
+    let summary = tests.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("Lines      100.00% (3/3)"), "{summary}");
+    let gate = tests
+        .supercov(&["runs", "latest", "check", "--min-lines", "100"])
+        .succeeds();
+    assert!(gate.contains("lines        100.00%  3/3"), "{gate}");
+}

@@ -859,3 +859,50 @@ fn a_large_assessment_reads_its_tree_and_names_every_failure() {
         assert!(invalid.contains("invalid answer for "), "{invalid}");
     }
 }
+
+#[test]
+fn security_beside_an_assessed_run_says_which_flagged_lines_a_test_catches() {
+    let project = shop("security-asserted");
+    // The page read fails, so the test reaches every line but the reply.
+    project.write(
+        "test/handler.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { handler } from \"../src/handler.js\";\n\ntest(\"a missing page is refused\", async () => {\n  const db = { query: async () => [] };\n  const req = { query: { id: \"1\", file: \"a\", title: \"t\" }, params: { name: \"no-such-page\" } };\n  await assert.rejects(handler(req, { send() {} }, db), /ENOENT/);\n});\n",
+    );
+    project.write(
+        "scripts/deploy.js",
+        "import { exec } from \"node:child_process\";\nexec(\"deploy \" + process.argv[2]);\n",
+    );
+    project.git(&["init", "-q"]);
+    let run = project.measure(&[]);
+    let (base, _) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+
+    let (base, _) = gateway(MODEL, answer_reviewer);
+    let report = project
+        .supercov_with(
+            &[
+                "security",
+                "src/handler.js",
+                "scripts/deploy.js",
+                "--run",
+                "latest",
+            ],
+            &through(&base),
+        )
+        .succeeds();
+    contains_all(
+        &report,
+        &[
+            "scripts/deploy.js",
+            "the run did not measure this file",
+            // The run left only the reply uncovered.
+            "and 1 of its measured lines are not covered by the run",
+            "lines are asserted (a test is judged to catch a change to them)",
+            "line 9: asserted; a test is judged to catch a change to it",
+            "line 11: asserted; a test is judged to catch a change to it",
+        ],
+    );
+    assert!(!report.contains("line 12: asserted"), "{report}");
+}
