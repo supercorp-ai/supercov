@@ -619,3 +619,99 @@ fn help_and_bundled_guides_need_no_project() {
     let version = project.supercov(&["--version"]).succeeds();
     assert!(version.contains(env!("CARGO_PKG_VERSION")), "{version}");
 }
+
+#[test]
+fn every_way_of_importing_node_assert_is_credited_to_its_test() {
+    let project = Project::empty("assert-styles");
+    project.write(
+        "package.json",
+        r#"{ "name": "styles", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/lib.js",
+        "export function* evens(limit) {\n  for (let n = 0; n < limit; n += 2) {\n    yield n;\n  }\n}\n\nexport const label = (value) => (value ? `on:${value}` : \"off\");\n",
+    );
+    project.write(
+        "test/default.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { evens } from \"../src/lib.js\";\ntest(\"default import\", () => {\n  assert.deepStrictEqual([...evens(5)], [0, 2, 4]);\n  assert.ok(true);\n});\n",
+    );
+    project.write(
+        "test/namespace.test.js",
+        "import test from \"node:test\";\nimport * as assert from \"node:assert/strict\";\nimport { label } from \"../src/lib.js\";\ntest(\"namespace import\", () => {\n  assert.equal(label(\"x\"), \"on:x\");\n});\n",
+    );
+    project.write(
+        "test/named.test.js",
+        "import test from \"node:test\";\nimport { strict as assert, notEqual } from \"node:assert\";\nimport { equal, ok } from \"node:assert/strict\";\nimport { label } from \"../src/lib.js\";\ntest(\"named imports\", () => {\n  equal(label(\"x\"), \"on:x\");\n  ok(label(0) === \"off\");\n  assert.match(label(\"y\"), /on/);\n  notEqual(label(1), \"off\");\n});\n",
+    );
+    project.write(
+        "test/require.test.cjs",
+        "const test = require(\"node:test\");\nconst assert = require(\"node:assert/strict\");\ntest(\"require\", async () => {\n  const { label } = await import(\"../src/lib.js\");\n  assert.strictEqual(label(\"\"), \"off\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    let measured = project.supercov(&["--", "node", "--test"]).succeeds();
+    assert!(measured.contains("pass 4"), "{measured}");
+    for (test, assertions) in [
+        (
+            "default import",
+            &[
+                "node:assert.deepStrictEqual at test/default.test.js:5:3",
+                "node:assert.ok at test/default.test.js:6:3",
+            ][..],
+        ),
+        (
+            "namespace import",
+            &["node:assert/strict.equal at test/namespace.test.js:5:3"][..],
+        ),
+        (
+            "named imports",
+            &[
+                "node:assert/strict.equal at test/named.test.js:6:3",
+                "node:assert/strict.ok at test/named.test.js:7:3",
+                "node:assert/strict.match at test/named.test.js:8:3",
+                "node:assert.notEqual at test/named.test.js:9:3",
+            ][..],
+        ),
+        (
+            "require",
+            &["node:assert/strict.strictEqual at test/require.test.cjs:5:3"][..],
+        ),
+    ] {
+        let read = project
+            .supercov(&["runs", "latest", "test", test])
+            .succeeds();
+        contains_all(&read, assertions);
+    }
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("Lines      100.00% (4/4)"), "{summary}");
+}
+
+#[test]
+fn a_function_shipped_as_text_runs_where_no_probe_exists() {
+    // A function sent to a worker, a `vm` context or a browser page goes as
+    // its source text; a probe inside it names a global that is not there.
+    let project = Project::empty("shipped");
+    project.write(
+        "package.json",
+        r#"{ "name": "shipped", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/task.js",
+        "export function square(n) {\n  if (n < 0) {\n    throw new Error(\"negative\");\n  }\n  return n * n;\n}\nexport const cube = (n) => n * n * n;\nexport const shipped = [square.toString(), `${cube}`, String(square)];\nexport function local(flag) {\n  return flag ? \"a\" : \"b\";\n}\n",
+    );
+    project.write(
+        "test/task.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport vm from \"node:vm\";\nimport { shipped, local } from \"../src/task.js\";\ntest(\"shipped functions run\", () => {\n  assert.equal(vm.runInNewContext(`(${shipped[0]})(4)`), 16);\n  assert.equal(vm.runInNewContext(`(${shipped[1]})(2)`), 8);\n  assert.equal(vm.runInNewContext(`(${shipped[2]})(3)`), 9);\n  assert.equal(local(true), \"a\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    let measured = project.supercov(&["--", "node", "--test"]).succeeds();
+    assert!(measured.contains("pass 1"), "{measured}");
+    // What is left as source is declared, never silently uncovered.
+    let file = project
+        .supercov(&["runs", "latest", "file", "src/task.js"])
+        .succeeds();
+    assert!(file.contains("Measurement limitations         2"), "{file}");
+    let local = project
+        .supercov(&["runs", "latest", "line", "src/task.js:10"])
+        .succeeds();
+    assert!(!local.contains("NOT COVERED"), "{local}");
+}

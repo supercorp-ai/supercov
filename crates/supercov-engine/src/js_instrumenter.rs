@@ -2067,9 +2067,61 @@ struct SafetyAnalysis {
     dynamic_limitations: Vec<CandidateLimitation>,
 }
 
+/// The names a file reads function source through: `name.toString()`,
+/// `String(name)` and `${name}` in a template. A function bound to one of
+/// them is shipped as text -- to a worker, a `vm` context, a browser page --
+/// where no probe exists, so it is left as source like a literal read in
+/// place. Another file's reads are not visible here.
+#[derive(Default)]
+struct SourceReads(HashSet<String>);
+
+impl<'a> Visit<'a> for SourceReads {
+    fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
+        if member.property.name == "toString"
+            && let Expression::Identifier(object) = &member.object
+        {
+            self.0.insert(object.name.to_string());
+        }
+        walk::walk_static_member_expression(self, member);
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if expression_is_identifier(&call.callee, "String")
+            && let Some(Argument::Identifier(argument)) = call.arguments.first()
+        {
+            self.0.insert(argument.name.to_string());
+        }
+        walk::walk_call_expression(self, call);
+    }
+
+    fn visit_template_literal(&mut self, template: &oxc_ast::ast::TemplateLiteral<'a>) {
+        for expression in &template.expressions {
+            if let Expression::Identifier(identifier) = expression {
+                self.0.insert(identifier.name.to_string());
+            }
+        }
+        walk::walk_template_literal(self, template);
+    }
+}
+
+/// The name a function is bound to where it is declared: its own, or the
+/// variable it initializes.
+fn bound_name<State>(own_name: Option<&str>, context: &TraverseCtx<'_, State>) -> Option<String> {
+    own_name
+        .map(str::to_owned)
+        .or_else(|| match context.ancestors().next()? {
+            Ancestor::VariableDeclaratorInit(parent) => parent
+                .id()
+                .get_binding_identifier()
+                .map(|identifier| identifier.name.to_string()),
+            _ => None,
+        })
+}
+
 struct SafetyScanner<'s> {
     source: &'s str,
     file: &'s str,
+    source_reads: HashSet<String>,
     source_sensitive_functions: HashSet<SpanKey>,
     with_statements: HashSet<SpanKey>,
     function_limitations: Vec<CandidateLimitation>,
@@ -2520,6 +2572,7 @@ impl<'s> SafetyScanner<'s> {
         Self {
             source,
             file,
+            source_reads: HashSet::new(),
             source_sensitive_functions: HashSet::new(),
             with_statements: HashSet::new(),
             function_limitations: Vec::new(),
@@ -2552,6 +2605,7 @@ impl<'s> SafetyScanner<'s> {
     fn enter_source_sensitive_function<State>(
         &mut self,
         span: Span,
+        name: Option<String>,
         context: &TraverseCtx<'_, State>,
     ) {
         // A function handed to a compile-time style macro never runs: the
@@ -2564,7 +2618,8 @@ impl<'s> SafetyScanner<'s> {
             self.unsafe_function_depth += 1;
             return;
         }
-        let sensitive = observes_function_source(span, context);
+        let sensitive = observes_function_source(span, context)
+            || name.is_some_and(|name| self.source_reads.contains(&name));
         if sensitive {
             self.source_sensitive_functions.insert(span_key(span));
             let limitation = self.limitation(
@@ -2591,7 +2646,8 @@ impl<'s> SafetyScanner<'s> {
 
 impl<'a> Traverse<'a, ()> for SafetyScanner<'_> {
     fn enter_function(&mut self, node: &mut Function<'a>, context: &mut TraverseCtx<'a, ()>) {
-        self.enter_source_sensitive_function(node.span, context);
+        let name = bound_name(node.id.as_ref().map(|id| id.name.as_str()), context);
+        self.enter_source_sensitive_function(node.span, name, context);
     }
 
     fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
@@ -2603,7 +2659,8 @@ impl<'a> Traverse<'a, ()> for SafetyScanner<'_> {
         node: &mut ArrowFunctionExpression<'a>,
         context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.enter_source_sensitive_function(node.span, context);
+        let name = bound_name(None, context);
+        self.enter_source_sensitive_function(node.span, name, context);
     }
 
     fn exit_arrow_function_expression(
@@ -2682,7 +2739,10 @@ fn analyze_safety<'a>(
     // oxc_traverse uses resolved lexical scope IDs while walking ancestry.
     // Building semantics here initializes those IDs without changing the AST.
     SemanticBuilder::new().build(program);
+    let mut reads = SourceReads::default();
+    reads.visit_program(program);
     let mut scanner = SafetyScanner::new(source, file);
+    scanner.source_reads = reads.0;
     traverse_mut(&mut scanner, allocator, program, Default::default(), ());
     let mut semantic_limitations = scanner.function_limitations;
     semantic_limitations.extend(scanner.with_limitations);
@@ -2837,6 +2897,7 @@ fn observes_function_source<State>(span: Span, context: &TraverseCtx<'_, State>)
             Ancestor::CallExpressionArguments(parent) => {
                 return expression_is_identifier(parent.callee(), "String");
             }
+            Ancestor::TemplateLiteralExpressions(_) => return true,
             Ancestor::BinaryExpressionLeft(parent) => {
                 return matches!(
                     parent.operator(),
