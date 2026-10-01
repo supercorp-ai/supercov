@@ -683,6 +683,39 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         })
         .collect::<Vec<_>>();
 
+    // Code that runs once per process -- a static initializer, a module's
+    // top level -- is credited to the first test to reach it, so a test that
+    // only reads what it set up runs nothing recorded in that file. For a
+    // change to such code, a test whose own file names one of the file's
+    // top-level declarations is affected too.
+    let named_by_tests = changes
+        .iter()
+        .filter_map(|(file, change)| match change {
+            FileChange::Code {
+                before,
+                narrow: false,
+                ..
+            } => {
+                let stem = file.rsplit('/').next()?.split('.').next()?.to_owned();
+                let mut names = before
+                    .units
+                    .iter()
+                    .filter(|unit| unit.parent.is_none_or(|p| before.units[p].path.is_empty()))
+                    .filter_map(|unit| unit.path.rsplit('.').next().map(str::to_owned))
+                    .filter(|name| name.len() > 2)
+                    .collect::<BTreeSet<_>>();
+                if stem.len() > 2
+                    && !matches!(stem.as_str(), "mod" | "lib" | "main" | "index" | "__init__")
+                {
+                    names.insert(stem);
+                }
+                Some((*file, names))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut test_sources = BTreeMap::<&str, Option<String>>::new();
+
     let mut affected = Vec::new();
     let mut undetermined = Vec::new();
     let mut unaffected = Vec::new();
@@ -765,6 +798,22 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                 }
             }
         }
+        for (file, names) in &named_by_tests {
+            if record.files.contains_key(*file) || *file == record.test.file.as_str() {
+                continue; // what it ran there already decided
+            }
+            let source = test_sources
+                .entry(record.test.file.as_str())
+                .or_insert_with(|| fs::read_to_string(root.join(&record.test.file)).ok());
+            if let Some(name) = source
+                .as_deref()
+                .and_then(|text| names.iter().find(|name| names_word(text, name)))
+            {
+                reasons.push(format!(
+                    "{file}: declarations changed, and the test file names {name} (code that runs once per process is credited to the first test to reach it)"
+                ));
+            }
+        }
         if !crate::coverage_report::coverage_is_complete(&record.attribution) {
             // What its own record proves is the strong claim, and it keeps it:
             // a Ruby test credited with the changed line ran the changed line,
@@ -822,6 +871,16 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         "meaning": "Tests whose recorded execution a change since the run could have reached, and those whose execution nothing recorded: a test that ran alongside others has no coverage of its own, so it is undetermined whenever a change reaches anything the run covered. Run both. A file the run never captured, a dependency or a configuration change is not seen here; see workingTree."
     }))
 }
+/// Whether `text` holds `word` as a whole identifier.
+fn names_word(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(at, _)| {
+        let before = text[..at].chars().last();
+        let after = text[at + word.len()..].chars().next();
+        let part = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        !part(before) && !part(after)
+    })
+}
+
 /// A declaration's own lines: its span without the spans of the
 /// declarations nested in it, as inclusive `[first, last]` ranges.
 fn own_lines(code: &crate::source_units::Code, index: usize) -> Vec<[usize; 2]> {
@@ -977,8 +1036,10 @@ mod tests {
         // start the file: an `export` keyword there would belong to the top
         // level, not to the function.
         let app = "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n";
-        let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
+        let test = "import assert from 'node:assert/strict';\nimport { LIMIT } from '../src/config.js';\nassert.equal(work(), 1);\n";
+        let config = "export const LIMIT = 5;\nfunction check(n) {\n  return n < LIMIT;\n}\n";
         fs::write(root.join("src/app.js"), app).unwrap();
+        fs::write(root.join("src/config.js"), config).unwrap();
         fs::write(root.join("tests/app.test.js"), test).unwrap();
         // The fixture run's one point sits at line 1, column 0 of src/app.js
         // with a zero-based byte column, which is how every non-JavaScript
@@ -986,7 +1047,11 @@ mod tests {
         let inputs = crate::source_capture::capture(
             &root,
             "python",
-            ["src/app.js".into(), "tests/app.test.js".into()],
+            [
+                "src/app.js".into(),
+                "src/config.js".into(),
+                "tests/app.test.js".into(),
+            ],
         )
         .unwrap();
         let directory = crate::run_store::create_analyzable_test_run(&root, "first");
@@ -1088,8 +1153,22 @@ mod tests {
                 .starts_with("test file changed"),
             "{report}"
         );
-        // A source file removed.
+        // Top-level code the test never ran a statement of -- it runs once,
+        // at import, credited to whoever imported first -- in a file the
+        // test names: affected, and it says why.
         fs::write(root.join("tests/app.test.js"), test).unwrap();
+        fs::write(root.join("src/config.js"), config.replace("= 5", "= 6")).unwrap();
+        let report = affected_tests(&root, &run).unwrap();
+        assert_eq!(names(&report, "affected"), ["test"], "{report}");
+        assert!(
+            report["affected"][0]["reasons"][0]
+                .as_str()
+                .unwrap()
+                .contains("the test file names config"),
+            "{report}"
+        );
+        fs::write(root.join("src/config.js"), config).unwrap();
+        // A source file removed.
         fs::remove_file(root.join("src/app.js")).unwrap();
         let report = affected_tests(&root, &run).unwrap();
         assert_eq!(
@@ -1119,8 +1198,10 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("tests")).unwrap();
         let app = "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n";
-        let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
+        let test = "import assert from 'node:assert/strict';\nimport { LIMIT } from '../src/config.js';\nassert.equal(work(), 1);\n";
+        let config = "export const LIMIT = 5;\nfunction check(n) {\n  return n < LIMIT;\n}\n";
         fs::write(root.join("src/app.js"), app).unwrap();
+        fs::write(root.join("src/config.js"), config).unwrap();
         fs::write(root.join("tests/app.test.js"), test).unwrap();
         let inputs = crate::source_capture::capture(
             &root,
@@ -1219,8 +1300,10 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("tests")).unwrap();
         let app = "function work() {\n  return 1;\n}\nfunction idle() {\n  return 2;\n}\n";
-        let test = "import assert from 'node:assert/strict';\nassert.equal(work(), 1);\n";
+        let test = "import assert from 'node:assert/strict';\nimport { LIMIT } from '../src/config.js';\nassert.equal(work(), 1);\n";
+        let config = "export const LIMIT = 5;\nfunction check(n) {\n  return n < LIMIT;\n}\n";
         fs::write(root.join("src/app.js"), app).unwrap();
+        fs::write(root.join("src/config.js"), config).unwrap();
         fs::write(root.join("tests/app.test.js"), test).unwrap();
         let inputs = crate::source_capture::capture(
             &root,
