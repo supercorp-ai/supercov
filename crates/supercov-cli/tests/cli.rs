@@ -1921,3 +1921,114 @@ fn the_gate_and_the_export_count_what_ran_outside_a_test_as_the_summary_does() {
         .succeeds();
     assert!(gate.contains("lines        100.00%  3/3"), "{gate}");
 }
+
+#[test]
+fn every_listing_pages_and_names_its_next_page() {
+    let project = Project::cart("pages");
+    project.write(
+        "src/tax.js",
+        "export function tax(sum, rate) {\n  return rate > 0 ? sum * rate : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { tax } from \"../src/tax.js\";\n\ntest(\"taxes a sum\", () => assert.equal(tax(10, 0.5), 5));\n",
+    );
+    project.commit("tax");
+    let first = project.measure(&["--test-name-pattern", "total"]);
+    let second = project.measure(&[]);
+    let run = format!("'{second}'");
+    for (args, next) in [
+        (
+            vec!["runs", "--limit", "1"],
+            "npx supercov runs --offset 1 --limit 1".to_owned(),
+        ),
+        (
+            vec!["runs", "latest", "files", "--limit", "1"],
+            format!("runs {run} files --offset 1 --limit 1"),
+        ),
+        (
+            vec!["runs", "latest", "gaps", "--limit", "1"],
+            format!("runs {run} gaps --offset 1 --limit 1"),
+        ),
+        // A filtered listing's next page keeps the filter.
+        (
+            vec![
+                "runs", "latest", "gaps", "--filter", "passed", "--limit", "1",
+            ],
+            format!("runs {run} gaps --filter passed --offset 1 --limit 1"),
+        ),
+        (
+            vec![
+                "runs", "latest", "files", "--filter", "passed", "--limit", "1",
+            ],
+            format!("runs {run} files --filter passed --offset 1 --limit 1"),
+        ),
+        (
+            vec!["runs", "latest", "file", "src/cart.js", "--limit", "1"],
+            format!("runs {run} file 'src/cart.js' --offset 1 --limit 1"),
+        ),
+        (
+            vec!["runs", "latest", "line", "src/cart.js:13", "--limit", "1"],
+            format!("runs {run} line 'src/cart.js:13' --offset 1 --limit 1"),
+        ),
+        (
+            vec![
+                "runs",
+                "latest",
+                "decision",
+                "src/cart.js:13",
+                "--limit",
+                "1",
+            ],
+            format!("runs {run} decision 'src/cart.js:13' --offset 1 --limit 1"),
+        ),
+        (
+            vec!["runs", "latest", "scope", "--limit", "1"],
+            format!("runs {run} scope --offset 1 --limit 1"),
+        ),
+        (
+            vec!["runs", "latest", "source", "src/cart.js", "--limit", "2"],
+            format!("runs {run} source 'src/cart.js' --offset 2 --limit 2"),
+        ),
+        (
+            vec![
+                "runs",
+                "latest",
+                "test",
+                "total adds prices",
+                "--limit",
+                "1",
+            ],
+            format!("runs {run} test 'total adds prices' --offset 1 --limit 1"),
+        ),
+        (
+            vec!["diff", &first, &second, "--limit", "1"],
+            format!("diff '{first}' {run} --offset 1 --limit 1"),
+        ),
+    ] {
+        let listed = project.supercov(&args).succeeds();
+        assert!(listed.contains(&next), "{args:?}: no {next:?} in\n{listed}");
+        // The command it names reads the next page.
+        let mut words = vec![String::new()];
+        let mut quoted = false;
+        for character in next.trim_start_matches("npx supercov ").chars() {
+            match character {
+                '\'' => quoted = !quoted,
+                ' ' if !quoted => words.push(String::new()),
+                _ => words.last_mut().unwrap().push(character),
+            }
+        }
+        let words = words.iter().map(String::as_str).collect::<Vec<_>>();
+        let following = project.supercov(&words).succeeds();
+        assert_ne!(following, listed, "{words:?} repeated the first page");
+    }
+
+    // A run whose suite failed says so where runs are listed.
+    project.write(
+        "test/broken.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n\ntest(\"breaks\", () => assert.equal(1, 2));\n",
+    );
+    project.supercov(&["--", "node", "--test"]).exits(1);
+    let listed = project.supercov(&["runs", "--limit", "1"]).succeeds();
+    assert!(listed.contains("FAILED (exit 1)"), "{listed}");
+}
