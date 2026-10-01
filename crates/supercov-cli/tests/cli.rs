@@ -1514,3 +1514,162 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
     project.supercov(&["__sweep-trash"]).exits(2);
     project.supercov(&["__sweep-trash", root]).succeeds();
 }
+
+/// A sandbox SDK as a package would ship it: it mounts a host directory into
+/// a "guest" (a symlink here) and runs a command there with exactly the
+/// environment the call passes.
+const SANDBOX: &str = r#"import { spawn } from "node:child_process";
+import { mkdirSync, symlinkSync } from "node:fs";
+import { dirname } from "node:path";
+
+export const sandbox = {
+  async boot(options) {
+    const mount = options.mounts?.[0] ?? { source: options.hostPath, target: options.guestPath };
+    mkdirSync(dirname(mount.target), { recursive: true });
+    symlinkSync(mount.source, mount.target, "dir");
+    return {
+      run(argv, options) {
+        // A remote guest sees only what the call hands it: Supercov has to
+        // have translated the project root into the guest's path already.
+        if (options.env.SUPERCOV_PROJECT_ROOT !== mount.target) return 97;
+        return new Promise((resolve, reject) => {
+          const child = spawn(argv[0], argv.slice(1), {
+            cwd: mount.target,
+            env: options.env,
+            stdio: "inherit",
+          });
+          child.once("error", reject);
+          child.once("close", (code) => resolve(code));
+        });
+      },
+    };
+  },
+};
+
+export default sandbox;
+"#;
+
+#[test]
+fn code_a_test_runs_inside_a_sandbox_it_mounts_is_credited_to_that_test() {
+    let project = Project::empty("sandbox-launch");
+    project.write(
+        "package.json",
+        r#"{ "name": "remote", "private": true, "type": "module" }"#,
+    );
+    project.write("src/cart.js", common::CART);
+    project.write(
+        "node_modules/opaque-sandbox/package.json",
+        r#"{ "name": "opaque-sandbox", "type": "module", "exports": "./index.mjs" }"#,
+    );
+    project.write("node_modules/opaque-sandbox/index.mjs", SANDBOX);
+    project.write(
+        "guest/describe.mjs",
+        "import { describe } from \"../src/cart.js\";\nif (describe([{ name: \"pen\" }]) !== \"pen\") process.exit(1);\n",
+    );
+    project.write(
+        "test/remote.test.js",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { sandbox } from "opaque-sandbox";
+
+test("the guest describes the cart", async () => {
+  const target = join(mkdtempSync(join(tmpdir(), "guest-")), "workspace");
+  const machine = await sandbox.boot({ mounts: [{ source: process.cwd(), target }] });
+  const code = await machine.run([process.execPath, "guest/describe.mjs"], { env: process.env });
+  assert.equal(code, 0);
+});
+"#,
+    );
+    // The same launch through a namespace import and a parenthesized callee,
+    // and through a default import with the mapping spelled out.
+    project.write(
+        "test/namespace.test.js",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import * as sdk from "opaque-sandbox";
+
+test("a namespace import launches too", async () => {
+  const target = join(mkdtempSync(join(tmpdir(), "guest-")), "workspace");
+  const machine = await (sdk.sandbox).boot({ mounts: [{ source: process.cwd(), target }] });
+  assert.equal(await machine.run([process.execPath, "guest/describe.mjs"], { env: process.env }), 0);
+});
+"#,
+    );
+    project.write(
+        "test/default.test.js",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import box from "opaque-sandbox";
+
+test("a default import launches too", async () => {
+  const guestPath = join(mkdtempSync(join(tmpdir(), "guest-")), "workspace");
+  const machine = await box.boot({ hostPath: process.cwd(), guestPath });
+  assert.equal(await machine.run([process.execPath, "guest/describe.mjs"], { env: process.env }), 0);
+});
+"#,
+    );
+    // Product code that launches the sandbox is rewritten the same way.
+    project.write(
+        "src/remote.js",
+        r#"import { sandbox } from "opaque-sandbox";
+import * as sdk from "opaque-sandbox";
+import box from "opaque-sandbox";
+
+export async function runInGuest(how, script, target) {
+  const options = { mounts: [{ source: process.cwd(), target }] };
+  const machine =
+    how === "named"
+      ? await sandbox.boot(options)
+      : how === "namespace"
+        ? await (sdk.sandbox).boot(options)
+        : await box.boot(options);
+  return machine.run([process.execPath, script], { env: process.env });
+}
+"#,
+    );
+    project.write(
+        "test/source.test.js",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runInGuest } from "../src/remote.js";
+
+test("product code launches the guest", async () => {
+  for (const how of ["named", "namespace", "default"]) {
+    const guest = join(mkdtempSync(join(tmpdir(), "guest-")), "workspace");
+    assert.equal(await runInGuest(how, "guest/describe.mjs", guest), 0);
+  }
+});
+"#,
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest", "--json"]).json();
+    let transport = &summary["data"]["transport"];
+    assert_eq!(transport["workspaceCapabilities"], 6, "{transport}");
+    assert_eq!(transport["remoteLaunches"], 6, "{transport}");
+    // `describe` runs only in the guest, and its line is the launching tests'.
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:20"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "the guest describes the cart",
+            "a namespace import launches too",
+            "a default import launches too",
+            "product code launches the guest",
+        ],
+    );
+}
