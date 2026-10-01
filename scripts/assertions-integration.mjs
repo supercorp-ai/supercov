@@ -2,11 +2,13 @@
 // question answered by rule (a console.log or print line is not asserted;
 // everything else is), so the verdicts, the answer cache and --dry-run are
 // checked without the network, for JavaScript, Python (unittest, so only an
-// interpreter is needed), Go, Ruby (Minitest), Rust and Java (Maven, offline).
+// interpreter is needed), Go, Ruby (Minitest and test-unit), Rust (a doctest
+// among its tests), Java (Maven, offline), and Vitest and Jest, linked from
+// the repository's own node_modules.
 // --javascript-only
 // skips the others where they are not installed, as in the Alpine image.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { latestRun, requireSupercov } from "./coverage-test-helpers.mjs";
@@ -246,7 +248,7 @@ end
 const rs = join(scratch, "rs");
 write = writer(rs);
 write("Cargo.toml", '[package]\nname = "shop"\nversion = "0.0.0"\nedition = "2021"\n');
-write("src/lib.rs", "pub mod cart;\npub mod format;\n");
+write("src/lib.rs", "//! ```\n//! assert_eq!(shop::cart::total(&[]), 0);\n//! ```\npub mod cart;\npub mod format;\n");
 write("src/cart.rs", `pub struct Item {
     pub price: u32,
     pub quantity: u32,
@@ -401,6 +403,59 @@ const hasMaven =
   spawnSync("mvn", ["-q", "-o", "test"], { cwd: jv, encoding: "utf8" }).status === 0 &&
   (rmSync(join(jv, "target"), { recursive: true, force: true }), true);
 
+// The JavaScript sources again, under Vitest and Jest.
+const repositoryRoot = resolve(import.meta.dirname, "..");
+function jsRunner(name, runner, imports) {
+  const root = join(scratch, name);
+  mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
+  cpSync(join(js, "src"), join(root, "src"), { recursive: true });
+  symlinkSync(join(repositoryRoot, "node_modules", runner), join(root, "node_modules", runner));
+  symlinkSync(join(repositoryRoot, "node_modules", ".bin", runner), join(root, "node_modules", ".bin", runner));
+  if (runner === "vitest") symlinkSync(join(repositoryRoot, "node_modules", "vite"), join(root, "node_modules", "vite"));
+  write = writer(root);
+  write("package.json", JSON.stringify({ name: `assertions-${name}`, private: true, type: "module", scripts: { test: runner === "vitest" ? "vitest run" : "jest" } }));
+  if (runner === "jest") write("jest.config.mjs", "export default { transform: {}, testMatch: ['**/tests/**/*.test.mjs'] };\n");
+  write("tests/cart.test.mjs", `${imports}
+import { total } from '../src/cart.mjs'
+
+test('adds prices', () => {
+  expect(total([{ price: 10, quantity: 2 }])).toBe(20)
+})
+
+test('discounts big carts', () => {
+  expect(total([{ price: 60, quantity: 2 }])).toBe(108)
+})
+`);
+  write("tests/format.test.mjs", `${imports}
+import { label } from '../src/format.mjs'
+
+test('upper-cases a name', () => {
+  expect(label('  ab ')).toBe('AB')
+})
+
+test('names a blank label', () => {
+  expect(label('  ')).toBe('unknown')
+})
+`);
+  return root;
+}
+const hasRunner = (runner) => existsSync(join(repositoryRoot, "node_modules", runner));
+const vitestRoot = hasRunner("vitest") && jsRunner("vitest", "vitest", "import { test, expect } from 'vitest'");
+const jestRoot = hasRunner("jest") && jsRunner("jest", "jest", "import { test, expect } from '@jest/globals'");
+
+// Ruby's test-unit, where it is installed: the Minitest suite rewritten.
+const tu = join(scratch, "test-unit");
+const testUnit =
+  // `gem` only asks whether it is installed; `require` would run an empty
+  // suite at exit, which fails.
+  !javascriptOnly && ruby && spawnSync(ruby, ["-e", "gem 'test-unit'"], { encoding: "utf8" }).status === 0;
+if (testUnit) {
+  cpSync(join(rb, "lib"), join(tu, "lib"), { recursive: true });
+  write = writer(tu);
+  for (const file of ["test/cart_test.rb", "test/format_test.rb"])
+    write(file, readFileSync(join(rb, file), "utf8").replace('require "minitest/autorun"', 'require "test/unit"').replace("Minitest::Test", "Test::Unit::TestCase"));
+}
+
 // The stand-in: answers every noul question, 0.1 for a console.log or print
 // line and 0.9 otherwise, and counts requests in a file.
 const counter = join(scratch, "requests.txt");
@@ -413,10 +468,10 @@ const server = spawn(process.execPath, ["--input-type=module", "-e", `
     req.on("end", () => {
       const request = JSON.parse(body);
       if (req.url !== "/v1/systemone" || req.headers.authorization !== "Bearer test-key") { res.writeHead(401).end(); return; }
-      if (!request.state?.code_run || !request.state?.test_code || !request.state?.test?.name) { res.writeHead(400).end(); return; }
+      if (!request.state?.code_run || !request.state?.test_code || !request.state?.test?.name) { console.error("[stand-in] incomplete state for " + request.state?.test?.name + ": " + Object.keys(request.state ?? {}).filter((k) => !request.state[k]).join(",")); res.writeHead(400).end(); return; }
       // The test's own code, found by its title, not the file's head.
       const title = request.state.test.name.split(/::| > /).pop().split("[")[0].split(".").pop().split("#").pop();
-      if (!request.state.test_code.includes(title)) { res.writeHead(400).end(); return; }
+      if (!/\\(line \\d+\\)/.test(request.state.test.name) && !request.state.test_code.includes(title)) { console.error("[stand-in] " + request.state.test.name + ": test code without " + title); res.writeHead(400).end(); return; }
       appendFileSync(${JSON.stringify(counter)}, Object.keys(request.questions).length + "\\n");
       const answers = Object.fromEntries(Object.entries(request.questions).map(([id, q]) =>
         [id, { type: "noul", noul: /console\\.log|print\\(|Println\\(|println!\\(|puts |System\\.out\\.println\\(/.test(q.instructions.task) ? 0.1 : 0.9 }]));
@@ -534,6 +589,19 @@ try {
     scenario({ name: "Java", root: jv, statements: 8, command: ["mvn", "-q", "-o", "test"], logFile: "src/main/java/shop/Cart.java", logText: "System.out.println", logLine: 14,
       edit: ["src/main/java/shop/Format.java", "trimmed.toUpperCase()", "trimmed.toUpperCase().strip()"] });
   else if (!javascriptOnly) console.log("[assertions] Java: skipped, Maven cannot build offline here");
+  const jsEdit = ["src/format.mjs", "toUpperCase()", "toLocaleUpperCase()"];
+  if (vitestRoot)
+    scenario({ name: "Vitest", root: vitestRoot, command: ["npx", "vitest", "run"], logFile: "src/cart.mjs", logText: "console.log", logLine: 9, edit: jsEdit });
+  if (jestRoot)
+    scenario({ name: "Jest", root: jestRoot, command: ["npx", "jest"], logFile: "src/cart.mjs", logText: "console.log", logLine: 9, edit: jsEdit,
+      runEnv: { ...binary, NODE_OPTIONS: "--experimental-vm-modules" } });
+  if (testUnit) {
+    const bin = resolve(ruby, "..");
+    scenario({ name: "test-unit", root: tu, runEnv: { ...binary, PATH: `${bin}:${process.env.PATH}`, RUBYOPT: "" },
+      command: [ruby, "-Ilib", "-Itest", "-e", 'Dir.glob("test/*_test.rb").sort.each { |f| require File.expand_path(f) }'],
+      logFile: "lib/cart.rb", logText: "puts", logLine: 10,
+      edit: ["lib/format.rb", "trimmed.upcase", "trimmed.upcase.strip"] });
+  }
 } finally {
   server.kill();
   rmSync(scratch, { recursive: true, force: true });
