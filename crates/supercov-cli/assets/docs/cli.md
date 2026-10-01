@@ -438,11 +438,12 @@ the commit's own tests run against it:
 
 No failing test was left out of the set to run. On real commits the
 assessment narrows little -- Jev judges most tests that ran a changed line to
-catch the change -- and its verdicts ranked a failing test in the first three
-for only 6 of 32 breaking commits. Ranking by name instead put one there for
-10 of those 32, and for 13 of 25 breaking commits in four projects it was not
-designed on (hashie, Masterminds/semver, itsdangerous, java-classmate), where
-file order managed 11; it needs no assessment. After a project's first
+catch the change -- and its verdicts alone ranked a failing test in the first
+three for only 6 of 32 breaking commits. Ranking by name, with the verdicts
+breaking ties, put one there for 10 of those 32, and for 15 of 25 breaking
+commits in four projects it was not designed on (hashie, Masterminds/semver,
+itsdangerous, java-classmate), where file order managed 11; without an
+assessment, name alone managed 8 and 12. After a project's first
 assessment, each commit cost under a cent.
 
 ## Combine shards
