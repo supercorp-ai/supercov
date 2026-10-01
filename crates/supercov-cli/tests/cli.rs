@@ -2383,3 +2383,73 @@ fn absolute_source_roots_name_the_same_rust_code_in_the_workspace() {
     let whole = measured(project.root.to_str().unwrap());
     assert!(whole.contains("Lines      50.00% (2/4)"), "{whole}");
 }
+
+#[test]
+fn cargo_configuration_and_target_flags_reach_the_measured_build() {
+    let project = Project::empty("cargo-config");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"config\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn double(x: u32) -> u32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let rustc = std::process::Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .unwrap();
+    let host = String::from_utf8(rustc.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+        .unwrap();
+    let target_eq = format!("--target={host}");
+    let mut measured = vec![
+        vec!["--", "cargo", "test", "--config", "build.incremental=false"],
+        vec!["--", "cargo", "test", "--config=build.incremental=false"],
+        vec!["--", "cargo", "test", "--target", &host],
+        vec!["--", "cargo", "test", &target_eq],
+    ];
+    // A toolchain selector goes through rustup, where there is one.
+    let rustup = std::process::Command::new("rustup")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if rustup {
+        measured.push(vec!["--", "cargo", "+stable", "test"]);
+    }
+    for args in measured {
+        project.supercov(&args).succeeds();
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        assert!(
+            summary.contains("Lines      100.00% (2/2)"),
+            "{args:?}: {summary}"
+        );
+    }
+    for (args, message) in [
+        (
+            vec!["--", "cargo", "test", "--config"],
+            "Cargo option --config has no value",
+        ),
+        (
+            vec!["--", "cargo", "test", "--target"],
+            "Cargo option --target has no value",
+        ),
+        // What Cargo refuses itself, it says.
+        (
+            vec!["--", "cargo", "test", "--config="],
+            "was not a TOML dotted key expression",
+        ),
+        (vec!["--", "cargo", "test", "--target="], "target was empty"),
+    ] {
+        let refused = project.supercov(&args);
+        assert_ne!(refused.code(), 0, "{args:?}");
+        assert!(
+            refused.stderr().contains(message),
+            "{args:?}: {}",
+            refused.stderr()
+        );
+    }
+}
