@@ -1946,7 +1946,20 @@ fn create_coverage_view_with_model(
     let tests_by_hit = tests_by_hit.into_relation(&hit_ids);
     let phases_by_hit = phases_by_hit.into_relation(&hit_ids);
     let explicit_phases_by_hit = explicit_phases_by_hit.into_relation(&hit_ids);
-    let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+    // A frontend may decline one outcome of a branch (a block that can never
+    // be entered, a rescue that can never be reached) or the whole branch;
+    // a branch whose every outcome is declined is declined itself.
+    let mut declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+    for branch in &manifest.branches {
+        if !branch.alternatives.is_empty()
+            && branch
+                .alternatives
+                .iter()
+                .all(|alternative| declined.contains(&alternative.id))
+        {
+            declined.insert(&branch.id);
+        }
+    }
     // What confidence asks of each test and phase a relation numbers, looked
     // up once per number rather than once per mention: a run's points and
     // lines mention tests millions of times, and each lookup hashed an id.
@@ -2075,7 +2088,10 @@ fn create_coverage_view_with_model(
         .branches
         .iter()
         .cloned()
-        .map(|meta| {
+        .map(|mut meta| {
+            // A declined outcome leaves the denominator; the others stay.
+            meta.alternatives
+                .retain(|alternative| !declined.contains(&alternative.id));
             let alternatives = meta
                 .alternatives
                 .iter()

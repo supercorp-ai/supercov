@@ -399,6 +399,7 @@ module Supercov
       @vector_counts = {}
       @open = {}
       @loop_state = {}
+      @pending_loops = {}
       @arrivals = {}
       @limitations = {}
       @active_threads = {}
@@ -716,6 +717,7 @@ module Supercov
         thread = Thread.current
         ending = thread[:__supercov_context] || @context
         settle_arrivals(ending)
+        settle_loops(ending)
         sample_stdlib(thread, ending)
         if identity.nil?
           @context = 0
@@ -1172,6 +1174,7 @@ module Supercov
       state_key = [current_context, target["id"]]
       hit(current_context, target["zero"]) if @loop_state[state_key] == :pending
       @loop_state[state_key] = :pending
+      @pending_loops[state_key] = target["zero"]
       collection
     end
 
@@ -1180,7 +1183,20 @@ module Supercov
       state_key = [current_context, target["id"]]
       hit(current_context, target["entered"]) if @loop_state[state_key] == :pending
       @loop_state[state_key] = :entered
+      @pending_loops.delete(state_key)
       nil
+    end
+
+    # A loop reached for the last time in a phase and never entered ran zero
+    # times; nothing reaches it again to say so, so the phase's end does.
+    def settle_loops(context)
+      @pending_loops.delete_if do |(ctx, id), zero|
+        next false unless ctx == context
+
+        hit(ctx, zero)
+        @loop_state[[ctx, id]] = :settled
+        true
+      end
     end
 
     # Value-context `&&`/`||`/`||=`/`&&=`: the left operand decides the branch.
@@ -1316,6 +1332,7 @@ module Supercov
         return if @closed
 
         settle_arrivals(@context)
+        settle_loops(@context)
         collect_stdlib(@context, final: true)
         @closed = true
         record("t" => "exit", "at" => now_ms)

@@ -230,6 +230,17 @@ try {
     const gaps = query(['runs', 'latest', 'file', 'lib/flow.rb'], environment, flow);
     assert.deepEqual(gaps.gapLines.map((line) => line.line), [21, 28, 38], JSON.stringify(gaps.gapLines));
     assert.deepEqual([gaps.counts.uncoveredLines, gaps.counts.missingBranches, gaps.totalLimitations], [0, 3, 0], JSON.stringify(gaps.counts));
+
+    // More of what Ruby writes: `||=` and `&&=` on instance and class
+    // variables, a negated `unless`, a block over an empty collection and an
+    // empty block, `when ... then`, a rescue modifier, `while`, and a `return`
+    // as one arm's value. The one gap is the `||=` whose variable starts set;
+    // the empty block, which no call can enter, is not counted.
+    const more = supercov(['--', 'ruby', '-Ilib', '-Itest', 'test/more_test.rb'], environment, flow);
+    assert.equal(more.status, 0, `${more.stdout}\n${more.stderr}`);
+    assert.match(more.stdout, /23 assertions, 0 failures, 0 errors/);
+    const moreGaps = query(['runs', 'latest', 'file', 'lib/more.rb'], environment, flow);
+    assert.deepEqual(moreGaps.gapLines.map((line) => line.line), [5], JSON.stringify(moreGaps.gapLines));
   }
 
   const minitest = supercov(['--', 'ruby', '-Itest', 'test/shapes_test.rb'], environment);

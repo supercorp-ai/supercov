@@ -26,6 +26,7 @@
 
 **Fixed**
 
+- Ruby: a block over an empty collection (`items.each { ... }` given `[]`) records its zero iterations. They were recorded only when the same test reached the loop again, so a test that passed an empty collection once got no credit for it. A Ruby outcome Supercov declares it cannot observe, such as entering an empty block, is now left out of the branch count instead of reported as a gap no test could close.
 - A JavaScript or TypeScript source file that does not parse no longer stops the run. It runs as written, nothing in it is measured, and the run is marked incomplete with the parser's message and position, as Ruby and Python already do for a file they cannot instrument; a test file that does not parse fails in its runner as it does without Supercov. The error used to be a debug dump and no test ran. A line nothing measured now reads NOT MEASURED in `runs <run> line`, as it does in `file`.
 - `supercov quality` and `supercov security` keep their saved assessments out of Git, as a coverage run keeps its runs: the first write adds `.supercov/.gitignore`. In a project with no coverage run, `.supercov/` appeared in `git status` and `git add -A` committed the answer cache.
 - Assessing a Rust function that returns a closure as `impl Fn(..) -> T` asks about the closure returning another `T` (`|x| 0`). The closure itself was taken for a `T` and asked about as `(|x| x * 3) ^ 1`, a change that does not compile.
