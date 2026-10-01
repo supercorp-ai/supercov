@@ -1,5 +1,6 @@
 //! Java and Kotlin: statements by tree-sitter, tests by class and method name.
 use super::{Change, Located, Starts, line_of, line_starts};
+use crate::jvm_instrumenter::JvmLanguage;
 use tree_sitter::{Node, Parser};
 
 fn kotlin(file: &str) -> bool {
@@ -11,18 +12,32 @@ fn kotlin(file: &str) -> bool {
 /// value taking the default value, anything else skipped. Local declarations
 /// of classes and functions, and variables without a value, are not assessed.
 pub(super) fn statement_starts(file: &str, source: &str) -> Starts {
-    let mut parser = Parser::new();
     let mut out = Starts::new();
-    let grammar = if kotlin(file) {
-        tree_sitter_kotlin_ng::LANGUAGE.into()
+    // The instrumenter's parse first: it reads the Kotlin the grammar alone
+    // gets wrong, exactly as the measured run did. Failing that, whatever the
+    // grammar recovered still holds statements worth assessing.
+    let language = if kotlin(file) {
+        JvmLanguage::Kotlin
     } else {
-        tree_sitter_java::LANGUAGE.into()
+        JvmLanguage::Java
     };
-    if parser.set_language(&grammar).is_err() {
-        return out;
-    }
-    let Some(tree) = parser.parse(source, None) else {
-        return out;
+    let tree = match crate::jvm_instrumenter::parse(source, language) {
+        Ok(tree) => tree,
+        Err(_) => {
+            let mut parser = Parser::new();
+            let grammar = if kotlin(file) {
+                tree_sitter_kotlin_ng::LANGUAGE.into()
+            } else {
+                tree_sitter_java::LANGUAGE.into()
+            };
+            if parser.set_language(&grammar).is_err() {
+                return out;
+            }
+            let Some(tree) = parser.parse(source, None) else {
+                return out;
+            };
+            tree
+        }
     };
     let starts = line_starts(source);
     walk(tree.root_node(), source, &starts, kotlin(file), &mut out);
@@ -123,8 +138,54 @@ fn change(node: Node, source: &str, kotlin: bool) -> Option<Option<Change>> {
         | "function_declaration"
         | "object_declaration"
         | "type_alias" => None,
+        // A Kotlin branch's last expression is the value the branch yields
+        // when its `if`, `when` or `try` is used as one: skipping it would
+        // not compile, and the change that means something is the value.
+        _ if kotlin && yields_value(node) => Some(Change::ReturnUndefined),
         _ => Some(Change::Skip),
     })
+}
+
+/// Whether a statement is the last in a block whose value is used: a branch
+/// of an `if`, `when` or `try` that is itself a value.
+fn yields_value(node: Node) -> bool {
+    let Some(block) = node.parent().filter(|p| p.kind() == "block") else {
+        return false;
+    };
+    let mut cursor = block.walk();
+    let last = block
+        .named_children(&mut cursor)
+        .filter(|child| !child.kind().contains("comment"))
+        .last();
+    if last.map(|last| last.id()) != Some(node.id()) {
+        return false;
+    }
+    let owner = match block.parent() {
+        Some(p) if matches!(p.kind(), "if_expression" | "try_expression") => p,
+        Some(p) if matches!(p.kind(), "when_entry" | "catch_block") => match p.parent() {
+            Some(owner) => owner,
+            None => return false,
+        },
+        _ => return false,
+    };
+    used(owner)
+}
+
+/// Whether an `if`, `when` or `try` is used for its value.
+fn used(expression: Node) -> bool {
+    let Some(parent) = expression.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        // A statement of its own, unless it ends a block that is a value.
+        "block" => yields_value(expression),
+        "statements" | "source_file" | "class_body" | "lambda_literal" => false,
+        // `else if`: the outer `if` decides.
+        "if_expression" => used(parent),
+        "when_entry" => parent.parent().is_some_and(used),
+        // Assigned, returned, passed, an expression body, an operand.
+        _ => true,
+    }
 }
 
 /// `if (c) {`, `} else if (c) {` -> `c`
@@ -222,6 +283,38 @@ mod tests {
             Some(Change::ValueUndefined)
         );
         assert_eq!(change_at(&starts, 11, "log(z);", j), Some(Change::Skip));
+    }
+
+    /// Forge's `stringBuilder.toString()` ending a `when` branch: the value
+    /// the branch yields, which skipping would not even compile.
+    #[test]
+    fn a_kotlin_branch_value_is_changed_as_a_value() {
+        let source = "fun f(c: Boolean, j: Any): String {\n    val y = if (c) {\n        log()\n        \"a\"\n    } else {\n        \"b\"\n    }\n    if (c) {\n        log()\n    }\n    return when (j) {\n        is Int -> {\n            log()\n            j.toString()\n        }\n        else -> try {\n            g(j)\n        } catch (e: Exception) {\n            y\n        }\n    }\n}\n";
+        let starts = statement_starts("F.kt", source);
+        let j = Language::Jvm;
+        assert_eq!(change_at(&starts, 3, "log()", j), Some(Change::Skip));
+        assert_eq!(
+            change_at(&starts, 4, "\"a\"", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 6, "\"b\"", j),
+            Some(Change::ReturnUndefined)
+        );
+        // An `if` that is a statement yields nothing.
+        assert_eq!(change_at(&starts, 9, "log()", j), Some(Change::Skip));
+        assert_eq!(
+            change_at(&starts, 14, "j.toString()", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 17, "g(j)", j),
+            Some(Change::ReturnUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 19, "y", j),
+            Some(Change::ReturnUndefined)
+        );
     }
 
     #[test]

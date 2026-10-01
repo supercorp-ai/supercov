@@ -687,36 +687,108 @@ fn declares_launcher_for_compilation(build_file: &str) -> bool {
     })
 }
 
-/// A Gradle build file with the launcher among its test dependencies.
+/// A Gradle build file with the launcher among its test dependencies, and
+/// every JUnit 4 project moved onto the JUnit Platform.
 ///
-/// Appended as its own `dependencies` block rather than edited into the
+/// Appended as its own `allprojects` block rather than edited into the
 /// existing one: Gradle merges them, and finding the right brace in a Groovy
 /// or Kotlin script by hand is the kind of parsing that works until it does
 /// not.
-fn gradle_with_launcher(build_file: &str, kotlin: bool, catalog: &str) -> Option<String> {
-    if declares_launcher_for_compilation(build_file) {
+///
+/// `junit4` names the projects (by directory, relative to the root) whose
+/// tests are JUnit 4. Gradle runs those through a framework of its own, which
+/// no platform listener hears; Vintage runs exactly the same tests on the
+/// platform, as Maven's copy already gets. Only a task still on Gradle's JUnit
+/// 4 framework is switched, so one the build already put on the platform or on
+/// TestNG keeps it.
+fn gradle_with_launcher(
+    build_file: &str,
+    kotlin: bool,
+    catalog: &str,
+    junit4: &[String],
+) -> Option<String> {
+    let launcher = !declares_launcher_for_compilation(build_file);
+    if !launcher && junit4.is_empty() {
         return None;
     }
-    let coordinate = match launcher_version(&format!("{build_file}\n{}", catalog_versions(catalog)))
-    {
-        Some(version) => format!("org.junit.platform:{LAUNCHER_ARTIFACT}:{version}"),
-        None => format!("org.junit.platform:{LAUNCHER_ARTIFACT}"),
+    let platform = launcher_version(&format!("{build_file}\n{}", catalog_versions(catalog)));
+    let coordinate = |group: &str, artifact: &str, version: Option<String>| match version {
+        Some(version) => format!("{group}:{artifact}:{version}"),
+        None => format!("{group}:{artifact}"),
+    };
+    // In the Kotlin DSL the typed accessors do not exist inside
+    // `allprojects`, so the configurations are named as strings.
+    let dependency = |indent: &str, configuration: &str, coordinate: String| {
+        if kotlin {
+            format!("{indent}\"{configuration}\"(\"{coordinate}\")\n")
+        } else {
+            format!("{indent}{configuration} '{coordinate}'\n")
+        }
     };
     // `allprojects` rather than a bare `dependencies` block, because a
     // multi-project build compiles each subproject's test sources against that
     // subproject's own classpath and a declaration in the root reaches none of
-    // them. Guarded by the java plugin so a root that only aggregates — which
-    // has no test source set and no configurations to add to — is left alone.
-    // In the Kotlin DSL the typed accessor does not exist inside `allprojects`,
-    // so the configuration is named as a string.
-    let line = if kotlin {
-        format!("            \"testImplementation\"(\"{coordinate}\")")
-    } else {
-        format!("            testImplementation '{coordinate}'")
-    };
+    // them. Guarded by the java plugin so a root that only aggregates -- which
+    // has no test source set and no configurations to add to -- is left alone.
+    let mut body = String::new();
+    if launcher {
+        body.push_str("        dependencies {\n");
+        body.push_str(&dependency(
+            "            ",
+            "testImplementation",
+            coordinate("org.junit.platform", LAUNCHER_ARTIFACT, platform.clone()),
+        ));
+        body.push_str("        }\n");
+    }
+    if !junit4.is_empty() {
+        // The root is `.` to Supercov and the empty path to Gradle.
+        let quote = |text: &str| {
+            let text = if text == "." { "" } else { text };
+            format!("\"{}\"", text.replace('\\', "/"))
+        };
+        let projects = junit4
+            .iter()
+            .map(|p| quote(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // The project's directory relative to the root, with forward slashes
+        // on every OS: the same spelling `junit4` uses.
+        let relative =
+            "rootDir.toPath().relativize(projectDir.toPath()).toString().replace('\\\\', '/')";
+        let (list, test_tasks, still_junit4) = if kotlin {
+            (
+                format!("listOf({projects})"),
+                "tasks.withType<Test>().configureEach",
+                "options is JUnitOptions",
+            )
+        } else {
+            (
+                format!("[{projects}]"),
+                "tasks.withType(Test).configureEach",
+                "options instanceof JUnitOptions",
+            )
+        };
+        body.push_str(&format!("        if ({relative} in {list}) {{\n"));
+        body.push_str("            dependencies {\n");
+        // Vintage is versioned with Jupiter, not with the platform.
+        body.push_str(&dependency(
+            "                ",
+            "testRuntimeOnly",
+            coordinate(
+                "org.junit.vintage",
+                VINTAGE_ARTIFACT,
+                platform.as_deref().map(engine_version_of_platform),
+            ),
+        ));
+        body.push_str("            }\n");
+        body.push_str(&format!(
+            "            {test_tasks} {{\n                if ({still_junit4}) useJUnitPlatform()\n            }}\n"
+        ));
+        body.push_str("        }\n");
+    }
     let plugin = if kotlin { "\"java\"" } else { "'java'" };
     Some(format!(
-        "{build_file}\n// Added by Supercov: the JUnit Platform listener that attributes coverage\n// to each test is compiled from each project's own test sources, and the\n// launcher API it implements is on the test runtime classpath but not the\n// compile one.\nallprojects {{\n    plugins.withId({plugin}) {{\n        dependencies {{\n{line}\n        }}\n    }}\n}}\n"
+        "{build_file}\n// Added by Supercov: the JUnit Platform listener that attributes coverage\n// to each test is compiled from each project's own test sources, and the\n// launcher API it implements is on the test runtime classpath but not the\n// compile one. JUnit 4 tests run on the platform through Vintage.\nallprojects {{\n    plugins.withId({plugin}) {{\n{body}    }}\n}}\n"
     ))
 }
 
@@ -1019,10 +1091,11 @@ fn instrument_workspace(
         if !module.has_tests {
             continue;
         }
-        if frameworks.junit4 && build != JvmBuild::Maven {
-            // Only Maven's copy gets Vintage added below; elsewhere the module
-            // keeps its probes and gets no listener, because attributing it is
-            // impossible and trying would break it.
+        if frameworks.junit4 && build == JvmBuild::Plain {
+            // Maven's and Gradle's copies get Vintage added below; a plain
+            // tree has no build to add it to, so the module keeps its probes
+            // and gets no listener, because attributing it is impossible and
+            // trying would break it.
             unmeasurable.push(module.directory.clone());
             continue;
         }
@@ -1140,10 +1213,24 @@ fn instrument_workspace(
             }
         }
         JvmBuild::Gradle
-            if !modules
-                .iter()
-                .any(|module| module.has_tests && frameworks_of(&module.directory).platform) => {}
+            if !modules.iter().any(|module| {
+                let frameworks = frameworks_of(&module.directory);
+                module.has_tests && (frameworks.platform || frameworks.junit4)
+            }) => {}
         JvmBuild::Gradle => {
+            // A module on TestNG as well keeps Gradle's TestNG framework: its
+            // own listener attributes it.
+            let junit4 = modules
+                .iter()
+                .filter(|module| {
+                    let frameworks = frameworks_of(&module.directory);
+                    module.has_tests
+                        && frameworks.junit4
+                        && !frameworks.testng
+                        && !modular.contains(&module.directory)
+                })
+                .map(|module| module.directory.clone())
+                .collect::<Vec<_>>();
             for name in ["build.gradle.kts", "build.gradle"] {
                 let path = workspace.join(name);
                 let Ok(existing) = fs::read_to_string(&path) else {
@@ -1152,8 +1239,9 @@ fn instrument_workspace(
                 let catalog = fs::read_to_string(workspace.join("gradle/libs.versions.toml"))
                     .unwrap_or_default();
                 if let Some(updated) =
-                    gradle_with_launcher(&existing, name.ends_with(".kts"), &catalog)
+                    gradle_with_launcher(&existing, name.ends_with(".kts"), &catalog, &junit4)
                 {
+                    added_vintage |= !junit4.is_empty();
                     write(&path, &updated)?;
                     added_launcher = Some(if name.ends_with(".kts") {
                         "build.gradle.kts"
@@ -1780,7 +1868,7 @@ mod tests {
         );
         // A version catalog, by reference.
         let catalog = "[versions]\njunit = \"5.11.3\"\n\n[libraries]\njunit-jupiter = { module = \"org.junit.jupiter:junit-jupiter\", version.ref = \"junit\" }\n";
-        let updated = gradle_with_launcher("plugins { id 'java' }\n", false, catalog).unwrap();
+        let updated = gradle_with_launcher("plugins { id 'java' }\n", false, catalog, &[]).unwrap();
         assert!(
             updated.contains("junit-platform-launcher:1.11.3"),
             "{updated}"
@@ -1856,7 +1944,8 @@ mod tests {
     fn gradle_gets_the_launcher_in_the_dialect_its_script_is_written_in() {
         let groovy =
             "dependencies {\n    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'\n}\n";
-        let updated = gradle_with_launcher(groovy, false, "").expect("the launcher is missing");
+        let updated =
+            gradle_with_launcher(groovy, false, "", &[]).expect("the launcher is missing");
         assert!(
             updated
                 .contains("testImplementation 'org.junit.platform:junit-platform-launcher:1.10.2'"),
@@ -1864,7 +1953,7 @@ mod tests {
         );
         // The project's own block survives: Gradle merges what we append.
         assert!(updated.contains("junit-jupiter:5.10.2"), "{updated}");
-        assert_eq!(gradle_with_launcher(&updated, false, ""), None);
+        assert_eq!(gradle_with_launcher(&updated, false, "", &[]), None);
 
         // Gradle 9 makes every project declare the launcher, and the
         // configuration its own documentation recommends is testRuntimeOnly,
@@ -1872,7 +1961,7 @@ mod tests {
         // following that advice has the artifact and still cannot compile a
         // listener, so it gets a compile-visible declaration alongside.
         let runtime_only = "dependencies {\n    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n";
-        let updated = gradle_with_launcher(runtime_only, false, "")
+        let updated = gradle_with_launcher(runtime_only, false, "", &[])
             .expect("a runtime-only declaration does not reach the compiler");
         assert!(
             updated.contains("testImplementation 'org.junit.platform:junit-platform-launcher"),
@@ -1884,7 +1973,7 @@ mod tests {
         );
 
         let kotlin = "dependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.10.2\")\n}\n";
-        let updated = gradle_with_launcher(kotlin, true, "").expect("the launcher is missing");
+        let updated = gradle_with_launcher(kotlin, true, "", &[]).expect("the launcher is missing");
         assert!(
             updated.contains(
                 "\"testImplementation\"(\"org.junit.platform:junit-platform-launcher:1.10.2\")"
@@ -1892,6 +1981,41 @@ mod tests {
             "the Kotlin DSL has no typed accessor inside allprojects:\n{updated}"
         );
         assert!(updated.contains("plugins.withId(\"java\")"), "{updated}");
+    }
+
+    #[test]
+    fn gradle_moves_junit_4_projects_onto_the_platform_through_vintage() {
+        let kotlin = "dependencies {\n    testImplementation(\"junit:junit:4.13.2\")\n}\n";
+        let updated = gradle_with_launcher(kotlin, true, "", &[".".into(), "moshi".into()])
+            .expect("a JUnit 4 project needs Vintage");
+        assert!(
+            updated
+                .contains("\"testRuntimeOnly\"(\"org.junit.vintage:junit-vintage-engine:5.10.2\")"),
+            "{updated}"
+        );
+        assert!(updated.contains("in listOf(\"\", \"moshi\")"), "{updated}");
+        assert!(
+            updated.contains("if (options is JUnitOptions) useJUnitPlatform()"),
+            "only a task still on Gradle's JUnit 4 framework is switched:\n{updated}"
+        );
+
+        // Already compiling against the launcher, Vintage is still added.
+        let groovy = "dependencies {\n    testImplementation 'junit:junit:4.13.2'\n    testImplementation 'org.junit.platform:junit-platform-launcher:1.13.1'\n}\n";
+        let updated = gradle_with_launcher(groovy, false, "", &["core".into()])
+            .expect("a JUnit 4 project needs Vintage");
+        assert!(
+            updated.contains("testRuntimeOnly 'org.junit.vintage:junit-vintage-engine:5.10.2'"),
+            "{updated}"
+        );
+        assert!(updated.contains("in [\"core\"]"), "{updated}");
+        assert!(
+            updated.contains("tasks.withType(Test).configureEach"),
+            "{updated}"
+        );
+        assert!(
+            !updated.contains("\n            testImplementation 'org.junit.platform"),
+            "the launcher is already there:\n{updated}"
+        );
     }
 
     #[test]
