@@ -101,7 +101,7 @@ function assertFixtureTotals(summary) {
   // `until`, safe navigation, case/in, rescue flow and same-line statements.
   assert.equal(summary.model.variant, 'ruby-owned-coverage');
   assert.deepEqual([summary.coverage.lines.covered, summary.coverage.lines.total], [85, 88], JSON.stringify(summary.coverage));
-  assert.deepEqual([summary.coverage.branches.covered, summary.coverage.branches.total], [114, 132], JSON.stringify(summary.coverage));
+  assert.deepEqual([summary.coverage.branches.covered, summary.coverage.branches.total], [87, 102], JSON.stringify(summary.coverage));
   assert.deepEqual([summary.coverage.coveredConditions, summary.coverage.conditions], [13, 19], JSON.stringify(summary.coverage));
   assert.equal(summary.testExitCode, 0);
   assert.equal(summary.measurement.complete, true, JSON.stringify(summary.measurement));
@@ -199,7 +199,7 @@ try {
     );
     assert.deepEqual(
       [stdlibOnly.coverage.branches.covered, stdlibOnly.coverage.branches.total],
-      [8, 8],
+      [4, 4],
       JSON.stringify(stdlibOnly.coverage),
     );
     // A method whose body starts on a line with no line event (one here, a

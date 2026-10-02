@@ -6,7 +6,7 @@
 //! Rust owns merging, attempt outcomes, attribution confidence, filtering and
 //! every structural coverage verdict.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -2002,9 +2002,68 @@ fn create_coverage_view_with_model(
             &explicit_kinds,
         )
     };
+    // A decision's two outcomes are branch outcomes. Python, Ruby and Rust
+    // declare them as a branch of their own, `<decision>:outcome`; for a
+    // decision declared without one, the branch is made here from the
+    // decision's vectors, so every language counts and lists outcomes the
+    // same way and no decision is counted twice.
+    let declared_branches = manifest
+        .branches
+        .iter()
+        .map(|branch| branch.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut outcome_branches = Vec::new();
     let mut decisions = Vec::with_capacity(decision_metadata.len());
     for meta in decision_metadata {
         let mutable = vectors_by_decision.remove(&meta.id).unwrap_or_default();
+        let outcome_id = format!("{}:outcome", meta.id);
+        if !declared_branches.contains(outcome_id.as_str()) {
+            let alternatives = [true, false]
+                .into_iter()
+                .map(|outcome| {
+                    let (mut tests, mut phases, mut explicit) =
+                        (Vec::new(), Vec::new(), Vec::new());
+                    for observation in mutable
+                        .iter()
+                        .filter(|observation| observation.vector.outcome == outcome)
+                    {
+                        tests.extend(&observation.tests);
+                        phases.extend(&observation.phases);
+                        explicit.extend(&observation.explicit_phases);
+                    }
+                    let tests = tests_by_hit.reached(tests);
+                    let phases = phases_by_hit.reached(phases);
+                    let explicit = explicit_phases_by_hit.reached(explicit);
+                    AlternativeResult {
+                        id: format!("{outcome_id}:{outcome}"),
+                        label: outcome.to_string(),
+                        covered: !tests.names.is_empty(),
+                        confidence: confidence(&tests, &phases, &explicit),
+                        tests: tests.names,
+                        phases: phases.names,
+                    }
+                })
+                .collect::<Vec<_>>();
+            outcome_branches.push(BranchResult {
+                covered: alternatives.iter().all(|alternative| alternative.covered),
+                meta: BranchMeta {
+                    id: outcome_id,
+                    kind: meta.kind.clone(),
+                    file: meta.file.clone(),
+                    line: meta.line,
+                    column: meta.column,
+                    source: meta.source.clone(),
+                    alternatives: alternatives
+                        .iter()
+                        .map(|alternative| BranchAlternativeMeta {
+                            id: alternative.id.clone(),
+                            label: alternative.label.clone(),
+                        })
+                        .collect(),
+                },
+                alternatives,
+            });
+        }
         let mut observations = Vec::with_capacity(mutable.len());
         let mut observed_phases = Vec::new();
         let mut observed_explicit = Vec::new();
@@ -2126,6 +2185,7 @@ fn create_coverage_view_with_model(
                 alternatives,
             }
         })
+        .chain(outcome_branches)
         .collect::<Vec<_>>();
 
     // Obligations the frontend declined to measure leave the covered/uncovered

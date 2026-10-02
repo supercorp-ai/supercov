@@ -1100,7 +1100,6 @@
       OBLIGATION_KINDS.forEach(kind => {
         const total = totals[kind.id] || 0;
         let open = Number(record?.[kind.field]) || 0;
-        if (kind.id === "branches") open += decisions.reduce((count, decision) => count + 2 - new Set(decision.vectors.map(vector => vector.outcome)).size, 0);
         pool.kinds[kind.id] = { total, open, percentage: total ? Math.max(0, total - open) / total * 100 : null };
       });
       return pool;

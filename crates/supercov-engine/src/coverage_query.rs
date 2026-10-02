@@ -1981,7 +1981,9 @@ pub fn coverage_file_detail_query(
                     .any(|value| matches!(value, CoverageFileObligation::Line(_)))
             {
                 "missing"
-            } else if !obligations.is_empty() {
+            } else if !obligations.is_empty() || observed_lines.contains(&line) {
+                // A line that ran with part of it outside measurement ran part
+                // of the way, as its line view says.
                 "part"
             } else {
                 "limited"

@@ -46,7 +46,7 @@ fn a_measured_suite_reads_back_through_every_query() {
         &gaps,
         &[
             "src/cart.js",
-            "lines 3  statements 2  functions 2  branch outcomes 1  MC/DC conditions 4",
+            "lines 3  statements 2  functions 2  branch outcomes 4  MC/DC conditions 4",
         ],
     );
     let files = project.supercov(&["runs", "latest", "files"]).succeeds();
@@ -926,7 +926,7 @@ fn a_run_of_two_test_kinds_narrows_pages_and_groups() {
         &narrowed,
         &[
             "Projection: kind e2e",
-            "[covered elsewhere: 22; nowhere: 12]",
+            "[covered elsewhere: 25; nowhere: 15]",
             "file --kind 'e2e'",
         ],
     );
@@ -1938,6 +1938,71 @@ fn the_gate_and_the_export_count_what_ran_outside_a_test_as_the_summary_does() {
         .supercov(&["runs", "latest", "check", "--min-lines", "100"])
         .succeeds();
     assert!(gate.contains("lines        100.00%  3/3"), "{gate}");
+}
+
+#[test]
+fn the_file_view_counts_and_labels_lines_as_the_summary_and_line_view_do() {
+    let project = Project::empty("line-states");
+    project.write("package.json", r#"{ "name": "states" }"#);
+    project.write(
+        "src/states.js",
+        "const scope = { value: 7 };\nfunction sloppy() {\n  with (scope) {\n    return value;\n  }\n}\nfunction both(a, b) {\n  if (a && b) {\n    return 1;\n  }\n  return 0;\n}\nfunction never() {\n  return 2;\n}\nfunction half(flag) {\n  return flag ? 1 : 0;\n}\nmodule.exports = { sloppy, both, never, half };\n",
+    );
+    project.write(
+        "test/states.test.js",
+        "const test = require(\"node:test\");\nconst assert = require(\"node:assert/strict\");\nconst { sloppy, both, half } = require(\"../src/states.js\");\ntest(\"sloppy reads the scope\", () => assert.equal(sloppy(), 7));\ntest(\"both, true and true\", () => assert.equal(both(true, true), 1));\ntest(\"both, false\", () => assert.equal(both(false, true), 0));\ntest(\"half, true\", () => assert.equal(half(true), 1));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("Branches   75.00% (3/4)"), "{summary}");
+
+    // `half` only ever returned 1: the decision's false outcome is the one
+    // branch the summary counts as missing, and the file view says so too.
+    let file = project
+        .supercov(&["runs", "latest", "file", "src/states.js"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "Branch outcomes not taken       1",
+            "   17  PARTIAL       flag",
+            "Unobserved: decision never false",
+        ],
+    );
+    let counts = project
+        .supercov(&["runs", "latest", "file", "src/states.js", "--json"])
+        .succeeds();
+    let counts: serde_json::Value = serde_json::from_str(&counts).unwrap();
+    assert_eq!(counts["data"]["counts"]["missingBranches"], 1, "{counts}");
+    project
+        .supercov(&["runs", "report", "--format", "lcov", "--output", "out.lcov"])
+        .succeeds();
+    let lcov = project.read("out.lcov");
+    contains_all(&lcov, &["BRF:4", "BRH:3", "BRDA:17,1,0,1", "BRDA:17,1,1,-"]);
+    assert_eq!(
+        lcov.lines()
+            .filter(|line| line.starts_with("BRDA:"))
+            .count(),
+        4,
+        "{lcov}"
+    );
+
+    // The `with` line ran; only its body is outside measurement. Both views
+    // call it partial, and the body, which nothing recorded, not measured.
+    assert!(
+        file.contains("    3  PARTIAL       with (scope) {"),
+        "{file}"
+    );
+    assert!(!file.contains("NOT MEASURED"), "{file}");
+    let with_line = project
+        .supercov(&["runs", "latest", "line", "src/states.js:3"])
+        .succeeds();
+    assert!(with_line.contains("Status\n  PARTIAL"), "{with_line}");
+    let body = project
+        .supercov(&["runs", "latest", "line", "src/states.js:4"])
+        .succeeds();
+    assert!(body.contains("Status\n  NOT MEASURED"), "{body}");
 }
 
 #[test]

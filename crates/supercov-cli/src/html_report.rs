@@ -450,13 +450,6 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
     let decisions = index
         .decision_details(CoverageViewId::All)
         .map_err(|error| format!("could not read decisions for run {}: {error}", run.id))?;
-    for decision in &decisions {
-        *file_totals
-            .entry(decision.meta.file.clone())
-            .or_default()
-            .entry("branches".into())
-            .or_default() += 2;
-    }
     let tests = index
         .test_details(CoverageViewId::All)
         .map_err(|error| format!("could not read tests for run {}: {error}", run.id))?

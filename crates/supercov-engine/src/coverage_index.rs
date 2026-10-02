@@ -4191,11 +4191,17 @@ mod tests {
         let tests = index.test_summaries(CoverageViewId::All).unwrap();
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].provenance.runner, "node:test");
-        let decision = index.anchors(CoverageViewId::All, "src/a.js", 1).unwrap();
+        // The decision, and its two outcomes as a branch.
+        let anchors = index.anchors(CoverageViewId::All, "src/a.js", 1).unwrap();
+        assert_eq!(anchors.len(), 2);
+        let decision = anchors
+            .iter()
+            .filter(|anchor| anchor.kind == "decision")
+            .collect::<Vec<_>>();
         assert_eq!(decision.len(), 1);
-        assert_eq!(decision[0].kind, "decision");
         assert_eq!(decision[0].conditions, Some(2));
         assert_eq!(decision[0].tests, ["test"]);
+        assert!(anchors.iter().any(|anchor| anchor.kind == "branch"));
         let point = index.anchors(CoverageViewId::All, "src/a.js", 2).unwrap();
         assert_eq!(point.len(), 1);
         assert_eq!(point[0].kind, "statement");
@@ -4214,6 +4220,12 @@ mod tests {
             [Some(false), None]
         );
         let hits = index.hit_metadata(CoverageViewId::All).unwrap();
+        // The point, and the decision's two outcomes.
+        assert_eq!(hits.len(), 3);
+        let hits = hits
+            .into_iter()
+            .filter(|hit| hit.obligation != "branch")
+            .collect::<Vec<_>>();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "point");
         assert_eq!(hits[0].source, "work();");

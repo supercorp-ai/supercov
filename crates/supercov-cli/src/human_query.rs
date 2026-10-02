@@ -400,6 +400,8 @@ fn branch_need(value: &str) -> String {
             "left-selected short-circuit outcome not observed".into()
         }
         "right evaluated / selected" => "right-selected outcome not observed".into(),
+        "true" => "decision never true".into(),
+        "false" => "decision never false".into(),
         other => format!("branch outcome not observed: {other}"),
     }
 }
@@ -903,13 +905,17 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     count(data.counts.measurement_limitations)
                 ),
                 String::new(),
-                format!(
-                    "Tests touching this file: {}",
-                    count(data.total_tests)
-                ),
+                format!("Tests touching this file: {}", count(data.total_tests)),
                 String::new(),
                 "Gaps".into(),
-                "  NOT COVERED = line never executed; PARTIAL = line executed but some behavior remains untested".into(),
+                format!(
+                    "  NOT COVERED = line never executed; PARTIAL = line executed but some behavior remains untested{}",
+                    if data.gap_lines.iter().any(|gap| gap.state == "limited") {
+                        "; NOT MEASURED = no record of the line, for the reason given"
+                    } else {
+                        ""
+                    }
+                ),
                 " LINE  STATUS        SOURCE".into(),
             ];
             for gap in &data.gap_lines {

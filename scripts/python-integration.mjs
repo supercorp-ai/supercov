@@ -13,7 +13,7 @@
 // imported by the product path.
 
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -129,12 +129,12 @@ function totals(summary) {
 // `core` leaves out tests/test_patterns.py, whose `match` 3.9 cannot parse,
 // and has to come out the same on every interpreter.
 const FIXTURE_TOTALS = {
-  full: [81, 82, 83, 84, 18, 18, 79, 94, 8, 16],
-  core: [75, 82, 77, 84, 17, 18, 69, 94, 8, 16],
+  full: [81, 82, 83, 84, 18, 18, 59, 70, 8, 16],
+  core: [75, 82, 77, 84, 17, 18, 50, 70, 8, 16],
 };
 const CORPUS_TOTALS = {
-  full: [67, 67, 69, 69, 17, 17, 94, 114, 12, 27],
-  core: [61, 67, 63, 69, 16, 17, 82, 114, 12, 27],
+  full: [67, 67, 69, 69, 17, 17, 65, 80, 12, 27],
+  core: [61, 67, 63, 69, 16, 17, 55, 80, 12, 27],
 };
 
 function assertFixtureTotals(summary, expected = FIXTURE_TOTALS.full) {
@@ -433,6 +433,14 @@ try {
     oracleEnvironment,
   );
   assertOracleAgreement(oracleProject, oracleEnvironment);
+  // Each decision outcome is one branch: the export's total is its own
+  // records, and the summary's, not the outcomes counted twice.
+  successfulSupercov(oracleProject, ['runs', 'report', '--format', 'lcov', '--output', 'oracle.lcov'], oracleEnvironment);
+  const tracefile = readFileSync(resolve(oracleProject, 'oracle.lcov'), 'utf8');
+  const records = tracefile.split('\n').filter((line) => line.startsWith('BRDA:'));
+  const declared = tracefile.split('\n').filter((line) => line.startsWith('BRF:')).reduce((sum, line) => sum + Number(line.slice(4)), 0);
+  assert.equal(declared, records.length, tracefile);
+  assert.equal(declared, query(oracleProject, ['runs', 'latest'], oracleEnvironment).coverage.branches.total);
 
 
   // A suite stops a server it started by signalling it. Python's default
