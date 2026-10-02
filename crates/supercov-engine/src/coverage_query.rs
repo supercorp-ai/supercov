@@ -472,6 +472,10 @@ pub struct CoverageCoversLineData {
     pub anchored: Vec<CoverageAnchor>,
     pub limitations: Vec<CoverageFileLimitation>,
     pub remaining: Vec<CoverageFileObligation>,
+    /// The run's saved assertion assessment for this place, attached by the
+    /// CLI when the run has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -494,6 +498,10 @@ pub struct CoverageCoversAnchorsData {
     pub remaining: Vec<CoverageFileObligation>,
     pub total_tests: usize,
     pub tests: Vec<CoverageCoveringTest>,
+    /// The run's saved assertion assessment for this place, attached by the
+    /// CLI when the run has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -811,6 +819,7 @@ pub fn coverage_covers_query(
                 remaining: remaining_page,
                 total_tests: total_anchor_tests,
                 tests: anchor_tests_page,
+                assertions: None,
             }),
             pagination(options.offset, options.limit, returned, total),
         ));
@@ -898,6 +907,7 @@ pub fn coverage_covers_query(
             anchored: anchored_page,
             limitations: limitations_page,
             remaining: remaining_page,
+            assertions: None,
         }),
         pagination(options.offset, options.limit, returned, total),
     ))
@@ -1633,6 +1643,10 @@ pub struct CoverageFileDetailData {
     pub total_gap_lines: usize,
     pub gap_lines: Vec<CoverageFileGapLine>,
     pub total_limitations: usize,
+    /// The run's saved assertion assessment for this place, attached by the
+    /// CLI when the run has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2025,6 +2039,7 @@ pub fn coverage_file_detail_query(
             total_gap_lines,
             gap_lines: selected_gap_lines,
             total_limitations,
+            assertions: None,
         },
         pagination(options.offset, options.limit, returned, total_gap_lines),
     ))

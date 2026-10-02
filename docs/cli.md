@@ -19,6 +19,9 @@ npx supercov --help
 | Inspect one file | `npx supercov runs latest file <path>` |
 | See how much executed code the tests assert | `npx supercov runs latest assertions` |
 | Assess it with Jev | `npx supercov runs latest assertions assess` |
+| Find what is not asserted in one file | `npx supercov runs latest assertions <path>` |
+| See each test's answer for one statement | `npx supercov runs latest assertions <path>:<line>` |
+| See what one test is judged to catch | `npx supercov runs latest assertions --test <name>` |
 | Read matching current source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Open an interactive report | `npx supercov report` |

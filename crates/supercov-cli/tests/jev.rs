@@ -777,6 +777,113 @@ fn a_patch_review_reads_only_changed_source_and_says_what_it_skipped() {
     );
 }
 
+/// Jev judges every test to catch every change but one to `let sum = 0`.
+fn answer_all_but_the_sum(id: &str, question: &serde_json::Value) -> serde_json::Value {
+    if question["instructions"]["task"]
+        .as_str()
+        .is_some_and(|task| task.contains("let sum = 0"))
+    {
+        answer_no(id, question)
+    } else {
+        answer_yes(id, question)
+    }
+}
+
+#[test]
+fn a_saved_assessment_reads_from_its_files_down_to_one_statement_and_one_test() {
+    let project = Project::cart("assertion-views");
+    let (base, _) = gateway(MODEL, answer_all_but_the_sum);
+    let run = project.measure(&[]);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+
+    // From the run: the files, with the command for the next step.
+    let files = project.supercov(&["runs", &run, "assertions"]).succeeds();
+    contains_all(
+        &files,
+        &[
+            " NOT ASSERTED  ASSERTED  FILE",
+            "            1       7/8  src/cart.js",
+            "showing 1-1 of 1",
+            "assertions 'src/cart.js'",
+        ],
+    );
+    // A file: what is not asserted in it, and the test that came closest.
+    let file = project
+        .supercov(&["runs", &run, "assertions", "src/cart.js"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "src/cart.js: 87.5% asserted (7 of 8 statements)",
+            "    2  let sum = 0;  (value becomes undefined)",
+            "assertions 'src/cart.js:2'",
+        ],
+    );
+    // One statement: every asked test's answer.
+    let statement = project
+        .supercov(&["runs", &run, "assertions", "src/cart.js:2"])
+        .succeeds();
+    contains_all(
+        &statement,
+        &["Not asserted:", "would pass   total adds prices"],
+    );
+    assert!(!statement.contains("would fail"), "{statement}");
+    // One test: what it was asked about, caught or not. A statement one test
+    // catches is not asked of the rest, so this one was asked only the sum.
+    let test = project
+        .supercov(&["runs", &run, "assertions", "--test", "total adds prices"])
+        .succeeds();
+    contains_all(
+        &test,
+        &[
+            "judged to catch a change to 0 of the 1 statements it was asked about",
+            "Would not catch\n  src/cart.js:2  let sum = 0;",
+        ],
+    );
+    // Paged in JSON as in text.
+    let page = project
+        .supercov(&["runs", &run, "assertions", "--limit", "1", "--json"])
+        .json();
+    assert_eq!(page["data"]["page"]["returned"], 1, "{page}");
+    assert_eq!(page["data"]["page"]["nextOffset"], serde_json::Value::Null);
+    // The coverage views say the same beside each file's and line's coverage.
+    let file_view = project
+        .supercov(&["runs", &run, "file", "src/cart.js"])
+        .succeeds();
+    contains_all(
+        &file_view,
+        &[
+            "Assertions  87.5% (7/8 statements a test is judged to catch)",
+            "  Not asserted on line(s) 2\n",
+            "assertions 'src/cart.js'",
+        ],
+    );
+    let line_view = project
+        .supercov(&["runs", &run, "line", "src/cart.js:2"])
+        .succeeds();
+    contains_all(
+        &line_view,
+        &[
+            "  Not asserted: `let sum = 0;`",
+            "assertions 'src/cart.js:2'",
+        ],
+    );
+    // Names that match nothing, or several, say so.
+    let missing = project
+        .supercov(&["runs", &run, "assertions", "src/none.js"])
+        .exits(2);
+    assert!(
+        missing.contains("no assessed statement in src/none.js"),
+        "{missing}"
+    );
+    let several = project
+        .supercov(&["runs", &run, "assertions", "--test", "total"])
+        .exits(2);
+    assert!(several.contains("assessed tests match total"), "{several}");
+}
+
 /// A probability above one, which no model can mean.
 fn answer_beyond_one(id: &str, question: &serde_json::Value) -> serde_json::Value {
     if question["type"] == "noul" {

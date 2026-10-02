@@ -61,6 +61,7 @@ would catch breaking, then add checks for them:
 ```sh supercov
 npx supercov runs latest assertions assess
 npx supercov runs latest assertions
+npx supercov runs latest assertions <path>
 ```
 
 `assess` needs `TYPESAFE_API_KEY`; reading does not. A statement that is not

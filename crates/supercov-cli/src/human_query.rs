@@ -442,6 +442,87 @@ fn file_gap_needs<'a>(
         .collect()
 }
 
+/// The saved assessment's word on a file, beside its coverage: nothing when
+/// the run has not been assessed or the file has no assessed statement.
+fn file_assertion_lines(assertions: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(a) = assertions.filter(|a| a["available"] == true) else {
+        return Vec::new();
+    };
+    let statements = a["statements"].as_u64().unwrap_or(0);
+    if statements == 0 {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        String::new(),
+        format!(
+            "Assertions  {}% ({}/{statements} statements a test is judged to catch)",
+            a["percentage"], a["asserted"]
+        ),
+    ];
+    let not = a["notAssertedLines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_u64)
+        .collect::<Vec<_>>();
+    if !not.is_empty() {
+        let shown = not
+            .iter()
+            .take(12)
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if not.len() > 12 {
+            format!(" and {} more", not.len() - 12)
+        } else {
+            String::new()
+        };
+        lines.push(format!("  Not asserted on line(s) {shown}{more}"));
+        lines.push(format!(
+            "  Inspect: {}",
+            a["inspect"].as_str().unwrap_or("")
+        ));
+    }
+    lines
+}
+
+/// The saved assessment's word on the statements of one line.
+fn line_assertion_lines(assertions: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(a) = assertions.filter(|a| a["available"] == true) else {
+        return Vec::new();
+    };
+    let statements = a["statements"].as_array().cloned().unwrap_or_default();
+    if statements.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![String::new(), "Assertions".into()];
+    for statement in &statements {
+        let test = statement["test"]["name"].as_str().unwrap_or("no test");
+        let likely = statement["answer"]
+            .as_f64()
+            .map(|p| format!(", {:.0}% likely to fail", p * 100.0))
+            .unwrap_or_default();
+        lines.push(if statement["asserted"] == true {
+            format!(
+                "  Asserted: `{}`; {test} is judged to fail if it changes ({}{likely})",
+                statement["text"].as_str().unwrap_or(""),
+                statement["change"].as_str().unwrap_or("")
+            )
+        } else {
+            format!(
+                "  Not asserted: `{}`; no test that runs it is judged to fail if it changes ({}); closest: {test}{likely}",
+                statement["text"].as_str().unwrap_or(""),
+                statement["change"].as_str().unwrap_or("")
+            )
+        });
+    }
+    lines.push(format!(
+        "  Inspect: {}",
+        a["inspect"].as_str().unwrap_or("")
+    ));
+    lines
+}
+
 fn state_label(state: &str) -> &'static str {
     match state {
         "missing" => "NOT COVERED",
@@ -918,6 +999,13 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 ),
                 " LINE  STATUS        SOURCE".into(),
             ];
+            if let Some(at) = lines
+                .iter()
+                .position(|line| line.starts_with("Tests touching this file"))
+            {
+                let assertions = file_assertion_lines(data.assertions.as_ref());
+                lines.splice(at + 1..at + 1, assertions);
+            }
             for gap in &data.gap_lines {
                 lines.push(format!(
                     "{:>5}  {:<12}  {}",
@@ -1108,6 +1196,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             format!("  - {}: {}", limitation.kind, limitation.reason)
                         }));
                     }
+                    lines.extend(line_assertion_lines(data.assertions.as_ref()));
                     lines.extend([String::new(), "Covering tests".into()]);
                     if data.tests.is_empty() {
                         lines.push("  None".into());
@@ -1198,6 +1287,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             format!("  - {}: {}", limitation.kind, limitation.reason)
                         }));
                     }
+                    lines.extend(line_assertion_lines(data.assertions.as_ref()));
                     lines.extend([String::new(), "Covering tests".into()]);
                     if data.tests.is_empty() {
                         lines.push("  None".into());

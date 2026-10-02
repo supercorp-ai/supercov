@@ -641,15 +641,23 @@ function scenario({ name, root, command, logFile, logText, logLine, edit, statem
   const s = first.summary;
   if (s.statements !== statements || s.asserted !== asserted || s.notAsserted !== 1 || s.requests === 0)
     fail(`${name}: expected ${asserted} of ${statements} statements asserted after requests`, first);
-  const not = first.notAsserted[0];
-  if (not.file !== logFile || !not.text.includes(logText) || not.change !== "skipped")
-    fail(`${name}: expected the ${logText} line as the one not asserted`, first);
+  // The overview names the file with the statement not asserted; the file's
+  // page names the statement.
+  if (first.files?.[0]?.file !== logFile || first.files[0].notAsserted !== 1)
+    fail(`${name}: expected ${logFile} first among the files, with one statement not asserted`, first);
   if (!existsSync(resolve(root, ".supercov/runs", latestRun(root), "assertion-coverage.json")))
     fail(`${name}: expected the run's saved result`, first);
 
   // Reading needs neither the network nor a key.
-  const read = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", "--json"], { env: { ...binary, TYPESAFE_API_KEY: "", TYPESAFE_BASE_URL: "http://127.0.0.1:9" } }).stdout).data;
-  if (read.summary?.asserted !== asserted || read.notAsserted?.[0]?.line !== logLine) fail(`${name}: reading returns the saved result`, read);
+  const offline = { env: { ...binary, TYPESAFE_API_KEY: "", TYPESAFE_BASE_URL: "http://127.0.0.1:9" } };
+  const read = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", logFile, "--json"], offline).stdout).data;
+  const not = read.notAsserted?.[0];
+  if (read.summary?.asserted !== asserted || not?.line !== logLine || !not.text.includes(logText) || not.change !== "skipped")
+    fail(`${name}: reading the file returns its statement not asserted`, read);
+  // One statement shows every asked test's answer.
+  const statement = JSON.parse(requireSupercov(root, ["runs", latestRun(root), "assertions", `${logFile}:${logLine}`, "--json"], offline).stdout).data;
+  if (statement.statements?.[0]?.asserted !== false || !statement.statements[0].answers?.length || statement.statements[0].answers.some((answer) => answer.catches))
+    fail(`${name}: the statement view shows each test's answer, none catching it`, statement);
 
   const sent = requests();
   const again = assess();

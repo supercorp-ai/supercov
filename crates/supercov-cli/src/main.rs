@@ -1966,6 +1966,31 @@ fn execute_public_query(
                             data,
                         );
                     }
+                    match &mut output.data {
+                        supercov_engine::indexed_query::IndexedQueryData::FileDetail(data) => {
+                            data.assertions = Some(assertions_command::for_file(run, &data.file));
+                        }
+                        supercov_engine::indexed_query::IndexedQueryData::Line(data) => {
+                            use supercov_engine::coverage_query::CoverageCoversData;
+                            match data.as_mut() {
+                                CoverageCoversData::Anchors(data) => {
+                                    data.assertions = Some(assertions_command::for_line(
+                                        run,
+                                        &data.location.file,
+                                        data.location.line,
+                                    ));
+                                }
+                                CoverageCoversData::Line(data) => {
+                                    data.assertions = Some(assertions_command::for_line(
+                                        run,
+                                        &data.location.file,
+                                        data.location.line,
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                     if let supercov_engine::indexed_query::IndexedQueryData::Summary(data) =
                         &mut output.data
                     {

@@ -83,18 +83,32 @@ executed -- and asks [Jev](https://typesafe.ai) whether the test would fail for
 each statement's change. It prints an estimate first; `--dry-run` sends nothing.
 It needs a TypeSafe AI API key in `TYPESAFE_API_KEY`.
 
-`assertions` reads the saved result: the share asserted and the statements that
-are not, with no network and no key. `npx supercov runs latest` and the HTML
-report show the same number.
+`assertions` reads the saved result with no network and no key, a page at a
+time, from the run down to one statement:
+
+```bash
+npx supercov runs latest assertions                       # the share, and the files by statements not asserted
+npx supercov runs latest assertions src/adapters.ts       # that file's statements not asserted
+npx supercov runs latest assertions src/adapters.ts:100   # one statement: each asked test's answer
+npx supercov runs latest assertions --test "closes the stream"  # what one test catches, and what it misses
+```
 
 ```text
 Run run_4f2a: 93.8% asserted (2731 of 2913 executed statements)
 
-182 not asserted: no test that runs them was judged to fail if they changed.
-
-  src/adapters.ts
-      100  res.removeListener("close", onResClose);  (skipped)
+Files, most statements not asserted first: a statement is not asserted when no test that runs it was judged to fail if it changed.
+ NOT ASSERTED  ASSERTED  FILE
+           41   388/429  src/adapters.ts
+           ...
+showing 1-20 of 57
+next page: npx supercov runs 'run_4f2a' assertions --offset 20
+inspect a file: npx supercov runs 'run_4f2a' assertions 'src/adapters.ts'
 ```
+
+Each listing ends with the command for its next page and for the next step
+down, so an agent reads only as much as it needs. `runs latest file` and
+`runs latest line` show the same verdicts beside the coverage, and
+`npx supercov runs latest` and the HTML report show the same share.
 
 A statement that is not asserted is a place to add a check: a test that runs it
 exists, but nothing it asserts depends on what the statement does.

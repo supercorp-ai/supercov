@@ -2045,10 +2045,17 @@
         if (actions.childElementCount) cell.append(actions); stats.append(cell);
       };
       const record = run?.files.find(value => value.file === file);
-      const fileLines = (run?.lines || []).filter(line => line.file === file);
-      const lineShare = fileLines.length ? fileLines.filter(line => line.covered).length / fileLines.length * 100 : null;
+      // The same pooled count as the overview and this file's breakdown: one
+      // file's coverage read 80% here (its lines) and 70.7% on the overview.
+      const filePool = run ? fileObligationPool(run, file) : null;
+      const pooled = (() => {
+        if (!filePool) return null;
+        let total = 0, open = 0;
+        Object.values(filePool.kinds).forEach(kind => { total += kind.total; open += Math.min(kind.open, kind.total); });
+        return total ? (total - open) / total * 100 : null;
+      })();
       const openCount = record ? missing(record) + record.measurementLimitations : 0;
-      stat("Coverage", record?.measurementLimitations ? "Limited" : lineShare === null ? "—" : pct(lineShare), openCount ? "open" : "", markCoverage(lineShare, 26, openCount), lineShare === null || openCount > 0);
+      stat("Coverage", record?.measurementLimitations ? "Limited" : pooled === null ? "—" : pct(pooled), openCount ? "open" : "", markCoverage(pooled, 26, openCount), pooled === null || openCount > 0);
       const counts = run && assertionFileCount(run, file);
       const share = counts?.total ? counts.asserted / counts.total * 100 : null;
       stat("Assertions", share === null ? "—" : pct(share), share === null ? "quiet" : "", markCredit(share, 26), share === null || share < 100);
