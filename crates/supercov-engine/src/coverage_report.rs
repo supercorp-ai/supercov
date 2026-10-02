@@ -693,6 +693,10 @@ pub struct TransportStats {
     pub child_launches: usize,
     pub remote_launches: usize,
     pub workspace_capabilities: usize,
+    /// Processes that ran the workspace without Supercov's settings -- in a
+    /// container or VM it was mounted into -- and set themselves up from it.
+    /// Their coverage counts for the run and is credited to no test.
+    pub guest_processes: usize,
     pub scoped_server_records: usize,
     pub background_server_records: usize,
     pub corrupt_records: usize,
@@ -761,6 +765,12 @@ enum ExecutionTraceEvent {
         guest_root: String,
         cache_identities: Vec<String>,
     },
+    GuestProcess {
+        at: String,
+        pid: u32,
+        ppid: u32,
+        guest_root: String,
+    },
 }
 
 impl ExecutionTraceEvent {
@@ -770,6 +780,7 @@ impl ExecutionTraceEvent {
             Self::ChildLaunch { .. } => "child-launch",
             Self::RemoteLaunch { .. } => "remote-launch",
             Self::WorkspaceCapability { .. } => "workspace-capability",
+            Self::GuestProcess { .. } => "guest-process",
         }
     }
 }
@@ -2719,6 +2730,7 @@ pub fn analyze_coverage_archive(
         child_launches: count_event("child-launch"),
         remote_launches: count_event("remote-launch"),
         workspace_capabilities: count_event("workspace-capability"),
+        guest_processes: count_event("guest-process"),
         scoped_server_records: scoped_records.len(),
         background_server_records: background_records.len(),
         corrupt_records: scoped.corrupt_records
@@ -2885,6 +2897,7 @@ impl TransportStats {
             child_launches: 0,
             remote_launches: 0,
             workspace_capabilities: 0,
+            guest_processes: 0,
             scoped_server_records: 0,
             background_server_records: 0,
             corrupt_records: 0,

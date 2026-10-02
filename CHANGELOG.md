@@ -4,6 +4,7 @@
 
 **Changed**
 
+- The run summary's Measurement section says how many processes ran the workspace in a container or VM without Supercov's settings (`Guests`), and JSON reports count them as `data.transport.guestProcesses`. Their coverage counts for the run and is credited to no test. Stored runs are re-indexed once, on their first query.
 - A Jest test is named by its `describe` blocks with ` > `, `small > charges`, as Vitest, Playwright and node:test tests are; `tests affected --names` still prints `small charges`, which `jest -t` matches. Its id does not change.
 - A node:test test inside `describe` or `suite` blocks is named by them, `small > charges`, as Vitest, Jest and Playwright tests are. Two tests with one name in different blocks were one name in every listing, and `assertions assess --changed` could not tell them apart when it chose which of a statement's tests to ask. Saved assertion answers for such tests are asked again once, since the question names the test.
 - Rust code the compiler never builds for the target is not counted: a `#[cfg(windows)]` function on Linux or macOS, or the other branch of a `#[cfg(unix)]`/`#[cfg(windows)]` pair, read as uncovered lines no test could reach. Items behind a feature or a custom cfg are still counted, since the target alone does not settle them.
@@ -28,6 +29,7 @@
 
 **Fixed**
 
+- A container started by a builder, as Testcontainers starts one (`new GenericContainer(..).withBindMounts([{ source, target }]).withEnvironment(env).start()`), gets Supercov's settings with paths moved to the mount, and its coverage is credited to the test that started it.
 - In an npm, pnpm or Yarn workspaces monorepo, a package another package imports by name is measured through that import. The isolated copy's `node_modules` linked the package back to the original project, so `cart`'s tests ran `money`'s code uninstrumented: it was credited only to `money`'s own tests, and `tests affected` left `cart`'s tests out when `money` changed. Scoped packages (`@acme/format`) included.
 - A TypeScript project whose test command compiles its tests somewhere else (`tsc && node --test dist/test/...`) runs under Supercov. Each test file imported Supercov's runtime by a relative path, which pointed nowhere once compiled into `dist/`, and the test failed with `Cannot find module '../.supercov/node_modules/runtime.mjs'`.
 - A process that runs the instrumented workspace without Supercov's settings -- a container or VM the workspace is mounted into, started by an SDK that passes on no environment -- runs and is measured. The instrumented code threw `Cannot read properties of undefined (reading 'mcdcBegin')` at its first line; it now finds the run's settings in the workspace it was loaded from, and its coverage counts for the run, credited to no test.

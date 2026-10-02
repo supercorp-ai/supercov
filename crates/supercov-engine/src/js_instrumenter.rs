@@ -918,8 +918,9 @@ fn capability_source_candidate(source: &str) -> bool {
     // `/workspace` loses genuine opaque launchers. The nested mount shape is
     // already specific, and the AST pass below still restricts wrapping to
     // the imported root actually called with that argument.
-    let mount_mapping =
-        source.contains("mounts") && source.contains("source") && source.contains("target");
+    let mount_mapping = (source.contains("mounts") || source.contains("Mounts"))
+        && source.contains("source")
+        && source.contains("target");
     direct_mapping || mount_mapping
 }
 
@@ -937,6 +938,8 @@ fn capability_callee_root(expression: &Expression<'_>) -> Option<String> {
         Expression::StaticMemberExpression(member) => capability_callee_root(&member.object),
         Expression::ComputedMemberExpression(member) => capability_callee_root(&member.object),
         Expression::CallExpression(call) => capability_callee_root(&call.callee),
+        // `new GenericContainer(..).withBindMounts(..)`: the builder's class.
+        Expression::NewExpression(construction) => capability_callee_root(&construction.callee),
         Expression::ParenthesizedExpression(parenthesized) => {
             capability_callee_root(&parenthesized.expression)
         }
@@ -981,10 +984,18 @@ impl<'a> Visit<'a> for CapabilityCallCollector<'_> {
     }
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        // A builder method named for mounts (`withBindMounts`) takes the
+        // mounts themselves, `[{ source, target }]`, with no `mounts` key.
+        let mounting = matches!(&call.callee, Expression::StaticMemberExpression(member)
+            if member.property.name.to_ascii_lowercase().contains("mount"));
+        let mounted = |argument: &Argument<'_>| {
+            let text = source_slice(self.source, argument.span());
+            mounting && text.contains("source") && text.contains("target")
+        };
         if call
             .arguments
             .iter()
-            .any(|argument| self.argument_has_mapping(argument))
+            .any(|argument| self.argument_has_mapping(argument) || mounted(argument))
             && let Some(root) = capability_callee_root(&call.callee)
         {
             self.roots.insert(root);

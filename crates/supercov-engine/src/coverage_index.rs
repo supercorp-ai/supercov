@@ -54,7 +54,7 @@ const SUMMARY_RECORD_SIZE: usize = 176;
 const FILE_GAP_RECORD_SIZE: usize = 176;
 const DECISION_GAP_RECORD_SIZE: usize = 96;
 const DIMENSION_RECORD_SIZE: usize = 192;
-const PROJECTION_RECORD_SIZE: usize = 536;
+const PROJECTION_RECORD_SIZE: usize = 544;
 const SCOPE_ENTRY_RECORD_SIZE: usize = 96;
 const CONFIDENCE_RECORD_SIZE: usize = 96;
 const LINE_RECORD_SIZE: usize = 80;
@@ -1308,6 +1308,7 @@ fn projection_record(
         {
             put_u64(&mut record, 408 + index * 8, usize_u64(value)?);
         }
+        put_u64(&mut record, 536, usize_u64(transport.guest_processes)?);
     }
 
     let phase_tests = view
@@ -2786,15 +2787,17 @@ impl<'a> CoverageIndex<'a> {
                     "measurement blocking count",
                 ));
             }
-            let transport_values = (0..8)
+            let mut transport_values = (0..8)
                 .map(|index| number(408 + index * 8))
                 .collect::<Result<Vec<_>, _>>()?;
+            transport_values.push(number(536)?);
             let transport = if bool_field(record[1])? {
                 Some(TransportStats {
                     processes: transport_values[0],
                     child_launches: transport_values[1],
                     remote_launches: transport_values[2],
                     workspace_capabilities: transport_values[3],
+                    guest_processes: transport_values[8],
                     scoped_server_records: transport_values[4],
                     background_server_records: transport_values[5],
                     corrupt_records: transport_values[6],

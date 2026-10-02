@@ -32,6 +32,8 @@ else {
         process.env.SUPERCOV_PROJECT_ROOT = root;
         process.env.SUPERCOV_EXECUTION_LOG_SHARD ??= `bootstrap-${process.pid}-${Date.now()}`;
         require("./runtime.mjs");
+        // Counted in the run's summary: coverage from here belongs to no test.
+        require("./launchSupervisor.mjs").recordExecution({ event: "guest-process", guestRoot: root });
     }
     catch {
         // Without its settings or its runtime nothing can be recorded here,

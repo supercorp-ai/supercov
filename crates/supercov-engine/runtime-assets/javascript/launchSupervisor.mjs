@@ -54,6 +54,10 @@ function executionLogPath(path, token = executionLog.token) {
         ? `${path.slice(0, -".jsonl".length)}${suffix}`
         : `${path}${suffix}`;
 }
+/** Append one event to the run's execution log, as the supervisor does. */
+export function recordExecution(value) {
+    record(value);
+}
 function record(value) {
     const configuredPath = process.env["SUPERCOV_EXECUTION_LOG"];
     if (!configuredPath)
@@ -433,6 +437,21 @@ export function wrapCapabilityObject(value, mapping) {
                         guestRoot: mapping.guestRoot,
                     });
                 }
+                else if (typeof property === "string" &&
+                    /env/i.test(property) &&
+                    args.length === 1 &&
+                    args[0] &&
+                    typeof args[0] === "object" &&
+                    environmentMap(args[0])) {
+                    // A builder that takes the command's environment by itself
+                    // (`withEnvironment(env)`) before it starts the command.
+                    callArguments = [injectRemoteLaunch(args[0], mapping)];
+                    record({
+                        event: "remote-launch",
+                        command: commandSummary([property]),
+                        guestRoot: mapping.guestRoot,
+                    });
+                }
                 return wrapResult(Reflect.apply(member, target, callArguments), mapping);
             };
         },
@@ -450,6 +469,7 @@ export function wrapImportedCapability(value) {
         return value;
     if (isClassConstructor(value)) {
         patchBuilder(value);
+        patchMountMethods(value);
         return value;
     }
     const object = value;
@@ -503,6 +523,49 @@ export function wrapImportedCapability(value) {
     });
     importedCapabilityProxies.set(object, proxy);
     return proxy;
+}
+const patchedMountMethods = new WeakSet();
+/**
+ * A builder made with `new` (`new GenericContainer(image)`) takes its mounts
+ * on an instance method, `withBindMounts([{ source, target }])`. The class
+ * itself must stay the exact value it is -- registries compare constructors
+ * -- so its mount methods are patched in place instead: called with a mount
+ * of the workspace, the builder they return is followed, and its later calls
+ * (`withEnvironment`, `start`) see the mapping. Called without one, they do
+ * what they always did.
+ */
+function patchMountMethods(builder) {
+    for (let prototype = builder.prototype; prototype && prototype !== Object.prototype; prototype = Object.getPrototypeOf(prototype)) {
+        for (const name of Object.getOwnPropertyNames(prototype)) {
+            if (!/mount/i.test(name))
+                continue;
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+            if (!descriptor ||
+                typeof descriptor.value !== "function" ||
+                !descriptor.writable ||
+                patchedMountMethods.has(descriptor.value))
+                continue;
+            const original = descriptor.value;
+            const patched = function supercovMountMethod(...args) {
+                const hostRoot = process.env["SUPERCOV_PROJECT_ROOT"];
+                const mapping = hostRoot
+                    ? args.map((argument) => discoverWorkspaceMapping(argument, hostRoot)).find(Boolean)
+                    : undefined;
+                const result = Reflect.apply(original, this, args);
+                if (!mapping)
+                    return result;
+                record({
+                    event: "workspace-capability",
+                    hostRoot: mapping.hostRoot,
+                    guestRoot: mapping.guestRoot,
+                    cacheIdentities: [],
+                });
+                return wrapResult(result, mapping);
+            };
+            patchedMountMethods.add(patched);
+            Object.defineProperty(prototype, name, { ...descriptor, value: patched });
+        }
+    }
 }
 function patchBuilder(builder) {
     if (patchedBuilders.has(builder))

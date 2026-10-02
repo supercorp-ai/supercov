@@ -2572,8 +2572,8 @@ fn affected_test_names_select_exactly_those_tests_in_their_runner() {
 
 /// Sandbox SDKs pass a command's environment in different places: an `env`
 /// option, an `envs` option (E2B), or a plain map after the command
-/// (Daytona). Each refuses unless Supercov already moved the project root to
-/// the guest's path.
+/// (Daytona) or a builder method (Testcontainers). Each refuses unless
+/// Supercov already moved the project root to the guest's path.
 const SANDBOX_SHAPES: &str = r#"import { spawnSync } from "node:child_process";
 import { mkdirSync, symlinkSync } from "node:fs";
 import { dirname } from "node:path";
@@ -2595,6 +2595,19 @@ export const sandbox = {
     };
   },
 };
+
+// A builder, as Testcontainers is: mounts, environment and command set one
+// call at a time, then started.
+export class Container {
+  withBindMounts(mounts) { this.mount = mounts[0]; return this; }
+  withEnvironment(environment) { this.environment = environment; return this; }
+  withCommand(argv) { this.argv = argv; return this; }
+  start() {
+    mkdirSync(dirname(this.mount.target), { recursive: true });
+    symlinkSync(this.mount.source, this.mount.target, "dir");
+    return go(this.mount.target, this.argv, this.environment);
+  }
+}
 "#;
 
 #[test]
@@ -2618,7 +2631,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sandbox } from "sandbox-shapes";
+import { sandbox, Container } from "sandbox-shapes";
 
 const machine = () =>
   sandbox.boot({ mounts: [{ source: process.cwd(), target: join(mkdtempSync(join(tmpdir(), "guest-")), "workspace") }] });
@@ -2627,13 +2640,27 @@ const argv = [process.execPath, "guest/describe.mjs"];
 test("an env option", () => assert.equal(machine().exec(argv, { env: { ...process.env } }), 0));
 test("an envs option", () => assert.equal(machine().run(argv, { envs: { ...process.env } }), 0));
 test("an environment map", () => assert.equal(machine().execute(argv, { ...process.env }), 0));
+test("a builder", () => {
+  const target = join(mkdtempSync(join(tmpdir(), "guest-")), "workspace");
+  const started = new Container()
+    .withBindMounts([{ source: process.cwd(), target }])
+    .withEnvironment({ ...process.env })
+    .withCommand(argv)
+    .start();
+  assert.equal(started, 0);
+});
 "#,
     );
     project.git(&["init", "-q"]);
     project.supercov(&["--", "node", "--test"]).succeeds();
     let summary = project.supercov(&["runs", "latest", "--json"]).json();
     assert_eq!(
-        summary["data"]["transport"]["remoteLaunches"], 3,
+        summary["data"]["transport"]["remoteLaunches"], 4,
+        "{summary}"
+    );
+    // Every guest had the settings, so none set itself up.
+    assert_eq!(
+        summary["data"]["transport"]["guestProcesses"], 0,
         "{summary}"
     );
     let line = project
@@ -2641,7 +2668,12 @@ test("an environment map", () => assert.equal(machine().execute(argv, { ...proce
         .succeeds();
     contains_all(
         &line,
-        &["an env option", "an envs option", "an environment map"],
+        &[
+            "an env option",
+            "an envs option",
+            "an environment map",
+            "a builder",
+        ],
     );
 }
 
@@ -2701,6 +2733,17 @@ test("the guest describes the cart", () => {
         .supercov(&["runs", "latest", "line", "src/cart.js:20"])
         .succeeds();
     contains_all(&line, &["Status\n  COVERED", "Background / unattributed"]);
+    // The run says so, and how many.
+    let summary = project.supercov(&["runs", "latest", "--json"]).json();
+    assert_eq!(
+        summary["data"]["transport"]["guestProcesses"], 1,
+        "{summary}"
+    );
+    let text = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(
+        text.contains("  Guests           1 process(es) ran the workspace in a container or VM without Supercov's settings"),
+        "{text}"
+    );
 }
 
 #[cfg(unix)]

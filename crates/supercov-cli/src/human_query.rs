@@ -660,6 +660,16 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 format!("  Attribution      {}", attribution_line(&data.test_attribution)),
                 "  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.".into(),
             ]);
+            if let Some(guests) = data
+                .transport
+                .as_ref()
+                .map(|transport| transport.guest_processes)
+                .filter(|guests| *guests > 0)
+            {
+                lines.push(format!(
+                    "  Guests           {guests} process(es) ran the workspace in a container or VM without Supercov's settings; their coverage counts for the run, credited to no test"
+                ));
+            }
             if let Some(workspace) = &data.workspace {
                 lines.push(format!("  Command outputs  {workspace}"));
             }
