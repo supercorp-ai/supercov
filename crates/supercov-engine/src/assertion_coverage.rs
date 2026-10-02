@@ -1040,8 +1040,7 @@ impl Population {
         } else {
             return None;
         };
-        let p = normalize(&base);
-        let s = p.to_string_lossy().to_string();
+        let s = normalize(&base);
         let candidates = [
             s.clone(),
             format!("{s}.ts"),
@@ -1783,18 +1782,21 @@ fn import_specifiers(text: &str) -> Vec<String> {
     out
 }
 
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
+/// The project-relative name of `path`, `..` and `.` resolved, with `/`
+/// between parts on every platform: a run names its files that way, and on
+/// Windows a joined path had `\\` and named a helper no run had.
+fn normalize(path: &Path) -> String {
+    let mut out = Vec::new();
     for c in path.components() {
         match c {
             std::path::Component::ParentDir => {
                 out.pop();
             }
             std::path::Component::CurDir => {}
-            other => out.push(other),
+            other => out.push(other.as_os_str().to_string_lossy().into_owned()),
         }
     }
-    out
+    out.join("/")
 }
 
 /// `compilerOptions.paths` of the project's tsconfig.json: `"~/*": ["./app/*"]`

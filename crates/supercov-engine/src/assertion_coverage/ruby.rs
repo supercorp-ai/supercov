@@ -480,7 +480,6 @@ pub(super) fn helpers(root: &Path, from: &str, text: &str) -> Vec<String> {
         };
         for base in bases {
             let path = super::normalize(&base.join(format!("{name}.rb")));
-            let path = path.to_string_lossy().replace('\\', "/");
             if root.join(&path).is_file() {
                 out.push(path);
                 break;
