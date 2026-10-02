@@ -43,7 +43,12 @@ times out, or the process crashes. The change depends on the statement:
 | a `when`, `switch`, `try`, `loop` or Kotlin `throw` a function ends on | every value it returns becomes that stand-in (skipping it would leave the function nothing to return) |
 | declaration or assignment with a value | the value becomes that stand-in, without being evaluated |
 | JSX expression | the value becomes undefined |
+| `return true`/`false`, or a declaration of `true`/`false` (JavaScript, TypeScript, Python) | the boolean becomes the other one: `false` becoming `undefined` changes nothing a truthiness check reads |
+| `return undefined` or `return None` | skipped, since returning the stand-in would be the same code |
+| `throw` in TypeScript | throws a bare `new Error()` instead: deleting a throw seldom compiles, because it usually guards the narrowing the next line relies on |
 | anything else | skipped: the statement does not run |
+
+A constructor's `super(...)` is not assessed: skipping it does not compile.
 
 The stand-in is `undefined` in JavaScript and TypeScript, `None` in Python and
 `nil` in Ruby. Go and the JVM languages replace a value after it is computed,
@@ -96,7 +101,7 @@ npx supercov runs latest assertions --test "closes the stream"  # what one test 
 ```text
 Run run_4f2a: 93.8% asserted (2731 of 2913 executed statements)
 
-Files, most statements not asserted first: a statement is not asserted when no test that runs it was judged to fail if it changed.
+Files, most statements not asserted first: a statement is not asserted when none of the tests asked about it was judged to fail if it changed. Up to 15 of the tests that run a statement are asked, so a test never asked can still catch it.
  NOT ASSERTED  ASSERTED  FILE
            41   388/429  src/adapters.ts
            ...
@@ -110,8 +115,13 @@ down, so an agent reads only as much as it needs. `runs latest file` and
 `runs latest line` show the same verdicts beside the coverage, and
 `npx supercov runs latest` and the HTML report show the same share.
 
-A statement that is not asserted is a place to add a check: a test that runs it
-exists, but nothing it asserts depends on what the statement does.
+A statement that is not asserted is a place to add a check: tests run it, but
+nothing the asked tests assert depends on what the statement does. Five of the
+tests that run a statement are asked first, and up to 15 when none of those
+catches it: tests whose file quotes text the statement writes (a log line, a
+message), then tests named like the source file, then one per test file and
+describe block. A statement many tests run can still be caught by one that was
+never asked; the statement view (`assertions <file>:<line>`) says how many were.
 
 ## Which tests check a change
 

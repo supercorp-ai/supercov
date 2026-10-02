@@ -75,7 +75,8 @@ test('async connection ownership, shared HTTP requests and teardown keep exact a
   assert.equal(setup.role, 'setup');
   assert.deepEqual(setup.server.filter(r => r.type === 'hit').map(r => r.id), ['shared-setup']);
   assert.equal(records.find(r => r.test === 'skipped declaration').status, 'skipped');
-  assert.equal(records.find(r => r.test === 'todo declaration').status, 'skipped');
+  // A todo test runs and is counted todo, as node:test counts it.
+  assert.equal(records.find(r => r.test === 'todo declaration').status, 'todo');
 });
 
 test('camel-case test paths have explicit provenance while ambiguous paths keep runner defaults', () => {

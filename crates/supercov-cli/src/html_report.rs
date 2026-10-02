@@ -23,9 +23,8 @@ use crate::{current_integrity_for_run, full_suite_hints, public_run_inventory};
 
 const REPORT_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_SNAPSHOTS: usize = 20;
-const DEFAULT_RUNS: usize = 10;
+const DEFAULT_RUNS: usize = 5;
 const MAX_RUNS: usize = 20;
-const MAX_REPORT_BYTES: usize = 24 * 1024 * 1024;
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const PAYLOAD_MARKER: &str = "SUPERCOV_REPORT_PAYLOAD";
@@ -46,7 +45,7 @@ struct ReportOptions {
 }
 
 fn help() -> &'static str {
-    "Usage: supercov report [run-id] [options]\n\nGenerates one private, self-contained interactive HTML file from stored runs.\nNo server or network connection is required.\n\nOptions:\n  --compare <run-id>   choose the initial comparison run\n  --runs <n>           include up to n runs (default: 10, maximum: 20)\n  --output <path>      write to this path, relative to the working directory
+    "Usage: supercov report [run-id] [options]\n\nGenerates one private, self-contained interactive HTML file from stored runs.\nNo server or network connection is required.\n\nOptions:\n  --compare <run-id>   choose the initial comparison run\n  --runs <n>           include up to n runs (default: 5, maximum: 20)\n  --output <path>      write to this path, relative to the working directory
                        (default: .supercov/reports/supercov-report.html in the project)\n  --no-open            do not open the report in the default browser\n  -h, --help           show this help\n"
 }
 
@@ -588,22 +587,14 @@ fn build_assertions(run: &StoredRun) -> Option<serde_json::Value> {
 /// marking those lines as if they were comments. Only the multi-line ones are
 /// carried; a single-line statement adds nothing the line record lacks.
 fn statement_spans(run: &StoredRun) -> serde_json::Value {
+    // Written at publication; a run published before that is analysed again.
+    if let Some(spans) = supercov_engine::run_store::read_statement_spans(run) {
+        return spans.into();
+    }
     let Ok(coverage) = supercov_engine::source_manifest::coverage(run) else {
         return serde_json::json!([]);
     };
-    coverage
-        .view
-        .points
-        .iter()
-        .filter(|p| p.meta.kind == supercov_engine::coverage_analysis::PointKind::Statement)
-        .filter_map(|p| {
-            let extra = p.meta.source.matches('\n').count();
-            (extra > 0).then(|| serde_json::json!({
-                "file": p.meta.file, "line": p.meta.line, "end": p.meta.line + extra, "covered": p.covered,
-            }))
-        })
-        .collect::<Vec<_>>()
-        .into()
+    supercov_engine::run_store::statement_spans(&coverage).into()
 }
 
 /// Source for assessed files, included only when it is still what was assessed.
@@ -1038,13 +1029,9 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
             securities,
             timeline,
         };
+        // No size cap: a report is a local file, and refusing one after
+        // preparing every run cost a large project three minutes.
         let html = render_html(&bundle)?;
-        if html.len() > MAX_REPORT_BYTES {
-            return Err(format!(
-                "report is {:.1} MB, above the 24 MB PR-attachment target; retry with --runs 1",
-                html.len() as f64 / 1024.0 / 1024.0
-            ));
-        }
         // The default lives inside the store, which carries its own
         // `.gitignore`, so a report cannot be committed by accident. An
         // explicit path is the user's and resolves against where they ran
@@ -1099,7 +1086,7 @@ mod tests {
 
     #[test]
     fn parses_portable_report_options() {
-        assert_eq!(parse_options(&[]).unwrap().runs, 10);
+        assert_eq!(parse_options(&[]).unwrap().runs, 5);
         let options = parse_options(&[
             "run_123".into(),
             "--compare".into(),

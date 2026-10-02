@@ -2104,6 +2104,61 @@ fn the_file_view_counts_and_labels_lines_as_the_summary_and_line_view_do() {
 }
 
 #[test]
+fn todo_tests_are_counted_as_node_test_counts_them() {
+    // supergateway's suite: node said 1,076 tests, 1,057 passed, 6 todo;
+    // Supercov said 1,071 total and 1,058 passed. A body-less todo was never
+    // recorded, a todo whose body failed was a failure, and tests in a
+    // describe.todo were passes.
+    let project = Project::cart("todo");
+    project.write(
+        "test/todo.test.js",
+        r#"import test, { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { total } from '../src/cart.js';
+test.todo('todo without a body');
+test.todo('todo with a passing body', () => assert.equal(total([]), 0));
+test.todo('todo with a failing body', () => assert.equal(1, 2));
+test('option todo, passing', { todo: true }, () => assert.equal(1, 1));
+test('option todo with a reason, failing', { todo: 'later' }, () => assert.equal(1, 2));
+test('context todo', (t) => { t.todo('not yet'); assert.equal(1, 1); });
+test.skip('skipped', () => assert.equal(1, 2));
+describe('suite', () => { it.todo('it todo'); });
+describe.todo('todo suite', () => { it('inside a todo suite', () => assert.equal(1, 1)); });
+"#,
+    );
+    project.commit("todo");
+    let native = std::process::Command::new("node")
+        .args(["--test", "--test-reporter", "spec"])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    let native = String::from_utf8_lossy(&native.stdout).into_owned();
+    let count = |label: &str| -> String {
+        native
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("\u{2139} {label} ")))
+            .unwrap_or_else(|| panic!("no {label} in\n{native}"))
+            .trim()
+            .to_owned()
+    };
+    project.measure(&[]);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    for (label, ours) in [
+        ("tests", "Total"),
+        ("pass", "Passed"),
+        ("skipped", "Skipped"),
+        ("todo", "Todo"),
+    ] {
+        let expected = count(label);
+        assert!(
+            summary.contains(&format!("  {ours:<11} {expected}\n")),
+            "{ours} should be node's {label} {expected}:\n{summary}"
+        );
+    }
+    assert!(!summary.contains("  Failed"), "{summary}");
+}
+
+#[test]
 fn printed_commands_name_the_way_supercov_was_started() {
     let project = Project::cart("launchers");
     let run = project.measure(&[]);

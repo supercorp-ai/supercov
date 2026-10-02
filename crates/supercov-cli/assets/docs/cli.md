@@ -349,13 +349,13 @@ up to ten recent runs. Selecting a run compares it with the previous saved run
 automatically.
 
 ```sh
-npx supercov report --runs 5
+npx supercov report --runs 10
 npx supercov report --output artifacts/supercov-report.html --no-open
 ```
 
-Use `--runs N` to include up to 20 stored runs. Reports are capped at 24 MB so
-they remain suitable for a normal pull-request attachment; use `--runs 1` if a
-large project exceeds that target. See [Portable HTML reports](reports.md) for
+A report includes the five newest runs; `--runs N` includes up to 20. A large
+project's report can pass GitHub's 25 MB attachment limit; `--runs 1` makes
+the smallest. See [Portable HTML reports](reports.md) for
 the privacy and source-integrity rules.
 
 ## Find a smaller test set

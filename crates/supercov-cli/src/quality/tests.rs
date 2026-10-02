@@ -2403,6 +2403,42 @@ fn security_snapshots_live_in_their_own_lane_and_read_back_as_security() {
 }
 
 #[test]
+fn a_file_view_reports_what_the_summary_flagged() {
+    // supergateway's src/index.ts: the file question said 0.31, the line tier
+    // confirmed line 322 at 0.64, and the summary flagged it. The file view
+    // said `no 0.31`, judged on the file question alone.
+    let temp = Temp::new();
+    let (id, _) = store::identity().unwrap();
+    let manifest = json!({
+        "created_at": "2026-10-02T00-00-00-000000Z", "instrument": "security",
+        "catalog_version": "security-v3", "model": "jev-1.13.0",
+        "counts": {"assessed": 1, "flagged": 1}, "by_check": {"sensitive_data_exposure": 1},
+    });
+    let files = json!({"files": [{"path": "src/index.ts", "status": "completed",
+        "present": [{"check": "sensitive_data_exposure", "value": 0.64, "tier": "line",
+                     "lines": [{"line": 322, "check": "sensitive_data_exposure", "value": 0.64,
+                                "text": "logger.error('Fatal error:', err)"}]}],
+        "checks": {"sensitive_data_exposure": 0.31, "injection_sink": 0.12}}]});
+    store::write(&temp.0, "security", &id, &manifest, &files).unwrap();
+    let file = query::file(&temp.0, "security", "src/index.ts", None).unwrap();
+    let text = query::render(&file);
+    assert!(
+        text.contains("  yes  0.64  sensitive_data_exposure\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("            line 322  0.64  logger.error('Fatal error:', err)\n"),
+        "{text}"
+    );
+    assert!(text.contains("   no  0.12  injection_sink\n"), "{text}");
+    let summary = query::render(&query::show(&temp.0, "security", None, 20).unwrap());
+    assert!(
+        summary.contains("0.64  sensitive_data_exposure"),
+        "{summary}"
+    );
+}
+
+#[test]
 fn an_assessment_takes_a_run_to_cross_with() {
     let options = parse_scan(vec!["--run".into(), "latest".into(), "src".into()]).unwrap();
     assert_eq!(options.run.as_deref(), Some("latest"));

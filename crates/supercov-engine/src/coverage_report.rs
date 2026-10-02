@@ -150,7 +150,7 @@ pub struct RuntimeSnapshot {
     pub phase_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionScope {
     pub version: usize,
@@ -2729,15 +2729,40 @@ pub fn analyze_coverage_archive(
             && entry.path.ends_with(".jsonl")
     }));
     let scoped_records = scoped.records;
+    // Each server record joins the first result with its scope, once. A
+    // linear search per record and a linear duplicate check per result made
+    // this quadratic: supergateway's e2e servers spent most of a 20 s report
+    // preparation, and of publication, comparing scopes.
+    let mut by_scope = std::collections::HashMap::<&ExecutionScope, usize>::new();
+    for (index, raw) in raw_results.iter().enumerate() {
+        if let Some(scope) = &raw.scope {
+            by_scope.entry(scope).or_insert(index);
+        }
+    }
+    let by_scope: std::collections::HashMap<ExecutionScope, usize> = by_scope
+        .into_iter()
+        .map(|(scope, index)| (scope.clone(), index))
+        .collect();
+    let mut seen = std::collections::HashMap::<usize, std::collections::HashSet<Vec<u8>>>::new();
     for record in &scoped_records {
         let Some(scope) = &record.scope else { continue };
-        let Some(raw) = raw_results
-            .iter_mut()
-            .find(|raw| raw.scope.as_ref() == Some(scope))
-        else {
+        let Some(&index) = by_scope.get(scope) else {
             continue;
         };
-        if !raw.server.contains(record) {
+        let raw = &mut raw_results[index];
+        let known = seen.entry(index).or_insert_with(|| {
+            raw.server
+                .iter()
+                .filter_map(|existing| serde_json::to_vec(existing).ok())
+                .collect()
+        });
+        let Ok(key) = serde_json::to_vec(record) else {
+            if !raw.server.contains(record) {
+                raw.server.push(record.clone());
+            }
+            continue;
+        };
+        if known.insert(key) {
             raw.server.push(record.clone());
         }
     }

@@ -328,7 +328,10 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         return ExitCode::SUCCESS;
     };
     if !DOC_TOPICS.contains(&topic.as_str()) {
-        eprintln!("[supercov] unknown guide {topic:?}; run `supercov docs` to list topics");
+        eprintln!(
+            "[supercov] unknown guide {topic:?}; run `{} docs` to list topics",
+            launcher_command()
+        );
         return ExitCode::from(2);
     }
     let embedded = match topic.as_str() {

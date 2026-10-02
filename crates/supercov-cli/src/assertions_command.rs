@@ -473,9 +473,12 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     if options.changed {
         // The checkout has changed since the run: its code is the snapshot
         // the run's assessment kept.
-        let snapshot = coverage::load_snapshot(&run.directory.join(SNAPSHOT_FILE)).ok_or(
-            "this run's sources were not kept; assess the run first (`supercov runs <run> assertions assess`) before changing its code",
-        )?;
+        let snapshot = coverage::load_snapshot(&run.directory.join(SNAPSHOT_FILE)).ok_or_else(|| {
+            format!(
+                "this run's sources were not kept; assess the run first (`{} runs <run> assertions assess`) before changing its code",
+                crate::launcher_command()
+            )
+        })?;
         let stored = maps::load_manifest(run)?;
         let Some(language) = coverage::Language::from_manifest(&stored.manifest.language) else {
             return Err(format!(
@@ -529,10 +532,29 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
             })
             .sum();
         let undecided = (0..n).filter(|&s| pass.undecided(s)).count();
+        // The most the pass can ask: every undecided statement asked of as
+        // many tests as it widens to, grouped by test as the rounds group
+        // them. A fixed "1.5 to 3 times the first round" was 4x on
+        // supergateway, where most statements need more than their first tests.
+        let mut per_test = BTreeMap::<usize, usize>::new();
+        for s in (0..n).filter(|&s| pass.undecided(s)) {
+            for t in population.order(s, MORE_TESTS) {
+                *per_test.entry(t).or_default() += 1;
+            }
+        }
+        let most: usize = per_test.values().map(|c| c.div_ceil(MAX_QUESTIONS)).sum();
+        let most = most.max(plan.len());
+        let most_tokens = if plan.is_empty() {
+            0
+        } else {
+            bytes * most / plan.len()
+        };
+        let cost = |tokens: usize| tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS;
         return Ok(json!({
             "run": run.id, "dryRun": true, "statements": n, "answeredFromCache": n - undecided,
-            "firstRound": {"requests": plan.len(), "inputTokens": bytes, "costUsd": bytes as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS},
-            "note": "Statements every first test says is still passing are asked of more tests; on measured projects the whole pass cost 1.5 to 3 times the first round.",
+            "firstRound": {"requests": plan.len(), "inputTokens": bytes, "costUsd": cost(bytes)},
+            "atMost": {"requests": most, "inputTokens": most_tokens, "costUsd": cost(most_tokens)},
+            "note": "Statements their first tests are not judged to catch are asked of more tests, so the pass costs between the first round and the most.",
         }));
     }
     let endpoint = quality::endpoint()?;
@@ -832,6 +854,8 @@ fn change_name_js(change: Change) -> &'static str {
         Change::ValueUndefined => "value becomes undefined",
         Change::ExpressionUndefined => "value becomes undefined",
         Change::Skip => "skipped",
+        Change::Flip => "boolean flipped",
+        Change::BareError => "throws a bare Error",
     }
 }
 
@@ -1267,12 +1291,13 @@ fn render(data: &Value) -> String {
             )
         };
         return format!(
-            "Run {}: {} changed statement(s) {asked}: {} requests, ${:.4}; {} answers reused.\n`supercov runs {} tests affected` now says which affected tests catch the change.\n",
+            "Run {}: {} changed statement(s) {asked}: {}, ${:.4}; {} reused.\n`{} runs {} tests affected` now says which affected tests catch the change.\n",
             data["run"].as_str().unwrap_or(""),
             s["changed"],
-            s["requests"],
+            counted(&s["requests"], "request", "requests"),
             s["costUsd"].as_f64().unwrap_or(0.0),
-            s["answersReused"],
+            counted(&s["answersReused"], "answer", "answers"),
+            crate::launcher_command(),
             data["run"].as_str().unwrap_or(""),
         );
     }
@@ -1309,13 +1334,16 @@ fn render(data: &Value) -> String {
     if data["dryRun"] == true {
         let f = &data["firstRound"];
         return format!(
-            "Run {}: {} executed statements, {} answered from the cache.\nFirst round: {} requests, about {} input tokens, ${:.4}.\n{}\n",
+            "Run {}: {} executed statements, {} answered from the cache.\nFirst round: {} requests, about {} input tokens, ${:.4}.\nAt most: {} requests, about {} input tokens, ${:.4}.\n{}\n",
             data["run"].as_str().unwrap_or(""),
             data["statements"],
             data["answeredFromCache"],
             f["requests"],
             f["inputTokens"],
             f["costUsd"].as_f64().unwrap_or(0.0),
+            data["atMost"]["requests"],
+            data["atMost"]["inputTokens"],
+            data["atMost"]["costUsd"].as_f64().unwrap_or(0.0),
             data["note"].as_str().unwrap_or("")
         );
     }
@@ -1329,11 +1357,20 @@ fn render(data: &Value) -> String {
     if data["view"] == "files" {
         let s = &data["summary"];
         out.push_str(&format!(
-            "\nAssessed by Jev: {} requests, {} input tokens, ${:.4}; {} answers reused from .supercov/assertions/.\n",
-            s["requests"], s["inputTokens"], s["costUsd"].as_f64().unwrap_or(0.0), s["answersReused"]
+            "\nAssessed by Jev: {}, {} input tokens, ${:.4}; {} reused from .supercov/assertions/.\n",
+            counted(&s["requests"], "request", "requests"),
+            s["inputTokens"],
+            s["costUsd"].as_f64().unwrap_or(0.0),
+            counted(&s["answersReused"], "answer", "answers")
         ));
     }
     out
+}
+
+/// `1 answer`, `2 answers`: a count with its noun.
+fn counted(value: &Value, one: &str, many: &str) -> String {
+    let n = value.as_u64().unwrap_or(0);
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 fn share(value: &Value) -> String {
@@ -1374,7 +1411,7 @@ fn render_files(run: &str, data: &Value) -> String {
         return out;
     }
     out.push_str(
-        "\nFiles, most statements not asserted first: a statement is not asserted when no test that runs it was judged to fail if it changed.\n NOT ASSERTED  ASSERTED  FILE\n",
+        "\nFiles, most statements not asserted first: a statement is not asserted when none of the tests asked about it was judged to fail if it changed. Up to {MORE_TESTS} of the tests that run a statement are asked, so a test never asked can still catch it.\n NOT ASSERTED  ASSERTED  FILE\n",
     );
     for file in &files {
         out.push_str(&format!(
@@ -1417,7 +1454,7 @@ fn render_file(run: &str, data: &Value) -> String {
         out.push_str("Every statement this file ran is asserted.\n");
         return out;
     }
-    out.push_str("\nNot asserted: no test that runs them was judged to fail if they changed.\n  LINE  STATEMENT  (change)  closest test\n");
+    out.push_str(&format!("\nNot asserted: none of the tests asked was judged to fail if they changed. Up to {MORE_TESTS} of the tests that run a statement are asked; one never asked can still catch it.\n  LINE  STATEMENT  (change)  tests asked  closest test\n"));
     for st in &not {
         let closest = st["test"]["name"]
             .as_str()
@@ -1431,8 +1468,12 @@ fn render_file(run: &str, data: &Value) -> String {
                 )
             })
             .unwrap_or_default();
+        let asked = match (st["testsAsked"].as_u64(), st["testsRunningIt"].as_u64()) {
+            (Some(asked), Some(ran)) => format!("  {asked} of {ran}"),
+            _ => String::new(),
+        };
         out.push_str(&format!(
-            " {:>5}  {}  ({}){closest}\n",
+            " {:>5}  {}  ({}){asked}{closest}\n",
             st["line"].as_u64().unwrap_or(0),
             st["text"].as_str().unwrap_or(""),
             st["change"].as_str().unwrap_or("")
@@ -1466,7 +1507,7 @@ fn render_statement(run: &str, data: &Value) -> String {
     );
     for st in data["statements"].as_array().cloned().unwrap_or_default() {
         out.push_str(&format!(
-            "\n  {}\n  Change: {}{}\n  {}: {} test(s) run it, {} asked\n",
+            "\n  {}\n  Change: {}{}\n  {}: {} test(s) run it, {} asked{}\n",
             st["text"].as_str().unwrap_or(""),
             st["change"].as_str().unwrap_or(""),
             st["replacement"]
@@ -1479,7 +1520,13 @@ fn render_statement(run: &str, data: &Value) -> String {
                 "Not asserted"
             },
             st["testsRunningIt"],
-            st["testsAsked"]
+            st["testsAsked"],
+            // Not asserted by the asked tests is not the same as by every test.
+            if st["asserted"] != true && st["testsAsked"].as_u64() < st["testsRunningIt"].as_u64() {
+                "; the tests not asked were not judged"
+            } else {
+                ""
+            }
         ));
         for answer in st["answers"].as_array().cloned().unwrap_or_default() {
             out.push_str(&format!(

@@ -437,6 +437,9 @@ pub struct IndexedOutcomeCounts {
     pub interrupted: usize,
     pub unknown: usize,
     pub unstarted: usize,
+    /// node:test's todo tests, which the runner counts on their own: neither
+    /// passed nor failed, whatever their body did.
+    pub todo: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1561,6 +1564,7 @@ fn test_summary_record(
         "interrupted" => 5,
         "unknown" => 6,
         "unstarted" => 7,
+        "todo" => 8,
         _ => return Err(CoverageIndexError::InvalidRecord("test outcome")),
     };
     put_u32(&mut record, 4, strings.intern(&test.id)?);
@@ -2931,15 +2935,31 @@ impl<'a> CoverageIndex<'a> {
                 files_with_coverage_gaps: number(328)?,
                 tests: number(336)?,
                 setups: number(344)?,
-                test_outcomes: IndexedOutcomeCounts {
-                    passed: number(352)?,
-                    failed: number(360)?,
-                    flaky: number(368)?,
-                    skipped: number(376)?,
-                    timed_out: number(384)?,
-                    interrupted: number(392)?,
-                    unknown: number(400)?,
-                    unstarted: number(520)?,
+                test_outcomes: {
+                    let mut outcomes = IndexedOutcomeCounts {
+                        passed: number(352)?,
+                        failed: number(360)?,
+                        flaky: number(368)?,
+                        skipped: number(376)?,
+                        timed_out: number(384)?,
+                        interrupted: number(392)?,
+                        unknown: number(400)?,
+                        unstarted: number(520)?,
+                        todo: 0,
+                    };
+                    // The projection record has no slot left, so todo is the
+                    // tests no other outcome counts; zero in older indexes.
+                    outcomes.todo = number(336)?.saturating_sub(
+                        outcomes.passed
+                            + outcomes.failed
+                            + outcomes.flaky
+                            + outcomes.skipped
+                            + outcomes.timed_out
+                            + outcomes.interrupted
+                            + outcomes.unknown
+                            + outcomes.unstarted,
+                    );
+                    outcomes
                 },
                 source_scope,
             });
@@ -3245,6 +3265,7 @@ impl<'a> CoverageIndex<'a> {
                     5 => "interrupted",
                     6 => "unknown",
                     7 => "unstarted",
+                    8 => "todo",
                     _ => return Err(CoverageIndexError::InvalidRecord("test outcome")),
                 }
                 .into(),

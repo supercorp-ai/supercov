@@ -57,6 +57,7 @@ fn outcome_lines(outcomes: &IndexedOutcomeCounts) -> Vec<String> {
         ("Failed", outcomes.failed),
         ("Flaky", outcomes.flaky),
         ("Skipped", outcomes.skipped),
+        ("Todo", outcomes.todo),
         ("Timed out", outcomes.timed_out),
         ("Interrupted", outcomes.interrupted),
         ("Unknown", outcomes.unknown),
