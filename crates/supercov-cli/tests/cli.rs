@@ -2534,3 +2534,38 @@ fn cargo_configuration_planted_in_the_rust_workspace_is_refused() {
     std::fs::remove_dir(container.join(".cargo")).unwrap();
     project.supercov(&["--", "cargo", "test"]).succeeds();
 }
+
+#[test]
+fn affected_test_names_select_exactly_those_tests_in_their_runner() {
+    let project = Project::empty("runner-names");
+    project.write("package.json", r#"{ "name": "names", "type": "module" }"#);
+    project.write(
+        "src/fee.js",
+        "export function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\n\nexport function tax(sum) {\n  return sum * 2;\n}\n",
+    );
+    // One name in two describe blocks; only one of them runs fee.
+    project.write(
+        "test/fee.test.js",
+        "import { describe, test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { fee, tax } from \"../src/fee.js\";\n\ndescribe(\"small\", () => {\n  test(\"charges\", () => assert.equal(fee(10), 5));\n});\ndescribe(\"large\", () => {\n  test(\"charges\", () => assert.equal(tax(10), 20));\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("names");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let tests = project
+        .supercov(&["runs", "latest", "test", "charges"])
+        .succeeds();
+    contains_all(&tests, &["small > charges [", "large > charges ["]);
+    project.edit("src/fee.js", "? 0 : 5", "? 0 : 6");
+    let names = project
+        .supercov(&["runs", "latest", "tests", "affected", "--names"])
+        .succeeds();
+    assert_eq!(names.trim(), "small charges");
+    // node:test matches a test by its suites and its name joined by spaces.
+    let selected = std::process::Command::new("node")
+        .args(["--test", "--test-name-pattern", names.trim()])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    let output = String::from_utf8_lossy(&selected.stdout);
+    assert!(output.contains("ℹ tests 1\n"), "{output}");
+}

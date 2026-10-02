@@ -1192,7 +1192,7 @@ fn a_change_more_tests_ran_than_are_asked_says_so() {
         changed.contains("asked of the tests that ran them, 40 at most each (1 ran under more)"),
         "{changed}"
     );
-    // Forty of the 45 are asked, every test file among them.
+    // Forty of the 45 are asked, every test file and describe block among them.
     let asked = seen.lock().unwrap()[before..]
         .iter()
         .filter_map(|(_, _, request)| request["state"]["test"]["file"].as_str().map(str::to_owned))
@@ -1211,6 +1211,21 @@ fn a_change_more_tests_ran_than_are_asked_says_so() {
             asked.iter().any(|asked| asked == file),
             "{file} not asked: {asked:?}"
         );
+    }
+    let names = seen.lock().unwrap()[before..]
+        .iter()
+        .filter_map(|(_, _, request)| request["state"]["test"]["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    // node:test names carry their describe block, so each block of each file
+    // has a test among the forty.
+    for file in ["fee", "checkout", "refund"] {
+        for group in ["small", "large", "edge"] {
+            let prefix = format!("{group} > {file} {group} ");
+            assert!(
+                names.iter().any(|name| name.starts_with(&prefix)),
+                "no {prefix:?} test asked: {names:?}"
+            );
+        }
     }
 }
 

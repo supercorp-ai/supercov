@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as native from "node:test";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
@@ -86,6 +87,43 @@ function restoreUserError(error, depth = 0) {
     }
     return error;
 }
+// The describe/suite blocks a test is registered in, outermost first. A test
+// is named by them as Vitest, Jest and Playwright name theirs, so two tests
+// with one name in different suites stay apart, and `tests affected --names`
+// gives what --test-name-pattern matches. A store rather than a stack: an
+// async suite registers tests after it awaits.
+const suitePath = new AsyncLocalStorage();
+function suiteName(args, callback) {
+    return typeof args[0] === "string" ? args[0] : callback.name || "<anonymous>";
+}
+function wrappedSuite(original) {
+    const wrapped = function supercovNodeSuite(...args) {
+        const index = callbackIndex(args);
+        if (index < 0)
+            return Reflect.apply(original, this, args);
+        const callback = args[index];
+        const path = [...(suitePath.getStore() ?? []), suiteName(args, callback)];
+        const next = [...args];
+        next[index] = function supercovNodeSuiteCallback(...callbackArgs) {
+            return suitePath.run(path, () => Reflect.apply(callback, this, callbackArgs));
+        };
+        // node:test reports a suite at its direct caller, as it does a test.
+        const registration = registrationAt(callerLocation(supercovNodeSuite));
+        if (registration)
+            return registration(this === undefined ? original : original.bind(this), next);
+        return Reflect.apply(original, this, next);
+    };
+    for (const property of ["skip", "todo", "only"]) {
+        const member = original[property];
+        if (typeof member === "function")
+            Object.defineProperty(wrapped, property, {
+                configurable: true,
+                enumerable: true,
+                value: wrappedSuite(member),
+            });
+    }
+    return wrapped;
+}
 const registrationCounts = new Map();
 function wrappedRegistration(original, parentTestId, forcedStatus) {
     const wrapped = function supercovNodeTest(...args) {
@@ -96,7 +134,9 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
         const location = callerLocation(supercovNodeTest);
         const identity = {
             runner: "node:test",
-            name: testName(args, callback),
+            name: parentTestId
+                ? testName(args, callback)
+                : [...(suitePath.getStore() ?? []), testName(args, callback)].join(" > "),
             ...(parentTestId ? { parentTestId } : {}),
             ...location,
             // Source-map producers disagree about whether a call expression maps to
@@ -260,8 +300,8 @@ function restoringHook(original, scope, hookName = "hook") {
 }
 export const test = wrappedRegistration(native.test);
 export const it = wrappedRegistration(native.it);
-export const suite = native.suite;
-export const describe = native.describe;
+export const suite = wrappedSuite(native.suite);
+export const describe = wrappedSuite(native.describe);
 export const before = restoringHook(native.before, undefined, "before");
 export const after = restoringHook(native.after, undefined, "after");
 export const beforeEach = restoringHook(native.beforeEach, undefined, "beforeEach");
@@ -270,4 +310,18 @@ export const mock = native.mock;
 export const snapshot = native.snapshot;
 export const run = native.run;
 export const assert = native.assert;
+// node:test hangs its whole API off `test` (test.mock, test.describe,
+// test.expectFailure, test.getTestContext...). What the adapter does not wrap
+// stays the runtime's own.
+const adapted = { it, describe, suite, before, after, beforeEach, afterEach, test };
+for (const property of Object.keys(native.test)) {
+    if (property in test && !(property in adapted))
+        continue;
+    Object.defineProperty(test, property, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: adapted[property] ?? native.test[property],
+    });
+}
 export default test;

@@ -166,7 +166,14 @@ pub fn command(args: &[String]) -> ExitCode {
                             .as_str()
                             .is_some_and(|v| dropped.contains(&v))
                     })
-                    .filter_map(|t| t[key].as_str())
+                    .filter_map(|t| {
+                        let value = t[key].as_str()?;
+                        Some(if names {
+                            runner_filter_name(t["file"].as_str().unwrap_or(""), value)
+                        } else {
+                            value.to_owned()
+                        })
+                    })
                     .collect::<Vec<_>>();
                 // Ranked when there is an assessment (most likely to catch
                 // the change first), sorted otherwise.
@@ -174,7 +181,7 @@ pub fn command(args: &[String]) -> ExitCode {
                     lines.sort_unstable();
                 }
                 let mut seen = BTreeSet::new();
-                lines.retain(|line| seen.insert(*line));
+                lines.retain(|line| seen.insert(line.clone()));
                 for line in lines {
                     println!("{line}");
                 }
@@ -591,6 +598,21 @@ fn strip_changed_code(data: &mut Value) {
                 entry.remove("changedCode");
             }
         }
+    }
+}
+
+/// A test's name as its runner's name filter matches it. Vitest, Playwright
+/// and node:test are recorded as `suite > test`, and `vitest -t`, `--grep` and
+/// `--test-name-pattern` match the suites and the test joined by spaces:
+/// `small > adds` printed as it is selects nothing.
+fn runner_filter_name(file: &str, name: &str) -> String {
+    let javascript = [".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"]
+        .iter()
+        .any(|extension| file.ends_with(extension));
+    if javascript {
+        name.replace(" > ", " ")
+    } else {
+        name.to_owned()
     }
 }
 

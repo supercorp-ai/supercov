@@ -383,7 +383,10 @@ neither do comments, blank lines or trailing whitespace. A test that did not
 pass in the run is listed regardless.
 
 `--names` prints one affected test name per line and `--files` one test file
-per line, for a runner's filter. A dependency, lockfile, configuration or
+per line, for a runner's filter. A Vitest, Playwright or node:test test inside
+`describe` blocks is printed as the blocks and the test joined by spaces
+(`small charges`), which is what `vitest -t`, `--grep` and
+`--test-name-pattern` match. A dependency, lockfile, configuration or
 toolchain change affects every test and is reported as such. A source file
 added since the run is outside every test's record; the working-tree check
 says so, and the suite should run in full.
