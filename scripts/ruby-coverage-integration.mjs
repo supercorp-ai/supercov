@@ -144,6 +144,20 @@ try {
   assert.match(rspec.stderr, /interpreter process\(es\) on Ruby (3\.[3-9]|[4-9])/);
   assertTotals(query(['runs', 'latest'], environment));
 
+  // A Ruby script with no test runner is the command's choice, not a
+  // Supercov bug: the run says which runners it measures, and keeps no
+  // evidence to send.
+  const plain = resolve(temporary, 'plain');
+  mkdirSync(resolve(plain, 'test'), { recursive: true });
+  writeFileSync(resolve(plain, 'Gemfile'), 'source "https://rubygems.org"\n');
+  writeFileSync(resolve(plain, 'double.rb'), 'def double(x)\n  x * 2\nend\n');
+  writeFileSync(resolve(plain, 'test/check.rb'), 'require_relative "../double"\nraise "bad" unless double(2) == 4\n');
+  run('git', ['init', '-q', '.'], { cwd: plain });
+  const unrun = supercov(['--', 'ruby', 'test/check.rb'], environment, plain);
+  assert.notEqual(unrun.status, 0, unrun.stderr);
+  assert.match(unrun.stderr, /produced no test outcomes; Supercov measures Ruby through RSpec, Minitest/);
+  assert.doesNotMatch(unrun.stderr, /Supercov bug/);
+
   if (probes) {
     const compound = query(['runs', 'latest', 'decision', 'lib/shapes.rb:8'], environment);
     assert.deepEqual(compound.decisions[0].meta.conditions, ['a', 'b', 'c']);

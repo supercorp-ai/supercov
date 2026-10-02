@@ -433,6 +433,18 @@ try {
     oracleEnvironment,
   );
   assertOracleAgreement(oracleProject, oracleEnvironment);
+
+  // A Python script with no test runner is the command's choice, not a
+  // Supercov bug: the run says so and keeps no evidence to send.
+  const runnerless = resolve(temporary, 'plain');
+  mkdirSync(resolve(runnerless, 'tests'), { recursive: true });
+  writeFileSync(resolve(runnerless, 'pyproject.toml'), '[project]\nname = "plain"\nversion = "0"\n');
+  writeFileSync(resolve(runnerless, 'double.py'), 'def double(x):\n    return x * 2\n');
+  writeFileSync(resolve(runnerless, 'tests/check.py'), 'import sys\nsys.path.insert(0, ".")\nfrom double import double\nassert double(2) == 4\n');
+  run('git', ['init', '-q', '.'], { cwd: runnerless });
+  const unrun = supercov(runnerless, ['--', 'python', 'tests/check.py'], environmentFor(runnerless, venv));
+  assert.notEqual(unrun.status, 0, unrun.stderr);
+  assert.doesNotMatch(unrun.stderr, /Supercov bug/, unrun.stderr);
   // Each decision outcome is one branch: the export's total is its own
   // records, and the summary's, not the outcomes counted twice.
   successfulSupercov(oracleProject, ['runs', 'report', '--format', 'lcov', '--output', 'oracle.lcov'], oracleEnvironment);

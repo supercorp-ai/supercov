@@ -33,6 +33,7 @@
 
 **Fixed**
 
+- A Ruby or Python command that runs no test framework, or an interpreter older than Supercov measures (Ruby before 3.3), says only that, with exit status 1. It also said "this is a Supercov bug" and copied the run's evidence into `.supercov/failed-evidence/` to send, though the message above it had already said what to change.
 - On Windows, `assertions assess` shows Jev the helper a test imports by a relative path or a tsconfig alias. The helper was named with `\` and matched no file of the run, so Jev judged the test without it.
 - On Windows, a TypeScript project with a `tsconfig.json` runs: the run's fingerprint called the tsconfig outside the project, because it was named by its `\\?\C:\...` form and the project by its plain one, and the run stopped before any test.
 - On Windows, a run waits for another run in the same project instead of taking its lock over. Whether the lock's owner was still running was answered yes only for the asking process itself, so every other live run's lock read as left behind.

@@ -328,6 +328,17 @@ pub fn run_direct_ruby(
                     execution.exit_code
                 ));
             }
+            // The interpreter or the runner the command used is not one
+            // Supercov measures: the message says what to change, and the
+            // evidence has nothing in it to diagnose.
+            Err(
+                error @ (crate::ruby_evidence::RubyEvidenceError::UnsupportedRuby(_)
+                | crate::ruby_evidence::RubyEvidenceError::NoTests
+                | crate::ruby_evidence::RubyEvidenceError::NoInterpreter),
+            ) => {
+                measured.set(false);
+                return Err(error.to_string());
+            }
             result => result.map_err(|error| error.to_string())?,
         };
         validate_frontend_report_request(&run.declaration, &run.request)

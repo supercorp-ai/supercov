@@ -410,6 +410,17 @@ pub fn run_direct_python(
                     execution.exit_code
                 ));
             }
+            // The interpreter or the runner the command used is not one
+            // Supercov measures: the message says what to change, and the
+            // evidence has nothing in it to diagnose.
+            Err(
+                error @ (crate::python_evidence::PythonEvidenceError::UnsupportedPython(_)
+                | crate::python_evidence::PythonEvidenceError::NoTests
+                | crate::python_evidence::PythonEvidenceError::NoInterpreter),
+            ) => {
+                measured.set(false);
+                return Err(error.to_string());
+            }
             result => result.map_err(|error| error.to_string())?,
         };
         validate_frontend_report_request(&run.declaration, &run.request)
