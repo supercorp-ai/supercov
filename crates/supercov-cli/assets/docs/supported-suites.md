@@ -52,7 +52,8 @@ Supercov reports the level it actually observed. It does not guess.
 | Vitest | Exact per test, with setup execution kept separate; Browser Mode included |
 | Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept |
 | `node:test` | Exact per test |
-| AVA and Mocha | Aggregate structural coverage |
+| Mocha | Exact per test and retry, `--parallel` included, with setup execution kept separate |
+| AVA | Aggregate structural coverage |
 | Other Node-based runners | Aggregate when their processes remain visible to Supercov |
 | Browser component runners without an adapter | Aggregate structural coverage |
 

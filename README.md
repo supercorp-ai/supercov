@@ -306,7 +306,8 @@ Supercov uses exact per-test attribution where an adapter is available. For othe
 | Vitest | Exact per test, with setup execution kept separate |
 | Jest | Exact per test, including parameterized tests |
 | `node:test` | Exact per test |
-| AVA and Mocha | Aggregate structural coverage |
+| Mocha | Exact per test and retry, `--parallel` included |
+| AVA | Aggregate structural coverage |
 | Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity |
 | rustdoc doctests | Exact per doctest |
 | cargo-nextest | Exact test, attempt, retry, and binary identity |

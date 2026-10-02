@@ -440,6 +440,16 @@ if ((isJestEntrypoint || process.env.JEST_WORKER_ID) && process.env.SUPERCOV_EVI
     globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
     process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
 }
+// The Mocha CLI, the child it forks for Node options, and each --parallel
+// worker run tests through Mocha's Runner, which the adapter patches before
+// Mocha loads it.
+const isMochaEntrypoint = /\/node_modules\/(?:\.bin\/_?mocha|mocha\/(?:bin\/_?mocha(?:\.js)?|lib\/cli\/cli\.js|lib\/nodejs\/worker\.c?js))$/.test(entrypoint);
+if (isMochaEntrypoint && process.env.SUPERCOV_EVIDENCE_DIR) {
+    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
+    process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    const { adaptMocha } = await import(new URL("./mocha.mjs", import.meta.url).href);
+    await adaptMocha(entrypoint);
+}
 if (isJestEntrypoint && process.env.SUPERCOV_EVIDENCE_DIR) {
     // Jest reads one configuration. Ours (jest.config.mjs) reads the user's
     // the way Jest would and adds the adapter and reporter; an explicit

@@ -2919,6 +2919,85 @@ fn jest_tests_are_named_by_their_describe_blocks_and_selected_by_jest() {
 
 #[cfg(unix)]
 #[test]
+fn mocha_tests_are_attributed_one_by_one_and_selected_by_grep() {
+    let project = Project::empty("mocha-tests");
+    project.write(
+        "package.json",
+        r#"{ "name": "mocha-tests", "type": "module", "scripts": { "test": "mocha" } }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write(
+        "src/cart.js",
+        "export function total(items) {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\nexport function discount(sum, code) {\n  if (code === \"HALF\") {\n    return sum / 2;\n  }\n  return sum;\n}\nexport function prepare() {\n  return 1;\n}\nlet calls = 0;\nexport function flaky() {\n  calls += 1;\n  return calls > 1;\n}\n",
+    );
+    project.write(
+        "test/cart.test.js",
+        "import assert from \"node:assert/strict\";\nimport { total, discount, prepare, flaky } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  before(() => prepare());\n  describe(\"total\", () => {\n    it(\"adds prices\", () => assert.equal(total([{ price: 2 }, { price: 3 }]), 5));\n  });\n  describe(\"discount\", () => {\n    it(\"halves with HALF\", () => assert.equal(discount(10, \"HALF\"), 5));\n    it.skip(\"keeps the sum otherwise\", () => assert.equal(discount(10, \"X\"), 10));\n  });\n  it(\"passes on its second try\", function () {\n    this.retries(1);\n    assert.ok(flaky());\n  });\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("mocha");
+    // Serially and with --parallel, where each worker runs its own files.
+    for command in [
+        &["--", "npx", "mocha"][..],
+        &["--", "npx", "mocha", "--parallel"],
+    ] {
+        project.supercov(command).succeeds();
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        contains_all(
+            &summary,
+            &[
+                "Attribution      Exact for 4 test(s)",
+                "Passed      2",
+                "Flaky       1",
+                "Skipped     1",
+            ],
+        );
+    }
+    // The before hook ran as setup, not inside the first test.
+    let hook = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:11"])
+        .succeeds();
+    assert!(!hook.contains("adds prices ["), "{hook}");
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:6"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "cart > discount > halves with HALF [",
+            "unit/mocha",
+            "node:assert/strict.equal (passed)",
+        ],
+    );
+    assert!(!line.contains("adds prices ["), "{line}");
+    project.edit("src/cart.js", "return sum / 2;", "return sum * 0.5;");
+    let names = project
+        .supercov(&["runs", "latest", "tests", "affected", "--names"])
+        .succeeds();
+    assert!(
+        names
+            .lines()
+            .any(|name| name == "cart discount halves with HALF"),
+        "{names}"
+    );
+    let selected = std::process::Command::new(project.root.join("node_modules/.bin/mocha"))
+        .args(["--grep", "cart discount halves with HALF"])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    let output = String::from_utf8_lossy(&selected.stdout);
+    assert!(output.contains("1 passing"), "{output}");
+    assert!(!output.contains("pending"), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
 fn typescript_tests_compiled_into_another_directory_run_and_are_measured() {
     let project = Project::empty("tsc-outdir");
     project.write(

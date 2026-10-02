@@ -57,6 +57,7 @@ const mappings = [
     "bootstrap.cjs",
     "capability.mjs",
     "launchSupervisor.mjs",
+    "mocha.mjs",
     "nodeAssert.mjs",
     "nodeAssertAdapter.mjs",
     "nodeAssertStrict.mjs",

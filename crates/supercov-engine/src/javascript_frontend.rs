@@ -44,6 +44,7 @@ const RUNTIME_FILES: &[&str] = &[
     "jestReporter.mjs",
     "jestRuntime.cjs",
     "launchSupervisor.mjs",
+    "mocha.mjs",
     "nodeAssert.mjs",
     "nodeAssertAdapter.mjs",
     "nodeAssertStrict.mjs",
@@ -505,6 +506,7 @@ fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
         "launchSupervisor.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/launchSupervisor.mjs"
         )),
+        "mocha.mjs" => Some(include_bytes!("../runtime-assets/javascript/mocha.mjs")),
         "nodeAssert.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/nodeAssert.mjs"
         )),

@@ -65,6 +65,9 @@ fn runtime(runner: &str) -> &'static str {
         "jest" => {
             "Jest; a test past its timeout (default 5000 ms) fails; an unhandled error during the run fails it; jest.fn() returns undefined unless given an implementation."
         }
+        "mocha" => {
+            "Mocha; a test past its timeout (default 2000 ms) fails; an uncaught error, a rejected promise it returns or an error passed to done fails it; beforeEach hooks run before each test."
+        }
         "pytest" => {
             "pytest; a failing assert or an uncaught exception fails the test; there is no timeout unless pytest-timeout is configured; fixtures from conftest.py run before the test; a Mock or MagicMock returns another mock unless given a return value."
         }
