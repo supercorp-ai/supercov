@@ -1247,7 +1247,8 @@ fn cargo_flags_the_build_owns_are_left_to_it_and_runs_with_no_test_are_refused()
             "requires `cargo test` or `cargo nextest run`",
         ),
     ] {
-        let refused = project.supercov(&args);
+        // Cargo quotes a refused argument in color when CI asks for it.
+        let refused = project.supercov_with(&args, &[("CARGO_TERM_COLOR", "never")]);
         assert_ne!(refused.code(), 0, "{args:?}");
         assert!(
             refused.stderr().contains(message),
@@ -1284,7 +1285,8 @@ fn a_rust_command_supercov_cannot_select_tests_from_is_refused_with_why() {
             "the Cargo test command contains an unsupported shell boundary",
         ),
     ] {
-        let refused = project.supercov(&args);
+        // Cargo quotes a refused argument in color when CI asks for it.
+        let refused = project.supercov_with(&args, &[("CARGO_TERM_COLOR", "never")]);
         assert_ne!(refused.code(), 0, "{args:?}");
         assert!(
             refused.stderr().contains(message),
@@ -1379,7 +1381,8 @@ fn a_rust_command_supercov_cannot_select_tests_from_is_refused_with_why() {
             "libtest discovery contract does not recognize option --frobnicate",
         ),
     ] {
-        let refused = project.supercov(&args);
+        // Cargo quotes a refused argument in color when CI asks for it.
+        let refused = project.supercov_with(&args, &[("CARGO_TERM_COLOR", "never")]);
         assert_ne!(refused.code(), 0, "{args:?}");
         assert!(
             refused.stderr().contains(message),
@@ -1873,6 +1876,7 @@ fn an_optional_link_a_chain_cut_short_before_it_is_not_credited() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_project_with_links_sockets_and_pipes_is_measured_through_them() {
     let outside = Project::empty("links-outside");
@@ -2594,7 +2598,8 @@ fn cargo_configuration_and_target_flags_reach_the_measured_build() {
         ),
         (vec!["--", "cargo", "test", "--target="], "target was empty"),
     ] {
-        let refused = project.supercov(&args);
+        // Cargo quotes a refused argument in color when CI asks for it.
+        let refused = project.supercov_with(&args, &[("CARGO_TERM_COLOR", "never")]);
         assert_ne!(refused.code(), 0, "{args:?}");
         assert!(
             refused.stderr().contains(message),
@@ -2689,7 +2694,14 @@ fn affected_test_names_select_exactly_those_tests_in_their_runner() {
     assert_eq!(names.trim(), "small charges");
     // node:test matches a test by its suites and its name joined by spaces.
     let selected = std::process::Command::new("node")
-        .args(["--test", "--test-name-pattern", names.trim()])
+        // Node 22 reports in TAP when its output is not a terminal.
+        .args([
+            "--test",
+            "--test-reporter",
+            "spec",
+            "--test-name-pattern",
+            names.trim(),
+        ])
         .current_dir(&project.root)
         .output()
         .unwrap();
