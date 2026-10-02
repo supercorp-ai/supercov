@@ -487,9 +487,22 @@
     .prompt-status { font-size: 12px; color: var(--muted); min-height: 16px; }
 
     /* ---------- boot ---------- */
-    .loading, .fatal { max-width: 560px; margin: 16vh auto; padding: 34px; border: 1px solid var(--rule-soft); border-radius: 16px; background: var(--card); box-shadow: var(--shadow); text-align: center; }
-    .spinner { width: 26px; height: 26px; margin: 0 auto 14px; border: 3px solid var(--rule); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    .fatal { max-width: 560px; margin: 16vh auto; padding: 34px; border: 1px solid var(--rule-soft); border-radius: 16px; background: var(--card); box-shadow: var(--shadow); text-align: center; }
+    /* Shown while the payload unpacks, before the script has chosen a theme:
+       it follows the reader's own setting until then. The mark has eightfold
+       symmetry, so an eighth of a turn loops without a seam. */
+    .opening { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 24px; text-align: center; color: var(--ink); }
+    .opening-mark { width: 44px; height: 44px; margin-bottom: 14px; color: var(--ink); animation: opening-turn 2.4s cubic-bezier(.65, 0, .35, 1) infinite; }
+    .opening-title { font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+    .opening-note { font-size: 13px; color: var(--muted); }
+    .opening-bar { width: 168px; height: 3px; margin-top: 16px; border-radius: 3px; background: var(--rule); overflow: hidden; }
+    .opening-bar span { display: block; width: 38%; height: 100%; border-radius: inherit; background: var(--accent); animation: opening-slide 1.3s ease-in-out infinite; }
+    @keyframes opening-turn { 0%, 25% { transform: rotate(0); } 60%, 100% { transform: rotate(45deg); } }
+    @keyframes opening-slide { from { transform: translateX(-110%); } to { transform: translateX(280%); } }
+    @media (prefers-reduced-motion: reduce) { .opening-mark, .opening-bar span { animation: none; } }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme]) { color-scheme: dark; --bg: #0f1218; --ink: #f2f4f7; --muted: #98a1b4; --rule: rgba(255, 255, 255, .11); --accent: #4aa3ff; }
+    }
 
     /* Overview: compact labels, left-aligned summaries, full-width evidence. */
     .overview-label { font: 600 15px/1.3 var(--sans); letter-spacing: -.015em; color: var(--ink); margin: 0 0 16px; }
@@ -879,7 +892,7 @@
   </style>
 </head>
 <body>
-  <div id="app"><div class="loading"><div class="spinner" aria-hidden="true"></div><strong>Opening Supercov evidence…</strong><p class="muted">The report is decompressing locally. Nothing is uploaded.</p></div></div>
+  <div id="app"><div class="opening" role="status" aria-live="polite"><svg class="opening-mark" viewBox="0 0 256 256" aria-hidden="true"><path fill="currentColor" d="M44 100h168a28 28 0 0 1 0 56H44a28 28 0 0 1 0-56Z"/><path fill="currentColor" d="M128 16a28 28 0 0 1 28 28v168a28 28 0 0 1-56 0V44a28 28 0 0 1 28-28Z"/><path fill="currentColor" d="M48.804 88.402 167.598 207.196A28 28 0 0 0 207.196 167.598L88.402 48.804A28 28 0 0 0 48.804 88.402Z"/><path fill="currentColor" d="M88.402 207.196 207.196 88.402A28 28 0 0 0 167.598 48.804L48.804 167.598A28 28 0 0 0 88.402 207.196Z"/></svg><span class="opening-title">Opening the report</span><span class="opening-note">Unpacking it in your browser. Nothing is uploaded.</span><span class="opening-bar" aria-hidden="true"><span></span></span></div></div>
   <script id="report-data" type="application/octet-stream">SUPERCOV_REPORT_PAYLOAD</script>
   <script>
   (() => {
