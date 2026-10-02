@@ -33,6 +33,8 @@
 
 **Fixed**
 
+- In JavaScript, a `switch` case reached by falling through is no longer credited as selected: `case 0: case 1:` run with 0, or a case with no `break` before the next, said the later case had been tested. A `switch` inside a case of another `switch` with no `default` is measured; it was left out of the totals without being declared.
+- In Go, a `switch` case that the case before it falls through into is no longer credited as selected: for 20, `case n > 10: ...; fallthrough` runs `case n > 5`'s body, and the report said a test had selected `n > 5` though none had checked it. A `default` reached by falling through counts the same way, and labeled switches keep their `break`.
 - A Ruby or Python command that runs no test framework, or an interpreter older than Supercov measures (Ruby before 3.3), says only that, with exit status 1. It also said "this is a Supercov bug" and copied the run's evidence into `.supercov/failed-evidence/` to send, though the message above it had already said what to change.
 - On Windows, `assertions assess` shows Jev the helper a test imports by a relative path or a tsconfig alias. The helper was named with `\` and matched no file of the run, so Jev judged the test without it.
 - On Windows, a TypeScript project with a `tsconfig.json` runs: the run's fingerprint called the tsconfig outside the project, because it was named by its `\\?\C:\...` form and the project by its plain one, and the run stopped before any test.

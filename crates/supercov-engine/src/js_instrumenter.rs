@@ -5607,11 +5607,13 @@ impl<'a> SwitchTransformer<'a, '_> {
         )
     }
 
+    /// Each case records only when the switch selected it: a case the one
+    /// before falls into (`case 0: case 1:`, or a body with no `break`) ran
+    /// without its test matching, and crediting it claimed a test of a value
+    /// none had checked. `entered` says the switch has already selected a
+    /// case; it also tells a switch with no default that nothing matched.
     fn instrument(&mut self, statement: &mut Statement<'a>, target: &SwitchTarget) {
-        let entered = target
-            .no_match_id
-            .as_ref()
-            .map(|_| self.names.allocate("_supercovSwitchEntered"));
+        let entered = self.names.allocate("_supercovSwitchEntered");
         let node = Self::inner_switch(statement).expect("switch target must remain a switch");
         for (index, case) in node.cases.iter_mut().enumerate() {
             let probe = self.probe(
@@ -5620,14 +5622,19 @@ impl<'a> SwitchTransformer<'a, '_> {
                     .get(index)
                     .expect("switch case target count must remain stable"),
             );
-            case.consequent.insert(0, probe);
-            if let Some(entered) = &entered {
-                case.consequent.insert(0, self.entered_assignment(entered));
-            }
+            let selected = self.ast.statement_if(
+                Span::default(),
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.identifier(&entered),
+                ),
+                probe,
+                None,
+            );
+            case.consequent.insert(0, self.entered_assignment(&entered));
+            case.consequent.insert(0, selected);
         }
-        let (Some(entered), Some(no_match_id)) = (entered, &target.no_match_id) else {
-            return;
-        };
         let declaration =
             Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
                 Span::default(),
@@ -5646,20 +5653,20 @@ impl<'a> SwitchTransformer<'a, '_> {
                 false,
             ));
         let original = statement.take_in(self.ast.allocator);
-        let no_match = self.ast.statement_if(
-            Span::default(),
-            self.ast.expression_unary(
+        let mut body = self.ast.vec_from_array([declaration, original]);
+        if let Some(no_match_id) = &target.no_match_id {
+            body.push(self.ast.statement_if(
                 Span::default(),
-                UnaryOperator::LogicalNot,
-                self.identifier(&entered),
-            ),
-            self.probe(no_match_id),
-            None,
-        );
-        *statement = self.ast.statement_block(
-            Span::default(),
-            self.ast.vec_from_array([declaration, original, no_match]),
-        );
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.identifier(&entered),
+                ),
+                self.probe(no_match_id),
+                None,
+            ));
+        }
+        *statement = self.ast.statement_block(Span::default(), body);
     }
 }
 
@@ -5697,11 +5704,10 @@ impl<'a> VisitMut<'a> for SwitchTransformer<'a, '_> {
             walk_mut::walk_statement(self, statement);
             return;
         };
-        let has_no_match = target.no_match_id.is_some();
         self.instrument(statement, &target);
-        if !has_no_match {
-            walk_mut::walk_statement(self, statement);
-        }
+        // The switch now sits in a block of its own; its target is spent, so
+        // walking it reaches the switches inside its cases and nothing twice.
+        walk_mut::walk_statement(self, statement);
     }
 }
 
@@ -7092,8 +7098,6 @@ struct SwitchCollector<'s> {
     source_sensitive_functions: &'s HashSet<SpanKey>,
     unsafe_function_depth: usize,
     with_depth: usize,
-    suppressed_depth: usize,
-    suppressed_nodes: Vec<bool>,
     analysis: SwitchAnalysis,
 }
 
@@ -7166,13 +7170,7 @@ impl<'a> Traverse<'a, ()> for SwitchCollector<'_> {
         _context: &mut TraverseCtx<'a, ()>,
     ) {
         let has_default = node.cases.iter().any(|case| case.test.is_none());
-        let transformed = self.suppressed_depth == 0 && !self.unsafe_context();
-        let suppresses = transformed && !has_default;
-        self.suppressed_nodes.push(suppresses);
-        if suppresses {
-            self.suppressed_depth += 1;
-        }
-        if !transformed {
+        if self.unsafe_context() {
             return;
         }
         let id = stable_id(self.source, self.file, "switch", node.span, "");
@@ -7215,20 +7213,6 @@ impl<'a> Traverse<'a, ()> for SwitchCollector<'_> {
             },
         );
     }
-
-    fn exit_switch_statement(
-        &mut self,
-        _node: &mut SwitchStatement<'a>,
-        _context: &mut TraverseCtx<'a, ()>,
-    ) {
-        if self
-            .suppressed_nodes
-            .pop()
-            .expect("switch collector stack must remain balanced")
-        {
-            self.suppressed_depth -= 1;
-        }
-    }
 }
 
 fn collect_switch_branches<'a>(
@@ -7244,8 +7228,6 @@ fn collect_switch_branches<'a>(
         source_sensitive_functions,
         unsafe_function_depth: 0,
         with_depth: 0,
-        suppressed_depth: 0,
-        suppressed_nodes: Vec::new(),
         analysis: SwitchAnalysis::default(),
     };
     traverse_mut(&mut collector, allocator, program, Default::default(), ());

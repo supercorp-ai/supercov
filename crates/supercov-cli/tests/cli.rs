@@ -1839,6 +1839,38 @@ test("skips each shape when absent", () => {
 
 #[cfg(unix)]
 #[test]
+fn a_switch_case_reached_by_falling_through_is_not_credited_and_nested_switches_count() {
+    // `level(20)` falls from `case n > 10` into `case n > 5`, and `kind(0)`
+    // from `case 0` into `case 1`: neither later test matched. A switch inside
+    // a switch with no default used to be neither measured nor declared.
+    let project = Project::empty("switches");
+    project.write(
+        "package.json",
+        r#"{ "name": "switches", "type": "module" }"#,
+    );
+    project.write("src/s.js", "export function level(n) {\n  let out = \"\";\n  switch (true) {\n    case n > 10:\n      out += \"high \";\n    case n > 5:\n      out += \"mid\";\n      break;\n    default:\n      out = \"low\";\n  }\n  return out;\n}\nexport function kind(x) {\n  switch (x) {\n    case 0:\n    case 1:\n      return \"small\";\n  }\n  return \"other\";\n}\nexport function nested(a, b) {\n  switch (a) {\n    case 1:\n      switch (b) {\n        case \"x\":\n          return \"1x\";\n        case \"y\":\n          return \"1y\";\n      }\n  }\n  return \"?\";\n}\nexport function looped(xs) {\n  let total = 0;\n  outer: for (const x of xs) {\n    switch (x) {\n      case -1:\n        break outer;\n      case 0:\n        continue;\n      default:\n        total += x;\n    }\n  }\n  return total;\n}\n");
+    project.write("test/s.test.js", "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { level, kind, nested, looped } from \"../src/s.js\";\ntest(\"switches\", () => {\n  assert.equal(level(20), \"high mid\");\n  assert.equal(kind(0), \"small\");\n  assert.equal(nested(1, \"x\"), \"1x\");\n  assert.equal(looped([1, 0, 2, -1, 5]), 3);\n});\n");
+    project.git(&["init", "-q"]);
+    let measured = project.supercov(&["--", "node", "--test"]).succeeds();
+    assert!(measured.contains("pass 1"), "{measured}");
+    let file = project
+        .supercov(&["runs", "latest", "file", "src/s.js"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "    3  PARTIAL       true\n       Unobserved: branch outcome not observed: case n > 5\n       Unobserved: branch outcome not observed: default\n",
+            "   15  PARTIAL       x\n       Unobserved: branch outcome not observed: case 1\n",
+            "   25  PARTIAL       b\n       Unobserved: branch outcome not observed: case \"y\"\n       Unobserved: switch no-match outcome not observed\n",
+        ],
+    );
+    // Labels still reach the loop around the switch, and each of its cases
+    // was selected.
+    assert!(!file.contains("   37  PARTIAL"), "{file}");
+    assert!(!file.contains("   38  PARTIAL"), "{file}");
+}
+
+#[test]
 fn an_optional_link_a_chain_cut_short_before_it_is_not_credited() {
     // In `a?.b?.c` the object of `?.c` is undefined when `a` is, though
     // `?.c` never ran, and so is the object of `?.b` in `f?.()?.b` when `f`

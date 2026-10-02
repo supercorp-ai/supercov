@@ -1542,3 +1542,69 @@ fn exact_attribution_credits_a_parallel_test_by_running_it_alone() {
     }
     std::fs::remove_dir_all(root).ok();
 }
+
+/// A case a `fallthrough` runs into ran without its own expression matching:
+/// for 20, `case n > 10` falls into `case n > 5`'s body, and crediting that
+/// case as selected claimed a test of `n > 5` no test made. A labeled switch
+/// keeps its `break`, and a fallthrough into `default` counts for neither.
+#[test]
+fn a_case_entered_by_fallthrough_is_not_credited_as_selected() {
+    let Some(go) = go_binary() else {
+        common::skip("go", "no Go toolchain found");
+        return;
+    };
+    let root = temporary("fallthrough");
+    write(&root, "go.mod", "module example.com/levels\n\ngo 1.22\n");
+    write(
+        &root,
+        "levels.go",
+        "package levels\n\nfunc Level(n int) string {\n\tout := \"\"\n\tswitch {\n\tcase n > 10:\n\t\tout += \"high \"\n\t\tfallthrough\n\tcase n > 5:\n\t\tout += \"mid\"\n\tdefault:\n\t\tout = \"low\"\n\t}\n\treturn out\n}\n\nfunc Count(xs []int) int {\n\ttotal := 0\nouter:\n\tfor _, x := range xs {\n\t\tswitch x {\n\t\tcase 0:\n\t\t\tfallthrough\n\t\tdefault:\n\t\t\ttotal++\n\t\tcase -1:\n\t\t\tbreak outer\n\t\t}\n\t}\n\treturn total\n}\n",
+    );
+    write(
+        &root,
+        "levels_test.go",
+        "package levels\n\nimport \"testing\"\n\nfunc TestHigh(t *testing.T) {\n\tif Level(20) != \"high mid\" {\n\t\tt.Fatal(Level(20))\n\t}\n}\n\nfunc TestCount(t *testing.T) {\n\tif Count([]int{0, -1, 7}) != 1 {\n\t\tt.Fatal(Count([]int{0, -1, 7}))\n\t}\n}\n",
+    );
+    let request = DirectGoRunRequest {
+        root: root.clone(),
+        command: vec![go.display().to_string(), "test".into(), "./...".into()],
+        run_id: "run-go-fallthrough".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+    let mut diagnostics = Vec::new();
+    let result = run_direct_go(&request, &mut diagnostics).unwrap_or_else(|error| {
+        panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        )
+    });
+    let report = supercov_engine::coverage_report::analyze_coverage_archive(
+        &supercov_engine::coverage_report::ArchiveReportRequest {
+            archive_path: result.run_directory.join("evidence.raw.gz"),
+            run_id: "run-go-fallthrough".into(),
+            generated_at: "2026-01-01T00:00:00.000Z".into(),
+            integrity: None,
+            test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(Some(0)),
+        },
+    )
+    .expect("report");
+    let taken = |line: usize, label: &str| {
+        report
+            .view
+            .branches
+            .iter()
+            .filter(|branch| branch.meta.line == line)
+            .flat_map(|branch| &branch.alternatives)
+            .find(|alternative| alternative.label == label)
+            .unwrap_or_else(|| panic!("no `{label}` alternative on line {line}"))
+            .covered
+    };
+    assert!(taken(5, "case n > 10:"));
+    assert!(!taken(5, "case n > 5:"), "reached only by falling through");
+    assert!(!taken(5, "default"));
+    assert!(taken(21, "case 0:"));
+    assert!(taken(21, "case -1:"));
+    assert!(!taken(21, "default"), "reached only by falling through");
+    std::fs::remove_dir_all(root).unwrap();
+}
