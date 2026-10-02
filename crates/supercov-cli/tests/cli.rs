@@ -2775,15 +2775,17 @@ import { sandbox, Container } from "sandbox-shapes";
 const machine = () =>
   sandbox.boot({ mounts: [{ source: process.cwd(), target: join(mkdtempSync(join(tmpdir(), "guest-")), "workspace") }] });
 const argv = [process.execPath, "guest/describe.mjs"];
+// Windows' own environment has names like this one in it.
+const windowsLike = { ...process.env, "ProgramFiles(x86)": "C:\\Program Files (x86)" };
 
 test("an env option", () => assert.equal(machine().exec(argv, { env: { ...process.env } }), 0));
 test("an envs option", () => assert.equal(machine().run(argv, { envs: { ...process.env } }), 0));
-test("an environment map", () => assert.equal(machine().execute(argv, { ...process.env }), 0));
+test("an environment map", () => assert.equal(machine().execute(argv, windowsLike), 0));
 test("a builder", () => {
   const target = join(mkdtempSync(join(tmpdir(), "guest-")), "workspace");
   const started = new Container()
     .withBindMounts([{ source: process.cwd(), target }])
-    .withEnvironment({ ...process.env })
+    .withEnvironment(windowsLike)
     .withCommand(argv)
     .start();
   assert.equal(started, 0);

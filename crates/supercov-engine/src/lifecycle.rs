@@ -464,9 +464,34 @@ fn process_exists(pid: u32) -> bool {
     result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn process_exists(pid: u32) -> bool {
-    // Replaced by the Windows Job-object strategy before Windows GA.
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: a query-only handle, closed below; nothing is read through it
+    // but the exit code.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // A process another account owns refuses the query, and exists.
+        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+    }
+    let mut code = 0u32;
+    // SAFETY: `handle` is open and `code` outlives the call.
+    let read = unsafe { GetExitCodeProcess(handle, &mut code) };
+    // SAFETY: opened above and not used after this.
+    unsafe { CloseHandle(handle) };
+    read != 0 && code == STILL_ACTIVE as u32
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_exists(pid: u32) -> bool {
     pid == std::process::id()
 }
 

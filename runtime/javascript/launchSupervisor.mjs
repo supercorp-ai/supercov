@@ -260,11 +260,13 @@ function launchArgv(value) {
 }
 // A plain map of environment variables, as `run(argv, { ...process.env })`
 // passes one: string values under variable names, at least one of them in
-// capitals, and nothing an options object would carry.
+// capitals, and nothing an options object would carry. A name is anything
+// without `=`: Windows' own environment has `ProgramFiles(x86)`, and a map
+// copied from it was taken for options and its guest left unconfigured.
 function environmentMap(value) {
     const entries = Object.entries(value);
     return (entries.length > 0 &&
-        entries.every(([name, item]) => typeof item === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) &&
+        entries.every(([name, item]) => typeof item === "string" && /^[^=\0]+$/.test(name)) &&
         entries.some(([name]) => /^[A-Z_][A-Z0-9_]*$/.test(name)) &&
         !launchOptions(value));
 }
