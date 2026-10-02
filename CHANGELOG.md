@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A TypeScript test run through ts-node, or compiled with `tsc`, no longer fails to typecheck when an assertion awaits one of its operands (`assert.ok(await ready())`): the rewritten call lost the assertion's `asserts` signature (TS2776), and the file failed before any of its tests ran.
+
 ## 3.0.0
 
 **Breaking**

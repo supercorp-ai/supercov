@@ -7,6 +7,9 @@
 // - uuid compiles its TypeScript tests with tsc --strict. A wrapped assertion
 //   ran in a callback, which TypeScript narrows nothing into (TS18048,
 //   TS7034, TS7005), and an `asserts` signature narrowed nothing after it.
+//   An assertion with an awaited operand called a bound matcher, which an
+//   `asserts` signature cannot be called through (TS2776): ts-node refused
+//   every Supergateway test file that had one.
 // - commander reads { stdout } from util.promisify(execFile), which resolved
 //   the bare string under Supercov; chalk passes its fixtures an environment
 //   of their own, which Supercov extended with the parent's CI.
@@ -238,6 +241,17 @@ test('an asserts signature narrows what follows', () => {
   assert.throws(() => {
     assert.equal(user.name, 'bob');
   });
+});
+
+test('an awaited operand keeps the asserts signature', async () => {
+  const user = find('ada');
+  assert.ok(user, await Promise.resolve('found'));
+  assert.equal(user.name, 'ada');
+  assert(await Promise.resolve(true));
+  assert.strict.ok(await Promise.resolve(1))
+  assert
+    .deepEqual(await Promise.resolve([user.name]), ['ada']);
+  if (user.name) assert.equal(await Promise.resolve(user.name.length), 3);
 });
 `);
   const built = supercov(typed, ['--', 'npm', 'test']);
