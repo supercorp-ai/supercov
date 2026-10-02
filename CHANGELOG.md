@@ -28,6 +28,7 @@
 
 **Fixed**
 
+- In an npm, pnpm or Yarn workspaces monorepo, a package another package imports by name is measured through that import. The isolated copy's `node_modules` linked the package back to the original project, so `cart`'s tests ran `money`'s code uninstrumented: it was credited only to `money`'s own tests, and `tests affected` left `cart`'s tests out when `money` changed. Scoped packages (`@acme/format`) included.
 - A TypeScript project whose test command compiles its tests somewhere else (`tsc && node --test dist/test/...`) runs under Supercov. Each test file imported Supercov's runtime by a relative path, which pointed nowhere once compiled into `dist/`, and the test failed with `Cannot find module '../.supercov/node_modules/runtime.mjs'`.
 - A process that runs the instrumented workspace without Supercov's settings -- a container or VM the workspace is mounted into, started by an SDK that passes on no environment -- runs and is measured. The instrumented code threw `Cannot read properties of undefined (reading 'mcdcBegin')` at its first line; it now finds the run's settings in the workspace it was loaded from, and its coverage counts for the run, credited to no test.
 - A sandbox command whose environment is given as an `envs` option (E2B) or as a plain map after the command (Daytona) gets Supercov's settings with paths moved to the guest, as an `env` option already did, and its coverage is credited to the test that launched it. The guest got the host's paths, which do not exist inside it.

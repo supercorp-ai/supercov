@@ -677,6 +677,67 @@ fn pathdiff(from: &Path, to: &Path) -> Result<PathBuf, WorkspaceError> {
     Ok(relative)
 }
 
+/// One entry of the root `node_modules`. A package of the project's own
+/// workspaces -- `node_modules/money` linked to `../packages/money` by npm,
+/// pnpm or Yarn -- links to its copy in the workspace, which is the
+/// instrumented one: linked to the project's entry it resolved to the
+/// original, so another package's tests ran its code unmeasured and a change
+/// to it never named them. Everything else links to the project's entry. A
+/// scope directory (`@acme/`) is mirrored and its packages linked the same
+/// way. Links to a copy are relative, so they hold when the staged workspace
+/// is moved into place.
+#[cfg(unix)]
+fn link_package(
+    root: &Path,
+    workspace: &Path,
+    target: &Path,
+    to: &Path,
+) -> Result<(), WorkspaceError> {
+    let metadata = fs::symlink_metadata(target).map_err(|error| io_error(target, error))?;
+    let scope = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('@'));
+    if scope && metadata.file_type().is_dir() {
+        fs::create_dir_all(to).map_err(|error| io_error(to, error))?;
+        let mut packages = fs::read_dir(target)
+            .map_err(|error| io_error(target, error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| io_error(target, error))?;
+        packages.sort_by_key(fs::DirEntry::file_name);
+        for package in packages {
+            link_package(
+                root,
+                workspace,
+                &package.path(),
+                &to.join(package.file_name()),
+            )?;
+        }
+        return Ok(());
+    }
+    if metadata.file_type().is_symlink()
+        && let (Ok(resolved), Ok(canonical_root)) = (
+            canonicalize_simplified(target),
+            canonicalize_simplified(root),
+        )
+        && let Ok(local) = resolved.strip_prefix(&canonical_root)
+        && !local.as_os_str().is_empty()
+        && !local.components().any(|part| {
+            matches!(
+                part.as_os_str().to_str(),
+                Some("node_modules" | ".supercov")
+            )
+        })
+    {
+        let copy = workspace.join(local);
+        if fs::symlink_metadata(&copy).is_ok() {
+            return create_link(&pathdiff(to, &copy)?, to, true)
+                .map_err(|error| io_error(to, error));
+        }
+    }
+    create_link(target, to, false).map_err(|error| io_error(to, error))
+}
+
 fn link_node_modules<Operations: WorkspaceOperations>(
     root: &Path,
     workspace: &Path,
@@ -721,7 +782,7 @@ fn link_node_modules<Operations: WorkspaceOperations>(
         let target = entry.path();
         let to = destination.join(entry.file_name());
         #[cfg(unix)]
-        create_link(&target, &to, false).map_err(|error| io_error(&to, error))?;
+        link_package(root, workspace, &target, &to)?;
         #[cfg(windows)]
         {
             let file_type = entry

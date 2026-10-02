@@ -2784,3 +2784,77 @@ fn typescript_tests_compiled_into_another_directory_run_and_are_measured() {
         .succeeds();
     assert!(line.contains("small orders pay ["), "{line}");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_package_another_package_imports_is_measured_through_that_import() {
+    let project = Project::empty("monorepo");
+    project.write(
+        "package.json",
+        r#"{ "name": "mono", "private": true, "workspaces": ["packages/*"], "scripts": { "test": "npm test --workspaces --if-present" } }"#,
+    );
+    project.write(
+        "packages/money/package.json",
+        r#"{ "name": "money", "type": "module", "exports": "./src/money.js", "scripts": { "test": "node --test" } }"#,
+    );
+    project.write(
+        "packages/money/src/money.js",
+        "export function cents(amount) {\n  return Math.round(amount * 100);\n}\n",
+    );
+    project.write(
+        "packages/money/test/money.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { cents } from \"../src/money.js\";\ntest(\"cents\", () => assert.equal(cents(1.5), 150));\n",
+    );
+    project.write(
+        "packages/format/package.json",
+        r#"{ "name": "@acme/format", "type": "module", "exports": "./src/format.js" }"#,
+    );
+    project.write(
+        "packages/format/src/format.js",
+        "export function label(cents) {\n  return `${cents}c`;\n}\n",
+    );
+    project.write(
+        "packages/cart/package.json",
+        r#"{ "name": "cart", "type": "module", "scripts": { "test": "node --test" } }"#,
+    );
+    project.write(
+        "packages/cart/src/cart.js",
+        "import { cents } from \"money\";\nimport { label } from \"@acme/format\";\nexport function total(prices) {\n  return label(prices.reduce((sum, price) => sum + cents(price), 0));\n}\n",
+    );
+    project.write(
+        "packages/cart/test/cart.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\ntest(\"total\", () => assert.equal(total([1, 2]), \"300c\"));\n",
+    );
+    // What npm install makes of the workspaces: links into the project.
+    std::fs::create_dir_all(project.root.join("node_modules/@acme")).unwrap();
+    std::os::unix::fs::symlink("../packages/money", project.root.join("node_modules/money"))
+        .unwrap();
+    std::os::unix::fs::symlink("../packages/cart", project.root.join("node_modules/cart")).unwrap();
+    std::os::unix::fs::symlink(
+        "../../packages/format",
+        project.root.join("node_modules/@acme/format"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.git(&["init", "-q"]);
+    project.commit("mono");
+    project.supercov(&["--", "npm", "test"]).succeeds();
+    // cart's test reaches money and format through node_modules.
+    let money = project
+        .supercov(&["runs", "latest", "line", "packages/money/src/money.js:2"])
+        .succeeds();
+    contains_all(&money, &["cents [", "total ["]);
+    let format = project
+        .supercov(&["runs", "latest", "line", "packages/format/src/format.js:2"])
+        .succeeds();
+    assert!(format.contains("total ["), "{format}");
+    project.edit(
+        "packages/money/src/money.js",
+        "amount * 100",
+        "amount * 1000",
+    );
+    let affected = project
+        .supercov(&["runs", "latest", "tests", "affected", "--names"])
+        .succeeds();
+    assert_eq!(affected.trim(), "cents\ntotal");
+}
