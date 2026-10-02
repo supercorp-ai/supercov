@@ -19,9 +19,8 @@ use crate::{
         IndexedSourceScope, IndexedSummaryConfidence, IndexedTestSummary,
     },
     coverage_report::{
-        CoverageConfidence, CoverageReportRequest, CoverageView, DecisionMeta, ReportError,
-        SourceLine, TestAttempt, TestProvenance, TransportStats, analyze_coverage_results,
-        coverage_summary_for_tests,
+        CoverageConfidence, CoverageView, DecisionMeta, ReportError, SourceLine, TestAttempt,
+        TestProvenance, TransportStats, coverage_summary_for_tests,
     },
 };
 use supercov_contracts::AgentPagination;
@@ -48,42 +47,6 @@ pub struct MinimumTestSetResult {
     pub expanded: Vec<String>,
     pub summary: CoverageSummary,
     pub explored_states: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MinimumTestSetRequest {
-    pub coverage: CoverageReportRequest,
-    #[serde(default = "default_target")]
-    pub target: f64,
-    #[serde(default = "default_metric")]
-    pub metric: MinimizeMetric,
-    #[serde(default = "default_max_states")]
-    pub max_states: usize,
-}
-
-fn default_target() -> f64 {
-    100.0
-}
-
-fn default_metric() -> MinimizeMetric {
-    MinimizeMetric::All
-}
-
-fn default_max_states() -> usize {
-    5_000
-}
-
-pub fn minimum_test_set_for_request(
-    request: &MinimumTestSetRequest,
-) -> Result<MinimumTestSetResult, QueryError> {
-    let report = analyze_coverage_results(&request.coverage)?;
-    minimum_test_set(
-        &report.view,
-        request.target,
-        request.metric,
-        request.max_states,
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -509,6 +472,10 @@ pub struct CoverageCoversLineData {
     pub anchored: Vec<CoverageAnchor>,
     pub limitations: Vec<CoverageFileLimitation>,
     pub remaining: Vec<CoverageFileObligation>,
+    /// The run's saved assertion assessment for this place, attached by the
+    /// CLI when the run has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -531,6 +498,10 @@ pub struct CoverageCoversAnchorsData {
     pub remaining: Vec<CoverageFileObligation>,
     pub total_tests: usize,
     pub tests: Vec<CoverageCoveringTest>,
+    /// The run's saved assertion assessment for this place, attached by the
+    /// CLI when the run has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -848,6 +819,7 @@ pub fn coverage_covers_query(
                 remaining: remaining_page,
                 total_tests: total_anchor_tests,
                 tests: anchor_tests_page,
+                assertions: None,
             }),
             pagination(options.offset, options.limit, returned, total),
         ));
@@ -935,6 +907,7 @@ pub fn coverage_covers_query(
             anchored: anchored_page,
             limitations: limitations_page,
             remaining: remaining_page,
+            assertions: None,
         }),
         pagination(options.offset, options.limit, returned, total),
     ))
@@ -1404,23 +1377,6 @@ fn selected_decision(
     }
 }
 
-/// Reconstruct the exact decision view used by provenance-filtered queries.
-/// Project filters are applied against the immutable query index.
-pub fn filtered_decisions(
-    index: &CoverageIndex<'_>,
-    view: CoverageViewId,
-    kind: Option<&str>,
-    runner: Option<&str>,
-) -> Result<Vec<crate::coverage_report::DecisionResult>, QueryError> {
-    let tests = index.test_summaries(view)?;
-    let selected = selected_test_ids(&tests, kind, runner)?;
-    index
-        .decision_details(view)?
-        .into_iter()
-        .map(|decision| Ok(selected_decision(decision, selected.as_ref())))
-        .collect()
-}
-
 pub fn coverage_decision_query(
     index: &CoverageIndex<'_>,
     options: CoverageDecisionQueryOptions<'_>,
@@ -1636,13 +1592,6 @@ impl CoverageFileObligation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CoverageFileTest {
-    pub id: String,
-    pub name: String,
-    pub provenance: TestProvenance,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CoverageFileLimitation {
     pub id: String,
     pub kind: String,
@@ -1694,6 +1643,10 @@ pub struct CoverageFileDetailData {
     pub total_gap_lines: usize,
     pub gap_lines: Vec<CoverageFileGapLine>,
     pub total_limitations: usize,
+    /// The run's saved assertion assessment for this place, attached by the
+    /// CLI when the run has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1914,6 +1867,14 @@ pub fn coverage_file_detail_query(
             })
         })
         .collect::<Vec<_>>();
+    // A line ran when anything anchored on it was observed. A line inside a
+    // multi-line expression has no line obligation of its own, so this is
+    // what tells one that never ran from one that ran part of the way.
+    let observed_lines = metadata
+        .iter()
+        .filter(|point| point.file == file && selected_includes(&point.tests))
+        .map(|point| point.line)
+        .collect::<BTreeSet<_>>();
     let original_decisions = index.decision_details(options.view)?;
     let mut mcdc = Vec::new();
     for original in original_decisions
@@ -2020,12 +1981,23 @@ pub fn coverage_file_detail_query(
                     .iter()
                     .find_map(|value| compact_source(&value.source))
             });
-            let state = if obligations
-                .iter()
-                .any(|value| matches!(value, CoverageFileObligation::Line(_)))
+            // An MC/DC condition can be evaluated without anything on its own
+            // line being recorded, so only branch and point gaps can say a
+            // line never ran.
+            let never_ran = !observed_lines.contains(&line)
+                && !obligations.is_empty()
+                && obligations
+                    .iter()
+                    .all(|value| !matches!(value, CoverageFileObligation::Mcdc(_)));
+            let state = if never_ran
+                || obligations
+                    .iter()
+                    .any(|value| matches!(value, CoverageFileObligation::Line(_)))
             {
                 "missing"
-            } else if !obligations.is_empty() {
+            } else if !obligations.is_empty() || observed_lines.contains(&line) {
+                // A line that ran with part of it outside measurement ran part
+                // of the way, as its line view says.
                 "part"
             } else {
                 "limited"
@@ -2067,6 +2039,7 @@ pub fn coverage_file_detail_query(
             total_gap_lines,
             gap_lines: selected_gap_lines,
             total_limitations,
+            assertions: None,
         },
         pagination(options.offset, options.limit, returned, total_gap_lines),
     ))
@@ -3376,6 +3349,7 @@ mod tests {
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: std::mem::take(&mut results),
             generated_at: "time".into(),

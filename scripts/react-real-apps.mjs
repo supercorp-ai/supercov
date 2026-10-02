@@ -4,7 +4,9 @@ import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(
+const binary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   repository,
   `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`,
 );

@@ -27,7 +27,7 @@ use crate::{
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
-    ruby_evidence::{RubyAssertionInventory, RubyFrontendRun, build_ruby_frontend_run},
+    ruby_evidence::{RubyFrontendRun, build_ruby_frontend_run},
     ruby_project::{PreparedRubyProject, prepare_ruby_project, ruby_integrity_inputs},
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
 };
@@ -231,7 +231,7 @@ pub fn run_direct_ruby(
             &FrontendIntegrityInputs::embedded_ruby(),
         )
         .map_err(|error| error.to_string())?;
-        let assertion_inputs = crate::assertion_inputs::capture(
+        let source_inputs = crate::source_capture::capture(
             &root,
             "ruby",
             ruby_integrity_inputs(&project.files, &request.command).assertion_paths(),
@@ -312,7 +312,7 @@ pub fn run_direct_ruby(
             &request.run_id,
             &request.started_at,
             execution.exit_code,
-            &RubyAssertionInventory::new(&root, &assertion_inputs),
+            &root,
         ) {
             // No test reported an outcome and the command itself failed: it
             // never ran its tests (`No module named pytest`, an error while
@@ -328,13 +328,24 @@ pub fn run_direct_ruby(
                     execution.exit_code
                 ));
             }
+            // The interpreter or the runner the command used is not one
+            // Supercov measures: the message says what to change, and the
+            // evidence has nothing in it to diagnose.
+            Err(
+                error @ (crate::ruby_evidence::RubyEvidenceError::UnsupportedRuby(_)
+                | crate::ruby_evidence::RubyEvidenceError::NoTests
+                | crate::ruby_evidence::RubyEvidenceError::NoInterpreter),
+            ) => {
+                measured.set(false);
+                return Err(error.to_string());
+            }
             result => result.map_err(|error| error.to_string())?,
         };
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
         let entries = run.archive_entries().map_err(|error| error.to_string())?;
-        let entries = crate::assertion_inputs::append(entries, &assertion_inputs)?;
+        let entries = crate::source_capture::append(entries, &source_inputs)?;
         let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(&root, &ruby_directory).map_err(|error| error.to_string())?;
         let evidence_publication_ms = elapsed_ms(publication_started);

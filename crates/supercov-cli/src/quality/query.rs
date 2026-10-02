@@ -634,8 +634,28 @@ pub fn render(view: &Value) -> String {
         "gaps" => render_gaps(view),
         "file" => render_file_catalog(view),
         "snapshots" => render_snapshots(view),
+        "quality.clean" => render_clean(view, "quality"),
+        "security.clean" => render_clean(view, "security"),
         other => format!("unknown quality view: {other}\n"),
     }
+}
+
+fn render_clean(view: &Value, lane: &str) -> String {
+    let removed = view["removed"].as_array().map_or(&[][..], Vec::as_slice);
+    let mut text = format!(
+        "{} {} saved {lane} assessment(s), keeping {}.\n",
+        if view["dry_run"] == true {
+            "Would remove"
+        } else {
+            "Removed"
+        },
+        removed.len(),
+        view["kept"]
+    );
+    for id in removed.iter().filter_map(Value::as_str) {
+        text.push_str(&format!("  {id}\n"));
+    }
+    text
 }
 
 fn render_snapshots(view: &Value) -> String {
@@ -653,11 +673,10 @@ fn render_snapshots(view: &Value) -> String {
     for row in rows {
         let counts = &row["counts"];
         text.push_str(&format!(
-            "\n{} — {}\n   {} assessed, {} windowed, {} errors; scanned {}\n",
+            "\n{} — {}\n   {} assessed, {} errors; scanned {}\n",
             row["id"].as_str().unwrap_or("?"),
             row["created_at"].as_str().unwrap_or("?"),
             counts["assessed"],
-            counts["partial"],
             counts["errors"],
             row["paths"].as_array().map_or(String::new(), |paths| paths
                 .iter()

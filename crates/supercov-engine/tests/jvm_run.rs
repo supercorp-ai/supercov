@@ -99,9 +99,19 @@ const SUITE: &str = r#"package app;
 
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class CalculatorTest {
+    // Two invocations named alike, and one whose name holds a tab: each is
+    // its own test, under a name that reads back as one line.
+    @ParameterizedTest(name = "value {0}")
+    @ValueSource(strings = {"x", "x", "a\tb"})
+    void named(String value) {
+        assertEquals("small", Calculator.size(value.length(), false));
+    }
+
     @Test
     void bigWhenLoudAndLarge() {
         assertEquals("BIG", Calculator.size(20, true));
@@ -198,7 +208,7 @@ fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reach
     assert_eq!(result.source_files, 1);
     // The disabled one included: a test the suite declared and did not run is
     // a fact worth reporting, not an absence worth hiding.
-    assert_eq!(result.tests, 3);
+    assert_eq!(result.tests, 6);
 
     let archive = result.run_directory.join("evidence.raw.gz");
     let entries =
@@ -215,7 +225,7 @@ fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reach
             .iter()
             .filter(|path| path.ends_with("mcdc.json"))
             .count(),
-        3,
+        6,
         "one record per test: {named:?}"
     );
 
@@ -235,6 +245,12 @@ fn a_maven_project_runs_through_its_own_build_and_publishes_what_each_test_reach
             .any(|record| record.contains("CalculatorTest#bigWhenLoudAndLarge()")),
         "tests carry the names the framework itself chose"
     );
+    for invocation in ["#[1] value x", "#[2] value x", "#[3] value a\\\\tb"] {
+        assert!(
+            records.iter().any(|record| record.contains(invocation)),
+            "{invocation} in {records:?}"
+        );
+    }
     assert!(
         records
             .iter()
@@ -332,7 +348,133 @@ fn a_gradle_project_runs_through_its_own_build_and_publishes_what_each_test_reac
     );
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.build, JvmBuild::Gradle);
-    assert_eq!(result.tests, 3);
+    // The shared suite: two tests, a disabled one, three invocations.
+    assert_eq!(result.tests, 6);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A JUnit 4 subproject, declared through a version catalog the way moshi
+/// declares it, in a Kotlin DSL build whose root only aggregates.
+fn gradle_junit4_fixture(root: &Path) {
+    write(
+        root,
+        "settings.gradle.kts",
+        "rootProject.name = \"demo\"\ninclude(\"core\")\n",
+    );
+    write(root, "build.gradle.kts", "");
+    write(
+        root,
+        "gradle/libs.versions.toml",
+        "[libraries]\njunit = \"junit:junit:4.13.2\"\n",
+    );
+    write(
+        root,
+        "core/build.gradle.kts",
+        "plugins { java }\n\nrepositories { mavenCentral() }\n\ndependencies {\n    testImplementation(libs.junit)\n}\n",
+    );
+    write(root, "core/src/main/java/app/Calculator.java", SOURCE);
+    write(
+        root,
+        "core/src/test/java/app/CalculatorTest.java",
+        "package app;\n\nimport org.junit.Test;\nimport static org.junit.Assert.assertEquals;\n\npublic class CalculatorTest {\n    @Test\n    public void bigWhenLoudAndLarge() {\n        assertEquals(\"BIG\", Calculator.size(20, true));\n    }\n\n    @Test\n    public void smallOtherwise() {\n        assertEquals(\"small\", Calculator.size(1, false));\n    }\n}\n",
+    );
+}
+
+/// Gradle runs JUnit 4 through a framework of its own, which no platform
+/// listener hears. The copy runs the same tests on the platform through
+/// Vintage, as Maven's already did, so they are attributed rather than
+/// declined -- and the author's build files are left exactly as they were.
+#[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
+fn a_gradle_junit_4_project_runs_on_the_platform_in_the_copy() {
+    let _building = common::building();
+    let Some(gradle) = common::tool("gradle") else {
+        common::skip("jvm", "no Gradle found");
+        return;
+    };
+    let resolvable = common::resolvable("jvm", || {
+        let warmup = temporary("gradle-junit4-warmup");
+        gradle_junit4_fixture(&warmup);
+        let built = Command::new(&gradle)
+            .args(["--quiet", "--console=plain", "test"])
+            .current_dir(&warmup)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        std::fs::remove_dir_all(&warmup).ok();
+        built
+    });
+    if !resolvable {
+        common::skip(
+            "jvm",
+            "Gradle cannot resolve this project's dependencies here",
+        );
+        return;
+    }
+
+    let root = temporary("gradle-junit4");
+    gradle_junit4_fixture(&root);
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![
+            gradle.display().to_string(),
+            "--console=plain".into(),
+            "test".into(),
+        ],
+        run_id: "run-jvm-gradle-junit4".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+    let mut diagnostics = Vec::new();
+    let result = match run_direct_jvm(&request, &mut diagnostics) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "run failed: {error}\n--- diagnostics ---\n{}",
+            String::from_utf8_lossy(&diagnostics)
+        ),
+    };
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    assert_eq!(result.exit_code, 0, "{diagnostics}");
+    assert_eq!(result.tests, 2, "{diagnostics}");
+    assert!(
+        diagnostics.contains("junit-vintage-engine"),
+        "{diagnostics}"
+    );
+    assert!(!diagnostics.contains("not attributed"), "{diagnostics}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("build.gradle.kts")).unwrap(),
+        "",
+        "the project's own build file must come back exactly as it went in"
+    );
+    let records = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .filter(|entry| entry.path.ends_with("mcdc.json"))
+    .map(|entry| String::from_utf8(entry.contents).expect("utf-8"))
+    .collect::<Vec<_>>();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("CalculatorTest#bigWhenLoudAndLarge")),
+        "{records:?}"
+    );
+    // Each test is recorded with the file that declares it: JUnit names the
+    // class in full, and matching that on the bare file name left every JVM
+    // test without one -- and `tests affected` with nothing to answer about.
+    let executions: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(result.run_directory.join("test-executions.json"))
+            .expect("the run records what each test executed"),
+    )
+    .unwrap();
+    let tests = executions["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 2, "{executions}");
+    assert!(
+        tests
+            .iter()
+            .all(|t| t["test"]["file"] == "core/src/test/java/app/CalculatorTest.java"),
+        "{executions}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 

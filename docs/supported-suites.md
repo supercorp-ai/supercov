@@ -50,9 +50,11 @@ Supercov reports the level it actually observed. It does not guess.
 | --- | --- |
 | Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
 | Vitest | Exact per test, with setup execution kept separate; Browser Mode included |
-| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept; passing `expect` occurrences are identified for assertion maps |
+| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept |
 | `node:test` | Exact per test |
-| AVA and Mocha | Aggregate structural coverage |
+| Mocha | Exact per test and retry, `--parallel` included, with setup execution kept separate |
+| AVA | Exact per test, concurrent tests included, in worker threads or child processes |
+| node-tap 15 and newer | Exact per subtest, nested and parallel (`t.jobs`) subtests included |
 | Other Node-based runners | Aggregate when their processes remain visible to Supercov |
 | Browser component runners without an adapter | Aggregate structural coverage |
 
@@ -81,9 +83,6 @@ obligations. `{value}` is reached exactly when the tree is, and
 `onClick={() => save()}` is measured where the handler is called rather than
 where it is created.
 
-`expect.element(...)`, `expect.soft(...)` and `expect.poll(...)` are recognised
-as assertions, so their passing occurrences are available to assertion maps.
-
 ### React and React Native
 
 React components can use Testing Library with Vitest/jsdom, Vitest Browser Mode,
@@ -93,11 +92,10 @@ it does not measure Hermes, native modules, simulator/device execution, Detox or
 Maestro. React SSR hydration is exercised in jsdom and Chromium; this does not
 establish Next.js Server Components, streaming SSR or server actions.
 
-An assertion map can explain which displayed value, accessible name, disabled
-state or error message a test checks. JSX expression coverage and a passing
-assertion are evidence for reviewing that explanation, not automatic semantic
-proof. A button being rendered does not establish that its disabled state was
-checked. Keep your existing runner and matchers.
+Assertion coverage treats a JSX expression as a statement: it asks whether a
+test would notice the displayed value, accessible name, disabled state or error
+message becoming undefined. A button being rendered does not establish that its
+disabled state was checked. Keep your existing runner and matchers.
 
 The [React verification example](https://github.com/supercorp-ai/supercov/tree/main/examples/react-verification)
 shows a fully executed checkout whose weak tests accept four UI regressions,
@@ -117,11 +115,6 @@ If tests import compiled output such as `dist/` or launch a script that uses it,
 Supercov runs the project's build inside the isolated copy before testing.
 Keep using your normal test and build commands. Instrumentation does not
 require changing the project's TypeScript settings.
-
-For assertion maps, Node, Vitest, Jest and Playwright's Node-side assertions
-supply supported passing-occurrence evidence. Custom assertion wrappers and
-browser-side checks can have additional observation limits. See
-[Assertion evidence](assertion-evidence.md) before interpreting a missing occurrence.
 
 ### Browsers, servers, and child processes
 
@@ -169,6 +162,19 @@ modules. Statements, functions, branches, boolean decisions, loops and error
 propagation are measured. Const contexts and macro expansions remain visible
 with explicit measurement limitations.
 
+Test code is not measured, as cargo-llvm-cov and cargo-tarpaulin leave it out:
+files under a `tests`, `examples` or `benches` directory, files named
+`tests.rs`, `*_tests.rs` or `*-tests.rs`, everything a test target or a
+`#[cfg(test)]` module declares, and items marked `#[cfg(test)]`, `#[test]` or
+`#[bench]`. Its assertions still mark which evidence a passing assertion
+witnessed.
+
+Neither is code the compiler never builds for the target: a `#[cfg(windows)]`
+function on Linux, or one behind `#[cfg(not(target_os = "macos"))]` on a Mac,
+is not counted. Only predicates the target settles (`unix`, `windows`,
+`target_*`) are decided; an item behind a feature or a custom cfg is counted
+either way.
+
 Use the repository's normal flags after the wrapped command:
 
 ```sh
@@ -200,7 +206,8 @@ comprehensions, short-circuit operators, `match` cases and exception paths.
 Child interpreters, threads and thread pools can retain the calling test's
 identity. The report also distinguishes execution before a passing assertion
 from later execution. These phase records alone do not prove which values the
-assertion checks.
+assertion checks; [assertion coverage](assertions.md) measures which executed
+statements the pytest and unittest tests would catch breaking.
 
 Interpreters launched with `-I`, `-E` or `-S` ignore the required startup hook
 and are not measured. Code compiled from strings at runtime has no source
@@ -222,23 +229,21 @@ npx supercov -- python -m unittest
 | Runner | Attribution | Current requirement |
 | --- | --- | --- |
 | RSpec | Exact example and before/example/after phase identity | Ruby 3.4 or newer for full measurement; run with `npx supercov -- rspec` or `bundle exec rspec` |
-| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; a test's coverage is a lower bound (see below); skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
+| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
 | test-unit | Exact test and setup/test/teardown identity; omissions and pendings recorded | `ruby -Itest ...`, `rake test` |
 | parallel_tests, Rails process workers | Exact per worker process | Workers inherit the run through `RUBYOPT`; verified on a Rails app with bootsnap, Zeitwerk and two forked workers |
 | Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
 | Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
 
-Ruby reports a line the first time it executes and never again, which is what
-makes collecting coverage cheap enough to leave on. So a test is credited with
-the lines it was first to reach, and a later test running the same lines is
-credited with none of them: what a test is credited with is really its own, and
-what it is not credited with is not evidence it did not run the code.
-
-Totals are unaffected — every line is credited to exactly one test. What this
-changes is per-test reporting: `npx supercov runs <id> test <name>` gives its
-numbers as "at least", and `tests affected` reports a test whose own record
-cannot settle the question as **undetermined** rather than unaffected, so
-`--names` includes it in the set to run.
+Every test is credited with every line it runs: each statement of an
+instrumented file carries a probe. Code Supercov cannot instrument -- a file
+it could not compile with its probes, or a `Ractor.new` block, where no probe
+can run -- falls back to Ruby's one-shot line coverage, which reports a line
+the first time it executes and never again. There a test is credited with the
+lines it was first to reach; what it is not credited with is not evidence it
+did not run the code. The run says so, per-test numbers there read "at least",
+and `tests affected` reports a test whose own record cannot settle the
+question as **undetermined**, so `--names` includes it in the set to run.
 
 Your project runs in place with its own interpreter and bundle. Supercov loads
 through `RUBYOPT`; application files on disk and their backtrace line numbers
@@ -246,11 +251,9 @@ stay unchanged. RSpec, Minitest and test-unit assertions can identify execution
 before a passing assertion. That timing evidence alone does not show which
 values the assertion checks.
 
-Ruby 3.4 and newer support statement, method, branch and MC/DC measurement,
+Ruby 3.3 and newer support statement, method, branch and MC/DC measurement,
 including loops, iterator blocks, short-circuit operators, pattern matching,
-optional calls and exception paths. Ruby 3.3 supplies Ruby's own line, method
-and branch coverage; obligations requiring additional instrumentation are
-reported as measurement limits.
+optional calls and exception paths.
 
 Some constructs have narrower coverage. Code in a non-main Ractor keeps line
 coverage but may lack other observations. Certain nested-return expressions
@@ -347,10 +350,6 @@ no way to run code on `os.Exit`, and a `TestMain` need not reach the `m.Run()`
 call Supercov wraps — `goleak.VerifyTestMain(m)` runs the suite and exits
 itself. Without periodic writes such a run recorded nothing at all.
 
-For assertion maps, `t.Error`, `t.Errorf`, `t.Fatal`, `t.Fatalf` and testify's
-`assert` and `require` are inventoried. A Go test states its claim with an `if`
-and reports the violation, so the report is the site.
-
 A repository with several modules works either way it is laid out. A directory
 with a `go.mod` of its own that no `go.work` names is a different module, and
 `go test ./...` walks past it, so Supercov leaves it alone. A `go.work`
@@ -372,7 +371,7 @@ npx supercov -- go test ./core/... ./app/...
 | Kotest | Exact per test, under the names Kotest itself reports | — |
 | Spock | Exact per feature, under the names Spock itself reports | — |
 | TestNG | Exact per test, each data-provider invocation its own | — |
-| JUnit 4 alone | Exact per test, through Vintage — see below | Maven |
+| JUnit 4 alone | Exact per test, through Vintage — see below | Maven or Gradle |
 
 Multi-module builds are measured module by module: each compiles its own source
 set and forks its own JVM, so each gets a runtime and records evidence of its
@@ -391,10 +390,11 @@ report name the same thing.
 JUnit 4 on its own is not a platform engine and does not run on one. Maven and
 Gradle choose a test provider from what is on the classpath, so putting the
 platform there makes the build pick a provider that finds no engine and fail.
-For a Maven module, Supercov adds `junit-vintage-engine` to the copy — the
-platform's own way of running exactly those JUnit 4 tests through the lifecycle
-it listens to — and measures them; your own build still runs JUnit 4 as it did.
-A Gradle module is left alone and told about rather than broken.
+Supercov adds `junit-vintage-engine` to the copy — the platform's own way of
+running exactly those JUnit 4 tests through the lifecycle it listens to — and
+measures them; your own build still runs JUnit 4 as it did. In a Gradle build
+the copy also switches each JUnit 4 module's test tasks to `useJUnitPlatform()`,
+leaving any task the build already put on the platform or on TestNG as it was.
 
 Supercov instruments an isolated copy and leaves your build file alone. In the
 copy it adds a test-scoped `junit-platform-launcher`, because the listener is
@@ -427,10 +427,6 @@ Every one of these is named in the run: ask for `npx supercov runs latest
 limitations` and each appears with its file, its line, and why it was left
 alone. A source file the parser cannot read is declared there too, so a hole in
 the denominator stays visible after the build log is gone.
-
-For assertion maps, forms spelled `assertSomething`, `assertThat` or `fail` are
-inventoried, which covers JUnit, TestNG, AssertJ, Hamcrest and kotlin.test.
-Kotest's infix matchers are not.
 
 ```sh
 npx supercov -- mvn test

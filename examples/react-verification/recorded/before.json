@@ -3,54 +3,10 @@
     "runner-default": 3
   },
   "assertionCoverage": {
-    "available": true,
-    "summary": {
-      "status": "notAssessed",
-      "reason": "No recorded flow explanations",
-      "pendingChanges": 0,
-      "metric": "measured statements",
-      "statements": {
-        "asserted": 0,
-        "declared": 0,
-        "total": 14,
-        "percentage": null
-      },
-      "assertions": 7,
-      "inventoryAssertions": 7,
-      "missingInventoryAssertions": 0,
-      "assertionsWithFlows": 0,
-      "assertionsWithoutFlows": 7,
-      "observedAssertionsWithoutCurrentExplanation": 3,
-      "questions": 0,
-      "currentFlows": 0,
-      "draftFlows": 0,
-      "staleFlows": 0,
-      "invalidFlows": 0,
-      "eligibleFlows": 0,
-      "retiredAssertions": 0,
-      "unobservedAssertions": 4,
-      "inventoryFailures": 0,
-      "unanchoredStatements": 0,
-      "runPassed": true,
-      "lines": {
-        "asserted": 0,
-        "declared": 0,
-        "total": 13,
-        "percentage": null
-      },
-      "excludedStatements": 0
-    },
-    "basis": "agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
-    "revision": "fcd37e09c35f16a130cef40827dd756114624016abe5046b30a8de7ddaf52b9a",
-    "inheritance": {
-      "from": null,
-      "skipped": []
-    },
-    "map": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/runs/run_5c23599854c51519/assertions.json",
-    "validationErrors": [],
-    "scope": "whole run with matching current source; independent of structural query filters"
+    "available": false,
+    "assess": "npx supercov runs run_629cd1bcb4de56bf assertions assess"
   },
-  "run": "run_5c23599854c51519",
+  "run": "run_629cd1bcb4de56bf",
   "command": [
     "npm",
     "run",
@@ -59,7 +15,7 @@
   "hints": [
     "This run observed only the `unit` test kind and wrapped `npm run test:before`. Other test scripts include test:after. For whole-project coverage, measure the package's full test command: `npx supercov -- npm test`."
   ],
-  "workspace": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/workspaces/workspace/supercov-react-verification-LavbfO",
+  "workspace": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-JYtCPG/.supercov/workspaces/workspace/supercov-react-verification-JYtCPG",
   "filters": {
     "outcome": "all",
     "kind": null,
@@ -92,7 +48,7 @@
       "mutation score or assertion fault-detection strength"
     ]
   },
-  "generatedAt": "2026-09-15T20:26:48.452Z",
+  "generatedAt": "2026-09-30T18:43:26.543Z",
   "valid": true,
   "testExitCode": 0,
   "stale": false,
@@ -161,6 +117,7 @@
       "kind": "unit",
       "tests": 3,
       "setups": 1,
+      "attributed": 3,
       "summary": {
         "decisions": 0,
         "executedDecisions": 0,
@@ -212,6 +169,7 @@
       "runner": "vitest",
       "tests": 3,
       "setups": 1,
+      "attributed": 3,
       "summary": {
         "decisions": 0,
         "executedDecisions": 0,
@@ -263,6 +221,11 @@
     "browserFallback": 0,
     "serverExplicit": 0,
     "serverFallback": 0
+  },
+  "testAttribution": {
+    "exact": 3,
+    "partial": 0,
+    "runWide": 0
   },
   "transport": {
     "processes": 3,

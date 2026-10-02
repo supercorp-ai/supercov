@@ -159,7 +159,10 @@ struct CountingWriter<W> {
     written: u64,
 }
 
+/// A disk filling mid-archive, injected by the test that proves no partial
+/// archive is ever published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum EvidenceArchiveWriteFault {
     NoSpaceAfterBytes(u64),
 }
@@ -428,6 +431,7 @@ pub fn write_archive(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn write_archive_with_fault(
     entries: Vec<EvidenceArchiveEntry>,
     destination: &Path,

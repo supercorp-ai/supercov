@@ -1464,11 +1464,10 @@ fn kotlin(source: &str) -> Option<Outline> {
 
 #[cfg(test)]
 mod tests {
-    /// Every acknowledged assertion flow rests on these digests. If this
-    /// fails, a change made declaration digests different, so every
-    /// acknowledged flow in every map will read as needing acknowledgement:
-    /// raise `assertion_map::BASIS_FORMAT` so each says why, and only then
-    /// update the pinned value.
+    /// `tests affected` compares these digests across runs. If this fails, a
+    /// change made declaration digests different, so every stored run will
+    /// read every declaration as changed until it is rerun: make sure that is
+    /// intended, and only then update the pinned value.
     #[test]
     fn declaration_digests_are_pinned_to_the_basis_format() {
         let samples = [
@@ -1517,7 +1516,7 @@ mod tests {
         let pinned = format!("{:x}", Sha256::digest(all.as_bytes()));
         assert_eq!(
             pinned, PINNED_DECLARATION_DIGESTS,
-            "declaration digests changed: raise assertion_map::BASIS_FORMAT, then update the pin\n{all}"
+            "declaration digests changed: every stored run will read as changed; update the pin only if intended\n{all}"
         );
     }
     const PINNED_DECLARATION_DIGESTS: &str =

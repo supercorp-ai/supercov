@@ -16,7 +16,9 @@ import { tmpdir } from "node:os";
 import { basename, relative, resolve } from "node:path";
 
 const toolRoot = resolve(".");
-const rustBinary = resolve(
+const rustBinary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   toolRoot,
   `target/debug/supercov${process.platform === "win32" ? ".exe" : ""}`,
 );

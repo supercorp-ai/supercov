@@ -94,7 +94,7 @@ jobs:
         run: node scripts/native-package-integration.mjs --npm-preflight
       - name: Verify Windows frozen-input path normalization
         if: runner.os == 'Windows'
-        run: cargo test --target ${{ matrix.target }} -p supercov-engine --test assertion_maps frozen_inputs_accept_absolute_relative_and_windows_verbatim_paths_once
+        run: cargo test --target ${{ matrix.target }} -p supercov-engine --test source_manifest frozen_inputs_accept_absolute_relative_and_windows_verbatim_paths_once
       - name: Build native binary
         if: matrix.musl != true && !matrix.glibc
         run: cargo build --release --target ${{ matrix.target }} -p supercov
@@ -104,10 +104,10 @@ jobs:
       - name: Build static musl binary
         if: matrix.musl
         run: cargo build --config 'target.${{ matrix.target }}.linker="musl-gcc"' --release --target ${{ matrix.target }} -p supercov
-      - name: Packed install, real JS/TS runs and assertion map gates
+      - name: Packed install and real JS/TS runs
         if: matrix.packedInstall
         run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
-      - name: JS/TS assertion maps on Alpine
+      - name: JS/TS assertion coverage on Alpine
         if: matrix.musl
         shell: bash
         run: |
@@ -117,7 +117,7 @@ jobs:
               mkdir /workspace
               tar -xf - -C /workspace
               cd /workspace
-              node scripts/assertion-map-alpine-integration.mjs /supercov
+              node scripts/assertions-integration.mjs /supercov --javascript-only
             '
       - name: Stage native package
         run: node scripts/package-native.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out native-dist

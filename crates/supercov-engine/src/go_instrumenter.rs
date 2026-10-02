@@ -446,6 +446,15 @@ fn branch_wrapper(alias: &str, when_true: u64, when_false: u64, decision: Option
 /// `switch`. A probe there turns `for i := 0; c; i++` into a four-clause loop
 /// that does not compile. Every real statement is a child of a `statement_list`,
 /// so that is the rule rather than a list of exceptions to remember.
+/// The `fallthrough` a case clause ends with, if it ends with one.
+fn ending_fallthrough(clause: Node) -> Option<Node> {
+    let body = clause
+        .children(&mut clause.walk())
+        .find(|child| child.kind() == "statement_list")?;
+    let last = body.named_child(body.named_child_count().checked_sub(1)?)?;
+    (last.kind() == "fallthrough_statement").then_some(last)
+}
+
 fn in_statement_position(node: Node) -> bool {
     node.parent()
         .is_some_and(|parent| parent.kind() == "statement_list")
@@ -729,7 +738,29 @@ impl<'a> Collector<'a> {
                     .map(|(label, _)| label.as_str())
                     .collect::<Vec<_>>();
                 let probes = self.add_branch(node, kind, &labels);
-                for (probe, (_, clause)) in probes.iter().zip(cases.iter()) {
+                // A case the one before it falls through into runs without its
+                // own expression being matched: `case n > 10: ...; fallthrough`
+                // runs `case n > 5`'s body for 20, and crediting that case as
+                // selected claimed a test of `n > 5` none made. The case before
+                // sets a flag as it falls through; the next one records only
+                // when the flag is clear, and clears it.
+                let fallthroughs = cases
+                    .iter()
+                    .map(|(_, clause)| clause.and_then(|clause| ending_fallthrough(clause)))
+                    .collect::<Vec<_>>();
+                let flag = format!("_scvFell{}", node.start_byte());
+                if fallthroughs.iter().any(Option::is_some) {
+                    // Before a label too, so `break L` still names the switch.
+                    let statement = node
+                        .parent()
+                        .filter(|parent| parent.kind() == "labeled_statement")
+                        .unwrap_or(node);
+                    self.edit(statement.start_byte(), 90, format!("var {flag} bool; "));
+                    for fallthrough in fallthroughs.iter().flatten() {
+                        self.call_before(fallthrough.start_byte(), format!("{flag} = true"));
+                    }
+                }
+                for (index, (probe, (_, clause))) in probes.iter().zip(cases.iter()).enumerate() {
                     match clause {
                         Some(clause) => {
                             let at = clause
@@ -737,7 +768,15 @@ impl<'a> Collector<'a> {
                                 .find(|child| child.kind() == "statement_list")
                                 .map(|body| body.start_byte())
                                 .unwrap_or_else(|| clause.end_byte());
-                            self.call_before(at, format!("{alias}.A({probe})"));
+                            if index > 0 && fallthroughs[index - 1].is_some() {
+                                self.edit(
+                                    at,
+                                    100,
+                                    format!("if {flag} {{ {flag} = false }} else {{ {alias}.A({probe}) }}; "),
+                                );
+                            } else {
+                                self.call_before(at, format!("{alias}.A({probe})"));
+                            }
                         }
                         None => {
                             // Before the switch's closing brace.
@@ -921,6 +960,7 @@ pub fn build_go_obligations_with_alias(
             limitations: collector.limitations,
             unmeasured: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         },
         probes: collector.probes,
         edits,

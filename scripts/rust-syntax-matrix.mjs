@@ -20,7 +20,8 @@ const runtimeCases = JSON.parse(
 const cases = [...executionCases, ...runtimeCases];
 
 const binary = resolve(
-  process.env.SUPERCOV_RUST_BINARY ??
+  process.env.SUPERCOV_BINARY ??
+    process.env.SUPERCOV_RUST_BINARY ??
     `target/debug/${process.platform === "win32" ? "supercov.exe" : "supercov"}`,
 );
 const transformed = spawnSync(binary, ["__instrument-js"], {

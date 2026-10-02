@@ -81,12 +81,6 @@ def install(runtime):
         def wrapper(self, *args, **kwargs):
             if not runtime.closed:
                 runtime.assertion()
-                # These wrap the public assert* methods, so one frame up is
-                # the test itself. A nested assert (assertListEqual calling
-                # assertEqual) reports unittest's own file, which the
-                # inventory does not know and therefore discards.
-                frame = _sys._getframe(1)
-                runtime.assertion_site(frame.f_code.co_filename, frame.f_lineno)
             return original(self, *args, **kwargs)
 
         wrapper.__name__ = name

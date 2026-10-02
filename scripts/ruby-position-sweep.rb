@@ -2,7 +2,7 @@
 
 # Development gate for the Ruby frontend. For every file in a corpus it
 # applies the plan's insertions the way the runtime does, adds the runtime's
-# own load-time probes for lines this interpreter will not count, and checks
+# own load-time probe before every statement, and checks
 # against Ruby itself that
 #   1. the transformed source compiles and keeps its line count,
 #   2. every stdlib branch key the plan expects exists in the untouched
@@ -26,11 +26,23 @@
 #   cargo run -p supercov-engine --example ruby_plan -- FILES... > plan.json
 #   ruby scripts/ruby-position-sweep.rb [--load] plan.json
 #
-# Exit status is non-zero when any file fails. Ruby 3.4+ is required, since
-# 3.3 does not apply Coverage to code compiled by hand.
+# Exit status is non-zero when any file fails. On Ruby 3.3, which does not
+# apply Coverage to code compiled by hand, checks 2 and 3 are skipped -- 3.3
+# reads no keys and probes every statement, as 3.4 does -- and methods are
+# counted from the compiled instruction sequences instead.
 
 require "coverage"
 require "json"
+
+# Ruby 3.3 does not apply Coverage to code compiled by hand.
+HAND_COMPILED_COVERAGE = (RUBY_VERSION.split(".").first(2).map(&:to_i) <=> [3, 4]) >= 0
+
+# The methods an instruction sequence defines, wherever they nest.
+def method_iseqs(iseq)
+  count = iseq.to_a[9] == :method ? 1 : 0
+  iseq.each_child { |child| count += method_iseqs(child) }
+  count
+end
 require_relative "../runtime/ruby/supercov_runtime"
 
 # One file, transformed the way the runtime transforms it.
@@ -41,14 +53,11 @@ class SweptFile
     @path = path
     @plan = plan
     @source = File.binread(path)
-    stub = begin
-      Coverage.line_stub(path)
-    rescue StandardError
-      []
-    end
+    # As the runtime does on 3.4+: every statement gets a table probe.
     lines = plan["lines"].to_h { |line, id| [line.to_i, id] }
     extra, probes = Supercov::LoadTime.statement_probes(
-      "$__supercov", 1 << 40, lines, plan["statementOffsets"] || {}, stub
+      "$__supercov", 1 << 40, lines, plan["statementOffsets"] || {}, [],
+      plan["ractorBlocks"] || [], Supercov::LINE_TABLE, plan["refineBlocks"] || [], @source
     )
     @probed_lines = probes.each_value.to_h { |target| [target["id"], true] }
     @edits = Supercov::LoadTime.merge_edits(plan["edits"], extra)
@@ -112,12 +121,19 @@ def load_one(plan_path, path, probed)
   file = SweptFile.new(path, plans.fetch(path))
   synthetic = "/supercov-sweep/#{File.basename(path)}"
   $__supercov = StubProbe.new
+  $__supercov_lines = {}
   Coverage.start(lines: true, branches: true, methods: true)
+  iseq = nil
   begin
     source = probed ? file.transformed : file.source.dup.force_encoding(Encoding::UTF_8)
-    RubyVM::InstructionSequence.compile(source, synthetic, synthetic, 1).eval
+    iseq = RubyVM::InstructionSequence.compile(source, synthetic, synthetic, 1)
+    iseq.eval
   rescue Exception => error # rubocop:disable Lint/RescueException
     puts JSON.generate("status" => "unloadable", "error" => "#{error.class}: #{error.message.to_s.lines.first.to_s.strip}")
+    return
+  end
+  unless HAND_COMPILED_COVERAGE
+    puts JSON.generate("status" => "loaded", "methods" => Array.new(method_iseqs(iseq)))
     return
   end
   reported = Coverage.result(stop: true, clear: true)[synthetic] || {}
@@ -201,22 +217,25 @@ plans.each do |path, plan|
   # The untouched source, compiled apart, is where Ruby 3.3 reads the keys.
   plain_synthetic = "/supercov-sweep/#{files}/plain/#{File.basename(path)}"
   RubyVM::InstructionSequence.compile(file.source.dup.force_encoding(Encoding::UTF_8), plain_synthetic, plain_synthetic, 1)
-  results = Coverage.result(stop: false, clear: true)
-  reported = results[synthetic]
-  plain_reported = results[plain_synthetic]
-  if reported.nil? || plain_reported.nil?
-    puts "COVER  #{path}: Ruby reported no coverage for the compiled file"
-    failures += 1
-    next
-  end
-  ruby_keys = {}
-  plain_reported[:branches].each do |group, branches|
-    branches.each_key do |branch|
-      ruby_keys[["branch", group[0].to_s, branch[0].to_s, branch[2], branch[3], branch[4], branch[5]]] = true
+  missing = []
+  if HAND_COMPILED_COVERAGE
+    results = Coverage.result(stop: false, clear: true)
+    reported = results[synthetic]
+    plain_reported = results[plain_synthetic]
+    if reported.nil? || plain_reported.nil?
+      puts "COVER  #{path}: Ruby reported no coverage for the compiled file"
+      failures += 1
+      next
     end
+    ruby_keys = {}
+    plain_reported[:branches].each do |group, branches|
+      branches.each_key do |branch|
+        ruby_keys[["branch", group[0].to_s, branch[0].to_s, branch[2], branch[3], branch[4], branch[5]]] = true
+      end
+    end
+    missing = file.branch_keys.reject { |key| ruby_keys[key] }.map { |key| "branch #{key[1..].inspect}" }
+    missing.concat(file.unprovable_lines(reported[:lines]))
   end
-  missing = file.branch_keys.reject { |key| ruby_keys[key] }.map { |key| "branch #{key[1..].inspect}" }
-  missing.concat(file.unprovable_lines(reported[:lines]))
   if load_mode
     plain = load_result(plan_path, path, false)
     if plain["status"] == "loaded"
@@ -240,7 +259,7 @@ plans.each do |path, plan|
   puts "         ... #{missing.length - 8} more" if missing.length > 8
 end
 
-summary = "#{files} file(s), #{failures} failing, #{probed_at_runtime} statement line(s) probed at load time because Ruby does not count them"
+summary = "#{files} file(s), #{failures} failing, #{probed_at_runtime} statement line(s) probed at load time"
 summary += ", #{loaded} file(s) loaded and #{methods_seen} method key(s) checked" if load_mode
 puts summary
 exit(failures.zero? ? 0 : 1)

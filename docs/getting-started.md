@@ -139,7 +139,7 @@ if anything is missing.
 - for Go, Go 1.22 or newer;
 - for Java and Kotlin, JDK 17 or newer, with Maven or Gradle;
 - for Python, CPython 3.9 or newer with pytest or unittest;
-- for Ruby, Ruby 3.4 or newer with RSpec, Minitest, test-unit or Cucumber (3.3 measures lines, methods and simple branches only).
+- for Ruby, Ruby 3.3 or newer with RSpec, Minitest, test-unit or Cucumber.
 
 The CLI is a native binary. `npx supercov` picks the build for your operating
 system and architecture, and nothing is compiled on install; the same binary is

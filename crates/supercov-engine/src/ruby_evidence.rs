@@ -11,10 +11,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 
-use memmap2::{Mmap, MmapOptions};
+use memmap2::MmapOptions;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -65,9 +65,19 @@ enum Record {
         ruby: String,
         executable: String,
         argv: Vec<String>,
+        /// `exact` when every statement of an instrumented file is probed
+        /// test by test (Ruby 3.4+); absent or `first` when lines come from
+        /// Coverage's one-shot lines, credited to the first test only.
+        #[serde(default)]
+        lines: Option<String>,
     },
     Worker {
         worker: String,
+    },
+    /// A file fell back to Coverage's one-shot lines mid-run: from here its
+    /// lines are credited to the first test that runs them.
+    Lines {
+        mode: String,
     },
     Phase {
         ctx: u64,
@@ -95,6 +105,17 @@ enum Record {
         ctx: u64,
         id: String,
     },
+    /// Names for the numbers `hits` records use, in order from `first`: the
+    /// runtime writes each id once per process and a number after that.
+    Ids {
+        first: usize,
+        names: Vec<String>,
+    },
+    /// One context's hits since the last boundary, by number.
+    Hits {
+        ctx: u64,
+        n: Vec<usize>,
+    },
     Dec {
         ctx: u64,
         id: String,
@@ -105,14 +126,6 @@ enum Record {
     /// this record is the assertion's evidence too.
     Assert {
         ctx: u64,
-    },
-    /// One assertion site a call phase reached, once per site per test. Ruby
-    /// backtraces carry no column, so the line is resolved against the syntax
-    /// inventory; a frame that names no inventoried site witnesses nothing.
-    Asite {
-        ctx: u64,
-        f: String,
-        l: usize,
     },
     Limitation {
         id: String,
@@ -250,78 +263,18 @@ type OutcomesByAttempt = BTreeMap<(String, String, usize), Vec<(String, String, 
 type RunnersByAttempt = BTreeMap<(String, String, usize), String>;
 /// (worker, test, retry) -> the source file the runner named for the test
 type TestFilesByAttempt = BTreeMap<(String, String, usize), String>;
-/// (worker, test, retry) -> assertion sites the call phase reached, in the
-/// order they were first seen, as the runtime reported them: (path, line)
-type SitesByAttempt = BTreeMap<(String, String, usize), Vec<(String, usize)>>;
-
-/// The assertion sites Supercov inventoried from source before the run,
-/// indexed so a runtime backtrace frame can name one exactly.
-///
-/// Ruby backtraces carry a file and a line but no column, while an assertion
-/// anchor is a file, line and column. The inventory supplies the missing
-/// column. It is also the validator: a frame that names no inventoried site
-/// witnesses nothing, so a runtime that reports the wrong frame loses a
-/// witness rather than inventing one.
-pub struct RubyAssertionInventory {
-    root: PathBuf,
-    /// (project-relative file, line) -> the sites on that line
-    columns: BTreeMap<(String, usize), Vec<usize>>,
-}
-
-impl RubyAssertionInventory {
-    pub fn new(root: &Path, inputs: &crate::assertion_map::Inputs) -> Self {
-        let mut columns = BTreeMap::<(String, usize), Vec<usize>>::new();
-        for site in &inputs.assertions {
-            columns
-                .entry((site.at.file.clone(), site.at.line))
-                .or_default()
-                // Every native manifest reports a zero-based byte column and
-                // the report adds one to reach the anchor's own column.
-                .push(site.at.column.saturating_sub(1));
-        }
-        for sites in columns.values_mut() {
-            sites.sort_unstable();
-            sites.dedup();
-        }
-        Self {
-            root: root.to_path_buf(),
-            columns,
-        }
-    }
-
-    /// An inventory with no sites: every frame names nothing, which is what a
-    /// run with no assertion inputs should see.
-    pub fn empty() -> Self {
-        Self {
-            root: PathBuf::new(),
-            columns: BTreeMap::new(),
-        }
-    }
-
-    /// Ruby reports both forms: a backtrace frame is absolute, while a method
-    /// defined by a file the interpreter loaded by a relative path keeps that
-    /// path. A path outside the project names nothing here.
-    pub fn relative(&self, path: &str) -> Option<String> {
-        let candidate = Path::new(path);
-        let relative = if candidate.is_absolute() {
-            candidate.strip_prefix(&self.root).ok()?
-        } else {
-            candidate.strip_prefix("./").unwrap_or(candidate)
-        };
-        let text = relative.to_string_lossy().replace('\\', "/");
-        (!text.is_empty() && !text.starts_with("../")).then_some(text)
-    }
-
-    /// `file:line:column` when that line holds exactly one inventoried site.
-    /// Two assertions on one line cannot be told apart from a backtrace, so
-    /// the frame names neither rather than guessing between them.
-    pub fn locate(&self, path: &str, line: usize) -> Option<String> {
-        let file = self.relative(path)?;
-        match self.columns.get(&(file.clone(), line))?.as_slice() {
-            [column] => Some(format!("{file}:{line}:{column}")),
-            _ => None,
-        }
-    }
+/// A runtime path, project-relative. Ruby reports both forms: a backtrace
+/// frame is absolute, while a method defined by a file the interpreter loaded
+/// by a relative path keeps that path. A path outside the project names nothing.
+fn relative(root: &Path, path: &str) -> Option<String> {
+    let candidate = Path::new(path);
+    let relative = if candidate.is_absolute() {
+        candidate.strip_prefix(root).ok()?
+    } else {
+        candidate.strip_prefix("./").unwrap_or(candidate)
+    };
+    let text = relative.to_string_lossy().replace('\\', "/");
+    (!text.is_empty() && !text.starts_with("../")).then_some(text)
 }
 
 #[derive(Debug, Default)]
@@ -347,8 +300,9 @@ struct Evidence {
     outcomes: OutcomesByAttempt,
     runners: RunnersByAttempt,
     test_files: TestFilesByAttempt,
-    sites: SitesByAttempt,
     limitations: Vec<RuntimeLimitation>,
+    /// Some process credited a line to the first test that ran it only.
+    first_sighting: bool,
 }
 
 fn read_evidence_directory(directory: &Path, run_id: &str) -> Result<Evidence, RubyEvidenceError> {
@@ -414,9 +368,18 @@ fn align_transport(value: usize) -> Option<usize> {
     value.checked_add(7).map(|value| value & !7)
 }
 
+/// A field of a header whose length was checked: it cannot run past it.
+fn checked_u32(bytes: &[u8], offset: usize) -> u32 {
+    transport_u32(bytes, offset).expect("the header was checked to hold this field")
+}
+
+fn checked_u64(bytes: &[u8], offset: usize) -> u64 {
+    transport_u64(bytes, offset).expect("the header was checked to hold this field")
+}
+
 fn read_evidence_file(
     name: &str,
-    contents: &Mmap,
+    contents: &[u8],
     run_id: &str,
     evidence: &mut Evidence,
 ) -> Result<(), RubyEvidenceError> {
@@ -431,30 +394,31 @@ fn read_evidence_file(
     {
         return Err(invalid_transport("header or version does not match"));
     }
-    let declared_capacity =
-        transport_u64(contents, 16).ok_or_else(|| invalid_transport("capacity is missing"))?;
+    let declared_capacity = checked_u64(contents, 16);
     if declared_capacity < TRANSPORT_HEADER_SIZE as u64 || declared_capacity > contents.len() as u64
     {
         return Err(invalid_transport(
             "declared capacity is outside the mapped file",
         ));
     }
-    let dropped =
-        transport_u64(contents, 24).ok_or_else(|| invalid_transport("drop counter is missing"))?;
+    let dropped = checked_u64(contents, 24);
     if dropped != 0 {
         return Err(RubyEvidenceError::DroppedRecords {
             file: name.into(),
             count: dropped,
         });
     }
-    let transport_pid = transport_u64(contents, 32)
-        .filter(|pid| *pid != 0)
-        .ok_or_else(|| invalid_transport("process id is missing"))?;
+    let transport_pid = checked_u64(contents, 32);
+    if transport_pid == 0 {
+        return Err(invalid_transport("process id is missing"));
+    }
     let mut contexts = BTreeMap::<u64, Identity>::new();
     // What each call phase recorded so far, kept until its first assertion
     // marker moves it to the phase's assertion identity.
     let mut before_assertion = BTreeMap::<u64, Observations>::new();
     let mut process_worker: Option<String> = None;
+    // The process's id names, by the number its `hits` records use.
+    let mut interned = Vec::<String>::new();
     let mut process_started = false;
     let mut process_reported = false;
     let mut cursor = TRANSPORT_HEADER_SIZE;
@@ -479,9 +443,7 @@ fn read_evidence_file(
         {
             return Err(invalid("commit marker or reserved bytes are invalid"));
         }
-        let length = transport_u32(contents, cursor + 4)
-            .map(|value| value as usize)
-            .ok_or_else(|| invalid("payload length is missing"))?;
+        let length = checked_u32(contents, cursor + 4) as usize;
         if length == 0 || length > TRANSPORT_MAX_RECORD_SIZE {
             return Err(invalid("payload length is outside the transport bound"));
         }
@@ -500,8 +462,7 @@ fn read_evidence_file(
             return Err(invalid("frame padding is not zero"));
         }
         let payload = &contents[payload_start..payload_end];
-        let expected_checksum = transport_u32(contents, cursor + 8)
-            .ok_or_else(|| invalid("payload checksum is missing"))?;
+        let expected_checksum = checked_u32(contents, cursor + 8);
         if transport_checksum(payload) != expected_checksum {
             return Err(invalid("payload checksum does not match"));
         }
@@ -518,8 +479,12 @@ fn read_evidence_file(
                 pid,
                 worker,
                 ruby,
+                lines,
                 ..
             } => {
+                if lines.as_deref() != Some("exact") {
+                    evidence.first_sighting = true;
+                }
                 if v != RUBY_EVIDENCE_VERSION {
                     return Err(RubyEvidenceError::UnsupportedVersion(v));
                 }
@@ -547,6 +512,11 @@ fn read_evidence_file(
                 process_worker = Some(worker);
             }
             Record::Worker { worker } => process_worker = Some(worker),
+            Record::Lines { mode } => {
+                if mode != "exact" {
+                    evidence.first_sighting = true;
+                }
+            }
             Record::Phase {
                 ctx,
                 worker,
@@ -634,6 +604,32 @@ fn read_evidence_file(
                 .hits
                 .insert(id);
             }
+            Record::Ids { first, names } => {
+                if first != interned.len() {
+                    return Err(invalid("id names must continue where the last ones ended"));
+                }
+                interned.extend(names);
+            }
+            Record::Hits { ctx, n } => {
+                let ids = n
+                    .iter()
+                    .map(|&number| interned.get(number).cloned())
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| invalid("hit number has no name"))?;
+                if let Some(before) = before_assertion.get_mut(&ctx) {
+                    before.hits.extend(ids.iter().cloned());
+                }
+                observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .hits
+                .extend(ids);
+            }
             Record::Dec { ctx, id, v, o } => {
                 if v.is_empty() || !v.bytes().all(|digit| matches!(digit, b'0' | b'1' | b'2')) {
                     return Err(invalid("decision vector digits must be 0, 1 or 2"));
@@ -690,32 +686,6 @@ fn read_evidence_file(
                     asserted.hits.extend(before.hits);
                     for (id, vectors) in before.vectors {
                         asserted.vectors.entry(id).or_default().extend(vectors);
-                    }
-                }
-            }
-            Record::Asite { ctx, f, l } => {
-                if f.is_empty() || l == 0 {
-                    return Err(invalid("assertion site needs a file and a line"));
-                }
-                let identity = contexts
-                    .get(&ctx)
-                    .ok_or(RubyEvidenceError::UnknownContext {
-                        file: name.into(),
-                        line: line_number,
-                        context: ctx,
-                    })?;
-                // Only the call phase witnesses a test's assertions; setup and
-                // teardown assertions belong to no single site under test.
-                if identity.phase == "call" {
-                    let key = (
-                        identity.worker.clone(),
-                        identity.test.clone(),
-                        identity.retry,
-                    );
-                    let sites = evidence.sites.entry(key).or_default();
-                    let site = (f, l);
-                    if !sites.contains(&site) {
-                        sites.push(site);
                     }
                 }
             }
@@ -1045,7 +1015,7 @@ pub fn build_ruby_frontend_run(
     run_id: &str,
     generated_at: &str,
     test_exit_code: i32,
-    assertions: &RubyAssertionInventory,
+    root: &Path,
 ) -> Result<RubyFrontendRun, RubyEvidenceError> {
     let evidence = read_evidence_directory(evidence_directory, run_id)?;
     if evidence.interpreters == 0 {
@@ -1062,9 +1032,14 @@ pub fn build_ruby_frontend_run(
         outcomes,
         runners,
         test_files,
-        sites,
         limitations,
+        first_sighting,
     } = evidence;
+    let attribution = if first_sighting {
+        crate::coverage_report::ATTRIBUTION_PARTIAL
+    } else {
+        crate::coverage_report::ATTRIBUTION_EXACT
+    };
     let mut manifest = manifest.clone();
     let index = ManifestIndex::new(&manifest);
 
@@ -1163,35 +1138,6 @@ pub fn build_ruby_frontend_run(
                     error: None,
                 });
                 runtime.push(snapshot(&index, observations, &id)?);
-                // One phase per assertion site the call phase reached, so an
-                // assertion map can tell the sites apart. The per-test phase
-                // above keeps carrying the pre-assertion evidence; these are
-                // witnesses only, and a site the inventory does not know is
-                // skipped rather than guessed at.
-                let attempt = (worker.clone(), test.clone(), retry);
-                for (path, line) in sites.get(&attempt).into_iter().flatten() {
-                    let Some(location) = assertions.locate(path, *line) else {
-                        continue;
-                    };
-                    phases.push(CoveragePhase {
-                        id: stable_id("ruby-assertion", &[run_id, &id, &location]),
-                        kind: "assertion".into(),
-                        operation: format!("{runner} assertion at {location}"),
-                        source: Some(location),
-                        caused_by_phase_id: Some(id.clone()),
-                        started_at_ms: position as i64 * 2 + 1,
-                        ended_at_ms: Some(position as i64 * 2 + 2),
-                        status: Some(
-                            if outcome == "passed" && !*xfail {
-                                "passed"
-                            } else {
-                                "failed"
-                            }
-                            .into(),
-                        ),
-                        error: None,
-                    });
-                }
             }
         }
         // A phase the runtime entered but the runner never reported (the worker
@@ -1231,7 +1177,7 @@ pub fn build_ruby_frontend_run(
             // fallback for an adapter that cannot name the file.
             test_file: test_files
                 .get(&(worker.clone(), test.clone(), retry))
-                .and_then(|path| assertions.relative(path))
+                .and_then(|path| relative(root, path))
                 .or_else(|| test.split("::").next().map(str::to_owned)),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
@@ -1252,14 +1198,12 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
-            // What a Ruby test is recorded as reaching is its own and is not
-            // all of it. The runtime asks Ruby's Coverage for one-shot lines,
-            // which report a line the first time it executes in the process
-            // and never again -- so the first test to reach a line is credited
-            // with it and every later test that runs the same line is recorded
-            // as having reached nothing there. Cheap to collect, and it makes
-            // a test's hits a lower bound rather than a description.
-            attribution: crate::coverage_report::ATTRIBUTION_PARTIAL.into(),
+            // Ruby 3.3+ probes every statement, so what a test is recorded as
+            // reaching is all of it. Unprobed lines come from Coverage's one-shot
+            // lines, which report a line the first time it executes in the
+            // process and never again: the first test to reach a line is
+            // credited with it, and a test's hits are a lower bound.
+            attribution: attribution.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1305,7 +1249,7 @@ pub fn build_ruby_frontend_run(
             // fallback for an adapter that cannot name the file.
             test_file: test_files
                 .get(&(worker.clone(), test.clone(), retry))
-                .and_then(|path| assertions.relative(path))
+                .and_then(|path| relative(root, path))
                 .or_else(|| test.split("::").next().map(str::to_owned)),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
@@ -1319,14 +1263,12 @@ pub fn build_ruby_frontend_run(
                 source: RUBY_FRONTEND_VERSION.into(),
             },
             role: "test".into(),
-            // What a Ruby test is recorded as reaching is its own and is not
-            // all of it. The runtime asks Ruby's Coverage for one-shot lines,
-            // which report a line the first time it executes in the process
-            // and never again -- so the first test to reach a line is credited
-            // with it and every later test that runs the same line is recorded
-            // as having reached nothing there. Cheap to collect, and it makes
-            // a test's hits a lower bound rather than a description.
-            attribution: crate::coverage_report::ATTRIBUTION_PARTIAL.into(),
+            // Ruby 3.3+ probes every statement, so what a test is recorded as
+            // reaching is all of it. Unprobed lines come from Coverage's one-shot
+            // lines, which report a line the first time it executes in the
+            // process and never again: the first test to reach a line is
+            // credited with it, and a test's hits are a lower bound.
+            attribution: attribution.into(),
             phases,
             runtime,
             browser: Vec::new(),
@@ -1483,23 +1425,23 @@ pub fn build_ruby_frontend_run(
                             scopes: vec![FrontendLimitationScope::Action],
                             reason: format!("{runner} exposes no general action lifecycle"),
                         },
-                        // Declared because it was not, and the declaration is
-                        // what a reader checks a number against. Ruby's
-                        // Coverage reports a line the first time it executes
-                        // in the process and never again, which is what makes
-                        // collecting it cheap: the first test to reach a line
-                        // is credited with it and every later test that runs
-                        // the same line is recorded against none of it. What a
-                        // test is credited with is its own; what it is not
-                        // credited with is not evidence it did not run.
-                        FrontendLimitation {
-                            id: format!("ruby-{runner}-first-sighting-lines"),
-                            scopes: vec![FrontendLimitationScope::Test],
-                            reason:
-                                "Ruby records a line for the first test that reaches it, so a test's coverage is a lower bound and the run's is its upper one"
-                                    .into(),
-                        },
-                    ],
+                    ]
+                    .into_iter()
+                    // Declared because the declaration is what a reader checks
+                    // a number against. Where lines come from Ruby's one-shot
+                    // Coverage (a file loaded without probes, a Ractor block),
+                    // a line is reported the first time it executes in the
+                    // process and never again: what a test is credited with is
+                    // its own; what it is not credited with is not evidence it
+                    // did not run.
+                    .chain(first_sighting.then(|| FrontendLimitation {
+                        id: format!("ruby-{runner}-first-sighting-lines"),
+                        scopes: vec![FrontendLimitationScope::Test],
+                        reason:
+                            "some lines came from Ruby's one-shot line coverage (code loaded without Supercov's probes), which records a line for the first test that reaches it, so a test's coverage is a lower bound and the run's is its upper one"
+                                .into(),
+                    }))
+                    .collect(),
                 })
                 .collect(),
             structural_limitations,
@@ -1555,6 +1497,70 @@ mod tests {
         bytes
     }
 
+    #[test]
+    fn a_damaged_transport_is_refused_with_what_is_wrong() {
+        // A killed interpreter, a full disk or another process writing into
+        // the evidence directory each leave a transport like one of these.
+        let process = serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]});
+        let exit = serde_json::json!({"t":"exit","at":9});
+        let valid = transport(&[process.clone(), exit.clone()]);
+        let read = |bytes: &[u8]| match read_evidence_file(
+            "main.7.a.mmap",
+            bytes,
+            "run-1",
+            &mut Evidence::default(),
+        ) {
+            Ok(()) => "accepted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(read(&valid), "accepted");
+        // The first frame's header is at 64 and its payload at 80.
+        let payload_end = 80 + process.to_string().len();
+        assert_ne!(payload_end % 8, 0, "the frame has padding to corrupt");
+        let set = |at: usize, value: &[u8]| {
+            let mut bytes = valid.clone();
+            bytes[at..at + value.len()].copy_from_slice(value);
+            bytes
+        };
+        let mut truncated = valid[..payload_end].to_vec();
+        truncated[16..24].copy_from_slice(&(payload_end as u64).to_le_bytes());
+        let other_owner = transport(&[
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":8,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]}),
+        ]);
+        let other_run = transport(&[
+            serde_json::json!({"t":"process","v":1,"run":"run-2","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]}),
+        ]);
+        for (bytes, reason) in [
+            (set(0, b"X"), "header or version does not match"),
+            (
+                set(16, &8_u64.to_le_bytes()),
+                "declared capacity is outside the mapped file",
+            ),
+            (set(24, &3_u64.to_le_bytes()), "3"),
+            (set(32, &0_u64.to_le_bytes()), "process id is missing"),
+            (set(64, &[2]), "commit marker or reserved bytes are invalid"),
+            (
+                set(68, &0_u32.to_le_bytes()),
+                "payload length is outside the transport bound",
+            ),
+            (
+                set(68, &4096_u32.to_le_bytes()),
+                "payload extends past the mapped file",
+            ),
+            (truncated, "aligned frame extends past the mapped file"),
+            (set(payload_end, &[1]), "frame padding is not zero"),
+            (
+                set(72, &0_u32.to_le_bytes()),
+                "payload checksum does not match",
+            ),
+            (other_owner, "does not match the transport owner"),
+            (other_run, "run-2"),
+        ] {
+            let said = read(&bytes);
+            assert!(said.contains(reason), "{reason}: {said}");
+        }
+    }
+
     fn temporary(name: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1601,7 +1607,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            &RubyAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         let declared = serde_json::to_string(&run.request.manifest.limitations).unwrap();
@@ -1621,7 +1627,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            &RubyAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         let declared = serde_json::to_string(&run.request.manifest.limitations).unwrap();
@@ -1637,7 +1643,7 @@ mod tests {
     // runtimes report whatever the interpreter loaded, so these fixtures have
     // to speak the host's dialect too.
     fn under(first: &str, rest: &str) -> String {
-        let mut path = PathBuf::from(if cfg!(windows) {
+        let mut path = std::path::PathBuf::from(if cfg!(windows) {
             format!("C:\\{first}")
         } else {
             format!("/{first}")
@@ -1646,32 +1652,6 @@ mod tests {
             path.push(part);
         }
         path.to_string_lossy().into_owned()
-    }
-
-    fn inventory_of(root: &str, sites: &[(&str, usize, usize)]) -> RubyAssertionInventory {
-        use crate::assertion_map::{Anchor, Files, Inputs, InventorySite};
-        RubyAssertionInventory::new(
-            Path::new(root),
-            &Inputs {
-                schema_version: 1,
-                language: "ruby".into(),
-                context_digest: "context".into(),
-                files: Files::new(),
-                assertions: sites
-                    .iter()
-                    .map(|(file, line, column)| InventorySite {
-                        at: Anchor {
-                            file: (*file).into(),
-                            line: *line,
-                            column: *column,
-                            text: "assert_equal 1, f(1)".into(),
-                        },
-                        operation: "assert".into(),
-                    })
-                    .collect(),
-                limitations: vec![],
-            },
-        )
     }
 
     fn assertion_sources(run: &RubyFrontendRun) -> Vec<String> {
@@ -1687,7 +1667,7 @@ mod tests {
         name: &str,
         sites: &[serde_json::Value],
         outcome_file: Option<&str>,
-        inventory: &RubyAssertionInventory,
+        root: &str,
     ) -> RubyFrontendRun {
         let source = "def f(a)\n  a\nend\n";
         let mut probe = 0;
@@ -1713,7 +1693,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            inventory,
+            Path::new(root),
         )
         .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -1722,63 +1702,11 @@ mod tests {
     }
 
     #[test]
-    fn an_assertion_site_becomes_a_located_phase_when_the_inventory_names_one() {
-        // A Ruby backtrace carries no column, so a line is a witness only when
-        // the inventory holds exactly one site on it. The column reported is
-        // zero-based, which is what every native manifest reports and what the
-        // assertion report adds one to.
-        let inventory = inventory_of(&under("project", ""), &[("test/m_test.rb", 6, 5)]);
-        let run = run_with_sites(
-            "asite-located",
-            &[
-                serde_json::json!({"t":"asite","ctx":1,"f":under("project", "test/m_test.rb"),"l":6}),
-            ],
-            None,
-            &inventory,
-        );
-        assert!(
-            assertion_sources(&run).contains(&"test/m_test.rb:6:4".to_string()),
-            "expected a located assertion phase, got {:?}",
-            assertion_sources(&run)
-        );
-    }
-
-    #[test]
-    fn an_ambiguous_or_foreign_assertion_site_witnesses_nothing() {
-        // Two sites on one line cannot be told apart from a backtrace, and a
-        // frame outside the project names nothing. Both lose the witness
-        // rather than guessing one.
-        let ambiguous = inventory_of(
-            &under("project", ""),
-            &[("test/m_test.rb", 6, 5), ("test/m_test.rb", 6, 30)],
-        );
-        let run = run_with_sites(
-            "asite-ambiguous",
-            &[
-                serde_json::json!({"t":"asite","ctx":1,"f":under("project", "test/m_test.rb"),"l":6}),
-            ],
-            None,
-            &ambiguous,
-        );
-        assert_eq!(
-            assertion_sources(&run),
-            vec!["MTest#test_x".to_string()],
-            "only the per-test assertion phase should remain"
-        );
-
-        let known = inventory_of(&under("project", ""), &[("test/m_test.rb", 6, 5)]);
-        let outside = run_with_sites(
-            "asite-outside",
-            &[
-                serde_json::json!({"t":"asite","ctx":1,"f":under("elsewhere", "test/m_test.rb"),"l":6}),
-            ],
-            None,
-            &known,
-        );
-        assert_eq!(
-            assertion_sources(&outside),
-            vec!["MTest#test_x".to_string()]
-        );
+    fn a_test_s_assertions_are_its_one_assertion_phase() {
+        // The per-test assertion phase carries the evidence from the first
+        // assertion on; there is no separate phase per assertion line.
+        let run = run_with_sites("ruby-assertion-phase", &[], None, &under("project", ""));
+        assert_eq!(assertion_sources(&run), vec!["MTest#test_x".to_string()]);
     }
 
     #[test]
@@ -1786,20 +1714,20 @@ mod tests {
         // Minitest keeps the path the interpreter loaded, which may be
         // relative; a backtrace is absolute. Both name the same project file,
         // and an adapter that names none falls back to the identity.
-        let inventory = inventory_of(&under("project", ""), &[("test/m_test.rb", 6, 5)]);
+        let root = under("project", "");
         for reported in [
             under("project", "test/m_test.rb"),
             "test/m_test.rb".to_owned(),
             "./test/m_test.rb".to_owned(),
         ] {
-            let run = run_with_sites("asite-file", &[], Some(reported.as_str()), &inventory);
+            let run = run_with_sites("asite-file", &[], Some(reported.as_str()), &root);
             assert_eq!(
                 run.request.raw_results[0].test_file.as_deref(),
                 Some("test/m_test.rb"),
                 "{reported} should resolve to the project path"
             );
         }
-        let without = run_with_sites("asite-nofile", &[], None, &inventory);
+        let without = run_with_sites("asite-nofile", &[], None, &root);
         assert_eq!(
             without.request.raw_results[0].test_file.as_deref(),
             Some("MTest#test_x"),
@@ -1843,7 +1771,7 @@ mod tests {
             "run-1",
             "now",
             1,
-            &RubyAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -1889,7 +1817,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &RubyAssertionInventory::empty(),
+                Path::new(""),
             )
             .unwrap();
             validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -1982,7 +1910,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            &RubyAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -2010,7 +1938,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &RubyAssertionInventory::empty()
+                Path::new("")
             ),
             Err(RubyEvidenceError::NoInterpreter)
         ));

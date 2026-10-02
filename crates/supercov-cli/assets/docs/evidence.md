@@ -134,14 +134,3 @@ SUPERCOV_TEST_KIND=integration npx supercov -- npm test
 
 Supported values are `unit`, `component`, `integration` and `e2e`. Use separate
 runs when different suites need different classifications.
-
-## When assertion evidence is missing
-
-A test can make assertions without executing measured application code. It
-might check static data or a dependency, or use work performed in shared setup.
-Missing attribution across an asynchronous boundary can also leave a gap.
-
-The assertion detail explains why a mapped node did or did not receive credit.
-Use [Investigating assertion evidence](assertion-evidence.md) to distinguish
-these cases. The report's runtime action-phase counts are separate from the
-assertion map; zero action-phase lines does not mean zero asserted statements.

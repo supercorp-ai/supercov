@@ -279,6 +279,7 @@ mod tests {
             branches: Vec::new(),
             limitations: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let written = write_rust_build_cache(
             &root,

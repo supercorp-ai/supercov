@@ -2332,8 +2332,12 @@ fn the_security_report_names_what_fired_and_where_tests_never_went() {
     let text = human_security(&report);
     assert!(text.starts_with("Security: 1 of 3 files flagged, 2 clean.\n"));
     assert!(text.contains("injection_sink 1"));
-    assert!(text.contains("1 flagged files have lines no test in run run_1 executed; 1 are executed by tests that no assertion is credited with."));
-    assert!(text.contains("executed by tests, but no assertion is credited"));
+    assert!(text.contains("1 flagged files have lines no test in run run_1 executed; 1 are executed by tests that are not judged to catch any line of them."));
+    assert!(
+        text.contains(
+            "executed by tests, but no test is judged to catch a change to any line of it"
+        )
+    );
     assert!(
         text.contains(
             "  src/routes.ts\n    0.93  injection_sink\n          line 42  0.91  db.query(`select ${id}`)\n    and 12 of its measured lines"

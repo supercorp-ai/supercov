@@ -411,10 +411,9 @@ pub fn analyze_core(input: &CoverageCoreInput) -> Result<CoverageCoreOutput, Ana
         functions.iter().filter(|point| point.covered).count(),
         functions.len(),
     );
-    let branches = count(
-        decision_outcome_covered + generic_alternative_covered,
-        input.decisions.len() * 2 + generic_alternative_total,
-    );
+    // A decision's outcomes reach here as a branch of their own, beside the
+    // decision, so branch coverage is the branches alone.
+    let branches = count(generic_alternative_covered, generic_alternative_total);
     let decision_outcomes = count(decision_outcome_covered, input.decisions.len() * 2);
     let condition_outcomes = count(condition_outcome_covered, conditions * 2);
     let value_selections = count(value_alternative_covered, value_alternative_total);

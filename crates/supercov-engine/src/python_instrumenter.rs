@@ -369,6 +369,7 @@ impl<'a> PythonObligationCollector<'a> {
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             plan: PythonFilePlan::default(),
             point_ids: BTreeSet::new(),

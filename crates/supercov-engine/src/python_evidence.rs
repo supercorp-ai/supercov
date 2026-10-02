@@ -152,11 +152,6 @@ enum Record {
     /// `unittest` reports the caller's frame and pytest reports the line its
     /// rewriter recorded; both are resolved against the syntax inventory, and
     /// a frame naming no inventoried site witnesses nothing.
-    Asite {
-        ctx: u64,
-        f: String,
-        l: usize,
-    },
     Limitation {
         id: String,
         reason: String,
@@ -293,78 +288,19 @@ type OutcomesByAttempt = BTreeMap<(String, String, usize), Vec<(String, String, 
 type RunnersByAttempt = BTreeMap<(String, String, usize), String>;
 /// (worker, test, retry) -> the source file the runner named for the test
 type TestFilesByAttempt = BTreeMap<(String, String, usize), String>;
-/// (worker, test, retry) -> assertion sites the call phase reached, in the
-/// order they were first seen, as the runtime reported them: (path, line)
-type SitesByAttempt = BTreeMap<(String, String, usize), Vec<(String, usize)>>;
 
-/// The assertion sites Supercov inventoried from source before the run,
-/// indexed so a runtime frame can name one exactly.
-///
-/// Python reports a file and a line for an assertion, while an assertion
-/// anchor is a file, line and column. The inventory supplies the missing
-/// column and validates the frame: one that names no inventoried site
-/// witnesses nothing, so a wrong frame loses a witness rather than inventing
-/// one.
-pub struct PythonAssertionInventory {
-    root: PathBuf,
-    /// (project-relative file, line) -> the sites on that line
-    columns: BTreeMap<(String, usize), Vec<usize>>,
-}
-
-impl PythonAssertionInventory {
-    pub fn new(root: &Path, inputs: &crate::assertion_map::Inputs) -> Self {
-        let mut columns = BTreeMap::<(String, usize), Vec<usize>>::new();
-        for site in &inputs.assertions {
-            columns
-                .entry((site.at.file.clone(), site.at.line))
-                .or_default()
-                // Every native manifest reports a zero-based byte column and
-                // the report adds one to reach the anchor's own column.
-                .push(site.at.column.saturating_sub(1));
-        }
-        for sites in columns.values_mut() {
-            sites.sort_unstable();
-            sites.dedup();
-        }
-        Self {
-            root: root.to_path_buf(),
-            columns,
-        }
-    }
-
-    /// An inventory with no sites: every frame names nothing, which is what a
-    /// run with no assertion inputs should see.
-    pub fn empty() -> Self {
-        Self {
-            root: PathBuf::new(),
-            columns: BTreeMap::new(),
-        }
-    }
-
-    /// Python reports both forms: a frame's `co_filename` is whatever the
-    /// interpreter loaded, absolute or relative. A path outside the project
-    /// names nothing here.
-    pub fn relative(&self, path: &str) -> Option<String> {
-        let candidate = Path::new(path);
-        let relative = if candidate.is_absolute() {
-            candidate.strip_prefix(&self.root).ok()?
-        } else {
-            candidate.strip_prefix("./").unwrap_or(candidate)
-        };
-        let text = relative.to_string_lossy().replace('\\', "/");
-        (!text.is_empty() && !text.starts_with("../")).then_some(text)
-    }
-
-    /// `file:line:column` when that line holds exactly one inventoried site.
-    /// Two assertions on one line cannot be told apart from a line number, so
-    /// the frame names neither rather than guessing between them.
-    pub fn locate(&self, path: &str, line: usize) -> Option<String> {
-        let file = self.relative(path)?;
-        match self.columns.get(&(file.clone(), line))?.as_slice() {
-            [column] => Some(format!("{file}:{line}:{column}")),
-            _ => None,
-        }
-    }
+/// A runtime path, project-relative. Python reports both forms: a frame's
+/// `co_filename` is whatever the interpreter loaded, absolute or relative. A
+/// path outside the project names nothing.
+fn relative(root: &Path, path: &str) -> Option<String> {
+    let candidate = Path::new(path);
+    let relative = if candidate.is_absolute() {
+        candidate.strip_prefix(root).ok()?
+    } else {
+        candidate.strip_prefix("./").unwrap_or(candidate)
+    };
+    let text = relative.to_string_lossy().replace('\\', "/");
+    (!text.is_empty() && !text.starts_with("../")).then_some(text)
 }
 
 #[derive(Debug, Default)]
@@ -401,7 +337,6 @@ struct Evidence {
     outcomes: OutcomesByAttempt,
     runners: RunnersByAttempt,
     test_files: TestFilesByAttempt,
-    sites: SitesByAttempt,
     limitations: BTreeMap<(String, Option<String>, Option<String>), RuntimeLimitation>,
     /// The layout's ids, which slot hits are positions in.
     slot_ids: Vec<String>,
@@ -1000,6 +935,15 @@ fn transport_u64(bytes: &[u8], offset: usize) -> Option<u64> {
         .map(u64::from_le_bytes)
 }
 
+/// A field of a header whose length was checked: it cannot run past it.
+fn checked_u32(bytes: &[u8], offset: usize) -> u32 {
+    transport_u32(bytes, offset).expect("the header was checked to hold this field")
+}
+
+fn checked_u64(bytes: &[u8], offset: usize) -> u64 {
+    transport_u64(bytes, offset).expect("the header was checked to hold this field")
+}
+
 fn transport_checksum(payload: &[u8], version: u32) -> u32 {
     if version == TRANSPORT_VERSION_FNV {
         return payload.iter().fold(0x811c_9dc5_u32, |value, byte| {
@@ -1040,25 +984,24 @@ fn parse_transport(
         return Err(invalid_transport("header or version does not match"));
     }
     let version = version.unwrap_or(TRANSPORT_VERSION);
-    let declared_capacity =
-        transport_u64(contents, 16).ok_or_else(|| invalid_transport("capacity is missing"))?;
+    let declared_capacity = checked_u64(contents, 16);
     if declared_capacity < TRANSPORT_HEADER_SIZE as u64 || declared_capacity > contents.len() as u64
     {
         return Err(invalid_transport(
             "declared capacity is outside the mapped file",
         ));
     }
-    let dropped =
-        transport_u64(contents, 24).ok_or_else(|| invalid_transport("drop counter is missing"))?;
+    let dropped = checked_u64(contents, 24);
     if dropped != 0 {
         return Err(PythonEvidenceError::DroppedRecords {
             file: name.into(),
             count: dropped,
         });
     }
-    let transport_pid = transport_u64(contents, 32)
-        .filter(|pid| *pid != 0)
-        .ok_or_else(|| invalid_transport("process id is missing"))?;
+    let transport_pid = checked_u64(contents, 32);
+    if transport_pid == 0 {
+        return Err(invalid_transport("process id is missing"));
+    }
     let mut records = Vec::new();
     let mut cursor = TRANSPORT_HEADER_SIZE;
     let mut record_index = 0;
@@ -1082,9 +1025,7 @@ fn parse_transport(
         {
             return Err(invalid("commit marker or reserved bytes are invalid"));
         }
-        let length = transport_u32(contents, cursor + 4)
-            .map(|value| value as usize)
-            .ok_or_else(|| invalid("payload length is missing"))?;
+        let length = checked_u32(contents, cursor + 4) as usize;
         if length == 0 || length > TRANSPORT_MAX_RECORD_SIZE {
             return Err(invalid("payload length is outside the transport bound"));
         }
@@ -1103,8 +1044,7 @@ fn parse_transport(
             return Err(invalid("frame padding is not zero"));
         }
         let payload = &contents[payload_start..payload_end];
-        let expected_checksum = transport_u32(contents, cursor + 8)
-            .ok_or_else(|| invalid("payload checksum is missing"))?;
+        let expected_checksum = checked_u32(contents, cursor + 8);
         if transport_checksum(payload, version) != expected_checksum {
             return Err(invalid("payload checksum does not match"));
         }
@@ -1416,32 +1356,6 @@ fn apply_transport(
                     asserted.slot_hits.extend(before.slot_hits);
                     for (id, vectors) in before.vectors {
                         asserted.vectors.entry(id).or_default().extend(vectors);
-                    }
-                }
-            }
-            Record::Asite { ctx, f, l } => {
-                if f.is_empty() || l == 0 {
-                    return Err(invalid("assertion site needs a file and a line"));
-                }
-                let identity = contexts
-                    .get(&ctx)
-                    .ok_or(PythonEvidenceError::UnknownContext {
-                        file: name.into(),
-                        line: line_number,
-                        context: ctx,
-                    })?;
-                // Only the call phase witnesses a test's assertions; setup and
-                // teardown assertions belong to no single site under test.
-                if identity.phase == "call" {
-                    let key = (
-                        identity.worker.clone(),
-                        identity.test.clone(),
-                        identity.retry,
-                    );
-                    let sites = evidence.sites.entry(key).or_default();
-                    let site = (f, l);
-                    if !sites.contains(&site) {
-                        sites.push(site);
                     }
                 }
             }
@@ -1758,7 +1672,7 @@ pub fn build_python_frontend_run(
     run_id: &str,
     generated_at: &str,
     test_exit_code: i32,
-    assertions: &PythonAssertionInventory,
+    root: &Path,
 ) -> Result<PythonFrontendRun, PythonEvidenceError> {
     let evidence = read_evidence_directory(evidence_directory, run_id)?;
     if evidence.interpreters == 0 {
@@ -1775,7 +1689,6 @@ pub fn build_python_frontend_run(
         outcomes,
         runners,
         test_files,
-        sites,
         limitations,
         slot_ids,
     } = evidence;
@@ -1895,42 +1808,6 @@ pub fn build_python_frontend_run(
                     error: None,
                 });
                 runtime.push(take(identity)?);
-                // One phase per assertion site the call phase reached, so an
-                // assertion map can tell the sites apart. The per-test phase
-                // above keeps carrying the pre-assertion evidence; these are
-                // witnesses only, and a site the inventory does not know is
-                // skipped rather than guessed at.
-                let attempt = (worker.clone(), test.clone(), retry);
-                // Keyed on the located site, not on the spelling reported:
-                // two spellings of one file name one site, and a phase id
-                // minted twice refuses the run, as it did in #40.
-                let mut located = BTreeSet::new();
-                for (path, line) in sites.get(&attempt).into_iter().flatten() {
-                    let Some(location) = assertions.locate(path, *line) else {
-                        continue;
-                    };
-                    if !located.insert(location.clone()) {
-                        continue;
-                    }
-                    phases.push(CoveragePhase {
-                        id: stable_id("python-assertion", &[run_id, &id, &location]),
-                        kind: "assertion".into(),
-                        operation: format!("{runner} assertion at {location}"),
-                        source: Some(location),
-                        caused_by_phase_id: Some(id.clone()),
-                        started_at_ms: position as i64 * 2 + 1,
-                        ended_at_ms: Some(position as i64 * 2 + 2),
-                        status: Some(
-                            if outcome == "passed" && !*xfail {
-                                "passed"
-                            } else {
-                                "failed"
-                            }
-                            .into(),
-                        ),
-                        error: None,
-                    });
-                }
             }
         }
         // A phase the runtime entered but pytest never reported (the worker
@@ -1970,7 +1847,7 @@ pub fn build_python_frontend_run(
             // derivation stays only as a fallback.
             test_file: test_files
                 .get(&(worker.clone(), test.clone(), retry))
-                .and_then(|path| assertions.relative(path))
+                .and_then(|path| relative(root, path))
                 .or_else(|| test.split("::").next().map(str::to_owned)),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
@@ -2037,7 +1914,7 @@ pub fn build_python_frontend_run(
             // derivation stays only as a fallback.
             test_file: test_files
                 .get(&(worker.clone(), test.clone(), retry))
-                .and_then(|path| assertions.relative(path))
+                .and_then(|path| relative(root, path))
                 .or_else(|| test.split("::").next().map(str::to_owned)),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
@@ -2281,6 +2158,95 @@ mod tests {
         path
     }
 
+    /// One transport in memory, a frame per payload.
+    fn transport_bytes(payloads: &[&[u8]]) -> Vec<u8> {
+        let capacity = payloads
+            .iter()
+            .fold(TRANSPORT_HEADER_SIZE, |cursor, payload| {
+                align_transport(cursor + TRANSPORT_RECORD_HEADER_SIZE + payload.len()).unwrap()
+            });
+        let mut bytes = vec![0_u8; capacity];
+        bytes[..8].copy_from_slice(TRANSPORT_MAGIC);
+        bytes[8..12].copy_from_slice(&TRANSPORT_VERSION.to_le_bytes());
+        bytes[12..16].copy_from_slice(&(TRANSPORT_HEADER_SIZE as u32).to_le_bytes());
+        bytes[16..24].copy_from_slice(&(capacity as u64).to_le_bytes());
+        bytes[32..40].copy_from_slice(&1_u64.to_le_bytes());
+        let mut cursor = TRANSPORT_HEADER_SIZE;
+        for payload in payloads {
+            let start = cursor + TRANSPORT_RECORD_HEADER_SIZE;
+            bytes[start..start + payload.len()].copy_from_slice(payload);
+            bytes[cursor + 4..cursor + 8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes[cursor + 8..cursor + 12].copy_from_slice(&crc32fast::hash(payload).to_le_bytes());
+            bytes[cursor] = 1;
+            cursor = align_transport(start + payload.len()).unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_damaged_transport_is_refused_with_what_is_wrong() {
+        // A killed writer, a full disk or another process writing into the
+        // evidence directory each leave a transport like one of these. Each
+        // is refused, never read as evidence.
+        let exit: &[u8] = br#"{"t":"exit","at":9}"#;
+        let valid = transport_bytes(&[exit]);
+        let read = |bytes: &[u8]| match parse_transport("main.1.mmap", bytes, &[], None) {
+            Ok(_) => "accepted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(read(&valid), "accepted");
+        // The first frame's header starts at 64, its payload at 80 and ends at
+        // 99, and its padding runs to 104.
+        let set = |at: usize, value: &[u8]| {
+            let mut bytes = valid.clone();
+            bytes[at..at + value.len()].copy_from_slice(value);
+            bytes
+        };
+        let mut truncated = valid[..99].to_vec();
+        truncated[16..24].copy_from_slice(&99_u64.to_le_bytes());
+        for (bytes, reason) in [
+            (set(0, b"X"), "header or version does not match"),
+            (
+                set(8, &99_u32.to_le_bytes()),
+                "header or version does not match",
+            ),
+            (
+                set(16, &8_u64.to_le_bytes()),
+                "declared capacity is outside the mapped file",
+            ),
+            (set(24, &3_u64.to_le_bytes()), "3"),
+            (set(32, &0_u64.to_le_bytes()), "process id is missing"),
+            (set(64, &[2]), "commit marker or reserved bytes are invalid"),
+            (
+                set(68, &0_u32.to_le_bytes()),
+                "payload length is outside the transport bound",
+            ),
+            (
+                set(68, &64_u32.to_le_bytes()),
+                "payload extends past the mapped file",
+            ),
+            (truncated, "aligned frame extends past the mapped file"),
+            (set(100, &[1]), "frame padding is not zero"),
+            (
+                set(72, &0_u32.to_le_bytes()),
+                "payload checksum does not match",
+            ),
+            (transport_bytes(&[b"{not json"]), "key must be a string"),
+            (
+                transport_bytes(&[br#"{"t":"runs","ctx":1,"r":[]}"#]),
+                "slot runs arrived without the run's slot layout",
+            ),
+        ] {
+            let said = read(&bytes);
+            assert!(said.contains(reason), "{reason}: {said}");
+        }
+        // A frame whose commit byte never landed ends the transport there,
+        // as a killed writer leaves it.
+        let mut uncommitted = transport_bytes(&[exit, exit]);
+        uncommitted[104] = 0;
+        assert_eq!(read(&uncommitted), "accepted");
+    }
+
     fn write_transport(path: &Path, records: &[serde_json::Value], dropped: u64) {
         write_transport_version(path, records, dropped, TRANSPORT_VERSION, None);
     }
@@ -2351,32 +2317,6 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    fn inventory_of(root: &str, sites: &[(&str, usize, usize)]) -> PythonAssertionInventory {
-        use crate::assertion_map::{Anchor, Files, Inputs, InventorySite};
-        PythonAssertionInventory::new(
-            Path::new(root),
-            &Inputs {
-                schema_version: 1,
-                language: "python".into(),
-                context_digest: "context".into(),
-                files: Files::new(),
-                assertions: sites
-                    .iter()
-                    .map(|(file, line, column)| InventorySite {
-                        at: Anchor {
-                            file: (*file).into(),
-                            line: *line,
-                            column: *column,
-                            text: "assert f(1) == 1".into(),
-                        },
-                        operation: "assert".into(),
-                    })
-                    .collect(),
-                limitations: vec![],
-            },
-        )
-    }
-
     fn assertion_sources(run: &PythonFrontendRun) -> Vec<String> {
         run.request.raw_results[0]
             .phases
@@ -2390,7 +2330,7 @@ mod tests {
         name: &str,
         sites: &[serde_json::Value],
         outcome_file: Option<&str>,
-        inventory: &PythonAssertionInventory,
+        root: &str,
     ) -> PythonFrontendRun {
         let source = "def f(a):\n    return a\n";
         let obligations = build_python_obligations("m.py", source).unwrap();
@@ -2414,7 +2354,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            inventory,
+            Path::new(root),
         )
         .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -2646,55 +2586,12 @@ mod tests {
     }
 
     #[test]
-    fn an_assertion_site_becomes_a_located_phase_when_the_inventory_names_one() {
-        // Python reports a file and a line for an assertion, so a line is a
-        // witness only when the inventory holds exactly one site on it. The
-        // column reported is zero-based, which is what every native manifest
-        // reports and what the assertion report adds one to.
-        let inventory = inventory_of(&under("project", ""), &[("tests/test_m.py", 6, 5)]);
-        let run = run_with_sites(
-            "py-asite-located",
-            &[json!({"t":"asite","ctx":1,"f":under("project", "tests/test_m.py"),"l":6})],
-            None,
-            &inventory,
-        );
-        assert!(
-            assertion_sources(&run).contains(&"tests/test_m.py:6:4".to_string()),
-            "expected a located assertion phase, got {:?}",
-            assertion_sources(&run)
-        );
-    }
-
-    #[test]
-    fn an_ambiguous_or_foreign_assertion_site_witnesses_nothing() {
-        // Two sites on one line cannot be told apart from a line number, and a
-        // frame outside the project names nothing. Both lose the witness
-        // rather than guessing one.
-        let ambiguous = inventory_of(
-            &under("project", ""),
-            &[("tests/test_m.py", 6, 5), ("tests/test_m.py", 6, 30)],
-        );
-        let run = run_with_sites(
-            "py-asite-ambiguous",
-            &[json!({"t":"asite","ctx":1,"f":under("project", "tests/test_m.py"),"l":6})],
-            None,
-            &ambiguous,
-        );
+    fn a_test_s_assertions_are_its_one_assertion_phase() {
+        // The per-test assertion phase carries the evidence from the first
+        // assertion on; there is no separate phase per assertion line.
+        let run = run_with_sites("py-assertion-phase", &[], None, &under("project", ""));
         assert_eq!(
             assertion_sources(&run),
-            vec!["tests/test_m.py::test_a".to_string()],
-            "only the per-test assertion phase should remain"
-        );
-
-        let known = inventory_of(&under("project", ""), &[("tests/test_m.py", 6, 5)]);
-        let outside = run_with_sites(
-            "py-asite-outside",
-            &[json!({"t":"asite","ctx":1,"f":under("elsewhere", "tests/test_m.py"),"l":6})],
-            None,
-            &known,
-        );
-        assert_eq!(
-            assertion_sources(&outside),
             vec!["tests/test_m.py::test_a".to_string()]
         );
     }
@@ -2705,20 +2602,20 @@ mod tests {
         // the test's module; either may be absolute or relative. Both name the
         // same project file, and a runner that names none falls back to the
         // node id.
-        let inventory = inventory_of(&under("project", ""), &[("tests/test_m.py", 6, 5)]);
+        let root = under("project", "");
         for reported in [
             under("project", "tests/test_m.py"),
             "tests/test_m.py".to_owned(),
             "./tests/test_m.py".to_owned(),
         ] {
-            let run = run_with_sites("py-asite-file", &[], Some(reported.as_str()), &inventory);
+            let run = run_with_sites("py-asite-file", &[], Some(reported.as_str()), &root);
             assert_eq!(
                 run.request.raw_results[0].test_file.as_deref(),
                 Some("tests/test_m.py"),
                 "{reported} should resolve to the project path"
             );
         }
-        let without = run_with_sites("py-asite-nofile", &[], None, &inventory);
+        let without = run_with_sites("py-asite-nofile", &[], None, &root);
         assert_eq!(
             without.request.raw_results[0].test_file.as_deref(),
             Some("tests/test_m.py"),
@@ -2761,7 +2658,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            &PythonAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -2906,7 +2803,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty(),
+                Path::new(""),
             )
             .unwrap();
             validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -2991,15 +2888,9 @@ mod tests {
             2,
             "deduplicate before manifest expansion"
         );
-        let run = build_python_frontend_run(
-            &manifest,
-            &directory,
-            "run-1",
-            "now",
-            0,
-            &PythonAssertionInventory::empty(),
-        )
-        .unwrap();
+        let run =
+            build_python_frontend_run(&manifest, &directory, "run-1", "now", 0, Path::new(""))
+                .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         let limitations = &run.request.manifest.limitations;
         assert_eq!(limitations.len(), 2);
@@ -3031,15 +2922,9 @@ mod tests {
             json!({"t":"limitation","id":"python-probes-unobserved-module","file":"only_run.py","reason":"entry script"}),
         ];
         write_transport(&directory.join("main.1.mmap"), &records, 0);
-        let run = build_python_frontend_run(
-            &manifest,
-            &directory,
-            "run-1",
-            "now",
-            0,
-            &PythonAssertionInventory::empty(),
-        )
-        .unwrap();
+        let run =
+            build_python_frontend_run(&manifest, &directory, "run-1", "now", 0, Path::new(""))
+                .unwrap();
         let unmeasured = &run.request.manifest.unmeasured;
         let file_points = |file: &str| {
             manifest
@@ -3099,7 +2984,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            &PythonAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
@@ -3120,6 +3005,187 @@ mod tests {
             &["", &decision.id]
         )));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_damaged_record_is_refused_with_what_is_wrong() {
+        // The runtime writes none of these. Another version of it, another
+        // run's leftovers or a damaged write can, and each is refused rather
+        // than read as evidence.
+        let source = "def f(a, b):\n    if a and b:\n        return 1\n    return 0\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let decision = obligations.plan.decisions[0].id.clone();
+        let process = json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]});
+        let phase = json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"t::a","retry":0,"phase":"call"});
+        let outcome = json!({"t":"outcome","worker":"main","test":"t::a","retry":0,"phase":"call","outcome":"passed","xfail":false});
+        let with = |record: &serde_json::Value, key: &str, value: serde_json::Value| {
+            let mut changed = record.clone();
+            changed[key] = value;
+            changed
+        };
+        let read = |name: &str, records: Vec<serde_json::Value>| {
+            let directory = temporary(name);
+            write_transport(&directory.join("main.1.mmap"), &records, 0);
+            let said = match build_python_frontend_run(
+                &obligations.manifest,
+                &directory,
+                "run-1",
+                "now",
+                0,
+                Path::new(""),
+            ) {
+                Ok(_) => "accepted".to_owned(),
+                Err(error) => error.to_string(),
+            };
+            fs::remove_dir_all(directory).unwrap();
+            said
+        };
+        let exit = json!({"t":"exit","at":9});
+        assert_eq!(
+            read(
+                "record-valid",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    outcome.clone(),
+                    exit.clone()
+                ]
+            ),
+            "accepted"
+        );
+        for (name, records, reason) in [
+            (
+                "record-version",
+                vec![with(&process, "v", json!(2))],
+                "unsupported Python evidence version 2",
+            ),
+            (
+                "record-run",
+                vec![with(&process, "run", json!("run-0"))],
+                "belongs to run run-0, expected run-1",
+            ),
+            (
+                "record-pid",
+                vec![with(&process, "pid", json!(7))],
+                "does not match the transport owner",
+            ),
+            (
+                "record-python",
+                vec![with(&process, "python", json!("3.8.1"))],
+                "the test command ran Python 3.8.1",
+            ),
+            (
+                "record-context",
+                vec![process.clone(), with(&phase, "ctx", json!(0))],
+                "phase context 0 is reserved",
+            ),
+            (
+                "record-phase",
+                vec![process.clone(), with(&phase, "phase", json!("body"))],
+                "unknown pytest phase",
+            ),
+            (
+                "record-identity",
+                vec![process.clone(), with(&phase, "test", json!(" "))],
+                "must name a worker and test",
+            ),
+            (
+                "record-outcome-phase",
+                vec![process.clone(), with(&outcome, "phase", json!("body"))],
+                "unknown test outcome phase",
+            ),
+            (
+                "record-outcome",
+                vec![process.clone(), with(&outcome, "outcome", json!("maybe"))],
+                "unknown test outcome",
+            ),
+            (
+                "record-runner",
+                vec![process.clone(), with(&outcome, "runner", json!("nose"))],
+                "unknown Python test runner",
+            ),
+            (
+                "record-two-runners",
+                vec![
+                    process.clone(),
+                    outcome.clone(),
+                    with(&outcome, "runner", json!("unittest")),
+                ],
+                "one attempt was reported by two runners",
+            ),
+            (
+                "record-digits",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"dec","ctx":1,"id":decision,"v":"23","o":1}),
+                ],
+                "decision vector digits must be 0, 1 or 2",
+            ),
+            (
+                "record-decision-outcome",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"dec","ctx":1,"id":decision,"v":"22","o":2}),
+                ],
+                "decision outcome must be 0 or 1",
+            ),
+            (
+                "record-batch-digits",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"decs","ctx":1,"v":[[decision, "", 1]]}),
+                ],
+                "decision vector digits must be 0, 1 or 2",
+            ),
+            (
+                "record-batch-outcome",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"decs","ctx":1,"v":[[decision, "21", 3]]}),
+                ],
+                "decision outcome must be 0 or 1",
+            ),
+            (
+                "record-unknown-hit",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"hit","ctx":1,"id":"py:nowhere"}),
+                    outcome.clone(),
+                    exit.clone(),
+                ],
+                "unknown obligation: py:nowhere",
+            ),
+            (
+                "record-unknown-decision",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"dec","ctx":1,"id":"py:nodecision","v":"22","o":1}),
+                    outcome.clone(),
+                    exit.clone(),
+                ],
+                "unknown obligation: py:nodecision",
+            ),
+            (
+                "record-short-vector",
+                vec![
+                    process.clone(),
+                    phase.clone(),
+                    json!({"t":"dec","ctx":1,"id":decision,"v":"2","o":1}),
+                    outcome.clone(),
+                    exit.clone(),
+                ],
+                "reported 1 condition values, expected 2",
+            ),
+        ] {
+            let said = read(name, records);
+            assert!(said.contains(reason), "{name}: {said}");
+        }
     }
 
     // Version 2 checksums with CRC-32, version 1 with FNV-1a. A runtime older
@@ -3145,7 +3211,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty(),
+                Path::new(""),
             );
             fs::remove_dir_all(directory).unwrap();
             outcome.map(|_| ()).map_err(|error| error.to_string())
@@ -3192,7 +3258,7 @@ mod tests {
             "run-1",
             "now",
             0,
-            &PythonAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         assert_eq!(run.tests, 2);
@@ -3244,7 +3310,7 @@ mod tests {
             "run-1",
             "now",
             1,
-            &PythonAssertionInventory::empty(),
+            Path::new(""),
         )
         .unwrap();
         // The protocol refuses a repeated phase id, which is what threw the
@@ -3287,7 +3353,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::NoInterpreter)
         ));
@@ -3306,7 +3372,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::NoTests)
         ));
@@ -3330,7 +3396,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::NoTests)
         ));
@@ -3348,7 +3414,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::UnsupportedPython(_))
         ));
@@ -3366,7 +3432,7 @@ mod tests {
                 "run-1",
                 "now",
                 0,
-                &PythonAssertionInventory::empty()
+                Path::new("")
             ),
             Err(PythonEvidenceError::DroppedRecords { count: 2, .. })
         ));

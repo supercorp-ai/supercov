@@ -5,57 +5,24 @@
   "assertionCoverage": {
     "available": true,
     "summary": {
-      "status": "available",
-      "reason": "Agent-assessed statements; mapping completeness is unknown",
-      "pendingChanges": 0,
-      "metric": "measured statements",
-      "statements": {
-        "asserted": 4,
-        "declared": 4,
-        "total": 14,
-        "percentage": 28.571428571428573
-      },
-      "assertions": 7,
-      "inventoryAssertions": 7,
-      "missingInventoryAssertions": 0,
-      "assertionsWithFlows": 4,
-      "assertionsWithoutFlows": 3,
-      "observedAssertionsWithoutCurrentExplanation": 3,
-      "questions": 0,
-      "currentFlows": 4,
-      "draftFlows": 0,
-      "staleFlows": 0,
-      "invalidFlows": 0,
-      "eligibleFlows": 4,
-      "retiredAssertions": 0,
-      "unobservedAssertions": 0,
-      "inventoryFailures": 0,
-      "unanchoredStatements": 0,
-      "runPassed": true,
-      "lines": {
-        "asserted": 3,
-        "declared": 3,
-        "total": 13,
-        "percentage": 23.076923076923077
-      },
-      "excludedStatements": 0
+      "statements": 12,
+      "asserted": 10,
+      "notAsserted": 2,
+      "percentage": 83.3,
+      "requests": 4,
+      "answersReused": 14,
+      "inputTokens": 4606,
+      "costUsd": 0.00019345200000000002
     },
-    "basis": "agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
-    "revision": "233511d86aa86761403d4ca73e706fc61414b73321bc71c89ca14bd91d5c2359",
-    "inheritance": {
-      "from": null,
-      "skipped": []
-    },
-    "map": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/runs/run_6f86beed95a82a1b/assertions.json",
-    "validationErrors": [],
-    "scope": "whole run with matching current source; independent of structural query filters"
+    "basis": "Jev, from what each test ran; a statement is asserted when some test that runs it is judged to fail if it changes",
+    "model": "jev-1.13.0"
   },
-  "run": "run_6f86beed95a82a1b",
+  "run": "run_9b03c9d351d52caf",
   "command": [
     "npm",
     "test"
   ],
-  "workspace": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/workspaces/workspace/supercov-react-verification-LavbfO",
+  "workspace": "/private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-JYtCPG/.supercov/workspaces/workspace/supercov-react-verification-JYtCPG",
   "filters": {
     "outcome": "all",
     "kind": null,
@@ -88,7 +55,7 @@
       "mutation score or assertion fault-detection strength"
     ]
   },
-  "generatedAt": "2026-09-15T20:26:50.056Z",
+  "generatedAt": "2026-09-30T18:43:28.306Z",
   "valid": true,
   "testExitCode": 0,
   "stale": false,
@@ -157,6 +124,7 @@
       "kind": "unit",
       "tests": 7,
       "setups": 2,
+      "attributed": 7,
       "summary": {
         "decisions": 0,
         "executedDecisions": 0,
@@ -208,6 +176,7 @@
       "runner": "vitest",
       "tests": 7,
       "setups": 2,
+      "attributed": 7,
       "summary": {
         "decisions": 0,
         "executedDecisions": 0,
@@ -259,6 +228,11 @@
     "browserFallback": 0,
     "serverExplicit": 0,
     "serverFallback": 10
+  },
+  "testAttribution": {
+    "exact": 7,
+    "partial": 0,
+    "runWide": 0
   },
   "transport": {
     "processes": 4,

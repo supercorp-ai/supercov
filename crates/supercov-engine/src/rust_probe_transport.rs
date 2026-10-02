@@ -21,8 +21,6 @@ use crate::rust_runtime::{RustProbeObservation, valid_probe_id};
 pub const RUST_TRANSPORT_ENV: &str = "SUPERCOV_RUST_TRANSPORT_FILE";
 pub const RUST_TRANSPORT_TOKEN_ENV: &str = "SUPERCOV_RUST_TRANSPORT_TOKEN";
 pub const RUST_CONTEXT_ENV: &str = "SUPERCOV_RUST_CONTEXT_ID";
-pub const DEFAULT_DESCRIPTOR_CAPACITY: u32 = 32_768;
-pub const DEFAULT_PAYLOAD_CAPACITY: u32 = 4 * 1024 * 1024;
 
 const MAGIC: &[u8; 8] = b"SCVRUST3";
 const VERSION: u32 = 3;
@@ -280,6 +278,26 @@ fn get_u64(source: &[u8], offset: usize) -> Option<u64> {
     ))
 }
 
+/// A field the reader already bounded: the header was checked whole, and
+/// the file was checked to be exactly as long as its descriptors and payload
+/// need, so a field inside either cannot run past the file.
+/// An eight-byte field of a record whose length was checked.
+fn le_u64(field: &[u8]) -> u64 {
+    u64::from_le_bytes(
+        field
+            .try_into()
+            .expect("the record was checked to hold this field"),
+    )
+}
+
+fn bounded_u32(source: &[u8], offset: usize) -> u32 {
+    get_u32(source, offset).expect("the file was checked to hold this field")
+}
+
+fn bounded_u64(source: &[u8], offset: usize) -> u64 {
+    get_u64(source, offset).expect("the file was checked to hold this field")
+}
+
 fn total_size(descriptors: u32, payload: u32) -> Option<usize> {
     HEADER_SIZE
         .checked_add(
@@ -442,8 +460,8 @@ pub fn read_rust_transport(
     {
         return Err(RustTransportError::InvalidHeader);
     }
-    let descriptors = get_u32(&mapping, 20).ok_or(RustTransportError::InvalidHeader)?;
-    let payload_capacity = get_u32(&mapping, 24).ok_or(RustTransportError::InvalidHeader)?;
+    let descriptors = bounded_u32(&mapping, 20);
+    let payload_capacity = bounded_u32(&mapping, 24);
     if descriptors == 0 || payload_capacity == 0 {
         return Err(RustTransportError::InvalidHeader);
     }
@@ -481,23 +499,13 @@ pub fn read_rust_transport(
         if mapping[descriptor + 3] != 0 {
             return Err(RustTransportError::InvalidDescriptor(index));
         }
-        let pid = get_u32(&mapping, descriptor + PID_OFFSET)
-            .ok_or(RustTransportError::InvalidDescriptor(index))?;
-        let context_id = get_u64(&mapping, descriptor + CONTEXT_OFFSET)
-            .ok_or(RustTransportError::InvalidDescriptor(index))?;
-        let payload_offset = get_u32(&mapping, descriptor + PAYLOAD_OFFSET_OFFSET)
-            .ok_or(RustTransportError::InvalidDescriptor(index))?
-            as usize;
-        let payload_length = get_u32(&mapping, descriptor + PAYLOAD_LENGTH_OFFSET)
-            .ok_or(RustTransportError::InvalidDescriptor(index))?
-            as usize;
-        let id_length = get_u32(&mapping, descriptor + ID_LENGTH_OFFSET)
-            .ok_or(RustTransportError::InvalidDescriptor(index))? as usize;
-        let value_length = get_u32(&mapping, descriptor + VALUE_LENGTH_OFFSET)
-            .ok_or(RustTransportError::InvalidDescriptor(index))?
-            as usize;
-        let expected_checksum = get_u64(&mapping, descriptor + CHECKSUM_OFFSET)
-            .ok_or(RustTransportError::InvalidDescriptor(index))?;
+        let pid = bounded_u32(&mapping, descriptor + PID_OFFSET);
+        let context_id = bounded_u64(&mapping, descriptor + CONTEXT_OFFSET);
+        let payload_offset = bounded_u32(&mapping, descriptor + PAYLOAD_OFFSET_OFFSET) as usize;
+        let payload_length = bounded_u32(&mapping, descriptor + PAYLOAD_LENGTH_OFFSET) as usize;
+        let id_length = bounded_u32(&mapping, descriptor + ID_LENGTH_OFFSET) as usize;
+        let value_length = bounded_u32(&mapping, descriptor + VALUE_LENGTH_OFFSET) as usize;
+        let expected_checksum = bounded_u64(&mapping, descriptor + CHECKSUM_OFFSET);
         let end = payload_offset
             .checked_add(payload_length)
             .filter(|end| *end <= payload_capacity as usize)
@@ -507,9 +515,7 @@ pub fn read_rust_transport(
         {
             return Err(RustTransportError::InvalidDescriptor(index));
         }
-        let payload = mapping
-            .get(payload_base + payload_offset..payload_base + end)
-            .ok_or(RustTransportError::InvalidDescriptor(index))?;
+        let payload = &mapping[payload_base + payload_offset..payload_base + end];
         let (id, values) = payload.split_at(id_length);
         if checksum(
             kind,
@@ -566,11 +572,7 @@ pub fn read_rust_transport(
                 ordinal_hits.push(RustOrdinalHit {
                     process_id: pid,
                     context_id,
-                    ordinal: u64::from_le_bytes(
-                        values
-                            .try_into()
-                            .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                    ),
+                    ordinal: le_u64(values),
                 });
             }
             KIND_PHASE
@@ -579,16 +581,8 @@ pub fn read_rust_transport(
                     && values.len() == 16
                     && !matches!(context_id, 0 | u64::MAX) =>
             {
-                let parent_context_id = u64::from_le_bytes(
-                    values[..8]
-                        .try_into()
-                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                );
-                let invocation_nonce = u64::from_le_bytes(
-                    values[8..]
-                        .try_into()
-                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                );
+                let parent_context_id = le_u64(&values[..8]);
+                let invocation_nonce = le_u64(&values[8..]);
                 if matches!(parent_context_id, 0 | u64::MAX)
                     || rust_assertion_context_id(parent_context_id, id, invocation_nonce)?
                         != context_id
@@ -625,16 +619,8 @@ pub fn read_rust_transport(
                     && values.len() == 16
                     && !matches!(context_id, 0 | u64::MAX) =>
             {
-                let parent_context_id = u64::from_le_bytes(
-                    values[..8]
-                        .try_into()
-                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                );
-                let invocation_nonce = u64::from_le_bytes(
-                    values[8..]
-                        .try_into()
-                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
-                );
+                let parent_context_id = le_u64(&values[..8]);
+                let invocation_nonce = le_u64(&values[8..]);
                 if matches!(parent_context_id, 0 | u64::MAX)
                     || rust_thread_context_id(parent_context_id, invocation_nonce) != context_id
                 {
@@ -1643,6 +1629,122 @@ fn main() {{
             partition_rust_transport_by_test_contexts(&duplicate_definition, &bases),
             Err(RustTransportError::InvalidAttribution(_))
         ));
+    }
+
+    #[test]
+    fn a_damaged_transport_is_refused_with_what_is_wrong() {
+        // A killed test process, a full disk or a stray writer each leave a
+        // transport like one of these; each is refused, never read.
+        let directory = temporary_directory("damaged");
+        let id: &[u8] = b"rs:statement:0123456789abcdef01234567";
+        let case = AtomicUsize::new(0);
+        let write = |bytes: &[u8]| {
+            let path = directory.join(format!(
+                "case-{}.transport",
+                case.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::write(&path, bytes).unwrap();
+            path
+        };
+        let base = directory.join("base.transport");
+        create_rust_transport(&base, TOKEN, 4, 512).unwrap();
+        let empty = fs::read(&base).unwrap();
+        let with = |records: &[(u8, u8, &[u8], &[u8])]| {
+            let mut bytes = empty.clone();
+            for (kind, outcome, id, values) in records {
+                append_record(&mut bytes, *kind, *outcome, 1, id, values);
+            }
+            bytes
+        };
+        let valid = with(&[(KIND_HIT, 0, id, b"")]);
+        let read = |bytes: &[u8], token: &[u8; TOKEN_SIZE]| match read_rust_transport(
+            &write(bytes),
+            token,
+        ) {
+            Ok(_) => "accepted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(read(&valid, &TOKEN), "accepted");
+        let set = |at: usize, value: &[u8]| {
+            let mut bytes = valid.clone();
+            bytes[at..at + value.len()].copy_from_slice(value);
+            bytes
+        };
+        let descriptor = HEADER_SIZE;
+        let mut longer = valid.clone();
+        longer.push(0);
+        for (bytes, token, reason) in [
+            (set(0, b"X"), TOKEN, "invalid Rust transport header"),
+            (
+                valid.clone(),
+                [0x41; TOKEN_SIZE],
+                "invalid Rust transport header",
+            ),
+            (set(52, &[1]), TOKEN, "invalid Rust transport header"),
+            (
+                set(20, &0_u32.to_le_bytes()),
+                TOKEN,
+                "invalid Rust transport header",
+            ),
+            (longer, TOKEN, "invalid Rust transport length"),
+            (
+                set(descriptor + COMMIT_OFFSET, &[2]),
+                TOKEN,
+                "invalid Rust transport descriptor 0",
+            ),
+            (
+                set(descriptor + 3, &[1]),
+                TOKEN,
+                "invalid Rust transport descriptor 0",
+            ),
+            (
+                set(descriptor + PAYLOAD_LENGTH_OFFSET, &99_u32.to_le_bytes()),
+                TOKEN,
+                "invalid Rust transport descriptor 0",
+            ),
+            (
+                set(descriptor + PAYLOAD_OFFSET_OFFSET, &4_000_u32.to_le_bytes()),
+                TOKEN,
+                "invalid Rust transport descriptor 0",
+            ),
+            (
+                set(descriptor + CHECKSUM_OFFSET, &0_u64.to_le_bytes()),
+                TOKEN,
+                "invalid Rust transport record 0",
+            ),
+            (
+                with(&[(KIND_HIT, 0, b"not-a-probe", b"")]),
+                TOKEN,
+                "invalid Rust transport record 0",
+            ),
+            (
+                with(&[(KIND_HIT, 0, &[0xff, 0xfe], b"")]),
+                TOKEN,
+                "invalid Rust transport record 0",
+            ),
+            (
+                with(&[(KIND_HIT, 0, id, b"x")]),
+                TOKEN,
+                "invalid Rust transport record 0",
+            ),
+            (
+                with(&[(99, 0, id, b"")]),
+                TOKEN,
+                "invalid Rust transport record 0",
+            ),
+        ] {
+            let said = read(&bytes, &token);
+            assert!(said.contains(reason), "{reason}: {said}");
+        }
+        // A descriptor whose commit byte never landed is skipped, as a
+        // killed writer leaves it.
+        let uncommitted = {
+            let mut bytes = valid.clone();
+            bytes[descriptor + COMMIT_OFFSET] = 0;
+            bytes
+        };
+        assert_eq!(read(&uncommitted, &TOKEN), "accepted");
+        fs::remove_dir_all(&directory).ok();
     }
 
     fn append_record(

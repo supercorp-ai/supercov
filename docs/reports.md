@@ -82,16 +82,15 @@ thinner than a pixel would read as complete. Arriving from a kind on the
 overview narrows the list to the files owing it, behind a scope the reader can
 see and dismiss. The file view explains each unreached obligation's evidence
 beside the source.
-When an assertion map explains this run, the source view also marks each
-statement the map credits, and the file list shows how many of a file's
-statements are credited. Credit is per statement: a line holding a guard and a
-claimed consequence is marked for the consequence alone. One compact gutter
-button contains both coverage and assertion symbols and opens a rounded inline
-card with both kinds of evidence. Coverage
-includes attributed tests, open obligations, measurement limits and decision
-evidence. Named test rows show their file locations. Assertion cards lead with
-the observed behavior and flow explanation, followed by the expression and test
-location. Missing links and unavailable maps have explicit empty states.
+When the run has been assessed with `assertions assess`, the source view also
+marks each assessed statement as asserted or not, and the file list shows how
+many of a file's statements are asserted. One compact gutter button contains
+both coverage and assertion symbols and opens an inline card with both kinds of
+evidence: attributed tests, open obligations, measurement limits and decision
+evidence for coverage; for assertions, whether a test is judged to catch a
+change to the statement, which test, and a button to open it. A file with
+statements that are not asserted lists them. An unassessed run says how to
+assess it.
 
 The **Improve** buttons open copyable, metric-specific prompts for Codex, Claude
 Code, Gemini CLI, or another coding agent. The dialog shares supercov.com's

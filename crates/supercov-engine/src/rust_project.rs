@@ -15,7 +15,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    coverage_report::CoverageManifest, rust_instrumenter::instrument_rust_source,
+    coverage_report::CoverageManifest,
+    rust_instrumenter::{instrument_rust_file, test_code_path, test_item},
     rust_runtime::render_rust_runtime,
 };
 
@@ -250,18 +251,31 @@ fn push_workspace_source(path: &str, workspace: &Path, compiled: &mut BTreeSet<S
 /// A file that does not exist is skipped, not an error: a `#[cfg]`-gated
 /// module may name a file the checkout lacks, and rustc only complains when
 /// that cfg is active. Files outside the workspace are left alone as well.
+/// Every file the crate roots reach. `tests` gets those only test code
+/// reaches -- through a test target's root or a `#[cfg(test)]` module --
+/// which are test code whatever their names. Every other route is followed
+/// first, so a file reached both ways is not test code.
 fn resolve_module_tree(
     workspace: &Path,
     roots: &BTreeSet<PathBuf>,
+    test_roots: &BTreeSet<PathBuf>,
     files: &mut BTreeSet<PathBuf>,
+    tests: &mut BTreeSet<PathBuf>,
 ) -> Result<(), RustProjectError> {
     let canonical_workspace = canonical_directory(workspace)?;
     // (file, directory its `mod` children resolve in)
-    let mut pending = roots
+    let (mut pending, mut pending_tests): (Vec<_>, Vec<_>) = roots
         .iter()
         .map(|root| (root.clone(), owner_directory(root)))
-        .collect::<Vec<_>>();
-    while let Some((file, directory)) = pending.pop() {
+        .partition(|(root, _)| !test_roots.contains(root));
+    loop {
+        let (file, directory, test) = match pending.pop() {
+            Some((file, directory)) => (file, directory, false),
+            None => match pending_tests.pop() {
+                Some((file, directory)) => (file, directory, true),
+                None => break,
+            },
+        };
         // `#[path = "../src/shared.rs"]` climbs out of its directory; the
         // path is normalised lexically so the workspace check and the file
         // set see one spelling of it.
@@ -295,12 +309,30 @@ fn resolve_module_tree(
         if !files.insert(file.clone()) {
             continue;
         }
+        if test {
+            tests.insert(file.clone());
+        }
         let source = fs::read_to_string(&file).map_err(|error| RustProjectError::Io {
             path: file.clone(),
             reason: error.to_string(),
         })?;
         let parsed = SourceFile::parse(&source, Edition::CURRENT).tree();
-        collect_module_declarations(parsed.items(), &file, &directory, false, &mut pending);
+        let mut declared = Vec::new();
+        collect_module_declarations(
+            parsed.items(),
+            &file,
+            &directory,
+            false,
+            false,
+            &mut declared,
+        );
+        for (child, owner, gated) in declared {
+            if test || gated {
+                pending_tests.push((child, owner));
+            } else {
+                pending.push((child, owner));
+            }
+        }
     }
     Ok(())
 }
@@ -327,12 +359,15 @@ fn owner_directory(file: &Path) -> PathBuf {
 /// Walk the items of one module body. `directory` is where this module's
 /// `mod name;` children live; `inline` says whether we are inside a
 /// `mod name { ... }` block, which changes what `#[path]` is relative to.
+/// `gated` says whether the body is test code, and is passed on with each
+/// declared file.
 fn collect_module_declarations(
     items: impl Iterator<Item = ast::Item>,
     file: &Path,
     directory: &Path,
     inline: bool,
-    pending: &mut Vec<(PathBuf, PathBuf)>,
+    gated: bool,
+    pending: &mut Vec<(PathBuf, PathBuf, bool)>,
 ) {
     for item in items {
         match item {
@@ -340,6 +375,7 @@ fn collect_module_declarations(
                 let Some(name) = module.name() else {
                     continue;
                 };
+                let gated = gated || test_item(module.syntax());
                 let name = name.text().to_string();
                 let path_attribute = module.attrs().find_map(|attr| {
                     let is_path = attr
@@ -349,7 +385,7 @@ fn collect_module_declarations(
                 });
                 if let Some(list) = module.item_list() {
                     let nested = directory.join(&name);
-                    collect_module_declarations(list.items(), file, &nested, true, pending);
+                    collect_module_declarations(list.items(), file, &nested, true, gated, pending);
                 } else if let Some(path) = path_attribute {
                     // Relative to the file's own directory at the top level,
                     // to the inline module's directory inside a block; the
@@ -361,13 +397,17 @@ fn collect_module_declarations(
                     };
                     let target = base.join(path);
                     let owner = owner_directory(&target);
-                    pending.push((target, owner));
+                    pending.push((target, owner, gated));
                 } else {
                     // `name.rs` and `name/mod.rs` both put their children in
                     // `directory/name/`.
                     let children = directory.join(&name);
-                    pending.push((directory.join(format!("{name}.rs")), children.clone()));
-                    pending.push((children.join("mod.rs"), children));
+                    pending.push((
+                        directory.join(format!("{name}.rs")),
+                        children.clone(),
+                        gated,
+                    ));
+                    pending.push((children.join("mod.rs"), children, gated));
                 }
             }
             ast::Item::MacroCall(call) => {
@@ -385,8 +425,12 @@ fn collect_module_declarations(
                     // decides which one counts.
                     for name in token_tree_modules(call.syntax()) {
                         let children = directory.join(&name);
-                        pending.push((directory.join(format!("{name}.rs")), children.clone()));
-                        pending.push((children.join("mod.rs"), children));
+                        pending.push((
+                            directory.join(format!("{name}.rs")),
+                            children.clone(),
+                            gated,
+                        ));
+                        pending.push((children.join("mod.rs"), children, gated));
                     }
                     continue;
                 }
@@ -398,7 +442,11 @@ fn collect_module_declarations(
                 }
                 // Included code is spliced into this module: its own `mod`
                 // declarations resolve where this module's do.
-                pending.push((owner_directory(file).join(literal), directory.to_path_buf()));
+                pending.push((
+                    owner_directory(file).join(literal),
+                    directory.to_path_buf(),
+                    gated,
+                ));
             }
             _ => {}
         }
@@ -508,37 +556,19 @@ fn crate_roots(
     Ok(roots)
 }
 
-/// Read-only Cargo workspace source discovery used by integrity checks. This
-/// deliberately shares the same path policy as transformation preparation.
-pub fn discover_rust_source_files(workspace: &Path) -> Result<Vec<String>, RustProjectError> {
-    let workspace = canonical_directory(workspace)?;
-    let metadata = cargo_metadata(&workspace)?;
-    let metadata_root = canonical_directory(&metadata.workspace_root)?;
-    if metadata_root != workspace {
-        return Err(RustProjectError::UnsafePath(
-            metadata.workspace_root.display().to_string(),
-        ));
-    }
-    let members = metadata
-        .workspace_members
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let packages = metadata
-        .packages
-        .into_iter()
-        .filter(|package| members.contains(&package.id))
-        .collect::<Vec<_>>();
-    if packages.is_empty() {
-        return Err(RustProjectError::NoWorkspacePackages);
-    }
-    let mut files = BTreeSet::new();
-    resolve_module_tree(&workspace, &crate_roots(&workspace, &packages)?, &mut files)?;
-    if files.is_empty() {
-        return Err(RustProjectError::NoSourceFiles);
-    }
-    files
-        .into_iter()
-        .map(|path| confined_relative(&workspace, &path))
+/// The crate roots of test, benchmark and example targets, whose module
+/// trees are test code.
+fn test_target_roots(packages: &[CargoPackage]) -> BTreeSet<PathBuf> {
+    packages
+        .iter()
+        .flat_map(|package| &package.targets)
+        .filter(|target| {
+            target
+                .kind
+                .iter()
+                .any(|kind| matches!(kind.as_str(), "test" | "bench" | "example"))
+        })
+        .filter_map(|target| fs::canonicalize(&target.src_path).ok())
         .collect()
 }
 
@@ -575,7 +605,13 @@ fn decline_proc_macro_obligations(
         return Ok(());
     }
     let mut reached = BTreeSet::new();
-    resolve_module_tree(workspace, proc_macro_roots, &mut reached)?;
+    resolve_module_tree(
+        workspace,
+        proc_macro_roots,
+        &BTreeSet::new(),
+        &mut reached,
+        &mut BTreeSet::new(),
+    )?;
     let mut files = BTreeSet::new();
     for path in reached {
         if let Ok(relative) = confined_relative(workspace, &path) {
@@ -698,6 +734,9 @@ fn merge_manifest(
         }
     }
     destination.points.append(&mut source.points);
+    destination
+        .assertion_sites
+        .append(&mut source.assertion_sites);
     destination.decisions.append(&mut source.decisions);
     destination.branches.append(&mut source.branches);
     // Obligations the file declined -- a `const fn` body, a `GlobalAlloc`
@@ -737,6 +776,16 @@ pub fn prepare_rust_project(
     workspace: &Path,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<PreparedRustProject, RustProjectError> {
+    prepare_rust_project_for(workspace, roots, None)
+}
+
+/// `prepare_rust_project` for a build whose target cfg values are known:
+/// items its `#[cfg(..)]` leaves uncompiled are not measured.
+pub fn prepare_rust_project_for(
+    workspace: &Path,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+    cfg: Option<&crate::rust_instrumenter::TargetCfg>,
+) -> Result<PreparedRustProject, RustProjectError> {
     // Named apart from the crate roots below, which reuse `roots`.
     let source_roots = roots;
     let elapsed = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
@@ -768,7 +817,19 @@ pub fn prepare_rust_project(
     let roots = crate_roots(&workspace, &packages)?;
     let proc_macro_roots = proc_macro_crate_roots(&workspace, &packages)?;
     let mut files = BTreeSet::new();
-    resolve_module_tree(&workspace, &roots, &mut files)?;
+    let mut tests = BTreeSet::new();
+    resolve_module_tree(
+        &workspace,
+        &roots,
+        &test_target_roots(&packages),
+        &mut files,
+        &mut tests,
+    )?;
+    // Test code is instrumented for its assertion markers alone.
+    let tests = tests
+        .iter()
+        .map(|path| confined_relative(&workspace, path))
+        .collect::<Result<BTreeSet<_>, _>>()?;
     if files.is_empty() {
         return Err(RustProjectError::NoSourceFiles);
     }
@@ -807,14 +868,14 @@ pub fn prepare_rust_project(
         branches: Vec::new(),
         limitations: Vec::new(),
         scope: None,
+        assertion_sites: Vec::new(),
     };
     for (relative, source) in &sources {
-        let transformed =
-            instrument_rust_source(relative, source, &runtime_path).map_err(|error| {
-                RustProjectError::Instrument {
-                    file: relative.clone(),
-                    reason: error.to_string(),
-                }
+        let test_file = tests.contains(relative) || test_code_path(relative);
+        let transformed = instrument_rust_file(relative, source, &runtime_path, test_file, cfg)
+            .map_err(|error| RustProjectError::Instrument {
+                file: relative.clone(),
+                reason: error.to_string(),
             })?;
         merge_manifest(&mut manifest, transformed.manifest)?;
         fs::write(workspace.join(relative), transformed.code).map_err(|error| {
@@ -851,6 +912,9 @@ pub fn prepare_rust_project(
 
     manifest
         .points
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    manifest
+        .assertion_sites
         .sort_by(|left, right| left.id.cmp(&right.id));
     manifest
         .decisions
@@ -1014,6 +1078,79 @@ fn integration_choice() {
             "{scope:?}"
         );
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn test_code_is_instrumented_for_its_assertions_alone() {
+        // An integration test, a `#[cfg(test)]` module inline and one in its
+        // own file, named like any other: none of it is measured, as
+        // the usual Rust coverage tools leave it out. Each assertion still
+        // says where it stood.
+        let root = fixture();
+        let library = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            format!("#[cfg(test)]\nmod helpers;\n{library}"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/helpers.rs"),
+            "pub fn twice(value: i32) -> i32 {\n    let doubled = value * 2;\n    assert!(doubled >= value);\n    doubled\n}\n",
+        )
+        .unwrap();
+
+        let prepared = prepare_rust_project(&root, None).unwrap();
+        assert_eq!(
+            prepared.source_files,
+            ["src/helpers.rs", "src/lib.rs", "tests/integration.rs"]
+        );
+        let manifest = &prepared.manifest;
+        let measured = manifest
+            .points
+            .iter()
+            .map(|point| (point.file.as_str(), point.line))
+            .chain(
+                manifest
+                    .decisions
+                    .iter()
+                    .map(|decision| (decision.file.as_str(), decision.line)),
+            )
+            .chain(
+                manifest
+                    .branches
+                    .iter()
+                    .map(|branch| (branch.file.as_str(), branch.line)),
+            )
+            .collect::<BTreeSet<_>>();
+        // `choose` alone: its function, its statement, its decision.
+        assert!(
+            measured
+                .iter()
+                .all(|(file, line)| *file == "src/lib.rs" && (3..=5).contains(line)),
+            "{measured:?}"
+        );
+        assert!(!measured.is_empty());
+        let sites = manifest
+            .assertion_sites
+            .iter()
+            .map(|site| (site.file.as_str(), site.source.as_str()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            sites,
+            BTreeSet::from([
+                ("src/helpers.rs", "assert!(doubled >= value);"),
+                ("src/lib.rs", "assert_eq!(super::choose(true, true), 7);"),
+                (
+                    "tests/integration.rs",
+                    "assert_eq!(rust_project_fixture::choose(false, true), 3);"
+                ),
+            ])
+        );
+        // Test code keeps its markers and nothing else.
+        let helpers = fs::read_to_string(root.join("src/helpers.rs")).unwrap();
+        assert!(helpers.contains("::assertion("), "{helpers}");
+        assert!(!helpers.contains("::hit("), "{helpers}");
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

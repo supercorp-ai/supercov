@@ -37,12 +37,15 @@ const AUTHORED_DIRECTORY: &str = ".supercov/node_modules/.authored";
 const AUTHORED_LIST: &str = ".supercov/node_modules/authored-sources.json";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.mjs",
+    "ava.mjs",
+    "bootstrap.cjs",
     "capability.mjs",
     "jest.cjs",
     "jest.config.mjs",
     "jestReporter.mjs",
     "jestRuntime.cjs",
     "launchSupervisor.mjs",
+    "mocha.mjs",
     "nodeAssert.mjs",
     "nodeAssertAdapter.mjs",
     "nodeAssertStrict.mjs",
@@ -54,6 +57,7 @@ const RUNTIME_FILES: &[&str] = &[
     "resolve-loader.mjs",
     "runnerEvidence.mjs",
     "runtime.mjs",
+    "tap.mjs",
     "transport.mjs",
     "vitest.mjs",
     "vitestBrowser.mjs",
@@ -179,7 +183,7 @@ impl std::fmt::Display for JavascriptFrontendError {
         match self {
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
             Self::Instrument { file, source } => {
-                write!(formatter, "failed to instrument {file}: {source:?}")
+                write!(formatter, "failed to instrument {file}: {source}")
             }
             Self::MissingRuntimeMarker => write!(
                 formatter,
@@ -487,6 +491,8 @@ struct ViteTransform {
 fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
     match name {
         "atomic.mjs" => Some(include_bytes!("../runtime-assets/javascript/atomic.mjs")),
+        "ava.mjs" => Some(include_bytes!("../runtime-assets/javascript/ava.mjs")),
+        "bootstrap.cjs" => Some(include_bytes!("../runtime-assets/javascript/bootstrap.cjs")),
         "capability.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/capability.mjs"
         )),
@@ -503,6 +509,7 @@ fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
         "launchSupervisor.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/launchSupervisor.mjs"
         )),
+        "mocha.mjs" => Some(include_bytes!("../runtime-assets/javascript/mocha.mjs")),
         "nodeAssert.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/nodeAssert.mjs"
         )),
@@ -530,6 +537,7 @@ fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
             "../runtime-assets/javascript/runnerEvidence.mjs"
         )),
         "runtime.mjs" => Some(include_bytes!("../runtime-assets/javascript/runtime.mjs")),
+        "tap.mjs" => Some(include_bytes!("../runtime-assets/javascript/tap.mjs")),
         "transport.mjs" => Some(include_bytes!("../runtime-assets/javascript/transport.mjs")),
         "vitest.mjs" => Some(include_bytes!("../runtime-assets/javascript/vitest.mjs")),
         "vitestBrowser.mjs" => Some(include_bytes!(
@@ -1027,6 +1035,49 @@ fn limitation_from_source(value: &SourceLimitation) -> CandidateLimitation {
 /// which read `__SUPERCOV_DIRECT_RUNTIME__` and may be loaded by a worker.
 /// The copy is inserted as whole lines before the helper declarations, and the
 /// source map gains as many empty lines, so every mapped position still holds.
+/// A source read by a process the preload never reached -- one started in a
+/// container or VM the workspace is mounted into, by an SDK that passed on
+/// none of Supercov's settings -- found no runtime and threw at its first
+/// probe. Each source of a direct run first loads bootstrap.cjs from the
+/// workspace it was loaded from, which installs the runtime there with the
+/// run's settings and does nothing where the preload already has. The line
+/// goes in before the helper declarations, and the source map gains an empty
+/// line, so every mapped position still holds.
+fn bootstrap_loader(
+    output: &mut crate::js_instrumenter::CandidateOutput,
+    file: &str,
+) -> Result<(), JavascriptFrontendError> {
+    let Some(binding) = output.runtime.as_ref() else {
+        return Ok(());
+    };
+    let direct = format!(
+        "{} = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin",
+        binding.mcdc_begin
+    );
+    let Some(found) = output.code.find(&direct) else {
+        return Ok(());
+    };
+    let loader = format!(
+        "{}\n",
+        crate::js_instrumenter::runtime_loader(&runtime_specifier(file, "bootstrap.cjs")?)
+    );
+    let offset = output.code[..found]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let line = output.code[..offset].matches('\n').count();
+    if let Some(serde_json::Value::String(mappings)) =
+        output.map.as_mut().and_then(|map| map.get_mut("mappings"))
+    {
+        let mut lines: Vec<&str> = mappings.split(';').collect();
+        if line <= lines.len() {
+            lines.insert(line, "");
+            *mappings = lines.join(";");
+        }
+    }
+    output.code.insert_str(offset, &loader);
+    Ok(())
+}
+
 fn bootstrap_runtime(
     output: &mut crate::js_instrumenter::CandidateOutput,
     runtime_source: &str,
@@ -1526,7 +1577,7 @@ pub fn prepare_javascript_frontend(
             command,
             &project.build_command,
         );
-        let mut output = timed(&SETUP.instrument_ns, || {
+        let instrumented = timed(&SETUP.instrument_ns, || {
             instrument_with_import_policy(
                 &source,
                 file,
@@ -1534,16 +1585,43 @@ pub fn prepare_javascript_frontend(
                 project.build_adapter == BuildAdapter::Direct,
                 elide,
             )
-        })
-        .map_err(|source| JavascriptFrontendError::Instrument {
-            file: file.clone(),
-            source,
-        })?;
+        });
+        let mut output = match instrumented {
+            Ok(output) => output,
+            // A file the parser rejects runs as written: the suite may never
+            // load it, and one that does fails there as it would without
+            // Supercov. Nothing in it is measured, and the run says so.
+            Err(crate::js_instrumenter::CandidateError::Parse(messages)) => {
+                let limitation = CandidateLimitation {
+                    id: format!("javascript-file-not-parsed#{file}"),
+                    kind: "source-scope".into(),
+                    file: file.clone(),
+                    line: 1,
+                    column: 0,
+                    source: String::new(),
+                    reason: format!(
+                        "Supercov could not parse this file ({}); it runs as written and nothing in it is measured",
+                        messages.join("; ")
+                    ),
+                };
+                limitations.insert(limitation.id.clone(), limitation);
+                continue;
+            }
+            Err(source) => {
+                return Err(JavascriptFrontendError::Instrument {
+                    file: file.clone(),
+                    source,
+                });
+            }
+        };
         if project.build_adapter == BuildAdapter::Generic {
             let runtime = generic_runtime_binding(workspace, project, &path, &generated)?;
             output.code = output.code.replace("virtual:supercov-runtime", &runtime);
         }
         bootstrap_runtime(&mut output, &standalone_runtime, browser_suite);
+        if project.build_adapter == BuildAdapter::Direct && !browser_suite {
+            bootstrap_loader(&mut output, file)?;
+        }
         // Direct commands can compile TypeScript themselves (`npm test` may
         // begin with `tsc`), so they need the same generated-source exemption
         // as Supercov's separately orchestrated generic build. Instrumentation
@@ -1613,18 +1691,26 @@ pub fn prepare_javascript_frontend(
         let capability_wrapper = (!project.source_files.contains(&entry.file))
             .then(|| runtime_specifier(&entry.file, "capability.mjs"))
             .transpose()?;
-        let assertion_runtime = runtime_specifier(&entry.file, "runtime.mjs")?;
-        let output = crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
-            &source,
-            &entry.file,
-            std::slice::from_ref(&project.playwright_module),
-            capability_wrapper.as_deref(),
-            Some(&assertion_runtime),
-        )
-        .map_err(|source| JavascriptFrontendError::Instrument {
-            file: entry.file.clone(),
-            source,
-        })?;
+        let assertion_runtime = runtime_specifier(&entry.file, "bootstrap.cjs")?;
+        let output =
+            match crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
+                &source,
+                &entry.file,
+                std::slice::from_ref(&project.playwright_module),
+                capability_wrapper.as_deref(),
+                Some(&assertion_runtime),
+            ) {
+                Ok(output) => output,
+                // A test file the parser rejects is left as written; its runner
+                // reports it, and it has no assertions to track.
+                Err(crate::js_instrumenter::CandidateError::Parse(_)) => continue,
+                Err(source) => {
+                    return Err(JavascriptFrontendError::Instrument {
+                        file: entry.file.clone(),
+                        source,
+                    });
+                }
+            };
         let coverage_transformed_by_vite = project.build_adapter == BuildAdapter::Vite
             && project.source_files.contains(&entry.file);
         if (output.assertions > 0 || output.capability_imports > 0) && !coverage_transformed_by_vite

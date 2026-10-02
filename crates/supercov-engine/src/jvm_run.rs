@@ -200,6 +200,74 @@ fn frameworks(build_file: &str) -> Frameworks {
     }
 }
 
+/// The modules a test command names, by directory, when it names any:
+/// Gradle's project-qualified tasks (`:moshi:test`), Maven's `-pl a,b`.
+/// Nothing when the command runs every module, as `gradle test` and
+/// `mvn test` do.
+fn named_modules(build: JvmBuild, command: &[String]) -> Option<BTreeSet<String>> {
+    let arguments = command.get(1..).unwrap_or_default();
+    match build {
+        JvmBuild::Gradle => {
+            let mut named = BTreeSet::new();
+            let mut skip = false;
+            for argument in arguments {
+                if std::mem::take(&mut skip) {
+                    continue;
+                }
+                if argument.starts_with('-') {
+                    // Flags whose value is the next argument; `-x :a:test`
+                    // excludes a task rather than asking for it.
+                    skip = matches!(
+                        argument.as_str(),
+                        "-x" | "--exclude-task"
+                            | "--tests"
+                            | "-p"
+                            | "--project-dir"
+                            | "-c"
+                            | "--settings-file"
+                            | "-I"
+                            | "--init-script"
+                            | "-g"
+                            | "--gradle-user-home"
+                    );
+                    continue;
+                }
+                // An unqualified task runs in every project; `:test` is the
+                // root project's own.
+                let qualified = argument.strip_prefix(':')?;
+                let project = qualified.rsplit_once(':').map_or("", |(p, _)| p);
+                named.insert(if project.is_empty() {
+                    ".".to_owned()
+                } else {
+                    project.replace(':', "/")
+                });
+            }
+            (!named.is_empty()).then_some(named)
+        }
+        JvmBuild::Maven => {
+            let at = arguments
+                .iter()
+                .position(|a| a == "-pl" || a == "--projects")?;
+            let list = arguments.get(at + 1)?;
+            let named = list
+                .split(',')
+                .map(|m| {
+                    m.trim()
+                        .trim_start_matches("./")
+                        .trim_end_matches('/')
+                        .to_owned()
+                })
+                .collect::<BTreeSet<_>>();
+            // `:artifactId` names a module by artifact, not by directory.
+            (!named
+                .iter()
+                .any(|m| m.starts_with(':') || m.starts_with('!')))
+            .then_some(named)
+        }
+        JvmBuild::Plain => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DirectJvmRunRequest {
@@ -373,30 +441,193 @@ fn launcher_version(build_file: &str) -> Option<String> {
     Some(jupiter_version(build_file).unwrap_or_else(|| DEFAULT_LAUNCHER_VERSION.to_owned()))
 }
 
-/// The platform version matching whatever Jupiter this file pins, if it pins
-/// one. JUnit numbers the platform 1.N alongside Jupiter 5.N.
+/// The launcher version for a Maven module, read through its parents.
+fn maven_launcher_version(directory: &Path, pom: &str) -> Option<String> {
+    let effective = maven_effective(directory, pom);
+    if effective.contains("junit-bom") {
+        return None;
+    }
+    if let Some(version) = jupiter_version(&effective) {
+        return Some(version);
+    }
+    // A Jupiter the pom names without a version, under a parent that could
+    // not be read (not yet downloaded): the parent manages it, and a pinned
+    // guess is what broke commons-cli.
+    let versionless = pom.contains("<artifactId>junit-jupiter") && jupiter_version(pom).is_none();
+    if pom.contains("<parent>") && versionless {
+        return None;
+    }
+    Some(DEFAULT_LAUNCHER_VERSION.to_owned())
+}
+
+/// The platform version matching whatever Jupiter this build pins, if it pins
+/// one. JUnit numbered the platform 1.N alongside Jupiter 5.N; from JUnit 6
+/// every artifact shares one version.
 fn jupiter_version(build_file: &str) -> Option<String> {
-    let jupiter = build_file.find("junit-jupiter")?;
-    let rest = &build_file[jupiter..];
-    rest.match_indices("5.").find_map(|(at, _)| {
-        let tail = &rest[at + 2..];
-        let minor = tail
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>();
-        let patch = tail[minor.len()..]
-            .strip_prefix('.')?
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>();
-        (!minor.is_empty() && !patch.is_empty()).then(|| format!("1.{minor}.{patch}"))
-    })
+    build_file
+        .match_indices("junit-jupiter")
+        .find_map(|(at, _)| {
+            let rest = &build_file[at..];
+            // Gradle: `org.junit.jupiter:junit-jupiter-api:5.13.1`.
+            let gradle = rest
+                .split_once(':')
+                .filter(|(artifact, _)| !artifact.contains(char::is_whitespace))
+                .map(|(_, tail)| tail);
+            // Maven: the `<version>` of the same `<dependency>`.
+            let maven = rest
+                .split("</dependency>")
+                .next()
+                .and_then(|dependency| dependency.split_once("<version>"))
+                .map(|(_, tail)| tail);
+            [gradle, maven]
+                .into_iter()
+                .flatten()
+                .find_map(platform_of_jupiter)
+        })
+}
+
+/// `5.13.1` -> `1.13.1`; `6.0.1` -> `6.0.1`; anything else (a property left
+/// unresolved, say) -> nothing.
+fn platform_of_jupiter(text: &str) -> Option<String> {
+    let version = text
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+        .collect::<String>();
+    let mut parts = version.splitn(3, '.');
+    let (major, minor, patch) = (parts.next()?, parts.next()?, parts.next()?);
+    if minor.is_empty() || patch.is_empty() || !minor.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    match major {
+        "5" => Some(format!("1.{minor}.{patch}")),
+        m if m.parse::<u32>().is_ok_and(|m| m >= 6) => Some(version),
+        _ => None,
+    }
+}
+
+/// A pom as Maven will read it for JUnit's version: its own text, then each
+/// parent's (from its `relativePath`, else the local repository), with
+/// `${properties}` replaced by the nearest definition.
+///
+/// commons-parent declares JUnit for every Apache Commons project through a
+/// BOM, and the project's own pom names no version at all. Read alone, that
+/// pom looks unversioned, and the launcher added for it disagreed with the
+/// engine the build actually resolved: JUnit refused to discover a single test.
+fn maven_effective(directory: &Path, pom: &str) -> String {
+    let mut chain = vec![pom.to_owned()];
+    let mut here = directory.to_path_buf();
+    let mut current = pom.to_owned();
+    for _ in 0..10 {
+        let Some(parent) = xml_block(&current, "parent") else {
+            break;
+        };
+        let field = |name: &str| xml_block(&parent, name).map(|v| v.trim().to_owned());
+        let (Some(artifact), Some(version)) = (field("artifactId"), field("version")) else {
+            break;
+        };
+        let group = field("groupId").unwrap_or_default();
+        let relative = field("relativePath").unwrap_or_else(|| "../pom.xml".into());
+        let mut on_disk = here.join(&relative);
+        if on_disk.is_dir() {
+            on_disk = on_disk.join("pom.xml");
+        }
+        let local = fs::read_to_string(&on_disk)
+            .ok()
+            .filter(|text| xml_block(text, "artifactId").is_some_and(|a| a.trim() == artifact));
+        let (text, next) = match local {
+            Some(text) => (text, on_disk.parent().map(Path::to_path_buf)),
+            None => match local_repository().map(|repo| {
+                repo.join(group.replace('.', "/"))
+                    .join(&artifact)
+                    .join(&version)
+                    .join(format!("{artifact}-{version}.pom"))
+            }) {
+                Some(path) => match fs::read_to_string(&path) {
+                    Ok(text) => (text, path.parent().map(Path::to_path_buf)),
+                    Err(_) => break,
+                },
+                None => break,
+            },
+        };
+        chain.push(text.clone());
+        current = text;
+        match next {
+            Some(next) => here = next,
+            None => break,
+        }
+    }
+    let mut properties = BTreeMap::new();
+    for text in &chain {
+        if let Some(block) = xml_block(text, "properties") {
+            for (name, value) in xml_children(&block) {
+                properties.entry(name).or_insert(value);
+            }
+        }
+        for (name, value) in [("project.version", xml_block(text, "version"))] {
+            if let Some(value) = value {
+                properties
+                    .entry(name.to_owned())
+                    .or_insert(value.trim().to_owned());
+            }
+        }
+    }
+    let mut out = chain.join("\n");
+    for _ in 0..3 {
+        for (name, value) in &properties {
+            out = out.replace(&format!("${{{name}}}"), value);
+        }
+    }
+    out
+}
+
+/// The text inside the first `<name>...</name>`.
+fn xml_block(text: &str, name: &str) -> Option<String> {
+    let open = format!("<{name}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&format!("</{name}>"))?;
+    Some(text[start..start + end].to_owned())
+}
+
+/// The simple `<name>value</name>` children of a block.
+fn xml_children(block: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = block;
+    while let Some(open) = rest.find('<') {
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('>') else { break };
+        let name = &rest[..close];
+        if name.starts_with(['/', '!', '?']) || name.contains(char::is_whitespace) {
+            rest = &rest[close + 1..];
+            continue;
+        }
+        let end_tag = format!("</{name}>");
+        let body = &rest[close + 1..];
+        let Some(end) = body.find(&end_tag) else {
+            break;
+        };
+        out.push((name.to_owned(), body[..end].trim().to_owned()));
+        rest = &body[end + end_tag.len()..];
+    }
+    out
+}
+
+/// Maven's local repository: `settings.xml`'s `localRepository`, else
+/// `~/.m2/repository`.
+fn local_repository() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let m2 = PathBuf::from(home).join(".m2");
+    let configured = fs::read_to_string(m2.join("settings.xml"))
+        .ok()
+        .and_then(|text| xml_block(&text, "localRepository"))
+        .map(|p| PathBuf::from(p.trim()));
+    Some(configured.unwrap_or_else(|| m2.join("repository")))
 }
 
 const DEFAULT_LAUNCHER_VERSION: &str = "1.10.2";
 
 /// The engine version matching a platform version: 1.N.P becomes 5.N.P.
 fn engine_version_of_platform(platform: &str) -> String {
+    // From JUnit 6 the platform and the engines share one version.
     match platform.strip_prefix("1.") {
         Some(rest) => format!("5.{rest}"),
         None => platform.to_owned(),
@@ -404,8 +635,8 @@ fn engine_version_of_platform(platform: &str) -> String {
 }
 
 /// `pom.xml` with the launcher among its test dependencies.
-fn maven_with_launcher(pom: &str) -> Option<String> {
-    maven_with_test_artifacts(pom, &[LAUNCHER_ARTIFACT])
+fn maven_with_launcher(pom: &str, platform: Option<String>) -> Option<String> {
+    maven_with_test_artifacts(pom, &[LAUNCHER_ARTIFACT], platform)
 }
 
 /// The engine that runs JUnit 4 tests on the JUnit Platform.
@@ -417,11 +648,15 @@ fn maven_with_launcher(pom: &str) -> Option<String> {
 /// measure, and the author's own build still runs JUnit 4 as before.
 const VINTAGE_ARTIFACT: &str = "junit-vintage-engine";
 
-fn maven_with_vintage(pom: &str) -> Option<String> {
-    maven_with_test_artifacts(pom, &[LAUNCHER_ARTIFACT, VINTAGE_ARTIFACT])
+fn maven_with_vintage(pom: &str, platform: Option<String>) -> Option<String> {
+    maven_with_test_artifacts(pom, &[LAUNCHER_ARTIFACT, VINTAGE_ARTIFACT], platform)
 }
 
-fn maven_with_test_artifacts(pom: &str, artifacts: &[&str]) -> Option<String> {
+fn maven_with_test_artifacts(
+    pom: &str,
+    artifacts: &[&str],
+    platform: Option<String>,
+) -> Option<String> {
     let missing = artifacts
         .iter()
         .filter(|artifact| !pom.contains(**artifact))
@@ -429,7 +664,6 @@ fn maven_with_test_artifacts(pom: &str, artifacts: &[&str]) -> Option<String> {
     if missing.is_empty() {
         return None;
     }
-    let platform = launcher_version(pom);
     let dependency = missing
         .iter()
         .map(|artifact| {
@@ -521,36 +755,158 @@ fn declares_launcher_for_compilation(build_file: &str) -> bool {
     })
 }
 
-/// A Gradle build file with the launcher among its test dependencies.
+/// A Gradle build file with the launcher among its test dependencies, and
+/// every JUnit 4 project moved onto the JUnit Platform.
 ///
-/// Appended as its own `dependencies` block rather than edited into the
+/// Appended as its own `allprojects` block rather than edited into the
 /// existing one: Gradle merges them, and finding the right brace in a Groovy
 /// or Kotlin script by hand is the kind of parsing that works until it does
 /// not.
-fn gradle_with_launcher(build_file: &str, kotlin: bool) -> Option<String> {
-    if declares_launcher_for_compilation(build_file) {
+///
+/// `junit4` names the projects (by directory, relative to the root) whose
+/// tests are JUnit 4. Gradle runs those through a framework of its own, which
+/// no platform listener hears; Vintage runs exactly the same tests on the
+/// platform, as Maven's copy already gets. Only a task still on Gradle's JUnit
+/// 4 framework is switched, so one the build already put on the platform or on
+/// TestNG keeps it.
+fn gradle_with_launcher(
+    build_file: &str,
+    kotlin: bool,
+    catalog: &str,
+    junit4: &[String],
+) -> Option<String> {
+    let launcher = !declares_launcher_for_compilation(build_file);
+    if !launcher && junit4.is_empty() {
         return None;
     }
-    let coordinate = match launcher_version(build_file) {
-        Some(version) => format!("org.junit.platform:{LAUNCHER_ARTIFACT}:{version}"),
-        None => format!("org.junit.platform:{LAUNCHER_ARTIFACT}"),
+    let platform = launcher_version(&format!("{build_file}\n{}", catalog_versions(catalog)));
+    let coordinate = |group: &str, artifact: &str, version: Option<String>| match version {
+        Some(version) => format!("{group}:{artifact}:{version}"),
+        None => format!("{group}:{artifact}"),
+    };
+    // In the Kotlin DSL the typed accessors do not exist inside
+    // `allprojects`, so the configurations are named as strings.
+    let dependency = |indent: &str, configuration: &str, coordinate: String| {
+        if kotlin {
+            format!("{indent}\"{configuration}\"(\"{coordinate}\")\n")
+        } else {
+            format!("{indent}{configuration} '{coordinate}'\n")
+        }
     };
     // `allprojects` rather than a bare `dependencies` block, because a
     // multi-project build compiles each subproject's test sources against that
     // subproject's own classpath and a declaration in the root reaches none of
-    // them. Guarded by the java plugin so a root that only aggregates — which
-    // has no test source set and no configurations to add to — is left alone.
-    // In the Kotlin DSL the typed accessor does not exist inside `allprojects`,
-    // so the configuration is named as a string.
-    let line = if kotlin {
-        format!("            \"testImplementation\"(\"{coordinate}\")")
-    } else {
-        format!("            testImplementation '{coordinate}'")
-    };
+    // them. Guarded by the java plugin so a root that only aggregates -- which
+    // has no test source set and no configurations to add to -- is left alone.
+    let mut body = String::new();
+    if launcher {
+        body.push_str("        dependencies {\n");
+        body.push_str(&dependency(
+            "            ",
+            "testImplementation",
+            coordinate("org.junit.platform", LAUNCHER_ARTIFACT, platform.clone()),
+        ));
+        body.push_str("        }\n");
+    }
+    if !junit4.is_empty() {
+        // The root is `.` to Supercov and the empty path to Gradle.
+        let quote = |text: &str| {
+            let text = if text == "." { "" } else { text };
+            format!("\"{}\"", text.replace('\\', "/"))
+        };
+        let projects = junit4
+            .iter()
+            .map(|p| quote(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // The project's directory relative to the root, with forward slashes
+        // on every OS: the same spelling `junit4` uses.
+        let relative =
+            "rootDir.toPath().relativize(projectDir.toPath()).toString().replace('\\\\', '/')";
+        let (list, test_tasks, still_junit4) = if kotlin {
+            (
+                format!("listOf({projects})"),
+                "tasks.withType<Test>().configureEach",
+                "options is JUnitOptions",
+            )
+        } else {
+            (
+                format!("[{projects}]"),
+                "tasks.withType(Test).configureEach",
+                "options instanceof JUnitOptions",
+            )
+        };
+        body.push_str(&format!("        if ({relative} in {list}) {{\n"));
+        body.push_str("            dependencies {\n");
+        // Vintage is versioned with Jupiter, not with the platform.
+        body.push_str(&dependency(
+            "                ",
+            "testRuntimeOnly",
+            coordinate(
+                "org.junit.vintage",
+                VINTAGE_ARTIFACT,
+                platform.as_deref().map(engine_version_of_platform),
+            ),
+        ));
+        body.push_str("            }\n");
+        body.push_str(&format!(
+            "            {test_tasks} {{\n                if ({still_junit4}) useJUnitPlatform()\n            }}\n"
+        ));
+        body.push_str("        }\n");
+    }
     let plugin = if kotlin { "\"java\"" } else { "'java'" };
     Some(format!(
-        "{build_file}\n// Added by Supercov: the JUnit Platform listener that attributes coverage\n// to each test is compiled from each project's own test sources, and the\n// launcher API it implements is on the test runtime classpath but not the\n// compile one.\nallprojects {{\n    plugins.withId({plugin}) {{\n        dependencies {{\n{line}\n        }}\n    }}\n}}\n"
+        "{build_file}\n// Added by Supercov: the JUnit Platform listener that attributes coverage\n// to each test is compiled from each project's own test sources, and the\n// launcher API it implements is on the test runtime classpath but not the\n// compile one. JUnit 4 tests run on the platform through Vintage.\nallprojects {{\n    plugins.withId({plugin}) {{\n{body}    }}\n}}\n"
     ))
+}
+
+/// A version catalog's JUnit entries in the form the build files use:
+/// `junit-bom` when it names the BOM, and
+/// `org.junit.jupiter:junit-jupiter:<version>` with `version.ref` resolved.
+fn catalog_versions(catalog: &str) -> String {
+    let versions = catalog
+        .split("[versions]")
+        .nth(1)
+        .map(|rest| rest.split("\n[").next().unwrap_or(""))
+        .unwrap_or("")
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            Some((
+                key.trim().to_owned(),
+                value.trim().trim_matches('"').to_owned(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut out = String::new();
+    for line in catalog.lines().filter(|l| l.contains("org.junit")) {
+        if line.contains("junit-bom") {
+            out.push_str("junit-bom\n");
+        }
+        if !line.contains("org.junit.jupiter") {
+            continue;
+        }
+        let quoted = |key: &str| {
+            line.split(key)
+                .nth(1)
+                .and_then(|r| r.split('"').nth(1))
+                .map(str::to_owned)
+        };
+        let version = quoted("version.ref")
+            .and_then(|key| versions.get(&key).cloned())
+            .or_else(|| quoted("version ="))
+            .or_else(|| quoted("version="));
+        if let Some(version) = version {
+            out.push_str(&format!("org.junit.jupiter:junit-jupiter:{version}\n"));
+        }
+    }
+    out
+}
+
+/// Whether a Maven build, through its own pom or a parent's, runs Apache RAT.
+fn checks_license_headers(workspace: &Path) -> bool {
+    fs::read_to_string(workspace.join("pom.xml"))
+        .is_ok_and(|pom| maven_effective(workspace, &pom).contains("apache-rat"))
 }
 
 /// A build file with its warnings-as-errors policy relaxed.
@@ -682,6 +1038,9 @@ struct InstrumentedWorkspace {
     /// What had to be relaxed in the copy's build files for instrumented code
     /// to compile, named so the user knows rather than infers.
     relaxed: Vec<&'static str>,
+    /// The build checks every file for a license header (Apache RAT), and
+    /// the copy holds Supercov's own runtime and listeners, which carry none.
+    license_check: bool,
     /// Modules Supercov instrumented but cannot attribute, and why they were
     /// left without a listener rather than broken by one.
     unmeasurable: Vec<String>,
@@ -707,6 +1066,25 @@ fn module_of(relative: &str) -> String {
 /// `CalculatorTest#zeroIsNamed()`, or a DSL framework's own wording.
 fn class_of(test_name: &str) -> Option<&str> {
     test_name.split('#').next().filter(|name| !name.is_empty())
+}
+
+/// The test file that declares a class the framework named in full
+/// (`com.example.FooTest`, `com.example.FooTest$Nested`): the file whose path
+/// ends in the class's package path, else the only one with its name.
+///
+/// Keyed on the bare file name alone, no reported class ever matched -- JUnit
+/// names classes in full -- so no JVM test had a file, and `tests affected`
+/// had no tests to answer about.
+fn declaring_file(declared_in: &BTreeMap<String, String>, class: &str) -> Option<String> {
+    let top = class.split('$').next().unwrap_or(class);
+    let path = top.replace('.', "/");
+    let simple = top.rsplit('.').next().unwrap_or(top);
+    let by_path = declared_in.values().find(|file| {
+        file.rsplit_once('.').is_some_and(|(stem, _)| {
+            stem.ends_with(&path) && stem[..stem.len() - path.len()].ends_with('/') || stem == path
+        })
+    });
+    by_path.or_else(|| declared_in.get(simple)).cloned()
 }
 
 fn instrument_workspace(
@@ -809,10 +1187,11 @@ fn instrument_workspace(
         if !module.has_tests {
             continue;
         }
-        if frameworks.junit4 && build != JvmBuild::Maven {
-            // Only Maven's copy gets Vintage added below; elsewhere the module
-            // keeps its probes and gets no listener, because attributing it is
-            // impossible and trying would break it.
+        if frameworks.junit4 && build == JvmBuild::Plain {
+            // Maven's and Gradle's copies get Vintage added below; a plain
+            // tree has no build to add it to, so the module keeps its probes
+            // and gets no listener, because attributing it is impossible and
+            // trying would break it.
             unmeasurable.push(module.directory.clone());
             continue;
         }
@@ -879,6 +1258,7 @@ fn instrument_workspace(
         write(&path, &updated)?;
     }
     relaxed.dedup();
+    let license_check = build == JvmBuild::Maven && checks_license_headers(workspace);
 
     // The platform listener is compiled from the project's own test sources,
     // so the launcher API it implements has to be on the compile classpath. A
@@ -915,11 +1295,13 @@ fn instrument_workspace(
                 // A JUnit 4 module also needs the engine that runs JUnit 4
                 // tests on the platform; without it the launcher would find no
                 // engine at all.
+                let platform =
+                    maven_launcher_version(&workspace.join(&module.directory), &existing);
                 let updated = if frameworks_of(&module.directory).junit4 {
                     added_vintage = true;
-                    maven_with_vintage(&existing)
+                    maven_with_vintage(&existing, platform)
                 } else {
-                    maven_with_launcher(&existing)
+                    maven_with_launcher(&existing, platform)
                 };
                 if let Some(updated) = updated {
                     write(&pom, &updated)?;
@@ -928,16 +1310,35 @@ fn instrument_workspace(
             }
         }
         JvmBuild::Gradle
-            if !modules
-                .iter()
-                .any(|module| module.has_tests && frameworks_of(&module.directory).platform) => {}
+            if !modules.iter().any(|module| {
+                let frameworks = frameworks_of(&module.directory);
+                module.has_tests && (frameworks.platform || frameworks.junit4)
+            }) => {}
         JvmBuild::Gradle => {
+            // A module on TestNG as well keeps Gradle's TestNG framework: its
+            // own listener attributes it.
+            let junit4 = modules
+                .iter()
+                .filter(|module| {
+                    let frameworks = frameworks_of(&module.directory);
+                    module.has_tests
+                        && frameworks.junit4
+                        && !frameworks.testng
+                        && !modular.contains(&module.directory)
+                })
+                .map(|module| module.directory.clone())
+                .collect::<Vec<_>>();
             for name in ["build.gradle.kts", "build.gradle"] {
                 let path = workspace.join(name);
                 let Ok(existing) = fs::read_to_string(&path) else {
                     continue;
                 };
-                if let Some(updated) = gradle_with_launcher(&existing, name.ends_with(".kts")) {
+                let catalog = fs::read_to_string(workspace.join("gradle/libs.versions.toml"))
+                    .unwrap_or_default();
+                if let Some(updated) =
+                    gradle_with_launcher(&existing, name.ends_with(".kts"), &catalog, &junit4)
+                {
+                    added_vintage |= !junit4.is_empty();
                     write(&path, &updated)?;
                     added_launcher = Some(if name.ends_with(".kts") {
                         "build.gradle.kts"
@@ -1021,6 +1422,7 @@ fn instrument_workspace(
         concurrent,
         added_vintage,
         relaxed,
+        license_check,
         unmeasurable,
         modular,
     })
@@ -1084,8 +1486,8 @@ pub fn run_direct_jvm(
             &mut integrity_inputs.execution_configuration,
             source_roots.as_deref(),
         );
-        let assertion_inputs =
-            crate::assertion_inputs::capture(&root, "jvm", integrity_inputs.assertion_paths())?;
+        let source_inputs =
+            crate::source_capture::capture(&root, "jvm", integrity_inputs.assertion_paths())?;
         let integrity = create_explicit_run_integrity(
             &root,
             &integrity_inputs,
@@ -1198,7 +1600,18 @@ pub fn run_direct_jvm(
             .map_err(|error| error.to_string())?;
         }
 
-        let (command, note) = command_with_fresh_results(instrumented.build, &request.command);
+        let (mut command, note) = command_with_fresh_results(instrumented.build, &request.command);
+        // Apache RAT fails the build on a file without a license header, and
+        // Supercov's runtime and listeners in the copy are such files: every
+        // Apache Commons project stopped before its first test.
+        if instrumented.license_check && !command.iter().any(|a| a.contains("rat.skip")) {
+            command.push("-Drat.skip=true".into());
+            writeln!(
+                diagnostics,
+                "[supercov] added -Drat.skip=true: Apache RAT checks every file in the build for a license header, and the workspace copy holds Supercov's own runtime and listeners, which carry none. Your own build still runs the check."
+            )
+            .map_err(|error| error.to_string())?;
+        }
         if let Some(note) = note {
             writeln!(diagnostics, "[supercov] {note}").map_err(|error| error.to_string())?;
         }
@@ -1233,6 +1646,7 @@ pub fn run_direct_jvm(
         let mut parts = Vec::new();
         let mut outcomes = Vec::new();
         let mut silent = Vec::new();
+        let named = named_modules(instrumented.build, &request.command);
         for module in instrumented
             .modules
             .iter()
@@ -1250,7 +1664,14 @@ pub fn run_direct_jvm(
                 .unwrap_or_default();
             written.sort();
             if written.is_empty() {
-                silent.push(module.directory.clone());
+                // A module the command never asked to run has nothing to
+                // say for itself.
+                if named
+                    .as_ref()
+                    .is_none_or(|named| named.contains(&module.directory))
+                {
+                    silent.push(module.directory.clone());
+                }
                 continue;
             }
             let mut forked = Vec::new();
@@ -1272,8 +1693,7 @@ pub fn run_direct_jvm(
                     // already in the name the framework reported.
                     package: module.directory.clone(),
                     file: class_of(&test.name)
-                        .and_then(|class| instrumented.declared_in.get(class))
-                        .cloned(),
+                        .and_then(|class| declaring_file(&instrumented.declared_in, class)),
                     status: test.status.clone(),
                     // True while the suite runs its tests one at a time, which
                     // is what `--exact-attribution` asks for. Left to run as
@@ -1318,9 +1738,9 @@ pub fn run_direct_jvm(
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
         let raw = write_archive(
-            crate::assertion_inputs::append(
+            crate::source_capture::append(
                 run.archive_entries().map_err(|error| error.to_string())?,
-                &assertion_inputs,
+                &source_inputs,
             )?,
             &archive_path,
         )
@@ -1547,9 +1967,71 @@ mod tests {
     }
 
     #[test]
+    fn junit_is_versioned_through_parents_catalogs_and_junit_6() {
+        // JUnit 6 numbers every artifact alike.
+        assert_eq!(
+            launcher_version("<artifactId>junit-jupiter</artifactId><version>6.0.1</version>")
+                .as_deref(),
+            Some("6.0.1")
+        );
+        assert_eq!(engine_version_of_platform("6.0.1"), "6.0.1");
+        // A version is read from the Jupiter dependency, not from whatever
+        // `5.` comes next in the file.
+        assert_eq!(
+            launcher_version("<artifactId>junit-jupiter</artifactId><version>${junit}</version><plugin><version>5.2.1</version></plugin>")
+                .as_deref(),
+            Some(DEFAULT_LAUNCHER_VERSION)
+        );
+        // A version catalog, by reference.
+        let catalog = "[versions]\njunit = \"5.11.3\"\n\n[libraries]\njunit-jupiter = { module = \"org.junit.jupiter:junit-jupiter\", version.ref = \"junit\" }\n";
+        let updated = gradle_with_launcher("plugins { id 'java' }\n", false, catalog, &[]).unwrap();
+        assert!(
+            updated.contains("junit-platform-launcher:1.11.3"),
+            "{updated}"
+        );
+
+        // A parent on disk that imports the BOM, and one that sets a property.
+        let root = std::env::temp_dir().join(format!(
+            "supercov-junit-parents-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let module = root.join("module");
+        fs::create_dir_all(&module).unwrap();
+        let child = "<project><parent><groupId>g</groupId><artifactId>p</artifactId><version>1</version></parent><dependencies><dependency><artifactId>junit-jupiter-api</artifactId></dependency></dependencies></project>";
+        fs::write(
+            root.join("pom.xml"),
+            "<project><artifactId>p</artifactId><dependencyManagement><dependencies><dependency><artifactId>junit-bom</artifactId><version>${junit.version}</version></dependency></dependencies></dependencyManagement></project>",
+        )
+        .unwrap();
+        assert_eq!(maven_launcher_version(&module, child), None);
+        fs::write(
+            root.join("pom.xml"),
+            "<project><artifactId>p</artifactId><properties><junit.version>5.14.4</junit.version></properties><dependencyManagement><dependencies><dependency><artifactId>junit-jupiter-api</artifactId><version>${junit.version}</version></dependency></dependencies></dependencyManagement></project>",
+        )
+        .unwrap();
+        assert_eq!(
+            maven_launcher_version(&module, child).as_deref(),
+            Some("1.14.4")
+        );
+        // A parent that cannot be read manages the version it left out.
+        fs::remove_file(root.join("pom.xml")).unwrap();
+        let unknown = child.replace(
+            "<artifactId>p</artifactId>",
+            "<artifactId>not-downloaded</artifactId>",
+        );
+        assert_eq!(maven_launcher_version(&module, &unknown), None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn the_launcher_is_added_once_and_only_where_it_is_missing() {
         let pom = "<project>\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>\n      <scope>test</scope>\n    </dependency>\n  </dependencies>\n</project>\n";
-        let updated = maven_with_launcher(pom).expect("the launcher is missing");
+        let updated =
+            maven_with_launcher(pom, launcher_version(pom)).expect("the launcher is missing");
         assert!(updated.contains("junit-platform-launcher"), "{updated}");
         assert!(updated.contains("<version>1.10.2</version>"), "{updated}");
         // Inside the existing block, not after it.
@@ -1558,11 +2040,15 @@ mod tests {
             "{updated}"
         );
         // A project that already has it is left exactly as it is.
-        assert_eq!(maven_with_launcher(&updated), None);
+        assert_eq!(
+            maven_with_launcher(&updated, launcher_version(&updated)),
+            None
+        );
 
         // And one with no dependencies block at all still gets a valid pom.
         let bare = "<project>\n  <artifactId>demo</artifactId>\n</project>\n";
-        let updated = maven_with_launcher(bare).expect("a block is created");
+        let updated =
+            maven_with_launcher(bare, launcher_version(bare)).expect("a block is created");
         assert!(updated.contains("<dependencies>"), "{updated}");
         assert!(
             updated.find("</dependencies>") < updated.find("</project>"),
@@ -1574,7 +2060,8 @@ mod tests {
     fn gradle_gets_the_launcher_in_the_dialect_its_script_is_written_in() {
         let groovy =
             "dependencies {\n    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'\n}\n";
-        let updated = gradle_with_launcher(groovy, false).expect("the launcher is missing");
+        let updated =
+            gradle_with_launcher(groovy, false, "", &[]).expect("the launcher is missing");
         assert!(
             updated
                 .contains("testImplementation 'org.junit.platform:junit-platform-launcher:1.10.2'"),
@@ -1582,7 +2069,7 @@ mod tests {
         );
         // The project's own block survives: Gradle merges what we append.
         assert!(updated.contains("junit-jupiter:5.10.2"), "{updated}");
-        assert_eq!(gradle_with_launcher(&updated, false), None);
+        assert_eq!(gradle_with_launcher(&updated, false, "", &[]), None);
 
         // Gradle 9 makes every project declare the launcher, and the
         // configuration its own documentation recommends is testRuntimeOnly,
@@ -1590,7 +2077,7 @@ mod tests {
         // following that advice has the artifact and still cannot compile a
         // listener, so it gets a compile-visible declaration alongside.
         let runtime_only = "dependencies {\n    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n";
-        let updated = gradle_with_launcher(runtime_only, false)
+        let updated = gradle_with_launcher(runtime_only, false, "", &[])
             .expect("a runtime-only declaration does not reach the compiler");
         assert!(
             updated.contains("testImplementation 'org.junit.platform:junit-platform-launcher"),
@@ -1602,7 +2089,7 @@ mod tests {
         );
 
         let kotlin = "dependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.10.2\")\n}\n";
-        let updated = gradle_with_launcher(kotlin, true).expect("the launcher is missing");
+        let updated = gradle_with_launcher(kotlin, true, "", &[]).expect("the launcher is missing");
         assert!(
             updated.contains(
                 "\"testImplementation\"(\"org.junit.platform:junit-platform-launcher:1.10.2\")"
@@ -1610,6 +2097,146 @@ mod tests {
             "the Kotlin DSL has no typed accessor inside allprojects:\n{updated}"
         );
         assert!(updated.contains("plugins.withId(\"java\")"), "{updated}");
+    }
+
+    /// apache/commons-cli takes RAT from commons-parent, and RAT failed the
+    /// copy on Supercov's own files before any test ran.
+    #[test]
+    fn a_test_class_named_in_full_finds_its_file() {
+        let declared_in = BTreeMap::from([
+            (
+                "AnnotationsTest".to_owned(),
+                "src/test/java/com/fasterxml/classmate/AnnotationsTest.java".to_owned(),
+            ),
+            (
+                "CalculatorSpec".to_owned(),
+                "src/test/kotlin/app/CalculatorSpec.kt".to_owned(),
+            ),
+        ]);
+        assert_eq!(
+            declaring_file(&declared_in, "com.fasterxml.classmate.AnnotationsTest").as_deref(),
+            Some("src/test/java/com/fasterxml/classmate/AnnotationsTest.java")
+        );
+        assert_eq!(
+            declaring_file(
+                &declared_in,
+                "com.fasterxml.classmate.AnnotationsTest$Nested"
+            )
+            .as_deref(),
+            Some("src/test/java/com/fasterxml/classmate/AnnotationsTest.java")
+        );
+        assert_eq!(
+            declaring_file(&declared_in, "app.CalculatorSpec").as_deref(),
+            Some("src/test/kotlin/app/CalculatorSpec.kt")
+        );
+        // A class reported without its package still finds its file by name.
+        assert_eq!(
+            declaring_file(&declared_in, "CalculatorSpec").as_deref(),
+            Some("src/test/kotlin/app/CalculatorSpec.kt")
+        );
+        assert_eq!(declaring_file(&declared_in, "org.other.Missing"), None);
+    }
+
+    #[test]
+    fn a_license_header_check_is_found_through_the_parent_pom() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rat-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("parent")).unwrap();
+        fs::write(
+            root.join("parent/pom.xml"),
+            "<project><artifactId>parent</artifactId><build><plugins><plugin><groupId>org.apache.rat</groupId><artifactId>apache-rat-plugin</artifactId></plugin></plugins></build></project>",
+        )
+        .unwrap();
+        fs::write(
+            root.join("pom.xml"),
+            "<project><parent><groupId>g</groupId><artifactId>parent</artifactId><version>1</version><relativePath>parent/pom.xml</relativePath></parent></project>",
+        )
+        .unwrap();
+        assert!(checks_license_headers(&root));
+        fs::write(
+            root.join("pom.xml"),
+            "<project><artifactId>plain</artifactId></project>",
+        )
+        .unwrap();
+        assert!(!checks_license_headers(&root));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn only_the_modules_a_command_names_are_expected_to_write_evidence() {
+        let words = |c: &str| c.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            named_modules(
+                JvmBuild::Gradle,
+                &words("./gradlew :moshi:test --tests *Reader*")
+            ),
+            Some(BTreeSet::from(["moshi".to_owned()]))
+        );
+        assert_eq!(
+            named_modules(
+                JvmBuild::Gradle,
+                &words("gradle :moshi:records-tests:test :test")
+            ),
+            Some(BTreeSet::from([
+                "moshi/records-tests".to_owned(),
+                ".".to_owned()
+            ]))
+        );
+        assert_eq!(named_modules(JvmBuild::Gradle, &words("gradle test")), None);
+        assert_eq!(
+            named_modules(JvmBuild::Gradle, &words("gradle test -x :slow:test")),
+            None
+        );
+        assert_eq!(
+            named_modules(JvmBuild::Maven, &words("mvn -pl core,api/ test")),
+            Some(BTreeSet::from(["core".to_owned(), "api".to_owned()]))
+        );
+        assert_eq!(
+            named_modules(JvmBuild::Maven, &words("mvn -pl :core test")),
+            None
+        );
+        assert_eq!(named_modules(JvmBuild::Maven, &words("mvn test")), None);
+    }
+
+    #[test]
+    fn gradle_moves_junit_4_projects_onto_the_platform_through_vintage() {
+        let kotlin = "dependencies {\n    testImplementation(\"junit:junit:4.13.2\")\n}\n";
+        let updated = gradle_with_launcher(kotlin, true, "", &[".".into(), "moshi".into()])
+            .expect("a JUnit 4 project needs Vintage");
+        assert!(
+            updated
+                .contains("\"testRuntimeOnly\"(\"org.junit.vintage:junit-vintage-engine:5.10.2\")"),
+            "{updated}"
+        );
+        assert!(updated.contains("in listOf(\"\", \"moshi\")"), "{updated}");
+        assert!(
+            updated.contains("if (options is JUnitOptions) useJUnitPlatform()"),
+            "only a task still on Gradle's JUnit 4 framework is switched:\n{updated}"
+        );
+
+        // Already compiling against the launcher, Vintage is still added.
+        let groovy = "dependencies {\n    testImplementation 'junit:junit:4.13.2'\n    testImplementation 'org.junit.platform:junit-platform-launcher:1.13.1'\n}\n";
+        let updated = gradle_with_launcher(groovy, false, "", &["core".into()])
+            .expect("a JUnit 4 project needs Vintage");
+        assert!(
+            updated.contains("testRuntimeOnly 'org.junit.vintage:junit-vintage-engine:5.10.2'"),
+            "{updated}"
+        );
+        assert!(updated.contains("in [\"core\"]"), "{updated}");
+        assert!(
+            updated.contains("tasks.withType(Test).configureEach"),
+            "{updated}"
+        );
+        assert!(
+            !updated.contains("\n            testImplementation 'org.junit.platform"),
+            "the launcher is already there:\n{updated}"
+        );
     }
 
     #[test]
@@ -1799,7 +2426,8 @@ mod tests {
         // depends on: the module compiles exactly as before and the listener
         // still cannot find the API it implements.
         let pom = "<project>\n  <dependencyManagement>\n    <dependencies>\n      <dependency>\n        <groupId>org.junit</groupId>\n        <artifactId>junit-bom</artifactId>\n        <version>5.10.2</version>\n      </dependency>\n    </dependencies>\n  </dependencyManagement>\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n    </dependency>\n  </dependencies>\n  <build>\n    <plugins>\n      <plugin>\n        <dependencies>\n          <dependency><groupId>x</groupId></dependency>\n        </dependencies>\n      </plugin>\n    </plugins>\n  </build>\n</project>\n";
-        let updated = maven_with_launcher(pom).expect("the launcher is missing");
+        let updated =
+            maven_with_launcher(pom, launcher_version(pom)).expect("the launcher is missing");
         let at = updated.find(LAUNCHER_ARTIFACT).expect("added");
         let managed_end = updated
             .find("</dependencyManagement>")
@@ -1857,7 +2485,8 @@ mod tests {
         assert_eq!(engine_version_of_platform("1.13.1"), "5.13.1");
 
         let pom = "<project>\n  <dependencies>\n    <dependency>\n      <groupId>junit</groupId>\n      <artifactId>junit</artifactId>\n      <version>4.13.2</version>\n    </dependency>\n  </dependencies>\n</project>\n";
-        let updated = maven_with_vintage(pom).expect("a JUnit 4 project needs both");
+        let updated =
+            maven_with_vintage(pom, launcher_version(pom)).expect("a JUnit 4 project needs both");
         assert!(updated.contains("<artifactId>junit-platform-launcher</artifactId>"));
         assert!(updated.contains("<artifactId>junit-vintage-engine</artifactId>"));
         assert!(
@@ -1876,6 +2505,9 @@ mod tests {
         );
 
         // A project that already has both is left alone.
-        assert_eq!(maven_with_vintage(&updated), None);
+        assert_eq!(
+            maven_with_vintage(&updated, launcher_version(&updated)),
+            None
+        );
     }
 }

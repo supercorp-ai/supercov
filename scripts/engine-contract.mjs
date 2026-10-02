@@ -19,7 +19,9 @@ const configured = process.env.SUPERCOV_CONTRACT_ENGINE;
 const engine = configured
   ? JSON.parse(configured)
   : [process.execPath, resolve(repository, "bin/supercov.js")];
-const localBinary = resolve(
+const localBinary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   repository,
   "target/debug",
   `supercov${process.platform === "win32" ? ".exe" : ""}`,

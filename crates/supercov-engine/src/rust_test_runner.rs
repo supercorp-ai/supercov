@@ -262,7 +262,10 @@ pub(crate) enum RustCargoCommandKind {
 }
 
 impl CargoTestInvocation {
-    pub(crate) fn command_position(&self) -> Option<usize> {
+    /// Where `test` (or `nextest run`) sits in the arguments. Only
+    /// `cargo_invocation` builds an invocation, and it refuses a command
+    /// without one.
+    pub(crate) fn command_position(&self) -> usize {
         match self.kind {
             RustCargoCommandKind::CargoTest => self
                 .arguments
@@ -273,6 +276,7 @@ impl CargoTestInvocation {
                 .windows(2)
                 .position(|pair| pair == ["nextest", "run"]),
         }
+        .expect("cargo_invocation keeps the test subcommand")
     }
 }
 
@@ -294,22 +298,11 @@ pub(crate) struct NextestListInvocation {
     pub runner_arguments: Vec<String>,
 }
 
-pub(crate) fn nextest_version_arguments(
-    invocation: &CargoTestInvocation,
-) -> Result<Vec<String>, RustTestRunnerError> {
-    if invocation.kind != RustCargoCommandKind::NextestRun {
-        return Err(RustTestRunnerError::UnsupportedCommand(
-            "a nextest version handshake requires `cargo nextest run`".into(),
-        ));
-    }
-    let command = invocation.command_position().ok_or_else(|| {
-        RustTestRunnerError::UnsupportedCommand(
-            "the expanded Cargo invocation lost its nextest run subcommand".into(),
-        )
-    })?;
+pub(crate) fn nextest_version_arguments(invocation: &CargoTestInvocation) -> Vec<String> {
+    let command = invocation.command_position();
     let mut arguments = invocation.arguments[..command].to_vec();
     arguments.extend(["nextest".into(), "--version".into()]);
-    Ok(arguments)
+    arguments
 }
 
 fn nextest_run_only_option(argument: &str) -> Option<bool> {
@@ -448,16 +441,7 @@ fn nextest_shared_option(argument: &str) -> Option<bool> {
 pub(crate) fn nextest_list_invocation(
     invocation: &CargoTestInvocation,
 ) -> Result<NextestListInvocation, RustTestRunnerError> {
-    if invocation.kind != RustCargoCommandKind::NextestRun {
-        return Err(RustTestRunnerError::UnsupportedCommand(
-            "a nextest list projection requires `cargo nextest run`".into(),
-        ));
-    }
-    let command = invocation.command_position().ok_or_else(|| {
-        RustTestRunnerError::UnsupportedCommand(
-            "the expanded Cargo invocation lost its nextest run subcommand".into(),
-        )
-    })?;
+    let command = invocation.command_position();
     let mut arguments = invocation.arguments[..command].to_vec();
     arguments.extend(["nextest".into(), "list".into()]);
     let mut index = command + 2;
@@ -641,42 +625,19 @@ fn cargo_option_takes_value(argument: &str) -> Option<bool> {
 pub(crate) fn rust_libtest_selection(
     invocation: &CargoTestInvocation,
 ) -> Result<RustLibtestSelection, RustTestRunnerError> {
-    if invocation.kind != RustCargoCommandKind::CargoTest {
-        return Err(RustTestRunnerError::UnsupportedCommand(
-            "libtest selection cannot be reconstructed from a nextest command".into(),
-        ));
-    }
-    let test = invocation
-        .arguments
-        .iter()
-        .position(|argument| argument == "test")
-        .ok_or_else(|| {
-            RustTestRunnerError::UnsupportedCommand(
-                "the expanded Cargo invocation lost its test subcommand".into(),
-            )
-        })?;
+    // `rust_cargo_execution_selection` has already refused an option Cargo's
+    // contract does not know and an option missing its value.
     let mut cargo_filter = None;
-    let mut index = test + 1;
+    let mut index = invocation.command_position() + 1;
     while index < invocation.arguments.len() {
         let argument = &invocation.arguments[index];
         if argument.starts_with('-') {
-            let takes_value = cargo_option_takes_value(argument).ok_or_else(|| {
-                RustTestRunnerError::UnsupportedCommand(format!(
-                    "the pinned Cargo test contract does not recognize option {argument}"
-                ))
-            })?;
-            if takes_value {
+            if cargo_option_takes_value(argument) == Some(true) {
                 index += 1;
-                if index == invocation.arguments.len() {
-                    return Err(RustTestRunnerError::UnsupportedCommand(format!(
-                        "Cargo option {argument} has no value"
-                    )));
-                }
             }
-        } else if cargo_filter.replace(argument.clone()).is_some() {
-            return Err(RustTestRunnerError::UnsupportedCommand(
-                "Cargo test has more than one pre-separator TESTNAME".into(),
-            ));
+        } else {
+            // The build has run by now, and Cargo refuses a second TESTNAME.
+            cargo_filter = Some(argument.clone());
         }
         index += 1;
     }
@@ -809,15 +770,7 @@ pub(crate) fn rust_cargo_execution_selection(
             doctest_arguments: Vec::new(),
         });
     }
-    let test = invocation
-        .arguments
-        .iter()
-        .position(|argument| argument == "test")
-        .ok_or_else(|| {
-            RustTestRunnerError::UnsupportedCommand(
-                "the expanded Cargo invocation lost its test subcommand".into(),
-            )
-        })?;
+    let test = invocation.command_position();
     let mut doc = false;
     let mut other_target = false;
     let mut index = test + 1;
@@ -887,11 +840,41 @@ pub(crate) fn relative_source(root: &Path, path: &Path) -> Result<String, RustTe
     Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
+/// The build step decides three things for itself: it builds without running,
+/// reads Cargo's JSON, and builds into Supercov's own target directory. The
+/// command's own `--message-format` and `--target-dir` would collide with
+/// those, so they are left out of the build; `--no-run` asks for no test at
+/// all, which leaves nothing to measure.
+fn build_owned_arguments(arguments: Vec<String>) -> Result<Vec<String>, RustTestRunnerError> {
+    let mut kept = Vec::with_capacity(arguments.len());
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        let name = argument
+            .split_once('=')
+            .map_or(argument.as_str(), |(name, _)| name);
+        match name {
+            "--no-run" => {
+                return Err(RustTestRunnerError::UnsupportedCommand(
+                    "`--no-run` builds the tests without running any, so there is nothing to measure; run the command without it".into(),
+                ));
+            }
+            "--message-format" | "--target-dir" => {
+                if !argument.contains('=') {
+                    arguments.next();
+                }
+            }
+            _ => kept.push(argument),
+        }
+    }
+    Ok(kept)
+}
+
 fn build_test_artifacts(
     project: &PreparedRustProject,
     command: &[String],
 ) -> Result<Vec<TestArtifact>, RustTestRunnerError> {
     let mut invocation = cargo_invocation(&project.workspace_root, command)?;
+    invocation.arguments = build_owned_arguments(invocation.arguments)?;
     invocation
         .arguments
         .extend(["--no-run".into(), "--message-format=json".into()]);
@@ -1054,6 +1037,13 @@ pub(crate) fn snapshot(
         .iter()
         .map(|point| (point.id.as_str(), point))
         .collect::<BTreeMap<_, _>>();
+    // An assertion in test code, which is not measured, names a site instead.
+    let asserting = manifest
+        .points
+        .iter()
+        .chain(&manifest.assertion_sites)
+        .map(|point| (point.id.as_str(), point))
+        .collect::<BTreeMap<_, _>>();
     let alternatives = manifest
         .branches
         .iter()
@@ -1139,9 +1129,9 @@ pub(crate) fn snapshot(
                     });
                 }
                 RustProbeObservation::Assertion { id } => {
-                    // The marker names the statement that asserts, which is
-                    // a point of this manifest.
-                    let Some(point) = points.get(id.as_str()) else {
+                    // The marker names the statement that asserts: a point
+                    // of this manifest, or an assertion site in test code.
+                    let Some(point) = asserting.get(id.as_str()) else {
                         return Err(RustTestRunnerError::UnknownProbe(id));
                     };
                     let witnessed = pending.remove(&thread).unwrap_or_default();
@@ -1883,7 +1873,6 @@ mod tests {
         assert!(execution.run_libtests);
         assert!(!execution.run_doctests);
         assert!(execution.doctest_arguments.is_empty());
-        assert!(rust_libtest_selection(&invocation).is_err());
         assert_eq!(
             nextest_list_invocation(&invocation).unwrap(),
             NextestListInvocation {
@@ -2002,7 +1991,7 @@ mod tests {
             runner_arguments: Vec::new(),
         };
         assert_eq!(
-            nextest_version_arguments(&invocation).unwrap(),
+            nextest_version_arguments(&invocation),
             ["+1.95.0", "nextest", "--version"]
         );
     }

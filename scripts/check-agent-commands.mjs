@@ -20,6 +20,7 @@ import { basename, dirname, relative, resolve } from "node:path";
 
 const repository = resolve(import.meta.dirname, "..");
 const binary =
+  process.env.SUPERCOV_BINARY ??
   process.env.SUPERCOV_RUST_BINARY ??
   resolve(repository, "target/debug", `supercov${process.platform === "win32" ? ".exe" : ""}`);
 

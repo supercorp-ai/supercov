@@ -54,7 +54,7 @@ const SUMMARY_RECORD_SIZE: usize = 176;
 const FILE_GAP_RECORD_SIZE: usize = 176;
 const DECISION_GAP_RECORD_SIZE: usize = 96;
 const DIMENSION_RECORD_SIZE: usize = 192;
-const PROJECTION_RECORD_SIZE: usize = 536;
+const PROJECTION_RECORD_SIZE: usize = 544;
 const SCOPE_ENTRY_RECORD_SIZE: usize = 96;
 const CONFIDENCE_RECORD_SIZE: usize = 96;
 const LINE_RECORD_SIZE: usize = 80;
@@ -132,22 +132,23 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-fn get_u32(bytes: &[u8], offset: usize) -> Result<u32, CoverageIndexError> {
-    Ok(u32::from_le_bytes(
-        bytes
-            .get(offset..offset + 4)
-            .and_then(|value| value.try_into().ok())
-            .ok_or(CoverageIndexError::InvalidRecord("truncated u32"))?,
-    ))
+/// A field of a record. Every record the reader takes is exactly its kind's
+/// size -- [`CoverageIndex::new`] refuses an index whose sizes differ -- and
+/// every field lies inside it, so a read cannot run past the record.
+fn get_u32(record: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        record[offset..offset + 4]
+            .try_into()
+            .expect("a field lies inside its record"),
+    )
 }
 
-fn get_u64(bytes: &[u8], offset: usize) -> Result<u64, CoverageIndexError> {
-    Ok(u64::from_le_bytes(
-        bytes
-            .get(offset..offset + 8)
-            .and_then(|value| value.try_into().ok())
-            .ok_or(CoverageIndexError::InvalidRecord("truncated u64"))?,
-    ))
+fn get_u64(record: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(
+        record[offset..offset + 8]
+            .try_into()
+            .expect("a field lies inside its record"),
+    )
 }
 
 fn usize_u64(value: usize) -> Result<u64, CoverageIndexError> {
@@ -1307,6 +1308,7 @@ fn projection_record(
         {
             put_u64(&mut record, 408 + index * 8, usize_u64(value)?);
         }
+        put_u64(&mut record, 536, usize_u64(transport.guest_processes)?);
     }
 
     let phase_tests = view
@@ -2512,11 +2514,11 @@ impl<'a> CoverageIndex<'a> {
         }
         Ok(IndexedCoverageModel {
             schema_version: COVERAGE_MODEL_SCHEMA_VERSION,
-            variant: self.string(get_u32(record, 0)?)?,
-            name: self.string(get_u32(record, 4)?)?,
-            completeness_meaning: self.string(get_u32(record, 8)?)?,
-            measured: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
-            not_measured: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
+            variant: self.string(get_u32(record, 0))?,
+            name: self.string(get_u32(record, 4))?,
+            completeness_meaning: self.string(get_u32(record, 8))?,
+            measured: self.relation_strings(get_u64(record, 16), get_u64(record, 24))?,
+            not_measured: self.relation_strings(get_u64(record, 32), get_u64(record, 40))?,
         })
     }
 
@@ -2525,8 +2527,8 @@ impl<'a> CoverageIndex<'a> {
         if record[12..].iter().any(|byte| *byte != 0) {
             return Err(CoverageIndexError::InvalidRecord("string reserved bytes"));
         }
-        let offset = get_u64(record, 0)?;
-        let length = u64::from(get_u32(record, 8)?);
+        let offset = get_u64(record, 0);
+        let length = u64::from(get_u32(record, 8));
         let value = self.index.bytes(SECTION_STRING_BYTES, offset, length)?;
         std::str::from_utf8(value)
             .map(str::to_owned)
@@ -2547,12 +2549,12 @@ impl<'a> CoverageIndex<'a> {
             if record[3] != 0 || record[12..16].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("summary reserved bytes"));
             }
-            self.string(get_u32(record, 4)?)?;
-            self.string(get_u32(record, 8)?)?;
+            self.string(get_u32(record, 4))?;
+            self.string(get_u32(record, 8))?;
             let count = |offset: usize| -> Result<CoverageCount, CoverageIndexError> {
-                let covered = usize::try_from(get_u64(record, offset)?)
+                let covered = usize::try_from(get_u64(record, offset))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?;
-                let total = usize::try_from(get_u64(record, offset + 8)?)
+                let total = usize::try_from(get_u64(record, offset + 8))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?;
                 if covered > total {
                     return Err(CoverageIndexError::InvalidRecord("covered exceeds total"));
@@ -2564,7 +2566,7 @@ impl<'a> CoverageIndex<'a> {
                 })
             };
             let value = |offset: usize| -> Result<usize, CoverageIndexError> {
-                usize::try_from(get_u64(record, offset)?)
+                usize::try_from(get_u64(record, offset))
                     .map_err(|_| CoverageIndexError::SizeOverflow)
             };
             let conditions = value(40)?;
@@ -2631,10 +2633,10 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("file-gap reserved bytes"));
             }
             let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-                usize::try_from(get_u64(record, offset)?)
+                usize::try_from(get_u64(record, offset))
                     .map_err(|_| CoverageIndexError::SizeOverflow)
             };
-            let mask = get_u32(record, 56)?;
+            let mask = get_u32(record, 56);
             if mask & !15 != 0 {
                 return Err(CoverageIndexError::InvalidRecord("limitation mask"));
             }
@@ -2658,8 +2660,8 @@ impl<'a> CoverageIndex<'a> {
             if score != expected_score {
                 return Err(CoverageIndexError::InvalidRecord("file-gap score"));
             }
-            let record_kind = self.optional_string(get_u32(record, 72)?)?;
-            let record_runner = self.optional_string(get_u32(record, 76)?)?;
+            let record_kind = self.optional_string(get_u32(record, 72))?;
+            let record_runner = self.optional_string(get_u32(record, 76))?;
             if record_kind.as_deref() != kind || record_runner.as_deref() != runner {
                 continue;
             }
@@ -2676,7 +2678,7 @@ impl<'a> CoverageIndex<'a> {
             }
             gaps.push(IndexedFileGap {
                 view,
-                file: self.string(get_u32(record, 4)?)?,
+                file: self.string(get_u32(record, 4))?,
                 uncovered_lines,
                 uncovered_statements,
                 uncovered_functions,
@@ -2737,7 +2739,7 @@ impl<'a> CoverageIndex<'a> {
         (offset..end)
             .map(|index| {
                 let record = self.index.record(SECTION_STRING_RELATIONS, index)?;
-                self.string(get_u32(record, 0)?)
+                self.string(get_u32(record, 0))
             })
             .collect()
     }
@@ -2762,8 +2764,8 @@ impl<'a> CoverageIndex<'a> {
                     "projection reserved bytes",
                 ));
             }
-            let record_kind = self.optional_string(get_u32(record, 4)?)?;
-            let record_runner = self.optional_string(get_u32(record, 8)?)?;
+            let record_kind = self.optional_string(get_u32(record, 4))?;
+            let record_runner = self.optional_string(get_u32(record, 8))?;
             if record_kind.as_deref() != kind || record_runner.as_deref() != runner {
                 continue;
             }
@@ -2773,7 +2775,7 @@ impl<'a> CoverageIndex<'a> {
                 ));
             }
             let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-                usize::try_from(get_u64(record, offset)?)
+                usize::try_from(get_u64(record, offset))
                     .map_err(|_| CoverageIndexError::SizeOverflow)
             };
             let limitations = number(192)?;
@@ -2785,15 +2787,17 @@ impl<'a> CoverageIndex<'a> {
                     "measurement blocking count",
                 ));
             }
-            let transport_values = (0..8)
+            let mut transport_values = (0..8)
                 .map(|index| number(408 + index * 8))
                 .collect::<Result<Vec<_>, _>>()?;
+            transport_values.push(number(536)?);
             let transport = if bool_field(record[1])? {
                 Some(TransportStats {
                     processes: transport_values[0],
                     child_launches: transport_values[1],
                     remote_launches: transport_values[2],
                     workspace_capabilities: transport_values[3],
+                    guest_processes: transport_values[8],
                     scoped_server_records: transport_values[4],
                     background_server_records: transport_values[5],
                     corrupt_records: transport_values[6],
@@ -2812,10 +2816,10 @@ impl<'a> CoverageIndex<'a> {
                 2 => Some((ScopeKind::Compiler, "compiler")),
                 _ => return Err(CoverageIndexError::InvalidRecord("coverage scope kind")),
             };
-            let scope_mode = self.optional_string(get_u32(record, 16)?)?;
-            let scope_language = self.optional_string(get_u32(record, 504)?)?;
-            let scope_model = self.optional_string(get_u32(record, 508)?)?;
-            let scope_unit = self.optional_string(get_u32(record, 512)?)?;
+            let scope_mode = self.optional_string(get_u32(record, 16))?;
+            let scope_language = self.optional_string(get_u32(record, 504))?;
+            let scope_model = self.optional_string(get_u32(record, 508))?;
+            let scope_unit = self.optional_string(get_u32(record, 512))?;
             let has_measurement_complete = bool_field(record[516])?;
             let measurement_complete = bool_field(record[517])?;
             if !has_measurement_complete && measurement_complete {
@@ -2842,7 +2846,7 @@ impl<'a> CoverageIndex<'a> {
                         if scope_mode.is_some()
                             || scope_unit.is_none()
                             || !has_measurement_complete
-                            || get_u32(record, 32)? != 0
+                            || get_u32(record, 32) != 0
                             || number(480)? != 0
                             || number(488)? != 0
                             || number(496)? != 0
@@ -2857,7 +2861,7 @@ impl<'a> CoverageIndex<'a> {
                     model: scope_model.expect("validated scope model"),
                     mode: scope_mode,
                     roots: self
-                        .relation_strings(get_u64(record, 24)?, u64::from(get_u32(record, 32)?))?,
+                        .relation_strings(get_u64(record, 24), u64::from(get_u32(record, 32)))?,
                     unit: scope_unit,
                     measurement_complete: has_measurement_complete.then_some(measurement_complete),
                     included: number(480)?,
@@ -2865,7 +2869,7 @@ impl<'a> CoverageIndex<'a> {
                     ambiguous: number(496)?,
                 })
             } else {
-                if get_u32(record, 32)? != 0
+                if get_u32(record, 32) != 0
                     || scope_mode.is_some()
                     || scope_language.is_some()
                     || scope_model.is_some()
@@ -2880,7 +2884,7 @@ impl<'a> CoverageIndex<'a> {
                 None
             };
             let empty_evidence_tests = number(472)?;
-            let first_empty_evidence_test = self.optional_string(get_u32(record, 20)?)?;
+            let first_empty_evidence_test = self.optional_string(get_u32(record, 20))?;
             if (empty_evidence_tests == 0) != first_empty_evidence_test.is_none() {
                 return Err(CoverageIndexError::InvalidRecord(
                     "empty-evidence diagnostic identity",
@@ -2890,7 +2894,7 @@ impl<'a> CoverageIndex<'a> {
                 view,
                 kind: record_kind,
                 runner: record_runner,
-                generated_at: self.string(get_u32(record, 12)?)?,
+                generated_at: self.string(get_u32(record, 12))?,
                 summary: decode_summary(record, 36, 40)?,
                 measurement: IndexedMeasurement {
                     complete: blocking == 0,
@@ -2967,17 +2971,17 @@ impl<'a> CoverageIndex<'a> {
                     "decision-gap reserved bytes",
                 ));
             }
-            let record_kind = self.optional_string(get_u32(record, 4)?)?;
-            let record_runner = self.optional_string(get_u32(record, 8)?)?;
+            let record_kind = self.optional_string(get_u32(record, 4))?;
+            let record_runner = self.optional_string(get_u32(record, 8))?;
             if record_kind.as_deref() != kind || record_runner.as_deref() != runner {
                 continue;
             }
-            let record_file = self.string(get_u32(record, 16)?)?;
+            let record_file = self.string(get_u32(record, 16))?;
             if record_file != file {
                 continue;
             }
             let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-                usize::try_from(get_u64(record, offset)?)
+                usize::try_from(get_u64(record, offset))
                     .map_err(|_| CoverageIndexError::SizeOverflow)
             };
             let conditions = number(48)?;
@@ -2990,13 +2994,13 @@ impl<'a> CoverageIndex<'a> {
             decisions.push(IndexedDecisionGap {
                 view,
                 file: record_file,
-                id: self.string(get_u32(record, 12)?)?,
+                id: self.string(get_u32(record, 12))?,
                 line: number(32)?,
                 column: number(40)?,
-                kind: self.string(get_u32(record, 20)?)?,
+                kind: self.string(get_u32(record, 20))?,
                 conditions,
                 missing_conditions,
-                source: self.string(get_u32(record, 24)?)?,
+                source: self.string(get_u32(record, 24))?,
             });
         }
         Ok(decisions)
@@ -3027,15 +3031,15 @@ impl<'a> CoverageIndex<'a> {
                     "dimension reserved bytes",
                 ));
             }
-            let name = self.string(get_u32(record, 4)?)?;
+            let name = self.string(get_u32(record, 4))?;
             values.push(IndexedDimensionCoverage {
                 kind: (dimension == CoverageDimension::Kind).then(|| name.clone()),
                 runner: (dimension == CoverageDimension::Runner).then_some(name),
-                tests: usize::try_from(get_u64(record, 8)?)
+                tests: usize::try_from(get_u64(record, 8))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                setups: usize::try_from(get_u64(record, 16)?)
+                setups: usize::try_from(get_u64(record, 16))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                attributed: usize::try_from(get_u64(record, 184)?)
+                attributed: usize::try_from(get_u64(record, 184))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 summary: decode_summary(record, 24, 32)?,
             });
@@ -3067,9 +3071,9 @@ impl<'a> CoverageIndex<'a> {
                 2 => "ambiguous",
                 _ => return Err(CoverageIndexError::InvalidRecord("source-scope status")),
             };
-            let measurement_limitations = usize::try_from(get_u64(record, 16)?)
+            let measurement_limitations = usize::try_from(get_u64(record, 16))
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
-            let mask = get_u32(record, 24)?;
+            let mask = get_u32(record, 24);
             if mask & !7 != 0 || (measurement_limitations == 0) != (mask == 0) {
                 return Err(CoverageIndexError::InvalidRecord(
                     "source-scope limitation annotation",
@@ -3086,10 +3090,10 @@ impl<'a> CoverageIndex<'a> {
                 }
             }
             entries.push(IndexedScopeEntry {
-                file: self.string(get_u32(record, 4)?)?,
+                file: self.string(get_u32(record, 4))?,
                 status: status.into(),
-                reason: self.string(get_u32(record, 8)?)?,
-                package_root: self.optional_string(get_u32(record, 12)?)?,
+                reason: self.string(get_u32(record, 8))?,
+                package_root: self.optional_string(get_u32(record, 12))?,
                 measurement_limitations,
                 limitation_kinds,
             });
@@ -3111,8 +3115,8 @@ impl<'a> CoverageIndex<'a> {
         let values = (0..4)
             .map(|index| {
                 self.relation_strings(
-                    get_u64(record, 8 + index * 16)?,
-                    get_u64(record, 16 + index * 16)?,
+                    get_u64(record, 8 + index * 16),
+                    get_u64(record, 16 + index * 16),
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -3152,8 +3156,8 @@ impl<'a> CoverageIndex<'a> {
             if record[3] != 0 || record[56..].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("line record"));
             }
-            let record_file = self.string(get_u32(record, 4)?)?;
-            let record_line = usize::try_from(get_u64(record, 8)?)
+            let record_file = self.string(get_u32(record, 4))?;
+            let record_line = usize::try_from(get_u64(record, 8))
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
             if record_file != file || record_line != line {
                 continue;
@@ -3166,9 +3170,9 @@ impl<'a> CoverageIndex<'a> {
                 line: record_line,
                 covered: bool_field(record[1])?,
                 measured: !bool_field(record[2])?,
-                tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
-                phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
-                confidence: self.confidence(get_u64(record, 48)?)?,
+                tests: self.relation_strings(get_u64(record, 16), get_u64(record, 24))?,
+                phases: self.relation_strings(get_u64(record, 32), get_u64(record, 40))?,
+                confidence: self.confidence(get_u64(record, 48))?,
             });
         }
         Ok(found)
@@ -3186,14 +3190,14 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("line record"));
             }
             lines.push(IndexedLine {
-                file: self.string(get_u32(record, 4)?)?,
-                line: usize::try_from(get_u64(record, 8)?)
+                file: self.string(get_u32(record, 4))?,
+                line: usize::try_from(get_u64(record, 8))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 covered: bool_field(record[1])?,
                 measured: !bool_field(record[2])?,
-                tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
-                phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
-                confidence: self.confidence(get_u64(record, 48)?)?,
+                tests: self.relation_strings(get_u64(record, 16), get_u64(record, 24))?,
+                phases: self.relation_strings(get_u64(record, 32), get_u64(record, 40))?,
+                confidence: self.confidence(get_u64(record, 48))?,
             });
         }
         Ok(lines)
@@ -3214,10 +3218,10 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("test summary record"));
             }
             tests.push(IndexedTestSummary {
-                id: self.string(get_u32(record, 4)?)?,
-                name: self.string(get_u32(record, 8)?)?,
-                file: self.optional_string(get_u32(record, 12)?)?,
-                title: self.optional_string(get_u32(record, 16)?)?,
+                id: self.string(get_u32(record, 4))?,
+                name: self.string(get_u32(record, 8))?,
+                file: self.optional_string(get_u32(record, 12))?,
+                title: self.optional_string(get_u32(record, 16))?,
                 role: match record[1] {
                     0 => "test",
                     1 => "setup",
@@ -3245,10 +3249,10 @@ impl<'a> CoverageIndex<'a> {
                 }
                 .into(),
                 provenance: crate::coverage_report::TestProvenance {
-                    runner: self.string(get_u32(record, 20)?)?,
-                    kind: self.string(get_u32(record, 24)?)?,
-                    project: self.optional_string(get_u32(record, 28)?)?,
-                    source: self.string(get_u32(record, 32)?)?,
+                    runner: self.string(get_u32(record, 20))?,
+                    kind: self.string(get_u32(record, 24))?,
+                    project: self.optional_string(get_u32(record, 28))?,
+                    source: self.string(get_u32(record, 32))?,
                 },
             });
         }
@@ -3260,8 +3264,8 @@ impl<'a> CoverageIndex<'a> {
         if record[1..8].iter().any(|byte| *byte != 0) {
             return Err(CoverageIndexError::InvalidRecord("test vector record"));
         }
-        let offset = get_u64(record, 8)?;
-        let count = get_u64(record, 16)?;
+        let offset = get_u64(record, 8);
+        let count = get_u64(record, 16);
         let descriptor = self.index.descriptor(SECTION_VECTOR_VALUES)?;
         let end = offset
             .checked_add(count)
@@ -3314,7 +3318,7 @@ impl<'a> CoverageIndex<'a> {
             if CoverageViewId::try_from(record[0])? != view {
                 return Ok(None);
             }
-            let id = self.string(get_u32(record, 4)?)?;
+            let id = self.string(get_u32(record, 4))?;
             positions
                 .get(&id)
                 .copied()
@@ -3329,7 +3333,7 @@ impl<'a> CoverageIndex<'a> {
             }
             if let Some(position) = position(record)? {
                 details[position].retries.push(
-                    usize::try_from(get_u64(record, 8)?)
+                    usize::try_from(get_u64(record, 8))
                         .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 );
             }
@@ -3344,10 +3348,10 @@ impl<'a> CoverageIndex<'a> {
                 details[position]
                     .attempts
                     .push(crate::coverage_report::TestAttempt {
-                        retry: usize::try_from(get_u64(record, 8)?)
+                        retry: usize::try_from(get_u64(record, 8))
                             .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                        status: self.string(get_u32(record, 16)?)?,
-                        expected_status: self.optional_string(get_u32(record, 20)?)?,
+                        status: self.string(get_u32(record, 16))?,
+                        expected_status: self.optional_string(get_u32(record, 20))?,
                     });
             }
         }
@@ -3363,8 +3367,8 @@ impl<'a> CoverageIndex<'a> {
                 details[position]
                     .lines
                     .push(crate::coverage_report::SourceLine {
-                        file: self.string(get_u32(record, 8)?)?.into(),
-                        line: usize::try_from(get_u64(record, 16)?)
+                        file: self.string(get_u32(record, 8))?.into(),
+                        line: usize::try_from(get_u64(record, 16))
                             .map_err(|_| CoverageIndexError::SizeOverflow)?,
                     });
             }
@@ -3380,7 +3384,7 @@ impl<'a> CoverageIndex<'a> {
             if let Some(position) = position(record)? {
                 details[position]
                     .hits
-                    .push(self.string(get_u32(record, 8)?)?);
+                    .push(self.string(get_u32(record, 8))?);
             }
         }
         let descriptor = self.index.descriptor(SECTION_TEST_DECISIONS)?;
@@ -3393,8 +3397,8 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("test decision record"));
             }
             if let Some(position) = position(record)? {
-                let offset = get_u64(record, 16)?;
-                let count = get_u64(record, 24)?;
+                let offset = get_u64(record, 16);
+                let count = get_u64(record, 24);
                 let end = offset
                     .checked_add(count)
                     .ok_or(CoverageIndexError::InvalidRecord("test vector range"))?;
@@ -3410,7 +3414,7 @@ impl<'a> CoverageIndex<'a> {
                 details[position]
                     .decisions
                     .push(crate::coverage_report::TestDecisionResult {
-                        id: self.string(get_u32(record, 8)?)?,
+                        id: self.string(get_u32(record, 8))?,
                         vectors: observed,
                     });
             }
@@ -3440,23 +3444,23 @@ impl<'a> CoverageIndex<'a> {
                 2 => "branch",
                 _ => return Err(CoverageIndexError::InvalidRecord("hit obligation")),
             };
-            let metadata_label = self.optional_string(get_u32(record, 36)?)?;
+            let metadata_label = self.optional_string(get_u32(record, 36))?;
             metadata.push(IndexedHitMetadata {
-                id: self.string(get_u32(record, 4)?)?,
+                id: self.string(get_u32(record, 4))?,
                 obligation: obligation.into(),
-                file: self.string(get_u32(record, 8)?)?,
-                line: usize::try_from(get_u64(record, 16)?)
+                file: self.string(get_u32(record, 8))?,
+                line: usize::try_from(get_u64(record, 16))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                column: usize::try_from(get_u64(record, 24)?)
+                column: usize::try_from(get_u64(record, 24))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                branch_kind: self.optional_string(get_u32(record, 32)?)?,
+                branch_kind: self.optional_string(get_u32(record, 32))?,
                 label: (obligation != "branch")
                     .then_some(metadata_label.clone())
                     .flatten(),
-                alternative: self.optional_string(get_u32(record, 40)?)?,
+                alternative: self.optional_string(get_u32(record, 40))?,
                 parent_id: (obligation == "branch").then_some(metadata_label).flatten(),
-                source: self.string(get_u32(record, 44)?)?,
-                tests: self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?,
+                source: self.string(get_u32(record, 44))?,
+                tests: self.relation_strings(get_u64(record, 48), get_u64(record, 56))?,
             });
         }
         Ok(metadata)
@@ -3479,14 +3483,14 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("limitation record"));
             }
             limitations.push(IndexedLimitation {
-                id: self.string(get_u32(record, 4)?)?,
-                kind: self.string(get_u32(record, 8)?)?,
-                file: self.string(get_u32(record, 12)?)?,
-                source: self.string(get_u32(record, 16)?)?,
-                reason: self.string(get_u32(record, 20)?)?,
-                line: usize::try_from(get_u64(record, 24)?)
+                id: self.string(get_u32(record, 4))?,
+                kind: self.string(get_u32(record, 8))?,
+                file: self.string(get_u32(record, 12))?,
+                source: self.string(get_u32(record, 16))?,
+                reason: self.string(get_u32(record, 20))?,
+                line: usize::try_from(get_u64(record, 24))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                column: usize::try_from(get_u64(record, 32)?)
+                column: usize::try_from(get_u64(record, 32))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 blocking: bool_field(record[1])?,
             });
@@ -3514,15 +3518,15 @@ impl<'a> CoverageIndex<'a> {
                 ));
             }
             metadata.push(crate::coverage_report::DecisionMeta {
-                id: self.string(get_u32(record, 4)?)?,
-                file: self.string(get_u32(record, 8)?)?,
-                source: self.string(get_u32(record, 12)?)?,
-                kind: self.string(get_u32(record, 16)?)?,
-                line: usize::try_from(get_u64(record, 24)?)
+                id: self.string(get_u32(record, 4))?,
+                file: self.string(get_u32(record, 8))?,
+                source: self.string(get_u32(record, 12))?,
+                kind: self.string(get_u32(record, 16))?,
+                line: usize::try_from(get_u64(record, 24))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                column: usize::try_from(get_u64(record, 32)?)
+                column: usize::try_from(get_u64(record, 32))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                conditions: self.relation_strings(get_u64(record, 40)?, get_u64(record, 48)?)?,
+                conditions: self.relation_strings(get_u64(record, 40), get_u64(record, 48))?,
             });
         }
         Ok(metadata)
@@ -3536,11 +3540,11 @@ impl<'a> CoverageIndex<'a> {
             .index
             .record(SECTION_DECISION_VECTOR_OBSERVATIONS, index)?;
         Ok(crate::coverage_report::VectorObservation {
-            confidence: self.confidence(get_u64(record, 0)?)?,
-            vector: self.test_vector(get_u64(record, 8)?)?,
-            tests: self.relation_ids(get_u64(record, 16)?, get_u64(record, 24)?)?,
-            phases: self.relation_ids(get_u64(record, 32)?, get_u64(record, 40)?)?,
-            explicit_phases: self.relation_ids(get_u64(record, 48)?, get_u64(record, 56)?)?,
+            confidence: self.confidence(get_u64(record, 0))?,
+            vector: self.test_vector(get_u64(record, 8))?,
+            tests: self.relation_ids(get_u64(record, 16), get_u64(record, 24))?,
+            phases: self.relation_ids(get_u64(record, 32), get_u64(record, 40))?,
+            explicit_phases: self.relation_ids(get_u64(record, 48), get_u64(record, 56))?,
         })
     }
 
@@ -3557,23 +3561,23 @@ impl<'a> CoverageIndex<'a> {
         let has_witness = record[0] & 4 != 0;
         let witness = if has_witness {
             Some([
-                self.test_vector(get_u64(record, 16)?)?,
-                self.test_vector(get_u64(record, 24)?)?,
+                self.test_vector(get_u64(record, 16))?,
+                self.test_vector(get_u64(record, 24))?,
             ])
         } else {
             None
         };
-        let first_tests = self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?;
-        let second_tests = self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?;
+        let first_tests = self.relation_strings(get_u64(record, 32), get_u64(record, 40))?;
+        let second_tests = self.relation_strings(get_u64(record, 48), get_u64(record, 56))?;
         if !has_witness && (!first_tests.is_empty() || !second_tests.is_empty()) {
             return Err(CoverageIndexError::InvalidRecord(
                 "condition witness tests without witness",
             ));
         }
         Ok(crate::coverage_report::ConditionResult {
-            index: usize::try_from(get_u64(record, 8)?)
+            index: usize::try_from(get_u64(record, 8))
                 .map_err(|_| CoverageIndexError::SizeOverflow)?,
-            source: self.string(get_u32(record, 4)?)?,
+            source: self.string(get_u32(record, 4))?,
             covered: record[0] & 1 != 0,
             assertion_covered: record[0] & 2 != 0,
             witness,
@@ -3619,8 +3623,8 @@ impl<'a> CoverageIndex<'a> {
                          available: u64,
                          label: &'static str|
              -> Result<std::ops::Range<u64>, CoverageIndexError> {
-                let start = get_u64(record, offset)?;
-                let count = get_u64(record, offset + 8)?;
+                let start = get_u64(record, offset);
+                let count = get_u64(record, offset + 8);
                 let end = start
                     .checked_add(count)
                     .ok_or(CoverageIndexError::InvalidRecord(label))?;
@@ -3635,7 +3639,7 @@ impl<'a> CoverageIndex<'a> {
             let conditions = range(48, condition_count, "decision condition range")?
                 .map(|index| self.decision_condition(index))
                 .collect::<Result<Vec<_>, _>>()?;
-            let id = self.string(get_u32(record, 4)?)?;
+            let id = self.string(get_u32(record, 4))?;
             let meta = metadata
                 .get(&id)
                 .cloned()
@@ -3661,8 +3665,8 @@ impl<'a> CoverageIndex<'a> {
                     .collect(),
                 vector_observations: observations,
                 conditions,
-                tests: self.relation_ids(get_u64(record, 16)?, get_u64(record, 24)?)?,
-                confidence: self.confidence(get_u64(record, 8)?)?,
+                tests: self.relation_ids(get_u64(record, 16), get_u64(record, 24))?,
+                confidence: self.confidence(get_u64(record, 8))?,
             });
         }
         Ok(decisions)
@@ -3685,16 +3689,16 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("phase summary record"));
             }
             phases.push(IndexedPhaseSummary {
-                id: self.string(get_u32(record, 4)?)?,
-                kind: self.string(get_u32(record, 8)?)?,
-                operation: self.string(get_u32(record, 12)?)?,
-                source: self.optional_string(get_u32(record, 16)?)?,
-                test: self.string(get_u32(record, 20)?)?,
-                status: self.optional_string(get_u32(record, 24)?)?,
-                caused_by_phase_id: self.optional_string(get_u32(record, 28)?)?,
-                lines: usize::try_from(get_u64(record, 32)?)
+                id: self.string(get_u32(record, 4))?,
+                kind: self.string(get_u32(record, 8))?,
+                operation: self.string(get_u32(record, 12))?,
+                source: self.optional_string(get_u32(record, 16))?,
+                test: self.string(get_u32(record, 20))?,
+                status: self.optional_string(get_u32(record, 24))?,
+                caused_by_phase_id: self.optional_string(get_u32(record, 28))?,
+                lines: usize::try_from(get_u64(record, 32))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
-                decisions: usize::try_from(get_u64(record, 40)?)
+                decisions: usize::try_from(get_u64(record, 40))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
             });
         }
@@ -3717,15 +3721,15 @@ impl<'a> CoverageIndex<'a> {
             if record[3] != 0 || record[12..16].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("anchor record"));
             }
-            let record_file = self.string(get_u32(record, 8)?)?;
-            let record_line = usize::try_from(get_u64(record, 16)?)
+            let record_file = self.string(get_u32(record, 8))?;
+            let record_line = usize::try_from(get_u64(record, 16))
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
             if record_file != file || record_line != line {
                 continue;
             }
-            let total = usize::try_from(get_u64(record, 32)?)
+            let total = usize::try_from(get_u64(record, 32))
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
-            let covered_conditions = usize::try_from(get_u64(record, 40)?)
+            let covered_conditions = usize::try_from(get_u64(record, 40))
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
             let (kind, conditions, covered_conditions) = match record[1] {
                 0 => {
@@ -3746,15 +3750,15 @@ impl<'a> CoverageIndex<'a> {
             }
             anchors.push(IndexedAnchor {
                 kind: kind.into(),
-                id: self.string(get_u32(record, 4)?)?,
+                id: self.string(get_u32(record, 4))?,
                 file: record_file,
                 line: record_line,
-                column: usize::try_from(get_u64(record, 24)?)
+                column: usize::try_from(get_u64(record, 24))
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 covered: bool_field(record[2])?,
                 conditions,
                 covered_conditions,
-                tests: self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?,
+                tests: self.relation_strings(get_u64(record, 48), get_u64(record, 56))?,
             });
         }
         anchors.sort_by_key(|anchor| anchor.column);
@@ -3787,7 +3791,7 @@ fn decode_summary(
     base: usize,
 ) -> Result<CoverageSummary, CoverageIndexError> {
     let number = |offset: usize| -> Result<usize, CoverageIndexError> {
-        usize::try_from(get_u64(record, offset)?).map_err(|_| CoverageIndexError::SizeOverflow)
+        usize::try_from(get_u64(record, offset)).map_err(|_| CoverageIndexError::SizeOverflow)
     };
     let count = |offset: usize| -> Result<CoverageCount, CoverageIndexError> {
         let covered = number(offset)?;
@@ -3927,6 +3931,7 @@ mod tests {
                     "reason": "dynamic source"
                 })],
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: vec![RawTestResult {
                 test_id: Some("test".into()),
@@ -4186,11 +4191,17 @@ mod tests {
         let tests = index.test_summaries(CoverageViewId::All).unwrap();
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].provenance.runner, "node:test");
-        let decision = index.anchors(CoverageViewId::All, "src/a.js", 1).unwrap();
+        // The decision, and its two outcomes as a branch.
+        let anchors = index.anchors(CoverageViewId::All, "src/a.js", 1).unwrap();
+        assert_eq!(anchors.len(), 2);
+        let decision = anchors
+            .iter()
+            .filter(|anchor| anchor.kind == "decision")
+            .collect::<Vec<_>>();
         assert_eq!(decision.len(), 1);
-        assert_eq!(decision[0].kind, "decision");
         assert_eq!(decision[0].conditions, Some(2));
         assert_eq!(decision[0].tests, ["test"]);
+        assert!(anchors.iter().any(|anchor| anchor.kind == "branch"));
         let point = index.anchors(CoverageViewId::All, "src/a.js", 2).unwrap();
         assert_eq!(point.len(), 1);
         assert_eq!(point[0].kind, "statement");
@@ -4209,6 +4220,12 @@ mod tests {
             [Some(false), None]
         );
         let hits = index.hit_metadata(CoverageViewId::All).unwrap();
+        // The point, and the decision's two outcomes.
+        assert_eq!(hits.len(), 3);
+        let hits = hits
+            .into_iter()
+            .filter(|hit| hit.obligation != "branch")
+            .collect::<Vec<_>>();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "point");
         assert_eq!(hits[0].source, "work();");
@@ -4238,6 +4255,7 @@ mod tests {
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: vec![RawTestResult {
                 test_id: Some("unstarted".into()),

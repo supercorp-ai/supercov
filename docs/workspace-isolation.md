@@ -100,8 +100,16 @@ project lock, and does not scan for similarly named directories.
 ## Containers and remote workspaces
 
 When a suite launches a container or VM from a mounted workspace, Supercov uses
-the isolated workspace as the source presented to that environment. The runtime
-must be able to cross the launch boundary and return evidence.
+the isolated workspace as the source presented to that environment. Where it
+sees the launch call -- a command and its environment passed as an `env`,
+`environment` or `envs` option, as a plain map after the command, or to a
+builder method such as Testcontainers' `withEnvironment` -- it hands the guest
+its settings with paths moved to the guest's mount, and the guest's coverage is
+credited to the test that launched it. A guest started any other way, with none
+of those settings, still runs the instrumented code: it reads the run's
+settings from the mounted workspace itself, and its coverage counts for the run
+as background coverage, credited to no test. The run summary's `Guests` line
+says how many processes did that.
 
 Dependencies stay out of the instrumented copy. The root `node_modules` is
 linked entry by entry to the project's own, so an environment that mounts the

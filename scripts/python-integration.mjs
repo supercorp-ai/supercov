@@ -13,13 +13,13 @@
 // imported by the product path.
 
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
+const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`));
 const launcher = resolve(repository, 'bin/supercov.js');
 const conformanceFixture = resolve(repository, 'tests/fixtures/python-conformance');
 const positionFixture = resolve(repository, 'tests/fixtures/python-position-corpus');
@@ -78,6 +78,8 @@ function environmentFor(project, venv) {
   };
   delete environment.PYTHONPATH;
   delete environment.PYTEST_PLUGINS;
+  // The cache scenarios read the bytecode pytest writes.
+  delete environment.PYTHONDONTWRITEBYTECODE;
   return environment;
 }
 
@@ -95,43 +97,6 @@ function successfulSupercov(project, args, environment) {
   return result;
 }
 
-// Every assertion the syntax inventory found, with the tests observed running
-// it. An assertion map credits a source statement only when a passing test ran
-// a named assertion, so a site with no observed test can never earn credit
-// however well it is explained.
-function assertionSites(project, environment, runId = 'latest') {
-  const sites = [];
-  let offset = 0;
-  for (;;) {
-    const page = query(project, ['runs', runId, 'assertions', '--limit', '200', '--offset', String(offset)], environment);
-    sites.push(...page.items.map((item) => ({
-      at: `${item.at.file}:${item.at.line}`,
-      tests: item.observedPassingTests ?? [],
-    })));
-    if (page.pagination.nextOffset === null) return sites;
-    offset = page.pagination.nextOffset;
-  }
-}
-
-// The inventory covers every captured test file, so a run that exercised some
-// of them leaves the others unobserved by design. Only the files this command
-// ran have to name a test for each of their assertions.
-function assertAssertionsAreObserved(project, environment, runner, ranFiles, expectedUnobserved = []) {
-  const sites = assertionSites(project, environment)
-    .filter((site) => ranFiles.some((file) => site.at.startsWith(`${file}:`)));
-  assert.ok(sites.length > 0, `${runner}: the inventory found no assertion sites in ${ranFiles.join(', ')}`);
-  // Credit needs a *passing* occurrence, so an assertion that only ever runs
-  // inside a failing or expected-failure test is unobserved by design.
-  const unobserved = sites.filter((site) => site.tests.length === 0).map((site) => site.at);
-  assert.deepEqual(unobserved, expectedUnobserved, `${runner}: every assertion a passing test runs should name that test`);
-  // An assertion map selects a test by file and name, so the run has to report
-  // the test's path rather than the runner's own identity.
-  const tests = query(project, ['runs', 'latest', 'test', sites[0].tests[0]], environment).tests;
-  assert.ok(
-    ranFiles.some((file) => tests[0].file === file),
-    `${runner}: expected the test under one of ${ranFiles.join(', ')}, got ${tests[0].file}`,
-  );
-}
 
 function query(project, args, environment) {
   const result = successfulSupercov(project, [...args, '--json'], environment);
@@ -164,12 +129,12 @@ function totals(summary) {
 // `core` leaves out tests/test_patterns.py, whose `match` 3.9 cannot parse,
 // and has to come out the same on every interpreter.
 const FIXTURE_TOTALS = {
-  full: [81, 82, 83, 84, 18, 18, 79, 94, 8, 16],
-  core: [75, 82, 77, 84, 17, 18, 69, 94, 8, 16],
+  full: [81, 82, 83, 84, 18, 18, 59, 70, 8, 16],
+  core: [75, 82, 77, 84, 17, 18, 50, 70, 8, 16],
 };
 const CORPUS_TOTALS = {
-  full: [67, 67, 69, 69, 17, 17, 94, 114, 12, 27],
-  core: [61, 67, 63, 69, 16, 17, 82, 114, 12, 27],
+  full: [67, 67, 69, 69, 17, 17, 65, 80, 12, 27],
+  core: [61, 67, 63, 69, 16, 17, 55, 80, 12, 27],
 };
 
 function assertFixtureTotals(summary, expected = FIXTURE_TOTALS.full) {
@@ -236,24 +201,13 @@ try {
   // twice more, untimed, by the first query after it.
   const evidencePath = serial.stdout.match(/\[coverage\] evidence: (.+)/)[1].trim();
   const runDirectory = evidencePath.slice(0, -'evidence.raw.gz'.length);
-  for (const name of ['query-index.v1.bin', 'assertions.summary.cache.json']) {
+  for (const name of ['query-index.v1.bin', 'test-executions.json']) {
     assert.ok(existsSync(resolve(runDirectory, name)), `publication wrote ${name} before any query`);
   }
   assert.match(serial.stderr, /\[supercov\] timings .* evidence=\d+(?:\.\d)?ms publication=\d+(?:\.\d)?ms total=/);
   assert.match(serial.stderr, new RegExp(`${hasMatch ? 14 : 13} test\\(s\\) across 3 source file\\(s\\)`));
   assert.match(serial.stderr, new RegExp(`interpreter process\\(es\\) on Python 3\\.${version.minor}\\.`));
   assertFixtureTotals(query(project, ['runs', 'latest'], environment), fixtureTotals);
-  // pytest's rewriter reports the line of each assert it passes, and a
-  // TestCase pytest runs reaches the wrapped unittest methods instead.
-  assertAssertionsAreObserved(
-    project,
-    environment,
-    'pytest',
-    ranTestFiles,
-    // The only assertion in an @unittest.expectedFailure test: it fails by
-    // design, so it never has a passing occurrence to witness with.
-    ['tests/test_unittest_style.py:19'],
-  );
   assert.deepEqual(
     decisionVectors(project, 'app/shapes.py:26', environment),
     ['TF->T', 'TT->F'],
@@ -280,15 +234,6 @@ try {
     environment,
   );
   assertFixtureTotals(query(project, ['runs', 'latest'], environment), fixtureTotals);
-  // Each xdist worker is its own process with its own contexts and evidence
-  // file, so the sites have to survive being joined from several of them.
-  assertAssertionsAreObserved(
-    project,
-    environment,
-    'pytest -n 2',
-    ranTestFiles,
-    ['tests/test_unittest_style.py:19'],
-  );
 
   const rerun = successfulSupercov(
     project,
@@ -488,6 +433,26 @@ try {
     oracleEnvironment,
   );
   assertOracleAgreement(oracleProject, oracleEnvironment);
+
+  // A Python script with no test runner is the command's choice, not a
+  // Supercov bug: the run says so and keeps no evidence to send.
+  const runnerless = resolve(temporary, 'plain');
+  mkdirSync(resolve(runnerless, 'tests'), { recursive: true });
+  writeFileSync(resolve(runnerless, 'pyproject.toml'), '[project]\nname = "plain"\nversion = "0"\n');
+  writeFileSync(resolve(runnerless, 'double.py'), 'def double(x):\n    return x * 2\n');
+  writeFileSync(resolve(runnerless, 'tests/check.py'), 'import sys\nsys.path.insert(0, ".")\nfrom double import double\nassert double(2) == 4\n');
+  run('git', ['init', '-q', '.'], { cwd: runnerless });
+  const unrun = supercov(runnerless, ['--', 'python', 'tests/check.py'], environmentFor(runnerless, venv));
+  assert.notEqual(unrun.status, 0, unrun.stderr);
+  assert.doesNotMatch(unrun.stderr, /Supercov bug/, unrun.stderr);
+  // Each decision outcome is one branch: the export's total is its own
+  // records, and the summary's, not the outcomes counted twice.
+  successfulSupercov(oracleProject, ['runs', 'report', '--format', 'lcov', '--output', 'oracle.lcov'], oracleEnvironment);
+  const tracefile = readFileSync(resolve(oracleProject, 'oracle.lcov'), 'utf8');
+  const records = tracefile.split('\n').filter((line) => line.startsWith('BRDA:'));
+  const declared = tracefile.split('\n').filter((line) => line.startsWith('BRF:')).reduce((sum, line) => sum + Number(line.slice(4)), 0);
+  assert.equal(declared, records.length, tracefile);
+  assert.equal(declared, query(oracleProject, ['runs', 'latest'], oracleEnvironment).coverage.branches.total);
 
 
   // A suite stops a server it started by signalling it. Python's default

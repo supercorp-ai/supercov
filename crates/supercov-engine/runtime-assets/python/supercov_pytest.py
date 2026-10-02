@@ -207,15 +207,9 @@ def pytest_assertion_pass(item, lineno, orig, expl):
     del orig, expl
     if _runtime is None or _xdist_controller:
         return
-    # pytest's rewriter hands us the line of the assert it just passed, so the
-    # site needs no frame walking. The file is the module under test.
-    #
-    # The hook stays armed for the whole test. It used to disarm itself after
-    # the first assertion, when one marker per test was all the runtime
-    # wanted; an assertion map needs every site, and only this hook knows
-    # where a rewritten `assert` is. The cost is that pytest builds an
-    # explanation string for each passing assertion rather than the first.
-    _runtime.assertion_site(_item_file(item), lineno)
+    # Marks where the test's assertion phase begins; later calls in the same
+    # test are no-ops. The plan's line probes do this for rewritten asserts
+    # they know about, and this hook covers the rest.
     _runtime.assertion()
 
 

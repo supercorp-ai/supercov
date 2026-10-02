@@ -495,7 +495,7 @@ fn shift_source_map(
             )
         })
         .collect::<Vec<_>>();
-    let mut shifted = oxc_sourcemap::SourceMap::new(
+    oxc_sourcemap::SourceMap::new(
         map.get_file().cloned(),
         map.get_names().cloned().collect::<Vec<Arc<str>>>(),
         map.get_source_root().map(str::to_string),
@@ -505,14 +505,7 @@ fn shift_source_map(
             .collect::<Vec<Option<Arc<str>>>>(),
         tokens.into_boxed_slice(),
         None,
-    );
-    if let Some(ignore_list) = map.get_x_google_ignore_list() {
-        shifted.set_x_google_ignore_list(ignore_list.to_vec());
-    }
-    if let Some(debug_id) = map.get_debug_id() {
-        shifted.set_debug_id(debug_id);
-    }
-    shifted
+    )
 }
 
 /// Where a statement Supercov generated inside a function or block starts, in
@@ -653,7 +646,7 @@ fn unmap_generated_statements(
             }
         })
         .collect::<Vec<_>>();
-    let mut unmapped = oxc_sourcemap::SourceMap::new(
+    oxc_sourcemap::SourceMap::new(
         map.get_file().cloned(),
         map.get_names().cloned().collect::<Vec<Arc<str>>>(),
         map.get_source_root().map(str::to_string),
@@ -663,14 +656,7 @@ fn unmap_generated_statements(
             .collect::<Vec<Option<Arc<str>>>>(),
         tokens.into_boxed_slice(),
         None,
-    );
-    if let Some(ignore_list) = map.get_x_google_ignore_list() {
-        unmapped.set_x_google_ignore_list(ignore_list.to_vec());
-    }
-    if let Some(debug_id) = map.get_debug_id() {
-        unmapped.set_debug_id(debug_id);
-    }
-    unmapped
+    )
 }
 
 /// A line of the instrumented copy starting with a closing brace Supercov
@@ -760,7 +746,7 @@ fn map_closing_lines(
     if !added {
         return map;
     }
-    let mut closed = oxc_sourcemap::SourceMap::new(
+    oxc_sourcemap::SourceMap::new(
         map.get_file().cloned(),
         map.get_names().cloned().collect::<Vec<Arc<str>>>(),
         map.get_source_root().map(str::to_string),
@@ -770,14 +756,7 @@ fn map_closing_lines(
             .collect::<Vec<Option<Arc<str>>>>(),
         patched.into_boxed_slice(),
         None,
-    );
-    if let Some(ignore_list) = map.get_x_google_ignore_list() {
-        closed.set_x_google_ignore_list(ignore_list.to_vec());
-    }
-    if let Some(debug_id) = map.get_debug_id() {
-        closed.set_debug_id(debug_id);
-    }
-    closed
+    )
 }
 
 fn generate_candidate(
@@ -853,6 +832,36 @@ pub enum CandidateError {
     },
 }
 
+impl std::fmt::Display for CandidateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownSourceType(file) => {
+                write!(formatter, "no JavaScript source type for {file}")
+            }
+            Self::Parse(messages) => write!(formatter, "{}", messages.join("; ")),
+            Self::CommentPreservation {
+                expected,
+                actual,
+                detail,
+            } => write!(
+                formatter,
+                "{expected} comments in the source, {actual} after instrumenting: {detail}"
+            ),
+        }
+    }
+}
+
+/// A parser error as a person reads it: the message, and where.
+fn parse_message(source: &str, message: &str, offset: Option<usize>) -> String {
+    match offset.filter(|offset| *offset <= source.len()) {
+        Some(offset) => {
+            let (line, column) = line_and_utf16_column(source, offset);
+            format!("{message} at line {line}, column {}", column + 1)
+        }
+        None => message.to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeBinding {
     ModuleImport,
@@ -909,8 +918,9 @@ fn capability_source_candidate(source: &str) -> bool {
     // `/workspace` loses genuine opaque launchers. The nested mount shape is
     // already specific, and the AST pass below still restricts wrapping to
     // the imported root actually called with that argument.
-    let mount_mapping =
-        source.contains("mounts") && source.contains("source") && source.contains("target");
+    let mount_mapping = (source.contains("mounts") || source.contains("Mounts"))
+        && source.contains("source")
+        && source.contains("target");
     direct_mapping || mount_mapping
 }
 
@@ -928,6 +938,8 @@ fn capability_callee_root(expression: &Expression<'_>) -> Option<String> {
         Expression::StaticMemberExpression(member) => capability_callee_root(&member.object),
         Expression::ComputedMemberExpression(member) => capability_callee_root(&member.object),
         Expression::CallExpression(call) => capability_callee_root(&call.callee),
+        // `new GenericContainer(..).withBindMounts(..)`: the builder's class.
+        Expression::NewExpression(construction) => capability_callee_root(&construction.callee),
         Expression::ParenthesizedExpression(parenthesized) => {
             capability_callee_root(&parenthesized.expression)
         }
@@ -972,10 +984,18 @@ impl<'a> Visit<'a> for CapabilityCallCollector<'_> {
     }
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        // A builder method named for mounts (`withBindMounts`) takes the
+        // mounts themselves, `[{ source, target }]`, with no `mounts` key.
+        let mounting = matches!(&call.callee, Expression::StaticMemberExpression(member)
+            if member.property.name.to_ascii_lowercase().contains("mount"));
+        let mounted = |argument: &Argument<'_>| {
+            let text = source_slice(self.source, argument.span());
+            mounting && text.contains("source") && text.contains("target")
+        };
         if call
             .arguments
             .iter()
-            .any(|argument| self.argument_has_mapping(argument))
+            .any(|argument| self.argument_has_mapping(argument) || mounted(argument))
             && let Some(root) = capability_callee_root(&call.callee)
         {
             self.roots.insert(root);
@@ -1726,13 +1746,6 @@ struct NodeAssertionSiteCollector<'s> {
     bindings: &'s NodeAssertionBindings,
     scoping: &'s oxc_semantic::Scoping,
     sites: HashMap<SpanKey, (String, String, bool)>,
-    inventory: bool,
-}
-
-/// Syntax/binding inventory using the same recognizer as instrumentation.
-/// Does not trace assertion operands or infer dependencies.
-pub fn assertion_ranges(file: &str, source: &str) -> Result<Vec<(usize, usize, String)>, String> {
-    assertion_ranges_with_expect_modules(file, source, &[])
 }
 
 /// How a project's JavaScript is parsed: in the script or module mode its
@@ -1749,38 +1762,6 @@ pub fn project_source_type(path: &Path) -> Result<SourceType, String> {
     } else {
         source_type.with_jsx(true)
     })
-}
-
-pub fn assertion_ranges_with_expect_modules(
-    file: &str,
-    source: &str,
-    modules: &[String],
-) -> Result<Vec<(usize, usize, String)>, String> {
-    let _positions = PositionScope::enter();
-    let source_type = project_source_type(Path::new(file))?;
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.errors.is_empty() {
-        return Err(format!("{} parse errors", parsed.errors.len()));
-    }
-    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
-    let bindings = node_assertion_bindings(&parsed.program, semantic.scoping(), modules);
-    let mut collector = NodeAssertionSiteCollector {
-        source,
-        file,
-        bindings: &bindings,
-        scoping: semantic.scoping(),
-        sites: HashMap::new(),
-        inventory: true,
-    };
-    collector.visit_program(&parsed.program);
-    let mut sites = collector
-        .sites
-        .into_iter()
-        .map(|((start, end), (op, _, _))| (start as usize, end as usize, op))
-        .collect::<Vec<_>>();
-    sites.sort();
-    Ok(sites)
 }
 
 fn referenced_symbol(
@@ -1915,9 +1896,9 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
                 || matches!(&call.callee,
                 Expression::StaticMemberExpression(m) if m.optional)
                 || matches!(&call.callee, Expression::ComputedMemberExpression(m) if m.optional);
-            // Keep optional sites in inventory, but never manufacture a passed
-            // occurrence when a call can short-circuit before invoking a matcher.
-            if optional && !self.inventory {
+            // Never manufacture a passed occurrence when a call can
+            // short-circuit before invoking a matcher.
+            if optional {
                 walk::walk_call_expression(self, call);
                 return;
             }
@@ -1975,6 +1956,24 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
 /// process, container, or VM while constructing a fresh environment. Static
 /// imports preserve ESM evaluation ordering and do not depend on runner-specific
 /// environment forwarding.
+/// The body of the function [`runtime_loader`] calls: where Node runs, it
+/// requires the bootstrap relative to the file the stack's first frame names.
+const RUNTIME_LOADER_BODY: &str = r#""const host = globalThis.process; if (!host || !host.getBuiltinModule) return; const frame = /(?:file:\\/\\/)?((?:\\/|[A-Za-z]:[\\\\/])[^\\s()]+?)(?=:\\d+:\\d+)/.exec(String(stack)); if (!frame) return; host.getBuiltinModule(\"node:module\").createRequire(frame[0].startsWith(\"file:\") ? frame[0] : frame[1])(specifier);""#;
+
+/// One statement that loads the run's bootstrap where no runtime is
+/// installed. It has to be valid in a module, a CommonJS file and a browser,
+/// pass a strict TypeScript check with or without Node's types, and survive
+/// compilers -- so no `import`, no `import.meta`, and nothing but
+/// `globalThis.__SUPERCOV_DIRECT_RUNTIME__`, `Function` and `Error` outside a
+/// function body the type checker does not read. The file's own location
+/// comes from a stack taken at its top level; `bootstrap` is relative to it.
+pub(crate) fn runtime_loader(bootstrap: &str) -> String {
+    let specifier = serde_json::to_string(bootstrap).expect("a path string serializes");
+    format!(
+        "if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {{ new Function(\"stack\", \"specifier\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
+    )
+}
+
 pub fn instrument_node_assertion_phases_with_runtime_imports(
     source: &str,
     file: &str,
@@ -2018,7 +2017,6 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
             bindings: &bindings,
             scoping: semantic.scoping(),
             sites: HashMap::new(),
-            inventory: false,
         };
         collector.visit_program(&parsed.program);
         assertions = collector.sites.len();
@@ -2053,9 +2051,26 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         });
     }
     let module = parsed.program.source_type.is_module();
-    let module_assertion_runtime = (assertions > 0 && module)
-        .then_some(assertion_runtime)
-        .flatten();
+    // The runtime the assertion phases call, loaded where nothing installed
+    // it. A statement rather than an `import`: an import's relative path broke
+    // once the test command compiled the file somewhere else (`tsc` into
+    // `dist/`), and the test failed on a module that was not there. It goes
+    // first, as the import was evaluated first, on the first line so every
+    // other line stays where it was.
+    if let Some(bootstrap) = assertion_runtime.filter(|_| assertions > 0) {
+        let at = if source.starts_with("#!") {
+            source
+                .find('\n')
+                .map_or(source.len(), |newline| newline + 1)
+        } else {
+            0
+        };
+        edits.push(TextEdit::insert(
+            at,
+            i64::MIN,
+            format!("{} ", runtime_loader(bootstrap)),
+        ));
+    }
     // An inline map is resolved relative to the transformed file itself, and
     // assertion-only transforms replace the file in place, so its basename is
     // the exact source-map reference.
@@ -2067,14 +2082,6 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
     // Append instead of prepend so every line of user code stays where it
     // was. Import declarations are instantiated before module evaluation
     // regardless of their textual position.
-    if let Some(runtime) = module_assertion_runtime {
-        code.push_str("\nimport ");
-        code.push_str(
-            &serde_json::to_string(runtime)
-                .expect("a JavaScript module specifier always serializes as a string"),
-        );
-        code.push_str(";\n");
-    }
     if assertions > 0 && source_type.is_typescript() {
         if module {
             code.push_str(&format!(
@@ -2102,16 +2109,146 @@ type SpanKey = (u32, u32);
 #[derive(Default)]
 struct SafetyAnalysis {
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
     semantic_limitations: Vec<CandidateLimitation>,
     dynamic_limitations: Vec<CandidateLimitation>,
+}
+
+/// The bindings a file reads function source through, in the places
+/// `observes_function_source` recognises a function written in place:
+/// `name.toString()`, `String(name)`, `${name}`, `"(" + name + ")"`, and the
+/// same through parentheses, casts, `?:`, `||`, `&&`, `,` and `=`. A function
+/// bound to one of them is shipped as text -- to a worker, a `vm` context, a
+/// browser page -- where no probe exists, so it is left as source like one
+/// read in place. Bindings are symbols, not names: a local `total` compared
+/// with a number says nothing about a function `total` elsewhere. Another
+/// file's reads are not visible here.
+struct SourceReads<'s> {
+    scoping: &'s oxc_semantic::Scoping,
+    symbols: HashSet<SymbolId>,
+}
+
+impl SourceReads<'_> {
+    fn read(&mut self, expression: &Expression<'_>) {
+        match expression {
+            Expression::Identifier(identifier) => {
+                self.symbols
+                    .extend(referenced_symbol(identifier, self.scoping));
+            }
+            Expression::ParenthesizedExpression(inner) => self.read(&inner.expression),
+            Expression::TSAsExpression(inner) => self.read(&inner.expression),
+            Expression::TSSatisfiesExpression(inner) => self.read(&inner.expression),
+            Expression::TSTypeAssertion(inner) => self.read(&inner.expression),
+            Expression::TSNonNullExpression(inner) => self.read(&inner.expression),
+            Expression::ConditionalExpression(inner) => {
+                self.read(&inner.consequent);
+                self.read(&inner.alternate);
+            }
+            Expression::LogicalExpression(inner) => {
+                self.read(&inner.left);
+                self.read(&inner.right);
+            }
+            Expression::SequenceExpression(inner) => {
+                if let Some(last) = inner.expressions.last() {
+                    self.read(last);
+                }
+            }
+            Expression::AssignmentExpression(inner) => self.read(&inner.right),
+            _ => {}
+        }
+    }
+}
+
+impl<'a> Visit<'a> for SourceReads<'_> {
+    fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
+        if member.property.name == "toString" {
+            self.read(&member.object);
+        }
+        walk::walk_static_member_expression(self, member);
+    }
+
+    fn visit_computed_member_expression(
+        &mut self,
+        member: &oxc_ast::ast::ComputedMemberExpression<'a>,
+    ) {
+        self.read(&member.expression);
+        walk::walk_computed_member_expression(self, member);
+    }
+
+    fn visit_object_property(&mut self, property: &oxc_ast::ast::ObjectProperty<'a>) {
+        if property.computed
+            && let Some(key) = property.key.as_expression()
+        {
+            self.read(key);
+        }
+        walk::walk_object_property(self, property);
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if expression_is_identifier(&call.callee, "String")
+            && let Some(argument) = call.arguments.first().and_then(Argument::as_expression)
+        {
+            self.read(argument);
+        }
+        walk::walk_call_expression(self, call);
+    }
+
+    fn visit_template_literal(&mut self, template: &oxc_ast::ast::TemplateLiteral<'a>) {
+        for expression in &template.expressions {
+            self.read(expression);
+        }
+        walk::walk_template_literal(self, template);
+    }
+
+    fn visit_binary_expression(&mut self, binary: &oxc_ast::ast::BinaryExpression<'a>) {
+        if matches!(
+            binary.operator,
+            BinaryOperator::Addition
+                | BinaryOperator::LessThan
+                | BinaryOperator::LessEqualThan
+                | BinaryOperator::GreaterThan
+                | BinaryOperator::GreaterEqualThan
+        ) {
+            self.read(&binary.left);
+            self.read(&binary.right);
+        }
+        walk::walk_binary_expression(self, binary);
+    }
+}
+
+/// The bindings a function is reached through where it is defined: its own
+/// name, and the variable it initializes or is assigned to.
+fn bound_symbols<State>(
+    own: Option<&oxc_ast::ast::BindingIdentifier<'_>>,
+    scoping: &oxc_semantic::Scoping,
+    context: &TraverseCtx<'_, State>,
+) -> Vec<SymbolId> {
+    let mut symbols = own
+        .and_then(|identifier| identifier.symbol_id.get())
+        .into_iter()
+        .collect::<Vec<_>>();
+    match context.ancestors().next() {
+        Some(Ancestor::VariableDeclaratorInit(parent)) => symbols.extend(
+            parent
+                .id()
+                .get_binding_identifier()
+                .and_then(|identifier| identifier.symbol_id.get()),
+        ),
+        Some(Ancestor::AssignmentExpressionRight(parent)) => {
+            if let AssignmentTarget::AssignmentTargetIdentifier(target) = parent.left() {
+                symbols.extend(referenced_symbol(target, scoping));
+            }
+        }
+        _ => {}
+    }
+    symbols
 }
 
 struct SafetyScanner<'s> {
     source: &'s str,
     file: &'s str,
+    scoping: &'s oxc_semantic::Scoping,
+    source_reads: HashSet<SymbolId>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
     function_limitations: Vec<CandidateLimitation>,
     with_limitations: Vec<CandidateLimitation>,
     dynamic_limitations: Vec<CandidateLimitation>,
@@ -2556,12 +2693,13 @@ fn collect_points<'a>(
 }
 
 impl<'s> SafetyScanner<'s> {
-    fn new(source: &'s str, file: &'s str) -> Self {
+    fn new(source: &'s str, file: &'s str, scoping: &'s oxc_semantic::Scoping) -> Self {
         Self {
             source,
             file,
+            scoping,
+            source_reads: HashSet::new(),
             source_sensitive_functions: HashSet::new(),
-            with_statements: HashSet::new(),
             function_limitations: Vec::new(),
             with_limitations: Vec::new(),
             dynamic_limitations: Vec::new(),
@@ -2592,6 +2730,7 @@ impl<'s> SafetyScanner<'s> {
     fn enter_source_sensitive_function<State>(
         &mut self,
         span: Span,
+        bindings: Vec<SymbolId>,
         context: &TraverseCtx<'_, State>,
     ) {
         // A function handed to a compile-time style macro never runs: the
@@ -2604,7 +2743,10 @@ impl<'s> SafetyScanner<'s> {
             self.unsafe_function_depth += 1;
             return;
         }
-        let sensitive = observes_function_source(span, context);
+        let sensitive = observes_function_source(span, context)
+            || bindings
+                .iter()
+                .any(|symbol| self.source_reads.contains(symbol));
         if sensitive {
             self.source_sensitive_functions.insert(span_key(span));
             let limitation = self.limitation(
@@ -2631,7 +2773,8 @@ impl<'s> SafetyScanner<'s> {
 
 impl<'a> Traverse<'a, ()> for SafetyScanner<'_> {
     fn enter_function(&mut self, node: &mut Function<'a>, context: &mut TraverseCtx<'a, ()>) {
-        self.enter_source_sensitive_function(node.span, context);
+        let bindings = bound_symbols(node.id.as_ref(), self.scoping, context);
+        self.enter_source_sensitive_function(node.span, bindings, context);
     }
 
     fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
@@ -2643,7 +2786,8 @@ impl<'a> Traverse<'a, ()> for SafetyScanner<'_> {
         node: &mut ArrowFunctionExpression<'a>,
         context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.enter_source_sensitive_function(node.span, context);
+        let bindings = bound_symbols(None, self.scoping, context);
+        self.enter_source_sensitive_function(node.span, bindings, context);
     }
 
     fn exit_arrow_function_expression(
@@ -2659,7 +2803,6 @@ impl<'a> Traverse<'a, ()> for SafetyScanner<'_> {
         node: &mut WithStatement<'a>,
         _context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.with_statements.insert(span_key(node.span));
         let limitation = self.limitation(
             node.span,
             "semantic-safety",
@@ -2721,14 +2864,22 @@ fn analyze_safety<'a>(
 ) -> SafetyAnalysis {
     // oxc_traverse uses resolved lexical scope IDs while walking ancestry.
     // Building semantics here initializes those IDs without changing the AST.
-    SemanticBuilder::new().build(program);
-    let mut scanner = SafetyScanner::new(source, file);
+    let scoping = SemanticBuilder::new()
+        .build(program)
+        .semantic
+        .into_scoping();
+    let mut reads = SourceReads {
+        scoping: &scoping,
+        symbols: HashSet::new(),
+    };
+    reads.visit_program(program);
+    let mut scanner = SafetyScanner::new(source, file, &scoping);
+    scanner.source_reads = reads.symbols;
     traverse_mut(&mut scanner, allocator, program, Default::default(), ());
     let mut semantic_limitations = scanner.function_limitations;
     semantic_limitations.extend(scanner.with_limitations);
     SafetyAnalysis {
         source_sensitive_functions: scanner.source_sensitive_functions,
-        with_statements: scanner.with_statements,
         semantic_limitations,
         dynamic_limitations: scanner.dynamic_limitations,
     }
@@ -2877,6 +3028,7 @@ fn observes_function_source<State>(span: Span, context: &TraverseCtx<'_, State>)
             Ancestor::CallExpressionArguments(parent) => {
                 return expression_is_identifier(parent.callee(), "String");
             }
+            Ancestor::TemplateLiteralExpressions(_) => return true,
             Ancestor::BinaryExpressionLeft(parent) => {
                 return matches!(
                     parent.operator(),
@@ -2914,8 +3066,18 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         return Err(CandidateError::Parse(
             parsed
                 .errors
-                .into_iter()
-                .map(|error| format!("{error:?}"))
+                .iter()
+                .map(|error| {
+                    parse_message(
+                        source,
+                        &error.message,
+                        error
+                            .labels
+                            .as_ref()
+                            .and_then(|labels| labels.first())
+                            .map(|label| label.offset()),
+                    )
+                })
                 .collect(),
         ));
     }
@@ -2956,7 +3118,6 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
-        with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -3092,20 +3253,6 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     instrument_candidate_with_binding(source, file, RuntimeBinding::ModuleImport, None, false)
 }
 
-pub fn instrument_candidate_with_runtime_hooks(
-    source: &str,
-    file: &str,
-    capability_wrapper: &str,
-) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(
-        source,
-        file,
-        RuntimeBinding::ModuleImport,
-        Some(capability_wrapper),
-        false,
-    )
-}
-
 /// Emit code for an isolated source-executing workspace. Unlike the module-
 /// import form, this has no virtual module dependency: the generated
 /// Node preload installs the frozen runtime on this global before user modules
@@ -3115,20 +3262,6 @@ pub fn instrument_direct_candidate(
     file: &str,
 ) -> Result<CandidateOutput, CandidateError> {
     instrument_candidate_with_binding(source, file, RuntimeBinding::DirectGlobal, None, false)
-}
-
-pub fn instrument_direct_candidate_with_runtime_hooks(
-    source: &str,
-    file: &str,
-    capability_wrapper: &str,
-) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(
-        source,
-        file,
-        RuntimeBinding::DirectGlobal,
-        Some(capability_wrapper),
-        false,
-    )
 }
 
 pub fn instrument_with_import_policy(
@@ -3167,8 +3300,18 @@ fn instrument_candidate_with_binding(
         return Err(CandidateError::Parse(
             parsed
                 .errors
-                .into_iter()
-                .map(|error| format!("{error:?}"))
+                .iter()
+                .map(|error| {
+                    parse_message(
+                        source,
+                        &error.message,
+                        error
+                            .labels
+                            .as_ref()
+                            .and_then(|labels| labels.first())
+                            .map(|label| label.offset()),
+                    )
+                })
                 .collect(),
         ));
     }
@@ -3209,7 +3352,6 @@ fn instrument_candidate_with_binding(
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
-        with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -3432,7 +3574,6 @@ fn instrument_candidate_with_binding(
         probe_file_v2: probe_file_v2.clone(),
         targets: statement_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     statement_transformer.visit_program(&mut parsed.program);
     let mut function_transformer = FunctionProbeTransformer {
@@ -3451,15 +3592,8 @@ fn instrument_candidate_with_binding(
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     rendered_transformer.visit_program(&mut parsed.program);
-    let mut optional_transformer = OptionalMemberTransformer {
-        ast,
-        optional_select_v2: optional_select_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
-        targets: optional_member_targets,
-        source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
-    };
-    optional_transformer.visit_program(&mut parsed.program);
+    // Made first so a member right after an optional call can read the
+    // call's frame; it rewrites the program after the members.
     let mut call_transformer = OptionalCallTransformer::new(
         ast,
         source,
@@ -3469,8 +3603,27 @@ fn instrument_candidate_with_binding(
         optional_call_sites,
         call_analysis.roots,
         safety.source_sensitive_functions.clone(),
-        safety.with_statements.clone(),
     );
+    let call_frames = optional_analysis
+        .after_call
+        .iter()
+        .filter_map(|(member, call)| {
+            call_transformer
+                .sites
+                .get(call)
+                .map(|site| (*member, site.frame.clone()))
+        })
+        .collect();
+    let mut optional_transformer = OptionalMemberTransformer {
+        ast,
+        optional_select_v2: optional_select_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        targets: optional_member_targets,
+        links: optional_analysis.links,
+        call_frames,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+    };
+    optional_transformer.visit_program(&mut parsed.program);
     call_transformer.visit_program(&mut parsed.program);
     let mut default_transformer = DefaultTransformer {
         ast,
@@ -3485,7 +3638,6 @@ fn instrument_candidate_with_binding(
         active_declaration: Vec::new(),
         parameter_pattern_depth: 0,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     default_transformer.visit_program(&mut parsed.program);
     let mut extended_transformer = ExtendedTransformer {
@@ -3498,7 +3650,6 @@ fn instrument_candidate_with_binding(
         names: CandidateNames::within(source, &namespace),
         scope_declarations: Vec::new(),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     extended_transformer.visit_program(&mut parsed.program);
     let mut transformer = ControlProbeV2Transformer {
@@ -3514,7 +3665,6 @@ fn instrument_candidate_with_binding(
         decision_index: 0,
         parameter_depth: 0,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     transformer.visit_program(&mut parsed.program);
     let mut logical_transformer = LogicalValueTransformer {
@@ -3531,7 +3681,6 @@ fn instrument_candidate_with_binding(
         logical_targets: selection_targets,
         assignment_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     logical_transformer.visit_program(&mut parsed.program);
     let mut switch_transformer = SwitchTransformer {
@@ -3540,7 +3689,6 @@ fn instrument_candidate_with_binding(
         targets: switch_analysis.targets,
         names: CandidateNames::within(source, &namespace),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     switch_transformer.visit_program(&mut parsed.program);
     let mut route_transformer = RouteRequestPhaseTransformer {
@@ -3556,7 +3704,6 @@ fn instrument_candidate_with_binding(
         with_request_phase: with_request_phase.clone(),
         used: route_transformer.used,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
-        with_statements: safety.with_statements.clone(),
     };
     request_transformer.visit_program(&mut parsed.program);
     let uses_request_phase = request_transformer.used;
@@ -3879,7 +4026,6 @@ struct StatementProbeTransformer<'a> {
     probe_file_v2: String,
     targets: HashMap<SpanKey, Vec<PointTarget>>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> StatementProbeTransformer<'a> {
@@ -3962,12 +4108,9 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
         self.wrap_bare(&mut statement.consequent);
@@ -4140,29 +4283,48 @@ struct OptionalMemberTransformer<'a> {
     probe_file_v2: String,
     /// The short and continued outcomes are two V2 points from this index.
     targets: HashMap<SpanKey, usize>,
+    links: HashMap<SpanKey, u8>,
+    /// For a target right after an optional call, that call's frame.
+    call_frames: HashMap<SpanKey, String>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> OptionalMemberTransformer<'a> {
-    /// `optionalSelectV2(file, first, object)`: records whether the object of
-    /// `object?.member` was nullish and passes it through.
-    fn instrument_operand(&self, operand: Expression<'a>, first: usize) -> Expression<'a> {
+    /// `optionalSelectV2(file, first, object, links, call)`: records whether
+    /// the object of `object?.member` was nullish and passes it through. In
+    /// `a?.b?.c` the object of `?.c` is undefined when `a` is, though `?.c`
+    /// never ran; `links`, and after an optional call that call's frame, let
+    /// the runtime tell the two apart.
+    fn instrument_operand(
+        &self,
+        operand: Expression<'a>,
+        first: usize,
+        links: u8,
+        call_frame: Option<&str>,
+    ) -> Expression<'a> {
+        let mut arguments = self.ast.vec_from_array([
+            Argument::from(
+                self.ast
+                    .expression_identifier(Span::default(), self.ast.ident(&self.probe_file_v2)),
+            ),
+            Argument::from(numeric(self.ast, first)),
+            Argument::from(operand),
+        ]);
+        if links != 0 {
+            arguments.push(Argument::from(numeric(self.ast, usize::from(links))));
+        }
+        if let Some(frame) = call_frame {
+            arguments.push(Argument::from(
+                self.ast
+                    .expression_identifier(Span::default(), self.ast.ident(frame)),
+            ));
+        }
         self.ast.expression_call(
             Span::default(),
             self.ast
                 .expression_identifier(Span::default(), self.ast.ident(&self.optional_select_v2)),
             NONE,
-            self.ast.vec_from_array([
-                Argument::from(
-                    self.ast.expression_identifier(
-                        Span::default(),
-                        self.ast.ident(&self.probe_file_v2),
-                    ),
-                ),
-                Argument::from(numeric(self.ast, first)),
-                Argument::from(operand),
-            ]),
+            arguments,
             false,
         )
     }
@@ -4171,8 +4333,14 @@ impl<'a> OptionalMemberTransformer<'a> {
         let Some(first) = self.targets.remove(&span_key(span)) else {
             return;
         };
+        let mut links = self.links.get(&span_key(span)).copied().unwrap_or(0);
+        let call_frame = self.call_frames.get(&span_key(span)).cloned();
+        if call_frame.is_none() {
+            // A call that is not measured leaves nothing to read.
+            links &= !LINK_AFTER_CALL;
+        }
         let operand = object.take_in(self.ast.allocator);
-        *object = self.instrument_operand(operand, first);
+        *object = self.instrument_operand(operand, first, links, call_frame.as_deref());
     }
 }
 
@@ -4197,12 +4365,9 @@ impl<'a> VisitMut<'a> for OptionalMemberTransformer<'a> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_computed_member_expression(&mut self, member: &mut ComputedMemberExpression<'a>) {
         self.instrument_target(member.span, &mut member.object);
@@ -4238,7 +4403,6 @@ struct OptionalCallTransformer<'a, 's> {
     sites: HashMap<SpanKey, OptionalCallSiteRuntime>,
     roots: HashMap<SpanKey, Vec<SpanKey>>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
     _source: std::marker::PhantomData<&'s str>,
 }
 
@@ -4253,7 +4417,6 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
         sites: HashMap<SpanKey, usize>,
         roots: HashMap<SpanKey, Vec<SpanKey>>,
         source_sensitive_functions: HashSet<SpanKey>,
-        with_statements: HashSet<SpanKey>,
     ) -> Self {
         let mut names = CandidateNames::new(source);
         let mut ordered = sites.into_iter().collect::<Vec<_>>();
@@ -4279,7 +4442,6 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
             sites,
             roots,
             source_sensitive_functions,
-            with_statements,
             _source: std::marker::PhantomData,
         }
     }
@@ -4412,6 +4574,14 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
                 wrapped.expression = self.instrument_callee(inner, site);
                 Expression::TSNonNullExpression(wrapped)
             }
+            // `a?.b()?.()`: the callee is what an earlier call in the same
+            // chain returned. It is reached only when that call goes ahead; a
+            // short-circuit before it never asked whether its result is
+            // nullish.
+            Expression::CallExpression(mut call) => {
+                call.arguments.insert(0, self.marker_spread(&site.frame, 1));
+                Expression::CallExpression(call)
+            }
             other => self.reached(&site.frame, other),
         }
     }
@@ -4419,8 +4589,12 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
     fn instrument_call(&self, call: &mut CallExpression<'a>, site: &OptionalCallSiteRuntime) {
         let callee = call.callee.take_in(self.ast.allocator);
         call.callee = self.instrument_callee(callee, site);
-        // `...(T = 2, file.none)` runs only when the call goes ahead, before its
-        // own arguments, and spreads nothing.
+        call.arguments.insert(0, self.marker_spread(&site.frame, 2));
+    }
+
+    /// `...(T = value, file.none)`: runs only when the call goes ahead, before
+    /// its own arguments, and spreads nothing.
+    fn marker_spread(&self, frame: &str, value: usize) -> Argument<'a> {
         let none = Expression::from(
             self.ast.member_expression_static(
                 Span::default(),
@@ -4430,17 +4604,14 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
                 false,
             ),
         );
-        let continued = self.ast.expression_sequence(
+        let marked = self.ast.expression_sequence(
             Span::default(),
             self.ast.vec_from_array([
-                assign_temporary(self.ast, &site.frame, numeric(self.ast, 2)),
+                assign_temporary(self.ast, frame, numeric(self.ast, value)),
                 none,
             ]),
         );
-        call.arguments.insert(
-            0,
-            Argument::SpreadElement(self.ast.alloc_spread_element(Span::default(), continued)),
-        );
+        Argument::SpreadElement(self.ast.alloc_spread_element(Span::default(), marked))
     }
 
     fn wrap_root(&mut self, expression: &mut Expression<'a>, site_keys: &[SpanKey]) {
@@ -4519,12 +4690,9 @@ impl<'a> VisitMut<'a> for OptionalCallTransformer<'a, '_> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
         walk_mut::walk_call_expression(self, call);
@@ -4563,7 +4731,6 @@ struct DefaultTransformer<'a> {
     active_declaration: Vec<SpanKey>,
     parameter_pattern_depth: usize,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> DefaultTransformer<'a> {
@@ -4819,12 +4986,9 @@ impl<'a> VisitMut<'a> for DefaultTransformer<'a> {
         }
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 }
 
 enum ExtendedKind {
@@ -4846,7 +5010,6 @@ struct ExtendedTransformer<'a, 's> {
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> ExtendedTransformer<'a, '_> {
@@ -5058,12 +5221,9 @@ impl<'a> VisitMut<'a> for ExtendedTransformer<'a, '_> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_statement(&mut self, statement: &mut Statement<'a>) {
         let Some((kind, key)) = Self::target(statement) else {
@@ -5108,7 +5268,6 @@ struct LogicalValueTransformer<'a, 's> {
     /// The same four points for `||=`, `&&=` and `??=`.
     assignment_targets: HashMap<SpanKey, usize>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> LogicalValueTransformer<'a, '_> {
@@ -5355,12 +5514,9 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
         let key = span_key(expression.span());
@@ -5387,7 +5543,6 @@ struct SwitchTransformer<'a, 's> {
     targets: HashMap<SpanKey, SwitchTarget>,
     names: CandidateNames<'s>,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> SwitchTransformer<'a, '_> {
@@ -5452,11 +5607,13 @@ impl<'a> SwitchTransformer<'a, '_> {
         )
     }
 
+    /// Each case records only when the switch selected it: a case the one
+    /// before falls into (`case 0: case 1:`, or a body with no `break`) ran
+    /// without its test matching, and crediting it claimed a test of a value
+    /// none had checked. `entered` says the switch has already selected a
+    /// case; it also tells a switch with no default that nothing matched.
     fn instrument(&mut self, statement: &mut Statement<'a>, target: &SwitchTarget) {
-        let entered = target
-            .no_match_id
-            .as_ref()
-            .map(|_| self.names.allocate("_supercovSwitchEntered"));
+        let entered = self.names.allocate("_supercovSwitchEntered");
         let node = Self::inner_switch(statement).expect("switch target must remain a switch");
         for (index, case) in node.cases.iter_mut().enumerate() {
             let probe = self.probe(
@@ -5465,14 +5622,19 @@ impl<'a> SwitchTransformer<'a, '_> {
                     .get(index)
                     .expect("switch case target count must remain stable"),
             );
-            case.consequent.insert(0, probe);
-            if let Some(entered) = &entered {
-                case.consequent.insert(0, self.entered_assignment(entered));
-            }
+            let selected = self.ast.statement_if(
+                Span::default(),
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.identifier(&entered),
+                ),
+                probe,
+                None,
+            );
+            case.consequent.insert(0, self.entered_assignment(&entered));
+            case.consequent.insert(0, selected);
         }
-        let (Some(entered), Some(no_match_id)) = (entered, &target.no_match_id) else {
-            return;
-        };
         let declaration =
             Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
                 Span::default(),
@@ -5491,20 +5653,20 @@ impl<'a> SwitchTransformer<'a, '_> {
                 false,
             ));
         let original = statement.take_in(self.ast.allocator);
-        let no_match = self.ast.statement_if(
-            Span::default(),
-            self.ast.expression_unary(
+        let mut body = self.ast.vec_from_array([declaration, original]);
+        if let Some(no_match_id) = &target.no_match_id {
+            body.push(self.ast.statement_if(
                 Span::default(),
-                UnaryOperator::LogicalNot,
-                self.identifier(&entered),
-            ),
-            self.probe(no_match_id),
-            None,
-        );
-        *statement = self.ast.statement_block(
-            Span::default(),
-            self.ast.vec_from_array([declaration, original, no_match]),
-        );
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.identifier(&entered),
+                ),
+                self.probe(no_match_id),
+                None,
+            ));
+        }
+        *statement = self.ast.statement_block(Span::default(), body);
     }
 }
 
@@ -5529,12 +5691,9 @@ impl<'a> VisitMut<'a> for SwitchTransformer<'a, '_> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_statement(&mut self, statement: &mut Statement<'a>) {
         let Some(key) = Self::target(statement) else {
@@ -5545,11 +5704,10 @@ impl<'a> VisitMut<'a> for SwitchTransformer<'a, '_> {
             walk_mut::walk_statement(self, statement);
             return;
         };
-        let has_no_match = target.no_match_id.is_some();
         self.instrument(statement, &target);
-        if !has_no_match {
-            walk_mut::walk_statement(self, statement);
-        }
+        // The switch now sits in a block of its own; its target is spent, so
+        // walking it reaches the switches inside its cases and nothing twice.
+        walk_mut::walk_statement(self, statement);
     }
 }
 
@@ -5841,7 +5999,6 @@ struct RequestPhaseTransformer<'a> {
     with_request_phase: String,
     used: bool,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> RequestPhaseTransformer<'a> {
@@ -5925,12 +6082,9 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
         walk_mut::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
         walk_mut::walk_call_expression(self, call);
@@ -6031,7 +6185,6 @@ struct ControlProbeV2Transformer<'a, 's> {
     decision_index: usize,
     parameter_depth: usize,
     source_sensitive_functions: HashSet<SpanKey>,
-    with_statements: HashSet<SpanKey>,
 }
 
 #[derive(Clone, Copy)]
@@ -6530,12 +6683,9 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         self.parameter_depth -= 1;
     }
 
-    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk_mut::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
     fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
         let plan = decision_outcome_is_variable(&statement.test)
@@ -6608,7 +6758,6 @@ struct DecisionCollector<'s> {
     decision_vector_counts: Vec<usize>,
     decision_logical_nodes: HashSet<SpanKey>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
-    with_statements: &'s HashSet<SpanKey>,
 }
 
 impl DecisionCollector<'_> {
@@ -6825,6 +6974,74 @@ struct LogicalAssignmentAnalysis {
 struct OptionalMemberAnalysis {
     branches: Vec<CandidateBranch>,
     targets: HashMap<SpanKey, (String, String)>,
+    /// Each target's place in its chain, as `optionalSelectV2` reads it.
+    links: HashMap<SpanKey, u8>,
+    /// The optional call a target's object holds, for a target right after
+    /// one: whether that call went ahead says whether the target ran.
+    after_call: HashMap<SpanKey, SpanKey>,
+}
+
+/// An optional link of the same chain runs before this one.
+const LINK_AFTER_ANOTHER: u8 = 1;
+/// An optional link of the same chain runs after this one.
+const LINK_BEFORE_ANOTHER: u8 = 2;
+/// The link before this one is an optional call.
+const LINK_AFTER_CALL: u8 = 4;
+
+/// The optional link of the same chain an optional member's object holds.
+enum LinkBelow {
+    None,
+    Member,
+    Call(SpanKey),
+}
+
+/// The earlier optional link of the same chain that `object`, the object of
+/// an optional member, holds: through plain member accesses, plain calls and
+/// `!`, which the chain's short-circuit skips along with the rest.
+/// Parentheses end the chain.
+fn optional_link_below(object: &Expression<'_>) -> LinkBelow {
+    let mut current = object;
+    loop {
+        current = match current {
+            Expression::StaticMemberExpression(member) if member.optional => {
+                return LinkBelow::Member;
+            }
+            Expression::ComputedMemberExpression(member) if member.optional => {
+                return LinkBelow::Member;
+            }
+            Expression::PrivateFieldExpression(member) if member.optional => {
+                return LinkBelow::Member;
+            }
+            Expression::CallExpression(call) if call.optional => {
+                return LinkBelow::Call(span_key(call.span));
+            }
+            Expression::StaticMemberExpression(member) => &member.object,
+            Expression::ComputedMemberExpression(member) => &member.object,
+            Expression::PrivateFieldExpression(member) => &member.object,
+            Expression::CallExpression(call) => &call.callee,
+            Expression::TSNonNullExpression(inner) => &inner.expression,
+            _ => return LinkBelow::None,
+        };
+    }
+}
+
+/// The same walk outward: whether this member is the object, through the
+/// same plain links, of a later optional member of its chain.
+fn optional_link_above<State>(context: &TraverseCtx<'_, State>) -> bool {
+    for ancestor in context.ancestors() {
+        match ancestor {
+            Ancestor::StaticMemberExpressionObject(parent) if *parent.optional() => return true,
+            Ancestor::ComputedMemberExpressionObject(parent) if *parent.optional() => return true,
+            Ancestor::PrivateFieldExpressionObject(parent) if *parent.optional() => return true,
+            Ancestor::StaticMemberExpressionObject(_)
+            | Ancestor::ComputedMemberExpressionObject(_)
+            | Ancestor::PrivateFieldExpressionObject(_)
+            | Ancestor::TSNonNullExpressionExpression(_) => {}
+            Ancestor::CallExpressionCallee(parent) if !*parent.optional() => {}
+            _ => return false,
+        }
+    }
+    false
 }
 
 #[derive(Default)]
@@ -6881,8 +7098,6 @@ struct SwitchCollector<'s> {
     source_sensitive_functions: &'s HashSet<SpanKey>,
     unsafe_function_depth: usize,
     with_depth: usize,
-    suppressed_depth: usize,
-    suppressed_nodes: Vec<bool>,
     analysis: SwitchAnalysis,
 }
 
@@ -6955,13 +7170,7 @@ impl<'a> Traverse<'a, ()> for SwitchCollector<'_> {
         _context: &mut TraverseCtx<'a, ()>,
     ) {
         let has_default = node.cases.iter().any(|case| case.test.is_none());
-        let transformed = self.suppressed_depth == 0 && !self.unsafe_context();
-        let suppresses = transformed && !has_default;
-        self.suppressed_nodes.push(suppresses);
-        if suppresses {
-            self.suppressed_depth += 1;
-        }
-        if !transformed {
+        if self.unsafe_context() {
             return;
         }
         let id = stable_id(self.source, self.file, "switch", node.span, "");
@@ -7004,20 +7213,6 @@ impl<'a> Traverse<'a, ()> for SwitchCollector<'_> {
             },
         );
     }
-
-    fn exit_switch_statement(
-        &mut self,
-        _node: &mut SwitchStatement<'a>,
-        _context: &mut TraverseCtx<'a, ()>,
-    ) {
-        if self
-            .suppressed_nodes
-            .pop()
-            .expect("switch collector stack must remain balanced")
-        {
-            self.suppressed_depth -= 1;
-        }
-    }
 }
 
 fn collect_switch_branches<'a>(
@@ -7033,8 +7228,6 @@ fn collect_switch_branches<'a>(
         source_sensitive_functions,
         unsafe_function_depth: 0,
         with_depth: 0,
-        suppressed_depth: 0,
-        suppressed_nodes: Vec::new(),
         analysis: SwitchAnalysis::default(),
     };
     traverse_mut(&mut collector, allocator, program, Default::default(), ());
@@ -7763,9 +7956,32 @@ struct OptionalMemberCollector<'s> {
 }
 
 impl OptionalMemberCollector<'_> {
-    fn record(&mut self, span: Span, optional: bool) {
+    fn record<State>(
+        &mut self,
+        span: Span,
+        optional: bool,
+        object: &Expression<'_>,
+        context: &TraverseCtx<'_, State>,
+    ) {
         if !optional || self.unsafe_function_depth > 0 || self.with_depth > 0 {
             return;
+        }
+        let below = match optional_link_below(object) {
+            LinkBelow::Member => LINK_AFTER_ANOTHER,
+            LinkBelow::Call(call) => {
+                self.analysis.after_call.insert(span_key(span), call);
+                LINK_AFTER_CALL
+            }
+            LinkBelow::None => 0,
+        };
+        let links = below
+            | if optional_link_above(context) {
+                LINK_BEFORE_ANOTHER
+            } else {
+                0
+            };
+        if links != 0 {
+            self.analysis.links.insert(span_key(span), links);
         }
         let id = stable_id(self.source, self.file, "optional-chain", span, "");
         let short_id = format!("{id}:short");
@@ -7855,25 +8071,25 @@ impl<'a> Traverse<'a, ()> for OptionalMemberCollector<'_> {
     fn enter_computed_member_expression(
         &mut self,
         node: &mut ComputedMemberExpression<'a>,
-        _context: &mut TraverseCtx<'a, ()>,
+        context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.record(node.span, node.optional);
+        self.record(node.span, node.optional, &node.object, context);
     }
 
     fn enter_static_member_expression(
         &mut self,
         node: &mut StaticMemberExpression<'a>,
-        _context: &mut TraverseCtx<'a, ()>,
+        context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.record(node.span, node.optional);
+        self.record(node.span, node.optional, &node.object, context);
     }
 
     fn enter_private_field_expression(
         &mut self,
         node: &mut PrivateFieldExpression<'a>,
-        _context: &mut TraverseCtx<'a, ()>,
+        context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.record(node.span, node.optional);
+        self.record(node.span, node.optional, &node.object, context);
     }
 }
 
@@ -8186,12 +8402,9 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
         walk::walk_arrow_function_expression(self, function);
     }
 
-    fn visit_with_statement(&mut self, statement: &WithStatement<'a>) {
-        if self.with_statements.contains(&span_key(statement.span)) {
-            return;
-        }
-        walk::walk_with_statement(self, statement);
-    }
+    // A with body is left uninstrumented: its object environment can
+    // intercept probe identifiers (see `enter_with_statement`).
+    fn visit_with_statement(&mut self, _statement: &WithStatement<'a>) {}
 
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
         if decision_outcome_is_variable(&statement.test) {
@@ -8584,7 +8797,6 @@ mod tests {
             let output = instrument_candidate(source, file).unwrap();
             assert!(!output.points.is_empty(), "{file}");
             assert!(output.code.contains("<div>"), "{file}");
-            assert!(assertion_ranges(file, source).is_ok(), "{file}");
         }
         // TypeScript keeps its angle-bracket assertion; JSX would misread it.
         assert!(instrument_candidate("const n = <number>value;", "src/index.ts").is_ok());
@@ -8816,12 +9028,23 @@ mod tests {
             "tests/value.test.mjs",
             &[],
             None,
-            Some("../.supercov/runtime.mjs"),
+            Some("../.supercov/node_modules/bootstrap.cjs"),
         )
         .unwrap();
         assert_eq!(output.assertions, 1);
-        assert!(output.code.contains("withNodeAssertionPhase"));
-        assert!(output.code.contains("import \"../.supercov/runtime.mjs\";"));
+        // The loader shares the first line, so the assertion stays on line 2.
+        let lines = output.code.lines().collect::<Vec<_>>();
+        assert!(lines[0].starts_with("if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {"));
+        assert!(lines[0].contains("\"../.supercov/node_modules/bootstrap.cjs\""));
+        assert!(lines[0].ends_with("import assert from 'node:assert';"));
+        assert!(lines[1].contains("withNodeAssertionPhase"));
+        let allocator = Allocator::default();
+        assert!(
+            Parser::new(&allocator, &output.code, SourceType::mjs())
+                .parse()
+                .errors
+                .is_empty()
+        );
     }
 
     #[test]

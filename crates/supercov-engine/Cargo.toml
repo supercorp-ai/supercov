@@ -17,7 +17,6 @@ oracle-harnesses = []
 
 [dependencies]
 ignore = "0.4"
-ar_archive_writer.workspace = true
 base64.workspace = true
 cargo-platform.workspace = true
 cargo-config2.workspace = true
@@ -46,8 +45,6 @@ oxc_syntax.workspace = true
 oxc_traverse.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
-schemars.workspace = true
-serde_path_to_error.workspace = true
 sha2.workspace = true
 supercov-contracts.workspace = true
 sysinfo.workspace = true

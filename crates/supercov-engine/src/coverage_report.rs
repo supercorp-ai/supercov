@@ -6,7 +6,7 @@
 //! Rust owns merging, attempt outcomes, attribution confidence, filtering and
 //! every structural coverage verdict.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,11 @@ pub struct CoverageManifest {
     pub unmeasured: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<Value>,
+    /// Statements in test code that carry an assertion marker. Test code is
+    /// not measured, so these are no obligation; they say where a passing
+    /// assertion stood.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertion_sites: Vec<PointMeta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,6 +693,10 @@ pub struct TransportStats {
     pub child_launches: usize,
     pub remote_launches: usize,
     pub workspace_capabilities: usize,
+    /// Processes that ran the workspace without Supercov's settings -- in a
+    /// container or VM it was mounted into -- and set themselves up from it.
+    /// Their coverage counts for the run and is credited to no test.
+    pub guest_processes: usize,
     pub scoped_server_records: usize,
     pub background_server_records: usize,
     pub corrupt_records: usize,
@@ -756,6 +765,12 @@ enum ExecutionTraceEvent {
         guest_root: String,
         cache_identities: Vec<String>,
     },
+    GuestProcess {
+        at: String,
+        pid: u32,
+        ppid: u32,
+        guest_root: String,
+    },
 }
 
 impl ExecutionTraceEvent {
@@ -765,6 +780,7 @@ impl ExecutionTraceEvent {
             Self::ChildLaunch { .. } => "child-launch",
             Self::RemoteLaunch { .. } => "remote-launch",
             Self::WorkspaceCapability { .. } => "workspace-capability",
+            Self::GuestProcess { .. } => "guest-process",
         }
     }
 }
@@ -1941,7 +1957,20 @@ fn create_coverage_view_with_model(
     let tests_by_hit = tests_by_hit.into_relation(&hit_ids);
     let phases_by_hit = phases_by_hit.into_relation(&hit_ids);
     let explicit_phases_by_hit = explicit_phases_by_hit.into_relation(&hit_ids);
-    let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+    // A frontend may decline one outcome of a branch (a block that can never
+    // be entered, a rescue that can never be reached) or the whole branch;
+    // a branch whose every outcome is declined is declined itself.
+    let mut declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+    for branch in &manifest.branches {
+        if !branch.alternatives.is_empty()
+            && branch
+                .alternatives
+                .iter()
+                .all(|alternative| declined.contains(&alternative.id))
+        {
+            declined.insert(&branch.id);
+        }
+    }
     // What confidence asks of each test and phase a relation numbers, looked
     // up once per number rather than once per mention: a run's points and
     // lines mention tests millions of times, and each lookup hashed an id.
@@ -1973,9 +2002,68 @@ fn create_coverage_view_with_model(
             &explicit_kinds,
         )
     };
+    // A decision's two outcomes are branch outcomes. Python, Ruby and Rust
+    // declare them as a branch of their own, `<decision>:outcome`; for a
+    // decision declared without one, the branch is made here from the
+    // decision's vectors, so every language counts and lists outcomes the
+    // same way and no decision is counted twice.
+    let declared_branches = manifest
+        .branches
+        .iter()
+        .map(|branch| branch.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut outcome_branches = Vec::new();
     let mut decisions = Vec::with_capacity(decision_metadata.len());
     for meta in decision_metadata {
         let mutable = vectors_by_decision.remove(&meta.id).unwrap_or_default();
+        let outcome_id = format!("{}:outcome", meta.id);
+        if !declared_branches.contains(outcome_id.as_str()) {
+            let alternatives = [true, false]
+                .into_iter()
+                .map(|outcome| {
+                    let (mut tests, mut phases, mut explicit) =
+                        (Vec::new(), Vec::new(), Vec::new());
+                    for observation in mutable
+                        .iter()
+                        .filter(|observation| observation.vector.outcome == outcome)
+                    {
+                        tests.extend(&observation.tests);
+                        phases.extend(&observation.phases);
+                        explicit.extend(&observation.explicit_phases);
+                    }
+                    let tests = tests_by_hit.reached(tests);
+                    let phases = phases_by_hit.reached(phases);
+                    let explicit = explicit_phases_by_hit.reached(explicit);
+                    AlternativeResult {
+                        id: format!("{outcome_id}:{outcome}"),
+                        label: outcome.to_string(),
+                        covered: !tests.names.is_empty(),
+                        confidence: confidence(&tests, &phases, &explicit),
+                        tests: tests.names,
+                        phases: phases.names,
+                    }
+                })
+                .collect::<Vec<_>>();
+            outcome_branches.push(BranchResult {
+                covered: alternatives.iter().all(|alternative| alternative.covered),
+                meta: BranchMeta {
+                    id: outcome_id,
+                    kind: meta.kind.clone(),
+                    file: meta.file.clone(),
+                    line: meta.line,
+                    column: meta.column,
+                    source: meta.source.clone(),
+                    alternatives: alternatives
+                        .iter()
+                        .map(|alternative| BranchAlternativeMeta {
+                            id: alternative.id.clone(),
+                            label: alternative.label.clone(),
+                        })
+                        .collect(),
+                },
+                alternatives,
+            });
+        }
         let mut observations = Vec::with_capacity(mutable.len());
         let mut observed_phases = Vec::new();
         let mut observed_explicit = Vec::new();
@@ -2070,7 +2158,10 @@ fn create_coverage_view_with_model(
         .branches
         .iter()
         .cloned()
-        .map(|meta| {
+        .map(|mut meta| {
+            // A declined outcome leaves the denominator; the others stay.
+            meta.alternatives
+                .retain(|alternative| !declined.contains(&alternative.id));
             let alternatives = meta
                 .alternatives
                 .iter()
@@ -2094,6 +2185,7 @@ fn create_coverage_view_with_model(
                 alternatives,
             }
         })
+        .chain(outcome_branches)
         .collect::<Vec<_>>();
 
     // Obligations the frontend declined to measure leave the covered/uncovered
@@ -2611,72 +2703,6 @@ fn is_mcdc_journal(path: &str) -> bool {
     path == "mcdc.jsonl" || path.ends_with(".mcdc.jsonl")
 }
 
-fn validate_rust_compiler_scope(manifest: &CoverageManifest) -> Result<(), ReportError> {
-    let scope = manifest
-        .scope
-        .as_ref()
-        .and_then(Value::as_object)
-        .ok_or_else(|| ReportError::InvalidArchive("missing Rust compiler source scope".into()))?;
-    let mut expected = BTreeSet::from([
-        "crate",
-        "language",
-        "measurementComplete",
-        "model",
-        "sourceFingerprint",
-    ]);
-    // Historical experimental metadata is ignored, never used for credit.
-    if scope.contains_key("assertionIdentities") {
-        expected.insert("assertionIdentities");
-    }
-    if scope.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected
-        || scope.get("language").and_then(Value::as_str) != Some("rust")
-        || scope.get("model").and_then(Value::as_str) != Some("rust-source-v1")
-        || scope
-            .get("crate")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
-        || !scope
-            .get("measurementComplete")
-            .is_some_and(Value::is_boolean)
-    {
-        return Err(ReportError::InvalidArchive(
-            "malformed Rust compiler source scope".into(),
-        ));
-    }
-    let fingerprint = scope
-        .get("sourceFingerprint")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            ReportError::InvalidArchive("missing Rust compiler source fingerprint".into())
-        })?;
-    let expected_fingerprint = BTreeSet::from(["algorithm", "digest", "files", "generatedFiles"]);
-    let digest = fingerprint.get("digest").and_then(Value::as_str);
-    let files = fingerprint.get("files").and_then(Value::as_u64);
-    let generated = fingerprint.get("generatedFiles").and_then(Value::as_u64);
-    if fingerprint
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>()
-        != expected_fingerprint
-        || fingerprint.get("algorithm").and_then(Value::as_str) != Some("sha256")
-        || !digest.is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-        || files.is_none_or(|files| files == 0)
-        || generated
-            .zip(files)
-            .is_none_or(|(generated, files)| generated > files)
-    {
-        return Err(ReportError::InvalidArchive(
-            "malformed Rust compiler source fingerprint".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
@@ -2764,6 +2790,7 @@ pub fn analyze_coverage_archive(
         child_launches: count_event("child-launch"),
         remote_launches: count_event("remote-launch"),
         workspace_capabilities: count_event("workspace-capability"),
+        guest_processes: count_event("guest-process"),
         scoped_server_records: scoped_records.len(),
         background_server_records: background_records.len(),
         corrupt_records: scoped.corrupt_records
@@ -2793,9 +2820,6 @@ pub fn analyze_coverage_archive(
             "frontend language {} differs from coverage model language {}",
             frontend.language, coverage_model.language
         )));
-    }
-    if frontend.frontend_version == "rust-compiler-v1" {
-        validate_rust_compiler_scope(&manifest)?;
     }
     separate_repeated_executions(&mut raw_results);
     release_leaked_phases(&mut raw_results);
@@ -2933,6 +2957,7 @@ impl TransportStats {
             child_launches: 0,
             remote_launches: 0,
             workspace_capabilities: 0,
+            guest_processes: 0,
             scoped_server_records: 0,
             background_server_records: 0,
             corrupt_records: 0,
@@ -3127,6 +3152,7 @@ mod tests {
             limitations: vec![],
             unmeasured: Vec::new(),
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let with_declined = CoverageManifest {
             decisions: vec![],
@@ -3135,6 +3161,7 @@ mod tests {
             limitations: vec![],
             unmeasured: vec!["declined".into()],
             scope: None,
+            assertion_sites: Vec::new(),
         };
 
         let baseline =
@@ -3197,6 +3224,7 @@ mod tests {
             limitations: vec![],
             unmeasured: vec!["declined".into()],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let view = create_coverage_view(
             &manifest,
@@ -3229,6 +3257,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let view =
             create_coverage_view(&manifest, &[raw("test", 0, "passed", &[])], "time").unwrap();
@@ -3254,6 +3283,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let mut attempt = raw("test", 0, "passed", &[]);
         attempt.runtime[0].decisions.push(DecisionSnapshot {
@@ -3298,6 +3328,7 @@ mod tests {
             scope: Some(serde_json::json!({
                 "entries": [{ "file": "src/empty.js", "status": "included" }]
             })),
+            assertion_sites: Vec::new(),
         };
         let vector = McdcVector {
             values: vec![Some(true), Some(true)],
@@ -3343,6 +3374,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let phase = CoveragePhase {
             id: "assertion".into(),
@@ -3385,6 +3417,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let failed = raw("flaky", 0, "failed", &["failed"]);
         let mut passed = raw("flaky", 1, "passed", &["passed"]);
@@ -3432,6 +3465,7 @@ mod tests {
                 branches: vec![],
                 limitations: vec![],
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: vec![companion, expected],
             generated_at: "time".into(),
@@ -3460,6 +3494,7 @@ mod tests {
                 branches: vec![],
                 limitations: vec![],
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             raw_results: vec![unstarted],
             generated_at: "time".into(),
@@ -3544,6 +3579,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         // Declare exactly the observed runners: the journal's node:test and the
         // synthesized background runner, shaped as the JavaScript run declares it.
@@ -3641,6 +3677,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         // Declare exactly the observed runners: the journal's node:test and the
         // synthesized background runner, shaped as the JavaScript run declares it.
@@ -3744,6 +3781,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let mut result = raw("test", 0, "passed", &[]);
         result.scope = Some(ExecutionScope {
@@ -3807,6 +3845,7 @@ mod tests {
             branches: vec![],
             limitations: vec![],
             scope: None,
+            assertion_sites: Vec::new(),
         };
         let path = archive(vec![
             EvidenceArchiveEntry {
@@ -3839,51 +3878,6 @@ mod tests {
                 if reason.contains("javascript differs from coverage model language rust")
         ));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn rust_compiler_scope_requires_an_exact_full_source_fingerprint() {
-        let mut manifest = CoverageManifest {
-            unmeasured: Vec::new(),
-            decisions: vec![],
-            points: vec![],
-            branches: vec![],
-            limitations: vec![],
-            scope: Some(serde_json::json!({
-                "language": "rust",
-                "model": "rust-source-v1",
-                "crate": "fixture",
-                "measurementComplete": false,
-                "sourceFingerprint": {
-                    "algorithm": "sha256",
-                    "digest": "1".repeat(64),
-                    "files": 2,
-                    "generatedFiles": 1,
-                },
-            })),
-        };
-        validate_rust_compiler_scope(&manifest).unwrap();
-
-        // The optional extension does not open the scope to arbitrary keys or
-        // unvalidated records, and legacy archives still need no such field.
-        let mut extended = manifest.clone();
-        extended.scope.as_mut().unwrap()["assertionIdentities"] = serde_json::json!({
-            "schema":"supercov-rust-assertion-identities-v1", "records":[]
-        });
-        validate_rust_compiler_scope(&extended).unwrap();
-
-        manifest.scope.as_mut().unwrap()["sourceFingerprint"]["digest"] =
-            Value::String("not-a-digest".into());
-        assert!(matches!(
-            validate_rust_compiler_scope(&manifest),
-            Err(ReportError::InvalidArchive(reason))
-                if reason == "malformed Rust compiler source fingerprint"
-        ));
-
-        manifest.scope.as_mut().unwrap()["sourceFingerprint"]["digest"] =
-            Value::String("1".repeat(64));
-        manifest.scope.as_mut().unwrap()["sourceFingerprint"]["unexpected"] = Value::Bool(true);
-        assert!(validate_rust_compiler_scope(&manifest).is_err());
     }
 
     #[test]

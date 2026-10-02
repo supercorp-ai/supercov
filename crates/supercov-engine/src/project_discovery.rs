@@ -790,13 +790,6 @@ fn reachable_script_tokens(manifest: &Value, tokens: &[String]) -> Vec<String> {
     all
 }
 
-/// Resolve npm/pnpm/yarn script indirection before identifying a runner. This
-/// is shared by discovery and the Rust-owned execution frontend so `npm test`
-/// receives exactly the same adapter decision as an explicit runner command.
-pub fn command_uses_tool(root: &Path, command: &[String], tool: &str) -> bool {
-    has_tool(&command_tokens(&expanded_command(root, command)), tool)
-}
-
 fn configured_path(
     root: &Path,
     environment: &BTreeMap<String, String>,

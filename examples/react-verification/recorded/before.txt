@@ -3,13 +3,13 @@
 > vitest run tests/checkout.weak.test.tsx
 
 
- RUN  v4.1.11 /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/workspaces/workspace/supercov-react-verification-LavbfO
+ RUN  v4.1.11 /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-JYtCPG/.supercov/workspaces/workspace/supercov-react-verification-JYtCPG
 
- ✓ tests/checkout.weak.test.tsx (3 tests) 115ms
+ ✓ tests/checkout.weak.test.tsx (3 tests) 62ms
 
  Test Files  1 passed (1)
       Tests  3 passed (3)
-   Start at  23:26:48
-   Duration  935ms (transform 25ms, setup 101ms, import 49ms, tests 115ms, environment 529ms)
+   Start at  21:43:27
+   Duration  485ms (transform 20ms, setup 51ms, import 36ms, tests 62ms, environment 240ms)
 
-[coverage] evidence: /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-LavbfO/.supercov/runs/run_5c23599854c51519/evidence.raw.gz
+[coverage] evidence: /private/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-react-verification-JYtCPG/.supercov/runs/run_629cd1bcb4de56bf/evidence.raw.gz

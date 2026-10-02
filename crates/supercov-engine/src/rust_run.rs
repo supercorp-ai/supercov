@@ -21,7 +21,7 @@ use crate::{
     rust_build_cache::{
         read_rust_build_cache, rust_build_cache_key, rust_target_directory, write_rust_build_cache,
     },
-    rust_project::{PreparedRustProject, prepare_rust_project},
+    rust_project::{PreparedRustProject, prepare_rust_project_for},
     rust_test_runner::run_prepared_rust_tests,
     workspace::{cached_workspace_path, prepare_cached_workspace, recover_cached_workspace},
 };
@@ -231,8 +231,8 @@ pub fn run_direct_rust(
             &mut integrity_inputs.execution_configuration,
             source_roots.as_deref(),
         );
-        let assertion_inputs =
-            crate::assertion_inputs::capture(&root, "rust", integrity_inputs.assertion_paths())?;
+        let source_inputs =
+            crate::source_capture::capture(&root, "rust", integrity_inputs.assertion_paths())?;
         let integrity = create_explicit_run_integrity(
             &root,
             &integrity_inputs,
@@ -245,6 +245,12 @@ pub fn run_direct_rust(
         let workspace_started = Instant::now();
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
         let workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
+        if let Some(planted) = crate::workspace::planted_cargo_configuration(&root, &workspace) {
+            return Err(format!(
+                "{} would change how Supercov builds the project but not how `cargo test` does; remove it",
+                planted.display()
+            ));
+        }
         let target_directory = rust_target_directory(&root);
         let cache_started = Instant::now();
         let cached = read_rust_build_cache(&workspace, &target_directory, &build_cache_key);
@@ -283,7 +289,16 @@ pub fn run_direct_rust(
                 &root, &workspace, &ambient,
             )
             .map_err(|error| error.to_string())?;
-            prepare_rust_project(&workspace, roots.as_ref()).map_err(|error| error.to_string())?
+            // The target the command builds for decides which `#[cfg]` items
+            // exist; when it cannot be read, every item is measured.
+            let cfg = crate::rust_test_runner::cargo_invocation(&workspace, &request.command)
+                .ok()
+                .and_then(|invocation| {
+                    crate::rust_cargo_configuration::active_target_cfg(&workspace, &invocation)
+                })
+                .map(|values| crate::rust_instrumenter::TargetCfg::new(&values));
+            prepare_rust_project_for(&workspace, roots.as_ref(), cfg.as_ref())
+                .map_err(|error| error.to_string())?
         };
         project.target_directory = target_directory;
         fs::create_dir_all(&project.target_directory).map_err(|error| error.to_string())?;
@@ -342,9 +357,9 @@ pub fn run_direct_rust(
             .join(&request.run_id)
             .join("evidence.raw.gz");
         let raw = write_archive(
-            crate::assertion_inputs::append(
+            crate::source_capture::append(
                 run.archive_entries().map_err(|error| error.to_string())?,
-                &assertion_inputs,
+                &source_inputs,
             )?,
             &archive_path,
         )

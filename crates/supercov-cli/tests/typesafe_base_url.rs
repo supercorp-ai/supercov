@@ -1,100 +1,25 @@
 //! `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` against a local server that
 //! answers the way a gateway does: at its own path, with a dated build of the
 //! model it was asked for.
+mod common;
+
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
-    net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    thread,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 const DATED_BUILD: &str = "typesafe/jev-1.13-20260917";
 
 /// What the server was sent: the path, the Authorization header and the body.
-type Seen = Arc<Mutex<Vec<(String, String, Value)>>>;
+type Seen = common::Seen;
 
 /// Answers every question it is asked, as `model`, and records each request.
 fn gateway(model: &'static str) -> (String, Seen) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!(
-        "http://127.0.0.1:{}/api",
-        listener.local_addr().unwrap().port()
-    );
-    let seen: Seen = Arc::default();
-    let record = Arc::clone(&seen);
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let path = line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_owned();
-            let (mut length, mut authorization) = (0, String::new());
-            loop {
-                let mut header = String::new();
-                reader.read_line(&mut header).unwrap();
-                if header.trim().is_empty() {
-                    break;
-                }
-                let (name, value) = header.split_once(':').unwrap();
-                match name.to_ascii_lowercase().as_str() {
-                    "content-length" => length = value.trim().parse().unwrap(),
-                    "authorization" => authorization = value.trim().to_owned(),
-                    _ => {}
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            let request: Value = serde_json::from_slice(&body).unwrap();
-            let reply = serde_json::to_vec(&answer(&request, model)).unwrap();
-            record.lock().unwrap().push((path, authorization, request));
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                 content-length: {}\r\nconnection: close\r\n\r\n",
-                reply.len()
-            )
-            .unwrap();
-            stream.write_all(&reply).unwrap();
-        }
-    });
-    (base, seen)
-}
-
-/// A valid answer to every question: no for each yes/no, `none` (or the first
-/// option) for each choice.
-fn answer(request: &Value, model: &str) -> Value {
-    let mut answers = Map::new();
-    for (id, question) in request["questions"].as_object().unwrap() {
-        let value = if question["type"] == "choice" {
-            let options: Vec<&String> = question["criteria"].as_object().unwrap().keys().collect();
-            let chosen = options
-                .iter()
-                .find(|o| o.as_str() == "none")
-                .unwrap_or(&options[0]);
-            let probabilities: Map<String, Value> = options
-                .iter()
-                .map(|o| ((*o).clone(), json!(if o == chosen { 1.0 } else { 0.0 })))
-                .collect();
-            json!({ "type": "choice", "choice": chosen, "probabilities": probabilities, "confidence": 1.0 })
-        } else {
-            json!({ "type": "noul", "noul": 0.1 })
-        };
-        answers.insert(id.clone(), value);
-    }
-    json!({ "model": model, "answers": answers, "usage": { "input_tokens": 100, "output_tokens": 0 } })
+    common::gateway(model, common::answer_no)
 }
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);

@@ -3,7 +3,9 @@ import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 const repository = resolve(import.meta.dirname, '..');
 const cwd = resolve(repository, 'examples/react-verification');
-const binary = resolve(
+const binary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   repository,
   `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`,
 );

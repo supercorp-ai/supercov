@@ -291,13 +291,24 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
         if entry.file_name() == ".deleter.lock" {
             continue;
         }
-        let metadata = fs::symlink_metadata(&path).map_err(|source| io_error(&path, source))?;
-        if metadata.file_type().is_dir() {
-            fs::remove_dir_all(&path).map_err(|source| io_error(&path, source))?;
+        // An entry already gone -- removed by hand, or by a sweeper whose
+        // lock was replaced -- is as swept as one removed here.
+        let gone = |error: &io::Error| error.kind() == io::ErrorKind::NotFound;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if gone(&error) => continue,
+            Err(source) => return Err(io_error(&path, source)),
+        };
+        let removal = if metadata.file_type().is_dir() {
+            fs::remove_dir_all(&path)
         } else {
-            fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+            fs::remove_file(&path)
+        };
+        match removal {
+            Ok(()) => removed += 1,
+            Err(error) if gone(&error) => {}
+            Err(source) => return Err(io_error(&path, source)),
         }
-        removed += 1;
     }
     Ok(removed)
 }
@@ -453,9 +464,34 @@ fn process_exists(pid: u32) -> bool {
     result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn process_exists(pid: u32) -> bool {
-    // Replaced by the Windows Job-object strategy before Windows GA.
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: a query-only handle, closed below; nothing is read through it
+    // but the exit code.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // A process another account owns refuses the query, and exists.
+        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+    }
+    let mut code = 0u32;
+    // SAFETY: `handle` is open and `code` outlives the call.
+    let read = unsafe { GetExitCodeProcess(handle, &mut code) };
+    // SAFETY: opened above and not used after this.
+    unsafe { CloseHandle(handle) };
+    read != 0 && code == STILL_ACTIVE as u32
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_exists(pid: u32) -> bool {
     pid == std::process::id()
 }
 
@@ -631,7 +667,8 @@ fn hex_digest(digest: &[u8; 32]) -> String {
         })
 }
 
-/// Publish immutable run evidence and its initial assertion map/state together.
+/// Publish immutable run evidence with its source manifest cache and per-test
+/// execution record together.
 pub fn publish_run(
     root: &Path,
     metadata: &RunMetadata,
@@ -647,7 +684,7 @@ pub fn publish_run(
 #[derive(Default)]
 pub struct Archived {
     pub report: Option<crate::coverage_report::CoverageReport>,
-    pub inputs: Option<crate::assertion_map::InputManifest>,
+    pub inputs: Option<crate::source_manifest::InputManifest>,
 }
 
 /// `publish_run` for a frontend that holds what it archived; see `Archived`.
@@ -707,9 +744,9 @@ pub(crate) fn publish_run_with_fault(
     let mut json = serde_json::to_vec_pretty(metadata).map_err(LifecycleError::Metadata)?;
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
-    // Everything publication derives from the evidence -- the assertion map's
-    // record of what each test ran, the summary `runs latest` shows, the query
-    // index -- comes from one analysis of it, made here. Each used to analyse
+    // Everything publication derives from the evidence -- the record of what
+    // each test ran and the query index -- comes from one analysis of it, made
+    // here. Each used to analyse
     // the archive on its own: once here, twice more in the first query after
     // the run, and on a 3,900-test Python suite each analysis took 5 to 8
     // seconds. Evidence that will not analyse is published as before; the
@@ -732,7 +769,7 @@ pub(crate) fn publish_run_with_fault(
     let archived_inputs = match archived
         .inputs
         .map(|manifest| {
-            crate::assertion_store::archived_manifest(manifest, hex_digest(&evidence_sha256))
+            crate::source_manifest::archived_manifest(manifest, hex_digest(&evidence_sha256))
         })
         .transpose()
     {
@@ -740,11 +777,11 @@ pub(crate) fn publish_run_with_fault(
         Err(reason) => {
             let _ = remove_stored_tree_deferred(root, &staging);
             return Err(LifecycleError::InvalidState(format!(
-                "assertion map publication: {reason}"
+                "source manifest publication: {reason}"
             )));
         }
     };
-    // The assertion map and the query index both read the analysis and
+    // The execution record and the query index both read the analysis and
     // write their own files, so they are written side by side.
     let prepared = std::thread::scope(|scope| {
         let index = analysed.as_ref().map(|report| {
@@ -758,7 +795,7 @@ pub(crate) fn publish_run_with_fault(
                 }
             })
         });
-        let prepared = crate::assertion_store::prepare_publication_with(
+        let prepared = crate::source_manifest::prepare_publication_with(
             root,
             &staging,
             metadata,
@@ -781,7 +818,7 @@ pub(crate) fn publish_run_with_fault(
     if let Err(reason) = prepared {
         let _ = remove_stored_tree_deferred(root, &staging);
         return Err(LifecycleError::InvalidState(format!(
-            "assertion map publication: {reason}"
+            "source manifest publication: {reason}"
         )));
     }
     sync_directory(&staging)?;
@@ -1093,7 +1130,6 @@ pub fn cleanup_storage_locked(
     let container = crate::workspace::workspace_container(root);
     let legacy = [root.join(".supercov/.cache"), root.join(".supercov/cache")];
     let mut caches = Vec::new();
-    let mut removed_cargo_cache = false;
     if remove_build_cache && active.is_empty() {
         if owned_workspace_container(root) {
             caches.push(container);
@@ -1103,14 +1139,8 @@ pub fn cleanup_storage_locked(
                 .into_iter()
                 .filter(|path| fs::symlink_metadata(path).is_ok()),
         );
-        removed_cargo_cache = crate::workspace::clean_cargo_workspace(root, options.dry_run)
-            .map_err(|error| {
-                LifecycleError::InvalidState(format!(
-                    "could not clean the owned Cargo workspace: {error}"
-                ))
-            })?;
     }
-    result.removed_build_cache = removed_cargo_cache || !caches.is_empty();
+    result.removed_build_cache = !caches.is_empty();
     if !options.dry_run {
         for cache in caches {
             remove_stored_tree_deferred(root, &cache)?;
@@ -1232,9 +1262,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let inputs =
-            crate::assertion_inputs::capture(root, "javascript", [PathBuf::from("src/index.js")])
+            crate::source_capture::capture(root, "javascript", [PathBuf::from("src/index.js")])
                 .unwrap();
-        entries = crate::assertion_inputs::append(entries, &inputs).unwrap();
+        entries = crate::source_capture::append(entries, &inputs).unwrap();
         let path = root.join("evidence.gz");
         let metadata = write_archive(entries, &path).unwrap();
         (path, metadata.compressed_bytes)
@@ -1348,13 +1378,17 @@ mod tests {
         let (evidence, bytes) = evidence(&root);
         let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
         assert!(published.join("run.json").is_file());
-        assert!(published.join("assertions.json").is_file());
+        assert!(published.join("source-manifest.cache.json").is_file());
         assert!(
             !published
                 .join(crate::run_store::RUST_QUERY_INDEX_FILE)
                 .exists()
         );
-        assert!(!published.join("assertions.summary.cache.json").exists());
+        assert!(
+            !published
+                .join(crate::source_manifest::EXECUTIONS_FILE)
+                .exists()
+        );
         let run = stored(&root, id);
         let Err(query) = crate::run_store::open_or_rebuild_query_index(&run) else {
             panic!("the first query cannot analyse it either");
@@ -1417,8 +1451,7 @@ mod tests {
             fs::read(published.join("evidence.raw.gz")).unwrap(),
             fs::read(&evidence).unwrap()
         );
-        assert!(published.join("assertions.json").is_file());
-        assert!(published.join("assertions.state.json").is_file());
+        assert!(published.join("source-manifest.cache.json").is_file());
         assert!(matches!(
             publish_run(&root, &metadata(id, bytes), &evidence),
             Err(LifecycleError::PublicationExists(_))
@@ -1465,12 +1498,12 @@ mod tests {
         let mut entries = read_archive(&evidence).unwrap();
         entries
             .iter_mut()
-            .find(|e| e.path == crate::assertion_inputs::ARCHIVE_PATH)
+            .find(|e| e.path == crate::source_capture::ARCHIVE_PATH)
             .unwrap()
             .contents = b"{broken".to_vec();
         let raw = write_archive(entries, &evidence).unwrap();
         let error = publish_run(&root, &metadata(id, raw.compressed_bytes), &evidence).unwrap_err();
-        assert!(error.to_string().contains("assertion map publication"));
+        assert!(error.to_string().contains("source manifest publication"));
         assert!(!root.join(".supercov/runs").join(id).exists());
         assert!(
             !root
@@ -1625,11 +1658,6 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join(".supercov/cache/legacy")).unwrap();
-        let mut preparation = ProjectLock::acquire(&root, "prepare", "start").unwrap();
-        crate::workspace::prepare_cargo_cached_workspace(&root, &preparation).unwrap();
-        let cargo_container = crate::workspace::cargo_workspace_container(&root).unwrap();
-        preparation.release().unwrap();
-
         let mut active = ProjectLock::acquire(&root, "active", "start").unwrap();
         assert!(matches!(
             clean_storage(
@@ -1643,7 +1671,6 @@ mod tests {
             Err(LifecycleError::ActiveRun { .. })
         ));
         assert!(container.exists());
-        assert!(cargo_container.exists());
         active.release().unwrap();
 
         let cleaned = clean_storage(
@@ -1657,7 +1684,6 @@ mod tests {
         .unwrap();
         assert!(cleaned.removed_build_cache);
         assert!(!container.exists());
-        assert!(!cargo_container.exists());
         assert!(!root.join(".supercov/cache").exists());
         sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();

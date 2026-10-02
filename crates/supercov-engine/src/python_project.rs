@@ -235,6 +235,7 @@ pub fn prepare_python_project(
         branches: Vec::new(),
         limitations: Vec::new(),
         scope: None,
+        assertion_sites: Vec::new(),
     };
     let mut plan_files = BTreeMap::<String, PythonFilePlan>::new();
     let mut limitation_ids = BTreeSet::new();

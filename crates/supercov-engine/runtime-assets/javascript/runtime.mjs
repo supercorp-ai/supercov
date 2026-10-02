@@ -1641,8 +1641,23 @@ function selectAssignEndV2(file, first, value, right) {
   return value;
 }
 // `object?.member`: the short and continued outcomes are two V2 points.
-function optionalSelectV2(file, first, value) {
-  coverageHitV2(file, value === null || value === void 0 ? first : first + 1);
+// Whether the previous optional link of the chain being evaluated cut it
+// short. In `a?.b?.c` the object of `?.c` is undefined when `a` is, though
+// `?.c` never ran: `?.b` says so here and `?.c` records nothing. `links` has
+// 1 when an earlier link of the chain runs first and 2 when a later one
+// follows. Every link with a later one writes this and that later one reads
+// and clears it, so code run in between -- a getter, a call -- that
+// evaluates chains of its own leaves it as it found it. 4 means the earlier
+// link is an optional call, whose frame `call` is 2 only if it went ahead.
+var optionalChainCut = false;
+function optionalSelectV2(file, first, value, links, call) {
+  if (links & 1 && optionalChainCut || links & 4 && call !== 2) {
+    optionalChainCut = (links & 2) !== 0;
+    return value;
+  }
+  var nullish = value === null || value === void 0;
+  coverageHitV2(file, nullish ? first : first + 1);
+  optionalChainCut = nullish && (links & 2) !== 0;
   return value;
 }
 function optionalCallBegin(shortId, continuedId) {

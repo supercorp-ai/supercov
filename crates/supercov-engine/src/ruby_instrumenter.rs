@@ -393,6 +393,12 @@ pub struct RubyFilePlan {
     /// load-time probes either (see [`RACTOR_BLOCK_LIMITATION`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ractor_blocks: Vec<[usize; 2]>,
+    /// Byte ranges of `refine` blocks. A refinement is active inside its own
+    /// block, so an operator the block refines -- `Hash#[]=` among them --
+    /// is not the one a table probe means; statements there take the
+    /// method-call probe instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refine_blocks: Vec<[usize; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -713,6 +719,8 @@ struct Collector<'a> {
     begin_unmeasured: Vec<(String, usize)>,
     /// Byte ranges of `Ractor.new` blocks; no insertion may land inside.
     ractor_blocks: Vec<(usize, usize)>,
+    /// Byte ranges of `refine` blocks (see [`RubyFilePlan::refine_blocks`]).
+    refine_blocks: Vec<[usize; 2]>,
     error: Option<RubyInstrumenterError>,
 }
 
@@ -736,6 +744,7 @@ impl<'a> Collector<'a> {
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
+                assertion_sites: Vec::new(),
             },
             lines: BTreeMap::new(),
             statement_offsets: BTreeMap::new(),
@@ -759,6 +768,7 @@ impl<'a> Collector<'a> {
             depth: 0,
             begin_unmeasured: Vec::new(),
             ractor_blocks: Vec::new(),
+            refine_blocks: Vec::new(),
             error: None,
         }
     }
@@ -1942,6 +1952,30 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// A `case ... in` with no `else` raises NoMatchingPatternError -- or
+    /// its NoMatchingPatternKeyError subclass -- naming the last pattern it
+    /// tried. An inserted `else` would swallow that and return nil, so the
+    /// case is wrapped instead: the original exception is re-raised as it
+    /// was, and counted as "no pattern matched" only when this case raised
+    /// it, at its own line, rather than a nested one.
+    fn no_match_rescue(&mut self, id: &str, clauses: &[String], start: usize, end: usize) {
+        let mut ids = vec![format!("{id}:unmatched")];
+        ids.extend(clauses.iter().map(|clause| format!("{clause}:missed")));
+        let key = self.probe_key(ProbeTarget::Hits { ids });
+        let (line, _) = self.line_column(start);
+        self.edit(start, EditRank::Opener, "begin; ".into(), end);
+        self.edit(
+            end,
+            EditRank::Closer,
+            format!(
+                "; rescue ::NoMatchingPatternError; {RUBY_PROBE_RECEIVER}.hs({key}) if \
+                 $!.backtrace_locations&.first&.then {{ |l| l.lineno == {line} && l.path == __FILE__ }}; \
+                 raise; end"
+            ),
+            start,
+        );
+    }
+
     fn case_match_node(&mut self, node: &CaseMatchNode<'_>) {
         let node_span = self.location_span(&node.location());
         let (start, end) = (node.location().start_offset(), node.location().end_offset());
@@ -2070,7 +2104,7 @@ impl<'a> Collector<'a> {
                         KeyKind::Node,
                         vec![format!("{id}:unmatched")],
                     );
-                    self.no_match_probe(&id, &clause_ids, node.end_keyword_loc().start_offset());
+                    self.no_match_rescue(&id, &clause_ids, start, end);
                     CaseNoMatchPlan {
                         key: self.branches[key_index].key.clone(),
                         matched: format!("{id}:matched"),
@@ -2943,6 +2977,7 @@ impl<'a> Collector<'a> {
         RubyFileObligations {
             manifest: self.manifest,
             plan: RubyFilePlan {
+                refine_blocks: std::mem::take(&mut self.refine_blocks),
                 ractor_blocks: ractor_blocks
                     .iter()
                     .map(|(start, end)| [*start, *end])
@@ -3187,6 +3222,15 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             let location = block.location();
             self.ractor_blocks
                 .push((location.start_offset(), location.end_offset()));
+        }
+        if node.name().as_slice() == b"refine"
+            && node.receiver().is_none()
+            && let Some(block) = node.block()
+            && block.as_block_node().is_some()
+        {
+            let location = block.location();
+            self.refine_blocks
+                .push([location.start_offset(), location.end_offset()]);
         }
         if node.is_safe_navigation() {
             self.safe_navigation(node);

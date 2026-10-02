@@ -4,7 +4,9 @@ import { resolve } from "node:path";
 
 export const repository = resolve(import.meta.dirname, "..");
 export const launcher = resolve(repository, "bin/supercov.js");
-const localBinary = resolve(
+const localBinary =
+  process.env.SUPERCOV_BINARY ??
+  resolve(
   repository,
   "target/debug",
   `supercov${process.platform === "win32" ? ".exe" : ""}`,

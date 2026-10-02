@@ -1100,7 +1100,6 @@
       OBLIGATION_KINDS.forEach(kind => {
         const total = totals[kind.id] || 0;
         let open = Number(record?.[kind.field]) || 0;
-        if (kind.id === "branches") open += decisions.reduce((count, decision) => count + 2 - new Set(decision.vectors.map(vector => vector.outcome)).size, 0);
         pool.kinds[kind.id] = { total, open, percentage: total ? Math.max(0, total - open) / total * 100 : null };
       });
       return pool;
@@ -1383,13 +1382,13 @@
       const heading = node("div", "metric-heading"); heading.append(node("h2", "overview-label", "Assertions")); metric.append(heading);
       const data = run.assertions;
       const summary = data && data.summary || {};
-      if (!data || !data.available || summary.status !== "available" || summary.statements?.percentage == null) return missingMetric("assertions", "Assertions", data?.error || summary.reason || "No assertion links available for this run.");
+      if (!data || !data.available || summary.status !== "available" || summary.statements?.percentage == null) return missingMetric("assertions", "Assertions", data?.error || "Not assessed for this run. Run: npx supercov runs latest assertions assess");
       const statements = summary.statements || {};
       if (statements.percentage == null || Number(statements.percentage) < 100) heading.append(improveButton("assertions"));
       const head = node("div", "instrument-head"); head.append(markCredit(Number(statements.percentage) || 0, 62));
       const stack = node("div", "figure-stack");
       const figure = node("div", "figure"); figure.append(node("span", "figure-number", pct(statements.percentage)));
-      stack.append(figure, node("div", "figure-unit", "linked to assertions"));
+      stack.append(figure, node("div", "figure-unit", "asserted"));
       head.append(stack); metric.append(head);
       return metric;
     }
@@ -1659,7 +1658,7 @@
       const hero = node("section", "hero");
       const instruments = node("div", "instruments");
       const card = node("section", "instrument overview-card"); const metrics = node("div", "overview-metrics");
-      metrics.append(missingMetric("coverage", "Coverage", "Run tests to measure coverage."), missingMetric("assertions", "Assertions", "Assertion links need a coverage run."));
+      metrics.append(missingMetric("coverage", "Coverage", "Run tests to measure coverage."), missingMetric("assertions", "Assertions", "Assertions coverage needs a coverage run."));
       card.append(metrics); instruments.append(card, quality ? renderQuality(quality) : renderMissing("quality", "Not assessed", "No quality assessment matches this source.", true), renderSecurity()); hero.append(instruments); shell.append(hero);
     }
 
@@ -1696,53 +1695,14 @@
     function assertionData(run) { return run.assertions && run.assertions.available ? run.assertions : null; }
     function assertionFileCount(run, file) { const data = assertionData(run); return data && data.files ? data.files[file] || null : null; }
     function assertionStatementsIn(run, file) { const data = assertionData(run); return ((data && data.statements) || []).filter(item => item.file === file); }
-    function assertionSite(run, flowKey) { const data = assertionData(run); const id = String(flowKey).split("/")[0]; return ((data && data.sites) || []).find(site => site.id === id) || null; }
-    function assertionFlow(run, flowKey) { const site = assertionSite(run, flowKey); const flowId = String(flowKey).split("/").slice(1).join("/"); return site ? { site, flow: (site.flows || []).find(flow => flow.id === flowId) || null } : null; }
     // A flow selects tests by file and displayed name, which is how the run's
     // test records are named too; matching on both finds the record to open.
-    function testRecordFor(run, selector) { return (run.tests || []).find(test => test.role === "test" && test.file === selector.file && test.name === selector.name) || null; }
+    function testRecordFor(run, selector) { return selector ? (run.tests || []).find(test => test.role === "test" && test.file === selector.file && test.name === selector.name) || null : null; }
     function openTest(test) { state.tab = "tests"; state.testId = test.id; state.testFileFilter = null; state.testKind = "all"; state.testSuite = null; state.testQuery = ""; state.testFileLimit = 12; state.file = null; state.line = null; state.assertLine = null; render(); }
-    function testButtonsFor(run, site) {
-      const seen = new Set(); const actions = node("div", "card-actions");
-      (site.flows || []).flatMap(flow => flow.tests || []).forEach(selector => { const test = testRecordFor(run, selector); if (!test || seen.has(test.id)) return; seen.add(test.id); const action = node("button", "card-action", "Open test \u203a"); action.type = "button"; action.title = test.name; action.addEventListener("click", event => { event.stopPropagation(); openTest(test); }); actions.append(action); });
-      return seen.size ? actions : null;
-    }
-    // One card per (assertion, flow) pair that credits any statement on the
-    // line, in the order the statements appear.
-    function assertionCards(run, statements) {
-      const seen = new Set(); const cards = [];
-      statements.filter(item => item.asserted).forEach(item => (item.flows || []).forEach(key => { if (seen.has(key)) return; seen.add(key); const found = assertionFlow(run, key); if (found) cards.push(found); }));
-      return cards;
-    }
-    function renderAssertionCard(run, { site, flow }) {
-      const card = node("article", "annotation-card");
-      const observations = site.observes || [];
-      if (observations.length) {
-        card.append(node("h5", "annotation-title", observations[0]));
-        if (observations.length > 1) { const list = node("ul", "annotation-observes"); observations.slice(1).forEach(text => list.append(node("li", "", text))); card.append(list); }
-      }
-      if (flow?.explanation) card.append(node("p", "annotation-explanation", flow.explanation));
-      card.append(node("pre", "annotation-assertion", site.text));
-      const footer = node("div", "annotation-footer"); const meta = node("div", "annotation-meta");
-      const where = filePath(site.file, "annotation-location"); where.append(document.createTextNode(`:${site.line}`)); meta.append(where);
-      const tests = [...new Set((flow?.tests || []).map(test => test.name).filter(Boolean))];
-      if (tests.length) meta.append(node("span", "annotation-test-name", tests.join(" · ")));
-      footer.append(meta);
-      const records = [...new Set((flow?.tests || []).map(test => testRecordFor(run, test)).filter(Boolean))];
-      if (records.length) { const actions = node("div", "card-actions"); records.forEach(test => { const action = button(records.length === 1 ? "Open test ›" : `Open ${test.name} ›`, "subtle-button", () => openTest(test)); actions.append(action); }); footer.append(actions); }
-      card.append(footer); return card;
-    }
-    // Sites that credit statements in this file, with how many each credits.
-    function assertionsCreditingFile(run, file) {
-      const counts = new Map();
-      assertionStatementsIn(run, file).filter(item => item.asserted).forEach(item => (item.flows || []).forEach(key => { const site = assertionSite(run, key); if (!site) return; const entry = counts.get(site.id) || { site, lines: new Set() }; entry.lines.add(item.line); counts.set(site.id, entry); }));
-      return [...counts.values()].map(entry => ({ site: entry.site, lines: [...entry.lines].sort((a, b) => a - b) })).sort((a, b) => b.lines.length - a.lines.length || a.lines[0] - b.lines[0]);
-    }
     function assertionCreditLabel(run, statements) {
-      const credited = statements.filter(item => item.asserted);
-      if (!credited.length) return `Claimed by an assertion map, not credited: ${statements.map(item => item.text).join(" ")}`;
-      const checks = [...new Set(credited.flatMap(item => (item.flows || []).map(flow => assertionSite(run, flow)).filter(Boolean).map(site => (site.observes || [])[0] || site.text)))];
-      return `Credited by ${checks.length === 1 ? "an assertion" : `${integer(checks.length)} assertions`}${checks.length ? `: ${checks.join(" \u00b7 ")}` : ""}`;
+      const asserted = statements.find(item => item.asserted);
+      if (asserted) return `Asserted: ${asserted.test?.name || "a test"} is judged to fail if this statement changes`;
+      return "Not asserted: no test that runs this statement is judged to fail if it changes";
     }
     function assertionFileSummary(run, file) {
       const counts = assertionFileCount(run, file);
@@ -1786,34 +1746,35 @@
       }
       panel.append(coverage);
       const assertions = node("section", "line-evidence-section"); assertions.append(node("h4", "", "Assertions"));
-      if (span && claims.length) assertions.append(node("p", "", `Assertion links belong to the statement starting on line ${sourceLine}.`));
-      const cards = assertionCards(run, claims);
-      if (!assertionData(run)) assertions.append(node("p", "", run.assertions?.error || "No assertion map is available for this run."));
-      else if (!claims.length) assertions.append(node("p", "", "No recorded assertion links on this line."));
-      else {
-        if (claims.some(claim => !claim.asserted)) assertions.append(node("p", "", "Some recorded claims have not earned assertion credit in this run."));
-        cards.forEach(card => assertions.append(renderAssertionCard(run, card)));
-        if (!cards.length) assertions.append(node("p", "", "No credited assertion evidence is available for these claims."));
-      }
+      if (!assertionData(run)) assertions.append(node("p", "", run.assertions?.error || "Assertions were not assessed for this run."));
+      else if (!claims.length) assertions.append(node("p", "", "Not assessed: no statement a passing test ran starts on this line, or it is an import or declaration."));
+      else claims.forEach(claim => {
+        const entry = node("div", "line-gap");
+        entry.append(node("strong", "", claim.asserted ? "Asserted" : "Not asserted"));
+        entry.append(node("p", "", claim.asserted
+          ? `${claim.test?.name || "A test"} is judged to fail if this statement is changed (${claim.change}).`
+          : `No test that runs this statement is judged to fail if it is changed (${claim.change}).`));
+        const record = testRecordFor(run, claim.test);
+        if (record) { const actions = node("div", "card-actions"); actions.append(button("Open test \u203a", "subtle-button", () => openTest(record))); entry.append(actions); }
+        assertions.append(entry);
+      });
       panel.append(assertions); return panel;
     }
 
     function renderFileAssertions(run, file) {
-      const crediting = assertionsCreditingFile(run, file);
-      if (!crediting.length) return null; // The gutter gives an explicit empty state per line.
+      const unasserted = assertionStatementsIn(run, file).filter(item => !item.asserted);
+      if (!assertionData(run) || !unasserted.length) return null;
       const card = node("section", "detail-card file-assertions");
-      const head = node("div", "detail-card-head"); head.append(node("h3", "", "Assertions"), node("span", "small", `${integer(crediting.length)} linked`)); card.append(head);
-      const makeRow = ({ site, lines }) => {
-        const row = button("", "evidence-row", () => { state.line = lines[0]; state.assertLine = lines[0]; state.scrollToLine = lines[0]; state.sourceWindow = null; state.sourceRadius = 32; render(); });
-        const testNames = [...new Set((site.flows || []).flatMap(flow => (flow.tests || []).map(test => test.name)).filter(Boolean))];
-        const title = (site.observes || [])[0] || testNames[0] || `Assertion at line ${site.line}`;
-        const copy = node("span"); copy.append(node("span", "evidence-name", title), node("span", "evidence-meta", `${site.file}:${site.line}`));
-        row.append(copy, node("span", "relation-count", `${integer(lines.length)} ${lines.length === 1 ? "line" : "lines"}`), node("span", "file-chevron", "›")); return row;
+      const head = node("div", "detail-card-head"); head.append(node("h3", "", "Not asserted"), node("span", "small", `${integer(unasserted.length)} ${unasserted.length === 1 ? "statement" : "statements"}`)); card.append(head);
+      const makeRow = item => {
+        const row = button("", "evidence-row", () => { state.line = item.line; state.assertLine = item.line; state.scrollToLine = item.line; state.sourceWindow = null; state.sourceRadius = 32; render(); });
+        const copy = node("span"); copy.append(node("span", "evidence-name", item.text), node("span", "evidence-meta", `line ${item.line} \u00b7 ${item.change}`));
+        row.append(copy, node("span", "file-chevron", "\u203a")); return row;
       };
-      const list = node("div", "evidence-list"); crediting.slice(0, 3).forEach(entry => list.append(makeRow(entry))); card.append(list);
-      if (crediting.length > 3) {
+      const list = node("div", "evidence-list"); unasserted.slice(0, 3).forEach(item => list.append(makeRow(item))); card.append(list);
+      if (unasserted.length > 3) {
         const footer = node("div", "overview-footer");
-        const more = button(`View all ${integer(crediting.length)} assertions`, "subtle-button", () => openReportModal("evidence", run, more, { title: "Assertions", content: searchableEvidence(crediting, makeRow, ({ site }) => `${site.observes?.join(" ") || ""} ${site.text} ${site.file} ${(site.flows || []).flatMap(flow => (flow.tests || []).map(test => test.name)).join(" ")}`, "Find an assertion…") }));
+        const more = button(`View all ${integer(unasserted.length)}`, "subtle-button", () => openReportModal("evidence", run, more, { title: "Not asserted", content: searchableEvidence(unasserted, makeRow, item => `${item.text} ${item.line}`, "Find a statement\u2026") }));
         footer.append(more); card.append(footer);
       }
       return card;
@@ -1842,7 +1803,7 @@
       const legend = node("div", "source-legend");
       const assertedStatements = assertionStatementsIn(run, file);
       const legendKeys = [["!", "gap", "Open gap"], ["✓", "covered", "Covered executable line"], ["×", "missed", "Missed executable line"], ["·", "", "Non-executable source"]];
-      if (assertedStatements.length) legendKeys.push(["◆", "asserted", "Credited by an assertion"], ["◇", "declared", "Claimed, not credited"]);
+      if (assertedStatements.length) legendKeys.push(["◆", "asserted", "Asserted"], ["◇", "declared", "Not asserted"]);
       legendKeys.forEach(([symbol, tone, label]) => {
         const key = node("span", "source-key"); key.append(node("span", `source-key-symbol ${tone}`, symbol), node("span", "", label)); legend.append(key);
       });
@@ -1866,7 +1827,7 @@
       // multi-line statement that has no record of its own ran with that first
       // line, so it takes the innermost enclosing statement's state; comments
       // and blank lines inside still read as non-executable.
-      const spans = ((assertionData(run) || {}).spans || []).filter(span => span.file === file);
+      const spans = (run.statementSpans || []).filter(span => span.file === file);
       const continuationOf = line => { let best = null; spans.forEach(span => { if (line > span.line && line <= span.end && (!best || span.end - span.line < best.end - best.line)) best = span; }); return best; };
       const isProse = text => { const trimmed = text.trim(); return !trimmed || /^(\/\/|\/\*|\*)/.test(trimmed); };
       let rows = [];
@@ -1915,7 +1876,7 @@
         const stateMark = node("span", "code-state", stateValue);
         const assertMark = node("span", `code-assert${credited ? "" : effectiveClaims.length ? " declared" : " absent"}`, credited ? "◆" : effectiveClaims.length ? "◇" : "·");
         stateMark.setAttribute("aria-hidden", "true"); assertMark.setAttribute("aria-hidden", "true");
-        const assertionLabel = effectiveClaims.length ? assertionCreditLabel(run, effectiveClaims) : "No recorded assertion links";
+        const assertionLabel = effectiveClaims.length ? assertionCreditLabel(run, effectiveClaims) : "Assertions not assessed on this line";
         gutter.title = `${stateLabel} · ${assertionLabel}`;
         gutter.setAttribute("aria-label", `Line ${item.line}: ${stateLabel}. ${assertionLabel}. Show coverage and assertions`);
         gutter.setAttribute("aria-expanded", String(open)); gutter.setAttribute("aria-controls", panelId);
@@ -2084,10 +2045,17 @@
         if (actions.childElementCount) cell.append(actions); stats.append(cell);
       };
       const record = run?.files.find(value => value.file === file);
-      const fileLines = (run?.lines || []).filter(line => line.file === file);
-      const lineShare = fileLines.length ? fileLines.filter(line => line.covered).length / fileLines.length * 100 : null;
+      // The same pooled count as the overview and this file's breakdown: one
+      // file's coverage read 80% here (its lines) and 70.7% on the overview.
+      const filePool = run ? fileObligationPool(run, file) : null;
+      const pooled = (() => {
+        if (!filePool) return null;
+        let total = 0, open = 0;
+        Object.values(filePool.kinds).forEach(kind => { total += kind.total; open += Math.min(kind.open, kind.total); });
+        return total ? (total - open) / total * 100 : null;
+      })();
       const openCount = record ? missing(record) + record.measurementLimitations : 0;
-      stat("Coverage", record?.measurementLimitations ? "Limited" : lineShare === null ? "—" : pct(lineShare), openCount ? "open" : "", markCoverage(lineShare, 26, openCount), lineShare === null || openCount > 0);
+      stat("Coverage", record?.measurementLimitations ? "Limited" : pooled === null ? "—" : pct(pooled), openCount ? "open" : "", markCoverage(pooled, 26, openCount), pooled === null || openCount > 0);
       const counts = run && assertionFileCount(run, file);
       const share = counts?.total ? counts.asserted / counts.total * 100 : null;
       stat("Assertions", share === null ? "—" : pct(share), share === null ? "quiet" : "", markCredit(share, 26), share === null || share < 100);
@@ -2523,8 +2491,8 @@
         ["Software factory", "Write tests until coverage reaches 100%.", "Use {tool} to write meaningful tests until coverage reaches 100%."]
       ],
       assertions: [
-        ["Add assertions", "Test behavior that is not asserted yet.", "Improve assertion coverage with {tool}. Add meaningful assertions and validate their mappings."],
-        ["Map assertions", "Link existing assertions to the source they check.", "Use {tool} to map existing assertions to the source they check and validate the mappings."]
+        ["Add assertions", "Test behavior that is not asserted yet.", "Improve assertion coverage with {tool}: add tests that check the statements no test would catch breaking (npx supercov runs latest assertions lists them)."],
+        ["Assess assertions", "Work out how much of the code the tests assert.", "Use {tool} to assess assertion coverage (npx supercov runs latest assertions assess), then add tests for the statements that are not asserted."]
       ],
       quality: [
         ["One refactor", "Improve the strongest concern in one file.", "Use {tool} to address the strongest quality concern in one file, preserve behavior, and reassess."],

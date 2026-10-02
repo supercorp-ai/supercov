@@ -18,7 +18,7 @@ import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const binary = resolve(repository, "target/debug/supercov");
+const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, "target/debug/supercov"));
 const project = mkdtempSync(resolve(tmpdir(), "supercov-html-report-"));
 
 try {
@@ -73,53 +73,20 @@ try {
   assert(statSync(resolve(project, ".supercov/reports/supercov-report.html")).size > 0);
   assert.match(readFileSync(resolve(project, ".supercov/.gitignore"), "utf8"), /^\*/m);
 
-  // One flow, authored the way an agent would: a claim on the return statement,
-  // validated for its token, then acknowledged. Credit needs a passing
-  // assertion and execution of the claimed statement in the same selected
-  // test, which the named test above supplies.
   const runId = readdirSync(resolve(project, ".supercov/runs"))[0];
-  const mapPath = resolve(project, ".supercov/runs", runId, "assertions.json");
-  const map = JSON.parse(readFileSync(mapPath, "utf8"));
-  assert.equal(map.assertions.length, 1);
-  map.assertions[0].observes = ["The returned string starts with owner:."];
-  map.assertions[0].flows = [
-    {
-      id: "owner-return",
-      basis: null,
-      appliesTo: [{ file: "access.test.js", name: "owner access" }],
-      explanation: "access returns the owner string the assertion matches.",
-      nodes: [
-        {
-          id: "return",
-          at: {
-            file: "src/access.js",
-            line: 3,
-            column: 24,
-            text: "return `owner:${hostile.length}`;",
-          },
-        },
+  // An assertions assessment, written by hand the way `assertions assess`
+  // saves one, so this stays offline and free.
+  writeFileSync(
+    resolve(project, ".supercov/runs", runId, "assertion-coverage.json"),
+    JSON.stringify({
+      run: runId, model: "jev-1.13.0", basis: "Jev, from what each test ran",
+      summary: { statements: 2, asserted: 1, notAsserted: 1, percentage: 50 },
+      statements: [
+        { file: "src/access.js", line: 3, text: "if (member && owner) return `owner:${hostile.length}`;", change: "condition inverted", asserted: true, test: { file: "access.test.js", name: "owner access" } },
+        { file: "src/access.js", line: 4, text: 'return "visitor";', change: "returns undefined", asserted: false, test: null },
       ],
-      edges: [{ from: "return", to: "$assertion", kind: "data" }],
-      countsAsAsserted: ["return"],
-      watch: [],
-    },
-  ];
-  writeFileSync(mapPath, JSON.stringify(map, null, 2));
-  const validation = JSON.parse(
-    execFileSync(
-      binary,
-      ["runs", runId, "assertions", "validate", "--view", "flows", "--json"],
-      { cwd: project, encoding: "utf8", stdio: "pipe" },
-    ),
+    }),
   );
-  assert.equal(validation.data.valid, true);
-  map.assertions[0].flows[0].basis = validation.data.items[0].expectedBasis;
-  writeFileSync(mapPath, JSON.stringify(map, null, 2));
-  execFileSync(binary, ["runs", runId, "assertions", "check", "--json"], {
-    cwd: project,
-    encoding: "utf8",
-    stdio: "pipe",
-  });
 
   // A saved assessment, written by hand so this stays offline and free. What
   // decides pairing is the per-file digest, so it is taken from the file on
@@ -180,46 +147,19 @@ try {
   assert.equal(paired.timeline[0].kind, "paired");
   assert.equal(paired.timeline[0].qualityId, "q_00000000000000aa");
   assert.equal(paired.qualities[0].files[0].path, "src/access.js");
-  // With a flow acknowledged, the map explains something, and the report says
-  // where: per file, and per statement so the source view can mark the line.
-  // Credit is per statement, not per line — line 3 also holds the unclaimed
-  // guard — so the run's line-level figure would refuse it while the
-  // statement still shows.
-  const credited = paired.runs[0].assertions;
-  assert.equal(credited.summary.status, "available");
-  assert.equal(credited.summary.statements.asserted, 1);
-  assert.deepEqual(credited.files, {
-    "src/access.js": { total: 4, declared: 1, asserted: 1 },
-  });
-  assert.deepEqual(credited.statements, [
-    {
-      file: "src/access.js",
-      line: 3,
-      column: 24,
-      text: "return `owner:${hostile.length}`;",
-      asserted: true,
-      flows: [`${map.assertions[0].id}/owner-return`],
-    },
-  ]);
+  // The run's saved assertions assessment, per file and per statement so the
+  // source view can mark each line.
+  const assessed = paired.runs[0].assertions;
+  assert.equal(assessed.available, true);
+  assert.equal(assessed.summary.status, "available");
+  assert.deepEqual(assessed.summary.statements, { percentage: 50, asserted: 1, total: 2 });
+  assert.deepEqual(assessed.files, { "src/access.js": { total: 2, asserted: 1 } });
+  assert.equal(assessed.statements.length, 2);
+  assert.deepEqual(assessed.statements[0].test, { file: "access.test.js", name: "owner access" });
   // Statements that run past their first line are carried with their span so
   // continuation lines can show the state recorded on the first; the fixture
-  // has none, and a single-line statement must not appear here.
-  assert.deepEqual(credited.spans, []);
-  assert.equal(credited.sites.length, 1);
-  assert.equal(credited.sites[0].file, "access.test.js");
-  assert.deepEqual(credited.sites[0].observes, [
-    "The returned string starts with owner:.",
-  ]);
-  // The card beside a credited line shows the flow's own reasoning and the
-  // tests it was selected for; the explanation lives only in the map.
-  assert.deepEqual(credited.sites[0].flows, [
-    {
-      id: "owner-return",
-      eligible: true,
-      explanation: "access returns the owner string the assertion matches.",
-      tests: [{ file: "access.test.js", name: "owner access", status: "observed" }],
-    },
-  ]);
+  // has none.
+  assert.deepEqual(paired.runs[0].statementSpans, []);
   assert.doesNotMatch(JSON.stringify(paired), /\/(Users|home)\/[a-z]/i);
 
   // A snapshot of different bytes must not be folded into the run, however
@@ -284,10 +224,9 @@ try {
   assert.match(html, /function renderQuality/);
   assert.match(html, /function renderAssertions/);
   assert.match(html, /function assertionFileSummary/);
-  assert.match(html, /Credited by an assertion/);
+  assert.match(html, /is judged to fail if this statement changes/);
   assert.match(html, /file-row-trail/);
-  assert.match(html, /function renderAssertionCard/);
-  assert.match(html, /function assertionsCreditingFile/);
+  assert.match(html, /function renderFileAssertions/);
   assert.match(html, /code-annotation/);
   assert.match(html, /const continuationOf = /);
   assert.match(html, /function openTest/);
@@ -339,15 +278,11 @@ try {
   // never pairs anything: that is decided per file.
   assert.match(bundle.runs[0].sourceFingerprint, /^[0-9a-f]{64}$/);
   assert.equal(bundle.timeline[0].sourceFingerprint, undefined);
-  // Every run writes a map, so the section is carried. Nothing explains a flow
-  // yet, so it reports that status and no percentage rather than a zero.
+  // Before `assertions assess`, the section says how to assess rather than
+  // implying a zero.
   const asserted = bundle.runs[0].assertions;
-  assert.equal(asserted.available, true);
-  assert.equal(asserted.summary.status, "notAssessed");
-  assert.equal(asserted.summary.statements.percentage, null);
-  assert.match(asserted.basis, /agent-assessed/);
-  // The query path carries the map's absolute path; a shareable report must not.
-  assert.equal(asserted.map, undefined);
+  assert.equal(asserted.available, false);
+  assert.match(asserted.error, /assertions assess/);
   // A report is attached to pull requests; it must not carry a home directory.
   assert.doesNotMatch(JSON.stringify(bundle), /\/(Users|home)\/[a-z]/i);
   assert.equal(bundle.runs[0].sourceMode, "exact");
@@ -600,10 +535,10 @@ try {
     assert.equal(await improve.getByRole("radio").count(), 2);
     assert.equal(await improve.getByRole("group", { name: "Prompt language" }).count(), 0);
     assert.doesNotMatch(await improve.locator(".improve-prompt").textContent(), /\n/);
-    await improve.getByRole("radio", { name: /Map assertions/ }).check();
-    assert.match(await improve.locator(".improve-prompt").textContent(), /map existing assertions/);
+    await improve.getByRole("radio", { name: /Assess assertions/ }).check();
+    assert.match(await improve.locator(".improve-prompt").textContent(), /assess assertion coverage/);
     await improve.getByRole("button", { name: "Copy prompt", exact: true }).click();
-    await page.waitForFunction(() => window.copiedPrompt.includes("map existing assertions"));
+    await page.waitForFunction(() => window.copiedPrompt.includes("assess assertion coverage"));
     assert.equal(await page.evaluate(() => window.copiedPrompt), await improve.locator(".improve-prompt").textContent());
     await page.keyboard.press("Escape");
     await improve.waitFor({ state: "detached" });
@@ -623,8 +558,7 @@ try {
     const evidence = page.getByRole("region", { name: "Evidence for line 3", exact: true });
     assert.deepEqual(await evidence.locator("h4").allTextContents(), ["Coverage", "Assertions"]);
     assert.match(await evidence.locator(".line-test-name").textContent(), /owner access/);
-    assert.match(await evidence.locator(".annotation-title").first().textContent(), /./);
-    assert.match(await evidence.textContent(), /assert.match/);
+    assert.match(await evidence.textContent(), /owner access is judged to fail if this statement is changed/);
     assert.match(await evidence.textContent(), /Missing/);
     assert.equal(await coverageButton.getAttribute("aria-expanded"), "true");
     assert.equal(await page.locator('.code-row[data-line="3"] .code-state').count(), 1);
@@ -635,10 +569,10 @@ try {
     assert.equal(await evidence.count(), 1, "gutter evidence is keyboard accessible");
     await evidence.getByRole("button", { name: "Close", exact: true }).click();
     await page.locator('.code-row[data-line="4"] .code-evidence').click();
-    assert.match(await page.getByRole("region", { name: "Evidence for line 4", exact: true }).textContent(), /No recorded assertion links/);
+    assert.match(await page.getByRole("region", { name: "Evidence for line 4", exact: true }).textContent(), /Not asserted/);
     await page.locator(".file-assertions .evidence-row").first().click();
-    assert.equal(await evidence.count(), 1, "a file assertion jumps to its credited source line");
-    assert.equal(await page.locator('.code-row[data-line="3"]').evaluate(row => row.classList.contains("selected")), true);
+    assert.equal(await page.getByRole("region", { name: "Evidence for line 4", exact: true }).count(), 1, "a statement that is not asserted jumps to its line");
+    assert.equal(await page.locator('.code-row[data-line="4"]').evaluate(row => row.classList.contains("selected")), true);
     assert.match(await page.locator(".file-quality .quality-concern").textContent(), /Long method/);
     assert.match(await page.locator(".file-quality .quality-concern-value").textContent(), /0.95/);
     assert.equal(await page.getByText("Assessment details", { exact: true }).count(), 0);
@@ -647,7 +581,7 @@ try {
     assert.equal(await page.locator(".detail-stat-note").count(), 0);
     assert.match(await page.locator(".file-security").textContent(), /Not assessed/);
     assert.equal(await page.locator(".detail-stats").getByRole("img", { name: "Security: not assessed", exact: true }).count(), 1);
-    assert.deepEqual(await page.locator(".detail-view > .detail-card").evaluateAll(cards => cards.map(card => card.querySelector("h3")?.textContent)), ["Tests covering this file", "Assertions", "Quality", "Security"]);
+    assert.deepEqual(await page.locator(".detail-view > .detail-card").evaluateAll(cards => cards.map(card => card.querySelector("h3")?.textContent)), ["Tests covering this file", "Not asserted", "Quality", "Security"]);
     assert.equal(await page.locator(".file-tests .evidence-row").count(), 1);
     await page.locator(".file-tests .evidence-row").first().click();
     assert.match(await page.locator(".test-detail-header.detail-card .detail-heading").textContent(), /owner access/);

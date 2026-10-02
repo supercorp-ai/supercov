@@ -17,8 +17,11 @@ npx supercov --help
 | Read the newest run | `npx supercov runs latest` |
 | Find useful gaps | `npx supercov runs latest gaps` |
 | Inspect one file | `npx supercov runs latest file <path>` |
-| List assertions and their status | `npx supercov runs latest assertions` |
-| Inspect one assertion and its flows | `npx supercov runs latest assertion <id>` |
+| See how much executed code the tests assert | `npx supercov runs latest assertions` |
+| Assess it with Jev | `npx supercov runs latest assertions assess` |
+| Find what is not asserted in one file | `npx supercov runs latest assertions <path>` |
+| See each test's answer for one statement | `npx supercov runs latest assertions <path>:<line>` |
+| See what one test is judged to catch | `npx supercov runs latest assertions --test <name>` |
 | Read matching current source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Open an interactive report | `npx supercov report` |
@@ -146,8 +149,7 @@ npx supercov runs <run-id> [query] [options]
 | `kinds` | Group coverage by test level, such as unit or E2E |
 | `runners` | Group coverage by test runner |
 | `scope` | Review included, excluded, and ambiguous source files |
-| `assertions` | List assertions, including sites without flows, with freshness and execution status |
-| `assertion <id>` | Inspect one assertion and its authored flows |
+| `assertions` | Read the share of executed statements the tests assert, and the ones they do not; `assertions assess` works it out |
 | `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
@@ -169,40 +171,28 @@ npx supercov runs latest file --help
 npx supercov runs latest assertions --help
 ```
 
-Assertion queries read the run-owned map. `source <path>` reads the matching current
-file directly. It prints source code with line numbers, preserving indentation;
-add `--json` only when you want structured `{line, text}` items. `--offset` is
-zero-based and `--limit` controls the number of source lines. Source and assertion
-investigation require current files that match the run. Rerun the suite after
-source changes to inherit the map into a new run.
+`source <path>` reads the matching current file directly. It prints source code
+with line numbers, preserving indentation; add `--json` only when you want
+structured `{line, text}` items. `--offset` is zero-based and `--limit` controls
+the number of source lines. The file must still match the run; rerun the suite
+after source changes.
 
 ### Assertion coverage
 
-The regular run summary includes assertion coverage when a map has been
-assessed. JSON reports expose it under `data.assertionCoverage`. Start with
-[Understanding assertion coverage](assertions.md), or use these commands to
-inspect and check a map:
-
 ```sh supercov-example
-npx supercov runs <run-id> assertions --needs-attention
-npx supercov runs <run-id> assertion <assertion-id>
-npx supercov runs <run-id> assertions report --view statements --file src/shipping.js
-npx supercov runs <run-id> assertions report --view excludedStatements
-npx supercov runs <run-id> assertions validate --json
-npx supercov runs <run-id> assertions check --require-mappings
+npx supercov runs <run-id> assertions assess --dry-run
+npx supercov runs <run-id> assertions assess
+npx supercov runs <run-id> assertions
+npx supercov runs <run-id> assertions --all --json
 ```
 
-Edit the file shown by `assertions`. Validation returns `expectedBasis` tokens;
-after examining a flow, save its token in the map before running `check`.
-`--require-mappings` requires explanations for recognized assertions observed
-passing. Add `--require-observed` when every mapped site and selector should have
-passing evidence, or `--min <percentage>` for a chosen target.
-
-To inspect one large flow, add `--flow <flow-id> --view nodes` or `--view edges`
-to the assertion detail command. `--compact` omits repeated source text from the
-report. Follow the printed next-page command or JSON `pagination.nextOffset`.
-Validation supports `--view flows`, `--view changes` and `--view errors` for large
-maps. The [map reference](assertion-maps.md) describes all fields and gates.
+`assertions assess` asks Jev, test by test, whether each statement the test ran
+would make it fail if changed, and saves the result to the run; it needs
+`TYPESAFE_API_KEY` for questions not answered before. `assertions` reads the
+saved result without the network. The regular run summary shows the same share,
+and JSON reports expose it under `data.assertionCoverage`. See
+[Assertion coverage](assertions.md) for what counts as asserted and how answers
+are reused across runs.
 
 ## Fail CI below a coverage floor
 
@@ -230,11 +220,6 @@ rather than a pass or a failure:
 - a requested metric has nothing eligible, which is not the same as complete
 - a requested metric left obligations unmeasured, so no exact judgement exists
 - a requested metric is not recorded by the language adapter
-
-Assertion coverage keeps its own check. Whether a test *examines* what it
-executes is a different question from whether a line ran, and
-`runs <id> assertions check` carries the freshness and acknowledgement rules
-that answer needs.
 
 ## Check the lines a change touches
 
@@ -401,10 +386,71 @@ neither do comments, blank lines or trailing whitespace. A test that did not
 pass in the run is listed regardless.
 
 `--names` prints one affected test name per line and `--files` one test file
-per line, for a runner's filter. A dependency, lockfile, configuration or
+per line, for a runner's filter. A Vitest, Playwright or node:test test inside
+`describe` blocks is printed as the blocks and the test joined by spaces
+(`small charges`), which is what `vitest -t`, `--grep` and
+`--test-name-pattern` match. A dependency, lockfile, configuration or
 toolchain change affects every test and is reported as such. A source file
 added since the run is outside every test's record; the working-tree check
 says so, and the suite should run in full.
+
+### Which affected tests check the change
+
+When the run has an [assertion assessment](assertions.md), `tests affected`
+also says, for each affected test, whether it was judged to catch a change to
+the statements that changed in code it ran, and lists those tests first. A run
+without an assessment answers from coverage alone, as above.
+
+```sh supercov
+npx supercov runs latest assertions assess              # once, on the run
+# ... edit code ...
+npx supercov runs latest assertions assess --changed    # ask every test that ran the changed code
+npx supercov runs latest tests affected --names --ran-changed
+```
+
+The assessment stops asking about a statement once one test catches it, so on
+its own it knows only some tests' answers. `assess --changed` asks, for the
+statements in code changed since the run, every test that ran them: typically
+a few requests per commit. After it, `--ran-changed` leaves out the affected
+tests that ran the changed declaration but none of the changed statements, and
+`--asserting` also those judged to catch no change to them. Tests whose own
+file changed or that did not pass stay, and so does any test never asked. With
+an assessment or without, `--names` and `--files` list first the tests whose
+own file or name shares words with a changed file (`test_receivebuffer.py` for
+`_receivebuffer.py`), the verdicts breaking ties.
+
+Measured by applying random changes and running the suite:
+
+| Project | Breaking changes (failing tests) | Coverage's set | `--ran-changed` | `--asserting` | A failing test in the first three |
+| --- | --- | --- | --- | --- | --- |
+| h11 (Python, 78 tests) | 23 (153) | all 153 in 28 tests | all 153 in 23.5 | 141 in 19.9 | 18 of 23 |
+| go-version (Go, 31 tests) | 36 (140) | all 140 in 10.1 | all 140 in 9.8 | 133 in 9.4 | 32 of 36 |
+
+`--ran-changed` never dropped a failing test; `--asserting` dropped 5 to 8% of
+them. `assess --changed` cost about a tenth of a cent per change.
+
+Measured on real history: at each of a project's recent commits, the source
+the commit replaced was put back -- someone reintroducing what it fixed -- and
+the commit's own tests run against it:
+
+| Project | Commits (breaking) | Failing tests | Kept by coverage's set | Kept by `--asserting` | Tests selected (coverage / `--asserting`) of all |
+| --- | --- | --- | --- | --- | --- |
+| h11 (Python) | 60 (13) | 27 | 27 | 27 | 25.2 / 24.9 of 75 |
+| go-version (Go) | 24 (2) | 3 | 3 | 3 | 15.2 / 14.1 of 25 |
+| dry-inflector (Ruby) | 12 (7) | 26 | 26 | 26 | 813 / 718 of 1,109 |
+| uuid (TypeScript, node:test) | 4 (3) | 6 | 6 | 6 | 13.2 / 11.5 of 64 |
+| dtolnay/semver (Rust) | 20 (0) | 0 | -- | -- | 27.9 / 25.9 of 38 |
+| commons-cli (Java) | 15 (7) | 12 | 12 | 12 | 159 / 143 of 985 |
+
+No failing test was left out of the set to run. On real commits the
+assessment narrows little -- Jev judges most tests that ran a changed line to
+catch the change -- and its verdicts alone ranked a failing test in the first
+three for only 6 of 32 breaking commits. Ranking by name, with the verdicts
+breaking ties, put one there for 10 of those 32, and for 15 of 25 breaking
+commits in four projects it was not designed on (hashie, Masterminds/semver,
+itsdangerous, java-classmate), where file order managed 11; without an
+assessment, name alone managed 8 and 12. After a project's first
+assessment, each commit cost under a cent.
 
 ## Combine shards
 

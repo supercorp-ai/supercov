@@ -31,9 +31,6 @@ assert.deepEqual(manifest.files, [
   "docs/assertions.md",
   "docs/quality.md",
   "docs/security.md",
-  "docs/assertion-evidence.md",
-  "docs/assertion-maps.md",
-  "docs/assertion-agent.md",
   "docs/troubleshooting.md",
   "docs/cli.md",
   "docs/coverage-model.md",
@@ -42,7 +39,6 @@ assert.deepEqual(manifest.files, [
   "docs/verification.md",
   "docs/performance.md",
   "docs/workspace-isolation.md",
-  "schemas",
   "README.md"
 ]);
 assert.equal(
@@ -282,5 +278,5 @@ assert.equal(
 );
 
 console.log(
-  `[package-preflight] native launcher, ${runtimeFiles.length} target-language shims, Rust assertion-map workflow, no legacy engine or product-oracle dependencies`,
+  `[package-preflight] native launcher, ${runtimeFiles.length} target-language shims, no legacy engine or product-oracle dependencies`,
 );

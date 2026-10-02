@@ -128,14 +128,14 @@ const BASE_URL: &str = "https://api.typesafe.ai";
 /// The model every request names. `TYPESAFE_DEFAULT_MODEL` is the variable
 /// TypeSafe's own SDKs read, so a gateway that names Jev differently works the
 /// way it already does for them.
-fn model() -> &'static str {
+pub(crate) fn model() -> &'static str {
     static MODEL_IN_USE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     MODEL_IN_USE.get_or_init(|| setting("TYPESAFE_DEFAULT_MODEL").unwrap_or_else(|| MODEL.into()))
 }
 
 /// Where requests go: `TYPESAFE_BASE_URL`, read as TypeSafe's SDKs read it,
 /// with the API path appended.
-fn endpoint() -> Result<&'static str, String> {
+pub(crate) fn endpoint() -> Result<&'static str, String> {
     static ENDPOINT: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
     ENDPOINT
         .get_or_init(|| endpoint_for(setting("TYPESAFE_BASE_URL").as_deref()))
@@ -173,7 +173,7 @@ fn host(url: &str) -> &str {
 }
 
 /// An environment variable, where blank means unset as it does for the SDKs.
-fn setting(name: &str) -> Option<String> {
+pub(crate) fn setting(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
@@ -672,7 +672,7 @@ struct Window {
 /// as too large. Measured against 1,367 requests whose real input counts the
 /// API reported, this estimate is below the real count once, by 3%, which the
 /// gap between `MAX_REQUEST_TOKENS` and the model's limit absorbs.
-fn estimated_tokens(bytes: &[u8]) -> usize {
+pub(crate) fn estimated_tokens(bytes: &[u8]) -> usize {
     let dense = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-');
     let mut runs = 0;
     let mut run = 0;
@@ -1135,32 +1135,26 @@ fn read_text(path: &Path) -> Result<String, String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ApiResponse {
-    model: String,
-    answers: BTreeMap<String, Answer>,
-    usage: Usage,
+pub(crate) struct ApiResponse {
+    pub(crate) model: String,
+    pub(crate) answers: BTreeMap<String, Answer>,
+    pub(crate) usage: Usage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Usage {
-    input_tokens: u64,
-    output_tokens: u64,
+pub(crate) struct Usage {
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-enum Answer {
+pub(crate) enum Answer {
     Noul {
         noul: f64,
     },
     Choice {
         choice: String,
-        probabilities: BTreeMap<String, f64>,
-        confidence: f64,
-    },
-    Score {
-        score: f64,
-        legend: BTreeMap<String, String>,
         probabilities: BTreeMap<String, f64>,
         confidence: f64,
     },
@@ -1212,38 +1206,6 @@ fn validate(response: &ApiResponse, request: &Value) -> Result<(), String> {
                     keys.contains(choice)
                         && probability(*confidence)
                         && distribution(probabilities, keys)
-                })
-            }
-            Answer::Score {
-                score,
-                legend,
-                probabilities,
-                confidence,
-            } => {
-                let levels = question["criteria"]
-                    .as_array()
-                    .filter(|_| question["type"] == "score");
-                levels.is_some_and(|levels| {
-                    let keys = (0..levels.len()).map(|i| i.to_string()).collect();
-                    let expected: f64 = (0..levels.len())
-                        .map(|i| {
-                            i as f64 * probabilities.get(&i.to_string()).copied().unwrap_or(0.0)
-                        })
-                        .sum();
-                    // The provider rounds the score and each probability
-                    // independently. Bound both errors, including float noise.
-                    let rounding_error =
-                        0.005 * (1 + (0..levels.len()).sum::<usize>()) as f64 + 1e-9;
-                    score.is_finite()
-                        && *score >= 0.0
-                        && *score <= (levels.len() - 1) as f64
-                        && probability(*confidence)
-                        && distribution(probabilities, keys)
-                        && (*score - expected).abs() <= rounding_error
-                        && legend.len() == levels.len()
-                        && levels.iter().enumerate().all(|(i, level)| {
-                            legend.get(&i.to_string()).map(String::as_str) == level.as_str()
-                        })
                 })
             }
         };
@@ -1309,7 +1271,7 @@ fn jitter() -> Duration {
     Duration::from_millis((nanos % 250) as u64)
 }
 
-fn client() -> ureq::Agent {
+pub(crate) fn client() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(45)))
         .max_redirects(0)
@@ -1318,7 +1280,7 @@ fn client() -> ureq::Agent {
         .new_agent()
 }
 
-fn evaluate(
+pub(crate) fn evaluate(
     agent: &ureq::Agent,
     endpoint: &str,
     key: &str,
@@ -1454,7 +1416,7 @@ const CONCURRENCY: usize = 8;
 const MAX_BACKOFF_SECONDS: u64 = 30;
 
 /// What Jev charges for input. Output is free, so this is the whole bill.
-const USD_PER_MILLION_INPUT_TOKENS: f64 = 0.042;
+pub(crate) const USD_PER_MILLION_INPUT_TOKENS: f64 = 0.042;
 
 /// A request answered: its hash, the answer, whether it came from the cache,
 /// and any trouble saving it.
@@ -3595,7 +3557,7 @@ fn human_security(report: &Value) -> String {
         ));
         match report["flagged_executed_unasserted"].as_u64() {
             Some(n) => out.push_str(&format!(
-                "; {n} are executed by tests that no assertion is credited with.\n"
+                "; {n} are executed by tests that are not judged to catch any line of them.\n"
             )),
             None => out.push_str(".\n"),
         }
@@ -3686,26 +3648,19 @@ fn human_security(report: &Value) -> String {
         }
         if file["flagged_and_unasserted"] == true {
             out.push_str(
-                "    executed by tests, but no assertion is credited with any line of it\n",
+                "    executed by tests, but no test is judged to catch a change to any line of it\n",
             );
         } else if let Some(credited) = file["assertions"]["lines_credited"].as_u64() {
             out.push_str(&format!(
-                "    {credited} of its lines are credited to assertions\n"
+                "    {credited} of its lines are asserted (a test is judged to catch a change to them)\n"
             ));
             for finding in file["present"].as_array().unwrap_or(&empty) {
                 for line in finding["lines"].as_array().unwrap_or(&empty) {
-                    match line["asserted"].as_str() {
-                        Some("exercised") => out.push_str(&format!(
-                            "    line {}: proven reachable by a test that asserts it happens: {}\n",
-                            line["line"].as_u64().unwrap_or(0),
-                            line["asserted_by"].as_str().unwrap_or("")
-                        )),
-                        Some("prevented") => out.push_str(&format!(
-                            "    line {}: a test asserts it is prevented: {}\n",
-                            line["line"].as_u64().unwrap_or(0),
-                            line["asserted_by"].as_str().unwrap_or("")
-                        )),
-                        _ => {}
+                    if line["asserted"] == true {
+                        out.push_str(&format!(
+                            "    line {}: asserted; a test is judged to catch a change to it\n",
+                            line["line"].as_u64().unwrap_or(0)
+                        ));
                     }
                 }
             }
@@ -3844,50 +3799,9 @@ fn cross_with_coverage(
     let view = crate::load_run_view(selector)?;
     // Assertion credit is the third shelf, and only the security view asks
     // for it: a change review already says what appeared and where tests do
-    // not go. A run with no assertion map leaves every file on the second.
+    // not go. A run whose assertions were not assessed leaves every file on the second.
     let asserted = (file_flag == "flagged_and_untested")
         .then(|| crate::load_asserted_lines(selector).unwrap_or_default());
-    // What each credited flow establishes, asked once of the map's text. A
-    // line credited by a flow that asserts prevention is close to handled; a
-    // line credited by one that asserts the operation ran is proven reachable.
-    let verdicts: BTreeMap<(String, u64), (String, String)> = asserted
-        .as_ref()
-        .filter(|a| !a.is_empty())
-        .and_then(|_| crate::load_credited_flows(selector).ok())
-        .filter(|flows| !flows.is_empty())
-        .map(|flows| {
-            let key = std::env::var("TYPESAFE_API_KEY").ok();
-            let request = catalog::security::flow_request(&flows);
-            let mut out = BTreeMap::new();
-            if let Ok(Some(bytes)) = within_budget(&request)
-                && let Ok(root) = std::env::current_dir()
-            {
-                let agent = client();
-                let answered = answer_all(
-                    &root,
-                    "security",
-                    &agent,
-                    key.as_deref(),
-                    false,
-                    &[((0, None), request, bytes)],
-                    false,
-                );
-                if let Some(Ok((_, entry, _, _))) = answered.into_values().next() {
-                    for (i, flow) in flows.iter().enumerate() {
-                        if let Some(verdict) = choice(&entry.response, &format!("w{i}")) {
-                            for (file, line) in &flow.lines {
-                                out.insert(
-                                    (file.clone(), *line),
-                                    (verdict.clone(), flow.assertion.clone()),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            out
-        })
-        .unwrap_or_default();
     let mut both = 0usize;
     let mut unasserted = 0usize;
     let empty = Vec::new();
@@ -3923,17 +3837,15 @@ fn cross_with_coverage(
                             unasserted += 1;
                             file["flagged_and_unasserted"] = json!(true);
                         }
-                        // Per confirmed line: what the crediting assertion establishes.
+                        // Per confirmed line: whether a test is judged to catch it.
                         if let Some(present) = file["present"].as_array_mut() {
                             for finding in present {
                                 if let Some(lines) = finding["lines"].as_array_mut() {
                                     for line in lines {
                                         let number = line["line"].as_u64().unwrap_or(0);
-                                        if let Some((verdict, assertion)) =
-                                            verdicts.get(&(path.clone(), number))
+                                        if asserted.get(&path).is_some_and(|l| l.contains(&number))
                                         {
-                                            line["asserted"] = json!(verdict);
-                                            line["asserted_by"] = json!(assertion);
+                                            line["asserted"] = json!(true);
                                         }
                                     }
                                 }
