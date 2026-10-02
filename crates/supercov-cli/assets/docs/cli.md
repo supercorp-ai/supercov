@@ -182,6 +182,7 @@ after source changes.
 ```sh supercov-example
 npx supercov runs <run-id> assertions assess --dry-run
 npx supercov runs <run-id> assertions assess
+npx supercov runs <run-id> assertions assess --refresh   # ask again instead of reusing saved answers
 npx supercov runs <run-id> assertions
 npx supercov runs <run-id> assertions --all --json
 ```

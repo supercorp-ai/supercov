@@ -2,23 +2,27 @@
 
 ## Unreleased
 
-**Fixed**
+**Added**
 
-- Commands Supercov prints (next pages, `assertions assess`, the run's follow-up commands) are written the way you started it: `supercov …` from the PyPI, Ruby and Rust packages and the Go command from Go. They always said `npx supercov`.
-- `supercov quality` counts each file as good, fair or weak by the score it prints, as the HTML report does: a file shown as `good (8.0/10)` was counted fair for its 7.98.
-- A failing Playwright test's code frame shows your test's line, with the caret on the matcher, instead of Supercov's instrumented copy of it.
-- node:test todo tests are counted as node:test counts them, with their own `Todo` line in the summary. A todo test without a body was missing, a todo whose body failed counted as a failure, and the tests of a `describe.todo` counted as passes.
-- `security file <path>` shows what the summary flagged. A check the line pass confirmed read `no` with the file question's value, and was judged against the quality cutoff instead of the check's own; it now lists the confirmed lines.
-- `assertions assess --dry-run` says the most the pass can cost beside its first round. The stated "1.5 to 3 times the first round" was 4 times on a 1,076-test suite.
-- One answer or request is counted in the singular ("1 answer reused").
-- `assertions assess` asks first the tests whose file quotes text the statement writes. It went round-robin over test files in alphabetical order, so of 179 tests running a log line the 15 asked missed the one that compares the whole log. With this and the change rules below, a supergateway run went from 154 statements not asserted to 88 (93.4% to 96.2%) at the same cost, and all seven its reviewer had shown were caught by an existing test came out asserted.
-- Changes that could never be caught are no longer asked: `return undefined` (or `None`) is skipped instead of "returning undefined", and a `true`/`false` literal that is returned or declared is flipped instead of becoming undefined. A constructor's `super(...)` is not assessed, since skipping it does not compile. A TypeScript `throw` throws a bare `new Error()` instead of being deleted: deleting a guard's throw leaves code that does not type-check.
-- Not-asserted listings say how many of the tests that run each statement were asked; the statement view says the tests not asked were not judged.
+- `assertions assess --refresh` asks every question again instead of reusing saved answers, and keeps the new ones. A reused answer is the one Jev gave before, and there was no way to replace one shown to be wrong.
 
 **Changed**
 
+- `assertions assess` asks first the tests whose file quotes text the statement writes. It went round-robin over test files in alphabetical order, so of 179 tests running a log line the 15 asked missed the one that compares the whole log. With the change rules below, a reviewed supergateway run went from 154 statements not asserted to 88 (93.4% to 96.2%) at the same cost, and all seven the reviewer had shown were caught by an existing test came out asserted; a later run went from 94.8% to 97.2%.
+- Changes that could never be caught are no longer asked. `return undefined` (or `None`) is skipped instead of "returning undefined", and a returned or declared `true`/`false` is flipped instead of becoming undefined. A TypeScript `throw` throws a bare `new Error()` instead of being deleted, since deleting a guard's throw does not type-check, and a constructor's `super(...)` is not assessed.
+- Not-asserted listings say how many of the tests that run each statement were asked; the statement view says the tests not asked were not judged.
 - `supercov report` includes the five newest runs and writes the report whatever its size; `--runs N` includes N. It included ten and refused a report over 24 MB after preparing them all, three minutes on a large project.
-- A run keeps which of its statements run over several lines, and what an assessment reads, so `report` and `assertions assess` read them instead of analysing the run's evidence again.
+- A run keeps what `report` and `assertions assess` read from its evidence. On a supergateway run, a one-run report takes 1.1 s instead of 7.2 s, and planning an assessment 6 s instead of 16 s.
+
+**Fixed**
+
+- Commands Supercov prints (next pages, `assertions assess`, a run's follow-up commands) are written the way you started it: `supercov …` from the PyPI, Ruby and Rust packages and the Go command from Go. They always said `npx supercov`.
+- node:test todo tests are counted as node:test counts them, with their own `Todo` line in the summary. A todo test without a body was missing, a todo whose body failed counted as a failure, and the tests of a `describe.todo` counted as passes.
+- `security file <path>` shows what the summary flagged. A check the line pass confirmed read `no` with the file question's value, judged against the quality cutoff instead of the check's own; it now lists the confirmed lines.
+- `supercov quality` counts each file as good, fair or weak by the score it prints, as the HTML report does: a file shown as `good (8.0/10)` was counted fair for its 7.98.
+- `assertions assess --dry-run` says the most the pass can cost beside its first round. The stated "1.5 to 3 times the first round" was 4 times on a 1,076-test suite.
+- A failing Playwright test's code frame shows your test's line, with the caret on the matcher, instead of Supercov's instrumented copy of it.
+- One answer or request is counted in the singular ("1 answer reused").
 
 ## 3.0.1
 

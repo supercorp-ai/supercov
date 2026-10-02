@@ -279,6 +279,18 @@ fn an_assessment_is_saved_reused_and_drives_tests_affected() {
     assert!(reused.contains("100% asserted"), "{reused}");
     assert_eq!(seen.lock().unwrap().len(), asked, "every answer was reused");
 
+    // `--refresh` asks every question again instead, for an answer shown to
+    // be wrong, and keeps what it gets.
+    let refreshed = project
+        .supercov_with(&["runs", &again, "assertions", "assess", "--refresh"], &jev)
+        .succeeds();
+    assert!(refreshed.contains("; 0 answers reused"), "{refreshed}");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        asked * 2,
+        "every question was asked again"
+    );
+
     project.edit(
         "src/cart.js",
         "return express ? 15 : 5;",
