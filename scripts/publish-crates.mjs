@@ -20,10 +20,13 @@ const crates = ["supercov-contracts", "supercov-engine", "supercov"];
 const dryRun = process.argv.includes("--dry-run");
 assert(dryRun || process.env.CARGO_REGISTRY_TOKEN, "CARGO_REGISTRY_TOKEN is not set");
 
-for (const crate of crates) {
-  const response = await fetch(`https://crates.io/api/v1/crates/${crate}/${version}`, {
+const onRegistry = (crate) =>
+  fetch(`https://crates.io/api/v1/crates/${crate}/${version}`, {
     headers: { "user-agent": "supercov-release (https://github.com/supercorp-ai/supercov)" },
   });
+
+for (const crate of crates) {
+  const response = await onRegistry(crate);
   if (response.ok) {
     console.log(`[crates] ${crate}@${version} already exists; skipped`);
     continue;
@@ -33,11 +36,19 @@ for (const crate of crates) {
     console.log(`[crates] would publish ${crate}@${version}`);
     continue;
   }
-  const published = spawnSync("cargo", ["publish", "-p", crate, "--locked"], {
-    cwd: repository,
-    encoding: "utf8",
-    stdio: ["ignore", "inherit", "inherit"],
-  });
-  if (published.status !== 0) throw new Error(`failed to publish ${crate}@${version}`);
+  // A crate's dependency can be on crates.io and still missing from the index
+  // cargo resolves against: 3.0.0 stopped at `supercov` a second after
+  // `supercov-engine` was published. Try again while the index catches up.
+  for (let attempt = 1; ; attempt++) {
+    const published = spawnSync("cargo", ["publish", "-p", crate, "--locked"], {
+      cwd: repository,
+      encoding: "utf8",
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+    if (published.status === 0 || (await onRegistry(crate)).ok) break;
+    if (attempt === 5) throw new Error(`failed to publish ${crate}@${version}`);
+    console.log(`[crates] ${crate}@${version} failed to publish; trying again in 30 s`);
+    await new Promise((settle) => setTimeout(settle, 30_000));
+  }
   console.log(`[crates] published ${crate}@${version}`);
 }

@@ -1254,6 +1254,39 @@ impl AssertionEdits<'_> {
         self.edits.push(TextEdit::insert(end, width, closing));
     }
 
+    /// Bind a TypeScript statement's callee to a local typed as the callee
+    /// itself and call the local. An `asserts` signature narrows only through
+    /// an identifier or a qualified name, explicitly typed (TS2776, TS2775),
+    /// and a bound call is neither: ts-node refused every such test file. The
+    /// phase still opens only when the call is made, after its awaited
+    /// operands, as with any bound call.
+    fn bind_statement(
+        &mut self,
+        statement: &ExpressionStatement<'_>,
+        call: &CallExpression<'_>,
+        callee: &str,
+        operation: &str,
+        source: &str,
+    ) {
+        let Some((local, _)) = self.in_place.clone() else {
+            return;
+        };
+        let (start, end) = (statement.span.start as usize, statement.span.end as usize);
+        let width = (end - start) as i64;
+        self.edits.push(TextEdit::insert(
+            start,
+            -width,
+            format!("{{ const {local}: typeof {callee} = "),
+        ));
+        self.bind(call, operation, source);
+        self.edits.push(TextEdit::insert(
+            call.callee.span().end as usize,
+            width,
+            format!("; {local}"),
+        ));
+        self.edits.push(TextEdit::insert(end, width, " }".into()));
+    }
+
     /// Bind the original callee and receiver, leaving await and yield operands
     /// in their own function: no async thunk, extra await or new microtask.
     fn bind(&mut self, call: &CallExpression<'_>, operation: &str, source: &str) {
@@ -1308,16 +1341,21 @@ impl<'a> Visit<'a> for AssertionEdits<'_> {
     fn visit_expression_statement(&mut self, statement: &ExpressionStatement<'a>) {
         if self.in_place.is_some()
             && let Expression::CallExpression(call) = &statement.expression
-            && self
-                .sites
-                .get(&span_key(call.span))
-                .is_some_and(|(_, _, bound)| !bound)
+            && let Some(&(_, _, bound)) = self.sites.get(&span_key(call.span))
         {
-            let (operation, source, _) = self
-                .sites
-                .remove(&span_key(call.span))
-                .expect("the site was just found");
-            self.wrap_statement(statement, &operation, &source);
+            let entity = entity_name(&call.callee);
+            if !bound || entity.is_some() {
+                let (operation, source, _) = self
+                    .sites
+                    .remove(&span_key(call.span))
+                    .expect("the site was just found");
+                match entity {
+                    Some(callee) if bound => {
+                        self.bind_statement(statement, call, &callee, &operation, &source)
+                    }
+                    _ => self.wrap_statement(statement, &operation, &source),
+                }
+            }
         }
         walk::walk_expression_statement(self, statement);
     }
@@ -1331,6 +1369,20 @@ impl<'a> Visit<'a> for AssertionEdits<'_> {
             }
         }
         walk::walk_call_expression(self, call);
+    }
+}
+
+/// A callee that is an identifier or a qualified name (`assert`,
+/// `assert.strict.ok`), dotted and without whitespace: what `typeof` takes.
+fn entity_name(callee: &Expression<'_>) -> Option<String> {
+    match callee {
+        Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+        Expression::StaticMemberExpression(member) if !member.optional => Some(format!(
+            "{}.{}",
+            entity_name(&member.object)?,
+            member.property.name
+        )),
+        _ => None,
     }
 }
 
@@ -9060,6 +9112,46 @@ mod tests {
         let allocator = Allocator::default();
         assert!(
             Parser::new(&allocator, &output.code, SourceType::mjs())
+                .parse()
+                .errors
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_typescript_assertion_with_an_await_calls_a_typed_local() {
+        let source = concat!(
+            "import assert from 'node:assert/strict';\n",
+            "export async function check(user?: string) {\n",
+            "  assert.ok(user, await value());\n",
+            "  assert\n",
+            "    .equal(await value(), 1)\n",
+            "}\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.ts").unwrap();
+        assert_eq!(output.assertions, 2);
+        let code = &output.code;
+        let lines: Vec<&str> = code.lines().collect();
+        assert!(
+            lines[2].starts_with(
+                "  { const __supercovAssertionPhase: typeof assert.ok = globalThis.__SUPERCOV_DIRECT_RUNTIME__.bindNodeAssertionPhase("
+            ),
+            "{code}"
+        );
+        assert!(
+            lines[2]
+                .ends_with(", assert, \"ok\"); __supercovAssertionPhase(user, await value()); }"),
+            "{code}"
+        );
+        assert!(lines[3].contains(": typeof assert.equal = "), "{code}");
+        assert_eq!(
+            lines[4], "     \"equal\"); __supercovAssertionPhase(await value(), 1) }",
+            "{code}"
+        );
+        assert_eq!(lines[5], "}", "{code}");
+        let allocator = Allocator::default();
+        assert!(
+            Parser::new(&allocator, code, SourceType::ts())
                 .parse()
                 .errors
                 .is_empty()
