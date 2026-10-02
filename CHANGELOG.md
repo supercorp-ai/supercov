@@ -18,7 +18,7 @@
 **Changed**
 
 - `supercov report` includes the five newest runs and writes the report whatever its size; `--runs N` includes N. It included ten and refused a report over 24 MB after preparing them all, three minutes on a large project.
-- A run keeps which of its statements run over several lines, so a report reads them instead of analysing the run's evidence again.
+- A run keeps which of its statements run over several lines, and what an assessment reads, so `report` and `assertions assess` read them instead of analysing the run's evidence again.
 
 ## 3.0.1
 

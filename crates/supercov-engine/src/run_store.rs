@@ -30,6 +30,8 @@ pub const RUST_QUERY_PRODUCER_ABI_VERSION: u32 = 4;
 pub const RUST_QUERY_INDEX_FILE: &str = "query-index.v1.bin";
 /// The statements that continue onto later lines, written at publication.
 pub const STATEMENT_SPANS_FILE: &str = "statement-spans.json";
+/// What `assertions assess` reads from the analysis, written at publication.
+pub const ASSESSMENT_INPUT_FILE: &str = "assessment-input.json.gz";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -883,6 +885,23 @@ pub fn read_statement_spans(run: &StoredRun) -> Option<Vec<serde_json::Value>> {
 pub(crate) fn write_statement_spans(run: &StoredRun, report: &CoverageReport) -> io::Result<()> {
     let bytes = serde_json::to_vec(&statement_spans(report)).map_err(io::Error::other)?;
     fs::write(run.directory.join(STATEMENT_SPANS_FILE), bytes)
+}
+
+/// The assessment input publication wrote, when it did.
+pub fn read_assessment_input(
+    run: &StoredRun,
+) -> Option<crate::assertion_coverage::AssessmentInput> {
+    let file = fs::File::open(run.directory.join(ASSESSMENT_INPUT_FILE)).ok()?;
+    serde_json::from_reader(flate2::read::GzDecoder::new(io::BufReader::new(file))).ok()
+}
+
+pub(crate) fn write_assessment_input(run: &StoredRun, report: &CoverageReport) -> io::Result<()> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec(&crate::assertion_coverage::assessment_input(report))
+        .map_err(io::Error::other)?;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&bytes)?;
+    fs::write(run.directory.join(ASSESSMENT_INPUT_FILE), encoder.finish()?)
 }
 
 pub(crate) fn write_query_index_from(

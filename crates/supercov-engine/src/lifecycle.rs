@@ -802,6 +802,13 @@ pub(crate) fn publish_run_with_fault(
                             .join(crate::run_store::STATEMENT_SPANS_FILE),
                     );
                 }
+                if crate::run_store::write_assessment_input(&staged, report).is_err() {
+                    let _ = fs::remove_file(
+                        staged
+                            .directory
+                            .join(crate::run_store::ASSESSMENT_INPUT_FILE),
+                    );
+                }
             })
         });
         let prepared = crate::source_manifest::prepare_publication_with(
@@ -1405,6 +1412,11 @@ mod tests {
         assert_eq!(
             crate::run_store::read_statement_spans(&run).expect("publication wrote the spans"),
             crate::run_store::statement_spans(&analysed)
+        );
+        // So is what an assessment reads.
+        assert_eq!(
+            crate::run_store::read_assessment_input(&run).expect("publication wrote the input"),
+            crate::assertion_coverage::assessment_input(&analysed)
         );
         let written = fs::read(&index).unwrap();
         fs::remove_file(&index).unwrap();

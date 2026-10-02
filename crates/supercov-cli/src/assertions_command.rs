@@ -486,14 +486,14 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
                 stored.manifest.language
             ));
         };
-        let report = maps::coverage(run)?;
+        let input = assessment_input(run)?;
         let sources = snapshot
             .iter()
             .filter(|(file, _)| stored.manifest.files.contains_key(*file))
             .map(|(f, t)| (f.clone(), t.clone()))
             .collect();
         let population =
-            coverage::population(root, &report, &sources, language)?.with_files(snapshot);
+            coverage::population_from(root, &input, &sources, language)?.with_files(snapshot);
         return assess_changed(root, run, options, &population);
     }
     let inputs = maps::load_inputs(root, run)?;
@@ -503,8 +503,8 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
             inputs.inputs.language
         ));
     };
-    let report = maps::coverage(run)?;
-    let population = coverage::population(root, &report, &inputs.inputs.files, language)?;
+    let input = assessment_input(run)?;
+    let population = coverage::population_from(root, &input, &inputs.inputs.files, language)?;
     let n = population.statements.len();
     let mut pass = Pass {
         population: &population,
@@ -904,6 +904,15 @@ fn summary(
 }
 
 /// The run's saved result, when it has been assessed.
+/// What assessing reads from the run: stored at publication, or analysed
+/// from the evidence for a run published before that.
+fn assessment_input(run: &StoredRun) -> Result<coverage::AssessmentInput, String> {
+    match supercov_engine::run_store::read_assessment_input(run) {
+        Some(input) => Ok(input),
+        None => Ok(coverage::assessment_input(&maps::coverage(run)?)),
+    }
+}
+
 pub(crate) fn saved(run: &StoredRun) -> Option<Value> {
     std::fs::read(run.directory.join(RESULT_FILE))
         .ok()

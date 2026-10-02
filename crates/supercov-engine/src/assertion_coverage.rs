@@ -247,22 +247,113 @@ pub struct Population {
 
 /// The executed statements of a run and the tests that ran them. `sources` are
 /// the run's source files, verified against the run.
+/// What assessing a run reads from its analysis: the passing view's tests,
+/// and its measured statements and executed decisions with the tests that ran
+/// them. Publication stores it, so an assessment does not analyse the run's
+/// evidence again (4.4 s of supergateway's 7.6 s of planning).
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct AssessmentInput {
+    pub tests: Vec<InputTest>,
+    pub points: Vec<InputPoint>,
+    pub decisions: Vec<InputPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct InputTest {
+    pub id: String,
+    pub file: Option<String>,
+    pub name: String,
+    pub role: String,
+    pub runner: String,
+}
+
+/// A statement or decision, with the tests that ran it as indexes into
+/// `AssessmentInput::tests`.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct InputPoint {
+    pub file: String,
+    pub line: usize,
+    pub source: String,
+    pub tests: Vec<u32>,
+}
+
+pub fn assessment_input(report: &CoverageReport) -> AssessmentInput {
+    let view = &report.filters.passed;
+    let tests = view
+        .tests
+        .iter()
+        .map(|test| InputTest {
+            id: test.id.clone(),
+            file: test.file.clone(),
+            name: test.name.clone(),
+            role: test.role.clone(),
+            runner: test.provenance.runner.clone(),
+        })
+        .collect::<Vec<_>>();
+    let index = tests
+        .iter()
+        .enumerate()
+        .map(|(i, test)| (test.id.as_str(), i as u32))
+        .collect::<BTreeMap<_, _>>();
+    let indexes = |ids: &[crate::interned::Id]| {
+        ids.iter()
+            .filter_map(|id| index.get(id.as_str()).copied())
+            .collect::<Vec<_>>()
+    };
+    let points = view
+        .points
+        .iter()
+        .filter(|p| p.measured && p.meta.kind == PointKind::Statement)
+        .map(|p| InputPoint {
+            file: p.meta.file.clone(),
+            line: p.meta.line,
+            source: p.meta.source.clone(),
+            tests: indexes(&p.tests),
+        })
+        .collect();
+    let decisions = view
+        .decisions
+        .iter()
+        .filter(|d| d.executed)
+        .map(|d| InputPoint {
+            file: d.meta.file.clone(),
+            line: d.meta.line,
+            source: d.meta.source.clone(),
+            tests: indexes(&d.tests),
+        })
+        .collect();
+    AssessmentInput {
+        tests,
+        points,
+        decisions,
+    }
+}
+
 pub fn population(
     root: &Path,
     report: &CoverageReport,
     sources: &BTreeMap<String, String>,
     language: Language,
 ) -> Result<Population, String> {
-    let view = &report.filters.passed;
+    population_from(root, &assessment_input(report), sources, language)
+}
+
+pub fn population_from(
+    root: &Path,
+    input: &AssessmentInput,
+    sources: &BTreeMap<String, String>,
+    language: Language,
+) -> Result<Population, String> {
     let mut tests = Vec::new();
-    let mut index = BTreeMap::new();
     // JVM tests are named by class; their file is found by its path.
     let jvm_files = if language == Language::Jvm {
         project_files(root, &["java", "kt"])
     } else {
         Vec::new()
     };
-    for test in &view.tests {
+    // Input test index -> population test index.
+    let mut index = BTreeMap::<u32, usize>::new();
+    for (position, test) in input.tests.iter().enumerate() {
         let file = match test.file.as_ref().filter(|f| !f.is_empty()) {
             Some(file) => file.clone(),
             None if language == Language::Jvm => {
@@ -279,12 +370,12 @@ pub fn population(
         if test.role != "test" {
             continue;
         }
-        index.insert(test.id.as_str(), tests.len());
+        index.insert(position as u32, tests.len());
         tests.push(TestRef {
             id: test.id.clone(),
             file,
             name: test.name.clone(),
-            runner: test.provenance.runner.clone(),
+            runner: test.runner.clone(),
         });
     }
     let mut changes = BTreeMap::<String, BTreeMap<usize, Vec<(String, Option<Change>)>>>::new();
@@ -304,16 +395,15 @@ pub fn population(
     // Python and Ruby record an `elif`/`elsif`, and Go, Rust and the JVM
     // languages may record an `else if`, as a decision only: its condition is
     // taken after every statement, where no statement starts on its line.
-    let executed = view
+    let executed = input
         .points
         .iter()
-        .filter(|p| p.measured && p.meta.kind == PointKind::Statement)
-        .map(|p| (&p.meta.file, p.meta.line, &p.meta.source, &p.tests, false));
-    let elifs = view
+        .map(|p| (&p.file, p.line, &p.source, &p.tests, false));
+    let elifs = input
         .decisions
         .iter()
-        .filter(|d| d.executed && language != Language::JavaScript)
-        .map(|d| (&d.meta.file, d.meta.line, &d.meta.source, &d.tests, true));
+        .filter(|_| language != Language::JavaScript)
+        .map(|d| (&d.file, d.line, &d.source, &d.tests, true));
     for (file, line, text, point_tests, decision) in executed.chain(elifs) {
         let key = (file.clone(), line);
         if !seen.insert(key) {
@@ -321,7 +411,7 @@ pub fn population(
         }
         let ids = point_tests
             .iter()
-            .filter_map(|id| index.get(id.as_str()).copied())
+            .filter_map(|position| index.get(position).copied())
             .collect::<Vec<_>>();
         if ids.is_empty() {
             continue;
