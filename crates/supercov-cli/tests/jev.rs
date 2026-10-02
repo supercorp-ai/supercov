@@ -545,7 +545,12 @@ fn quality_names_a_mistake_before_asking_anything() {
         ),
         (
             vec!["quality", "nosuchdir"],
-            "nosuchdir: No such file or directory",
+            // The operating system's own words for a missing path.
+            if cfg!(windows) {
+                "nosuchdir: The system cannot find the file specified"
+            } else {
+                "nosuchdir: No such file or directory"
+            },
         ),
         (
             vec!["quality", "notes.txt"],

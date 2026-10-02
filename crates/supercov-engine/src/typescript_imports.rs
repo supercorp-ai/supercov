@@ -94,6 +94,7 @@ pub(crate) fn config_paths(root: &Path, files: &[String]) -> BTreeSet<PathBuf> {
             }
         }
     }
+    let given = root;
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
     let mut paths = BTreeSet::new();
     for file in files {
@@ -116,7 +117,14 @@ pub(crate) fn config_paths(root: &Path, files: &[String]) -> BTreeSet<PathBuf> {
             }
         }
     }
+    // Followed through links on the canonical root, handed back under the
+    // root as given: callers name files relative to it, and the canonical
+    // form differs -- `\\?\C:\...` on Windows, `/private/var` for `/var` on
+    // macOS -- so a fingerprint called its tsconfig outside the project.
     paths
+        .into_iter()
+        .filter_map(|path| path.strip_prefix(&root).ok().map(|local| given.join(local)))
+        .collect()
 }
 
 pub(crate) fn elides_type_imports(
@@ -322,10 +330,7 @@ mod tests {
         )
         .unwrap();
         assert!(!elides_type_imports(&root, "src/main.ts", &command, &build));
-        assert!(
-            config_paths(&root, &["src/main.ts".into()])
-                .contains(&fs::canonicalize(root.join("base.json")).unwrap())
-        );
+        assert!(config_paths(&root, &["src/main.ts".into()]).contains(&root.join("base.json")));
         assert!(!elides_type_imports(
             &root,
             "src/main.ts",

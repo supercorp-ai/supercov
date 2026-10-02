@@ -32,6 +32,7 @@
 
 **Fixed**
 
+- On Windows, a TypeScript project with a `tsconfig.json` runs: the run's fingerprint called the tsconfig outside the project, because it was named by its `\\?\C:\...` form and the project by its plain one, and the run stopped before any test.
 - On Windows, a run waits for another run in the same project instead of taking its lock over. Whether the lock's owner was still running was answered yes only for the asking process itself, so every other live run's lock read as left behind.
 - On Windows, a sandbox command given its environment as a plain map, or a builder's `withEnvironment`, gets Supercov's settings when the map is a copy of `process.env`. Windows' own variables have names like `ProgramFiles(x86)`, which made the map read as options, and the guest ran with the host's paths.
 - In a JavaScript chain of optional members, a link is no longer credited with a nullish outcome it never saw. In `o?.inner?.value`, a test where `o` was undefined covered "`inner` was nullish" too, so a suite that never reached a missing `inner` showed the guard fully covered; in `make?.()?.value`, a test without `make` covered "`make()` returned nothing". Each link now records only when the chain reaches it; a getter or call between two links that evaluates chains of its own does not disturb them. Optional calls were fixed the same way earlier.
