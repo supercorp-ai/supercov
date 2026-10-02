@@ -929,7 +929,7 @@ pub(crate) fn for_file(run: &StoredRun, file: &str) -> Value {
         "notAsserted": here.len() as u64 - asserted,
         "percentage": percentage(asserted, here.len() as u64),
         "notAssertedLines": lines,
-        "inspect": format!("npx supercov runs {} assertions {}", quote(&run.id), quote(file)),
+        "inspect": format!("{} runs {} assertions {}", crate::launcher_command(), quote(&run.id), quote(file)),
     })
 }
 
@@ -957,12 +957,12 @@ pub(crate) fn for_line(run: &StoredRun, file: &str, line: usize) -> Value {
     json!({
         "available": true,
         "statements": here,
-        "inspect": format!("npx supercov runs {} assertions {}", quote(&run.id), quote(&format!("{file}:{line}"))),
+        "inspect": format!("{} runs {} assertions {}", crate::launcher_command(), quote(&run.id), quote(&format!("{file}:{line}"))),
     })
 }
 
 fn not_assessed(run: &StoredRun) -> Value {
-    json!({"available": false, "assess": format!("npx supercov runs {} assertions assess", quote(&run.id))})
+    json!({"available": false, "assess": format!("{} runs {} assertions assess", crate::launcher_command(), quote(&run.id))})
 }
 
 /// The run's saved result, or where the last one is when this run has none.
@@ -980,7 +980,7 @@ fn read(run: &StoredRun, runs: &[StoredRun], options: &Options) -> Result<Value,
         "run": run.id,
         "assessed": false,
         "lastAssessed": last,
-        "assess": format!("npx supercov runs {} assertions assess", run.id),
+        "assess": format!("{} runs {} assertions assess", crate::launcher_command(), run.id),
         "note": "Answers from earlier assessments are reused when the same question comes up, so assessing a later run usually asks only about what changed; `assess --dry-run` shows how many questions it would send.",
     }))
 }
@@ -1081,7 +1081,8 @@ fn view(
                 .collect::<Vec<_>>();
             if here.is_empty() {
                 return Err(format!(
-                    "no assessed statement in {file}; `npx supercov runs {run} assertions` lists the assessed files"
+                    "no assessed statement in {file}; `{} runs {run} assertions` lists the assessed files",
+                    crate::launcher_command()
                 ));
             }
             let asserted = here.iter().filter(|s| s["asserted"] == true).count() as u64;
@@ -1130,7 +1131,8 @@ fn view(
                 .collect::<Vec<_>>();
             if here.is_empty() {
                 return Err(format!(
-                    "no assessed statement at {file}:{line}; `npx supercov runs {run} assertions {}` lists the file's statements that are not asserted",
+                    "no assessed statement at {file}:{line}; `{} runs {run} assertions {}` lists the file's statements that are not asserted",
+                    crate::launcher_command(),
                     quote(file)
                 ));
             }
@@ -1161,7 +1163,8 @@ fn view(
             let (test_file, test_name) = match tests.len() {
                 0 => {
                     return Err(format!(
-                        "no assessed test is named {query}; `npx supercov runs {run} tests` lists the run's tests"
+                        "no assessed test is named {query}; `{} runs {run} tests` lists the run's tests",
+                        crate::launcher_command()
                     ));
                 }
                 1 => tests.into_iter().next().unwrap(),
@@ -1383,11 +1386,16 @@ fn render_files(run: &str, data: &Value) -> String {
     }
     out.push_str(&page_footer(
         data,
-        &format!("npx supercov runs {} assertions", quote(run)),
+        &format!(
+            "{} runs {} assertions",
+            crate::launcher_command(),
+            quote(run)
+        ),
     ));
     if let Some(first) = files.iter().find(|f| f["notAsserted"].as_u64() > Some(0)) {
         out.push_str(&format!(
-            "inspect a file: npx supercov runs {} assertions {}\n",
+            "inspect a file: {} runs {} assertions {}\n",
+            crate::launcher_command(),
             quote(run),
             quote(first["file"].as_str().unwrap_or(""))
         ));
@@ -1433,14 +1441,16 @@ fn render_file(run: &str, data: &Value) -> String {
     out.push_str(&page_footer(
         data,
         &format!(
-            "npx supercov runs {} assertions {}",
+            "{} runs {} assertions {}",
+            crate::launcher_command(),
             quote(run),
             quote(file)
         ),
     ));
     if let Some(first) = not.first() {
         out.push_str(&format!(
-            "inspect a statement: npx supercov runs {} assertions {}\n",
+            "inspect a statement: {} runs {} assertions {}\n",
+            crate::launcher_command(),
             quote(run),
             quote(&format!("{file}:{}", first["line"]))
         ));
@@ -1525,7 +1535,8 @@ fn render_test(run: &str, data: &Value) -> String {
     out.push_str(&page_footer(
         data,
         &format!(
-            "npx supercov runs {} assertions --test {}",
+            "{} runs {} assertions --test {}",
+            crate::launcher_command(),
             quote(run),
             quote(name)
         ),

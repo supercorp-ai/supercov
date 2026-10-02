@@ -2104,6 +2104,41 @@ fn the_file_view_counts_and_labels_lines_as_the_summary_and_line_view_do() {
 }
 
 #[test]
+fn printed_commands_name_the_way_supercov_was_started() {
+    let project = Project::cart("launchers");
+    let run = project.measure(&[]);
+    let root = project.root.to_string_lossy().into_owned();
+    // The PyPI, Ruby and Rust packages run the binary itself; npm sets the
+    // package root; the Go launcher says so.
+    for (env, command) in [
+        (vec![], "supercov"),
+        (
+            vec![("SUPERCOV_PACKAGE_ROOT", root.as_str())],
+            "npx supercov",
+        ),
+        (
+            vec![("SUPERCOV_LAUNCHER", "go")],
+            "go run github.com/supercorp-ai/supercov/cmd/supercov@latest",
+        ),
+    ] {
+        let summary = project.supercov_with(&["runs", "latest"], &env).succeeds();
+        assert!(
+            summary.contains(&format!(
+                "not assessed — {command} runs {run} assertions assess"
+            )),
+            "{env:?}: {summary}"
+        );
+        assert!(
+            summary.contains(&format!("  {command} runs '{run}' files\n")),
+            "{env:?}: {summary}"
+        );
+        if command == "supercov" {
+            assert!(!summary.contains("npx supercov"), "{summary}");
+        }
+    }
+}
+
+#[test]
 fn every_listing_pages_and_names_its_next_page() {
     let project = Project::cart("pages");
     project.write(
@@ -2121,7 +2156,7 @@ fn every_listing_pages_and_names_its_next_page() {
     for (args, next) in [
         (
             vec!["runs", "--limit", "1"],
-            "npx supercov runs --offset 1 --limit 1".to_owned(),
+            "supercov runs --offset 1 --limit 1".to_owned(),
         ),
         (
             vec!["runs", "latest", "files", "--limit", "1"],
@@ -2192,7 +2227,7 @@ fn every_listing_pages_and_names_its_next_page() {
         // The command it names reads the next page.
         let mut words = vec![String::new()];
         let mut quoted = false;
-        for character in next.trim_start_matches("npx supercov ").chars() {
+        for character in next.trim_start_matches("supercov ").chars() {
             match character {
                 '\'' => quoted = !quoted,
                 ' ' if !quoted => words.push(String::new()),

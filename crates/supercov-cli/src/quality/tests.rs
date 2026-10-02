@@ -632,6 +632,23 @@ fn a_band_says_only_what_the_resolution_supports() {
     assert_eq!(band(None), "\u{2014}");
 }
 
+#[test]
+fn the_band_totals_count_each_file_by_the_band_it_prints() {
+    // 7.98 prints as `good (8.0/10)` and 4.96 as `fair (5.0/10)`; the totals
+    // line counted them as fair and weak, while the report counted them as
+    // the files showed.
+    let report = serde_json::json!({
+        "health": 6.9,
+        "files": [
+            {"path": "src/a.ts", "health": 7.98, "present": []},
+            {"path": "src/b.ts", "health": 4.96, "present": []},
+            {"path": "src/c.ts", "health": 4.94, "present": []},
+        ],
+    });
+    let printed = human_quality(&report);
+    assert!(printed.contains("  1 good, 1 fair, 1 weak.\n"), "{printed}");
+}
+
 fn windowed(path: &str, checks: &[(&str, f64)]) -> Answers {
     Answers {
         lines: Vec::new(),

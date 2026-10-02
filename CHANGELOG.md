@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- Commands Supercov prints (next pages, `assertions assess`, the run's follow-up commands) are written the way you started it: `supercov …` from the PyPI, Ruby and Rust packages and the Go command from Go. They always said `npx supercov`.
+- `supercov quality` counts each file as good, fair or weak by the score it prints, as the HTML report does: a file shown as `good (8.0/10)` was counted fair for its 7.98.
+- A failing Playwright test's code frame shows your test's line, with the caret on the matcher, instead of Supercov's instrumented copy of it.
+
 ## 3.0.1
 
 **Fixed**

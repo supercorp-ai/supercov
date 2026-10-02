@@ -544,7 +544,11 @@ fn build_assertions(run: &StoredRun) -> Option<serde_json::Value> {
     let Some(result) = crate::assertions_command::saved(run) else {
         return Some(serde_json::json!({
             "available": false,
-            "error": format!("Not assessed for this run. Run: npx supercov runs {} assertions assess", run.id),
+            "error": format!(
+                "Not assessed for this run. Run: {} runs {} assertions assess",
+                crate::launcher_command(),
+                run.id
+            ),
         }));
     };
     let mut files = BTreeMap::<String, (usize, usize)>::new();

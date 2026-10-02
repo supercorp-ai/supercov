@@ -155,6 +155,9 @@ impl Project {
             "TYPESAFE_DEFAULT_MODEL",
             "SUPERCOV_TEST_KIND",
             "SUPERCOV_SOURCE_ROOTS",
+            // How Supercov was started decides the commands it prints.
+            "SUPERCOV_PACKAGE_ROOT",
+            "SUPERCOV_LAUNCHER",
         ] {
             command.env_remove(name);
         }

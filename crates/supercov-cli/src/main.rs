@@ -240,7 +240,7 @@ fn main() -> ExitCode {
 /// The command the reader used to start Supercov. The npm package sets
 /// `SUPERCOV_PACKAGE_ROOT`, the Go launcher sets `SUPERCOV_LAUNCHER=go`, and
 /// the PyPI, Ruby and Rust packages run the binary itself as `supercov`.
-fn launcher_command() -> &'static str {
+pub(crate) fn launcher_command() -> &'static str {
     match std::env::var("SUPERCOV_LAUNCHER").as_deref() {
         Ok("go") => "go run github.com/supercorp-ai/supercov/cmd/supercov@latest",
         _ if std::env::var_os("SUPERCOV_PACKAGE_ROOT").is_some() => "npx supercov",
@@ -408,7 +408,7 @@ fn merge_command(run_ids: Vec<String>) -> ExitCode {
     match supercov_engine::run_merge::merge_coverage_runs(&root, &run_ids, &run_id, &started_at) {
         Ok(merged) => {
             println!("[supercov] merged run {merged}");
-            println!("npx supercov runs {merged}");
+            println!("{} runs {merged}", launcher_command());
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -1773,9 +1773,10 @@ fn full_suite_hints(root: &Path, command: &[String], observed_kinds: &[String]) 
         format!(" Other test scripts include {}.", alternatives.join(", "))
     };
     vec![format!(
-        "This run observed only the `{}` test kind and wrapped `{}`.{suites} For whole-project coverage, measure the package's full test command: `npx supercov -- npm test`.",
+        "This run observed only the `{}` test kind and wrapped `{}`.{suites} For whole-project coverage, measure the package's full test command: `{} -- npm test`.",
         observed_kinds[0],
-        command.join(" ")
+        command.join(" "),
+        launcher_command()
     )]
 }
 
@@ -1997,7 +1998,7 @@ fn execute_public_query(
                         data.command.clone_from(&run.metadata.command);
                         data.assertion_coverage = Some(match assertions_command::saved(run) {
                             Some(result) => serde_json::json!({"available": true, "summary": result["summary"], "basis": result["basis"], "model": result["model"]}),
-                            None => serde_json::json!({"available": false, "assess": format!("npx supercov runs {} assertions assess", run.id)}),
+                            None => serde_json::json!({"available": false, "assess": format!("{} runs {} assertions assess", crate::launcher_command(), run.id)}),
                         });
 
                         let observed_kinds = data
@@ -2615,7 +2616,7 @@ mod tests {
         assert_eq!(hints.len(), 1);
         assert!(hints[0].contains("only the `unit` test kind"));
         assert!(hints[0].contains("test:e2e"));
-        assert!(hints[0].contains("npx supercov -- npm test"));
+        assert!(hints[0].contains(&format!("{} -- npm test", launcher_command())));
     }
 
     #[test]
