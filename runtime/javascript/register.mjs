@@ -458,6 +458,14 @@ if (/\/node_modules\/ava\/lib\/worker\/base\.js$/.test(entrypoint) && process.en
     const { adaptAva } = await import(new URL("./ava.mjs", import.meta.url).href);
     await adaptAva(entrypoint);
 }
+// The tap CLI runs each test file as a process of its own, marked with
+// TAP_CHILD_ID; the adapter patches tap's TestBase before the file loads it.
+if (process.env.TAP_CHILD_ID && process.env.SUPERCOV_EVIDENCE_DIR && entrypoint) {
+    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
+    process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    const { adaptTap } = await import(new URL("./tap.mjs", import.meta.url).href);
+    await adaptTap(entrypoint);
+}
 if (isJestEntrypoint && process.env.SUPERCOV_EVIDENCE_DIR) {
     // Jest reads one configuration. Ours (jest.config.mjs) reads the user's
     // the way Jest would and adds the adapter and reporter; an explicit

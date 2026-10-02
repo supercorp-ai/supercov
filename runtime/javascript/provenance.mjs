@@ -100,7 +100,7 @@ export function inferTestProvenance({ runner, file, project, explicitKind, }) {
             source: "path",
         };
     }
-    const defaultKind = runner === "vitest" || runner === "jest" || runner === "node:test" || runner === "mocha" || runner === "ava"
+    const defaultKind = runner === "vitest" || runner === "jest" || runner === "node:test" || runner === "mocha" || runner === "ava" || runner === "tap"
         ? "unit"
         : "unknown";
     return {

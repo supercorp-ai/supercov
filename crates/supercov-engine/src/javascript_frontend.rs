@@ -57,6 +57,7 @@ const RUNTIME_FILES: &[&str] = &[
     "resolve-loader.mjs",
     "runnerEvidence.mjs",
     "runtime.mjs",
+    "tap.mjs",
     "transport.mjs",
     "vitest.mjs",
     "vitestBrowser.mjs",
@@ -536,6 +537,7 @@ fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
             "../runtime-assets/javascript/runnerEvidence.mjs"
         )),
         "runtime.mjs" => Some(include_bytes!("../runtime-assets/javascript/runtime.mjs")),
+        "tap.mjs" => Some(include_bytes!("../runtime-assets/javascript/tap.mjs")),
         "transport.mjs" => Some(include_bytes!("../runtime-assets/javascript/transport.mjs")),
         "vitest.mjs" => Some(include_bytes!("../runtime-assets/javascript/vitest.mjs")),
         "vitestBrowser.mjs" => Some(include_bytes!(

@@ -3065,6 +3065,69 @@ fn ava_tests_running_at_once_are_attributed_each_to_its_own() {
 
 #[cfg(unix)]
 #[test]
+fn tap_subtests_running_at_once_are_attributed_each_to_its_own() {
+    let project = Project::empty("tap-tests");
+    project.write("package.json", r#"{ "name": "tap-tests" }"#);
+    // tap 15 and 16 are libtap with a CLI that runs each test file as a
+    // process of its own, marked with TAP_CHILD_ID; this is one such process.
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../node_modules")
+        .canonicalize()
+        .unwrap();
+    project.write(
+        "node_modules/tap/package.json",
+        r#"{ "name": "tap", "version": "16.0.0", "main": "index.js" }"#,
+    );
+    project.write(
+        "node_modules/tap/index.js",
+        "module.exports = require(\"libtap\");\n",
+    );
+    std::os::unix::fs::symlink(
+        modules.join("libtap"),
+        project.root.join("node_modules/libtap"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write(
+        "src/cart.js",
+        "exports.discount = function discount(sum, code) {\n  if (code === \"HALF\") {\n    return sum / 2;\n  }\n  return sum;\n};\n",
+    );
+    // With two jobs `halves` is still waiting when `group > keeps` runs.
+    project.write(
+        "test/cart.test.js",
+        "const t = require(\"tap\");\nconst { discount } = require(\"../src/cart\");\nt.jobs = 2;\nt.test(\"halves\", async (t) => {\n  await new Promise((resolve) => setTimeout(resolve, 50));\n  t.equal(discount(10, \"HALF\"), 5);\n});\nt.test(\"group\", async (t) => {\n  t.test(\"keeps\", async (t) => {\n    t.equal(discount(10, \"X\"), 10);\n    await new Promise((resolve) => setTimeout(resolve, 50));\n  });\n});\nt.test(\"skipped\", { skip: true }, async (t) => t.pass());\n",
+    );
+    project.git(&["init", "-q"]);
+    project
+        .supercov_with(
+            &["--", "node", "test/cart.test.js"],
+            &[("TAP_CHILD_ID", "1")],
+        )
+        .succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "Attribution      Exact for 4 test(s)",
+            "Passed      3",
+            "Skipped     1",
+        ],
+    );
+    let halved = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:3"])
+        .succeeds();
+    assert!(halved.contains("halves [tap:"), "{halved}");
+    assert!(!halved.contains("keeps [tap:"), "{halved}");
+    let kept = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:5"])
+        .succeeds();
+    assert!(kept.contains("group > keeps [tap:"), "{kept}");
+    assert!(!kept.contains("halves [tap:"), "{kept}");
+    assert!(!kept.contains("  group [tap:"), "{kept}");
+}
+
+#[cfg(unix)]
+#[test]
 fn typescript_tests_compiled_into_another_directory_run_and_are_measured() {
     let project = Project::empty("tsc-outdir");
     project.write(

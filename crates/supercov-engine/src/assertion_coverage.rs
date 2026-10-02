@@ -68,6 +68,9 @@ fn runtime(runner: &str) -> &'static str {
         "ava" => {
             "AVA; a failed t assertion, an uncaught error or a rejected promise the test returns fails it; a test past its timeout (default 10 s) fails; a test with no assertion fails unless failWithoutAssertions is off; a file's tests run concurrently unless declared with test.serial."
         }
+        "tap" => {
+            "node-tap; a failed t assertion, an uncaught error or a rejected promise a subtest returns fails it; a subtest past its timeout (default 30 s) fails; a parent fails when a subtest does; each test file runs as a process of its own."
+        }
         "mocha" => {
             "Mocha; a test past its timeout (default 2000 ms) fails; an uncaught error, a rejected promise it returns or an error passed to done fails it; beforeEach hooks run before each test."
         }

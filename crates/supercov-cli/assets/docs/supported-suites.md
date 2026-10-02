@@ -54,6 +54,7 @@ Supercov reports the level it actually observed. It does not guess.
 | `node:test` | Exact per test |
 | Mocha | Exact per test and retry, `--parallel` included, with setup execution kept separate |
 | AVA | Exact per test, concurrent tests included, in worker threads or child processes |
+| node-tap 15 and newer | Exact per subtest, nested and parallel (`t.jobs`) subtests included |
 | Other Node-based runners | Aggregate when their processes remain visible to Supercov |
 | Browser component runners without an adapter | Aggregate structural coverage |
 
