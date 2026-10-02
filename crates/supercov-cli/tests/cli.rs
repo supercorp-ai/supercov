@@ -2998,6 +2998,73 @@ fn mocha_tests_are_attributed_one_by_one_and_selected_by_grep() {
 
 #[cfg(unix)]
 #[test]
+fn ava_tests_running_at_once_are_attributed_each_to_its_own() {
+    let project = Project::empty("ava-tests");
+    project.write(
+        "package.json",
+        r#"{ "name": "ava-tests", "type": "module", "scripts": { "test": "ava" } }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write(
+        "src/cart.js",
+        "export function discount(sum, code) {\n  if (code === \"HALF\") {\n    return sum / 2;\n  }\n  return sum;\n}\n",
+    );
+    // `halves` is still waiting when `keeps` runs: AVA runs a file's tests
+    // at once, so only the carrier, not the clock, can tell them apart.
+    project.write(
+        "test/cart.test.js",
+        "import test from \"ava\";\nimport { discount } from \"../src/cart.js\";\ntest(\"halves\", async (t) => {\n  await new Promise((resolve) => setTimeout(resolve, 50));\n  t.is(discount(10, \"HALF\"), 5);\n});\ntest(\"keeps\", async (t) => {\n  t.is(discount(10, \"X\"), 10);\n  await new Promise((resolve) => setTimeout(resolve, 50));\n});\ntest.skip(\"skipped\", (t) => t.pass());\ntest.todo(\"later\");\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("ava");
+    for command in [
+        &["--", "npx", "ava"][..],
+        &["--", "npx", "ava", "--no-worker-threads"],
+    ] {
+        project.supercov(command).succeeds();
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        contains_all(
+            &summary,
+            &[
+                "Attribution      Exact for 4 test(s)",
+                "Passed      2",
+                "Skipped     2",
+            ],
+        );
+        let halved = project
+            .supercov(&["runs", "latest", "line", "src/cart.js:3"])
+            .succeeds();
+        assert!(halved.contains("halves [ava:"), "{halved}");
+        assert!(!halved.contains("keeps [ava:"), "{halved}");
+        let kept = project
+            .supercov(&["runs", "latest", "line", "src/cart.js:5"])
+            .succeeds();
+        assert!(kept.contains("keeps [ava:"), "{kept}");
+        assert!(!kept.contains("halves [ava:"), "{kept}");
+    }
+    project.edit("src/cart.js", "return sum / 2;", "return sum * 0.5;");
+    // Both ran discount; the skipped and todo tests have no pass to keep.
+    let names = project
+        .supercov(&["runs", "latest", "tests", "affected", "--names"])
+        .succeeds();
+    assert_eq!(names.trim(), "halves\nkeeps\nlater\nskipped");
+    let selected = std::process::Command::new(project.root.join("node_modules/.bin/ava"))
+        .args(["--match", "halves"])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    let output = String::from_utf8_lossy(&selected.stdout);
+    assert!(output.contains("1 test passed"), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
 fn typescript_tests_compiled_into_another_directory_run_and_are_measured() {
     let project = Project::empty("tsc-outdir");
     project.write(

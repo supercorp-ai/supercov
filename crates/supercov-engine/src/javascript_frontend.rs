@@ -37,6 +37,7 @@ const AUTHORED_DIRECTORY: &str = ".supercov/node_modules/.authored";
 const AUTHORED_LIST: &str = ".supercov/node_modules/authored-sources.json";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.mjs",
+    "ava.mjs",
     "bootstrap.cjs",
     "capability.mjs",
     "jest.cjs",
@@ -489,6 +490,7 @@ struct ViteTransform {
 fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
     match name {
         "atomic.mjs" => Some(include_bytes!("../runtime-assets/javascript/atomic.mjs")),
+        "ava.mjs" => Some(include_bytes!("../runtime-assets/javascript/ava.mjs")),
         "bootstrap.cjs" => Some(include_bytes!("../runtime-assets/javascript/bootstrap.cjs")),
         "capability.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/capability.mjs"

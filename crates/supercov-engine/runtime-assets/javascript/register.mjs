@@ -450,6 +450,14 @@ if (isMochaEntrypoint && process.env.SUPERCOV_EVIDENCE_DIR) {
     const { adaptMocha } = await import(new URL("./mocha.mjs", import.meta.url).href);
     await adaptMocha(entrypoint);
 }
+// An AVA worker, a thread or a child process, runs one test file through
+// AVA's Runner, which the adapter patches before the worker loads it.
+if (/\/node_modules\/ava\/lib\/worker\/base\.js$/.test(entrypoint) && process.env.SUPERCOV_EVIDENCE_DIR) {
+    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
+    process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    const { adaptAva } = await import(new URL("./ava.mjs", import.meta.url).href);
+    await adaptAva(entrypoint);
+}
 if (isJestEntrypoint && process.env.SUPERCOV_EVIDENCE_DIR) {
     // Jest reads one configuration. Ours (jest.config.mjs) reads the user's
     // the way Jest would and adds the adapter and reporter; an explicit

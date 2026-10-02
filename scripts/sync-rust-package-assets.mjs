@@ -54,6 +54,7 @@ const mappings = [
   // holds nothing outside its own directory -- still builds from source.
   ...runtimeFiles("javascript", [
     "atomic.mjs",
+    "ava.mjs",
     "bootstrap.cjs",
     "capability.mjs",
     "launchSupervisor.mjs",

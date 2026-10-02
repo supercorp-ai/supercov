@@ -65,6 +65,9 @@ fn runtime(runner: &str) -> &'static str {
         "jest" => {
             "Jest; a test past its timeout (default 5000 ms) fails; an unhandled error during the run fails it; jest.fn() returns undefined unless given an implementation."
         }
+        "ava" => {
+            "AVA; a failed t assertion, an uncaught error or a rejected promise the test returns fails it; a test past its timeout (default 10 s) fails; a test with no assertion fails unless failWithoutAssertions is off; a file's tests run concurrently unless declared with test.serial."
+        }
         "mocha" => {
             "Mocha; a test past its timeout (default 2000 ms) fails; an uncaught error, a rejected promise it returns or an error passed to done fails it; beforeEach hooks run before each test."
         }
