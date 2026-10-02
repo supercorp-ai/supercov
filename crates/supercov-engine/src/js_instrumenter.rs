@@ -2113,61 +2113,141 @@ struct SafetyAnalysis {
     dynamic_limitations: Vec<CandidateLimitation>,
 }
 
-/// The names a file reads function source through: `name.toString()`,
-/// `String(name)` and `${name}` in a template. A function bound to one of
-/// them is shipped as text -- to a worker, a `vm` context, a browser page --
-/// where no probe exists, so it is left as source like a literal read in
-/// place. Another file's reads are not visible here.
-#[derive(Default)]
-struct SourceReads(HashSet<String>);
+/// The bindings a file reads function source through, in the places
+/// `observes_function_source` recognises a function written in place:
+/// `name.toString()`, `String(name)`, `${name}`, `"(" + name + ")"`, and the
+/// same through parentheses, casts, `?:`, `||`, `&&`, `,` and `=`. A function
+/// bound to one of them is shipped as text -- to a worker, a `vm` context, a
+/// browser page -- where no probe exists, so it is left as source like one
+/// read in place. Bindings are symbols, not names: a local `total` compared
+/// with a number says nothing about a function `total` elsewhere. Another
+/// file's reads are not visible here.
+struct SourceReads<'s> {
+    scoping: &'s oxc_semantic::Scoping,
+    symbols: HashSet<SymbolId>,
+}
 
-impl<'a> Visit<'a> for SourceReads {
+impl SourceReads<'_> {
+    fn read(&mut self, expression: &Expression<'_>) {
+        match expression {
+            Expression::Identifier(identifier) => {
+                self.symbols
+                    .extend(referenced_symbol(identifier, self.scoping));
+            }
+            Expression::ParenthesizedExpression(inner) => self.read(&inner.expression),
+            Expression::TSAsExpression(inner) => self.read(&inner.expression),
+            Expression::TSSatisfiesExpression(inner) => self.read(&inner.expression),
+            Expression::TSTypeAssertion(inner) => self.read(&inner.expression),
+            Expression::TSNonNullExpression(inner) => self.read(&inner.expression),
+            Expression::ConditionalExpression(inner) => {
+                self.read(&inner.consequent);
+                self.read(&inner.alternate);
+            }
+            Expression::LogicalExpression(inner) => {
+                self.read(&inner.left);
+                self.read(&inner.right);
+            }
+            Expression::SequenceExpression(inner) => {
+                if let Some(last) = inner.expressions.last() {
+                    self.read(last);
+                }
+            }
+            Expression::AssignmentExpression(inner) => self.read(&inner.right),
+            _ => {}
+        }
+    }
+}
+
+impl<'a> Visit<'a> for SourceReads<'_> {
     fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
-        if member.property.name == "toString"
-            && let Expression::Identifier(object) = &member.object
-        {
-            self.0.insert(object.name.to_string());
+        if member.property.name == "toString" {
+            self.read(&member.object);
         }
         walk::walk_static_member_expression(self, member);
     }
 
+    fn visit_computed_member_expression(
+        &mut self,
+        member: &oxc_ast::ast::ComputedMemberExpression<'a>,
+    ) {
+        self.read(&member.expression);
+        walk::walk_computed_member_expression(self, member);
+    }
+
+    fn visit_object_property(&mut self, property: &oxc_ast::ast::ObjectProperty<'a>) {
+        if property.computed
+            && let Some(key) = property.key.as_expression()
+        {
+            self.read(key);
+        }
+        walk::walk_object_property(self, property);
+    }
+
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         if expression_is_identifier(&call.callee, "String")
-            && let Some(Argument::Identifier(argument)) = call.arguments.first()
+            && let Some(argument) = call.arguments.first().and_then(Argument::as_expression)
         {
-            self.0.insert(argument.name.to_string());
+            self.read(argument);
         }
         walk::walk_call_expression(self, call);
     }
 
     fn visit_template_literal(&mut self, template: &oxc_ast::ast::TemplateLiteral<'a>) {
         for expression in &template.expressions {
-            if let Expression::Identifier(identifier) = expression {
-                self.0.insert(identifier.name.to_string());
-            }
+            self.read(expression);
         }
         walk::walk_template_literal(self, template);
     }
+
+    fn visit_binary_expression(&mut self, binary: &oxc_ast::ast::BinaryExpression<'a>) {
+        if matches!(
+            binary.operator,
+            BinaryOperator::Addition
+                | BinaryOperator::LessThan
+                | BinaryOperator::LessEqualThan
+                | BinaryOperator::GreaterThan
+                | BinaryOperator::GreaterEqualThan
+        ) {
+            self.read(&binary.left);
+            self.read(&binary.right);
+        }
+        walk::walk_binary_expression(self, binary);
+    }
 }
 
-/// The name a function is bound to where it is declared: its own, or the
-/// variable it initializes.
-fn bound_name<State>(own_name: Option<&str>, context: &TraverseCtx<'_, State>) -> Option<String> {
-    own_name
-        .map(str::to_owned)
-        .or_else(|| match context.ancestors().next()? {
-            Ancestor::VariableDeclaratorInit(parent) => parent
+/// The bindings a function is reached through where it is defined: its own
+/// name, and the variable it initializes or is assigned to.
+fn bound_symbols<State>(
+    own: Option<&oxc_ast::ast::BindingIdentifier<'_>>,
+    scoping: &oxc_semantic::Scoping,
+    context: &TraverseCtx<'_, State>,
+) -> Vec<SymbolId> {
+    let mut symbols = own
+        .and_then(|identifier| identifier.symbol_id.get())
+        .into_iter()
+        .collect::<Vec<_>>();
+    match context.ancestors().next() {
+        Some(Ancestor::VariableDeclaratorInit(parent)) => symbols.extend(
+            parent
                 .id()
                 .get_binding_identifier()
-                .map(|identifier| identifier.name.to_string()),
-            _ => None,
-        })
+                .and_then(|identifier| identifier.symbol_id.get()),
+        ),
+        Some(Ancestor::AssignmentExpressionRight(parent)) => {
+            if let AssignmentTarget::AssignmentTargetIdentifier(target) = parent.left() {
+                symbols.extend(referenced_symbol(target, scoping));
+            }
+        }
+        _ => {}
+    }
+    symbols
 }
 
 struct SafetyScanner<'s> {
     source: &'s str,
     file: &'s str,
-    source_reads: HashSet<String>,
+    scoping: &'s oxc_semantic::Scoping,
+    source_reads: HashSet<SymbolId>,
     source_sensitive_functions: HashSet<SpanKey>,
     function_limitations: Vec<CandidateLimitation>,
     with_limitations: Vec<CandidateLimitation>,
@@ -2613,10 +2693,11 @@ fn collect_points<'a>(
 }
 
 impl<'s> SafetyScanner<'s> {
-    fn new(source: &'s str, file: &'s str) -> Self {
+    fn new(source: &'s str, file: &'s str, scoping: &'s oxc_semantic::Scoping) -> Self {
         Self {
             source,
             file,
+            scoping,
             source_reads: HashSet::new(),
             source_sensitive_functions: HashSet::new(),
             function_limitations: Vec::new(),
@@ -2649,7 +2730,7 @@ impl<'s> SafetyScanner<'s> {
     fn enter_source_sensitive_function<State>(
         &mut self,
         span: Span,
-        name: Option<String>,
+        bindings: Vec<SymbolId>,
         context: &TraverseCtx<'_, State>,
     ) {
         // A function handed to a compile-time style macro never runs: the
@@ -2663,7 +2744,9 @@ impl<'s> SafetyScanner<'s> {
             return;
         }
         let sensitive = observes_function_source(span, context)
-            || name.is_some_and(|name| self.source_reads.contains(&name));
+            || bindings
+                .iter()
+                .any(|symbol| self.source_reads.contains(symbol));
         if sensitive {
             self.source_sensitive_functions.insert(span_key(span));
             let limitation = self.limitation(
@@ -2690,8 +2773,8 @@ impl<'s> SafetyScanner<'s> {
 
 impl<'a> Traverse<'a, ()> for SafetyScanner<'_> {
     fn enter_function(&mut self, node: &mut Function<'a>, context: &mut TraverseCtx<'a, ()>) {
-        let name = bound_name(node.id.as_ref().map(|id| id.name.as_str()), context);
-        self.enter_source_sensitive_function(node.span, name, context);
+        let bindings = bound_symbols(node.id.as_ref(), self.scoping, context);
+        self.enter_source_sensitive_function(node.span, bindings, context);
     }
 
     fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
@@ -2703,8 +2786,8 @@ impl<'a> Traverse<'a, ()> for SafetyScanner<'_> {
         node: &mut ArrowFunctionExpression<'a>,
         context: &mut TraverseCtx<'a, ()>,
     ) {
-        let name = bound_name(None, context);
-        self.enter_source_sensitive_function(node.span, name, context);
+        let bindings = bound_symbols(None, self.scoping, context);
+        self.enter_source_sensitive_function(node.span, bindings, context);
     }
 
     fn exit_arrow_function_expression(
@@ -2781,11 +2864,17 @@ fn analyze_safety<'a>(
 ) -> SafetyAnalysis {
     // oxc_traverse uses resolved lexical scope IDs while walking ancestry.
     // Building semantics here initializes those IDs without changing the AST.
-    SemanticBuilder::new().build(program);
-    let mut reads = SourceReads::default();
+    let scoping = SemanticBuilder::new()
+        .build(program)
+        .semantic
+        .into_scoping();
+    let mut reads = SourceReads {
+        scoping: &scoping,
+        symbols: HashSet::new(),
+    };
     reads.visit_program(program);
-    let mut scanner = SafetyScanner::new(source, file);
-    scanner.source_reads = reads.0;
+    let mut scanner = SafetyScanner::new(source, file, &scoping);
+    scanner.source_reads = reads.symbols;
     traverse_mut(&mut scanner, allocator, program, Default::default(), ());
     let mut semantic_limitations = scanner.function_limitations;
     semantic_limitations.extend(scanner.with_limitations);

@@ -714,6 +714,30 @@ fn a_function_shipped_as_text_runs_where_no_probe_exists() {
         .supercov(&["runs", "latest", "line", "src/task.js:10"])
         .succeeds();
     assert!(!local.contains("NOT COVERED"), "{local}");
+
+    // A function reached by name through `+`, `||`, `?:` or an assignment
+    // is shipped as text too. A local of the same name read elsewhere is a
+    // different binding and leaves the function measured.
+    project.write(
+        "src/named.js",
+        "const worker = (n) => { if (n) { return 1; } return 0; };\nexport const joined = \"(\" + worker + \")\";\nconst fallback = (n) => { if (n) { return 2; } return 0; };\nexport const chosen = \"\" + (null || fallback);\nconst branch = (n) => { if (n) { return 3; } return 0; };\nexport const picked = String(Math.random() >= 0 ? branch : null);\nlet later;\nlater = (n) => { if (n) { return 4; } return 0; };\nexport const assigned = `${later}`;\nexport function total(n) {\n  if (n > 1) {\n    return n;\n  }\n  return 0;\n}\nexport function counter() {\n  let total = 0;\n  if (total < 5) total += 1;\n  return total;\n}\n",
+    );
+    project.write(
+        "test/named.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport vm from \"node:vm\";\nimport { joined, chosen, picked, assigned, total, counter } from \"../src/named.js\";\ntest(\"named functions run as text\", () => {\n  assert.equal(vm.runInNewContext(`${joined}(1)`), 1);\n  assert.equal(vm.runInNewContext(`(${chosen})(1)`), 2);\n  assert.equal(vm.runInNewContext(`(${picked})(1)`), 3);\n  assert.equal(vm.runInNewContext(`(${assigned})(1)`), 4);\n  assert.equal(total(2), 2);\n  assert.equal(counter(), 1);\n});\n",
+    );
+    let measured = project
+        .supercov(&["--", "node", "--test", "test/named.test.js"])
+        .succeeds();
+    assert!(measured.contains("pass 1"), "{measured}");
+    let named = project
+        .supercov(&["runs", "latest", "file", "src/named.js"])
+        .succeeds();
+    assert!(
+        named.contains("Measurement limitations         4"),
+        "{named}"
+    );
+    assert!(named.contains("   14  NOT COVERED   return 0;"), "{named}");
 }
 
 #[test]
