@@ -10,10 +10,12 @@
     "exitCode": 0,
     "sourceUnchanged": true,
     "publishedFiles": [
+      "assessment-input.json.gz",
       "evidence.raw.gz",
       "query-index.v1.bin",
       "run.json",
       "source-manifest.cache.json",
+      "statement-spans.json",
       "test-executions.json"
     ],
     "looseEvidenceRetained": false,
@@ -80,7 +82,8 @@
       "timedOut": 0,
       "interrupted": 0,
       "unknown": 0,
-      "unstarted": 0
+      "unstarted": 0,
+      "todo": 0
     }
   },
   "files": {

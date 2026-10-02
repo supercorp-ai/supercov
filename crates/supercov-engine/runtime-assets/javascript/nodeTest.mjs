@@ -93,19 +93,30 @@ function restoreUserError(error, depth = 0) {
 // gives what --test-name-pattern matches. A store rather than a stack: an
 // async suite registers tests after it awaits.
 const suitePath = new AsyncLocalStorage();
+// A suite marked todo or skip marks every test inside it, as node:test counts
+// them: `describe.todo` tests run, and are todo whatever they do.
+const suiteMark = new AsyncLocalStorage();
+function markOf(options, mark) {
+    if (mark === "skipped" || options?.skip)
+        return "skipped";
+    if (mark === "todo" || options?.todo)
+        return "todo";
+    return undefined;
+}
 function suiteName(args, callback) {
     return typeof args[0] === "string" ? args[0] : callback.name || "<anonymous>";
 }
-function wrappedSuite(original) {
+function wrappedSuite(original, mark) {
     const wrapped = function supercovNodeSuite(...args) {
         const index = callbackIndex(args);
         if (index < 0)
             return Reflect.apply(original, this, args);
         const callback = args[index];
         const path = [...(suitePath.getStore() ?? []), suiteName(args, callback)];
+        const marked = suiteMark.getStore() ?? markOf(testOptions(args, index), mark);
         const next = [...args];
         next[index] = function supercovNodeSuiteCallback(...callbackArgs) {
-            return suitePath.run(path, () => Reflect.apply(callback, this, callbackArgs));
+            return suitePath.run(path, () => suiteMark.run(marked, () => Reflect.apply(callback, this, callbackArgs)));
         };
         // node:test reports a suite at its direct caller, as it does a test.
         const registration = registrationAt(callerLocation(supercovNodeSuite));
@@ -119,7 +130,7 @@ function wrappedSuite(original) {
             Object.defineProperty(wrapped, property, {
                 configurable: true,
                 enumerable: true,
-                value: wrappedSuite(member),
+                value: wrappedSuite(member, property === "only" ? undefined : property === "skip" ? "skipped" : "todo"),
             });
     }
     return wrapped;
@@ -128,9 +139,9 @@ const registrationCounts = new Map();
 function wrappedRegistration(original, parentTestId, forcedStatus) {
     const wrapped = function supercovNodeTest(...args) {
         const index = callbackIndex(args);
-        if (index < 0)
-            return Reflect.apply(original, this, args);
-        const callback = args[index];
+        // `test.todo("name")` and `it.todo("name")` have no body and are still
+        // tests the runner counts.
+        const callback = index < 0 ? {} : args[index];
         const location = callerLocation(supercovNodeTest);
         const identity = {
             runner: "node:test",
@@ -153,19 +164,27 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
         registrationCounts.set(registrationKey, registrationOrdinal + 1);
         identity.registrationOrdinal = registrationOrdinal;
         const scope = runnerExecutionScope(identity);
-        const options = testOptions(args, index);
+        const options = testOptions(args, index < 0 ? args.length : index);
         const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
-        if (options?.skip || options?.todo || forcedStatus)
-            writeRunnerEvidence(identity, "skipped", scope, evidenceDirectory);
+        const marked = suiteMark.getStore() ?? markOf(options, forcedStatus);
+        if (index < 0) {
+            writeRunnerEvidence(identity, marked ?? "passed", scope, evidenceDirectory);
+            return Reflect.apply(original, this, args);
+        }
+        if (marked)
+            writeRunnerEvidence(identity, marked, scope, evidenceDirectory);
         const next = [...args];
         const execute = (callbackThis, context, done) => {
             // A test or its hooks may intentionally modify Supercov's public
             // environment while testing integrations. Keep this attempt's transport
             // destination fixed to the value present when the test was registered.
             beginBufferedServerEvidence(scope);
-            let status = options?.skip || options?.todo || forcedStatus
-                ? "skipped"
-                : "passed";
+            // A todo test runs, and stays todo whether its body passes or fails.
+            let status = marked ?? "passed";
+            const fail = () => {
+                if (status !== "todo")
+                    status = "failed";
+            };
             const contextProxy = new Proxy(context, {
                 get(target, property) {
                     // Read with the real context as receiver: TestContext accessors
@@ -174,7 +193,7 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
                     const value = Reflect.get(target, property, target);
                     if ((property === "skip" || property === "todo") && typeof value === "function") {
                         return (...callArgs) => {
-                            status = "skipped";
+                            status = property === "todo" ? "todo" : "skipped";
                             return Reflect.apply(value, target, callArgs);
                         };
                     }
@@ -202,7 +221,7 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
                 if (callback.length >= 2) {
                     const callbackDone = (error) => {
                         if (error) {
-                            status = "failed";
+                            fail();
                             restoreUserError(error);
                         }
                         finishBody();
@@ -216,7 +235,7 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
                         finishBody();
                         return value;
                     }, (error) => {
-                        status = "failed";
+                        fail();
                         finishBody();
                         throw restoreUserError(error);
                     });
@@ -224,7 +243,7 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
                 return result;
             }
             catch (error) {
-                status = "failed";
+                fail();
                 finishBody();
                 throw restoreUserError(error);
             }
@@ -249,7 +268,7 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
             Object.defineProperty(wrapped, property, {
                 configurable: true,
                 enumerable: true,
-                value: wrappedRegistration(member, parentTestId, property === "only" ? undefined : "skipped"),
+                value: wrappedRegistration(member, parentTestId, property === "only" ? undefined : property === "skip" ? "skipped" : "todo"),
             });
     }
     return wrapped;

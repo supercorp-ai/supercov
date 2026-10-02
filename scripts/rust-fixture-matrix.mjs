@@ -40,7 +40,26 @@ function runNode(arguments_, extraEnvironment = {}) {
 }
 
 // Chromium exercises every currently supported adapter/build fixture.
-run(["--prefix", "tests/fixtures/generic-playwright", "run", "test:coverage"]);
+// Its first attempt at the retry test fails on purpose, so the run prints a
+// code frame: it shows the project's line, not Supercov's instrumented copy.
+const playwright = spawnSync(
+  npm,
+  ["--prefix", "tests/fixtures/generic-playwright", "run", "test:coverage"],
+  { encoding: "utf8", env: { ...rustEnvironment, FORCE_COLOR: "0" }, maxBuffer: 64 * 1024 * 1024 },
+);
+process.stdout.write(playwright.stdout ?? "");
+process.stderr.write(playwright.stderr ?? "");
+if (playwright.status !== 0)
+  throw new Error(`generic-playwright test:coverage failed with exit ${playwright.status ?? "signal"}`);
+const printed = `${playwright.stdout}${playwright.stderr}`;
+const frame = /^(.*> \d+ \|\s+expect\(testInfo\.retry\)\.toBe\(1\);)\n(.*\^)/m.exec(printed);
+if (!frame)
+  throw new Error("the retry failure's code frame does not show the spec's own line");
+// The caret sits under the matcher, as Playwright puts it without Supercov.
+if (frame[2].length - 1 !== frame[1].indexOf("toBe"))
+  throw new Error(`the code frame's caret is not under the matcher:\n${frame[1]}\n${frame[2]}`);
+if (printed.includes("__supercov"))
+  throw new Error("a printed code frame shows Supercov's instrumented copy");
 for (const script of [
   "opaque-runner-integration.mjs",
   "opaque-esm-integration.mjs",

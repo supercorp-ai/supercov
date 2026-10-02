@@ -2104,6 +2104,96 @@ fn the_file_view_counts_and_labels_lines_as_the_summary_and_line_view_do() {
 }
 
 #[test]
+fn todo_tests_are_counted_as_node_test_counts_them() {
+    // supergateway's suite: node said 1,076 tests, 1,057 passed, 6 todo;
+    // Supercov said 1,071 total and 1,058 passed. A body-less todo was never
+    // recorded, a todo whose body failed was a failure, and tests in a
+    // describe.todo were passes.
+    let project = Project::cart("todo");
+    project.write(
+        "test/todo.test.js",
+        r#"import test, { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { total } from '../src/cart.js';
+test.todo('todo without a body');
+test.todo('todo with a passing body', () => assert.equal(total([]), 0));
+test.todo('todo with a failing body', () => assert.equal(1, 2));
+test('option todo, passing', { todo: true }, () => assert.equal(1, 1));
+test('option todo with a reason, failing', { todo: 'later' }, () => assert.equal(1, 2));
+test('context todo', (t) => { t.todo('not yet'); assert.equal(1, 1); });
+test.skip('skipped', () => assert.equal(1, 2));
+describe('suite', () => { it.todo('it todo'); });
+describe.todo('todo suite', () => { it('inside a todo suite', () => assert.equal(1, 1)); });
+"#,
+    );
+    project.commit("todo");
+    let native = std::process::Command::new("node")
+        .args(["--test", "--test-reporter", "spec"])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    let native = String::from_utf8_lossy(&native.stdout).into_owned();
+    let count = |label: &str| -> String {
+        native
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("\u{2139} {label} ")))
+            .unwrap_or_else(|| panic!("no {label} in\n{native}"))
+            .trim()
+            .to_owned()
+    };
+    project.measure(&[]);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    for (label, ours) in [
+        ("tests", "Total"),
+        ("pass", "Passed"),
+        ("skipped", "Skipped"),
+        ("todo", "Todo"),
+    ] {
+        let expected = count(label);
+        assert!(
+            summary.contains(&format!("  {ours:<11} {expected}\n")),
+            "{ours} should be node's {label} {expected}:\n{summary}"
+        );
+    }
+    assert!(!summary.contains("  Failed"), "{summary}");
+}
+
+#[test]
+fn printed_commands_name_the_way_supercov_was_started() {
+    let project = Project::cart("launchers");
+    let run = project.measure(&[]);
+    let root = project.root.to_string_lossy().into_owned();
+    // The PyPI, Ruby and Rust packages run the binary itself; npm sets the
+    // package root; the Go launcher says so.
+    for (env, command) in [
+        (vec![], "supercov"),
+        (
+            vec![("SUPERCOV_PACKAGE_ROOT", root.as_str())],
+            "npx supercov",
+        ),
+        (
+            vec![("SUPERCOV_LAUNCHER", "go")],
+            "go run github.com/supercorp-ai/supercov/cmd/supercov@latest",
+        ),
+    ] {
+        let summary = project.supercov_with(&["runs", "latest"], &env).succeeds();
+        assert!(
+            summary.contains(&format!(
+                "not assessed — {command} runs {run} assertions assess"
+            )),
+            "{env:?}: {summary}"
+        );
+        assert!(
+            summary.contains(&format!("  {command} runs '{run}' files\n")),
+            "{env:?}: {summary}"
+        );
+        if command == "supercov" {
+            assert!(!summary.contains("npx supercov"), "{summary}");
+        }
+    }
+}
+
+#[test]
 fn every_listing_pages_and_names_its_next_page() {
     let project = Project::cart("pages");
     project.write(
@@ -2121,7 +2211,7 @@ fn every_listing_pages_and_names_its_next_page() {
     for (args, next) in [
         (
             vec!["runs", "--limit", "1"],
-            "npx supercov runs --offset 1 --limit 1".to_owned(),
+            "supercov runs --offset 1 --limit 1".to_owned(),
         ),
         (
             vec!["runs", "latest", "files", "--limit", "1"],
@@ -2192,7 +2282,7 @@ fn every_listing_pages_and_names_its_next_page() {
         // The command it names reads the next page.
         let mut words = vec![String::new()];
         let mut quoted = false;
-        for character in next.trim_start_matches("npx supercov ").chars() {
+        for character in next.trim_start_matches("supercov ").chars() {
             match character {
                 '\'' => quoted = !quoted,
                 ' ' if !quoted => words.push(String::new()),

@@ -145,13 +145,13 @@ npx supercov report latest --compare <older-run-id>
 Include more local history or choose a destination with:
 
 ```sh
-npx supercov report --runs 5
+npx supercov report --runs 10
 npx supercov report --output artifacts/coverage.html --no-open
 ```
 
-`--runs` accepts 1 through 20. The generated file is capped at 24 MB, leaving
-room under GitHub's normal 25 MB attachment limit. A report that exceeds the
-cap is not written; retry with fewer runs.
+A report includes the five newest runs; `--runs` accepts 1 through 20. Each
+run adds to the file's size, and a large project's runs can take the report
+past GitHub's 25 MB attachment limit; `--runs 1` makes the smallest one.
 
 ## Source integrity
 

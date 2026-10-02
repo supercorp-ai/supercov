@@ -793,6 +793,22 @@ pub(crate) fn publish_run_with_fault(
                 {
                     let _ = fs::remove_file(&staged.query_index_path);
                 }
+                // Also disposable: the report analyses the evidence when the
+                // file is missing.
+                if crate::run_store::write_statement_spans(&staged, report).is_err() {
+                    let _ = fs::remove_file(
+                        staged
+                            .directory
+                            .join(crate::run_store::STATEMENT_SPANS_FILE),
+                    );
+                }
+                if crate::run_store::write_assessment_input(&staged, report).is_err() {
+                    let _ = fs::remove_file(
+                        staged
+                            .directory
+                            .join(crate::run_store::ASSESSMENT_INPUT_FILE),
+                    );
+                }
             })
         });
         let prepared = crate::source_manifest::prepare_publication_with(
@@ -1188,6 +1204,39 @@ mod tests {
         root
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_stored_tree_never_follows_a_link_out_of_it() {
+        // A report from supergateway: a worktree's node_modules linked to the
+        // main checkout's, and the main checkout's vanished mid-run. Supercov
+        // was not the cause (another process removed it), but its removal and
+        // sweep must never reach through a link into what the link points at.
+        let root = project();
+        let outside = std::env::temp_dir().join(format!("supercov-outside-{}", unique_name()));
+        fs::create_dir_all(outside.join("tsx/dist")).unwrap();
+        fs::write(outside.join("tsx/dist/loader.mjs"), "the dependency").unwrap();
+        let tree = root.join(".supercov/work/run_links");
+        fs::create_dir_all(tree.join("mirror")).unwrap();
+        std::os::unix::fs::symlink(&outside, tree.join("node_modules")).unwrap();
+        // The workspace's node_modules is a real directory of per-package links.
+        std::os::unix::fs::symlink(outside.join("tsx"), tree.join("mirror/tsx")).unwrap();
+        // And a stored tree that is itself a link.
+        std::os::unix::fs::symlink(&outside, root.join(".supercov/work/run_linked_root")).unwrap();
+        for target in [tree.clone(), root.join(".supercov/work/run_linked_root")] {
+            remove_stored_tree_deferred(&root, &target)
+                .unwrap()
+                .unwrap();
+        }
+        assert!(sweep_trash(&root).unwrap() >= 2);
+        assert!(!tree.exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("tsx/dist/loader.mjs")).unwrap(),
+            "the dependency"
+        );
+        fs::remove_dir_all(&outside).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     fn kept_evidence(root: &Path, id: &str) -> PathBuf {
         let evidence = root.join(".supercov/work").join(id).join("python/evidence");
         fs::create_dir_all(&evidence).unwrap();
@@ -1356,6 +1405,18 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "and it is valid for the published run"
+        );
+        // The report's statement spans come from the same analysis, and are
+        // what analysing the published evidence again would give.
+        let analysed = crate::source_manifest::coverage(&run).unwrap();
+        assert_eq!(
+            crate::run_store::read_statement_spans(&run).expect("publication wrote the spans"),
+            crate::run_store::statement_spans(&analysed)
+        );
+        // So is what an assessment reads.
+        assert_eq!(
+            crate::run_store::read_assessment_input(&run).expect("publication wrote the input"),
+            crate::assertion_coverage::assessment_input(&analysed)
         );
         let written = fs::read(&index).unwrap();
         fs::remove_file(&index).unwrap();

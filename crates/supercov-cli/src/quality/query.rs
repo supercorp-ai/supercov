@@ -135,6 +135,19 @@ fn file_catalog(snapshot: &Snapshot, path: &str) -> Result<Value, String> {
         .iter()
         .filter_map(|entry| Some((entry["check"].as_str()?, entry)))
         .collect();
+    // What fired is what the assessment recorded, so this view and the
+    // summary agree: a security check can fire on a line the line tier
+    // confirmed while the file question said no, and each security check has
+    // its own cut. This view read only the file question, against the
+    // quality cut, and said `no 0.31` for a finding the summary showed.
+    let security = instrument(&snapshot.manifest) == "security";
+    let recorded: Option<std::collections::BTreeMap<&str, &Value>> =
+        file["present"].as_array().map(|present| {
+            present
+                .iter()
+                .filter_map(|finding| Some((finding["check"].as_str()?, finding)))
+                .collect()
+        });
     let mut checks: Vec<Value> = file["checks"]
         .as_object()
         .map(|values| {
@@ -142,9 +155,29 @@ fn file_catalog(snapshot: &Snapshot, path: &str) -> Result<Value, String> {
                 .iter()
                 .map(|(id, value)| {
                     let entry = known.get(id.as_str());
+                    let fired = match &recorded {
+                        Some(recorded) => recorded.get(id.as_str()).copied(),
+                        None => None,
+                    };
+                    let present = match &recorded {
+                        Some(_) => fired.is_some(),
+                        // Older snapshots kept no list: each instrument's own cut.
+                        None => {
+                            let cut = if security {
+                                super::catalog::security::cut_for(id)
+                            } else {
+                                super::catalog::PRESENT_AT
+                            };
+                            value.as_f64().unwrap_or(0.0) >= cut
+                        }
+                    };
                     json!({
-                        "check": id, "value": value,
-                        "present": value.as_f64().unwrap_or(0.0) >= super::catalog::PRESENT_AT,
+                        "check": id,
+                        "value": fired.map_or(value, |f| &f["value"]),
+                        "file_value": value,
+                        "present": present,
+                        "tier": fired.map(|f| f["tier"].clone()),
+                        "lines": fired.map(|f| f["lines"].clone()),
                         "asks": entry.map(|e| e["asks"].clone()),
                         "evidence": entry.map(|e| e["evidence"].clone()),
                     })
@@ -490,6 +523,14 @@ fn render_file_catalog(view: &Value) -> String {
         ));
         if present && let Some(asks) = check["asks"].as_str() {
             out.push_str(&format!("            {asks}\n"));
+        }
+        for line in check["lines"].as_array().unwrap_or(&empty) {
+            out.push_str(&format!(
+                "            line {}  {:.2}  {}\n",
+                line["line"].as_u64().unwrap_or(0),
+                line["value"].as_f64().unwrap_or(0.0),
+                line["text"].as_str().unwrap_or("").trim()
+            ));
         }
     }
     out.push_str("\nEach line is a model judgment you can check against the file.\n");

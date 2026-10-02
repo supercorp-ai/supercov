@@ -17,7 +17,9 @@
 use crate::coverage_analysis::PointKind;
 use crate::coverage_report::CoverageReport;
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement as JsStatement};
+use oxc_ast::ast::{
+    Declaration, ExportDefaultDeclarationKind, Expression, Statement as JsStatement,
+};
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
@@ -126,6 +128,16 @@ pub enum Change {
     ExpressionUndefined,
     /// Anything else: the statement is skipped.
     Skip,
+    /// A boolean literal returned or declared: it becomes the other one.
+    /// `false` becoming undefined changes nothing a truthiness check reads,
+    /// so that change could never be caught.
+    Flip,
+    /// A TypeScript `throw`: it throws a bare `new Error()` instead. Deleting
+    /// it seldom compiles: a throw usually guards the narrowing the next line
+    /// relies on (`if ('error' in result) throw ...; return result.result`
+    /// is TS2339 without it). Keeping the throw keeps the types, and asks
+    /// whether any test checks which error comes out.
+    BareError,
 }
 
 /// The languages whose statements and tests this module can read.
@@ -229,26 +241,119 @@ pub struct Population {
     aliases: Vec<(String, String)>,
     /// Files read once: every request and every cache key reads the same text.
     files: std::sync::Mutex<BTreeMap<String, Option<std::sync::Arc<str>>>>,
+    /// Whether a test file contains a text fragment, by (file, fragment).
+    quotes: std::sync::Mutex<std::collections::HashMap<(String, String), bool>>,
 }
 
 /// The executed statements of a run and the tests that ran them. `sources` are
 /// the run's source files, verified against the run.
+/// What assessing a run reads from its analysis: the passing view's tests,
+/// and its measured statements and executed decisions with the tests that ran
+/// them. Publication stores it, so an assessment does not analyse the run's
+/// evidence again (4.4 s of supergateway's 7.6 s of planning).
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct AssessmentInput {
+    pub tests: Vec<InputTest>,
+    pub points: Vec<InputPoint>,
+    pub decisions: Vec<InputPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct InputTest {
+    pub id: String,
+    pub file: Option<String>,
+    pub name: String,
+    pub role: String,
+    pub runner: String,
+}
+
+/// A statement or decision, with the tests that ran it as indexes into
+/// `AssessmentInput::tests`.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct InputPoint {
+    pub file: String,
+    pub line: usize,
+    pub source: String,
+    pub tests: Vec<u32>,
+}
+
+pub fn assessment_input(report: &CoverageReport) -> AssessmentInput {
+    let view = &report.filters.passed;
+    let tests = view
+        .tests
+        .iter()
+        .map(|test| InputTest {
+            id: test.id.clone(),
+            file: test.file.clone(),
+            name: test.name.clone(),
+            role: test.role.clone(),
+            runner: test.provenance.runner.clone(),
+        })
+        .collect::<Vec<_>>();
+    let index = tests
+        .iter()
+        .enumerate()
+        .map(|(i, test)| (test.id.as_str(), i as u32))
+        .collect::<BTreeMap<_, _>>();
+    let indexes = |ids: &[crate::interned::Id]| {
+        ids.iter()
+            .filter_map(|id| index.get(id.as_str()).copied())
+            .collect::<Vec<_>>()
+    };
+    let points = view
+        .points
+        .iter()
+        .filter(|p| p.measured && p.meta.kind == PointKind::Statement)
+        .map(|p| InputPoint {
+            file: p.meta.file.clone(),
+            line: p.meta.line,
+            source: p.meta.source.clone(),
+            tests: indexes(&p.tests),
+        })
+        .collect();
+    let decisions = view
+        .decisions
+        .iter()
+        .filter(|d| d.executed)
+        .map(|d| InputPoint {
+            file: d.meta.file.clone(),
+            line: d.meta.line,
+            source: d.meta.source.clone(),
+            tests: indexes(&d.tests),
+        })
+        .collect();
+    AssessmentInput {
+        tests,
+        points,
+        decisions,
+    }
+}
+
 pub fn population(
     root: &Path,
     report: &CoverageReport,
     sources: &BTreeMap<String, String>,
     language: Language,
 ) -> Result<Population, String> {
-    let view = &report.filters.passed;
+    population_from(root, &assessment_input(report), sources, language)
+}
+
+pub fn population_from(
+    root: &Path,
+    input: &AssessmentInput,
+    sources: &BTreeMap<String, String>,
+    language: Language,
+) -> Result<Population, String> {
     let mut tests = Vec::new();
-    let mut index = BTreeMap::new();
     // JVM tests are named by class; their file is found by its path.
     let jvm_files = if language == Language::Jvm {
         project_files(root, &["java", "kt"])
     } else {
         Vec::new()
     };
-    for test in &view.tests {
+    // Input test index -> population test index.
+    let mut index = BTreeMap::<u32, usize>::new();
+    for (position, test) in input.tests.iter().enumerate() {
         let file = match test.file.as_ref().filter(|f| !f.is_empty()) {
             Some(file) => file.clone(),
             None if language == Language::Jvm => {
@@ -265,12 +370,12 @@ pub fn population(
         if test.role != "test" {
             continue;
         }
-        index.insert(test.id.as_str(), tests.len());
+        index.insert(position as u32, tests.len());
         tests.push(TestRef {
             id: test.id.clone(),
             file,
             name: test.name.clone(),
-            runner: test.provenance.runner.clone(),
+            runner: test.runner.clone(),
         });
     }
     let mut changes = BTreeMap::<String, BTreeMap<usize, Vec<(String, Option<Change>)>>>::new();
@@ -290,16 +395,15 @@ pub fn population(
     // Python and Ruby record an `elif`/`elsif`, and Go, Rust and the JVM
     // languages may record an `else if`, as a decision only: its condition is
     // taken after every statement, where no statement starts on its line.
-    let executed = view
+    let executed = input
         .points
         .iter()
-        .filter(|p| p.measured && p.meta.kind == PointKind::Statement)
-        .map(|p| (&p.meta.file, p.meta.line, &p.meta.source, &p.tests, false));
-    let elifs = view
+        .map(|p| (&p.file, p.line, &p.source, &p.tests, false));
+    let elifs = input
         .decisions
         .iter()
-        .filter(|d| d.executed && language != Language::JavaScript)
-        .map(|d| (&d.meta.file, d.meta.line, &d.meta.source, &d.tests, true));
+        .filter(|_| language != Language::JavaScript)
+        .map(|d| (&d.file, d.line, &d.source, &d.tests, true));
     for (file, line, text, point_tests, decision) in executed.chain(elifs) {
         let key = (file.clone(), line);
         if !seen.insert(key) {
@@ -307,7 +411,7 @@ pub fn population(
         }
         let ids = point_tests
             .iter()
-            .filter_map(|id| index.get(id.as_str()).copied())
+            .filter_map(|position| index.get(position).copied())
             .collect::<Vec<_>>();
         if ids.is_empty() {
             continue;
@@ -379,6 +483,7 @@ pub fn population(
         jvm_files,
         aliases: tsconfig_aliases(root),
         files: Default::default(),
+        quotes: Default::default(),
     })
 }
 
@@ -392,6 +497,7 @@ fn statement_starts(file: &str, source: &str) -> BTreeMap<usize, Vec<(String, Op
     struct Collector<'s> {
         source: &'s str,
         starts: &'s [usize],
+        typescript: bool,
         out: BTreeMap<usize, Vec<(String, Option<Change>)>>,
     }
     impl<'a> Visit<'a> for Collector<'_> {
@@ -403,32 +509,66 @@ fn statement_starts(file: &str, source: &str) -> BTreeMap<usize, Vec<(String, Op
                 .get(span.start as usize..span.end as usize)
                 .unwrap_or("")
                 .to_owned();
-            self.out
-                .entry(line)
-                .or_default()
-                .push((text, change_of(statement)));
+            self.out.entry(line).or_default().push((
+                text,
+                match statement {
+                    JsStatement::ThrowStatement(_) if self.typescript => Some(Change::BareError),
+                    _ => change_of(statement),
+                },
+            ));
             walk::walk_statement(self, statement);
         }
     }
     let mut collector = Collector {
         source,
         starts: &starts,
+        typescript: source_type.is_typescript(),
         out: BTreeMap::new(),
     };
     collector.visit_program(&parsed.program);
     collector.out
 }
 
+/// `undefined` or `void 0`: returning undefined instead is the same code.
+fn is_undefined(expression: &Expression) -> bool {
+    match expression {
+        Expression::Identifier(identifier) => identifier.name == "undefined",
+        Expression::UnaryExpression(unary) => {
+            unary.operator == oxc_syntax::operator::UnaryOperator::Void
+        }
+        _ => false,
+    }
+}
+
 fn change_of(statement: &JsStatement) -> Option<Change> {
     Some(match statement {
         JsStatement::IfStatement(_) => Change::Invert,
-        JsStatement::ReturnStatement(r) if r.argument.is_some() => Change::ReturnUndefined,
+        // `return undefined` returning undefined is the same code; skipping
+        // the return is the change that can show.
+        JsStatement::ReturnStatement(r) => match &r.argument {
+            Some(argument) if is_undefined(argument) => Change::Skip,
+            Some(Expression::BooleanLiteral(_)) => Change::Flip,
+            Some(_) => Change::ReturnUndefined,
+            None => Change::Skip,
+        },
         JsStatement::VariableDeclaration(d) => {
-            if d.declarations.iter().any(|d| d.init.is_some()) {
+            if let [only] = d.declarations.as_slice()
+                && matches!(only.init, Some(Expression::BooleanLiteral(_)))
+            {
+                Change::Flip
+            } else if d.declarations.iter().any(|d| d.init.is_some()) {
                 Change::ValueUndefined
             } else {
                 return None;
             }
+        }
+        // A constructor cannot skip `super(...)`: the result does not compile
+        // (TS2377), and in JavaScript it throws before anything is observed.
+        JsStatement::ExpressionStatement(e)
+            if matches!(&e.expression, Expression::CallExpression(call)
+                if matches!(call.callee, Expression::Super(_))) =>
+        {
+            return None;
         }
         JsStatement::ExportNamedDeclaration(e) => match &e.declaration {
             Some(Declaration::VariableDeclaration(d))
@@ -507,12 +647,24 @@ fn python_statement_starts(source: &str) -> BTreeMap<usize, Vec<(String, Option<
         fn visit_stmt(&mut self, stmt: &'a Stmt) {
             let change = match stmt {
                 Stmt::If(_) => Some(Change::Invert),
-                Stmt::Return(r) => Some(if r.value.is_some() {
-                    Change::ReturnUndefined
-                } else {
-                    Change::Skip
+                Stmt::Return(r) => Some(match r.value.as_deref() {
+                    // `return None` returning None is the same code.
+                    Some(Expr::NoneLiteral(_)) | None => Change::Skip,
+                    Some(Expr::BooleanLiteral(_)) => Change::Flip,
+                    Some(_) => Change::ReturnUndefined,
                 }),
+                Stmt::Assign(a)
+                    if a.targets.len() == 1
+                        && matches!(a.value.as_ref(), Expr::BooleanLiteral(_)) =>
+                {
+                    Some(Change::Flip)
+                }
                 Stmt::Assign(_) => Some(Change::ValueUndefined),
+                Stmt::AnnAssign(a)
+                    if matches!(a.value.as_deref(), Some(Expr::BooleanLiteral(_))) =>
+                {
+                    Some(Change::Flip)
+                }
                 Stmt::AnnAssign(a) => a.value.as_ref().map(|_| Change::ValueUndefined),
                 Stmt::Import(_)
                 | Stmt::ImportFrom(_)
@@ -586,6 +738,56 @@ fn numbered(lines: &[&str]) -> String {
         .join("\n")
 }
 
+/// The text a statement writes out: the fixed parts of its string literals,
+/// six characters or longer with a letter in them (`- Headers:` from
+/// `` `  - Headers: ${describe(headers)}` ``). A test that quotes one is the
+/// likeliest to assert what the statement produces.
+fn quoted_fragments(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, quote)) = chars.next() {
+        if !matches!(quote, '\'' | '"' | '`') {
+            continue;
+        }
+        let mut end = None;
+        while let Some((at, c)) = chars.next() {
+            if c == '\\' {
+                chars.next();
+            } else if c == quote {
+                end = Some(at);
+                break;
+            }
+        }
+        let Some(end) = end else { break };
+        let body = &text[start + quote.len_utf8()..end];
+        // The fixed text only: what sits inside `${...}`, `#{...}` or an
+        // f-string's `{...}` is an expression, not output.
+        let mut pieces = vec![String::new()];
+        let mut depth = 0usize;
+        for c in body.chars() {
+            match c {
+                '{' => {
+                    depth += 1;
+                    pieces.push(String::new());
+                }
+                '}' if depth > 0 => depth -= 1,
+                '$' | '#' | '%' if depth == 0 => pieces.push(String::new()),
+                _ if depth == 0 => pieces.last_mut().expect("one piece").push(c),
+                _ => {}
+            }
+        }
+        for piece in pieces {
+            let piece = piece.trim();
+            if piece.len() >= 6 && piece.chars().filter(|c| c.is_alphabetic()).count() >= 3 {
+                out.push(piece.to_owned());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn stem(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -643,8 +845,36 @@ impl Population {
             .clone()
     }
 
-    /// The tests to ask about a statement, in order: tests in a file named like
-    /// the source first, then one per describe block, round-robin over files.
+    /// Whether `test`'s file contains one of these fragments.
+    fn quotes(&self, test: usize, fragments: &[String]) -> bool {
+        let file = &self.tests[test].file;
+        fragments.iter().any(|fragment| {
+            let key = (file.clone(), fragment.clone());
+            if let Some(&known) = self
+                .quotes
+                .lock()
+                .expect("the quote cache is only read and filled")
+                .get(&key)
+            {
+                return known;
+            }
+            let found = self
+                .read(file)
+                .is_some_and(|text| text.contains(fragment.as_str()));
+            self.quotes
+                .lock()
+                .expect("the quote cache is only read and filled")
+                .insert(key, found);
+            found
+        })
+    }
+
+    /// The tests to ask about a statement, in order: tests whose file quotes
+    /// text the statement produces first, one per file; then tests in a file
+    /// named like the source; then one per describe block, round-robin over
+    /// files. Without the first rule, the alphabetically first files filled
+    /// the sample: on supergateway 15 of 179 tests were asked about a log
+    /// line, none of them the test that compares the whole startup log.
     pub fn order(&self, statement: usize, k: usize) -> Vec<usize> {
         let s = &self.statements[statement];
         let base = stem(&s.file);
@@ -699,10 +929,27 @@ impl Population {
             )
         });
         let mut picked = Vec::new();
+        let fragments = quoted_fragments(&s.text);
+        if !fragments.is_empty() {
+            let quoting = all
+                .iter()
+                .copied()
+                .filter(|&t| self.quotes(t, &fragments))
+                .collect::<Vec<_>>();
+            let mut files = BTreeSet::new();
+            let (first, rest): (Vec<usize>, Vec<usize>) = quoting
+                .iter()
+                .partition(|&&t| files.insert(self.tests[t].file.clone()));
+            for t in first.into_iter().chain(rest) {
+                if picked.len() < k {
+                    picked.push(t);
+                }
+            }
+        }
         let mut depth = 0;
         while picked.len() < k && by_file.iter().any(|(_, g)| g.len() > depth) {
             for (_, g) in &by_file {
-                if depth < g.len() && picked.len() < k {
+                if depth < g.len() && picked.len() < k && !picked.contains(&g[depth][0]) {
                     picked.push(g[depth][0]);
                 }
             }
@@ -1262,6 +1509,10 @@ impl Population {
             Change::ExpressionUndefined => vec![format!(
                 "the expression `{line}` evaluates to undefined instead (it is not evaluated)"
             )],
+            Change::Flip => vec![format!("`{line}` becomes `{}`", flipped(line))],
+            Change::BareError => vec![format!(
+                "`{line}` throws `new Error()` instead: execution still stops here, but the error has no message and is not its own type"
+            )],
             Change::Invert => {
                 let c = match self.language {
                     Language::Python => python_condition(line),
@@ -1341,6 +1592,35 @@ impl Population {
             "{:x}",
             Sha256::digest(serde_json::to_vec(&parts).expect("serializable key"))
         )
+    }
+}
+
+/// The line with its boolean literal turned into the other one: the last
+/// `true`/`false` (`True`/`False` in Python) that stands as a word.
+fn flipped(line: &str) -> String {
+    let words = [
+        ("true", "false"),
+        ("false", "true"),
+        ("True", "False"),
+        ("False", "True"),
+    ];
+    let found = words
+        .iter()
+        .filter_map(|(from, to)| {
+            line.match_indices(from)
+                .filter(|(at, _)| {
+                    let before = line[..*at].chars().next_back();
+                    let after = line[at + from.len()..].chars().next();
+                    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                    !word(before) && !word(after)
+                })
+                .last()
+                .map(|(at, _)| (at, *from, *to))
+        })
+        .max_by_key(|(at, _, _)| *at);
+    match found {
+        Some((at, from, to)) => format!("{}{to}{}", &line[..at], &line[at + from.len()..]),
+        None => line.to_owned(),
     }
 }
 
@@ -1856,6 +2136,98 @@ mod tests {
             change_at(&starts, 8, "a && b", js),
             Some(Change::ExpressionUndefined)
         );
+    }
+
+    #[test]
+    fn a_change_that_cannot_change_anything_is_not_asked() {
+        // supergateway's audit: `return undefined` "returning undefined" and
+        // `let answered = false` "becoming undefined" (read only as `!answered`)
+        // could never be caught, and skipping `super(...)` does not compile.
+        let source = "class H extends Map {\n  constructor() {\n    super([])\n  }\n}\nfunction f(a) {\n  if (a) return undefined\n  if (!a) return void 0\n  let answered = false\n  const done = true, more = 1\n  return false\n}\n";
+        let starts = statement_starts("x.ts", source);
+        let js = Language::JavaScript;
+        assert_eq!(change_at(&starts, 3, "super([])", js), None);
+        assert_eq!(
+            change_at(&starts, 7, "return undefined", js),
+            Some(Change::Skip)
+        );
+        assert_eq!(
+            change_at(&starts, 8, "return void 0", js),
+            Some(Change::Skip)
+        );
+        assert_eq!(
+            change_at(&starts, 9, "let answered = false", js),
+            Some(Change::Flip)
+        );
+        // Two declarators: the value change still applies to both.
+        assert_eq!(
+            change_at(&starts, 10, "const done = true, more = 1", js),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(
+            change_at(&starts, 11, "return false", js),
+            Some(Change::Flip)
+        );
+        let python = python_statement_starts(
+            "def f(a):\n    if a:\n        return None\n    ready = False\n    return True\n",
+        );
+        let py = Language::Python;
+        assert_eq!(change_at(&python, 3, "return None", py), Some(Change::Skip));
+        assert_eq!(
+            change_at(&python, 4, "ready = False", py),
+            Some(Change::Flip)
+        );
+        assert_eq!(change_at(&python, 5, "return True", py), Some(Change::Flip));
+        assert_eq!(flipped("let answered = false"), "let answered = true");
+        assert_eq!(flipped("return isTrue && false;"), "return isTrue && true;");
+        assert_eq!(flipped("ready = False"), "ready = True");
+    }
+
+    #[test]
+    fn a_typescript_throw_keeps_its_types() {
+        // supergateway's modernHttp.ts:294: deleting the guard's throw made
+        // `result.result` fail to type-check on the next line (TS2339).
+        let source = "async function list(reply) {\n  const result = await reply\n  if ('error' in result)\n    throw new Error(`tools/list failed: ${result.error.message}`)\n  return result.result\n}\n";
+        let typed = statement_starts("x.ts", source);
+        let js = Language::JavaScript;
+        assert_eq!(
+            change_at(
+                &typed,
+                4,
+                "throw new Error(`tools/list failed: ${result.error.message}`)",
+                js
+            ),
+            Some(Change::BareError)
+        );
+        let plain = statement_starts("x.js", source);
+        assert_eq!(
+            change_at(
+                &plain,
+                4,
+                "throw new Error(`tools/list failed: ${result.error.message}`)",
+                js
+            ),
+            Some(Change::Skip)
+        );
+    }
+
+    #[test]
+    fn a_statement_s_text_is_what_a_test_would_quote() {
+        assert_eq!(
+            quoted_fragments("logger.info(`  - Headers: ${describeHeaders(headers)}`)"),
+            vec!["- Headers:"]
+        );
+        assert_eq!(
+            quoted_fragments("logger.error(`Child exited: code=${code}, signal=${signal}`)"),
+            vec![", signal=", "Child exited: code="]
+        );
+        assert_eq!(
+            quoted_fragments("log(f\"Serving {path} on {port}\")"),
+            vec!["Serving"]
+        );
+        // Short or letterless pieces say nothing about a test.
+        assert!(quoted_fragments("x = 'abc' + \"1234567\"").is_empty());
+        assert!(quoted_fragments("return a + b").is_empty());
     }
 
     #[test]

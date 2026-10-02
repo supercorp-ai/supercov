@@ -28,6 +28,10 @@ const MAX_RUN_METADATA_BYTES: u64 = 1024 * 1024;
 pub const RUST_ANALYSIS_ABI_VERSION: u32 = 1;
 pub const RUST_QUERY_PRODUCER_ABI_VERSION: u32 = 4;
 pub const RUST_QUERY_INDEX_FILE: &str = "query-index.v1.bin";
+/// The statements that continue onto later lines, written at publication.
+pub const STATEMENT_SPANS_FILE: &str = "statement-spans.json";
+/// What `assertions assess` reads from the analysis, written at publication.
+pub const ASSESSMENT_INPUT_FILE: &str = "assessment-input.json.gz";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -850,6 +854,56 @@ pub fn analyze_stored_run(run: &StoredRun) -> Result<CoverageReport, RunIndexErr
 /// so the first query opens it instead of analysing the archive again. The
 /// identity is the evidence's digest, not its path, so an index written beside
 /// staged evidence stays valid once the directory is renamed into place.
+/// The statements that run over more than one line, with whether they ran:
+/// what the HTML report marks on a statement's continuation lines. Reading
+/// them back from the analysis meant analysing the evidence again, about
+/// 12 s per run on supergateway, so publication writes them beside the index.
+pub fn statement_spans(report: &CoverageReport) -> Vec<serde_json::Value> {
+    report
+        .view
+        .points
+        .iter()
+        .filter(|p| p.meta.kind == crate::coverage_analysis::PointKind::Statement)
+        .filter_map(|p| {
+            let extra = p.meta.source.matches('\n').count();
+            (extra > 0).then(|| {
+                serde_json::json!({
+                    "file": p.meta.file, "line": p.meta.line,
+                    "end": p.meta.line + extra, "covered": p.covered,
+                })
+            })
+        })
+        .collect()
+}
+
+/// The spans publication wrote, when it did.
+pub fn read_statement_spans(run: &StoredRun) -> Option<Vec<serde_json::Value>> {
+    let bytes = fs::read(run.directory.join(STATEMENT_SPANS_FILE)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub(crate) fn write_statement_spans(run: &StoredRun, report: &CoverageReport) -> io::Result<()> {
+    let bytes = serde_json::to_vec(&statement_spans(report)).map_err(io::Error::other)?;
+    fs::write(run.directory.join(STATEMENT_SPANS_FILE), bytes)
+}
+
+/// The assessment input publication wrote, when it did.
+pub fn read_assessment_input(
+    run: &StoredRun,
+) -> Option<crate::assertion_coverage::AssessmentInput> {
+    let file = fs::File::open(run.directory.join(ASSESSMENT_INPUT_FILE)).ok()?;
+    serde_json::from_reader(flate2::read::GzDecoder::new(io::BufReader::new(file))).ok()
+}
+
+pub(crate) fn write_assessment_input(run: &StoredRun, report: &CoverageReport) -> io::Result<()> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec(&crate::assertion_coverage::assessment_input(report))
+        .map_err(io::Error::other)?;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&bytes)?;
+    fs::write(run.directory.join(ASSESSMENT_INPUT_FILE), encoder.finish()?)
+}
+
 pub(crate) fn write_query_index_from(
     run: &StoredRun,
     report: &CoverageReport,

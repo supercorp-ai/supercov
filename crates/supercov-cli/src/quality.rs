@@ -3431,13 +3431,12 @@ fn human_quality(report: &Value) -> String {
     let health = report["health"].as_f64();
     let files = report["files"].as_array().unwrap_or(&empty);
     let scored: Vec<&Value> = files.iter().filter(|f| f["health"].is_number()).collect();
-    let count = |low: f64, high: f64| {
+    // Counted by the same band each file prints with, so a file shown as
+    // `good (8.0/10)` is never counted fair for its 7.98.
+    let count = |name: &str| {
         scored
             .iter()
-            .filter(|f| {
-                let h = f["health"].as_f64().unwrap_or(0.0);
-                h >= low && h < high
-            })
+            .filter(|f| band(f["health"].as_f64()) == name)
             .count()
     };
     out.push_str(&format!(
@@ -3448,9 +3447,9 @@ fn human_quality(report: &Value) -> String {
     ));
     out.push_str(&format!(
         "  {} good, {} fair, {} weak.\n",
-        count(8.0, f64::INFINITY),
-        count(5.0, 8.0),
-        count(f64::NEG_INFINITY, 5.0)
+        count("good"),
+        count("fair"),
+        count("weak")
     ));
     if let Some(resolved) = report["scope_resolved"].as_object() {
         out.push_str(&format!(

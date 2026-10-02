@@ -57,6 +57,7 @@ fn outcome_lines(outcomes: &IndexedOutcomeCounts) -> Vec<String> {
         ("Failed", outcomes.failed),
         ("Flaky", outcomes.flaky),
         ("Skipped", outcomes.skipped),
+        ("Todo", outcomes.todo),
         ("Timed out", outcomes.timed_out),
         ("Interrupted", outcomes.interrupted),
         ("Unknown", outcomes.unknown),
@@ -133,7 +134,11 @@ fn next_page(base: &str, page: &AgentPagination) -> Option<String> {
 }
 
 fn coverage_command(run: &str, request: &IndexedQueryRequest, child: &str) -> String {
-    let mut values = vec!["npx supercov runs".into(), shell_quote(run), child.into()];
+    let mut values = vec![
+        format!("{} runs", crate::launcher_command()),
+        shell_quote(run),
+        child.into(),
+    ];
     if request.filter != "all" {
         values.push(format!("--filter {}", request.filter));
     }
@@ -808,7 +813,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 format!("  {}", coverage_command(&data.run, request, "kinds")),
                 format!("  {}", coverage_command(&data.run, request, "runners")),
                 format!("  {}", coverage_command(&data.run, request, "scope")),
-                format!("  npx supercov runs {} --help", data.run),
+                format!("  {} runs {} --help", crate::launcher_command(), data.run),
             ]);
             lines.join("\n")
         }
@@ -1520,7 +1525,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             }
             lines.push(format!("{} per category", page_label(page)));
             let mut base = format!(
-                "npx supercov diff {} {}",
+                "{} diff {} {}",
+                crate::launcher_command(),
                 shell_quote(&data.older),
                 shell_quote(&data.newer)
             );
@@ -1582,7 +1588,7 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
                 )
             }));
             lines.push(page_label(pagination));
-            let mut base = "npx supercov runs".to_owned();
+            let mut base = format!("{} runs", crate::launcher_command());
             if filter != "all" {
                 base.push_str(&format!(" --filter {filter}"));
             }
@@ -1605,7 +1611,11 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
             "Assertions   not assessed — {}",
             value["assess"]
                 .as_str()
-                .unwrap_or("npx supercov runs latest assertions assess")
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!(
+                    "{} runs latest assertions assess",
+                    crate::launcher_command()
+                ))
         )];
     }
     let s = &value["summary"];
@@ -1667,7 +1677,10 @@ mod tests {
                 &request(),
                 Some("app/routes/app.articles.$articleId/route.tsx")
             ),
-            Some("inspect file: npx supercov runs 'run_00b780f05c9ae324' file 'app/routes/app.articles.$articleId/route.tsx'".into())
+            Some(format!(
+                "inspect file: {} runs 'run_00b780f05c9ae324' file 'app/routes/app.articles.$articleId/route.tsx'",
+                crate::launcher_command()
+            ))
         );
     }
 
@@ -1695,7 +1708,10 @@ mod tests {
         request.runner = Some("playwright".into());
         assert_eq!(
             coverage_command("run_00b780f05c9ae324", &request, "files"),
-            "npx supercov runs 'run_00b780f05c9ae324' files --filter failed --kind 'integration' --runner 'playwright'"
+            format!(
+                "{} runs 'run_00b780f05c9ae324' files --filter failed --kind 'integration' --runner 'playwright'",
+                crate::launcher_command()
+            )
         );
     }
 
