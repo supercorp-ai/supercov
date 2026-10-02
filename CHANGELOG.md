@@ -26,6 +26,7 @@
 
 **Fixed**
 
+- A Rust run refuses a `.cargo` directory inside `.supercov/`. Cargo reads configuration from every directory above where it builds, so a `config.toml` left in `.supercov/workspaces/` set environment variables, runners or aliases for the measured build that plain `cargo test` never saw.
 - `assertions assess --changed` says when a changed statement ran under more tests than it asks: "asked of the tests that ran them, 40 at most each (1 ran under more)". It said "asked of every test that ran them" though only 40 were asked.
 - `supercov report --output <directory>` writes `supercov-report.html` into the directory, as `runs report --output <directory>` writes there. It failed with "Invalid argument".
 - Assessing Rust never asks about a function returning a call to itself. A constructor such as `Point::unit()` could be asked as returning `Point::unit()`, a change that only recurses, so whether a test failed under it said nothing about what the test checks. A `Self { .. }` value in an `impl` now has one of its fields changed, as `Point { .. }` already had.

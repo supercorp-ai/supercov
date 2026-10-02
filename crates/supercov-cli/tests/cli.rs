@@ -2476,3 +2476,61 @@ fn cargo_configuration_and_target_flags_reach_the_measured_build() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_directory_the_project_does_not_own_is_never_written_through() {
+    let project = Project::cart("planted-workspace");
+    let elsewhere = Project::empty("planted-target");
+    std::fs::create_dir_all(project.root.join(".supercov")).unwrap();
+    // A link where Supercov keeps its isolated copy, pointing out of the
+    // project, as a hostile checkout or a confused script could leave it.
+    std::os::unix::fs::symlink(&elsewhere.root, project.root.join(".supercov/workspaces")).unwrap();
+    let measured = project.supercov(&["--", "node", "--test"]).exits(0);
+    assert!(measured.contains(".supercov/workspaces-"), "{measured}");
+    assert!(
+        std::fs::read_dir(&elsewhere.root).unwrap().next().is_none(),
+        "nothing was written through the link"
+    );
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("Lines      76.92% (10/13)"), "{summary}");
+}
+
+#[test]
+fn cargo_configuration_planted_in_the_rust_workspace_is_refused() {
+    let project = Project::empty("planted-cargo");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"planted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn double(x: u32) -> u32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let first = project.supercov(&["--", "cargo", "test"]).exits(0);
+    let workspace = first
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("[supercov] detected Rust; instrumenting isolated Cargo workspace ")
+        })
+        .expect("the run names its workspace");
+    let container = std::path::Path::new(workspace)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    // A Cargo configuration there would change how the copy builds.
+    std::fs::create_dir(container.join(".cargo")).unwrap();
+    let refused = project.supercov(&["--", "cargo", "test"]);
+    assert_ne!(refused.code(), 0);
+    assert!(
+        refused
+            .stderr()
+            .contains("would change how Supercov builds the project but not how `cargo test` does"),
+        "{}",
+        refused.stderr()
+    );
+    std::fs::remove_dir(container.join(".cargo")).unwrap();
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+}

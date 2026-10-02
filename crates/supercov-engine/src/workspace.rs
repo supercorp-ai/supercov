@@ -230,6 +230,24 @@ pub fn workspace_container(root: &Path) -> PathBuf {
     root.join(format!(".supercov/workspaces-{}-overflow", &digest[..16]))
 }
 
+/// A Cargo configuration in one of Supercov's own directories above the
+/// isolated copy of `root`. Cargo reads `.cargo/config.toml` from every
+/// ancestor of where it builds, so one there would change how the copy
+/// builds -- `[env]`, a runner, an alias -- while the project's own `cargo
+/// test` never sees it. The project's own `.cargo`, and those above the
+/// project, apply to both and are not Supercov's to judge.
+pub fn planted_cargo_configuration(root: &Path, workspace: &Path) -> Option<PathBuf> {
+    if !workspace.starts_with(root) {
+        return None;
+    }
+    workspace
+        .ancestors()
+        .skip(1)
+        .take_while(|directory| *directory != root)
+        .map(|directory| directory.join(".cargo"))
+        .find(|path| fs::symlink_metadata(path).is_ok())
+}
+
 pub fn cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
     Ok(workspace_container(root)
         .join("workspace")

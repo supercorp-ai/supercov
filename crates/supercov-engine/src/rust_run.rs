@@ -245,6 +245,12 @@ pub fn run_direct_rust(
         let workspace_started = Instant::now();
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
         let workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
+        if let Some(planted) = crate::workspace::planted_cargo_configuration(&root, &workspace) {
+            return Err(format!(
+                "{} would change how Supercov builds the project but not how `cargo test` does; remove it",
+                planted.display()
+            ));
+        }
         let target_directory = rust_target_directory(&root);
         let cache_started = Instant::now();
         let cached = read_rust_build_cache(&workspace, &target_directory, &build_cache_key);
