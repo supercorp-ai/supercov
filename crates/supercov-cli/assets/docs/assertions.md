@@ -140,6 +140,10 @@ test or its helpers, or to which tests run it, asks again. A dependency or
 configuration change asks everything again. After a typical commit only a few
 dozen questions are asked; the rest are reused.
 
+A reused answer is the one Jev gave before, right or wrong. When you have shown
+an answer wrong, `assess --refresh` asks every question again and keeps the new
+answers.
+
 ## Cost, speed and accuracy
 
 - **Cost:** about 0.006 cents per statement for a first assessment: 14 projects

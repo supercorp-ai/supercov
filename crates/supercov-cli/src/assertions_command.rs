@@ -19,12 +19,13 @@ use supercov_engine::{
 };
 
 const HELP: &str = r#"Usage: supercov runs <run> assertions [<file> | <file>:<line> | --test <name>] [--offset N] [--limit N | --all] [--json]
-       supercov runs <run> assertions assess [--changed] [--dry-run] [--workers N] [--json]
+       supercov runs <run> assertions assess [--changed] [--refresh] [--dry-run] [--workers N] [--json]
 
 How much of the executed code the tests assert: a statement counts as asserted
 when changing it would make at least one passing test that runs it fail. The
 change follows the statement: an `if` inverted (each way), `return x`
-returning undefined, a declaration's value becoming undefined, anything else
+returning undefined, a declaration's value becoming undefined, a boolean
+literal flipped, a TypeScript `throw` throwing a bare Error, anything else
 skipped. Imports and declarations without behaviour are left out.
 
 `assertions` reads the run's saved result: no network, no key.
@@ -53,6 +54,9 @@ Reading the saved result goes from the run down, a page at a time:
               asked of every test that ran them rather than until one
               catches the change: what `tests affected` reads to say which
               tests check the change. Saved beside the run's assessment.
+--refresh     (assess) Ask every question again instead of reusing saved
+              answers, and keep the new answers. For an answer you have
+              shown is wrong: a reused answer is the one Jev gave before.
 --dry-run     (assess) Estimate the requests and cost; send nothing.
 --workers N   (assess) Requests in flight at once (default 24). Each round
               plans the same requests whatever this is, so it changes only
@@ -128,6 +132,8 @@ struct Options {
     assess: bool,
     changed: bool,
     dry_run: bool,
+    /// Ask again rather than reuse saved answers.
+    refresh: bool,
     json: bool,
     target: Target,
     offset: usize,
@@ -237,6 +243,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         assess: false,
         changed: false,
         dry_run: false,
+        refresh: false,
         json: false,
         target: Target::Overview,
         offset: 0,
@@ -284,6 +291,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 o.target = target_of(value);
             }
             "--dry-run" => o.dry_run = true,
+            "--refresh" => o.refresh = true,
             "--changed" => o.changed = true,
             "--json" => o.json = true,
             "--all" => o.limit = None,
@@ -517,7 +525,12 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         refused: BTreeSet::new(),
     };
     let mut cache = Cache::load(root);
-    let mut reused = pass.seed(&cache);
+    // A refreshed pass reads no saved answer; what it asks is saved over them.
+    let mut reused = if options.refresh {
+        0
+    } else {
+        pass.seed(&cache)
+    };
     let key = quality::setting("TYPESAFE_API_KEY");
     let progress = !options.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
     let (mut requests, mut tokens, mut failures) = (0usize, 0u64, 0usize);
@@ -571,7 +584,9 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
                 break;
             }
             pass.widen();
-            reused += pass.seed(&cache);
+            if !options.refresh {
+                reused += pass.seed(&cache);
+            }
             continue;
         }
         let key = key
@@ -585,7 +600,9 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
                 break;
             }
             pass.widen();
-            reused += pass.seed(&cache);
+            if !options.refresh {
+                reused += pass.seed(&cache);
+            }
             continue;
         }
         let batch = within_limits(&population, &mut pass, planned);
@@ -695,7 +712,7 @@ fn assess_changed(
     for &s in &changed {
         for t in population.order(s, IMPACT_TESTS) {
             let key = population.pair_key(s, t, model, &salt);
-            match cache.answers.get(&key) {
+            match cache.answers.get(&key).filter(|_| !options.refresh) {
                 Some(&p) => {
                     answers.entry(s).or_default().push((t, p));
                     reused += 1;
