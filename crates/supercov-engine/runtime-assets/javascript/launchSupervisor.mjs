@@ -254,15 +254,30 @@ function launchArgv(value) {
         return value.cmd;
     return [String(value.command)];
 }
+// A plain map of environment variables, as `run(argv, { ...process.env })`
+// passes one: string values under variable names, at least one of them in
+// capitals, and nothing an options object would carry.
+function environmentMap(value) {
+    const entries = Object.entries(value);
+    return (entries.length > 0 &&
+        entries.every(([name, item]) => typeof item === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) &&
+        entries.some(([name]) => /^[A-Z_][A-Z0-9_]*$/.test(name)) &&
+        !launchOptions(value));
+}
 function injectRemoteLaunch(options, mapping) {
-    const environmentKey = "environment" in options && !("env" in options) ? "environment" : "env";
+    const coverage = {
+        ...process.env,
+        SUPERCOV_EXECUTION_LOG_SHARD: `${process.pid}-${++remoteLaunchSequence}`,
+    };
+    if (environmentMap(options))
+        return guestCoverageEnvironment(mapping, coverage, options);
+    // The SDK's own name for a command's environment: `env`, `environment`
+    // or, as E2B spells it, `envs`. A new one is called `env`.
+    const environmentKey = ["env", "environment", "envs"].find((key) => key in options) ?? "env";
     const existing = options[environmentKey];
     return {
         ...options,
-        [environmentKey]: guestCoverageEnvironment(mapping, {
-            ...process.env,
-            SUPERCOV_EXECUTION_LOG_SHARD: `${process.pid}-${++remoteLaunchSequence}`,
-        }, existing && typeof existing === "object"
+        [environmentKey]: guestCoverageEnvironment(mapping, coverage, existing && typeof existing === "object"
             ? existing
             : {}),
     };

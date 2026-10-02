@@ -37,6 +37,7 @@ const AUTHORED_DIRECTORY: &str = ".supercov/node_modules/.authored";
 const AUTHORED_LIST: &str = ".supercov/node_modules/authored-sources.json";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.mjs",
+    "bootstrap.cjs",
     "capability.mjs",
     "jest.cjs",
     "jest.config.mjs",
@@ -487,6 +488,7 @@ struct ViteTransform {
 fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
     match name {
         "atomic.mjs" => Some(include_bytes!("../runtime-assets/javascript/atomic.mjs")),
+        "bootstrap.cjs" => Some(include_bytes!("../runtime-assets/javascript/bootstrap.cjs")),
         "capability.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/capability.mjs"
         )),
@@ -1027,6 +1029,56 @@ fn limitation_from_source(value: &SourceLimitation) -> CandidateLimitation {
 /// which read `__SUPERCOV_DIRECT_RUNTIME__` and may be loaded by a worker.
 /// The copy is inserted as whole lines before the helper declarations, and the
 /// source map gains as many empty lines, so every mapped position still holds.
+/// A source read by a process the preload never reached -- one started in a
+/// container or VM the workspace is mounted into, by an SDK that passed on
+/// none of Supercov's settings -- found no runtime and threw at its first
+/// probe. Each source of a direct run first loads bootstrap.cjs from the
+/// workspace it was loaded from, which installs the runtime there with the
+/// run's settings and does nothing where the preload already has. The line
+/// goes in before the helper declarations, and the source map gains an empty
+/// line, so every mapped position still holds.
+fn bootstrap_loader(
+    output: &mut crate::js_instrumenter::CandidateOutput,
+    file: &str,
+) -> Result<(), JavascriptFrontendError> {
+    let Some(binding) = output.runtime.as_ref() else {
+        return Ok(());
+    };
+    let direct = format!(
+        "{} = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin",
+        binding.mcdc_begin
+    );
+    let Some(found) = output.code.find(&direct) else {
+        return Ok(());
+    };
+    let specifier = serde_json::to_string(&runtime_specifier(file, "bootstrap.cjs")?)
+        .expect("a path string serializes");
+    // One statement that is valid in a module, a CommonJS file and a browser,
+    // and that compilers leave alone: no `import`, no `import.meta`. It does
+    // nothing where a runtime is installed or where Node is not running (a
+    // browser test project loads these same files). A CommonJS file resolves
+    // the bootstrap from `__filename`; a module from its own URL, the first
+    // file in a stack taken at its top level.
+    let loader = format!(
+        "if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__ && typeof process === \"object\" && process?.getBuiltinModule) try {{ process.getBuiltinModule(\"node:module\").createRequire(typeof __filename === \"string\" ? __filename : /file:\\/\\/\\S+?(?=:\\d+:\\d+)/.exec(new Error().stack)[0])({specifier}); }} catch {{}}\n"
+    );
+    let offset = output.code[..found]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let line = output.code[..offset].matches('\n').count();
+    if let Some(serde_json::Value::String(mappings)) =
+        output.map.as_mut().and_then(|map| map.get_mut("mappings"))
+    {
+        let mut lines: Vec<&str> = mappings.split(';').collect();
+        if line <= lines.len() {
+            lines.insert(line, "");
+            *mappings = lines.join(";");
+        }
+    }
+    output.code.insert_str(offset, &loader);
+    Ok(())
+}
+
 fn bootstrap_runtime(
     output: &mut crate::js_instrumenter::CandidateOutput,
     runtime_source: &str,
@@ -1568,6 +1620,9 @@ pub fn prepare_javascript_frontend(
             output.code = output.code.replace("virtual:supercov-runtime", &runtime);
         }
         bootstrap_runtime(&mut output, &standalone_runtime, browser_suite);
+        if project.build_adapter == BuildAdapter::Direct && !browser_suite {
+            bootstrap_loader(&mut output, file)?;
+        }
         // Direct commands can compile TypeScript themselves (`npm test` may
         // begin with `tsc`), so they need the same generated-source exemption
         // as Supercov's separately orchestrated generic build. Instrumentation

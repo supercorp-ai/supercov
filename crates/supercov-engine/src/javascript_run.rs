@@ -721,6 +721,22 @@ pub fn run_direct_javascript(
         );
     }
     overrides.extend(project.build_environment.clone());
+    // What bootstrap.cjs installs in a process that runs the workspace without
+    // these settings: one started in a container or VM the workspace is
+    // mounted into. It moves `root` to where it sees the workspace from.
+    let settings = serde_json::json!({
+        "root": workspace.display().to_string(),
+        "environment": overrides
+            .iter()
+            .filter(|(name, _)| name.starts_with("SUPERCOV_"))
+            .collect::<BTreeMap<_, _>>(),
+    });
+    let settings_path = frontend.preload_path.with_file_name("run.json");
+    std::fs::write(
+        &settings_path,
+        serde_json::to_vec(&settings).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("{}: {error}", settings_path.display()))?;
     let preparation = if reusable_build.is_some() {
         writeln!(
             diagnostics,

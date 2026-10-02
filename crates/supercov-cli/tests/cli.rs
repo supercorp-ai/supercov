@@ -2569,3 +2569,136 @@ fn affected_test_names_select_exactly_those_tests_in_their_runner() {
     let output = String::from_utf8_lossy(&selected.stdout);
     assert!(output.contains("ℹ tests 1\n"), "{output}");
 }
+
+/// Sandbox SDKs pass a command's environment in different places: an `env`
+/// option, an `envs` option (E2B), or a plain map after the command
+/// (Daytona). Each refuses unless Supercov already moved the project root to
+/// the guest's path.
+const SANDBOX_SHAPES: &str = r#"import { spawnSync } from "node:child_process";
+import { mkdirSync, symlinkSync } from "node:fs";
+import { dirname } from "node:path";
+
+function go(target, argv, environment) {
+  if (environment?.SUPERCOV_PROJECT_ROOT !== target) return 97;
+  return spawnSync(argv[0], argv.slice(1), { cwd: target, env: environment, stdio: "inherit" }).status;
+}
+
+export const sandbox = {
+  boot(options) {
+    const { source, target } = options.mounts[0];
+    mkdirSync(dirname(target), { recursive: true });
+    symlinkSync(source, target, "dir");
+    return {
+      exec: (argv, options) => go(target, argv, options.env),
+      run: (argv, options) => go(target, argv, options.envs),
+      execute: (argv, environment) => go(target, argv, environment),
+    };
+  },
+};
+"#;
+
+#[test]
+fn each_way_a_sandbox_sdk_takes_an_environment_reaches_the_guest() {
+    let project = Project::empty("sandbox-shapes");
+    project.write("package.json", r#"{ "name": "shapes", "type": "module" }"#);
+    project.write("src/cart.js", common::CART);
+    project.write(
+        "node_modules/sandbox-shapes/package.json",
+        r#"{ "name": "sandbox-shapes", "type": "module", "exports": "./index.mjs" }"#,
+    );
+    project.write("node_modules/sandbox-shapes/index.mjs", SANDBOX_SHAPES);
+    project.write(
+        "guest/describe.mjs",
+        "import { describe } from \"../src/cart.js\";\nif (describe([{ name: \"pen\" }]) !== \"pen\") process.exit(1);\n",
+    );
+    project.write(
+        "test/shapes.test.js",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { sandbox } from "sandbox-shapes";
+
+const machine = () =>
+  sandbox.boot({ mounts: [{ source: process.cwd(), target: join(mkdtempSync(join(tmpdir(), "guest-")), "workspace") }] });
+const argv = [process.execPath, "guest/describe.mjs"];
+
+test("an env option", () => assert.equal(machine().exec(argv, { env: { ...process.env } }), 0));
+test("an envs option", () => assert.equal(machine().run(argv, { envs: { ...process.env } }), 0));
+test("an environment map", () => assert.equal(machine().execute(argv, { ...process.env }), 0));
+"#,
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest", "--json"]).json();
+    assert_eq!(
+        summary["data"]["transport"]["remoteLaunches"], 3,
+        "{summary}"
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:20"])
+        .succeeds();
+    contains_all(
+        &line,
+        &["an env option", "an envs option", "an environment map"],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_guest_started_with_none_of_supercovs_settings_runs_and_is_counted() {
+    let project = Project::empty("clean-guest");
+    project.write("package.json", r#"{ "name": "clean", "type": "module" }"#);
+    project.write("src/cart.js", common::CART);
+    // A VM: the project mounted at `target`, a command run there with only
+    // what the VM provides.
+    project.write(
+        "node_modules/fake-vm/package.json",
+        r#"{ "name": "fake-vm", "type": "module", "exports": "./index.mjs" }"#,
+    );
+    project.write(
+        "node_modules/fake-vm/index.mjs",
+        r#"import { spawnSync } from "node:child_process";
+import { mkdirSync, symlinkSync } from "node:fs";
+import { dirname } from "node:path";
+export function boot({ source, target }) {
+  mkdirSync(dirname(target), { recursive: true });
+  symlinkSync(source, target, "dir");
+  return {
+    run(argv) {
+      const result = spawnSync("/usr/bin/env", ["-i", `PATH=${process.env.PATH}`, ...argv], { cwd: target, encoding: "utf8" });
+      return { code: result.status, stderr: result.stderr };
+    },
+  };
+}
+"#,
+    );
+    project.write(
+        "guest/describe.mjs",
+        "import { describe } from \"../src/cart.js\";\nif (describe([{ name: \"pen\" }]) !== \"pen\") process.exit(1);\n",
+    );
+    project.write(
+        "test/vm.test.js",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { boot } from "fake-vm";
+
+test("the guest describes the cart", () => {
+  const target = join(mkdtempSync(join(tmpdir(), "guest-")), "workspace");
+  const result = boot({ source: process.cwd(), target }).run(["node", "guest/describe.mjs"]);
+  assert.equal(result.code, 0, result.stderr);
+});
+"#,
+    );
+    project.git(&["init", "-q"]);
+    // The instrumented source used to throw at its first probe in the guest.
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:20"])
+        .succeeds();
+    contains_all(&line, &["Status\n  COVERED", "Background / unattributed"]);
+}

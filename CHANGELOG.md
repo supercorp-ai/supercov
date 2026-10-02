@@ -27,6 +27,8 @@
 
 **Fixed**
 
+- A process that runs the instrumented workspace without Supercov's settings -- a container or VM the workspace is mounted into, started by an SDK that passes on no environment -- runs and is measured. The instrumented code threw `Cannot read properties of undefined (reading 'mcdcBegin')` at its first line; it now finds the run's settings in the workspace it was loaded from, and its coverage counts for the run, credited to no test.
+- A sandbox command whose environment is given as an `envs` option (E2B) or as a plain map after the command (Daytona) gets Supercov's settings with paths moved to the guest, as an `env` option already did, and its coverage is credited to the test that launched it. The guest got the host's paths, which do not exist inside it.
 - `tests affected --names` prints a Vitest, Playwright or node:test test inside `describe` blocks the way the runner's name filter matches it, the blocks and the test joined by spaces. It printed `small > charges`, and `vitest -t` given that selected no test at all.
 - A Rust run refuses a `.cargo` directory inside `.supercov/`. Cargo reads configuration from every directory above where it builds, so a `config.toml` left in `.supercov/workspaces/` set environment variables, runners or aliases for the measured build that plain `cargo test` never saw.
 - `assertions assess --changed` says when a changed statement ran under more tests than it asks: "asked of the tests that ran them, 40 at most each (1 ran under more)". It said "asked of every test that ran them" though only 40 were asked.
