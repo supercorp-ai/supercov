@@ -3592,15 +3592,8 @@ fn instrument_candidate_with_binding(
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     rendered_transformer.visit_program(&mut parsed.program);
-    let mut optional_transformer = OptionalMemberTransformer {
-        ast,
-        optional_select_v2: optional_select_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
-        targets: optional_member_targets,
-        links: optional_analysis.links,
-        source_sensitive_functions: safety.source_sensitive_functions.clone(),
-    };
-    optional_transformer.visit_program(&mut parsed.program);
+    // Made first so a member right after an optional call can read the
+    // call's frame; it rewrites the program after the members.
     let mut call_transformer = OptionalCallTransformer::new(
         ast,
         source,
@@ -3611,6 +3604,26 @@ fn instrument_candidate_with_binding(
         call_analysis.roots,
         safety.source_sensitive_functions.clone(),
     );
+    let call_frames = optional_analysis
+        .after_call
+        .iter()
+        .filter_map(|(member, call)| {
+            call_transformer
+                .sites
+                .get(call)
+                .map(|site| (*member, site.frame.clone()))
+        })
+        .collect();
+    let mut optional_transformer = OptionalMemberTransformer {
+        ast,
+        optional_select_v2: optional_select_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        targets: optional_member_targets,
+        links: optional_analysis.links,
+        call_frames,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+    };
+    optional_transformer.visit_program(&mut parsed.program);
     call_transformer.visit_program(&mut parsed.program);
     let mut default_transformer = DefaultTransformer {
         ast,
@@ -4271,19 +4284,23 @@ struct OptionalMemberTransformer<'a> {
     /// The short and continued outcomes are two V2 points from this index.
     targets: HashMap<SpanKey, usize>,
     links: HashMap<SpanKey, u8>,
+    /// For a target right after an optional call, that call's frame.
+    call_frames: HashMap<SpanKey, String>,
     source_sensitive_functions: HashSet<SpanKey>,
 }
 
 impl<'a> OptionalMemberTransformer<'a> {
-    /// `optionalSelectV2(file, first, object, links)`: records whether the
-    /// object of `object?.member` was nullish and passes it through. In
+    /// `optionalSelectV2(file, first, object, links, call)`: records whether
+    /// the object of `object?.member` was nullish and passes it through. In
     /// `a?.b?.c` the object of `?.c` is undefined when `a` is, though `?.c`
-    /// never ran; `links` lets the runtime tell the two apart.
+    /// never ran; `links`, and after an optional call that call's frame, let
+    /// the runtime tell the two apart.
     fn instrument_operand(
         &self,
         operand: Expression<'a>,
         first: usize,
         links: u8,
+        call_frame: Option<&str>,
     ) -> Expression<'a> {
         let mut arguments = self.ast.vec_from_array([
             Argument::from(
@@ -4295,6 +4312,12 @@ impl<'a> OptionalMemberTransformer<'a> {
         ]);
         if links != 0 {
             arguments.push(Argument::from(numeric(self.ast, usize::from(links))));
+        }
+        if let Some(frame) = call_frame {
+            arguments.push(Argument::from(
+                self.ast
+                    .expression_identifier(Span::default(), self.ast.ident(frame)),
+            ));
         }
         self.ast.expression_call(
             Span::default(),
@@ -4310,9 +4333,14 @@ impl<'a> OptionalMemberTransformer<'a> {
         let Some(first) = self.targets.remove(&span_key(span)) else {
             return;
         };
-        let links = self.links.get(&span_key(span)).copied().unwrap_or(0);
+        let mut links = self.links.get(&span_key(span)).copied().unwrap_or(0);
+        let call_frame = self.call_frames.get(&span_key(span)).cloned();
+        if call_frame.is_none() {
+            // A call that is not measured leaves nothing to read.
+            links &= !LINK_AFTER_CALL;
+        }
         let operand = object.take_in(self.ast.allocator);
-        *object = self.instrument_operand(operand, first, links);
+        *object = self.instrument_operand(operand, first, links, call_frame.as_deref());
     }
 }
 
@@ -6942,31 +6970,51 @@ struct OptionalMemberAnalysis {
     targets: HashMap<SpanKey, (String, String)>,
     /// Each target's place in its chain, as `optionalSelectV2` reads it.
     links: HashMap<SpanKey, u8>,
+    /// The optional call a target's object holds, for a target right after
+    /// one: whether that call went ahead says whether the target ran.
+    after_call: HashMap<SpanKey, SpanKey>,
 }
 
 /// An optional link of the same chain runs before this one.
 const LINK_AFTER_ANOTHER: u8 = 1;
 /// An optional link of the same chain runs after this one.
 const LINK_BEFORE_ANOTHER: u8 = 2;
+/// The link before this one is an optional call.
+const LINK_AFTER_CALL: u8 = 4;
 
-/// Whether `object`, the object of an optional member, holds an earlier
-/// optional member of the same chain: through plain member accesses, plain
-/// calls and `!`, which the chain's short-circuit skips along with the rest.
-/// An optional call has a short-circuit of its own, and parentheses end the
-/// chain, so either ends the walk.
-fn optional_link_below(object: &Expression<'_>) -> bool {
+/// The optional link of the same chain an optional member's object holds.
+enum LinkBelow {
+    None,
+    Member,
+    Call(SpanKey),
+}
+
+/// The earlier optional link of the same chain that `object`, the object of
+/// an optional member, holds: through plain member accesses, plain calls and
+/// `!`, which the chain's short-circuit skips along with the rest.
+/// Parentheses end the chain.
+fn optional_link_below(object: &Expression<'_>) -> LinkBelow {
     let mut current = object;
     loop {
         current = match current {
-            Expression::StaticMemberExpression(member) if member.optional => return true,
-            Expression::ComputedMemberExpression(member) if member.optional => return true,
-            Expression::PrivateFieldExpression(member) if member.optional => return true,
+            Expression::StaticMemberExpression(member) if member.optional => {
+                return LinkBelow::Member;
+            }
+            Expression::ComputedMemberExpression(member) if member.optional => {
+                return LinkBelow::Member;
+            }
+            Expression::PrivateFieldExpression(member) if member.optional => {
+                return LinkBelow::Member;
+            }
+            Expression::CallExpression(call) if call.optional => {
+                return LinkBelow::Call(span_key(call.span));
+            }
             Expression::StaticMemberExpression(member) => &member.object,
             Expression::ComputedMemberExpression(member) => &member.object,
             Expression::PrivateFieldExpression(member) => &member.object,
-            Expression::CallExpression(call) if !call.optional => &call.callee,
+            Expression::CallExpression(call) => &call.callee,
             Expression::TSNonNullExpression(inner) => &inner.expression,
-            _ => return false,
+            _ => return LinkBelow::None,
         };
     }
 }
@@ -7936,15 +7984,20 @@ impl OptionalMemberCollector<'_> {
         if !optional || self.unsafe_function_depth > 0 || self.with_depth > 0 {
             return;
         }
-        let links = if optional_link_below(object) {
-            LINK_AFTER_ANOTHER
-        } else {
-            0
-        } | if optional_link_above(context) {
-            LINK_BEFORE_ANOTHER
-        } else {
-            0
+        let below = match optional_link_below(object) {
+            LinkBelow::Member => LINK_AFTER_ANOTHER,
+            LinkBelow::Call(call) => {
+                self.analysis.after_call.insert(span_key(span), call);
+                LINK_AFTER_CALL
+            }
+            LinkBelow::None => 0,
         };
+        let links = below
+            | if optional_link_above(context) {
+                LINK_BEFORE_ANOTHER
+            } else {
+                0
+            };
         if links != 0 {
             self.analysis.links.insert(span_key(span), links);
         }

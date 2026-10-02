@@ -1838,7 +1838,8 @@ test("skips each shape when absent", () => {
 #[test]
 fn an_optional_link_a_chain_cut_short_before_it_is_not_credited() {
     // In `a?.b?.c` the object of `?.c` is undefined when `a` is, though
-    // `?.c` never ran. Each link is credited only with what it saw itself,
+    // `?.c` never ran, and so is the object of `?.b` in `f?.()?.b` when `f`
+    // is. Each link is credited only with what it saw itself,
     // and a getter or call between two links that evaluates chains of its
     // own does not disturb them.
     let project = Project::empty("optional-links");
@@ -1848,11 +1849,11 @@ fn an_optional_link_a_chain_cut_short_before_it_is_not_credited() {
     );
     project.write(
         "src/c.js",
-        "export const realNullish = (o) => o?.inner?.value;\nexport const three = (a) => a?.b?.c?.d;\nexport const viaCall = (o) => o?.get().x?.y;\nconst noisy = { get a() { const cut = null; cut?.z?.w; return { b: 1 }; } };\nexport const viaGetter = (o) => o?.a?.b;\nexport { noisy };\nexport class Holder {\n  #inner;\n  constructor(inner) { this.#inner = inner; }\n  read(self) { return self?.#inner?.value; }\n}\n",
+        "export const realNullish = (o) => o?.inner?.value;\nexport const three = (a) => a?.b?.c?.d;\nexport const viaCall = (o) => o?.get().x?.y;\nconst noisy = { get a() { const cut = null; cut?.z?.w; return { b: 1 }; } };\nexport const viaGetter = (o) => o?.a?.b;\nexport { noisy };\nexport class Holder {\n  #inner;\n  constructor(inner) { this.#inner = inner; }\n  read(self) { return self?.#inner?.value; }\n}\nexport const callThenMember = (f) => f?.()?.b;\nexport const callReturnsNothing = (f) => f?.()?.b;\n",
     );
     project.write(
         "test/c.test.js",
-        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport * as c from \"../src/c.js\";\ntest(\"chains\", () => {\n  // both links of realNullish: first nullish, then second nullish\n  assert.equal(c.realNullish(null), undefined);\n  assert.equal(c.realNullish({ inner: null }), undefined);\n  assert.equal(c.realNullish({ inner: { value: 1 } }), 1);\n  // three: a null, then b null; c never null\n  assert.equal(c.three(null), undefined);\n  assert.equal(c.three({ b: null }), undefined);\n  assert.equal(c.three({ b: { c: { d: 4 } } }), 4);\n  // viaCall: o null only; x never null\n  assert.equal(c.viaCall(null), undefined);\n  assert.equal(c.viaCall({ get: () => ({ x: { y: 2 } }) }), 2);\n  // viaGetter: o present, getter cuts its own chain short; a never null\n  assert.equal(c.viaGetter(c.noisy), 1);\n  assert.equal(c.viaGetter(null), undefined);\n  const h = new c.Holder({ value: 3 });\n  assert.equal(h.read(h), 3);\n  assert.equal(h.read(null), undefined);\n});\n",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport * as c from \"../src/c.js\";\ntest(\"chains\", () => {\n  // both links of realNullish: first nullish, then second nullish\n  assert.equal(c.realNullish(null), undefined);\n  assert.equal(c.realNullish({ inner: null }), undefined);\n  assert.equal(c.realNullish({ inner: { value: 1 } }), 1);\n  // three: a null, then b null; c never null\n  assert.equal(c.three(null), undefined);\n  assert.equal(c.three({ b: null }), undefined);\n  assert.equal(c.three({ b: { c: { d: 4 } } }), 4);\n  // viaCall: o null only; x never null\n  assert.equal(c.viaCall(null), undefined);\n  assert.equal(c.viaCall({ get: () => ({ x: { y: 2 } }) }), 2);\n  // viaGetter: o present, getter cuts its own chain short; a never null\n  assert.equal(c.viaGetter(c.noisy), 1);\n  assert.equal(c.viaGetter(null), undefined);\n  const h = new c.Holder({ value: 3 });\n  assert.equal(h.read(h), 3);\n  assert.equal(h.read(null), undefined);\n  // callThenMember: f null only; f() never returns nullish\n  assert.equal(c.callThenMember(null), undefined);\n  assert.equal(c.callThenMember(() => ({ b: 1 })), 1);\n  // callReturnsNothing: f null, f() null, and f() an object\n  assert.equal(c.callReturnsNothing(null), undefined);\n  assert.equal(c.callReturnsNothing(() => null), undefined);\n  assert.equal(c.callReturnsNothing(() => ({ b: 1 })), 1);\n});\n",
     );
     project.git(&["init", "-q"]);
     let measured = project.supercov(&["--", "node", "--test"]).succeeds();
@@ -1868,7 +1869,7 @@ fn an_optional_link_a_chain_cut_short_before_it_is_not_credited() {
         .join("\n");
     assert_eq!(
         gaps,
-        " LINE  STATUS        SOURCE\n    2  PARTIAL       a?.b?.c?.d\n       Unobserved: nullish short-circuit outcome not observed\n    3  PARTIAL       o?.get().x?.y\n       Unobserved: nullish short-circuit outcome not observed\n    4  PARTIAL       cut?.z\n       Unobserved: non-nullish continuation outcome not observed\n       Unobserved: nullish short-circuit outcome not observed\n       Unobserved: non-nullish continuation outcome not observed\n    5  PARTIAL       o?.a?.b\n       Unobserved: nullish short-circuit outcome not observed\n   10  PARTIAL       self?.#inner?.value\n       Unobserved: nullish short-circuit outcome not observed\nshowing 1-5 of 5 gap lines",
+        " LINE  STATUS        SOURCE\n    2  PARTIAL       a?.b?.c?.d\n       Unobserved: nullish short-circuit outcome not observed\n    3  PARTIAL       o?.get().x?.y\n       Unobserved: nullish short-circuit outcome not observed\n    4  PARTIAL       cut?.z\n       Unobserved: non-nullish continuation outcome not observed\n       Unobserved: nullish short-circuit outcome not observed\n       Unobserved: non-nullish continuation outcome not observed\n    5  PARTIAL       o?.a?.b\n       Unobserved: nullish short-circuit outcome not observed\n   10  PARTIAL       self?.#inner?.value\n       Unobserved: nullish short-circuit outcome not observed\n   12  PARTIAL       f?.()?.b\n       Unobserved: nullish short-circuit outcome not observed\nshowing 1-6 of 6 gap lines",
     );
 }
 
