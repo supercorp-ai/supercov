@@ -3597,6 +3597,7 @@ fn instrument_candidate_with_binding(
         optional_select_v2: optional_select_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
         targets: optional_member_targets,
+        links: optional_analysis.links,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     optional_transformer.visit_program(&mut parsed.program);
@@ -4269,28 +4270,38 @@ struct OptionalMemberTransformer<'a> {
     probe_file_v2: String,
     /// The short and continued outcomes are two V2 points from this index.
     targets: HashMap<SpanKey, usize>,
+    links: HashMap<SpanKey, u8>,
     source_sensitive_functions: HashSet<SpanKey>,
 }
 
 impl<'a> OptionalMemberTransformer<'a> {
-    /// `optionalSelectV2(file, first, object)`: records whether the object of
-    /// `object?.member` was nullish and passes it through.
-    fn instrument_operand(&self, operand: Expression<'a>, first: usize) -> Expression<'a> {
+    /// `optionalSelectV2(file, first, object, links)`: records whether the
+    /// object of `object?.member` was nullish and passes it through. In
+    /// `a?.b?.c` the object of `?.c` is undefined when `a` is, though `?.c`
+    /// never ran; `links` lets the runtime tell the two apart.
+    fn instrument_operand(
+        &self,
+        operand: Expression<'a>,
+        first: usize,
+        links: u8,
+    ) -> Expression<'a> {
+        let mut arguments = self.ast.vec_from_array([
+            Argument::from(
+                self.ast
+                    .expression_identifier(Span::default(), self.ast.ident(&self.probe_file_v2)),
+            ),
+            Argument::from(numeric(self.ast, first)),
+            Argument::from(operand),
+        ]);
+        if links != 0 {
+            arguments.push(Argument::from(numeric(self.ast, usize::from(links))));
+        }
         self.ast.expression_call(
             Span::default(),
             self.ast
                 .expression_identifier(Span::default(), self.ast.ident(&self.optional_select_v2)),
             NONE,
-            self.ast.vec_from_array([
-                Argument::from(
-                    self.ast.expression_identifier(
-                        Span::default(),
-                        self.ast.ident(&self.probe_file_v2),
-                    ),
-                ),
-                Argument::from(numeric(self.ast, first)),
-                Argument::from(operand),
-            ]),
+            arguments,
             false,
         )
     }
@@ -4299,8 +4310,9 @@ impl<'a> OptionalMemberTransformer<'a> {
         let Some(first) = self.targets.remove(&span_key(span)) else {
             return;
         };
+        let links = self.links.get(&span_key(span)).copied().unwrap_or(0);
         let operand = object.take_in(self.ast.allocator);
-        *object = self.instrument_operand(operand, first);
+        *object = self.instrument_operand(operand, first, links);
     }
 }
 
@@ -6928,6 +6940,54 @@ struct LogicalAssignmentAnalysis {
 struct OptionalMemberAnalysis {
     branches: Vec<CandidateBranch>,
     targets: HashMap<SpanKey, (String, String)>,
+    /// Each target's place in its chain, as `optionalSelectV2` reads it.
+    links: HashMap<SpanKey, u8>,
+}
+
+/// An optional link of the same chain runs before this one.
+const LINK_AFTER_ANOTHER: u8 = 1;
+/// An optional link of the same chain runs after this one.
+const LINK_BEFORE_ANOTHER: u8 = 2;
+
+/// Whether `object`, the object of an optional member, holds an earlier
+/// optional member of the same chain: through plain member accesses, plain
+/// calls and `!`, which the chain's short-circuit skips along with the rest.
+/// An optional call has a short-circuit of its own, and parentheses end the
+/// chain, so either ends the walk.
+fn optional_link_below(object: &Expression<'_>) -> bool {
+    let mut current = object;
+    loop {
+        current = match current {
+            Expression::StaticMemberExpression(member) if member.optional => return true,
+            Expression::ComputedMemberExpression(member) if member.optional => return true,
+            Expression::PrivateFieldExpression(member) if member.optional => return true,
+            Expression::StaticMemberExpression(member) => &member.object,
+            Expression::ComputedMemberExpression(member) => &member.object,
+            Expression::PrivateFieldExpression(member) => &member.object,
+            Expression::CallExpression(call) if !call.optional => &call.callee,
+            Expression::TSNonNullExpression(inner) => &inner.expression,
+            _ => return false,
+        };
+    }
+}
+
+/// The same walk outward: whether this member is the object, through the
+/// same plain links, of a later optional member of its chain.
+fn optional_link_above<State>(context: &TraverseCtx<'_, State>) -> bool {
+    for ancestor in context.ancestors() {
+        match ancestor {
+            Ancestor::StaticMemberExpressionObject(parent) if *parent.optional() => return true,
+            Ancestor::ComputedMemberExpressionObject(parent) if *parent.optional() => return true,
+            Ancestor::PrivateFieldExpressionObject(parent) if *parent.optional() => return true,
+            Ancestor::StaticMemberExpressionObject(_)
+            | Ancestor::ComputedMemberExpressionObject(_)
+            | Ancestor::PrivateFieldExpressionObject(_)
+            | Ancestor::TSNonNullExpressionExpression(_) => {}
+            Ancestor::CallExpressionCallee(parent) if !*parent.optional() => {}
+            _ => return false,
+        }
+    }
+    false
 }
 
 #[derive(Default)]
@@ -7866,9 +7926,27 @@ struct OptionalMemberCollector<'s> {
 }
 
 impl OptionalMemberCollector<'_> {
-    fn record(&mut self, span: Span, optional: bool) {
+    fn record<State>(
+        &mut self,
+        span: Span,
+        optional: bool,
+        object: &Expression<'_>,
+        context: &TraverseCtx<'_, State>,
+    ) {
         if !optional || self.unsafe_function_depth > 0 || self.with_depth > 0 {
             return;
+        }
+        let links = if optional_link_below(object) {
+            LINK_AFTER_ANOTHER
+        } else {
+            0
+        } | if optional_link_above(context) {
+            LINK_BEFORE_ANOTHER
+        } else {
+            0
+        };
+        if links != 0 {
+            self.analysis.links.insert(span_key(span), links);
         }
         let id = stable_id(self.source, self.file, "optional-chain", span, "");
         let short_id = format!("{id}:short");
@@ -7958,25 +8036,25 @@ impl<'a> Traverse<'a, ()> for OptionalMemberCollector<'_> {
     fn enter_computed_member_expression(
         &mut self,
         node: &mut ComputedMemberExpression<'a>,
-        _context: &mut TraverseCtx<'a, ()>,
+        context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.record(node.span, node.optional);
+        self.record(node.span, node.optional, &node.object, context);
     }
 
     fn enter_static_member_expression(
         &mut self,
         node: &mut StaticMemberExpression<'a>,
-        _context: &mut TraverseCtx<'a, ()>,
+        context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.record(node.span, node.optional);
+        self.record(node.span, node.optional, &node.object, context);
     }
 
     fn enter_private_field_expression(
         &mut self,
         node: &mut PrivateFieldExpression<'a>,
-        _context: &mut TraverseCtx<'a, ()>,
+        context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.record(node.span, node.optional);
+        self.record(node.span, node.optional, &node.object, context);
     }
 }
 

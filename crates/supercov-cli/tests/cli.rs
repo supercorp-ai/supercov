@@ -1836,6 +1836,43 @@ test("skips each shape when absent", () => {
 
 #[cfg(unix)]
 #[test]
+fn an_optional_link_a_chain_cut_short_before_it_is_not_credited() {
+    // In `a?.b?.c` the object of `?.c` is undefined when `a` is, though
+    // `?.c` never ran. Each link is credited only with what it saw itself,
+    // and a getter or call between two links that evaluates chains of its
+    // own does not disturb them.
+    let project = Project::empty("optional-links");
+    project.write(
+        "package.json",
+        r#"{ "name": "chain", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/c.js",
+        "export const realNullish = (o) => o?.inner?.value;\nexport const three = (a) => a?.b?.c?.d;\nexport const viaCall = (o) => o?.get().x?.y;\nconst noisy = { get a() { const cut = null; cut?.z?.w; return { b: 1 }; } };\nexport const viaGetter = (o) => o?.a?.b;\nexport { noisy };\nexport class Holder {\n  #inner;\n  constructor(inner) { this.#inner = inner; }\n  read(self) { return self?.#inner?.value; }\n}\n",
+    );
+    project.write(
+        "test/c.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport * as c from \"../src/c.js\";\ntest(\"chains\", () => {\n  // both links of realNullish: first nullish, then second nullish\n  assert.equal(c.realNullish(null), undefined);\n  assert.equal(c.realNullish({ inner: null }), undefined);\n  assert.equal(c.realNullish({ inner: { value: 1 } }), 1);\n  // three: a null, then b null; c never null\n  assert.equal(c.three(null), undefined);\n  assert.equal(c.three({ b: null }), undefined);\n  assert.equal(c.three({ b: { c: { d: 4 } } }), 4);\n  // viaCall: o null only; x never null\n  assert.equal(c.viaCall(null), undefined);\n  assert.equal(c.viaCall({ get: () => ({ x: { y: 2 } }) }), 2);\n  // viaGetter: o present, getter cuts its own chain short; a never null\n  assert.equal(c.viaGetter(c.noisy), 1);\n  assert.equal(c.viaGetter(null), undefined);\n  const h = new c.Holder({ value: 3 });\n  assert.equal(h.read(h), 3);\n  assert.equal(h.read(null), undefined);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    let measured = project.supercov(&["--", "node", "--test"]).succeeds();
+    assert!(measured.contains("pass 1"), "{measured}");
+    let file = project
+        .supercov(&["runs", "latest", "file", "src/c.js"])
+        .succeeds();
+    let gaps = file
+        .lines()
+        .skip_while(|line| !line.starts_with(" LINE"))
+        .filter(|line| !line.contains("Inspect:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        gaps,
+        " LINE  STATUS        SOURCE\n    2  PARTIAL       a?.b?.c?.d\n       Unobserved: nullish short-circuit outcome not observed\n    3  PARTIAL       o?.get().x?.y\n       Unobserved: nullish short-circuit outcome not observed\n    4  PARTIAL       cut?.z\n       Unobserved: non-nullish continuation outcome not observed\n       Unobserved: nullish short-circuit outcome not observed\n       Unobserved: non-nullish continuation outcome not observed\n    5  PARTIAL       o?.a?.b\n       Unobserved: nullish short-circuit outcome not observed\n   10  PARTIAL       self?.#inner?.value\n       Unobserved: nullish short-circuit outcome not observed\nshowing 1-5 of 5 gap lines",
+    );
+}
+
+#[test]
 fn a_project_with_links_sockets_and_pipes_is_measured_through_them() {
     let outside = Project::empty("links-outside");
     outside.write("secret.js", "export const secret = 1;\n");
