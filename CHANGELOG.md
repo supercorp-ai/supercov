@@ -4,6 +4,7 @@
 
 **Changed**
 
+- A Jest test is named by its `describe` blocks with ` > `, `small > charges`, as Vitest, Playwright and node:test tests are; `tests affected --names` still prints `small charges`, which `jest -t` matches. Its id does not change.
 - A node:test test inside `describe` or `suite` blocks is named by them, `small > charges`, as Vitest, Jest and Playwright tests are. Two tests with one name in different blocks were one name in every listing, and `assertions assess --changed` could not tell them apart when it chose which of a statement's tests to ask. Saved assertion answers for such tests are asked again once, since the question names the test.
 - Rust code the compiler never builds for the target is not counted: a `#[cfg(windows)]` function on Linux or macOS, or the other branch of a `#[cfg(unix)]`/`#[cfg(windows)]` pair, read as uncovered lines no test could reach. Items behind a feature or a custom cfg are still counted, since the target alone does not settle them.
 - Rust test code is not measured, as cargo-llvm-cov and cargo-tarpaulin leave it out by default: integration tests, examples and benchmarks, `tests.rs` and `*_tests.rs` files, modules only `#[cfg(test)]` declares, and `#[cfg(test)]`, `#[test]` and `#[bench]` items. Their statements and branches had counted toward the coverage of the crate under test, and every `assert!` they hold added a branch no passing test can take. Assertions in test code still mark which evidence a passing assertion witnessed.
@@ -27,6 +28,7 @@
 
 **Fixed**
 
+- A TypeScript project whose test command compiles its tests somewhere else (`tsc && node --test dist/test/...`) runs under Supercov. Each test file imported Supercov's runtime by a relative path, which pointed nowhere once compiled into `dist/`, and the test failed with `Cannot find module '../.supercov/node_modules/runtime.mjs'`.
 - A process that runs the instrumented workspace without Supercov's settings -- a container or VM the workspace is mounted into, started by an SDK that passes on no environment -- runs and is measured. The instrumented code threw `Cannot read properties of undefined (reading 'mcdcBegin')` at its first line; it now finds the run's settings in the workspace it was loaded from, and its coverage counts for the run, credited to no test.
 - A sandbox command whose environment is given as an `envs` option (E2B) or as a plain map after the command (Daytona) gets Supercov's settings with paths moved to the guest, as an `env` option already did, and its coverage is credited to the test that launched it. The guest got the host's paths, which do not exist inside it.
 - `tests affected --names` prints a Vitest, Playwright or node:test test inside `describe` blocks the way the runner's name filter matches it, the blocks and the test joined by spaces. It printed `small > charges`, and `vitest -t` given that selected no test at all.

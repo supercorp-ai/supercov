@@ -1051,16 +1051,9 @@ fn bootstrap_loader(
     let Some(found) = output.code.find(&direct) else {
         return Ok(());
     };
-    let specifier = serde_json::to_string(&runtime_specifier(file, "bootstrap.cjs")?)
-        .expect("a path string serializes");
-    // One statement that is valid in a module, a CommonJS file and a browser,
-    // and that compilers leave alone: no `import`, no `import.meta`. It does
-    // nothing where a runtime is installed or where Node is not running (a
-    // browser test project loads these same files). A CommonJS file resolves
-    // the bootstrap from `__filename`; a module from its own URL, the first
-    // file in a stack taken at its top level.
     let loader = format!(
-        "if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__ && typeof process === \"object\" && process?.getBuiltinModule) try {{ process.getBuiltinModule(\"node:module\").createRequire(typeof __filename === \"string\" ? __filename : /file:\\/\\/\\S+?(?=:\\d+:\\d+)/.exec(new Error().stack)[0])({specifier}); }} catch {{}}\n"
+        "{}\n",
+        crate::js_instrumenter::runtime_loader(&runtime_specifier(file, "bootstrap.cjs")?)
     );
     let offset = output.code[..found]
         .rfind('\n')
@@ -1692,7 +1685,7 @@ pub fn prepare_javascript_frontend(
         let capability_wrapper = (!project.source_files.contains(&entry.file))
             .then(|| runtime_specifier(&entry.file, "capability.mjs"))
             .transpose()?;
-        let assertion_runtime = runtime_specifier(&entry.file, "runtime.mjs")?;
+        let assertion_runtime = runtime_specifier(&entry.file, "bootstrap.cjs")?;
         let output =
             match crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
                 &source,

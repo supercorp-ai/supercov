@@ -2702,3 +2702,85 @@ test("the guest describes the cart", () => {
         .succeeds();
     contains_all(&line, &["Status\n  COVERED", "Background / unattributed"]);
 }
+
+#[cfg(unix)]
+#[test]
+fn jest_tests_are_named_by_their_describe_blocks_and_selected_by_jest() {
+    let project = Project::empty("jest-names");
+    project.write(
+        "package.json",
+        r#"{ "name": "jest-names", "scripts": { "test": "jest" } }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\nfunction tax(sum) {\n  return sum * 2;\n}\nmodule.exports = { fee, tax };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { fee, tax } = require(\"../src/fee\");\ndescribe(\"small\", () => {\n  test(\"charges\", () => expect(fee(10)).toBe(5));\n});\ndescribe(\"large\", () => {\n  describe(\"orders\", () => {\n    test(\"charges\", () => expect(tax(10)).toBe(20));\n  });\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("jest");
+    project.supercov(&["--", "npx", "jest"]).succeeds();
+    let tests = project
+        .supercov(&["runs", "latest", "test", "charges"])
+        .succeeds();
+    contains_all(&tests, &["small > charges [", "large > orders > charges ["]);
+    project.edit("src/fee.js", "? 0 : 5", "? 0 : 6");
+    let names = project
+        .supercov(&["runs", "latest", "tests", "affected", "--names"])
+        .succeeds();
+    assert_eq!(names.trim(), "small charges");
+    let selected = std::process::Command::new(project.root.join("node_modules/.bin/jest"))
+        .args(["-t", names.trim()])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    let output = String::from_utf8_lossy(&selected.stderr);
+    assert!(output.contains("1 failed, 1 skipped, 2 total"), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
+fn typescript_tests_compiled_into_another_directory_run_and_are_measured() {
+    let project = Project::empty("tsc-outdir");
+    project.write(
+        "package.json",
+        r#"{ "name": "tsc-outdir", "scripts": { "test": "tsc -p . && node --test dist/test/fee.test.js" } }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\ndist\n");
+    // A strict check of the test file too, and CommonJS output in `dist/`.
+    project.write(
+        "tsconfig.json",
+        r#"{ "compilerOptions": { "module": "commonjs", "target": "es2022", "outDir": "dist", "rootDir": ".", "strict": true, "types": ["node"] }, "include": ["src", "test"] }"#,
+    );
+    project.write(
+        "src/fee.ts",
+        "export function fee(sum: number): number {\n  return sum > 100 ? 0 : 5;\n}\n",
+    );
+    project.write(
+        "test/fee.test.ts",
+        "import { test } from \"node:test\";\nimport { equal } from \"node:assert/strict\";\nimport { fee } from \"../src/fee\";\n\ntest(\"small orders pay\", () => equal(fee(10), 5));\n",
+    );
+    project.git(&["init", "-q"]);
+    // The test file used to import the runtime by a path that pointed nowhere
+    // once compiled into dist/.
+    project.supercov(&["--", "npm", "test"]).succeeds();
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/fee.ts:2"])
+        .succeeds();
+    assert!(line.contains("small orders pay ["), "{line}");
+}

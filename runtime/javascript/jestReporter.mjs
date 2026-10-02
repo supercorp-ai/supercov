@@ -56,7 +56,9 @@ export default class SupercovJestReporter {
         const record = (attempt, attemptStatus, flaky) => {
             const payload = {
                 testId,
-                test: result.fullName,
+                // Named by its describe blocks, `small > charges`, as every
+                // JavaScript runner is; the id keeps Jest's own full name.
+                test: [...(result.ancestorTitles ?? []), result.title].join(" > "),
                 testFile,
                 title: result.title,
                 retry: attempt,

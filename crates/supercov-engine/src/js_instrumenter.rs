@@ -1945,6 +1945,24 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
 /// process, container, or VM while constructing a fresh environment. Static
 /// imports preserve ESM evaluation ordering and do not depend on runner-specific
 /// environment forwarding.
+/// The body of the function [`runtime_loader`] calls: where Node runs, it
+/// requires the bootstrap relative to the file the stack's first frame names.
+const RUNTIME_LOADER_BODY: &str = r#""const host = globalThis.process; if (!host || !host.getBuiltinModule) return; const frame = /(?:file:\\/\\/)?((?:\\/|[A-Za-z]:[\\\\/])[^\\s()]+?)(?=:\\d+:\\d+)/.exec(String(stack)); if (!frame) return; host.getBuiltinModule(\"node:module\").createRequire(frame[0].startsWith(\"file:\") ? frame[0] : frame[1])(specifier);""#;
+
+/// One statement that loads the run's bootstrap where no runtime is
+/// installed. It has to be valid in a module, a CommonJS file and a browser,
+/// pass a strict TypeScript check with or without Node's types, and survive
+/// compilers -- so no `import`, no `import.meta`, and nothing but
+/// `globalThis.__SUPERCOV_DIRECT_RUNTIME__`, `Function` and `Error` outside a
+/// function body the type checker does not read. The file's own location
+/// comes from a stack taken at its top level; `bootstrap` is relative to it.
+pub(crate) fn runtime_loader(bootstrap: &str) -> String {
+    let specifier = serde_json::to_string(bootstrap).expect("a path string serializes");
+    format!(
+        "if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {{ new Function(\"stack\", \"specifier\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
+    )
+}
+
 pub fn instrument_node_assertion_phases_with_runtime_imports(
     source: &str,
     file: &str,
@@ -2022,9 +2040,26 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         });
     }
     let module = parsed.program.source_type.is_module();
-    let module_assertion_runtime = (assertions > 0 && module)
-        .then_some(assertion_runtime)
-        .flatten();
+    // The runtime the assertion phases call, loaded where nothing installed
+    // it. A statement rather than an `import`: an import's relative path broke
+    // once the test command compiled the file somewhere else (`tsc` into
+    // `dist/`), and the test failed on a module that was not there. It goes
+    // first, as the import was evaluated first, on the first line so every
+    // other line stays where it was.
+    if let Some(bootstrap) = assertion_runtime.filter(|_| assertions > 0) {
+        let at = if source.starts_with("#!") {
+            source
+                .find('\n')
+                .map_or(source.len(), |newline| newline + 1)
+        } else {
+            0
+        };
+        edits.push(TextEdit::insert(
+            at,
+            i64::MIN,
+            format!("{} ", runtime_loader(bootstrap)),
+        ));
+    }
     // An inline map is resolved relative to the transformed file itself, and
     // assertion-only transforms replace the file in place, so its basename is
     // the exact source-map reference.
@@ -2036,14 +2071,6 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
     // Append instead of prepend so every line of user code stays where it
     // was. Import declarations are instantiated before module evaluation
     // regardless of their textual position.
-    if let Some(runtime) = module_assertion_runtime {
-        code.push_str("\nimport ");
-        code.push_str(
-            &serde_json::to_string(runtime)
-                .expect("a JavaScript module specifier always serializes as a string"),
-        );
-        code.push_str(";\n");
-    }
     if assertions > 0 && source_type.is_typescript() {
         if module {
             code.push_str(&format!(
@@ -8788,12 +8815,23 @@ mod tests {
             "tests/value.test.mjs",
             &[],
             None,
-            Some("../.supercov/runtime.mjs"),
+            Some("../.supercov/node_modules/bootstrap.cjs"),
         )
         .unwrap();
         assert_eq!(output.assertions, 1);
-        assert!(output.code.contains("withNodeAssertionPhase"));
-        assert!(output.code.contains("import \"../.supercov/runtime.mjs\";"));
+        // The loader shares the first line, so the assertion stays on line 2.
+        let lines = output.code.lines().collect::<Vec<_>>();
+        assert!(lines[0].starts_with("if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {"));
+        assert!(lines[0].contains("\"../.supercov/node_modules/bootstrap.cjs\""));
+        assert!(lines[0].ends_with("import assert from 'node:assert';"));
+        assert!(lines[1].contains("withNodeAssertionPhase"));
+        let allocator = Allocator::default();
+        assert!(
+            Parser::new(&allocator, &output.code, SourceType::mjs())
+                .parse()
+                .errors
+                .is_empty()
+        );
     }
 
     #[test]

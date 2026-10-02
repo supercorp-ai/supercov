@@ -49,7 +49,11 @@ function currentDeclaration() {
                 const occurrence = names.get(name) ?? 0;
                 names.set(name, occurrence + 1);
                 if (child === state.currentlyRunningTest)
-                    found = {occurrence, retry: Math.max((child.invocations ?? 1) - 1, 0)};
+                    found = {
+                        occurrence,
+                        retry: Math.max((child.invocations ?? 1) - 1, 0),
+                        path: [...parents, child.name],
+                    };
             }
         }
     }
@@ -157,7 +161,9 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
             retry,
             attemptId: `${testKey}-${retry}`,
         };
-        active = { scope, testFile, fullName, retry };
+        // Named as the reporter names it; the id keeps Jest's full name.
+        const name = declaration?.path?.join(" > ") ?? fullName;
+        active = { scope, testFile, fullName, name, retry };
         runtime.activateCoverageScope(scope);
         runtime.resetCoverage(testId);
     });
@@ -173,9 +179,9 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
         writeEvidence({
             testId: scope.testId,
             scope,
-            test: current.fullName,
+            test: current.name,
             testFile: current.testFile,
-            title: current.fullName,
+            title: current.name,
             retry: current.retry,
             // The reporter's record carries the outcome.
             status: "unknown",
