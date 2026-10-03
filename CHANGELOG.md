@@ -9,7 +9,6 @@
 **Fixed**
 
 - `quality diff` counts a file whose health did not move but lost a check as improved, not declined, and tells an edit from the model's own variation by the file's hash rather than its size.
-
 - `runs <run> assertions` prints how many tests are asked about a statement (15) in its heading; 3.0.2 printed `{MORE_TESTS}`.
 - A metric with nothing in it, such as branches in code without any, reads `nothing to measure (0/0)` in a run's summary and `—` in the kinds, runners and per-file tables, instead of 100%. `gaps` and a file's gap list say there are none instead of printing an empty table.
 - A run's summary no longer ends with a "Runtime action phases" block. It counted lines inside phases that no current feature records, so it read 0 on every run.
