@@ -248,6 +248,18 @@ pub fn diff(root: &Path, lane: &str, from: &str, to: &str, limit: usize) -> Resu
             .unwrap_or_default()
     };
 
+    // A check's raw answer in one snapshot: every answer is kept under
+    // `checks`, and a check only the line pass found carries its value in
+    // `present`.
+    let value = |file: &Value, check: &str| -> Option<f64> {
+        file["checks"][check].as_f64().or_else(|| {
+            file["present"]
+                .as_array()?
+                .iter()
+                .find(|p| p["check"] == check)?["value"]
+                .as_f64()
+        })
+    };
     let (mut declined, mut improved, mut added, mut removed) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut unchanged = 0usize;
@@ -260,14 +272,33 @@ pub fn diff(root: &Path, lane: &str, from: &str, to: &str, limit: usize) -> Resu
         let (before_health, after_health) = (was["health"].as_f64(), file["health"].as_f64());
         let appeared: Vec<String> = fired(file).difference(&fired(was)).cloned().collect();
         let gone: Vec<String> = fired(was).difference(&fired(file)).cloned().collect();
-        let same_source = was["bytes"] == file["bytes"];
+        // Each check that fired in either snapshot, with both answers, so a
+        // refactor shows what it moved even where the check is still present.
+        let checks: Vec<Value> = fired(was)
+            .union(&fired(file))
+            .map(|check| {
+                let state = if appeared.contains(check) {
+                    "appeared"
+                } else if gone.contains(check) {
+                    "no_longer_present"
+                } else {
+                    "still_present"
+                };
+                json!({ "check": check, "from": value(was, check), "to": value(file, check),
+                    "state": state })
+            })
+            .collect();
+        let same_source = match (was["sha256"].as_str(), file["sha256"].as_str()) {
+            (Some(a), Some(b)) => a == b,
+            _ => was["bytes"] == file["bytes"],
+        };
         let row = json!({
             "path": path, "from": before_health, "to": after_health,
             "movement": match (before_health, after_health) {
                 (Some(a), Some(b)) => json!(((b - a) * 100.0).round() / 100.0),
                 _ => Value::Null,
             },
-            "appeared": appeared, "no_longer_present": gone,
+            "appeared": appeared, "no_longer_present": gone, "checks": checks,
             // Identical bytes mean the same question was asked twice, so a
             // movement is the model's own variation rather than a change.
             "same_source": same_source,
@@ -275,7 +306,10 @@ pub fn diff(root: &Path, lane: &str, from: &str, to: &str, limit: usize) -> Resu
         match (before_health, after_health) {
             (Some(a), Some(b)) if b < a => declined.push(row),
             (Some(a), Some(b)) if b > a => improved.push(row),
-            _ if !appeared.is_empty() || !gone.is_empty() => declined.push(row),
+            // Same health: a check that appeared is a decline, and one that
+            // only went away is an improvement.
+            _ if !appeared.is_empty() => declined.push(row),
+            _ if !gone.is_empty() => improved.push(row),
             _ => unchanged += 1,
         }
     }
@@ -295,12 +329,29 @@ pub fn diff(root: &Path, lane: &str, from: &str, to: &str, limit: usize) -> Resu
     by_movement(&mut declined);
     by_movement(&mut improved);
     improved.reverse();
+    // Health over the files both snapshots assessed. Where the scopes differ,
+    // the snapshot totals compare different code: one file against a whole
+    // repository moved 3.7 to 5.3 with that file unchanged.
+    let shared = |snapshot: &BTreeMap<String, Value>, other: &BTreeMap<String, Value>| {
+        let files: Vec<(u64, f64)> = snapshot
+            .iter()
+            .filter(|(path, _)| other.contains_key(*path))
+            .filter_map(|(_, f)| Some((f["bytes"].as_u64()?, f["health"].as_f64()?)))
+            .collect();
+        catalog::aggregate(&files)
+    };
+    let shared_health = json!({
+        "files": new.keys().filter(|path| old.contains_key(*path)).count(),
+        "from": shared(&old, &new), "to": shared(&new, &old),
+    });
     let appeared_total: usize = declined
         .iter()
         .map(|row| row["appeared"].as_array().map(Vec::len).unwrap_or(0))
         .sum();
     let (declined_total, declined_rows) = limited(declined, limit);
     let (improved_total, improved_rows) = limited(improved, limit);
+    let (added_total, added) = limited(added, limit);
+    let (removed_total, removed) = limited(removed, limit);
     Ok(json!({
         "view": "quality-diff",
         "from": before.id, "to": after.id,
@@ -311,9 +362,11 @@ pub fn diff(root: &Path, lane: &str, from: &str, to: &str, limit: usize) -> Resu
         "health": {
             "from": before.manifest["health"], "to": after.manifest["health"],
         },
+        "same_scope": added_total == 0 && removed_total == 0,
+        "shared_health": shared_health,
         "counts": {
             "declined": declined_total, "improved": improved_total,
-            "unchanged": unchanged, "added": added.len(), "removed": removed.len(),
+            "unchanged": unchanged, "added": added_total, "removed": removed_total,
             "properties_appeared": appeared_total,
         },
         "declined": declined_rows, "improved": improved_rows,
@@ -604,14 +657,27 @@ fn render_quality_diff(view: &Value) -> String {
         view["health"]["from"].as_f64(),
         view["health"]["to"].as_f64(),
     );
-    match (was, now) {
-        (Some(a), Some(b)) => out.push_str(&format!(
-            "Health {} ({a:.1}) to {} ({b:.1}).\n\n",
+    if let (Some(a), Some(b)) = (was, now) {
+        out.push_str(&format!(
+            "Health {} ({a:.1}) to {} ({b:.1}).\n",
             band(was),
             band(now)
-        )),
-        _ => out.push('\n'),
+        ));
     }
+    if view["same_scope"] == false {
+        let shared = &view["shared_health"];
+        let files = shared["files"].as_u64().unwrap_or(0);
+        match (shared["from"].as_f64(), shared["to"].as_f64()) {
+            (Some(a), Some(b)) => out.push_str(&format!(
+                "The snapshots assessed different files, so compare the {} both assessed: {} ({a:.1}) to {} ({b:.1}).\n",
+                super::files(files),
+                band(Some(a)),
+                band(Some(b))
+            )),
+            _ => out.push_str("The snapshots assessed no file in common.\n"),
+        }
+    }
+    out.push('\n');
     out.push_str(&format!(
         "{} declined, {} improved, {} unchanged, {} added, {} removed.\n",
         counts["declined"].as_u64().unwrap_or(0),
@@ -638,14 +704,19 @@ fn render_quality_diff(view: &Value) -> String {
                 "  {movement:+.2}  {}\n",
                 row["path"].as_str().unwrap_or("?")
             ));
-            let appeared: Vec<&str> = row["appeared"]
-                .as_array()
-                .unwrap_or(&none)
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect();
-            if !appeared.is_empty() {
-                out.push_str(&format!("          appeared: {}\n", appeared.join(", ")));
+            for check in row["checks"].as_array().unwrap_or(&none) {
+                let answer = |v: &Value| v.as_f64().map_or("—".into(), |v| format!("{v:.2}"));
+                out.push_str(&format!(
+                    "          {}  {} → {}{}\n",
+                    check["check"].as_str().unwrap_or("?"),
+                    answer(&check["from"]),
+                    answer(&check["to"]),
+                    match check["state"].as_str() {
+                        Some("appeared") => ", appeared",
+                        Some("no_longer_present") => ", no longer present",
+                        _ => "",
+                    }
+                ));
             }
             if row["same_source"] == true {
                 out.push_str(
@@ -664,6 +735,43 @@ fn render_quality_diff(view: &Value) -> String {
         "Improved:",
         view["improved"].as_array().unwrap_or(&empty),
     );
+    // A refactor that extracts code lands in new files, so they are listed
+    // with what fired on them rather than only counted.
+    let added = view["added"].as_array().unwrap_or(&empty);
+    if !added.is_empty() {
+        out.push_str("\nAdded:\n");
+        for row in added {
+            let fired: Vec<String> = row["present"]
+                .as_array()
+                .unwrap_or(&none)
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{} {:.2}",
+                        p["check"].as_str().unwrap_or("?"),
+                        p["value"].as_f64().unwrap_or(0.0)
+                    )
+                })
+                .collect();
+            out.push_str(&format!(
+                "  {:>4}  {}{}\n",
+                band(row["health"].as_f64()),
+                row["path"].as_str().unwrap_or("?"),
+                if fired.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({})", fired.join(", "))
+                }
+            ));
+        }
+    }
+    let removed = view["removed"].as_array().unwrap_or(&empty);
+    if !removed.is_empty() {
+        out.push_str("\nRemoved:\n");
+        for row in removed {
+            out.push_str(&format!("  {}\n", row["path"].as_str().unwrap_or("?")));
+        }
+    }
     out
 }
 

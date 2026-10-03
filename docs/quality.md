@@ -170,8 +170,11 @@ npx supercov quality snapshots
 npx supercov quality diff <older> <newer>
 ```
 
-Which files lost health, which gained, which properties appeared, and which
-files entered or left the scope. A file whose contents did not change is marked,
+Which files lost health and which gained, each check that fired in either
+snapshot with its value before and after (`long_method 0.93 → 0.41, no longer
+present`), and which files entered or left the scope, with what fired on the new
+ones. A refactor that extracts code shows up as an added file, and a check still
+present at a lower value shows that the change moved it. A file whose contents did not change is marked,
 so a small movement does not send you looking for an edit that was never made.
 
 ## What it costs
@@ -223,7 +226,7 @@ npx supercov quality gaps                        # only files something fired on
 npx supercov quality file src/server.ts          # one file, every check
 npx supercov quality scope                       # which files, and why
 npx supercov quality snapshots                   # saved assessments
-npx supercov quality diff <older> <newer>        # what declined
+npx supercov quality diff <older> <newer>        # what changed
 npx supercov quality patch                       # what a change introduced
 ```
 

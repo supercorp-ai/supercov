@@ -1554,6 +1554,101 @@ fn a_diff_says_when_a_movement_cannot_be_the_code() {
 }
 
 #[test]
+fn a_diff_shows_each_check_a_refactor_moved_and_the_files_it_added() {
+    // The supergateway refactors: a check that went away with health unmoved,
+    // a check still present at a lower value, and a helper extracted into a
+    // new file. Each has to be readable from the diff.
+    let temp = Temp::new();
+    let file = |path: &str, health: f64, sha: &str, checks: Value, present: &[(&str, f64)]| {
+        json!({
+            "path": path, "status": "completed", "health": health, "bytes": 100, "sha256": sha,
+            "checks": checks,
+            "present": present.iter().map(|(c, v)| json!({ "check": c, "value": v })).collect::<Vec<_>>(),
+        })
+    };
+    catalog_snapshot(
+        &temp.0,
+        "q_0000000000000c01",
+        5.0,
+        vec![
+            file(
+                "src/split.ts",
+                5.0,
+                "aa",
+                json!({"long_method": 0.93, "temporary_field": 0.95}),
+                &[("long_method", 0.93), ("temporary_field", 0.95)],
+            ),
+            file(
+                "src/same.ts",
+                6.0,
+                "bb",
+                json!({"long_method": 0.7}),
+                &[("long_method", 0.7)],
+            ),
+            file("src/inlined.ts", 7.0, "cc", json!({}), &[]),
+        ],
+    );
+    catalog_snapshot(
+        &temp.0,
+        "q_0000000000000c02",
+        5.1,
+        vec![
+            file(
+                "src/split.ts",
+                5.4,
+                "ab",
+                json!({"long_method": 0.41, "temporary_field": 0.90}),
+                &[("temporary_field", 0.90)],
+            ),
+            // Same length, different bytes: an edit, not the model's variation.
+            file("src/same.ts", 6.0, "bc", json!({"long_method": 0.5}), &[]),
+            file(
+                "src/listing.ts",
+                8.2,
+                "dd",
+                json!({"magic_values": 0.65}),
+                &[("magic_values", 0.65)],
+            ),
+        ],
+    );
+    let view = query::diff(
+        &temp.0,
+        "quality",
+        "q_0000000000000c01",
+        "q_0000000000000c02",
+        20,
+    )
+    .unwrap();
+    assert_eq!(view["counts"]["declined"], 0, "{view:#}");
+    assert_eq!(view["counts"]["improved"], 2, "{view:#}");
+    let same = view["improved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["path"] == "src/same.ts")
+        .unwrap();
+    assert_eq!(same["same_source"], false);
+    let text = query::render(&view);
+    for expected in [
+        "long_method  0.93 → 0.41, no longer present",
+        "temporary_field  0.95 → 0.90\n",
+        "\nAdded:\n  good  src/listing.ts  (magic_values 0.65)\n",
+        "\nRemoved:\n  src/inlined.ts\n",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+    }
+    assert!(!text.contains("did not change"), "{text}");
+    // Two of three files are in both snapshots, so the totals compare
+    // different code and the shared files are offered instead.
+    assert_eq!(view["same_scope"], false);
+    assert_eq!(view["shared_health"]["files"], 2);
+    assert!(
+        text.contains("compare the 2 files both assessed: fair (5.5) to fair (5.7)."),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_diff_refuses_to_compare_two_different_questions() {
     let temp = Temp::new();
     catalog_snapshot(

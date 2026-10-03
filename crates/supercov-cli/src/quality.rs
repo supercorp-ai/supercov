@@ -220,7 +220,7 @@ Usage:
   supercov quality snapshots                   list saved assessments
   supercov quality clean [--keep N]            remove saved assessments
   supercov quality show [snapshot]             read a saved assessment
-  supercov quality diff <snapshot> <snapshot>  what declined between two
+  supercov quality diff <snapshot> <snapshot>  what changed between two
   supercov quality patch [file-or-directory]   what a change introduced
 
 Change range (quality patch). With none of these, it reviews uncommitted work

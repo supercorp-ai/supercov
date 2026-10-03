@@ -63,8 +63,9 @@ is known about it. `--all` includes test files, generated output and anything
 outside a source root, all of which are left out by default. `--dry-run` prints
 the exact requests and contacts nothing.
 
-`quality diff` reports what declined between two assessments: which files lost
-health, which properties appeared, and which files entered or left the scope.
+`quality diff` reports what changed between two assessments: which files lost
+or gained health, each check that moved in them with its value before and after,
+and which files entered or left the scope.
 
 Assessing needs a TypeSafe AI API key in `TYPESAFE_API_KEY`; reading a saved
 assessment does not. `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` use Jev

@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+**Changed**
+
+- `quality diff` shows each check that fired in either snapshot with its value before and after (`long_method 0.93 → 0.41, no longer present`), and lists the files a change added, with what fired on them, and removed. It printed only which checks appeared, so a refactor that removed a smell, lowered one or extracted a helper into a new file showed no effect. When the two snapshots assessed different files, it also gives health over the files both assessed: a one-file snapshot against a whole repository read as 3.7 to 5.3 with that file unchanged.
+
 **Fixed**
+
+- `quality diff` counts a file whose health did not move but lost a check as improved, not declined, and tells an edit from the model's own variation by the file's hash rather than its size.
 
 - `runs <run> assertions` prints how many tests are asked about a statement (15) in its heading; 3.0.2 printed `{MORE_TESTS}`.
 - A metric with nothing in it, such as branches in code without any, reads `nothing to measure (0/0)` in a run's summary and `—` in the kinds, runners and per-file tables, instead of 100%. `gaps` and a file's gap list say there are none instead of printing an empty table.
