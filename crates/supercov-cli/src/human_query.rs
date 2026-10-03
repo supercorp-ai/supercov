@@ -17,6 +17,25 @@ fn percentage(value: f64) -> String {
     format!("{value:.2}%")
 }
 
+/// A metric's share with its counts, or that the run had nothing of it to
+/// measure: a file with no branches read `Branches 100.00% (0/0)`.
+fn measured(percent: f64, covered: u64, total: u64) -> String {
+    if total == 0 {
+        "nothing to measure (0/0)".into()
+    } else {
+        format!("{} ({covered}/{total})", percentage(percent))
+    }
+}
+
+/// A percentage in a table column, or `—` where there was nothing to measure.
+fn share(percent: f64, total: usize) -> String {
+    if total == 0 {
+        "—".into()
+    } else {
+        percentage(percent)
+    }
+}
+
 fn optional_percentage(value: Option<f64>) -> String {
     value.map(percentage).unwrap_or_else(|| "—".into())
 }
@@ -185,11 +204,11 @@ fn filter_label(request: &IndexedQueryRequest) -> String {
 fn summary_line(summary: &CoverageSummary) -> String {
     format!(
         "lines {}, statements {}, functions {}, branches {}, MC/DC {}",
-        percentage(summary.lines.percentage),
-        percentage(summary.statements.percentage),
-        percentage(summary.functions.percentage),
-        percentage(summary.branches.percentage),
-        percentage(summary.condition_coverage_pct),
+        share(summary.lines.percentage, summary.lines.total),
+        share(summary.statements.percentage, summary.statements.total),
+        share(summary.functions.percentage, summary.functions.total),
+        share(summary.branches.percentage, summary.branches.total),
+        share(summary.condition_coverage_pct, summary.conditions),
     )
 }
 
@@ -259,6 +278,15 @@ fn render_files(
         format!(
             "\nProjection: {label}. Uncovered counts are recalculated using only that evidence."
         )
+    };
+    let body = if page.total == 0 {
+        if child == "gaps" {
+            "No gaps: every included file is fully covered and measured.".into()
+        } else {
+            "No source files are included in this run.".into()
+        }
+    } else {
+        body
     };
     let mut output = format!("{title}{projection}\n\n{body}\n\n{}", page_label(page));
     if let Some(inspect) =
@@ -358,9 +386,15 @@ fn render_dimension(
                 "{name}  {} test(s){}{setups}  lines {}  branches {}  MC/DC {}",
                 entry.tests,
                 unattributed_note(entry),
-                percentage(entry.summary.lines.percentage),
-                percentage(entry.summary.branches.percentage),
-                percentage(entry.summary.condition_coverage_pct),
+                share(entry.summary.lines.percentage, entry.summary.lines.total),
+                share(
+                    entry.summary.branches.percentage,
+                    entry.summary.branches.total
+                ),
+                share(
+                    entry.summary.condition_coverage_pct,
+                    entry.summary.conditions
+                ),
             )
         })
         .collect::<Vec<_>>()
@@ -461,7 +495,8 @@ fn file_assertion_lines(assertions: Option<&serde_json::Value>) -> Vec<String> {
         String::new(),
         format!(
             "Assertions  {}% ({}/{statements} statements a test is judged to catch)",
-            a["percentage"], a["asserted"]
+            a["percentage"].as_f64().unwrap_or(0.0),
+            a["asserted"]
         ),
     ];
     let not = a["notAssertedLines"]
@@ -572,10 +607,11 @@ fn render_anchor(anchor: &supercov_engine::coverage_query::CoverageAnchor) -> Ve
         },
     );
     let mut lines = vec![format!(
-        "  {} at column {} — {coverage} ({} covering tests)",
+        "  {} at column {} — {coverage} ({} covering test{})",
         title_case_kind(&anchor.kind),
         anchor.column,
-        count(anchor.covering_tests)
+        count(anchor.covering_tests),
+        if anchor.covering_tests == 1 { "" } else { "s" }
     )];
     if let Some(source) = &anchor.source {
         lines.push(format!("    `{source}`"));
@@ -661,22 +697,28 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 String::new(),
                 coverage_heading.into(),
                 format!(
-                    "  Lines      {} ({}/{})",
-                    percentage(data.coverage.lines.percentage),
-                    data.coverage.lines.covered,
-                    data.coverage.lines.total
+                    "  Lines      {}",
+                    measured(
+                        data.coverage.lines.percentage,
+                        data.coverage.lines.covered as u64,
+                        data.coverage.lines.total as u64
+                    )
                 ),
                 format!(
-                    "  Branches   {} ({}/{})",
-                    percentage(data.coverage.branches.percentage),
-                    data.coverage.branches.covered,
-                    data.coverage.branches.total
+                    "  Branches   {}",
+                    measured(
+                        data.coverage.branches.percentage,
+                        data.coverage.branches.covered as u64,
+                        data.coverage.branches.total as u64
+                    )
                 ),
                 format!(
-                    "  MC/DC      {} ({}/{})",
-                    percentage(data.coverage.condition_coverage_pct),
-                    data.coverage.covered_conditions,
-                    data.coverage.conditions
+                    "  MC/DC      {}",
+                    measured(
+                        data.coverage.condition_coverage_pct,
+                        data.coverage.covered_conditions as u64,
+                        data.coverage.conditions as u64
+                    )
                 ),
             ]);
             if let Some(assertions) = &data.assertion_coverage {
@@ -697,9 +739,12 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}{}",
                         kind.kind.as_deref().unwrap_or("unknown"),
                         kind.tests,
-                        percentage(kind.summary.lines.percentage),
-                        percentage(kind.summary.branches.percentage),
-                        percentage(kind.summary.condition_coverage_pct),
+                        share(kind.summary.lines.percentage, kind.summary.lines.total),
+                        share(
+                            kind.summary.branches.percentage,
+                            kind.summary.branches.total
+                        ),
+                        share(kind.summary.condition_coverage_pct, kind.summary.conditions),
                         unattributed_note(kind),
                     ));
                 }
@@ -779,22 +824,6 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     count(data.files_with_measurement_limitations)
                 ),
             ]);
-            if let Some(confidence) = &data.confidence {
-                lines.extend([
-                    String::new(),
-                    "Runtime action phases (separate from assertions coverage)".into(),
-                    format!(
-                        "  Recorded within action phases      {} lines",
-                        count(confidence.lines.action)
-                    ),
-                    format!(
-                        "  Other recorded execution           {} lines",
-                        count(confidence.lines.executed)
-                    ),
-                    "  These runtime phase counts are separate from the assertions coverage shown above."
-                        .into(),
-                ]);
-            }
             if !data.diagnostics.is_empty() {
                 lines.extend([String::new(), "Warnings".into()]);
                 for diagnostic in &data.diagnostics {
@@ -1002,8 +1031,13 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         ""
                     }
                 ),
-                " LINE  STATUS        SOURCE".into(),
             ];
+            if page.total == 0 {
+                lines.truncate(lines.len() - 1);
+                lines.push("  No gap lines: every line is covered and measured.".into());
+            } else {
+                lines.push(" LINE  STATUS        SOURCE".into());
+            }
             if let Some(at) = lines
                 .iter()
                 .position(|line| line.starts_with("Tests touching this file"))
@@ -1689,6 +1723,31 @@ mod tests {
         assert_eq!(
             inspect_file_command("run_00b780f05c9ae324", &request(), None),
             None
+        );
+    }
+
+    #[test]
+    fn a_metric_with_nothing_to_measure_is_not_a_percentage() {
+        assert_eq!(measured(100.0, 0, 0), "nothing to measure (0/0)");
+        assert_eq!(measured(50.0, 1, 2), "50.00% (1/2)");
+        assert_eq!(share(100.0, 0), "—");
+        assert_eq!(share(100.0, 4), "100.00%");
+    }
+
+    #[test]
+    fn a_run_without_gaps_says_so_instead_of_an_empty_list() {
+        let page = AgentPagination {
+            offset: 0,
+            limit: DEFAULT_LIMIT,
+            returned: 0,
+            total: 0,
+            has_more: false,
+            next_offset: None,
+        };
+        let text = render_files(&[], &request(), &page, "gaps", "run_00b780f05c9ae324");
+        assert!(
+            text.contains("\n\nNo gaps: every included file is fully covered and measured.\n\n"),
+            "{text}"
         );
     }
 

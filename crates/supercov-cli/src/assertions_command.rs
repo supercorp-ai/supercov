@@ -1436,9 +1436,9 @@ fn render_files(run: &str, data: &Value) -> String {
     if files.is_empty() {
         return out;
     }
-    out.push_str(
+    out.push_str(&format!(
         "\nFiles, most statements not asserted first: a statement is not asserted when none of the tests asked about it was judged to fail if it changed. Up to {MORE_TESTS} of the tests that run a statement are asked, so a test never asked can still catch it.\n NOT ASSERTED  ASSERTED  FILE\n",
-    );
+    ));
     for file in &files {
         out.push_str(&format!(
             " {:>12}  {:>8}  {}\n",

@@ -2394,7 +2394,7 @@ fn security_snapshots_live_in_their_own_lane_and_read_back_as_security() {
     assert_eq!(view["view"], "security");
     assert_eq!(view["instrument"], "security");
     let text = query::render(&view);
-    assert!(text.starts_with("Security: 1 of 1 files flagged, 0 clean.\n"));
+    assert!(text.starts_with("Security: 1 of 1 file flagged, 0 clean.\n"));
     assert!(text.contains("0.99  secret_in_source"));
     let file = query::file(&temp.0, "security", "src/k.ts", None).unwrap();
     assert!(query::render(&file).starts_with("src/k.ts  security surface\n"));

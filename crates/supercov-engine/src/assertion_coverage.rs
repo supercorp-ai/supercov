@@ -1598,6 +1598,36 @@ impl Population {
 /// The line with its boolean literal turned into the other one: the last
 /// `true`/`false` (`True`/`False` in Python) that stands as a word.
 fn flipped(line: &str) -> String {
+    // A trailing comment is not code: `let ready = false // true once open`
+    // flipped the comment's `true`.
+    let cut = comment_start(line);
+    let (code, comment) = line.split_at(cut);
+    format!("{}{comment}", flipped_code(code))
+}
+
+/// Where a trailing `//` or `# ` comment starts, outside string literals; the
+/// line's length when it has none. A bare `#` is code (a private field).
+fn comment_start(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut quote = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Some(_) if c == b'\\' => i += 1,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if matches!(c, b'\'' | b'"' | b'`') => quote = Some(c),
+            None if c == b'/' && bytes.get(i + 1) == Some(&b'/') => return i,
+            None if c == b'#' && bytes.get(i + 1).is_none_or(|n| *n == b' ') => return i,
+            None => {}
+        }
+        i += 1;
+    }
+    line.len()
+}
+
+fn flipped_code(line: &str) -> String {
     let words = [
         ("true", "false"),
         ("false", "true"),
@@ -2181,6 +2211,19 @@ mod tests {
         assert_eq!(flipped("let answered = false"), "let answered = true");
         assert_eq!(flipped("return isTrue && false;"), "return isTrue && true;");
         assert_eq!(flipped("ready = False"), "ready = True");
+        assert_eq!(
+            flipped("let ready = false // true once open"),
+            "let ready = true // true once open"
+        );
+        assert_eq!(
+            flipped("ready = False  # True later"),
+            "ready = True  # True later"
+        );
+        assert_eq!(flipped("this.#open = false"), "this.#open = true");
+        assert_eq!(
+            flipped("const s = 'a // b', on = false"),
+            "const s = 'a // b', on = true"
+        );
     }
 
     #[test]

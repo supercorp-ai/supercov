@@ -3387,6 +3387,11 @@ fn run_patch(
 const HOW_IT_IS_SCORED: &str = "Each check is a judgment you can verify against the file. Health is \
 arithmetic over those checks, done here and not by the model.\n";
 
+/// `1 file`, `2 files`.
+pub(crate) fn files(n: u64) -> String {
+    format!("{n} {}", if n == 1 { "file" } else { "files" })
+}
+
 /// A band, not a decimal. The measured resolution of these judgments is about
 /// one point, so `4.4/10` would claim precision nobody observed. The number
 /// stays in `--json`, where something has to sort.
@@ -3440,10 +3445,10 @@ fn human_quality(report: &Value) -> String {
             .count()
     };
     out.push_str(&format!(
-        "Quality {} ({:.1}/10) over {} files.\n",
+        "Quality {} ({:.1}/10) over {}.\n",
         band(health),
         health.unwrap_or(0.0),
-        scored.len()
+        self::files(scored.len() as u64)
     ));
     out.push_str(&format!(
         "  {} good, {} fair, {} weak.\n",
@@ -3531,7 +3536,8 @@ fn human_security(report: &Value) -> String {
     let assessed = counts["assessed"].as_u64().unwrap_or(0);
     let flagged = counts["flagged"].as_u64().unwrap_or(0);
     out.push_str(&format!(
-        "Security: {flagged} of {assessed} files flagged, {} clean{}.\n",
+        "Security: {flagged} of {} flagged, {} clean{}.\n",
+        self::files(assessed),
         assessed.saturating_sub(flagged),
         match counts["line_confirmed"].as_u64() {
             Some(n) if flagged > 0 => format!("; {n} confirmed at a line"),
@@ -3707,6 +3713,11 @@ fn human_security(report: &Value) -> String {
     out.push_str(
         "\nNarrow with `security gaps`, read one with `security file <path>`,\nor ask what a change introduced with `security patch --base origin/main`.\n",
     );
+    // A clean report has no file sections between the header and the hint,
+    // which left two blank lines.
+    while out.contains("\n\n\n") {
+        out = out.replace("\n\n\n", "\n\n");
+    }
     out
 }
 

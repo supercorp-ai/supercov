@@ -682,10 +682,11 @@ fn render(data: &Value) -> String {
     let undetermined = data["undetermined"].as_array().cloned().unwrap_or_default();
     let total = data["summary"]["tests"].as_u64().unwrap_or(0);
     out.push_str(&format!(
-        "Run {}: {} of {} tests affected by changes since the run{}\n",
+        "Run {}: {} of {} {} affected by changes since the run{}\n",
         data["run"].as_str().unwrap_or(""),
         affected.len(),
         total,
+        if total == 1 { "test" } else { "tests" },
         if undetermined.is_empty() {
             String::new()
         } else {
