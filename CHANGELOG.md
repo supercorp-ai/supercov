@@ -5,6 +5,10 @@
 **Fixed**
 
 - `runs <run> assertions` prints how many tests are asked about a statement (15) in its heading; 3.0.2 printed `{MORE_TESTS}`.
+- A run's summary says `nothing to measure (0/0)` for a metric with nothing in it, such as branches in a file without any, instead of `100.00% (0/0)`.
+- A run's summary no longer ends with a "Runtime action phases" block. It counted lines inside phases that no current feature records, so it read 0 on every run.
+- A statement that sets `false` before a comment mentioning `true` (`let ready = false // true once open`) is flipped in the code, not in the comment, so Jev is asked about the change that matters.
+- Counts read "1 file" and "1 test" instead of "1 files" and "1 tests"; a file's assertion percentage prints as a number; the security report no longer prints double blank lines.
 
 ## 3.0.2
 

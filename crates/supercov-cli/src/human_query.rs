@@ -17,6 +17,16 @@ fn percentage(value: f64) -> String {
     format!("{value:.2}%")
 }
 
+/// A metric's share with its counts, or that the run had nothing of it to
+/// measure: a file with no branches read `Branches 100.00% (0/0)`.
+fn measured(percent: f64, covered: u64, total: u64) -> String {
+    if total == 0 {
+        "nothing to measure (0/0)".into()
+    } else {
+        format!("{} ({covered}/{total})", percentage(percent))
+    }
+}
+
 fn optional_percentage(value: Option<f64>) -> String {
     value.map(percentage).unwrap_or_else(|| "—".into())
 }
@@ -461,7 +471,8 @@ fn file_assertion_lines(assertions: Option<&serde_json::Value>) -> Vec<String> {
         String::new(),
         format!(
             "Assertions  {}% ({}/{statements} statements a test is judged to catch)",
-            a["percentage"], a["asserted"]
+            a["percentage"].as_f64().unwrap_or(0.0),
+            a["asserted"]
         ),
     ];
     let not = a["notAssertedLines"]
@@ -661,22 +672,28 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 String::new(),
                 coverage_heading.into(),
                 format!(
-                    "  Lines      {} ({}/{})",
-                    percentage(data.coverage.lines.percentage),
-                    data.coverage.lines.covered,
-                    data.coverage.lines.total
+                    "  Lines      {}",
+                    measured(
+                        data.coverage.lines.percentage,
+                        data.coverage.lines.covered as u64,
+                        data.coverage.lines.total as u64
+                    )
                 ),
                 format!(
-                    "  Branches   {} ({}/{})",
-                    percentage(data.coverage.branches.percentage),
-                    data.coverage.branches.covered,
-                    data.coverage.branches.total
+                    "  Branches   {}",
+                    measured(
+                        data.coverage.branches.percentage,
+                        data.coverage.branches.covered as u64,
+                        data.coverage.branches.total as u64
+                    )
                 ),
                 format!(
-                    "  MC/DC      {} ({}/{})",
-                    percentage(data.coverage.condition_coverage_pct),
-                    data.coverage.covered_conditions,
-                    data.coverage.conditions
+                    "  MC/DC      {}",
+                    measured(
+                        data.coverage.condition_coverage_pct,
+                        data.coverage.covered_conditions as u64,
+                        data.coverage.conditions as u64
+                    )
                 ),
             ]);
             if let Some(assertions) = &data.assertion_coverage {
@@ -779,22 +796,6 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     count(data.files_with_measurement_limitations)
                 ),
             ]);
-            if let Some(confidence) = &data.confidence {
-                lines.extend([
-                    String::new(),
-                    "Runtime action phases (separate from assertions coverage)".into(),
-                    format!(
-                        "  Recorded within action phases      {} lines",
-                        count(confidence.lines.action)
-                    ),
-                    format!(
-                        "  Other recorded execution           {} lines",
-                        count(confidence.lines.executed)
-                    ),
-                    "  These runtime phase counts are separate from the assertions coverage shown above."
-                        .into(),
-                ]);
-            }
             if !data.diagnostics.is_empty() {
                 lines.extend([String::new(), "Warnings".into()]);
                 for diagnostic in &data.diagnostics {

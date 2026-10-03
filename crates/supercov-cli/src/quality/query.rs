@@ -379,10 +379,10 @@ fn render_quality(view: &Value) -> String {
     let mut out = String::new();
     let health = view["health"].as_f64();
     out.push_str(&format!(
-        "Quality {} ({:.1}/10) over {} files.\n",
+        "Quality {} ({:.1}/10) over {}.\n",
         band(health),
         health.unwrap_or(0.0),
-        view["counts"]["scored"].as_u64().unwrap_or(0)
+        super::files(view["counts"]["scored"].as_u64().unwrap_or(0))
     ));
     out.push_str(&format!(
         "Catalog {}, model {}, snapshot {}.\n\n",
@@ -426,7 +426,8 @@ fn render_security(view: &Value) -> String {
     let assessed = counts["assessed"].as_u64().unwrap_or(0);
     let flagged = counts["flagged"].as_u64().unwrap_or(0);
     out.push_str(&format!(
-        "Security: {flagged} of {assessed} files flagged, {} clean.\n",
+        "Security: {flagged} of {} flagged, {} clean.\n",
+        super::files(assessed),
         assessed.saturating_sub(flagged)
     ));
     if let Some(by_check) = view["by_check"].as_object()
@@ -482,8 +483,8 @@ fn render_gaps(view: &Value) -> String {
         return "Nothing fired on any assessed file.\n".into();
     }
     out.push_str(&format!(
-        "{} files with findings, {} clean.\n\n",
-        view["total"].as_u64().unwrap_or(0),
+        "{} with findings, {} clean.\n\n",
+        super::files(view["total"].as_u64().unwrap_or(0)),
         view["clean"].as_u64().unwrap_or(0)
     ));
     for file in files {

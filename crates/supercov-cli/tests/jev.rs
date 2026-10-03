@@ -34,7 +34,7 @@ fn quality_assesses_once_and_reads_back_without_the_network() {
     contains_all(
         &assessed,
         &[
-            "Quality weak (1.0/10) over 1 files.",
+            "Quality weak (1.0/10) over 1 file.",
             "weak  src/cart.js",
             "model typesafe/jev-1.13",
         ],
@@ -51,7 +51,7 @@ fn quality_assesses_once_and_reads_back_without_the_network() {
     let gaps = project.supercov(&["quality", "gaps"]).succeeds();
     contains_all(
         &gaps,
-        &["1 files with findings", "0.90  complex_conditional"],
+        &["1 file with findings", "0.90  complex_conditional"],
     );
     let file = project
         .supercov(&["quality", "file", "src/cart.js"])
@@ -215,7 +215,7 @@ fn security_reads_a_coverage_run_beside_its_findings() {
     contains_all(
         &flagged,
         &[
-            "Security: 1 of 1 files flagged",
+            "Security: 1 of 1 file flagged",
             "0.90  secret_in_source  (file-level only)",
         ],
     );
@@ -407,7 +407,7 @@ fn security_confirms_each_finding_at_the_line_that_holds_it() {
     contains_all(
         &report,
         &[
-            "Security: 1 of 1 files flagged, 0 clean; 1 confirmed at a line.",
+            "Security: 1 of 1 file flagged, 0 clean; 1 confirmed at a line.",
             "line 11  0.90  readFile(\"/srv/pages/\" + req.params.name, \"utf8\")",
             "line 12  0.90  res.send(",
         ],
