@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `runs <run> assertions` prints how many tests are asked about a statement (15) in its heading; 3.0.2 printed `{MORE_TESTS}`.
+
 ## 3.0.2
 
 **Added**

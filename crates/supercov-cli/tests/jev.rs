@@ -261,6 +261,12 @@ fn an_assessment_is_saved_reused_and_drives_tests_affected() {
 
     let saved = project.supercov(&["runs", &run, "assertions"]).succeeds();
     assert!(saved.contains("100% asserted (8 of 8"), "{saved}");
+    // 3.0.2 printed this heading's count as a literal `{MORE_TESTS}`.
+    assert!(
+        saved.contains("Up to 15 of the tests that run a statement are asked"),
+        "{saved}"
+    );
+    assert!(!saved.contains('{'), "{saved}");
     let all = project
         .supercov(&["runs", &run, "assertions", "--all", "--json"])
         .json();
