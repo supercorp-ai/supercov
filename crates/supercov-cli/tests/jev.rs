@@ -263,7 +263,7 @@ fn an_assessment_is_saved_reused_and_drives_tests_affected() {
     assert!(saved.contains("100% asserted (8 of 8"), "{saved}");
     // 3.0.2 printed this heading's count as a literal `{MORE_TESTS}`.
     assert!(
-        saved.contains("Up to 20 of the tests that run a statement are asked"),
+        saved.contains("Up to 18 of the tests that run a statement are asked"),
         "{saved}"
     );
     assert!(!saved.contains('{'), "{saved}");
@@ -1324,19 +1324,19 @@ fn a_statement_no_asked_test_catches_is_asked_of_the_tests_named_for_it() {
         .iter()
         .filter_map(|(_, _, request)| request["state"]["test"]["name"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 20, "fifteen, then five more: {names:?}");
+    assert_eq!(names.len(), 18, "fifteen, then three more: {names:?}");
     // By the usual order it would be the last of the forty-six.
     assert!(
         names[15..]
             .iter()
             .any(|name| name == "edge > zero for a sum over the limit"),
-        "the test named for the line is among the last five: {names:?}"
+        "the test named for the line is among the last three: {names:?}"
     );
     let statement = project
         .supercov(&["runs", &run, "assertions", "src/fee.js:2"])
         .succeeds();
     assert!(
-        statement.contains("Not asserted: 46 test(s) run it, 20 asked"),
+        statement.contains("Not asserted: 46 test(s) run it, 18 asked"),
         "{statement}"
     );
 }

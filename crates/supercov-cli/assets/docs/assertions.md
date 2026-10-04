@@ -101,7 +101,7 @@ npx supercov runs latest assertions --test "closes the stream"  # what one test 
 ```text
 Run run_4f2a: 93.8% asserted (2731 of 2913 executed statements)
 
-Files, most statements not asserted first: a statement is not asserted when none of the tests asked about it was judged to fail if it changed. Up to 20 of the tests that run a statement are asked, so a test never asked can still catch it.
+Files, most statements not asserted first: a statement is not asserted when none of the tests asked about it was judged to fail if it changed. Up to 18 of the tests that run a statement are asked, so a test never asked can still catch it.
  NOT ASSERTED  ASSERTED  FILE
            41   388/429  src/adapters.ts
            ...
@@ -120,7 +120,7 @@ nothing the asked tests assert depends on what the statement does. Five of the
 tests that run a statement are asked first, and up to 15 when none of those
 catches it: tests whose file quotes text the statement writes (a log line, a
 message), then tests named like the source file, then one per test file and
-describe block. When none of the 15 catches it, up to five more are asked, the
+describe block. When none of the 15 catches it, up to three more are asked, the
 ones most likely written for the statement: tests whose name shares words with
 the statement's line (`corsOrigin: a false value` for
 `return corsOrigin(origin)`), and among those the tests that ran the least

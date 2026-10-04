@@ -46,7 +46,7 @@ pub const FIRST_TESTS: usize = 5;
 pub const MORE_TESTS: usize = 15;
 /// Asked last, when none of those is judged to fail: the tests most likely
 /// written for the statement.
-pub const LAST_TESTS: usize = 5;
+pub const LAST_TESTS: usize = 3;
 /// The most tests one statement is asked of.
 pub const MAX_TESTS: usize = MORE_TESTS + LAST_TESTS;
 pub const MAX_QUESTIONS: usize = 150;
@@ -1017,7 +1017,7 @@ impl Population {
     /// A statement hundreds of tests run is mostly run in passing, by
     /// end-to-end tests on their way somewhere else. The tests written for it
     /// tend to say so in their name (`corsOrigin: a false value` for
-    /// `return corsOrigin(...)`) and to run little besides it. Asking five
+    /// `return corsOrigin(...)`) and to run little besides it. Asking a few
     /// more in the usual order found few of them; replacing some of the usual
     /// tests with these lost statements the usual tests catch.
     pub fn last_order(&self, statement: usize, asked: &[usize], k: usize) -> Vec<usize> {
@@ -2311,7 +2311,7 @@ mod tests {
         // The test naming what the line calls comes first, though it ran as
         // much as any; then the tests that ran the least.
         assert_eq!(population.tests[last[0]].name, "calls compute on start");
-        assert_eq!(unit(&last[1..4]), 3, "{last:?}");
+        assert_eq!(unit(&last[1..]), 2, "{last:?}");
         assert_eq!(
             name_words("const hostCount = getHTTPResponse2(send_data)"),
             [
