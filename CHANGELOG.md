@@ -5,6 +5,7 @@
 **Changed**
 
 - `assertions assess` asks up to three more tests before calling a statement not asserted: of the tests not yet asked, those whose name shares words with the statement's line (`corsOrigin: a false value` for `return corsOrigin(origin)`), then those that ran the least other code. Checked by making each change and running the tests: on click, 154 of the 382 statements called not asserted were caught by a test, and the extra tests find 46 of them while calling 8 asserted that no test catches; on supergateway they find 22 of 54 and add none. A statement that was asserted stays asserted. Listings say up to 18 tests are asked, and an assessment cost 8% (marshmallow) and 18% (click) more.
+- The question Jev is asked about a deleted statement says what the deletion does. A statement of several lines (a loop, a `try`, a call written over several lines) is named whole; shown by its first line, only that line was read as gone. Of 100 such verdicts checked on six projects by making the change and running the tests, 22 were wrong before and 9 after. In Python, a deleted `return` or `raise` says that execution carries on with what follows: of the skipped returns and raises of five projects, 61 of 371 verdicts were wrong before and 44 after. These statements are asked once more, since the question changed.
 
 ## 3.0.3
 
