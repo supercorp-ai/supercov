@@ -12,7 +12,8 @@ use std::{
 use supercov_engine::{
     agent_json,
     assertion_coverage::{
-        self as coverage, Change, FIRST_TESTS, MAX_QUESTIONS, MORE_TESTS, Population, THRESHOLD,
+        self as coverage, Change, FIRST_TESTS, LAST_TESTS, MAX_QUESTIONS, MAX_TESTS, MORE_TESTS,
+        Population, THRESHOLD,
     },
     run_store::{StoredRun, discover_runs, select_run},
     source_manifest as maps,
@@ -356,7 +357,9 @@ struct Pass<'p> {
     /// Per statement: (test, answer) in the order asked.
     answers: Vec<Vec<(usize, f64)>>,
     orders: Vec<Vec<usize>>,
-    wide: bool,
+    /// 0: the first tests. 1: more of them. 2: the last few, chosen for the
+    /// statement.
+    round: u8,
     keys: BTreeMap<(usize, usize), String>,
     /// (statement, test) pairs whose request is over Jev's limit even with
     /// that one question: the test is not asked about the statement.
@@ -378,7 +381,7 @@ impl Pass<'_> {
         self.answers[statement].iter().any(|(_, p)| *p >= THRESHOLD)
     }
     fn limit(&self, statement: usize) -> usize {
-        (if self.wide { MORE_TESTS } else { FIRST_TESTS })
+        [FIRST_TESTS, MORE_TESTS, MAX_TESTS][usize::from(self.round)]
             .min(self.population.statements[statement].tests.len())
     }
     fn undecided(&self, statement: usize) -> bool {
@@ -413,11 +416,25 @@ impl Pass<'_> {
     /// Before a statement is called not asserted, more of the tests that run
     /// it are asked.
     fn widen(&mut self) {
-        self.wide = true;
+        self.round += 1;
         for s in 0..self.population.statements.len() {
-            if !self.asserted(s) {
-                self.orders[s] = self.population.order(s, MORE_TESTS);
+            if self.asserted(s) {
+                continue;
             }
+            if self.round == 1 {
+                self.orders[s] = self.population.order(s, MORE_TESTS);
+                continue;
+            }
+            // The tests already asked, then the last few.
+            let mut asked = self.answers[s].iter().map(|(t, _)| *t).collect::<Vec<_>>();
+            asked.extend(
+                self.refused
+                    .range((s, 0)..=(s, usize::MAX))
+                    .map(|(_, t)| *t),
+            );
+            let last = self.population.last_order(s, &asked, LAST_TESTS);
+            asked.extend(last);
+            self.orders[s] = asked;
         }
     }
     /// The next requests: the tests that can answer the most undecided
@@ -520,7 +537,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         salt: salt(run),
         answers: vec![Vec::new(); n],
         orders: (0..n).map(|s| population.order(s, FIRST_TESTS)).collect(),
-        wide: false,
+        round: 0,
         keys: BTreeMap::new(),
         refused: BTreeSet::new(),
     };
@@ -551,7 +568,9 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         // supergateway, where most statements need more than their first tests.
         let mut per_test = BTreeMap::<usize, usize>::new();
         for s in (0..n).filter(|&s| pass.undecided(s)) {
-            for t in population.order(s, MORE_TESTS) {
+            let more = population.order(s, MORE_TESTS);
+            let last = population.last_order(s, &more, LAST_TESTS);
+            for t in more.into_iter().chain(last) {
                 *per_test.entry(t).or_default() += 1;
             }
         }
@@ -580,7 +599,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     let batch_size = ROUND_REQUESTS;
     loop {
         if (0..n).all(|s| !pass.undecided(s)) {
-            if pass.wide {
+            if pass.round == 2 {
                 break;
             }
             pass.widen();
@@ -596,7 +615,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         if planned.is_empty() {
             // Undecided statements no test is left to ask about (the rest
             // were over Jev's limit): widen once, then stop.
-            if pass.wide {
+            if pass.round == 2 {
                 break;
             }
             pass.widen();
@@ -1437,7 +1456,7 @@ fn render_files(run: &str, data: &Value) -> String {
         return out;
     }
     out.push_str(&format!(
-        "\nFiles, most statements not asserted first: a statement is not asserted when none of the tests asked about it was judged to fail if it changed. Up to {MORE_TESTS} of the tests that run a statement are asked, so a test never asked can still catch it.\n NOT ASSERTED  ASSERTED  FILE\n",
+        "\nFiles, most statements not asserted first: a statement is not asserted when none of the tests asked about it was judged to fail if it changed. Up to {MAX_TESTS} of the tests that run a statement are asked, so a test never asked can still catch it.\n NOT ASSERTED  ASSERTED  FILE\n",
     ));
     for file in &files {
         out.push_str(&format!(
@@ -1480,7 +1499,7 @@ fn render_file(run: &str, data: &Value) -> String {
         out.push_str("Every statement this file ran is asserted.\n");
         return out;
     }
-    out.push_str(&format!("\nNot asserted: none of the tests asked was judged to fail if they changed. Up to {MORE_TESTS} of the tests that run a statement are asked; one never asked can still catch it.\n  LINE  STATEMENT  (change)  tests asked  closest test\n"));
+    out.push_str(&format!("\nNot asserted: none of the tests asked was judged to fail if they changed. Up to {MAX_TESTS} of the tests that run a statement are asked; one never asked can still catch it.\n  LINE  STATEMENT  (change)  tests asked  closest test\n"));
     for st in &not {
         let closest = st["test"]["name"]
             .as_str()

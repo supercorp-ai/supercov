@@ -263,7 +263,7 @@ fn an_assessment_is_saved_reused_and_drives_tests_affected() {
     assert!(saved.contains("100% asserted (8 of 8"), "{saved}");
     // 3.0.2 printed this heading's count as a literal `{MORE_TESTS}`.
     assert!(
-        saved.contains("Up to 15 of the tests that run a statement are asked"),
+        saved.contains("Up to 20 of the tests that run a statement are asked"),
         "{saved}"
     );
     assert!(!saved.contains('{'), "{saved}");
@@ -1276,6 +1276,68 @@ fn tests_affected_and_assertions_name_a_mistake_and_estimate_a_change() {
     assert!(
         keyless.contains("set TYPESAFE_API_KEY to ask Jev"),
         "{keyless}"
+    );
+}
+
+#[test]
+fn a_statement_no_asked_test_catches_is_asked_of_the_tests_named_for_it() {
+    // Forty-six tests run the return. Fifteen are asked in the usual order,
+    // one per file and describe block; the test whose name shares a word with
+    // the line ("sum") is the last of its block and is not among them.
+    let project = Project::empty("last-tests");
+    project.write("package.json", r#"{"name":"last","type":"module"}"#);
+    project.write(
+        "src/fee.js",
+        "export function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\n",
+    );
+    for file in ["fee", "checkout", "refund"] {
+        let mut body = String::from(
+            "import { describe, test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { fee } from \"../src/fee.js\";\n\n",
+        );
+        for group in ["small", "large", "edge"] {
+            body.push_str(&format!("describe(\"{group}\", () => {{\n"));
+            for n in 0..5 {
+                body.push_str(&format!(
+                    "  test(\"{file} {group} {n}\", () => assert.equal(fee({}), {}));\n",
+                    n * 50,
+                    if n * 50 > 100 { 0 } else { 5 }
+                ));
+            }
+            if file == "refund" && group == "edge" {
+                body.push_str(
+                    "  test(\"zero for a sum over the limit\", () => assert.equal(fee(500), 0));\n",
+                );
+            }
+            body.push_str("});\n");
+        }
+        project.write(&format!("test/{file}.test.js"), &body);
+    }
+    project.git(&["init", "-q"]);
+    let run = project.measure(&[]);
+    let (base, seen) = gateway(MODEL, answer_no);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let names = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, _, request)| request["state"]["test"]["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 20, "fifteen, then five more: {names:?}");
+    // By the usual order it would be the last of the forty-six.
+    assert!(
+        names[15..]
+            .iter()
+            .any(|name| name == "edge > zero for a sum over the limit"),
+        "the test named for the line is among the last five: {names:?}"
+    );
+    let statement = project
+        .supercov(&["runs", &run, "assertions", "src/fee.js:2"])
+        .succeeds();
+    assert!(
+        statement.contains("Not asserted: 46 test(s) run it, 20 asked"),
+        "{statement}"
     );
 }
 
