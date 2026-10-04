@@ -1590,6 +1590,37 @@ impl Population {
                     "continue" | "next" => format!(
                         "`{line}` is deleted: the rest of the loop body runs in this iteration"
                     ),
+                    // A statement of several lines is shown by its first.
+                    // Read as "`for x in items:` is deleted", only the header
+                    // seemed to go: 22 of 100 such verdicts were wrong on six
+                    // projects, 9 with all of it named.
+                    _ if s.text.lines().count() > 1 => {
+                        let lines = s.text.lines().count();
+                        format!(
+                            "the whole statement starting `{line}` is deleted, all {lines} lines of it (lines {} to {}): none of it runs",
+                            s.line,
+                            s.line + lines - 1
+                        )
+                    }
+                    // Python: what deleting a return or a raise lets happen.
+                    // Of the skipped returns and raises of five projects, 61
+                    // of 371 verdicts were wrong as "is deleted" and 44 so.
+                    // (TypeScript returns were judged worse this way, 21 of
+                    // 82 against 18, and keep the plain wording.)
+                    _ if self.language == Language::Python
+                        && (word == "return" || word.starts_with("return ")) =>
+                    {
+                        format!(
+                            "`{line}` is deleted: the function does not return here, and execution carries on with whatever follows it"
+                        )
+                    }
+                    _ if self.language == Language::Python
+                        && (word == "raise" || word.starts_with("raise ")) =>
+                    {
+                        format!(
+                            "`{line}` is deleted: no error is raised here, and execution carries on with whatever follows it"
+                        )
+                    }
                     _ => format!("`{line}` is deleted (it never runs)"),
                 }]
             }
@@ -2433,6 +2464,98 @@ mod tests {
                 js
             ),
             Some(Change::Skip)
+        );
+    }
+
+    #[test]
+    fn a_deleted_statement_says_what_goes_and_what_then_runs() {
+        let source = "def f(items, n):\n    if n < 0:\n        raise ValueError(\"negative\")\n    if not items:\n        return None\n    for item in items:\n        use(item)\n    log(n)\n    return n\n";
+        let point = |line: usize, text: &str| InputPoint {
+            file: "pkg/f.py".into(),
+            line,
+            source: text.into(),
+            tests: vec![0],
+        };
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: "tests/test_f.py::test_f".into(),
+                file: Some("tests/test_f.py".into()),
+                name: "tests/test_f.py::test_f".into(),
+                role: "test".into(),
+                runner: "pytest".into(),
+            }],
+            points: vec![
+                point(3, "raise ValueError(\"negative\")"),
+                point(5, "return None"),
+                point(6, "for item in items:\n        use(item)"),
+                point(8, "log(n)"),
+            ],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("pkg/f.py".to_owned(), source.to_owned())]);
+        let python = population_from(
+            Path::new("/nonexistent"),
+            &input,
+            &sources,
+            Language::Python,
+        )
+        .unwrap();
+        let question = |population: &Population, line: usize| {
+            let at = population
+                .statements
+                .iter()
+                .position(|s| s.line == line)
+                .unwrap();
+            population.questions(at).join(" | ")
+        };
+        assert_eq!(
+            question(&python, 3),
+            "pkg/f.py:3: `raise ValueError(\"negative\")` is deleted: no error is raised here, and execution carries on with whatever follows it."
+        );
+        assert_eq!(
+            question(&python, 5),
+            "pkg/f.py:5: `return None` is deleted: the function does not return here, and execution carries on with whatever follows it."
+        );
+        assert_eq!(
+            question(&python, 6),
+            "pkg/f.py:6: the whole statement starting `for item in items:` is deleted, all 2 lines of it (lines 6 to 7): none of it runs."
+        );
+        assert_eq!(
+            question(&python, 8),
+            "pkg/f.py:8: `log(n)` is deleted (it never runs)."
+        );
+        // A JavaScript return keeps the plain wording: it was judged worse
+        // the other way.
+        let js = AssessmentInput {
+            tests: vec![InputTest {
+                id: "t".into(),
+                file: Some("test/g.test.js".into()),
+                name: "g".into(),
+                role: "test".into(),
+                runner: "node:test".into(),
+            }],
+            points: vec![InputPoint {
+                file: "src/g.js".into(),
+                line: 3,
+                source: "return;".into(),
+                tests: vec![0],
+            }],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([(
+            "src/g.js".to_owned(),
+            "function g(a) {\n  if (a) {\n    return;\n  }\n  use(a);\n}\n".to_owned(),
+        )]);
+        let javascript = population_from(
+            Path::new("/nonexistent"),
+            &js,
+            &sources,
+            Language::JavaScript,
+        )
+        .unwrap();
+        assert_eq!(
+            question(&javascript, 3),
+            "src/g.js:3: `return;` is deleted (it never runs)."
         );
     }
 
