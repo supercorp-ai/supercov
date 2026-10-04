@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "description": "Coverage, security and code quality for coding agents.",
   "author": {
     "name": "Supercorp",
