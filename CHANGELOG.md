@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- `assertions assess` asks up to three more tests before calling a statement not asserted: of the tests not yet asked, those whose name shares words with the statement's line (`corsOrigin: a false value` for `return corsOrigin(origin)`), then those that ran the least other code. Checked by making each change and running the tests: on click, 154 of the 382 statements called not asserted were caught by a test, and the extra tests find 46 of them while calling 8 asserted that no test catches; on supergateway they find 22 of 54 and add none. A statement that was asserted stays asserted. Listings say up to 18 tests are asked, and an assessment cost 8% (marshmallow) and 18% (click) more.
+
 ## 3.0.3
 
 **Changed**

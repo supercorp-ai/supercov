@@ -44,6 +44,11 @@ pub const MODEL: &str = "jev-1.13.0";
 /// flags, and 25 tests was no better than 15).
 pub const FIRST_TESTS: usize = 5;
 pub const MORE_TESTS: usize = 15;
+/// Asked last, when none of those is judged to fail: the tests most likely
+/// written for the statement.
+pub const LAST_TESTS: usize = 3;
+/// The most tests one statement is asked of.
+pub const MAX_TESTS: usize = MORE_TESTS + LAST_TESTS;
 pub const MAX_QUESTIONS: usize = 150;
 /// A statement is asserted when some test's answer is at least this.
 pub const THRESHOLD: f64 = 0.5;
@@ -485,6 +490,45 @@ pub fn population_from(
         files: Default::default(),
         quotes: Default::default(),
     })
+}
+
+/// The words of a name or a line of code: runs of letters and digits split at
+/// camelCase and at anything else, lowercased, short and filler words left out.
+fn name_words(text: &str) -> BTreeSet<String> {
+    const FILLER: [&str; 13] = [
+        "test", "tests", "the", "and", "for", "with", "get", "set", "self", "from", "not", "does",
+        "should",
+    ];
+    let mut words = BTreeSet::new();
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut word = String::new();
+    let mut flush = |word: &mut String| {
+        let w = word.to_lowercase();
+        if w.len() > 2 && !FILLER.contains(&w.as_str()) {
+            words.insert(w);
+        }
+        word.clear();
+    };
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphanumeric() {
+            flush(&mut word);
+            continue;
+        }
+        let previous = i.checked_sub(1).map(|p| chars[p]);
+        let next = chars.get(i + 1).copied();
+        // `getHTTPResponse`: a word starts at a capital after a lowercase
+        // letter, and at the last capital of a run before a lowercase one.
+        let starts = c.is_ascii_uppercase()
+            && (previous.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit())
+                || (previous.is_some_and(|p| p.is_ascii_uppercase())
+                    && next.is_some_and(|n| n.is_ascii_lowercase())));
+        if starts {
+            flush(&mut word);
+        }
+        word.push(c);
+    }
+    flush(&mut word);
+    words
 }
 
 /// Every statement starting on each line, outermost first, with its text and
@@ -964,6 +1008,49 @@ impl Population {
             }
         }
         picked
+    }
+
+    /// The tests to ask last, when none of `asked` was judged to fail: of the
+    /// rest, those whose name shares the most words with the statement's
+    /// line, and among those the tests that ran the least code.
+    ///
+    /// A statement hundreds of tests run is mostly run in passing, by
+    /// end-to-end tests on their way somewhere else. The tests written for it
+    /// tend to say so in their name (`corsOrigin: a false value` for
+    /// `return corsOrigin(...)`) and to run little besides it. Asking a few
+    /// more in the usual order found few of them; replacing some of the usual
+    /// tests with these lost statements the usual tests catch.
+    pub fn last_order(&self, statement: usize, asked: &[usize], k: usize) -> Vec<usize> {
+        let spread = self.order(statement, MORE_TESTS);
+        let position = |t: &usize| spread.iter().position(|x| x == t).unwrap_or(usize::MAX);
+        let s = &self.statements[statement];
+        let line = name_words(s.text.lines().next().unwrap_or(""));
+        let shared = |t: usize| {
+            let name = &self.tests[t].name;
+            let name = name.rsplit("::").next().unwrap_or(name);
+            name_words(name).intersection(&line).count()
+        };
+        let mut rest = s
+            .tests
+            .iter()
+            .copied()
+            .filter(|t| !asked.contains(t))
+            .collect::<Vec<_>>();
+        rest.sort_by_cached_key(|t| {
+            (
+                std::cmp::Reverse(shared(*t)),
+                self.breadth(*t),
+                position(t),
+                *t,
+            )
+        });
+        rest.truncate(k);
+        rest
+    }
+
+    /// How many statement lines a test ran.
+    fn breadth(&self, test: usize) -> usize {
+        self.ran[test].values().map(BTreeSet::len).sum()
     }
 
     /// The test's code: the file's first lines and the test's own body, found
@@ -2145,6 +2232,101 @@ fn tsconfig_aliases(root: &Path) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_statement_many_tests_run_is_asked_of_the_tests_that_ran_little_else() {
+        // Seventeen end-to-end tests pass through `total` and nine other
+        // statements; three unit tests, in the file that sorts last, run
+        // `total` alone. One test per file in file order never reaches the
+        // unit tests within fifteen.
+        let source = (0..10)
+            .map(|n| format!("const v{n} = compute({n});"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let test = |file: &str, name: &str| InputTest {
+            id: format!("{file}::{name}"),
+            file: Some(file.to_owned()),
+            name: name.to_owned(),
+            role: "test".into(),
+            runner: "node:test".into(),
+        };
+        let mut tests = (0..17)
+            .map(|n| {
+                let name = if n == 16 {
+                    "calls compute on start"
+                } else {
+                    "serves a request"
+                };
+                test(&format!("tests/e2e{n:02}.test.js"), name)
+            })
+            .collect::<Vec<_>>();
+        tests.extend((0..3).map(|n| test("tests/zz_unit.test.js", &format!("total case {n}"))));
+        let everyone = (0..20).collect::<Vec<u32>>();
+        let end_to_end = (0..17).collect::<Vec<u32>>();
+        let points = (0..10)
+            .map(|n| InputPoint {
+                file: "src/sum.js".into(),
+                line: n + 1,
+                source: format!("const v{n} = compute({n});"),
+                tests: if n == 0 {
+                    everyone.clone()
+                } else {
+                    end_to_end.clone()
+                },
+            })
+            .collect();
+        let input = AssessmentInput {
+            tests,
+            points,
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("src/sum.js".to_owned(), source)]);
+        let population = population_from(
+            Path::new("/nonexistent"),
+            &input,
+            &sources,
+            Language::JavaScript,
+        )
+        .unwrap();
+        let target = population
+            .statements
+            .iter()
+            .position(|s| s.line == 1)
+            .unwrap();
+        let unit = |order: &[usize]| {
+            order
+                .iter()
+                .filter(|&&t| population.tests[t].file == "tests/zz_unit.test.js")
+                .count()
+        };
+        let spread = population.order(target, MORE_TESTS);
+        assert_eq!(
+            unit(&spread),
+            0,
+            "file order alone leaves the unit tests out"
+        );
+        let last = population.last_order(target, &spread, LAST_TESTS);
+        assert_eq!(last.len(), LAST_TESTS);
+        assert!(last.iter().all(|t| !spread.contains(t)), "{last:?}");
+        // The test naming what the line calls comes first, though it ran as
+        // much as any; then the tests that ran the least.
+        assert_eq!(population.tests[last[0]].name, "calls compute on start");
+        assert_eq!(unit(&last[1..]), 2, "{last:?}");
+        assert_eq!(
+            name_words("const hostCount = getHTTPResponse2(send_data)"),
+            [
+                "const",
+                "count",
+                "data",
+                "host",
+                "http",
+                "response2",
+                "send"
+            ]
+            .map(String::from)
+            .into()
+        );
+    }
 
     #[test]
     fn changes_follow_the_audit() {
