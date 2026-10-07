@@ -59,7 +59,46 @@ pub fn target_is_build_output(directory: &Path) -> bool {
         || MARKERS.iter().any(|name| directory.join(name).is_file())
 }
 
-const SOURCE_DIRECTORIES: &[&str] = &["app", "src", "lib", "server", "client", "functions", "api"];
+const SOURCE_DIRECTORIES: &[&str] = &[
+    "app",
+    "src",
+    "lib",
+    "server",
+    "client",
+    "functions",
+    "api",
+    "components",
+    "pages",
+];
+/// The files Next.js reads from a project's root by name. `proxy` is what
+/// Next 16 calls `middleware`.
+const NEXT_ROOT_FILES: &[&str] = &[
+    "proxy",
+    "middleware",
+    "instrumentation",
+    "instrumentation-client",
+];
+/// The file names the App Router gives a meaning to under `app/`.
+const NEXT_APP_FILES: &[&str] = &[
+    "page",
+    "layout",
+    "route",
+    "loading",
+    "error",
+    "global-error",
+    "not-found",
+    "template",
+    "default",
+    "forbidden",
+    "unauthorized",
+    "icon",
+    "apple-icon",
+    "opengraph-image",
+    "twitter-image",
+    "sitemap",
+    "robots",
+    "manifest",
+];
 const PACKAGE_PARENTS: &[&str] = &["apps", "packages", "services", "workspaces"];
 const TEST_DIRECTORIES: &[&str] = &[
     "__tests__",
@@ -590,6 +629,53 @@ fn test_or_fixture(file: &str) -> bool {
         .any(|part| matches!(part, "test" | "spec"))
 }
 
+fn depends_on_next(manifest: &Value) -> bool {
+    ["dependencies", "devDependencies", "peerDependencies"]
+        .iter()
+        .any(|field| {
+            manifest
+                .get(field)
+                .is_some_and(|all| all.get("next").is_some())
+        })
+}
+
+/// A file the App Router serves. Under `app/` a directory is a URL segment,
+/// so `app/api/wordpress/test/route.ts` is the handler of `/api/wordpress/test`
+/// and not a test: five such "test connection" endpoints of one application
+/// were left out of what it measured. A folder that starts with `_` is private
+/// to the project and is not a segment, which keeps `__tests__` a test folder.
+fn next_app_file(app_directories: &[PathBuf], path: &Path) -> bool {
+    let Some(local) = app_directories
+        .iter()
+        .find_map(|directory| path.strip_prefix(directory).ok())
+    else {
+        return false;
+    };
+    let Some(name) = local.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let conventional = name.split_once('.').is_some_and(|(stem, extension)| {
+        NEXT_APP_FILES.contains(&stem) && !extension.contains('.')
+    });
+    conventional
+        && local.parent().is_none_or(|folders| {
+            folders
+                .components()
+                .all(|folder| !folder.as_os_str().to_string_lossy().starts_with('_'))
+        })
+}
+
+/// The path a named root leaves to judge: the part below it. Whoever names
+/// `scripts` or `src/test-utils` as a source root has said what it holds, so
+/// only what lies deeper is still guessed at. A root that is a file names that
+/// file, and nothing about it is guessed.
+fn below_named_root<'a>(roots: &[PathBuf], path: &'a Path) -> Option<&'a Path> {
+    roots
+        .iter()
+        .filter_map(|root| path.strip_prefix(root).ok())
+        .min_by_key(|local| local.components().count())
+}
+
 /// A benchmark: Vitest's `*.bench.ts` beside the code it measures, or a file
 /// under a `bench`/`benchmarks` directory. It runs the product; it is not the
 /// product. jshttp/cookie keeps four `src/*.bench.ts` files, which were
@@ -1020,7 +1106,9 @@ fn tsconfig_roots(directory: &Path) -> Vec<PathBuf> {
                 .find(['?', '*', '{', '['])
                 .map_or(value.as_str(), |index| &value[..index])
                 .trim_end_matches('/');
-            (!prefix.is_empty()).then(|| resolve(directory, prefix))
+            // `next-env.d.ts` is in every Next.js `include`; a declaration
+            // holds nothing to measure and is not a root.
+            (!prefix.is_empty() && !declaration_file(prefix)).then(|| resolve(directory, prefix))
         })
         .collect()
 }
@@ -1118,9 +1206,18 @@ pub fn discover_source_scope(
             .iter()
             .flat_map(|directory| {
                 let manifest = read_json(&directory.join("package.json")).unwrap_or(Value::Null);
+                let next_files = depends_on_next(&manifest)
+                    .then_some(NEXT_ROOT_FILES)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|name| {
+                        ["ts", "tsx", "js", "jsx", "mjs"]
+                            .map(|extension| directory.join(format!("{name}.{extension}")))
+                    });
                 let candidates = SOURCE_DIRECTORIES
                     .iter()
                     .map(|name| directory.join(name))
+                    .chain(next_files)
                     .chain(entry_targets(directory, &manifest))
                     .chain(tsconfig_roots(directory))
                     .collect::<Vec<_>>();
@@ -1141,6 +1238,13 @@ pub fn discover_source_scope(
             .collect()
     };
     let existing_roots = existing_roots(include_roots, explicit)?;
+    let app_directories = packages
+        .iter()
+        .filter(|directory| {
+            depends_on_next(&read_json(&directory.join("package.json")).unwrap_or(Value::Null))
+        })
+        .flat_map(|directory| [directory.join("app"), directory.join("src/app")])
+        .collect::<Vec<_>>();
     let mut all_files = Vec::new();
     files_under(&root, &root, &mut all_files)?;
     all_files.sort();
@@ -1160,18 +1264,25 @@ pub fn discover_source_scope(
             reason: reason.into(),
             package_root: package_root.clone(),
         };
+        let named = explicit
+            .then(|| below_named_root(&existing_roots, &path))
+            .flatten();
+        let guessed = match named {
+            Some(local) => local.to_string_lossy().replace('\\', "/"),
+            None => file.clone(),
+        };
         if declaration_file(&file) {
             entries.push(entry(SourceScopeStatus::Excluded, "TypeScript declaration"));
         } else if test_setup.contains(&path) {
             entries.push(entry(SourceScopeStatus::Excluded, "declared test setup"));
-        } else if test_or_fixture(&file) {
+        } else if test_or_fixture(&guessed) && !next_app_file(&app_directories, &path) {
             entries.push(entry(SourceScopeStatus::Excluded, "test or fixture source"));
-        } else if tool_script(&file) {
+        } else if tool_script(&guessed) {
             entries.push(entry(
                 SourceScopeStatus::Excluded,
                 "conventional tool script",
             ));
-        } else if benchmark(&file) {
+        } else if benchmark(&guessed) {
             entries.push(entry(SourceScopeStatus::Excluded, "benchmark"));
         } else if example(&file, package_root.as_deref()) {
             entries.push(entry(SourceScopeStatus::Excluded, "example"));
@@ -1645,6 +1756,148 @@ mod tests {
             "naming nothing leaves discovery automatic"
         );
         assert_eq!(configured_source_roots(&BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn a_next_application_is_measured_where_next_keeps_its_code() {
+        // A stock Next.js layout reported 89 files it could not classify:
+        // root `components/`, `proxy.ts` and `instrumentation.ts`. And five
+        // "test connection" endpoints were left out as tests, because under
+        // `app/` a directory named `test` is a URL segment.
+        let root = repository(
+            "next-layout",
+            &[
+                ("package.json", r#"{"dependencies":{"next":"16.1.1"}}"#),
+                (
+                    "tsconfig.json",
+                    r#"{"include":["next-env.d.ts","**/*.ts",".next/types/**/*.ts"]}"#,
+                ),
+                ("next-env.d.ts", "declare const next: unknown;"),
+                ("app/page.tsx", "page"),
+                ("app/api/wordpress/test/route.ts", "route"),
+                ("app/api/wordpress/test/route.test.ts", "test"),
+                ("app/api/wordpress/test/helper.ts", "helper"),
+                ("app/__tests__/page.tsx", "test"),
+                ("components/button.tsx", "component"),
+                ("pages/api/legacy.ts", "page"),
+                ("proxy.ts", "proxy"),
+                ("instrumentation.ts", "instrumentation"),
+                ("simulators/echo.ts", "simulator"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert_eq!(
+            discovered.source_files,
+            [
+                "app/api/wordpress/test/route.ts",
+                "app/page.tsx",
+                "components/button.tsx",
+                "instrumentation.ts",
+                "pages/api/legacy.ts",
+                "proxy.ts",
+            ]
+        );
+        assert_eq!(
+            discovered.source_roots,
+            [
+                "app",
+                "components",
+                "instrumentation.ts",
+                "pages",
+                "proxy.ts"
+            ],
+            "a declaration file is not a root"
+        );
+        for file in [
+            "app/api/wordpress/test/route.test.ts",
+            "app/api/wordpress/test/helper.ts",
+            "app/__tests__/page.tsx",
+        ] {
+            assert_eq!(entry(&discovered, file).reason, "test or fixture source");
+        }
+        // Nothing says what `simulators/` is, so it is still asked about.
+        assert_eq!(
+            entry(&discovered, "simulators/echo.ts").status,
+            SourceScopeStatus::Ambiguous
+        );
+        // Named roots keep the route too.
+        let roots = vec!["app".into()];
+        let named = discover_source_scope(&root, Some(&roots)).unwrap();
+        assert_eq!(
+            named.source_files,
+            ["app/api/wordpress/test/route.ts", "app/page.tsx"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_route_file_name_means_nothing_outside_a_next_application() {
+        let root = repository(
+            "not-next",
+            &[
+                ("package.json", "{}"),
+                ("app/main.ts", "main"),
+                ("app/test/route.ts", "a test helper"),
+                ("proxy.ts", "unknown"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert_eq!(discovered.source_files, ["app/main.ts"]);
+        assert_eq!(
+            entry(&discovered, "app/test/route.ts").reason,
+            "test or fixture source"
+        );
+        assert_eq!(
+            entry(&discovered, "proxy.ts").status,
+            SourceScopeStatus::Ambiguous
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_named_root_settles_what_it_names_and_guesses_only_below_it() {
+        // `scripts`, or a directory called `test-utils`, read as tooling and
+        // tests to discovery. Naming one as a source root says otherwise, and
+        // there was no way to say it: the named root stayed excluded.
+        let root = repository(
+            "named-roots",
+            &[
+                ("package.json", "{}"),
+                ("src/main.ts", "main"),
+                ("src/test-utils/build.ts", "helper"),
+                ("src/test-utils/__tests__/build.test.ts", "test"),
+                ("scripts/release.ts", "script"),
+                ("scripts/fixtures/sample.ts", "fixture"),
+                ("tools/one.spec.ts", "named file"),
+            ],
+        );
+        let roots = vec!["src".into()];
+        let discovered = discover_source_scope(&root, Some(&roots)).unwrap();
+        assert_eq!(discovered.source_files, ["src/main.ts"]);
+
+        let roots = vec![
+            "src/test-utils".into(),
+            "scripts".into(),
+            "tools/one.spec.ts".into(),
+        ];
+        let discovered = discover_source_scope(&root, Some(&roots)).unwrap();
+        assert_eq!(
+            discovered.source_files,
+            [
+                "scripts/release.ts",
+                "src/test-utils/build.ts",
+                "tools/one.spec.ts",
+            ]
+        );
+        assert_eq!(
+            entry(&discovered, "src/test-utils/__tests__/build.test.ts").reason,
+            "test or fixture source"
+        );
+        assert_eq!(
+            entry(&discovered, "scripts/fixtures/sample.ts").reason,
+            "test or fixture source"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

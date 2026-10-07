@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- A Next.js application is measured where Next.js keeps its code. Root `components/` and `pages/` are source in any project, and `proxy`, `middleware` and `instrumentation` files at the root of a project that depends on `next`; one application reported 89 files it could not classify, 81 of them there. Files the App Router serves (`route.ts`, `page.tsx` and the rest) are source whatever their folders are called, because under `app/` a folder is a URL segment: five `app/api/<service>/test/route.ts` endpoints were left out as tests.
+- A source root you name is source whatever it is called. `SUPERCOV_SOURCE_ROOTS=src,scripts` measures `scripts/`, and a root that is a file is always measured; only what lies below a named root is still recognised as a test or a tool script by its path.
+
+**Fixed**
+
+- `supercov -- <command>` no longer fails a `next build` on a type error in code nobody wrote. A probe in a condition stops TypeScript narrowing through it, so a function's inferred return type widened and a caller outside the source roots failed the build's type check (`'supabase' is possibly 'null'`). That check now reads each file as you wrote it, as `tsc --noEmit` already did.
+- A Playwright config written in TypeScript loads in a package without `"type"`. The generated wrapper imported it, which Playwright 1.60 on Node 24 ran as CommonJS with its `import` statements in place (`Cannot use import statement outside a module`); the wrapper now requires a CommonJS config and imports a module, as Playwright does.
+- `SUPERCOV_SOURCE_ROOTS` takes effect on a project that has already run. The workspace of the first run was reused, so the run reported automatic scope and the same counts until `.supercov/workspaces` was deleted.
+- A build the command makes from the instrumented copy stays out of the project as a whole. Only the files that imported Supercov's runtime were kept back, so a Playwright run left a `.next/` of 2,547 files in the checkout, 432 of them with probes.
+- When the build Supercov runs before the tests fails, the run says that it ran it, on the instrumented copy, and names `SUPERCOV_BUILD_COMMAND`.
+- The warning about tests that made assertions without source-coverage evidence lists code outside the measured source among its causes.
+
 ## 3.0.4
 
 **Changed**

@@ -9,7 +9,7 @@
 // transpiles to a module namespace; the generated wrapper spread that
 // namespace and lost `testDir`, so no test was found.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -140,6 +140,36 @@ try {
   const listed = supercov(interop, ['--', 'node', 'node_modules/playwright/cli.js', 'test', '--list']);
   assert.equal(listed.status, 0, listed.output);
   assert.match(listed.output, /Total: 1 test in 1 file/, listed.output);
+
+  // And in a package that names no type at all, which is what a Next.js
+  // application has. Node 24 hands Playwright's loader such a file as
+  // TypeScript still to be judged, the loader left its `import` statements in
+  // place, and the wrapper's own import of the config died on "Cannot use
+  // import statement outside a module" before a test was listed.
+  const typeless = resolve(temporary, 'typeless');
+  link(typeless);
+  write(typeless, 'package.json', JSON.stringify({ name: 'typeless', private: true }) + '\n');
+  write(typeless, 'src/value.js', 'module.exports = { value: 1 };\n');
+  write(typeless, 'tests/e2e/playwright.config.ts', [
+    "import { existsSync } from 'node:fs';",
+    "import { defineConfig } from '@playwright/test';",
+    "export default defineConfig({ testDir: '.', reporter: 'list', timeout: existsSync('.') ? 12345 : 1 });",
+    '',
+  ].join('\n'));
+  write(typeless, 'tests/e2e/sample.spec.ts', [
+    "import { test, expect } from '@playwright/test';",
+    "test('a discovered test', () => { expect(1).toBe(1); });",
+    '',
+  ].join('\n'));
+  const typelessListed = supercov(typeless, ['--', 'node', 'node_modules/playwright/cli.js', 'test', '--config', 'tests/e2e/playwright.config.ts', '--list']);
+  assert.equal(typelessListed.status, 0, typelessListed.output);
+  assert.match(typelessListed.output, /Total: 1 test in 1 file/, typelessListed.output);
+  // Playwright 1.60 is the one that failed; a later one loads the file either
+  // way, so the wrapper is read too: it requires a CommonJS config, as
+  // Playwright does, and never imports it.
+  const wrapper = readFileSync(resolve(typeless, '.supercov/workspaces/workspace/typeless/.supercov/playwright.config.mjs'), 'utf8');
+  assert.match(wrapper, /createRequire\(import\.meta\.url\)\(originalFile\)/);
+  assert.doesNotMatch(wrapper, /^import original from/m);
 
   // Workers: a classic worker needs the runtime no init script can give it,
   // a test that closes its page takes its dedicated workers with it, and a

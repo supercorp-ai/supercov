@@ -38,6 +38,10 @@ struct CacheIdentity<'a> {
     /// Instrumented sources import the runtime by absolute path, so output
     /// built in one place does not run from another.
     root: &'a Path,
+    /// Which files are instrumented. The execution fingerprint digests every
+    /// first-party file whatever its classification, so naming source roots
+    /// on a project that had already run kept the output built without them.
+    sources: &'a [String],
     command: &'a [String],
     environment: &'a BTreeMap<String, String>,
     node: String,
@@ -82,6 +86,7 @@ pub fn build_cache_key(
         instrumenter_fingerprint: &integrity.fingerprint.instrumenter,
         adapter: project.build_adapter,
         root: &project.root,
+        sources: &project.source_files,
         command: &project.build_command,
         environment: &project.build_environment,
         node: node_version(),

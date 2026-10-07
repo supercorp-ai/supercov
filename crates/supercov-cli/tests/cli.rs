@@ -3373,3 +3373,43 @@ fn a_workspace_package_another_package_imports_is_measured_through_that_import()
         .succeeds();
     assert_eq!(affected.trim(), "cents\ntotal");
 }
+
+#[test]
+fn source_roots_named_after_a_first_run_take_effect() {
+    // The workspace of a first, automatic run was reused for every later one:
+    // SUPERCOV_SOURCE_ROOTS changed which files are source but not a byte of
+    // any of them, so the run still reported automatic scope and the same
+    // counts, with nothing to say the variable had been ignored.
+    let project = Project::cart("roots-after-first-run");
+    project.write(
+        "extra/tax.js",
+        "export function tax(total) {\n  return total > 100 ? 20 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { tax } from \"../extra/tax.js\";\ntest(\"tax applies over a hundred\", () => {\n  assert.equal(tax(200), 20);\n});\n",
+    );
+    project.commit("tax");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let automatic = project.supercov(&["runs", "latest", "scope"]).succeeds();
+    contains_all(&automatic, &["mode automatic", "AMBIGUOUS  extra/tax.js"]);
+
+    project
+        .supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_SOURCE_ROOTS", "src,extra")],
+        )
+        .succeeds();
+    let named = project.supercov(&["runs", "latest", "scope"]).succeeds();
+    contains_all(
+        &named,
+        &[
+            "mode explicit; roots extra, src; included 2",
+            "INCLUDED  extra/tax.js  explicit source root",
+        ],
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "extra/tax.js:2"])
+        .succeeds();
+    assert!(line.contains("tax applies over a hundred"), "{line}");
+}

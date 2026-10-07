@@ -550,13 +550,18 @@ pub fn run_direct_javascript(
     )?;
     let build_cache_key = build_cache_key(&integrity, &project)?;
     // The root too: a generic build's sources import the runtime by
-    // absolute path, which a moved project must not reuse.
+    // absolute path, which a moved project must not reuse. And the files that
+    // are instrumented: the fingerprint digests every first-party file
+    // whatever its classification, so SUPERCOV_SOURCE_ROOTS set on a project
+    // that had already run was silently ignored until the workspace was
+    // deleted.
     let frontend_cache_key = format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         integrity.fingerprint.combined,
         integrity.fingerprint.execution,
         crate::source_manifest::digest(&request.command),
-        crate::source_manifest::digest(&project.root.to_string_lossy())
+        crate::source_manifest::digest(&project.root.to_string_lossy()),
+        crate::source_manifest::digest(&(&project.source_files, &source_roots))
     );
     let prior_workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
     let reusable_build = if project.build_adapter == BuildAdapter::Direct {
@@ -896,6 +901,22 @@ pub fn run_direct_javascript(
     if project.build_adapter != BuildAdapter::Direct && reusable_build.is_none() && build_succeeded
     {
         write_build_cache(&root, &workspace, &build_cache_key, &started_at)?;
+    }
+    // The tests never started, and the build's own output is all there is to
+    // read: a type error `next build` found in the instrumented copy read as
+    // one in the project's code, and nothing said the build was Supercov's to
+    // begin with or how to name another.
+    if execution
+        .phases
+        .iter()
+        .any(|phase| phase.kind == PhaseKind::Build && phase.result.exit_code() != 0)
+    {
+        let _ = writeln!(
+            diagnostics,
+            "[supercov] the build failed, so the tests did not run. Supercov ran `{}` on the instrumented copy of the project before the tests; if it passes in the project itself, the error comes from the copy. {}=<command> names the build to run instead.",
+            project.build_command.join(" "),
+            crate::project_discovery::BUILD_COMMAND_VARIABLE
+        );
     }
     if let Some(signal) = execution.interrupted_signal {
         interrupt_run_state(&root, &run_id, &started_at, signal_name(signal))
