@@ -659,6 +659,11 @@ test("instrumentation stack cleanup keeps the user's first frame", async () => {
     "    at Object.apply (/workspace/.supercov/nodeAssertAdapter.js:23:10)",
     "    at load (file:///workspace/.supercov/resolve-loader.mjs:42:7)",
     "    at withProbeV2Context (/workspace/.supercov/runtime.js:248:12)",
+    // Where a run keeps the runtime. Vitest printed these between the
+    // user's own lines for a failed node:assert call.
+    "    at /workspace/.supercov/node_modules/nodeAssertAdapter.mjs:57:107",
+    "    at withNodeAssertionPhase (/workspace/.supercov/node_modules/runtime.mjs:922:12)",
+    "    at Object.assertionApply [as apply] (file:///workspace/.supercov/node_modules/nodeAssertAdapter.mjs:57:20)",
     "    at tests/offline/article.spec.ts:155:9",
     "    at userHelper (/workspace/tests/helper.ts:8:3)",
   ].join("\n");

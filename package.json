@@ -66,6 +66,7 @@
     "sync:rust-assets": "node scripts/sync-rust-package-assets.mjs",
     "test:rust-assets": "node scripts/sync-rust-package-assets.mjs --check",
     "test": "cargo test --workspace",
+    "test:next-playwright": "cargo build -p supercov && npm --prefix tests/fixtures/next-playwright ci && node scripts/next-playwright-integration.mjs",
     "test:react": "cargo build -p supercov && node scripts/rust-vitest-projects-integration.mjs && npm --prefix examples/react-verification ci && npm --prefix examples/react-verification run demo && node scripts/react-hydration-compatibility.mjs",
     "test:release-tooling": "node --test tests/release/*.test.mjs",
     "test:runtime": "node --test tests/runtime/*.test.mjs",

@@ -87,6 +87,44 @@ fn outcome_lines(outcomes: &IndexedOutcomeCounts) -> Vec<String> {
     .collect()
 }
 
+/// The scope as a table: how many files, their status, where they are and why.
+fn scope_group_lines(groups: &[supercov_engine::coverage_query::ScopeGroup]) -> Vec<String> {
+    let files = groups
+        .iter()
+        .map(|group| count(group.files).len())
+        .max()
+        .unwrap_or(0)
+        .max("Files".len());
+    let directory = groups
+        .iter()
+        .map(|group| group.directory.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("Directory".len());
+    let mut lines = vec![format!(
+        "{:>files$}  {:<9}  {:<directory$}  Reason",
+        "Files", "Status", "Directory"
+    )];
+    lines.extend(groups.iter().map(|group| {
+        format!(
+            "{:>files$}  {:<9}  {:<directory$}  {}",
+            count(group.files),
+            group.status.to_uppercase(),
+            group.directory,
+            group.reason
+        )
+    }));
+    lines
+}
+
+/// The line that settles unclassified source, ready to copy.
+fn source_roots_hint(unclassified: &supercov_engine::coverage_query::UnclassifiedSource) -> String {
+    format!(
+        "If the ambiguous files are your code, name the source roots: SUPERCOV_SOURCE_ROOTS={}",
+        unclassified.roots.join(",")
+    )
+}
+
 fn diagnostic_lines(diagnostic: &CoverageDiagnostic) -> Vec<String> {
     if diagnostic.code == "TEST_EVIDENCE_MISSING" {
         let test_count = diagnostic
@@ -214,6 +252,101 @@ fn summary_line(summary: &CoverageSummary) -> String {
 
 fn gap_dimensions_total(gap: &supercov_engine::coverage_index::IndexedGapDimensions) -> usize {
     gap.lines + gap.statements + gap.functions + gap.branches + gap.mcdc_conditions
+}
+
+/// Coverage by directory: what each holds, how much of it every kind of test
+/// covers, and how much all of them cover together.
+fn render_areas(
+    data: &supercov_engine::coverage_query::CoverageAreasData,
+    request: &IndexedQueryRequest,
+    page: &AgentPagination,
+) -> String {
+    use supercov_engine::coverage_query::dimension_for_metric;
+    let (metric, heading) = match data.metric {
+        MinimizeMetric::All | MinimizeMetric::Lines => (MinimizeMetric::Lines, "Lines"),
+        MinimizeMetric::Statements => (MinimizeMetric::Statements, "Statements"),
+        MinimizeMetric::Functions => (MinimizeMetric::Functions, "Functions"),
+        MinimizeMetric::Branches => (MinimizeMetric::Branches, "Branches"),
+        MinimizeMetric::Mcdc => (MinimizeMetric::Mcdc, "MC/DC"),
+    };
+    let percent = |covered: usize, total: usize| {
+        share(
+            if total == 0 {
+                0.0
+            } else {
+                covered as f64 * 100.0 / total as f64
+            },
+            total,
+        )
+    };
+    let mut table = vec![
+        ["Directory".to_owned(), "Files".into(), heading.into()]
+            .into_iter()
+            .chain(data.kinds.iter().cloned())
+            .chain(["All".to_owned()])
+            .collect::<Vec<_>>(),
+    ];
+    for area in &data.areas {
+        let total = dimension_for_metric(&area.totals, metric);
+        table.push(
+            [area.directory.clone(), count(area.files), count(total)]
+                .into_iter()
+                .chain(
+                    area.by_kind
+                        .iter()
+                        .map(|kind| percent(dimension_for_metric(&kind.covered, metric), total)),
+                )
+                .chain([percent(dimension_for_metric(&area.covered, metric), total)])
+                .collect(),
+        );
+    }
+    let widths = (0..table[0].len())
+        .map(|column| {
+            table
+                .iter()
+                .map(|row| row[column].chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let label = filter_label(request);
+    let mut lines = vec![format!(
+        "Coverage by directory, {} deep{}",
+        data.depth,
+        if label.is_empty() {
+            String::new()
+        } else {
+            format!(" — {label}")
+        }
+    )];
+    lines.push(String::new());
+    lines.extend(table.iter().map(|row| {
+        row.iter()
+            .enumerate()
+            .map(|(column, cell)| {
+                if column == 0 {
+                    format!("{cell:<width$}", width = widths[column])
+                } else {
+                    format!("{cell:>width$}", width = widths[column])
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+            .trim_end()
+            .to_owned()
+    }));
+    lines.push(page_label(page));
+    let base = format!(
+        "{} --group dir{}",
+        coverage_command(&data.run, request, "files"),
+        request
+            .depth
+            .map_or_else(String::new, |depth| format!(" --depth {depth}"))
+    );
+    if let Some(next) = next_page(&base, page) {
+        lines.push(format!("next page: {next}"));
+    }
+    lines.join("\n")
 }
 
 fn render_files(
@@ -748,6 +881,47 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         unattributed_note(kind),
                     ));
                 }
+                // One kind of test at 35.83% under a run total of 41.58%
+                // read as two answers to one question. The rest ran while no
+                // test was running, and the rows now say so.
+                if let Some(tests) = &data.coverage_by_tests {
+                    let outside = [
+                        (
+                            data.coverage.lines.covered,
+                            tests.lines.covered,
+                            data.coverage.lines.total,
+                        ),
+                        (
+                            data.coverage.branches.covered,
+                            tests.branches.covered,
+                            data.coverage.branches.total,
+                        ),
+                        (
+                            data.coverage.covered_conditions,
+                            tests.covered_conditions,
+                            data.coverage.conditions,
+                        ),
+                    ]
+                    .map(|(all, tested, total)| (all.saturating_sub(tested), total));
+                    if outside.iter().any(|(only, _)| *only > 0) {
+                        let [lines_only, branches_only, conditions_only] =
+                            outside.map(|(only, total)| {
+                                share(
+                                    if total == 0 {
+                                        0.0
+                                    } else {
+                                        only as f64 * 100.0 / total as f64
+                                    },
+                                    total,
+                                )
+                            });
+                        lines.push(format!(
+                            "  {:<12} {:>4}          lines {:>7}  branches {:>7}  MC/DC {:>7}",
+                            "no test", "", lines_only, branches_only, conditions_only,
+                        ));
+                        lines.push("  \"no test\" is code that ran only while no test was running: start-up and setup, module loading, work between tests. It counts in the run's total and in no test's.".into());
+                    }
+                }
                 if let Some(defaults) = data
                     .test_kind_sources
                     .get("runner-default")
@@ -790,6 +964,45 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 String::new(),
                 "Measurement".into(),
                 format!("  Instrumentation  {measurement}"),
+            ]);
+            // "89 blocking limitation(s) in 89 file(s)" did not say that 79
+            // of them were one directory, or what would settle them.
+            if let Some(unclassified) = &data.unclassified_source {
+                const SHOWN: usize = 4;
+                let mut places = unclassified
+                    .directories
+                    .iter()
+                    .take(SHOWN)
+                    .map(|place| {
+                        let name = if place.directory == "." {
+                            "the top level"
+                        } else {
+                            &place.directory
+                        };
+                        format!("{name} {}", count(place.files))
+                    })
+                    .collect::<Vec<_>>();
+                if unclassified.directories.len() > SHOWN {
+                    places.push(format!(
+                        "{} elsewhere",
+                        count(
+                            unclassified.directories[SHOWN..]
+                                .iter()
+                                .map(|place| place.files)
+                                .sum()
+                        )
+                    ));
+                }
+                lines.push(format!(
+                    "                   Unclassified source: {}",
+                    places.join(", ")
+                ));
+                lines.push(format!(
+                    "                   {}",
+                    source_roots_hint(unclassified)
+                ));
+            }
+            lines.extend([
                 format!("  Attribution      {}", attribution_line(&data.test_attribution)),
                 "  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.".into(),
             ]);
@@ -845,6 +1058,9 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 format!("  {} runs {} --help", crate::launcher_command(), data.run),
             ]);
             lines.join("\n")
+        }
+        IndexedQueryData::Areas(data) => {
+            render_areas(data, request, page.expect("areas are paginated"))
         }
         IndexedQueryData::Files(data) => render_files(
             &data.files,
@@ -918,6 +1134,20 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     format!("{} blocking limitation(s)", data.measurement.blocking)
                 }
             ));
+            if request.group.as_deref() != Some("file") {
+                lines.push(String::new());
+                lines.extend(scope_group_lines(&data.groups));
+                if let Some(unclassified) = &data.unclassified_source {
+                    lines.push(String::new());
+                    lines.push(source_roots_hint(unclassified));
+                }
+                lines.push(String::new());
+                lines.push(format!(
+                    "File by file: {} --files",
+                    coverage_command(&data.run, request, "scope")
+                ));
+                return lines.join("\n");
+            }
             lines.extend(data.entries.iter().map(|entry| {
                 format!(
                     "{}  {}  {}{}{}",
@@ -940,7 +1170,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 )
             }));
             lines.push(page_label(page));
-            if let Some(next) = next_page(&coverage_command(&data.run, request, "scope"), page) {
+            if let Some(next) = next_page(
+                &format!("{} --files", coverage_command(&data.run, request, "scope")),
+                page,
+            ) {
                 lines.push(format!("next page: {next}"));
             }
             lines.join("\n")
@@ -1604,6 +1837,9 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
                 if run.coverage_error.is_some() {
                     status.push("INVALID COVERAGE".into());
                 }
+                if run.tests == Some(0) {
+                    status.push("NO TESTS RAN".into());
+                }
                 if run.stale == Some(true) {
                     status.push(format!("STALE ({})", run.reasons.join(", ")));
                 }
@@ -1700,6 +1936,8 @@ mod tests {
             limit: DEFAULT_LIMIT,
             target: None,
             max_states: None,
+            group: None,
+            depth: None,
         }
     }
 

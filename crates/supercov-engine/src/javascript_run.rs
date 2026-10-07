@@ -318,6 +318,9 @@ struct RunCleanup {
     workspace: Option<PathBuf>,
     state_written: bool,
     terminal_recorded: bool,
+    /// Leave the instrumented copy in place: its build failed, and what the
+    /// build read is the only evidence of why.
+    keep_workspace: bool,
 }
 
 impl RunCleanup {
@@ -360,8 +363,8 @@ impl Drop for RunCleanup {
                     .join(".supercov/server-evidence")
                     .join(&self.run_id),
             );
-            let keep_workspace =
-                std::env::var("SUPERCOV_KEEP_WORKSPACE").is_ok_and(|value| !value.is_empty());
+            let keep_workspace = self.keep_workspace
+                || std::env::var("SUPERCOV_KEEP_WORKSPACE").is_ok_and(|value| !value.is_empty());
             if !keep_workspace {
                 let _ = prune_cached_workspace_sources(&self.root, &self.lock);
             }
@@ -527,6 +530,7 @@ pub fn run_direct_javascript(
         workspace: None,
         state_written: false,
         terminal_recorded: false,
+        keep_workspace: false,
     };
     let recovered_runs =
         recover_abandoned_runs(&root, &started_at).map_err(|error| error.to_string())?;
@@ -855,6 +859,26 @@ pub fn run_direct_javascript(
                 })?;
                 RunStateStatus::Testing
             } else {
+                // A build nobody asked for, of twenty seconds, ran before a
+                // suite that builds the application itself, with nothing to
+                // say what it was or why.
+                writeln!(
+                    diagnostics,
+                    "[supercov] building the instrumented copy first: {} ({})",
+                    project.build_command.join(" "),
+                    if crate::project_discovery::declared_build_command(&environment).is_some() {
+                        format!("named by {}", crate::project_discovery::BUILD_COMMAND_VARIABLE)
+                    } else {
+                        format!(
+                            "the project has a build script and the command may need its output; {}=<command> names another",
+                            crate::project_discovery::BUILD_COMMAND_VARIABLE
+                        )
+                    }
+                )
+                .map_err(|error| OrchestrationError::PhaseSetup {
+                    phase: phase.name.clone(),
+                    reason: error.to_string(),
+                })?;
                 RunStateStatus::Building
             };
             update_run_state(&root, &run_id, status, &started_at, None).map_err(|error| {
@@ -917,6 +941,14 @@ pub fn run_direct_javascript(
             project.build_command.join(" "),
             crate::project_discovery::BUILD_COMMAND_VARIABLE
         );
+        // Seeing what the build read took four more runs that copied files
+        // out of the workspace one at a time.
+        cleanup.keep_workspace = true;
+        let _ = writeln!(
+            diagnostics,
+            "[supercov] the instrumented copy is kept until the next run, to inspect: {}",
+            workspace.display()
+        );
     }
     if let Some(signal) = execution.interrupted_signal {
         interrupt_run_state(&root, &run_id, &started_at, signal_name(signal))
@@ -951,8 +983,9 @@ pub fn run_direct_javascript(
         if outputs.synced > 0 {
             let _ = writeln!(
                 diagnostics,
-                "[supercov] synced {} file(s) the command created or changed back to the project",
-                outputs.synced
+                "[supercov] synced {} file(s) the command created or changed back to the project: {}",
+                outputs.synced,
+                crate::workspace::summarize_paths(&outputs.synced_paths)
             );
         }
         if !outputs.skipped_instrumented.is_empty() {
@@ -960,20 +993,15 @@ pub fn run_direct_javascript(
                 diagnostics,
                 "[supercov] {} file(s) stayed in the isolated workspace: they are instrumented copies, or were built from them, and must not overwrite your project: {}",
                 outputs.skipped_instrumented.len(),
-                outputs
-                    .skipped_instrumented
-                    .iter()
-                    .take(3)
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                crate::workspace::summarize_paths(&outputs.skipped_instrumented)
             );
         }
         if !outputs.deleted_in_workspace.is_empty() {
             let _ = writeln!(
                 diagnostics,
-                "[supercov] the command deleted {} file(s) in the isolated workspace; deletions are not propagated to the project",
-                outputs.deleted_in_workspace.len()
+                "[supercov] the command deleted {} file(s) in the isolated workspace; deletions are not propagated to the project: {}",
+                outputs.deleted_in_workspace.len(),
+                crate::workspace::summarize_paths(&outputs.deleted_in_workspace)
             );
         }
     }

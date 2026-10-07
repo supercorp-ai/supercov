@@ -890,7 +890,7 @@ function cleanInstrumentationStack(error) {
   if (!error || typeof error !== "object" || typeof error.stack !== "string")
     return error;
   const lines = error.stack.split("\n");
-  const visible = lines.filter((line, index) => index === 0 || !/[\\/]\.supercov[\\/](?:playwright|nodeTest|vitest|runtime|launchSupervisor|nodeAssert|nodeAssertStrict|nodeAssertAdapter|register|resolve-loader)\.(?:js|mjs)(?::|\))/u.test(line));
+  const visible = lines.filter((line, index) => index === 0 || !/[\\/]\.supercov[\\/](?:node_modules[\\/])?(?:playwright|nodeTest|vitest|runtime|launchSupervisor|nodeAssert|nodeAssertStrict|nodeAssertAdapter|register|resolve-loader)\.(?:js|mjs)(?::|\))/u.test(line));
   if (visible.length !== lines.length) {
     try {
       error.stack = visible.join("\n");

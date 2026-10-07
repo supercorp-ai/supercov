@@ -27,6 +27,10 @@ pub struct RunListEntry {
     pub mcdc: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage_error: Option<String>,
+    /// How many tests the run recorded. None ran in a run whose command
+    /// failed before its runner started, or was never a test command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tests: Option<usize>,
     pub command: Vec<String>,
     #[serde(serialize_with = "serialize_javascript_number")]
     pub duration_ms: f64,
@@ -63,16 +67,20 @@ pub fn run_list_query(
         .map(|run| -> Result<RunListEntry, RunIndexError> {
             let summary = open_or_rebuild_query_index(run).and_then(|container| {
                 let index = CoverageIndex::new(&container)?;
-                Ok(index.summary(view)?)
+                Ok((
+                    index.summary(view)?,
+                    index.projection(view, None, None)?.tests,
+                ))
             });
-            let (lines, branches, mcdc, coverage_error) = match summary {
-                Ok(summary) => (
+            let (lines, branches, mcdc, tests, coverage_error) = match summary {
+                Ok((summary, tests)) => (
                     Some(summary.lines.percentage),
                     Some(summary.branches.percentage),
                     Some(summary.condition_coverage_pct),
+                    Some(tests),
                     None,
                 ),
-                Err(error) => (None, None, None, Some(error.to_string())),
+                Err(error) => (None, None, None, None, Some(error.to_string())),
             };
             let comparison = current_integrity(run)
                 .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
@@ -83,6 +91,7 @@ pub fn run_list_query(
                 branches,
                 mcdc,
                 coverage_error,
+                tests,
                 command: run.metadata.command.clone(),
                 duration_ms: run.metadata.duration_ms,
                 timings: run.metadata.timings.clone(),

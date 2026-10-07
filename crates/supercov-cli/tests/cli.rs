@@ -101,7 +101,57 @@ fn a_measured_suite_reads_back_through_every_query() {
     assert!(kinds.contains("unit  3 test(s)  lines 76.92%"), "{kinds}");
     let runners = project.supercov(&["runs", "latest", "runners"]).succeeds();
     assert!(runners.contains("node:test  3 test(s)"), "{runners}");
+    // Coverage by directory, split by the kinds of test that ran, and the
+    // counts a percentage is worked out from on every file.
+    let areas = project
+        .supercov(&["runs", "latest", "files", "--group", "dir"])
+        .succeeds();
+    contains_all(
+        &areas,
+        &[
+            "Coverage by directory, 1 deep",
+            "Directory  Files  Lines    unit     All",
+            "src            1     13  76.92%  76.92%",
+        ],
+    );
+    let areas = project
+        .supercov(&["runs", "latest", "files", "--group", "dir", "--json"])
+        .json();
+    let area = &areas["data"]["areas"][0];
+    assert_eq!(area["directory"], "src");
+    assert_eq!(area["totals"]["lines"], 13);
+    assert_eq!(area["covered"]["lines"], 10);
+    assert_eq!(area["byKind"][0]["kind"], "unit");
+    assert_eq!(area["byKind"][0]["covered"]["lines"], 10);
+    let files = project
+        .supercov(&["runs", "latest", "files", "--json"])
+        .json();
+    let file = &files["data"]["files"][0];
+    assert_eq!(file["totals"]["lines"], 13);
+    assert_eq!(file["covered"]["lines"], 10);
+    assert_eq!(
+        file["covered"]["branches"].as_u64().unwrap() + file["missingBranches"].as_u64().unwrap(),
+        file["totals"]["branches"].as_u64().unwrap()
+    );
+    let wrong = project.supercov(&["runs", "latest", "files", "--depth", "2"]);
+    assert_eq!(wrong.code(), 2);
+
+    // The scope is read as a table of places first, and file by file on
+    // request.
     let scope = project.supercov(&["runs", "latest", "scope"]).succeeds();
+    contains_all(
+        &scope,
+        &[
+            "Files  Status     Directory  Reason",
+            "    1  INCLUDED   src        discovered package source root",
+            "    1  EXCLUDED   test       test or fixture source",
+            "File by file: supercov runs",
+            "scope --files",
+        ],
+    );
+    let scope = project
+        .supercov(&["runs", "latest", "scope", "--files"])
+        .succeeds();
     contains_all(
         &scope,
         &["INCLUDED  src/cart.js", "EXCLUDED  test/cart.test.js"],
@@ -2254,8 +2304,8 @@ fn every_listing_pages_and_names_its_next_page() {
             format!("runs {run} decision 'src/cart.js:13' --offset 1 --limit 1"),
         ),
         (
-            vec!["runs", "latest", "scope", "--limit", "1"],
-            format!("runs {run} scope --offset 1 --limit 1"),
+            vec!["runs", "latest", "scope", "--files", "--limit", "1"],
+            format!("runs {run} scope --files --offset 1 --limit 1"),
         ),
         (
             vec!["runs", "latest", "source", "src/cart.js", "--limit", "2"],
@@ -2609,7 +2659,7 @@ fn a_pnpm_workspace_finds_the_source_of_each_package_it_lists() {
     project.git(&["init", "-q"]);
     project.supercov(&["--", "node", "--test"]).succeeds();
     let scope = project
-        .supercov(&["runs", "latest", "scope", "--limit", "50"])
+        .supercov(&["runs", "latest", "scope", "--files", "--limit", "50"])
         .succeeds();
     contains_all(
         &scope,
@@ -3392,7 +3442,23 @@ fn source_roots_named_after_a_first_run_take_effect() {
     project.commit("tax");
     project.supercov(&["--", "node", "--test"]).succeeds();
     let automatic = project.supercov(&["runs", "latest", "scope"]).succeeds();
-    contains_all(&automatic, &["mode automatic", "AMBIGUOUS  extra/tax.js"]);
+    contains_all(
+        &automatic,
+        &[
+            "mode automatic",
+            "    1  AMBIGUOUS  extra      unclassified first-party source",
+            // What would settle it, ready to copy.
+            "SUPERCOV_SOURCE_ROOTS=src,extra",
+        ],
+    );
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "Unclassified source: extra 1",
+            "SUPERCOV_SOURCE_ROOTS=src,extra",
+        ],
+    );
 
     project
         .supercov_with(
@@ -3400,7 +3466,9 @@ fn source_roots_named_after_a_first_run_take_effect() {
             &[("SUPERCOV_SOURCE_ROOTS", "src,extra")],
         )
         .succeeds();
-    let named = project.supercov(&["runs", "latest", "scope"]).succeeds();
+    let named = project
+        .supercov(&["runs", "latest", "scope", "--files"])
+        .succeeds();
     contains_all(
         &named,
         &[
@@ -3408,8 +3476,25 @@ fn source_roots_named_after_a_first_run_take_effect() {
             "INCLUDED  extra/tax.js  explicit source root",
         ],
     );
+    assert!(!named.contains("SUPERCOV_SOURCE_ROOTS="), "{named}");
     let line = project
         .supercov(&["runs", "latest", "line", "extra/tax.js:2"])
         .succeeds();
     assert!(line.contains("tax applies over a hundred"), "{line}");
+}
+
+#[test]
+fn a_run_in_which_no_test_ran_is_marked_in_the_listing() {
+    // Four runs made only to copy files out of the workspace sat in `runs`
+    // as 0.00% beside the real ones, with nothing to tell them apart.
+    let project = Project::cart("no-tests-ran");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project.supercov(&["--", "node", "-e", "0"]).succeeds();
+    let runs = project.supercov(&["runs"]).succeeds();
+    let rows = runs.lines().collect::<Vec<_>>();
+    assert!(rows[1].ends_with("NO TESTS RAN"), "{runs}");
+    assert!(!rows[2].contains("NO TESTS RAN"), "{runs}");
+    let listed = project.supercov(&["runs", "--json"]).json();
+    assert_eq!(listed["data"]["runs"][0]["tests"], 0);
+    assert_eq!(listed["data"]["runs"][1]["tests"], 3);
 }

@@ -55,6 +55,13 @@ project never holds an instrumented build. Changes inside any `node_modules`
 directory are neither applied nor reported: dependency trees are not command
 outputs.
 
+The run prints where the synced files went, what stayed behind and what the
+command deleted, by top-level directory (`test-results/ 6`, `.next/ 2547`).
+
+When the build Supercov runs before the tests fails, the instrumented copy is
+left in `.supercov/workspaces/` until the next run, and the run prints its
+path. `SUPERCOV_KEEP_WORKSPACE=1` leaves it after any run.
+
 ## Files Supercov creates
 
 | Location | What it is for |
