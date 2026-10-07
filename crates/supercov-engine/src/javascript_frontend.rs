@@ -1327,7 +1327,31 @@ fn write_playwright_config(
             .replace('\\', "/");
         let specifier = serde_json::to_string(&format!("../{relative}"))
             .map_err(JavascriptFrontendError::Serialize)?;
-        format!("import original from {specifier};\n")
+        // Playwright requires a config that is CommonJS and imports one that
+        // is a module. Importing a TypeScript config of a package without
+        // `"type": "module"` left its `import` statements in a module Node
+        // then ran as CommonJS ("Cannot use import statement outside a
+        // module", Playwright 1.60 on Node 24), so the wrapper loads the
+        // config the way Playwright itself would.
+        format!(
+            "import {{ existsSync, readFileSync }} from 'node:fs';\n\
+             import {{ createRequire }} from 'node:module';\n\
+             const originalFile = fileURLToPath(new URL({specifier}, import.meta.url));\n\
+             const originalIsModule = (() => {{\n\
+               if (/\\.m[jt]s$/.test(originalFile)) return true;\n\
+               if (/\\.c[jt]s$/.test(originalFile)) return false;\n\
+               for (let folder = dirname(originalFile); ; folder = dirname(folder)) {{\n\
+                 const manifest = resolve(folder, 'package.json');\n\
+                 if (existsSync(manifest)) {{\n\
+                   try {{ return JSON.parse(readFileSync(manifest, 'utf8')).type === 'module'; }} catch {{ return false; }}\n\
+                 }}\n\
+                 if (dirname(folder) === folder) return false;\n\
+               }}\n\
+             }})();\n\
+             const original = originalIsModule\n\
+               ? (await import(pathToFileURL(originalFile).href)).default\n\
+               : createRequire(import.meta.url)(originalFile);\n"
+        )
     } else {
         "const original = {};\n".into()
     };
@@ -1339,7 +1363,7 @@ fn write_playwright_config(
     let source = format!(
         "import './node_modules/register.mjs';\n\
          import {{ dirname, isAbsolute, relative, resolve }} from 'node:path';\n\
-         import {{ fileURLToPath }} from 'node:url';\n\
+         import {{ fileURLToPath, pathToFileURL }} from 'node:url';\n\
          {original_import}\
          const configExport = original && original.__esModule === true && Object.prototype.hasOwnProperty.call(original, 'default') ? original.default : original;\n\
          const resolvedValue = typeof configExport === 'function' ? await configExport({{ command: 'test', mode: 'test' }}) : configExport;\n\

@@ -106,7 +106,7 @@ fn diagnostic_lines(diagnostic: &CoverageDiagnostic) -> Vec<String> {
                     if test_count == 1 { "test" } else { "tests" }
                 ),
                 format!("    Example: {first}"),
-                "  Possible causes: uninstrumented data, shared setup, lost async context, or missing probe transport. Missing evidence does not prove the code did not execute.".into(),
+                "  Possible causes: the code under test is outside the measured source (see `scope`), uninstrumented data, shared setup, lost async context, or missing probe transport. Missing evidence does not prove the code did not execute.".into(),
                 "  Inspect the test's coverage and assertion details to distinguish missing execution from missing attribution.".into(),
             ];
         }
@@ -1786,7 +1786,7 @@ mod tests {
             vec![
                 "  1 test made assertions, but Supercov received no source-coverage evidence:",
                 "    Example: safety.spec.ts > checks the VM",
-                "  Possible causes: uninstrumented data, shared setup, lost async context, or missing probe transport. Missing evidence does not prove the code did not execute.",
+                "  Possible causes: the code under test is outside the measured source (see `scope`), uninstrumented data, shared setup, lost async context, or missing probe transport. Missing evidence does not prove the code did not execute.",
                 "  Inspect the test's coverage and assertion details to distinguish missing execution from missing attribution.",
             ]
         );

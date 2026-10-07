@@ -178,6 +178,24 @@ const isAnalysisEntrypoint = new RegExp(`/node_modules/(?:\\.bin/(?:${analysisTo
         process.argv.includes("--noEmit"));
 if (isAnalysisEntrypoint)
     installAuthoredSourceView();
+// `next build` type-checks in a worker of its own instead of running tsc. A
+// probe in a condition stops TypeScript narrowing through it, so an inferred
+// return type widens, and a file outside the source roots that calls the
+// function fails the build on code nobody wrote ("'client' is possibly
+// 'null'"). Only that worker gets the authored view: the bundler, and `next
+// dev`, which sets TypeScript up in its main process, must read the copies.
+else if (/\/node_modules\/next\/dist\/compiled\/jest-worker\/processChild\.js$/.test(entrypoint) ||
+    (!workerThreads.isMainThread && /\/node_modules\/(?:\.bin\/next$|next\/dist\/)/.test(entrypoint))) {
+    const compile = Module.prototype._compile;
+    let installed = false;
+    Module.prototype._compile = function _compile(content, filename, ...rest) {
+        if (!installed && /[\\/]next[\\/]dist[\\/]lib[\\/]verify-typescript-setup\.js$/.test(filename)) {
+            installed = true;
+            installAuthoredSourceView();
+        }
+        return Reflect.apply(compile, this, [content, filename, ...rest]);
+    };
+}
 function installAuthoredSourceView() {
     let authored;
     try {

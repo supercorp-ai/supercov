@@ -145,6 +145,20 @@ without a conventional source directory is measured as a whole. Functions passed
 to compile-time style macros (`stylex.create(...)`) are left as written because
 the bundler consumes them at build time; nothing about them runs.
 
+Inside the roots, tests, fixtures, tool scripts and configuration files are
+still recognised by their path and left out. A root you name settles what it
+names: with `SUPERCOV_SOURCE_ROOTS=src,scripts` the `scripts/` directory is
+source, and so is `src/test-utils` when it is named as a root. Only what lies
+below a named root is still judged by its path, and a root that is a single
+file is always measured.
+
+In a Next.js application, root `components/` and `pages/`, and the root files
+Next.js reads by name (`proxy`, `middleware`, `instrumentation`) are source
+without being declared. Under `app/` a folder is a URL segment, so the files
+the App Router serves (`route.ts`, `page.tsx`, `layout.tsx` and the rest) are
+source whatever their folders are called: `app/api/wordpress/test/route.ts` is
+the handler of `/api/wordpress/test`, not a test.
+
 Choose roots that describe code the repository owns. Do not include dependencies
 or generated output merely to make a warning disappear.
 

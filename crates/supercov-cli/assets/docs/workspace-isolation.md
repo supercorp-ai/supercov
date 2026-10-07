@@ -34,6 +34,8 @@ and the instrumented copy is not what you wrote:
 
 - Linters, formatters and `tsc --noEmit` (ESLint, Prettier, standard, xo and
   the like) read each file as you wrote it, and don't see `.supercov`.
+- The type check `next build` runs reads each file as you wrote it too, while
+  the build itself compiles the instrumented copy.
 - Coverage tools the command runs itself (tap, c8, nyc, Jest's and Vitest's
   `--coverage`) still collect and report coverage. They measure the
   instrumented copy, and report close to what they report without Supercov,
@@ -42,12 +44,16 @@ and the instrumented copy is not what you wrote:
 
 Files the wrapped command creates or changes inside the isolated workspace are
 synced back to the project after the run, so `supercov -- npm test -- -u`
-updates snapshots in the repository exactly as `npm test -- -u` would. Two
+updates snapshots in the repository exactly as `npm test -- -u` would. Three
 exceptions are reported instead of applied: changes the command makes to
 instrumented source files (the instrumented copies must never overwrite your
-sources) and deletions (never propagated automatically). Changes inside any
-`node_modules` directory are neither applied nor reported: dependency trees are
-not command outputs.
+sources), a build the command made from them, and deletions (never propagated
+automatically). Such a build stays behind whole: when a file in `.next/`,
+`dist/` or another directory that git ignores or the project does not have was
+built from instrumented source, nothing in that directory is copied, so the
+project never holds an instrumented build. Changes inside any `node_modules`
+directory are neither applied nor reported: dependency trees are not command
+outputs.
 
 ## Files Supercov creates
 

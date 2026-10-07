@@ -1178,6 +1178,78 @@ fn validate_writeback_destination(root: &Path, relative: &Path) -> Result<(), Wo
     Ok(())
 }
 
+/// The build output directories of files built from instrumented source.
+///
+/// Such a directory is the outermost one holding the file that the project
+/// either ignores in git or does not have: `.next`, `dist`, `build`. A
+/// directory the project tracks is not one, so a generated file next to
+/// updated snapshots withholds only itself.
+struct BuiltDirectories<'a> {
+    root: &'a Path,
+    judged: BTreeMap<PathBuf, bool>,
+    directories: BTreeSet<PathBuf>,
+}
+
+impl<'a> BuiltDirectories<'a> {
+    fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            judged: BTreeMap::new(),
+            directories: BTreeSet::new(),
+        }
+    }
+
+    fn add(&mut self, relative: &Path) {
+        let mut directory = PathBuf::new();
+        let Some(parent) = relative.parent() else {
+            return;
+        };
+        for component in parent.components() {
+            directory.push(component);
+            let root = self.root;
+            let output = *self
+                .judged
+                .entry(directory.clone())
+                .or_insert_with(|| is_build_output(root, &directory));
+            if output {
+                self.directories.insert(directory);
+                return;
+            }
+        }
+    }
+
+    fn holds(&self, relative: &Path) -> bool {
+        relative
+            .ancestors()
+            .skip(1)
+            .any(|directory| self.directories.contains(directory))
+    }
+}
+
+/// A bundle, a module or the source map of one.
+fn compiled_javascript(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "js" | "mjs" | "cjs" | "map"))
+}
+
+fn is_build_output(root: &Path, directory: &Path) -> bool {
+    if fs::symlink_metadata(root.join(directory)).is_err() {
+        return true;
+    }
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "-q", "--"])
+        .arg(directory)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.code() == Some(0))
+}
+
 /// Copy files the wrapped command created or changed in the mirror back to
 /// the real project, so `supercov -- <command>` leaves the working tree in
 /// the same state `<command>` alone would have: updated snapshots, generated
@@ -1193,25 +1265,48 @@ pub fn sync_command_outputs(
     let mut current = BTreeMap::new();
     walk_output_files(workspace, workspace, &mut current)?;
     let mut sync = CommandOutputSync::default();
+    // A file the command built FROM an instrumented source carries the
+    // instrumentation with it. Copying that into the project would leave
+    // probes and a workspace-only runtime import in the application's own
+    // build output, which is the one thing isolation promises never
+    // happens. The generated runtime lives only inside a workspace, so a
+    // reference to it is proof the file is not the command's own output.
+    //
+    // Nor is the rest of the build it belongs to. `next build` wrote 2,547
+    // files of which a handful imported the runtime; the others (chunks with
+    // probes, manifests naming workspace paths) were copied, and a later
+    // `next start` in the project would have served an instrumented build.
+    let mut changed = Vec::new();
+    let mut built = BTreeSet::new();
+    let mut built_directories = BuiltDirectories::new(root);
     for (relative, state) in &current {
         if baseline.entries.get(relative) == Some(state) {
             continue;
         }
-        if protected.contains(relative) {
+        if !protected.contains(relative) {
+            // Compiled code marks a build. A report that quotes a stack frame
+            // of the runtime does not: the screenshots and traces beside a
+            // failed Playwright test's `error-context.md` are the command's
+            // own output.
+            let compiled = compiled_javascript(relative);
+            if built_from_instrumented_source(&workspace.join(relative), compiled)? {
+                built.insert(relative.clone());
+                if compiled {
+                    built_directories.add(relative);
+                }
+            }
+        }
+        changed.push(relative);
+    }
+    for relative in changed {
+        if protected.contains(relative)
+            || built.contains(relative)
+            || built_directories.holds(relative)
+        {
             sync.skipped_instrumented.push(relative.clone());
             continue;
         }
         let from = workspace.join(relative);
-        // A file the command built FROM an instrumented source carries the
-        // instrumentation with it. Copying that into the project would leave
-        // probes and a workspace-only runtime import in the application's own
-        // build output, which is the one thing isolation promises never
-        // happens. The generated runtime lives only inside a workspace, so a
-        // reference to it is proof the file is not the command's own output.
-        if references_generated_runtime(&from)? {
-            sync.skipped_instrumented.push(relative.clone());
-            continue;
-        }
         if unaccompanied_install_manifest(root, workspace, relative) {
             continue;
         }
@@ -1398,16 +1493,25 @@ fn unaccompanied_install_manifest(root: &Path, workspace: &Path, relative: &Path
 /// Whether `path` mentions the generated runtime module, which exists only
 /// inside an instrumented workspace. Read as bytes: build output can be
 /// minified, source-mapped or not valid UTF-8, and the marker is ASCII.
-fn references_generated_runtime(path: &Path) -> Result<bool, WorkspaceError> {
-    const MARKER: &[u8] = b".supercov/node_modules/";
+/// Whether a file the command wrote came out of instrumented source: it
+/// names the generated runtime, which lives only inside a workspace, or it is
+/// compiled code that calls the probes. A bundler that inlines the runtime
+/// leaves no path to it in a chunk (Turbopack's name it only in their source
+/// maps), but the probe calls are still there.
+fn built_from_instrumented_source(path: &Path, compiled: bool) -> Result<bool, WorkspaceError> {
+    const RUNTIME: &[u8] = b".supercov/node_modules/";
+    const PROBE: &[u8] = b"__supercov";
     let contents = match fs::read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(io_error(path, error)),
     };
-    Ok(contents
-        .windows(MARKER.len())
-        .any(|window| window == MARKER))
+    let holds = |marker: &[u8]| {
+        contents
+            .windows(marker.len())
+            .any(|window| window == marker)
+    };
+    Ok(holds(RUNTIME) || (compiled && holds(PROBE)))
 }
 
 pub fn prune_cached_workspace_sources(
@@ -1641,16 +1745,111 @@ mod tests {
 
         let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
 
+        // The declarations beside it were inferred from the instrumented
+        // copies too, so the whole build stays behind, not a part of it.
         assert_eq!(
             sync.skipped_instrumented,
-            vec![PathBuf::from("dist/app.js")],
-            "the instrumented artifact is reported, not copied"
+            vec![PathBuf::from("dist/app.d.ts"), PathBuf::from("dist/app.js")],
+            "the instrumented build is reported, not copied"
         );
-        assert!(!root.join("dist/app.js").exists());
-        // A sibling the build emitted that carries no instrumentation is the
-        // command's own output and still belongs to the project.
+        assert_eq!(sync.synced, 0);
+        assert!(!root.join("dist").exists());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_built_file_in_a_directory_the_project_keeps_withholds_only_itself() {
+        // `src` is the project's own directory, not a build's: the snapshot a
+        // test updated next to a generated bundle still belongs to the project.
+        let (root, workspace) = writeback_fixture("built-beside-outputs");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::write(
+            workspace.join("src/bundle.js"),
+            "import \"../.supercov/node_modules/runtime.mjs\";\n",
+        )
+        .unwrap();
+        fs::write(workspace.join("src/app.snap"), "updated\n").unwrap();
+
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+
+        assert_eq!(
+            sync.skipped_instrumented,
+            vec![PathBuf::from("src/bundle.js")]
+        );
         assert_eq!(sync.synced, 1);
-        assert!(root.join("dist/app.d.ts").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("src/app.snap")).unwrap(),
+            "updated\n"
+        );
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_report_that_quotes_the_runtime_does_not_make_its_directory_a_build() {
+        // A failed Playwright test writes its stack, runtime frames included,
+        // next to the screenshot and trace a developer opens to debug it.
+        let (root, workspace) = writeback_fixture("report-quotes-runtime");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("test-results/adds-an-item")).unwrap();
+        fs::write(
+            workspace.join("test-results/adds-an-item/error-context.md"),
+            "at launch (/w/.supercov/node_modules/playwright.mjs:907:44)\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("test-results/adds-an-item/trace.zip"),
+            "trace",
+        )
+        .unwrap();
+
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+
+        assert_eq!(
+            sync.skipped_instrumented,
+            vec![PathBuf::from("test-results/adds-an-item/error-context.md")]
+        );
+        assert_eq!(sync.synced, 1);
+        assert!(root.join("test-results/adds-an-item/trace.zip").exists());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_build_directory_git_ignores_stays_behind_even_when_the_project_has_one() {
+        let (root, workspace) = writeback_fixture("built-ignored");
+        let git = |arguments: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(arguments)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            fs::remove_dir_all(root.parent().unwrap()).unwrap();
+            return;
+        }
+        fs::write(root.join(".gitignore"), ".next\n").unwrap();
+        fs::create_dir_all(root.join(".next")).unwrap();
+        fs::write(root.join(".next/BUILD_ID"), "mine\n").unwrap();
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::create_dir_all(workspace.join(".next/server")).unwrap();
+        fs::write(
+            workspace.join(".next/server/chunk.js"),
+            // Turbopack inlines the runtime: a chunk holds probe calls and
+            // no path to it.
+            "__supercovCoverageHitV3(__supercovProbeFileV2, 0);\n",
+        )
+        .unwrap();
+        fs::write(workspace.join(".next/BUILD_ID"), "instrumented\n").unwrap();
+
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+
+        assert_eq!(sync.synced, 0);
+        assert_eq!(sync.skipped_instrumented.len(), 2);
+        assert_eq!(
+            fs::read_to_string(root.join(".next/BUILD_ID")).unwrap(),
+            "mine\n"
+        );
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 

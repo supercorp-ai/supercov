@@ -41,6 +41,10 @@ npx supercov runs latest scope
 Do not broaden the roots to dependencies or generated output merely to remove a
 warning. The goal is an honest boundary around code the repository owns.
 
+A file `scope` lists as `test or fixture source` or `conventional tool script`
+was recognised by its path. If it is your code, name its directory, or the file
+itself, as a root: a named root is source whatever it is called.
+
 ## Too much is measured
 
 Vendored or generated code beside your own is measured like the rest of the
