@@ -142,14 +142,14 @@ npx supercov runs <run-id> [query] [options]
 | --- | --- |
 | no query | Read the overall result, test outcome, completeness, and timings |
 | `gaps` | See only files with uncovered behavior or measurement limits |
-| `files` | See every included file, including fully covered files |
+| `files` | See every included file, including fully covered files; `--group dir` shows coverage by directory, split by test kind |
 | `file <path>` | Inspect the open obligations in one file |
 | `decision <id \| path:line>` | Understand missing boolean outcomes and MC/DC witnesses |
 | `line <path:line>` | See one line's state, obligations, and covering tests |
 | `test <id \| name>` | See the coverage attributed to one test |
 | `kinds` | Group coverage by test level, such as unit or E2E |
 | `runners` | Group coverage by test runner |
-| `scope` | Review included, excluded, and ambiguous source files |
+| `scope` | See what is source and what is not, by directory and reason; `--files` lists every file |
 | `assertions` | Read the share of executed statements the tests assert, and the ones they do not; `assertions assess` works it out |
 | `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
@@ -163,6 +163,27 @@ npx supercov runs latest decision app/routes/checkout.ts:42
 npx supercov runs latest line app/routes/checkout.ts:57
 npx supercov runs latest test "checkout retry"
 ```
+
+To see where the coverage is, read it by directory. Each row is a directory,
+with what it holds and how much of it each kind of test covers; `--depth`
+keeps more levels, and `--metric` picks branches, functions, statements or
+MC/DC instead of lines:
+
+```sh supercov
+npx supercov runs latest files --group dir
+npx supercov runs latest files --group dir --depth 2 --metric branches
+```
+
+```
+Directory   Files  Lines     e2e    unit      All
+app             4     15  86.67%   0.00%  100.00%
+lib             1     10  90.00%  40.00%   90.00%
+components      1      2 100.00%   0.00%  100.00%
+```
+
+In `--json`, every file of `files` and `gaps` carries `totals` and `covered`
+for each metric beside what is missing, so a percentage can be worked out for
+any file or set of files.
 
 Run any query with `--help` to see only the options valid for that query:
 
@@ -509,6 +530,7 @@ terminal or offline environment after the package has been downloaded.
 | --- | --- |
 | `SUPERCOV_SOURCE_ROOTS` | Comma-separated directories or files that hold your own code, in any language; everything else is left out |
 | `SUPERCOV_TEST_KIND` | Label the wrapped command as a test level such as `unit` or `e2e` |
+| `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran. It is kept without this when the build Supercov runs before the tests fails |
 | `SUPERCOV_BUILD_COMMAND` | The build a JavaScript project's tests need, as words or a JSON array, such as `yarn workspace web build` in a monorepo whose root `build` builds every package. Without it Supercov runs the project's `build` script, through the package manager that started the tests, when the tests need built output |
 
 Examples:

@@ -320,6 +320,11 @@ pub struct CoverageSummaryData {
     pub coverage: CoverageSummary,
     pub measurement: IndexedMeasurement,
     pub coverage_by_kind: Vec<IndexedDimensionCoverage>,
+    /// What the tests cover between them. `coverage` less this ran while no
+    /// test was running, which is why a run with one kind of test can show a
+    /// total above that kind's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_by_tests: Option<CoverageSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub e2e_gap_context: Option<CoverageKindGapContext>,
     pub coverage_by_runner: Vec<IndexedDimensionCoverage>,
@@ -343,6 +348,149 @@ pub struct CoverageSummaryData {
     pub test_outcomes: IndexedOutcomeCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_scope: Option<IndexedSourceScope>,
+    /// Where the files discovery could not classify are, and the roots that
+    /// would settle them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unclassified_source: Option<UnclassifiedSource>,
+}
+
+/// One row of the scope overview: the files of one place that share a status
+/// and the reason for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeGroup {
+    pub status: String,
+    pub directory: String,
+    pub reason: String,
+    pub files: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeDirectory {
+    pub directory: String,
+    pub files: usize,
+}
+
+/// The unclassified files of a run by where they are, and the source roots
+/// to name if they are the project's own code: the roots discovery found
+/// plus each of those places.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnclassifiedSource {
+    pub directories: Vec<ScopeDirectory>,
+    pub roots: Vec<String>,
+}
+
+/// Where a reader would look for a file: the directory at the top of the
+/// project, or of its package in a workspace. A file that sits at that top
+/// is in `.`.
+fn scope_directory(entry: &IndexedScopeEntry) -> String {
+    let package = entry.package_root.as_deref().filter(|root| *root != ".");
+    let local = package
+        .and_then(|root| entry.file.strip_prefix(root))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(&entry.file);
+    match (package, local.split_once('/')) {
+        (Some(package), Some((first, _))) => format!("{package}/{first}"),
+        (Some(package), None) => package.to_owned(),
+        (None, Some((first, _))) => first.to_owned(),
+        (None, None) => ".".to_owned(),
+    }
+}
+
+fn scope_status_rank(status: &str) -> u8 {
+    match status {
+        "ambiguous" => 0,
+        "included" => 1,
+        "excluded" => 2,
+        _ => 3,
+    }
+}
+
+/// Every scope entry, grouped. 845 entries took five pages to read and an
+/// `awk` to see that 79 of 89 unclassified files were one directory.
+pub fn scope_groups(entries: &[IndexedScopeEntry]) -> Vec<ScopeGroup> {
+    let mut groups = BTreeMap::<(u8, String, String, String), usize>::new();
+    for entry in entries {
+        *groups
+            .entry((
+                scope_status_rank(&entry.status),
+                entry.status.clone(),
+                scope_directory(entry),
+                entry.reason.clone(),
+            ))
+            .or_default() += 1;
+    }
+    let mut groups = groups
+        .into_iter()
+        .map(|((rank, status, directory, reason), files)| {
+            (
+                rank,
+                ScopeGroup {
+                    status,
+                    directory,
+                    reason,
+                    files,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    groups.sort_by(|(left_rank, left), (right_rank, right)| {
+        left_rank
+            .cmp(right_rank)
+            .then_with(|| right.files.cmp(&left.files))
+            .then_with(|| left.directory.cmp(&right.directory))
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    groups.into_iter().map(|(_, group)| group).collect()
+}
+
+pub fn unclassified_source(
+    roots: &[String],
+    entries: &[IndexedScopeEntry],
+) -> Option<UnclassifiedSource> {
+    let mut places = BTreeMap::<String, usize>::new();
+    let mut named = Vec::<(String, usize)>::new();
+    for entry in entries.iter().filter(|entry| entry.status == "ambiguous") {
+        let directory = scope_directory(entry);
+        *places.entry(directory.clone()).or_default() += 1;
+        // A file at the top is named itself; naming `.` would take the tests
+        // and the configuration with it.
+        let root = if entry.file.contains('/') && directory != "." {
+            directory
+        } else {
+            entry.file.clone()
+        };
+        match named.iter_mut().find(|(name, _)| *name == root) {
+            Some((_, files)) => *files += 1,
+            None => named.push((root, 1)),
+        }
+    }
+    if places.is_empty() {
+        return None;
+    }
+    let mut directories = places
+        .into_iter()
+        .map(|(directory, files)| ScopeDirectory { directory, files })
+        .collect::<Vec<_>>();
+    directories.sort_by(|left, right| {
+        right
+            .files
+            .cmp(&left.files)
+            .then_with(|| left.directory.cmp(&right.directory))
+    });
+    named.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let mut all = roots.to_vec();
+    for (root, _) in named {
+        if !all.contains(&root) {
+            all.push(root);
+        }
+    }
+    Some(UnclassifiedSource {
+        directories,
+        roots: all,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -390,6 +538,10 @@ pub struct CoverageScopeData {
     pub measurement_complete: Option<bool>,
     pub counts: ScopeCounts,
     pub measurement: IndexedMeasurement,
+    /// Every entry of the scope, grouped; `entries` is one page of them.
+    pub groups: Vec<ScopeGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unclassified_source: Option<UnclassifiedSource>,
     pub entries: Vec<IndexedScopeEntry>,
 }
 
@@ -2301,16 +2453,12 @@ pub fn coverage_scope_query(
         .ok_or(QueryError::ScopeUnavailable)?;
     let mut entries = index.scope_entries(options.view)?;
     entries.sort_by(|left, right| {
-        let rank = |status: &str| match status {
-            "ambiguous" => 0,
-            "included" => 1,
-            "excluded" => 2,
-            _ => 3,
-        };
-        rank(&left.status)
-            .cmp(&rank(&right.status))
+        scope_status_rank(&left.status)
+            .cmp(&scope_status_rank(&right.status))
             .then_with(|| left.file.cmp(&right.file))
     });
+    let groups = scope_groups(&entries);
+    let unclassified = unclassified_source(&scope.roots, &entries);
     let total = entries.len();
     let selected = entries
         .into_iter()
@@ -2344,6 +2492,8 @@ pub fn coverage_scope_query(
                 ambiguous: scope.ambiguous,
             },
             measurement: projection.measurement,
+            groups,
+            unclassified_source: unclassified,
             entries: selected,
         },
         pagination(options.offset, options.limit, returned, total),
@@ -2406,6 +2556,16 @@ pub fn coverage_summary_query(
     }
     let coverage_by_kind = index.dimensions(options.view, CoverageDimension::Kind)?;
     let coverage_by_runner = index.dimensions(options.view, CoverageDimension::Runner)?;
+    let coverage_by_tests = if options.kind.is_none() && options.runner.is_none() {
+        index
+            .dimensions(options.view, CoverageDimension::Tests)?
+            .into_iter()
+            .next()
+            .filter(|tests| tests.tests + tests.setups > 0)
+            .map(|tests| tests.summary)
+    } else {
+        None
+    };
     let other_e2e_kinds = coverage_by_kind
         .iter()
         .filter(|dimension| dimension.tests > 0)
@@ -2489,6 +2649,7 @@ pub fn coverage_summary_query(
         coverage: projection.summary,
         measurement,
         coverage_by_kind,
+        coverage_by_tests,
         e2e_gap_context,
         coverage_by_runner,
         attribution: projection.attribution,
@@ -2517,6 +2678,12 @@ pub fn coverage_summary_query(
         tests: projection.tests,
         setups: projection.setups,
         test_outcomes: projection.test_outcomes,
+        unclassified_source: match &projection.source_scope {
+            Some(scope) if scope.ambiguous > 0 => {
+                unclassified_source(&scope.roots, &index.scope_entries(options.view)?)
+            }
+            _ => None,
+        },
         source_scope: projection.source_scope,
     })
 }
@@ -2525,6 +2692,180 @@ pub fn coverage_summary_query(
 pub enum CoverageDimensionQueryData {
     Kinds(CoverageKindsData),
     Runners(CoverageRunnersData),
+}
+
+/// Coverage of one directory: what its files have to cover, how much of it
+/// is covered, and how much of it each kind of test covers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageArea {
+    pub directory: String,
+    pub files: usize,
+    pub totals: IndexedGapDimensions,
+    pub covered: IndexedGapDimensions,
+    pub by_kind: Vec<CoverageAreaKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageAreaKind {
+    pub kind: String,
+    pub covered: IndexedGapDimensions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageAreasData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub metric: MinimizeMetric,
+    pub depth: usize,
+    /// The kinds each area is split by, in the order of `byKind`. Empty when
+    /// the query already names one kind or runner.
+    pub kinds: Vec<String>,
+    pub areas: Vec<CoverageArea>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageAreasQueryOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub metric: MinimizeMetric,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub depth: usize,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+/// The directory a file is counted under: its first `depth` folders, or all
+/// of them when it has fewer. A file at the top of the project is in `.`.
+fn area_directory(file: &str, depth: usize) -> String {
+    let mut folders = file.split('/').collect::<Vec<_>>();
+    folders.pop();
+    if folders.is_empty() {
+        ".".into()
+    } else {
+        folders[..folders.len().min(depth)].join("/")
+    }
+}
+
+fn add_dimensions(sum: &mut IndexedGapDimensions, value: &IndexedGapDimensions) {
+    sum.lines += value.lines;
+    sum.statements += value.statements;
+    sum.functions += value.functions;
+    sum.branches += value.branches;
+    sum.mcdc_conditions += value.mcdc_conditions;
+}
+
+const NO_DIMENSIONS: IndexedGapDimensions = IndexedGapDimensions {
+    lines: 0,
+    statements: 0,
+    functions: 0,
+    branches: 0,
+    mcdc_conditions: 0,
+};
+
+/// One metric of a file's or a directory's counts; `all` reads as lines.
+pub fn dimension_for_metric(dimensions: &IndexedGapDimensions, metric: MinimizeMetric) -> usize {
+    match metric {
+        MinimizeMetric::All | MinimizeMetric::Lines => dimensions.lines,
+        MinimizeMetric::Statements => dimensions.statements,
+        MinimizeMetric::Functions => dimensions.functions,
+        MinimizeMetric::Branches => dimensions.branches,
+        MinimizeMetric::Mcdc => dimensions.mcdc_conditions,
+    }
+}
+
+/// Coverage by directory, split by test kind. "Where is the coverage" was the
+/// first question after a full run, and answering it took an LCOV export and
+/// a script: listings named files only and carried no totals.
+pub fn coverage_areas_query(
+    index: &CoverageIndex<'_>,
+    options: CoverageAreasQueryOptions<'_>,
+) -> Result<(CoverageAreasData, AgentPagination), QueryError> {
+    if options.limit == 0 || options.depth == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let files = index.file_gaps(options.view, options.kind, options.runner)?;
+    if (options.kind.is_some() || options.runner.is_some()) && files.is_empty() {
+        return Err(QueryError::TestFilterEmpty {
+            kind: options.kind.map(str::to_owned),
+            runner: options.runner.map(str::to_owned),
+        });
+    }
+    let kinds = if options.kind.is_none() && options.runner.is_none() {
+        index
+            .dimensions(options.view, CoverageDimension::Kind)?
+            .into_iter()
+            .filter(|kind| kind.tests > 0 && kind.attributed > 0)
+            .filter_map(|kind| kind.kind)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let mut areas = BTreeMap::<String, CoverageArea>::new();
+    for file in &files {
+        let directory = area_directory(&file.file, options.depth);
+        let area = areas
+            .entry(directory.clone())
+            .or_insert_with(|| CoverageArea {
+                directory,
+                files: 0,
+                totals: NO_DIMENSIONS,
+                covered: NO_DIMENSIONS,
+                by_kind: kinds
+                    .iter()
+                    .map(|kind| CoverageAreaKind {
+                        kind: kind.clone(),
+                        covered: NO_DIMENSIONS,
+                    })
+                    .collect(),
+            });
+        area.files += 1;
+        add_dimensions(&mut area.totals, &file.totals);
+        add_dimensions(&mut area.covered, &file.covered);
+    }
+    for (position, kind) in kinds.iter().enumerate() {
+        for file in index.file_gaps(options.view, Some(kind), None)? {
+            if let Some(area) = areas.get_mut(&area_directory(&file.file, options.depth)) {
+                add_dimensions(&mut area.by_kind[position].covered, &file.covered);
+            }
+        }
+    }
+    let mut areas = areas.into_values().collect::<Vec<_>>();
+    areas.sort_by(|left, right| {
+        dimension_for_metric(&right.totals, options.metric)
+            .cmp(&dimension_for_metric(&left.totals, options.metric))
+            .then_with(|| left.directory.cmp(&right.directory))
+    });
+    let total = areas.len();
+    let page = areas
+        .into_iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .collect::<Vec<_>>();
+    let returned = page.len();
+    Ok((
+        CoverageAreasData {
+            run: options.run.into(),
+            filters: CoverageQueryFilters {
+                outcome: match options.view {
+                    CoverageViewId::All => "all",
+                    CoverageViewId::Passed => "passed",
+                    CoverageViewId::Failed => "failed",
+                }
+                .into(),
+                kind: options.kind.map(str::to_owned),
+                runner: options.runner.map(str::to_owned),
+            },
+            metric: options.metric,
+            depth: options.depth,
+            kinds,
+            areas: page,
+        },
+        pagination(options.offset, options.limit, returned, total),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2613,11 +2954,14 @@ pub fn coverage_dimension_query(
         .collect::<Vec<_>>();
     let returned = selected.len();
     let data = match dimension {
-        CoverageDimension::Kind => CoverageDimensionQueryData::Kinds(CoverageKindsData {
-            run: run.into(),
-            filters,
-            kinds: selected,
-        }),
+        // The tests together are one entry of the summary, never a listing.
+        CoverageDimension::Kind | CoverageDimension::Tests => {
+            CoverageDimensionQueryData::Kinds(CoverageKindsData {
+                run: run.into(),
+                filters,
+                kinds: selected,
+            })
+        }
         CoverageDimension::Runner => CoverageDimensionQueryData::Runners(CoverageRunnersData {
             run: run.into(),
             filters,
@@ -3259,6 +3603,103 @@ mod tests {
 
     use super::*;
 
+    fn scope_entry(
+        file: &str,
+        status: &str,
+        reason: &str,
+        package: Option<&str>,
+    ) -> IndexedScopeEntry {
+        IndexedScopeEntry {
+            file: file.into(),
+            status: status.into(),
+            reason: reason.into(),
+            package_root: package.map(str::to_owned),
+            measurement_limitations: 0,
+            limitation_kinds: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_scope_is_grouped_by_place_and_names_the_roots_that_settle_it() {
+        let unclassified = "unclassified first-party source";
+        let entries = [
+            scope_entry("components/a.tsx", "ambiguous", unclassified, None),
+            scope_entry("components/ui/b.tsx", "ambiguous", unclassified, None),
+            scope_entry("proxy.ts", "ambiguous", unclassified, None),
+            scope_entry(
+                "app/page.tsx",
+                "included",
+                "discovered package source root",
+                None,
+            ),
+            scope_entry(
+                "tests/a.test.ts",
+                "excluded",
+                "test or fixture source",
+                None,
+            ),
+            scope_entry(
+                "next.config.ts",
+                "excluded",
+                "build/test/tool configuration",
+                None,
+            ),
+            scope_entry(
+                "packages/ui/extra/c.ts",
+                "ambiguous",
+                unclassified,
+                Some("packages/ui"),
+            ),
+            scope_entry(
+                "packages/ui/src/d.ts",
+                "included",
+                "discovered package source root",
+                Some("packages/ui"),
+            ),
+        ];
+        let groups = scope_groups(&entries)
+            .into_iter()
+            .map(|group| (group.files, group.status, group.directory))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            groups,
+            [
+                (2, "ambiguous".to_owned(), "components".to_owned()),
+                (1, "ambiguous".into(), ".".into()),
+                (1, "ambiguous".into(), "packages/ui/extra".into()),
+                (1, "included".into(), "app".into()),
+                (1, "included".into(), "packages/ui/src".into()),
+                (1, "excluded".into(), ".".into()),
+                (1, "excluded".into(), "tests".into()),
+            ]
+        );
+        // The roots discovery found, then each place: a directory by name,
+        // and a file at the top by its own, never `.`.
+        let hint =
+            unclassified_source(&["app".into(), "packages/ui/src".into()], &entries).unwrap();
+        assert_eq!(
+            hint.roots,
+            [
+                "app",
+                "packages/ui/src",
+                "components",
+                "packages/ui/extra",
+                "proxy.ts"
+            ]
+        );
+        assert_eq!(hint.directories[0].directory, "components");
+        assert_eq!(hint.directories[0].files, 2);
+        assert_eq!(unclassified_source(&[], &entries[3..6]), None);
+    }
+
+    #[test]
+    fn a_file_is_counted_under_its_first_folders() {
+        assert_eq!(area_directory("app/api/cron/route.ts", 1), "app");
+        assert_eq!(area_directory("app/api/cron/route.ts", 2), "app/api");
+        assert_eq!(area_directory("app/page.tsx", 2), "app");
+        assert_eq!(area_directory("proxy.ts", 2), ".");
+    }
+
     #[test]
     fn all_metric_keeps_statement_only_files_in_the_gap_set() {
         let gap = IndexedFileGap {
@@ -3280,6 +3721,20 @@ mod tests {
             },
             uncovered_everywhere: crate::coverage_index::IndexedGapDimensions {
                 lines: 0,
+                statements: 1,
+                functions: 0,
+                branches: 0,
+                mcdc_conditions: 0,
+            },
+            totals: crate::coverage_index::IndexedGapDimensions {
+                lines: 1,
+                statements: 2,
+                functions: 0,
+                branches: 0,
+                mcdc_conditions: 0,
+            },
+            covered: crate::coverage_index::IndexedGapDimensions {
+                lines: 1,
                 statements: 1,
                 functions: 0,
                 branches: 0,

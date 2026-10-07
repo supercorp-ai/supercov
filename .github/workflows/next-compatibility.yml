@@ -1,0 +1,49 @@
+name: Next.js compatibility
+
+# A Next.js application with a Vitest suite and a Playwright suite that builds
+# and serves the application itself: unit, end to end, then merged. 3.0.4
+# failed such an application at two consecutive steps before an end-to-end
+# test ran, and nothing here would have said so. One of the two depends on
+# the Node version, so both run.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '45 2 * * *'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo*'
+      - 'runtime/javascript/**'
+      - 'scripts/next-playwright-integration.mjs'
+      - 'tests/fixtures/next-playwright/**'
+      - '.github/workflows/next-compatibility.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: next-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  application:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: tests/fixtures/next-playwright/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: npm ci
+        working-directory: tests/fixtures/next-playwright
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/fixtures/next-playwright
+      - run: cargo build -p supercov
+      - run: node scripts/next-playwright-integration.mjs

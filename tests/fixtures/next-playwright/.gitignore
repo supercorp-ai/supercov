@@ -1,0 +1,7 @@
+node_modules
+.next
+.supercov
+test-results
+next-env.d.ts
+tsconfig.tsbuildinfo
+.env.test.local

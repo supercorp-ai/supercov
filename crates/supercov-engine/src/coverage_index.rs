@@ -51,7 +51,7 @@ pub const SECTION_COVERAGE_MODEL: u32 = 34;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
-const FILE_GAP_RECORD_SIZE: usize = 176;
+const FILE_GAP_RECORD_SIZE: usize = 200;
 const DECISION_GAP_RECORD_SIZE: usize = 96;
 const DIMENSION_RECORD_SIZE: usize = 192;
 const PROJECTION_RECORD_SIZE: usize = 544;
@@ -355,6 +355,11 @@ pub struct IndexedFileGap {
     pub limitation_kinds: Vec<String>,
     pub covered_by_other_tests: IndexedGapDimensions,
     pub uncovered_everywhere: IndexedGapDimensions,
+    /// What the file has to cover, and how much of it the selected tests do.
+    /// The listing gave only what was missing, so no percentage could be
+    /// worked out for a file, or summed for a directory.
+    pub totals: IndexedGapDimensions,
+    pub covered: IndexedGapDimensions,
     pub score: usize,
 }
 
@@ -399,6 +404,9 @@ pub struct IndexedDecisionGap {
 pub enum CoverageDimension {
     Kind = 0,
     Runner = 1,
+    /// Every test together: one unnamed entry, what the tests cover between
+    /// them. The run's total less this is what ran outside any test.
+    Tests = 2,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -650,6 +658,7 @@ struct MutableFileGap {
     limitation_mask: u32,
     covered_by_other_tests: [usize; 5],
     uncovered_everywhere: [usize; 5],
+    totals: [usize; 5],
 }
 
 fn limitation_kind(value: &serde_json::Value) -> Option<(&str, &str)> {
@@ -697,6 +706,7 @@ fn file_gaps(
     let mut files = BTreeMap::<String, MutableFileGap>::new();
     for line in &view.lines {
         let gap = gap_for(&mut files, &line.file);
+        gap.totals[0] += usize::from(line.measured);
         if line.measured && !includes_selected(&line.tests, selected, line.covered) {
             gap.uncovered_lines += 1;
             classify(gap, 0, selected, line.covered);
@@ -704,6 +714,12 @@ fn file_gaps(
     }
     for point in &view.points {
         let gap = gap_for(&mut files, &point.meta.file);
+        if point.measured {
+            gap.totals[match point.meta.kind {
+                crate::coverage_analysis::PointKind::Statement => 1,
+                crate::coverage_analysis::PointKind::Function => 2,
+            }] += 1;
+        }
         if point.measured && !includes_selected(&point.tests, selected, point.covered) {
             match point.meta.kind {
                 crate::coverage_analysis::PointKind::Statement => {
@@ -719,6 +735,7 @@ fn file_gaps(
     }
     for branch in &view.branches {
         let gap = gap_for(&mut files, &branch.meta.file);
+        gap.totals[3] += branch.alternatives.len();
         for alternative in &branch.alternatives {
             if !includes_selected(&alternative.tests, selected, alternative.covered) {
                 gap.missing_branches += 1;
@@ -728,6 +745,7 @@ fn file_gaps(
     }
     for decision in &view.decisions {
         let gap = gap_for(&mut files, &decision.meta.file);
+        gap.totals[4] += decision.meta.conditions.len();
         let selected_vectors = decision
             .vector_observations
             .iter()
@@ -806,6 +824,9 @@ fn file_gap_record(
     }
     for (index, value) in gap.uncovered_everywhere.into_iter().enumerate() {
         put_u64(&mut record, 120 + index * 8, usize_u64(value)?);
+    }
+    for (index, value) in gap.totals.into_iter().enumerate() {
+        put_u64(&mut record, 160 + index * 8, usize_u64(value)?);
     }
     Ok(record)
 }
@@ -965,6 +986,7 @@ fn dimension_record(
     let name = match dimension {
         CoverageDimension::Kind => value.kind.as_deref(),
         CoverageDimension::Runner => value.runner.as_deref(),
+        CoverageDimension::Tests => Some(""),
     }
     .ok_or(CoverageIndexError::InvalidRecord("dimension name"))?;
     put_u32(&mut record, 4, strings.intern(name)?);
@@ -2241,6 +2263,28 @@ pub fn coverage_index_sections(
                 &mut strings,
             )?);
         }
+        let role = |role: &str| view.tests.iter().filter(|test| test.role == role).count();
+        dimensions.extend_from_slice(&dimension_record(
+            id,
+            CoverageDimension::Tests,
+            &crate::coverage_report::DimensionCoverage {
+                kind: None,
+                runner: None,
+                tests: role("test"),
+                setups: role("setup"),
+                attributed: view
+                    .tests
+                    .iter()
+                    .filter(|test| {
+                        test.role == "test"
+                            && crate::coverage_report::coverage_is_its_own(&test.attribution)
+                    })
+                    .count(),
+                summary: crate::coverage_report::summary_for_tests(view)
+                    .map_err(|_| CoverageIndexError::InvalidRecord("coverage of the tests"))?,
+            },
+            &mut strings,
+        )?);
         for decision in &view.decisions {
             decision_gaps.extend_from_slice(&decision_gap_record(
                 id,
@@ -2632,7 +2676,6 @@ impl<'a> CoverageIndex<'a> {
             }
             if record[1..4].iter().any(|byte| *byte != 0)
                 || record[60..64].iter().any(|byte| *byte != 0)
-                || record[160..].iter().any(|byte| *byte != 0)
             {
                 return Err(CoverageIndexError::InvalidRecord("file-gap reserved bytes"));
             }
@@ -2680,6 +2723,18 @@ impl<'a> CoverageIndex<'a> {
                     limitation_kinds.push(kind.into());
                 }
             }
+            let totals = IndexedGapDimensions {
+                lines: number(160)?,
+                statements: number(168)?,
+                functions: number(176)?,
+                branches: number(184)?,
+                mcdc_conditions: number(192)?,
+            };
+            let covered = |total: usize, missing: usize| {
+                total
+                    .checked_sub(missing)
+                    .ok_or(CoverageIndexError::InvalidRecord("file-gap totals"))
+            };
             gaps.push(IndexedFileGap {
                 view,
                 file: self.string(get_u32(record, 4))?,
@@ -2703,6 +2758,14 @@ impl<'a> CoverageIndex<'a> {
                     functions: number(136)?,
                     branches: number(144)?,
                     mcdc_conditions: number(152)?,
+                },
+                totals: totals.clone(),
+                covered: IndexedGapDimensions {
+                    lines: covered(totals.lines, uncovered_lines)?,
+                    statements: covered(totals.statements, uncovered_statements)?,
+                    functions: covered(totals.functions, uncovered_functions)?,
+                    branches: covered(totals.branches, missing_branches)?,
+                    mcdc_conditions: covered(totals.mcdc_conditions, missing_mcdc_conditions)?,
                 },
                 score,
             });
@@ -3041,6 +3104,7 @@ impl<'a> CoverageIndex<'a> {
             let record_dimension = match record[1] {
                 0 => CoverageDimension::Kind,
                 1 => CoverageDimension::Runner,
+                2 => CoverageDimension::Tests,
                 _ => return Err(CoverageIndexError::InvalidRecord("dimension type")),
             };
             if record_dimension != dimension {

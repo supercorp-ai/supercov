@@ -51,6 +51,13 @@ pub struct IndexedQueryRequest {
     pub limit: usize,
     pub target: Option<f64>,
     pub max_states: Option<usize>,
+    /// How a listing is grouped: `file` for a scope listed file by file,
+    /// `dir` for files rolled up by directory.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// How many directory levels a rollup keeps.
+    #[serde(default)]
+    pub depth: Option<usize>,
 }
 
 fn default_limit() -> usize {
@@ -328,6 +335,7 @@ pub enum IndexedQueryData {
     Kinds(Box<CoverageKindsData>),
     Runners(Box<CoverageRunnersData>),
     Files(Box<CoverageFilesData>),
+    Areas(Box<crate::coverage_query::CoverageAreasData>),
     Gaps(Box<CoverageGapsData>),
     Minimize(Box<CoverageMinimizeData>),
     Diff(Box<CoverageDiffData>),
@@ -635,6 +643,27 @@ pub fn query_indexed(
         return Ok(IndexedQueryOutput {
             command: "coverage.file",
             data: IndexedQueryData::FileDecisions(Box::new(data)),
+            pagination: Some(page),
+        });
+    }
+
+    if request.command == "files" && request.group.as_deref() == Some("dir") {
+        let (data, page) = crate::coverage_query::coverage_areas_query(
+            index,
+            crate::coverage_query::CoverageAreasQueryOptions {
+                run: &request.run_id,
+                view,
+                metric: request.metric,
+                kind: request.kind.as_deref(),
+                runner: request.runner.as_deref(),
+                depth: request.depth.unwrap_or(1),
+                offset: request.offset,
+                limit: request.limit,
+            },
+        )?;
+        return Ok(IndexedQueryOutput {
+            command: "coverage.files",
+            data: IndexedQueryData::Areas(Box::new(data)),
             pagination: Some(page),
         });
     }

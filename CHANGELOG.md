@@ -2,18 +2,27 @@
 
 ## Unreleased
 
+**Added**
+
+- `runs <run> files --group dir` shows coverage by directory, split by the kinds of test that ran; `--depth` keeps more levels and `--metric` picks another metric. In `--json`, every file of `files` and `gaps` carries `totals` and `covered` for each metric; with only what was missing listed, no percentage could be worked out for a file or a directory.
+- A run's summary ends `By test kind` with a `no test` row when code ran only while no test was running (a server starting, modules loading). One kind of test at 35.83% under a total of 41.58% read as two answers; the row is the difference, and `--json` has it as `coverageByTests`.
+
 **Changed**
 
-- A Next.js application is measured where Next.js keeps its code. Root `components/` and `pages/` are source in any project, and `proxy`, `middleware` and `instrumentation` files at the root of a project that depends on `next`; one application reported 89 files it could not classify, 81 of them there. Files the App Router serves (`route.ts`, `page.tsx` and the rest) are source whatever their folders are called, because under `app/` a folder is a URL segment: five `app/api/<service>/test/route.ts` endpoints were left out as tests.
+- A Next.js application is measured where Next.js keeps its code. Root `components/` and `pages/` are source in any project, and `proxy`, `middleware` and `instrumentation` files at the root of one that depends on `next`. Files the App Router serves (`route.ts`, `page.tsx` and the rest) are source whatever their folders are called: five `app/api/<service>/test/route.ts` endpoints were left out as tests.
 - A source root you name is source whatever it is called. `SUPERCOV_SOURCE_ROOTS=src,scripts` measures `scripts/`, and a root that is a file is always measured; only what lies below a named root is still recognised as a test or a tool script by its path.
+- `runs <run> scope` prints the scope by directory and reason, the ambiguous places first, with the `SUPERCOV_SOURCE_ROOTS` value that would settle them; `--files` lists every file as before, and `--json` adds `groups`. The summary names the same places when instrumentation is incomplete.
+- The lines about synced, withheld and deleted files name their top-level directories with counts (`.next/ 2547, test-results/ 6`), and deletions are reported only for files the project still has.
+- The build Supercov runs before the tests is announced with its reason. When it fails, the run says it built the instrumented copy, names `SUPERCOV_BUILD_COMMAND`, and keeps that copy until the next run; `SUPERCOV_KEEP_WORKSPACE=1` keeps it after any run.
+- `runs` marks a run in which no test ran (`NO TESTS RAN`).
 
 **Fixed**
 
-- `supercov -- <command>` no longer fails a `next build` on a type error in code nobody wrote. A probe in a condition stops TypeScript narrowing through it, so a function's inferred return type widened and a caller outside the source roots failed the build's type check (`'supabase' is possibly 'null'`). That check now reads each file as you wrote it, as `tsc --noEmit` already did.
-- A Playwright config written in TypeScript loads in a package without `"type"`. The generated wrapper imported it, which Playwright 1.60 on Node 24 ran as CommonJS with its `import` statements in place (`Cannot use import statement outside a module`); the wrapper now requires a CommonJS config and imports a module, as Playwright does.
-- `SUPERCOV_SOURCE_ROOTS` takes effect on a project that has already run. The workspace of the first run was reused, so the run reported automatic scope and the same counts until `.supercov/workspaces` was deleted.
-- A build the command makes from the instrumented copy stays out of the project as a whole. Only the files that imported Supercov's runtime were kept back, so a Playwright run left a `.next/` of 2,547 files in the checkout, 432 of them with probes.
-- When the build Supercov runs before the tests fails, the run says that it ran it, on the instrumented copy, and names `SUPERCOV_BUILD_COMMAND`.
+- `supercov -- <command>` no longer fails a `next build` on a type error in code nobody wrote. A probe in a condition stops TypeScript narrowing through it, so an inferred return type widened and a caller outside the source roots failed the build's type check (`'supabase' is possibly 'null'`). That check now reads each file as you wrote it, as `tsc --noEmit` already did.
+- A Playwright config written in TypeScript loads in a package without `"type"`. The generated wrapper imported it, which Playwright 1.60 on Node 24 ran as CommonJS with its `import` statements in place; the wrapper now requires a CommonJS config and imports a module, as Playwright does.
+- `SUPERCOV_SOURCE_ROOTS` takes effect on a project that has already run. The first run's workspace was reused, so the run kept reporting automatic scope until `.supercov/workspaces` was deleted.
+- A build the command makes from the instrumented copy stays out of the project as a whole. Only files that imported Supercov's runtime were kept back, so a Playwright run left a `.next/` of 2,547 files in the checkout, 432 of them with probes.
+- A failed `node:assert` call under Vitest no longer prints Supercov's own stack frames between the test's lines.
 - The warning about tests that made assertions without source-coverage evidence lists code outside the measured source among its causes.
 
 ## 3.0.4

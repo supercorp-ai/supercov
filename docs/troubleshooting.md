@@ -32,7 +32,8 @@ unusual directory, declare the source roots explicitly:
 SUPERCOV_SOURCE_ROOTS=src,app npx supercov -- npm test
 ```
 
-Then inspect what Supercov included and excluded:
+Then inspect what Supercov included and excluded, by directory, or file by
+file with `--files`:
 
 ```sh supercov
 npx supercov runs latest scope

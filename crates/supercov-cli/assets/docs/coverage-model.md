@@ -94,6 +94,18 @@ Both are useful:
 - exact evidence helps you inspect or minimize individual tests;
 - aggregate evidence still shows whether the whole suite reached the source.
 
+Code that runs while no test is running counts in the run's total and in no
+test's: a server starting before the first test, modules loading, work between
+tests. When a run has any, the summary's `By test kind` table ends with a
+`no test` row for what only that covered, which is why a run with one kind of
+test can show a total above that kind's own:
+
+```
+By test kind
+  e2e             3 test(s)  lines  80.00%  branches  66.67%  MC/DC  25.00%
+  no test                    lines  17.14%  branches   0.00%  MC/DC   0.00%
+```
+
 See [Supported suites](supported-suites.md) for the attribution available from
 each runner.
 
@@ -126,6 +138,17 @@ If the summary reports ambiguous source scope, inspect it:
 
 ```sh supercov
 npx supercov runs latest scope
+```
+
+It prints the scope by directory and reason, the ambiguous places first, and
+the `SUPERCOV_SOURCE_ROOTS` value that would settle them. The summary names
+the same places under `Instrumentation`. Add `--files` to list every file.
+
+```
+Files  Status     Directory   Reason
+   79  AMBIGUOUS  components  unclassified first-party source
+  227  INCLUDED   app         discovered package source root
+  311  EXCLUDED   tests       test or fixture source
 ```
 
 When first-party source lives in unusual directories, declare it explicitly:

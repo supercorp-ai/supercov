@@ -51,13 +51,41 @@
       "conditions": 2,
       "coveredConditions": 2,
       "conditionCoveragePct": 100,
-      "lines": { "covered": 3, "total": 3, "percentage": 100 },
-      "statements": { "covered": 3, "total": 3, "percentage": 100 },
-      "functions": { "covered": 1, "total": 1, "percentage": 100 },
-      "branches": { "covered": 2, "total": 2, "percentage": 100 },
-      "decisionOutcomes": { "covered": 2, "total": 2, "percentage": 100 },
-      "conditionOutcomes": { "covered": 4, "total": 4, "percentage": 100 },
-      "valueSelections": { "covered": 0, "total": 0, "percentage": 100 },
+      "lines": {
+        "covered": 3,
+        "total": 3,
+        "percentage": 100
+      },
+      "statements": {
+        "covered": 3,
+        "total": 3,
+        "percentage": 100
+      },
+      "functions": {
+        "covered": 1,
+        "total": 1,
+        "percentage": 100
+      },
+      "branches": {
+        "covered": 2,
+        "total": 2,
+        "percentage": 100
+      },
+      "decisionOutcomes": {
+        "covered": 2,
+        "total": 2,
+        "percentage": 100
+      },
+      "conditionOutcomes": {
+        "covered": 4,
+        "total": 4,
+        "percentage": 100
+      },
+      "valueSelections": {
+        "covered": 0,
+        "total": 0,
+        "percentage": 100
+      },
       "coverageComplete": true
     },
     "measurement": {
@@ -100,7 +128,11 @@
     },
     "data": {
       "run": "<run-id>",
-      "filters": { "outcome": "all", "kind": null, "runner": null },
+      "filters": {
+        "outcome": "all",
+        "kind": null,
+        "runner": null
+      },
       "metric": "all",
       "files": [
         {
@@ -125,6 +157,20 @@
             "functions": 0,
             "branches": 0,
             "mcdcConditions": 0
+          },
+          "totals": {
+            "lines": 3,
+            "statements": 3,
+            "functions": 1,
+            "branches": 2,
+            "mcdcConditions": 2
+          },
+          "covered": {
+            "lines": 3,
+            "statements": 3,
+            "functions": 1,
+            "branches": 2,
+            "mcdcConditions": 2
           },
           "score": 0
         }

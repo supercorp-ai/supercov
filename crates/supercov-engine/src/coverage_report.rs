@@ -1166,6 +1166,26 @@ pub fn coverage_summary_for_file(
     summary_for_results(&decisions, &points, &branches, &lines, None)
 }
 
+/// What the tests of a view cover between them, leaving out what ran while
+/// no test was running: start-up and setup, module loading, work between
+/// tests. A setup scope is not a test: a kind's row counts tests, and a run
+/// whose server starts in a setup scope showed that code in the total only.
+pub(crate) fn summary_for_tests(view: &CoverageView) -> Result<CoverageSummary, ReportError> {
+    let selected = view
+        .tests
+        .iter()
+        .filter(|test| test.role == "test" && coverage_is_its_own(&test.attribution))
+        .map(|test| test.id.clone())
+        .collect::<BTreeSet<_>>();
+    summary_for_results(
+        &view.decisions,
+        &view.points,
+        &view.branches,
+        &view.lines,
+        Some(&selected),
+    )
+}
+
 fn summary_for_results(
     decisions: &[DecisionResult],
     points: &[PointResult],

@@ -37,7 +37,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .map(String::as_str);
     let Some(child) = child else {
         return Some(
-            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 included, excluded and ambiguous source files\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --offset <n>\n  --limit <n>\n  --json\n\nRun any query with --help for its exact usage.\n"
+            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --offset <n>\n  --limit <n>\n  --json\n\nRun any query with --help for its exact usage.\n"
                 .replace("  minimize              ", "  source <path>         matching current source with line numbers\n  minimize              "),
         );
     };
@@ -46,7 +46,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
             "supercov runs <run-id> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
         }
         "files" => {
-            "supercov runs <run-id> files [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> files [--group dir [--depth <n>]] [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
         }
         "gaps" => {
             "supercov runs <run-id> gaps [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
@@ -57,7 +57,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         "runners" => {
             "supercov runs <run-id> runners [--filter <all|passed|failed>] [--kind <kind>] [--offset <n>] [--limit <n>] [--json]"
         }
-        "scope" => "supercov runs <run-id> scope [--offset <n>] [--limit <n>] [--json]",
+        "scope" => "supercov runs <run-id> scope [--files] [--offset <n>] [--limit <n>] [--json]",
         "file" => {
             "supercov runs <run-id> file <path> [--group decision] [--sort <location|missing>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
         }
@@ -146,6 +146,11 @@ struct QueryOptions {
     target: f64,
     metric: MinimizeMetric,
     group_decision: bool,
+    /// `scope --files`: the scope file by file.
+    scope_files: bool,
+    /// `files --group dir`: files rolled up by directory.
+    group_dir: bool,
+    depth: Option<usize>,
     sort: DecisionSort,
     positional: Vec<String>,
 }
@@ -163,6 +168,9 @@ impl Default for QueryOptions {
             target: 100.0,
             metric: MinimizeMetric::All,
             group_decision: false,
+            scope_files: false,
+            group_dir: false,
+            depth: None,
             sort: DecisionSort::Location,
             positional: Vec::new(),
         }
@@ -303,28 +311,55 @@ fn parse_options(
                 };
                 options.offset = offset;
             }
+            "--files" => {
+                if command != "scope" {
+                    return Err(PublicQueryError::invalid(
+                        Some(&agent_command),
+                        json_output,
+                        "--files is only supported by: supercov runs <run-id> scope",
+                    ));
+                }
+                options.scope_files = true;
+            }
             "--group" => {
                 index += 1;
-                if arguments
-                    .get(index)
-                    .map(|group| group.to_lowercase())
-                    .as_deref()
-                    != Some("decision")
-                {
+                let group = arguments.get(index).map(|group| group.to_lowercase());
+                match (command, group.as_deref()) {
+                    ("file", Some("decision")) => options.group_decision = true,
+                    ("files", Some("dir")) => options.group_dir = true,
+                    ("file", _) => {
+                        return Err(PublicQueryError::invalid(
+                            Some(&agent_command),
+                            json_output,
+                            "--group must be decision",
+                        ));
+                    }
+                    ("files", _) => {
+                        return Err(PublicQueryError::invalid(
+                            Some(&agent_command),
+                            json_output,
+                            "--group must be dir",
+                        ));
+                    }
+                    _ => {
+                        return Err(PublicQueryError::invalid(
+                            Some(&agent_command),
+                            json_output,
+                            "--group is only supported by: supercov runs <run-id> file <source-file> --group decision, and supercov runs <run-id> files --group dir",
+                        ));
+                    }
+                }
+            }
+            "--depth" => {
+                index += 1;
+                let Some(depth) = parse_unsigned(arguments.get(index), true) else {
                     return Err(PublicQueryError::invalid(
                         Some(&agent_command),
                         json_output,
-                        "--group must be decision",
+                        "--depth must be a positive integer",
                     ));
-                }
-                if command != "file" {
-                    return Err(PublicQueryError::invalid(
-                        Some(&agent_command),
-                        json_output,
-                        "--group is only supported by: supercov runs <run-id> file <source-file>",
-                    ));
-                }
-                options.group_decision = true;
+                };
+                options.depth = Some(depth);
             }
             "--sort" => {
                 index += 1;
@@ -358,6 +393,13 @@ fn parse_options(
             Some(&agent_command),
             json_output,
             "--sort requires --group decision",
+        ));
+    }
+    if options.depth.is_some() && !options.group_dir {
+        return Err(PublicQueryError::invalid(
+            Some(&agent_command),
+            json_output,
+            "--depth requires --group dir",
         ));
     }
     if options.group_decision
@@ -411,9 +453,22 @@ fn coverage_invocation(
         limit: options.limit,
         target: None,
         max_states: None,
+        group: None,
+        depth: None,
     };
     match command {
-        "summary" | "kinds" | "runners" | "scope" | "files" | "gaps" => {}
+        "summary" | "kinds" | "runners" | "gaps" => {}
+        "files" => {
+            if options.group_dir {
+                request.group = Some("dir".into());
+                request.depth = options.depth;
+            }
+        }
+        "scope" => {
+            if options.scope_files {
+                request.group = Some("file".into());
+            }
+        }
         "file" => {
             let Some(file) = options.positional.first() else {
                 return Err(PublicQueryError::invalid(
@@ -525,6 +580,8 @@ pub fn parse_public_query(
                 limit: options.limit,
                 target: None,
                 max_states: None,
+                group: None,
+                depth: None,
             }),
             newer_run_id: Some(newer.clone()),
             agent_command: "diff".into(),

@@ -1086,6 +1086,8 @@ pub struct WorkspaceOutputBaseline {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CommandOutputSync {
     pub synced: usize,
+    /// Where the synced files went, for the line that reports them.
+    pub synced_paths: Vec<PathBuf>,
     /// Source files the command modified inside the workspace. Their mirror
     /// copies are instrumented, so copying them back would inject probes into
     /// the user's repository; they are reported instead.
@@ -1176,6 +1178,49 @@ fn validate_writeback_destination(root: &Path, relative: &Path) -> Result<(), Wo
         }
     }
     Ok(())
+}
+
+/// Paths by the place a reader would look for them: each top-level directory
+/// with how many of the files it holds, the largest first, and files at the
+/// root by name. "synced 2553 file(s)" named none of them, and 2,547 were a
+/// build nobody expected in the checkout.
+pub fn summarize_paths(paths: &[PathBuf]) -> String {
+    const SHOWN: usize = 4;
+    let mut places = BTreeMap::<String, usize>::new();
+    for path in paths {
+        let mut components = path.components();
+        let first = components
+            .next()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let place = if components.next().is_some() {
+            format!("{first}/")
+        } else {
+            first
+        };
+        *places.entry(place).or_default() += 1;
+    }
+    let mut places = places.into_iter().collect::<Vec<_>>();
+    places.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let mut shown = places
+        .iter()
+        .take(SHOWN)
+        .map(|(place, count)| {
+            if place.ends_with('/') {
+                format!("{place} {count}")
+            } else {
+                place.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    if places.len() > SHOWN {
+        let rest = places[SHOWN..]
+            .iter()
+            .map(|(_, count)| count)
+            .sum::<usize>();
+        shown.push(format!("{rest} elsewhere"));
+    }
+    shown.join(", ")
 }
 
 /// The build output directories of files built from instrumented source.
@@ -1317,9 +1362,12 @@ pub fn sync_command_outputs(
         }
         fs::copy(&from, &to).map_err(|error| io_error(&to, error))?;
         sync.synced += 1;
+        sync.synced_paths.push(relative.clone());
     }
     for relative in baseline.entries.keys() {
-        if !current.contains_key(relative) {
+        // Only what the project still has is worth a line: a rebuilt `.next`
+        // that never left the workspace "deleted" files nobody can find.
+        if !current.contains_key(relative) && fs::symlink_metadata(root.join(relative)).is_ok() {
             sync.deleted_in_workspace.push(relative.clone());
         }
     }
@@ -1785,6 +1833,26 @@ mod tests {
     }
 
     #[test]
+    fn paths_are_summarized_by_where_they_are() {
+        let paths = [
+            ".next/BUILD_ID",
+            ".next/server/app.js",
+            ".next/server/chunks/a.js",
+            "tests/e2e/runs/1/report.json",
+            "coverage/report.json",
+            "playwright-report/index.html",
+            "notes.txt",
+            "out/a.txt",
+        ]
+        .map(PathBuf::from);
+        assert_eq!(
+            summarize_paths(&paths),
+            ".next/ 3, coverage/ 1, notes.txt, out/ 1, 2 elsewhere"
+        );
+        assert_eq!(summarize_paths(&paths[..1]), ".next/ 1");
+    }
+
+    #[test]
     fn a_report_that_quotes_the_runtime_does_not_make_its_directory_a_build() {
         // A failed Playwright test writes its stack, runtime frames included,
         // next to the screenshot and trace a developer opens to debug it.
@@ -1897,8 +1965,11 @@ mod tests {
         let (root, workspace) = writeback_fixture("deletions");
         fs::write(workspace.join("stale.txt"), "old\n").unwrap();
         fs::write(root.join("stale.txt"), "old\n").unwrap();
+        // Gone from the workspace only: the project never had it.
+        fs::write(workspace.join("built.txt"), "old\n").unwrap();
         let baseline = workspace_output_baseline(&workspace).unwrap();
         fs::remove_file(workspace.join("stale.txt")).unwrap();
+        fs::remove_file(workspace.join("built.txt")).unwrap();
         let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
         assert_eq!(sync.deleted_in_workspace, [PathBuf::from("stale.txt")]);
         assert!(root.join("stale.txt").exists());
