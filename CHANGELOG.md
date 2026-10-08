@@ -4,7 +4,8 @@
 
 **Changed**
 
-- Supercov runs the command you give it, and no build of its own. It used to run the project's `build` script first whenever the tests might need its output: that happened in 114 of 272 test scripts of popular repositories, was redundant in 53 of them, took twenty seconds before a suite that builds the application itself, and cancelled the run when the build failed. If your tests read build output, put the build in the command, as in `supercov -- sh -c "npm run build && npm test"`; a failed run in a project that has a `build` script says so. Coverage is the same either way: measured on esbuild, webpack, SWC, tsc, Vite with Playwright, and Next.js. `SUPERCOV_BUILD_COMMAND` still names a build for Supercov to run first, and only that build is kept and reused between runs.
+- Supercov runs the command you give it, and no build of its own. It used to run a JavaScript project's `build` script first whenever the tests might need its output: that happened in 114 of 272 test scripts of popular repositories, was redundant in 53 of them, took twenty seconds before a suite that builds the application itself, and cancelled the run when the build failed. If your tests read build output, put the build in the command, as in `supercov -- sh -c "npm run build && npm test"`, or in a `pretest` script; a failed run in a project whose command does not reach its `build` script says so. Coverage is the same: measured on esbuild, webpack, SWC, tsc, Vite with Playwright, and Next.js.
+- `SUPERCOV_BUILD_COMMAND` is gone, with everything that existed to run a build: the Vite and generic build paths, the JavaScript build cache, and the settings Supercov inferred for a build from `process.env.X === "…"` comparisons in a bundler's config. There is one way a JavaScript project is instrumented now, whatever builds it.
 
 **Fixed**
 

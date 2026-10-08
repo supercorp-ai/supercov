@@ -5,12 +5,10 @@ import { coverageQuery, localRustEnvironment } from "./coverage-test-helpers.mjs
 
 const fixture = resolve("tests/fixtures/generic-playwright");
 const runsRoot = resolve(fixture, ".supercov/runs");
-// The runner serves what a build made, and this command has none in it.
-const namedBuild = { SUPERCOV_BUILD_COMMAND: "npm run build" };
 const before = new Set(existsSync(runsRoot) ? readdirSync(runsRoot) : []);
 const result = spawnSync(process.execPath, [resolve("bin/supercov.js"), "--", "npm", "run", "test:opaque:esm"], {
   cwd: fixture,
-  env: { ...process.env, ...localRustEnvironment, ...namedBuild },
+  env: { ...process.env, ...localRustEnvironment },
   encoding: "utf8",
   stdio: "pipe",
 });

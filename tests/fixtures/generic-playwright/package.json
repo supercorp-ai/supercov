@@ -4,9 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "test": "npm run test:unit && npm run test:e2e",
-    "test:built": "npm run build && npm test",
-    "test:coverage": "../../../bin/supercov.js -- npm run test:built",
+    "test": "npm run build && npm run test:unit && npm run test:e2e",
+    "test:coverage": "../../../bin/supercov.js -- npm test",
     "test:opaque": "node opaque-runner/runner.cjs",
     "test:opaque:esm": "node opaque-runner/runner.mjs",
     "test:coverage:opaque": "../../../bin/supercov.js -- npm run test:opaque",

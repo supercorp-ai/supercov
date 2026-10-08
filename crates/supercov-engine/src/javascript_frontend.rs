@@ -21,7 +21,7 @@ use crate::{
         CandidateBranch, CandidateDecision, CandidateError, CandidateLimitation, CandidatePoint,
         instrument_with_import_policy,
     },
-    project_discovery::{BuildAdapter, CoverageProject},
+    project_discovery::CoverageProject,
     source_discovery::{SourceLimitation, SourceScope},
 };
 
@@ -220,7 +220,6 @@ pub struct PreparedJavascriptFrontend {
     pub manifest_path: PathBuf,
     pub preload_path: PathBuf,
     pub playwright_config_path: PathBuf,
-    pub vite_config_path: PathBuf,
     pub vitest_config_path: PathBuf,
     pub assertion_calls: usize,
 }
@@ -355,7 +354,6 @@ pub fn load_cached_javascript_frontend(
         manifest_path,
         preload_path: generated.join("node_modules/register.mjs"),
         playwright_config_path: generated.join("playwright.config.mjs"),
-        vite_config_path: generated.join("vite.config.mjs"),
         vitest_config_path: generated.join("vitest.config.mjs"),
         assertion_calls: cache.assertion_calls,
     })
@@ -364,13 +362,10 @@ pub fn load_cached_javascript_frontend(
 fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<String> {
     let mut artifacts = vec![
         ".supercov/node_modules/package.json".to_owned(),
-        ".supercov/node_modules/applicationRuntime.mjs".to_owned(),
         ".supercov/node_modules/runtime.d.mts".to_owned(),
         ".supercov/playwright.config.mjs".to_owned(),
-        ".supercov/vite.config.mjs".to_owned(),
         ".supercov/vitest.config.mjs".to_owned(),
-        ".supercov/vite-transforms.json".to_owned(),
-        ".supercov/viteInstrumentation.mjs".to_owned(),
+        ".supercov/vitestCommands.mjs".to_owned(),
         ".supercov/manifest.json".to_owned(),
         ".supercov/statement-exclusions.json".to_owned(),
         ".supercov/instrumentation-complete".to_owned(),
@@ -483,14 +478,6 @@ fn write_javascript_frontend_cache(
         serde_json::to_vec_pretty(&cache).map_err(JavascriptFrontendError::Serialize)?;
     encoded.push(b'\n');
     atomic_write(&workspace.join(FRONTEND_CACHE_FILE), &encoded)
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ViteTransform {
-    source_sha256: String,
-    code: String,
-    map: Option<serde_json::Value>,
 }
 
 fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
@@ -908,10 +895,6 @@ fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFr
                 &destination,
                 isolate_runtime(&text, collector_id)?.as_bytes(),
             )?;
-            atomic_write(
-                &generated.join("applicationRuntime.mjs"),
-                isolate_runtime(&text, &format!("{collector_id}-application"))?.as_bytes(),
-            )?;
         } else {
             atomic_write(&destination, &bytes)?;
         }
@@ -995,74 +978,6 @@ fn runtime_declarations() -> String {
         ));
     }
     text
-}
-
-fn generic_runtime_binding(
-    workspace: &Path,
-    project: &CoverageProject,
-    source_path: &Path,
-    generated: &Path,
-) -> Result<String, JavascriptFrontendError> {
-    let mut hosts = project
-        .source_roots
-        .iter()
-        .filter_map(|root| {
-            let candidate = workspace.join(root);
-            if candidate.is_dir() && source_path.strip_prefix(&candidate).is_ok() {
-                Some(candidate)
-            } else if candidate.is_file() && candidate == source_path {
-                candidate.parent().map(Path::to_owned)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    hosts.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    let host = hosts
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| workspace.to_owned());
-    let runtime_directory = host.join(".supercov/node_modules");
-    fs::create_dir_all(&runtime_directory)
-        .map_err(|source| io_error(&runtime_directory, source))?;
-    // A bundler may externalize the node_modules import instead of compiling
-    // it, leaving Node to interpret the .js file at run time.
-    atomic_write(
-        &runtime_directory.join("package.json"),
-        b"{\"private\":true,\"type\":\"module\"}\n",
-    )?;
-    for name in ["runtime.mjs", "runtime.d.mts"] {
-        let source = generated.join("node_modules").join(name);
-        let destination = runtime_directory.join(name);
-        let contents = fs::read(&source).map_err(|error| io_error(&source, error))?;
-        atomic_write(&destination, &contents)?;
-    }
-    // A compiler moves the file to its output directory, where a bundler may
-    // read it next: lru-cache compiles src/ into dist/esm/ with tshy and
-    // bundles that with esbuild, which could not resolve a path relative to
-    // src/. There the runtime is imported by absolute path. A bundler that
-    // reads the sources where they are keeps the relative one: Turbopack
-    // refuses an absolute import ("server relative imports are not
-    // implemented yet") and Parcel reads one as relative to its root. Node
-    // resolves either (resolve-loader.mjs).
-    if project.relocating_build {
-        return Ok(runtime_directory
-            .join("runtime.mjs")
-            .to_string_lossy()
-            .replace('\\', "/"));
-    }
-    let parent = source_path.parent().ok_or_else(|| {
-        JavascriptFrontendError::UnsafeSourcePath(source_path.display().to_string())
-    })?;
-    let local = parent.strip_prefix(&host).map_err(|_| {
-        JavascriptFrontendError::UnsafeSourcePath(source_path.display().to_string())
-    })?;
-    let depth = local.components().count();
-    Ok(if depth == 0 {
-        "./.supercov/node_modules/runtime.mjs".into()
-    } else {
-        format!("{}.supercov/node_modules/runtime.mjs", "../".repeat(depth))
-    })
 }
 
 fn limitation_from_source(value: &SourceLimitation) -> CandidateLimitation {
@@ -1224,7 +1139,7 @@ fn write_vitest_config(
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
          import SupercovVitestReporter from './node_modules/vitestReporter.mjs';\n\
-         import {{ supercovBrowserCommands, supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
+         import {{ supercovBrowserCommands }} from './vitestCommands.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
          const discoveredConfig = {original};\n\
@@ -1281,7 +1196,6 @@ fn write_vitest_config(
            const loaded = originalPath ? await loadConfigFromFile(env, originalPath, process.cwd()) : undefined;\n\
            const config = mergeConfig(loaded?.config ?? {{}}, {{\n\
              cacheDir: resolve(process.cwd(), '.supercov/vitest-cache'),\n\
-             plugins: [supercovViteInstrumentation(process.cwd())],\n\
              test: {{ setupFiles: [resolve(process.cwd(), supercovSetupFile(loaded?.config))], maxConcurrency: 1, ...supercovBrowserTest(loaded?.config) }},\n\
            }});\n\
            supercovSkipCoverageThresholds(config.test?.coverage);\n\
@@ -1465,78 +1379,11 @@ fn write_playwright_config(
     Ok(path)
 }
 
-fn write_vite_config(
-    workspace: &Path,
-    generated: &Path,
-) -> Result<PathBuf, JavascriptFrontendError> {
-    let path = generated.join("vite.config.mjs");
-    let workspace = serde_json::to_string(&workspace.display().to_string())
-        .map_err(JavascriptFrontendError::Serialize)?;
-    let source = format!(
-        "import {{ createRequire }} from 'node:module';\n\
-         import {{ pathToFileURL }} from 'node:url';\n\
-         // pnpm's strict layout does not hoist vite to the project root: it\n\
-         // lives inside vitest's virtual store, so a bare 'vite' specifier\n\
-         // resolved from this generated file fails. Vitest depends on vite, so\n\
-         // fall back to resolving it through vitest's own tree rather than\n\
-         // requiring the project to hoist anything.\n\
-         const supercovRequire = createRequire(import.meta.url);\n\
-         const supercovLoadVite = async () => {{\n\
-           try {{\n\
-             return await import('vite');\n\
-           }} catch (error) {{\n\
-             let entry;\n\
-             try {{\n\
-               entry = createRequire(supercovRequire.resolve('vitest')).resolve('vite');\n\
-             }} catch {{\n\
-               throw error;\n\
-             }}\n\
-             return await import(pathToFileURL(entry).href);\n\
-           }}\n\
-         }};\n\
-         const viteNamespace = await supercovLoadVite();\n\
-         import {{ isAbsolute, relative, resolve }} from 'node:path';\n\
-         import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
-         const vite = viteNamespace.default ?? viteNamespace;\n\
-         const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
-         export default async function supercovViteConfig(env) {{\n\
-           const isolatedRoot = {workspace};\n\
-           const loaded = await loadConfigFromFile(env, undefined, isolatedRoot);\n\
-           const config = loaded?.config ?? {{}};\n\
-           const relocate = (value, label) => {{\n\
-             const absolute = isAbsolute(value) ? value : resolve(isolatedRoot, value);\n\
-             const local = relative(isolatedRoot, absolute);\n\
-             if (local === '' || (!local.startsWith('..') && !isAbsolute(local))) return absolute;\n\
-             throw new Error('Supercov refuses ' + label + ' outside the isolated project: ' + absolute);\n\
-           }};\n\
-           const relocateOutput = output => output ? ({{ ...output, dir: output.dir ? relocate(output.dir, 'Rollup output') : output.dir, file: output.file ? relocate(output.file, 'Rollup output') : output.file }}) : output;\n\
-           const rollupOutput = config.build?.rollupOptions?.output;\n\
-           const safe = {{ ...config,\n\
-             logLevel: ['1', 'true', 'yes'].includes(process.env.SUPERCOV_VERBOSE ?? process.env.SUPERCOV_DEBUG ?? '') ? config.logLevel : 'error',\n\
-             cacheDir: resolve(isolatedRoot, '.supercov/vite-cache'),\n\
-             build: {{ ...config.build, outDir: relocate(config.build?.outDir ?? 'dist', 'Vite build output'), rollupOptions: {{ ...config.build?.rollupOptions, output: Array.isArray(rollupOutput) ? rollupOutput.map(relocateOutput) : relocateOutput(rollupOutput) }} }},\n\
-           }};\n\
-           return mergeConfig(safe, {{ plugins: [supercovViteInstrumentation(isolatedRoot)] }});\n\
-         }}\n"
-    );
-    atomic_write(&path, source.as_bytes())?;
-    Ok(path)
-}
-
-fn write_vite_transforms(
-    generated: &Path,
-    transforms: &BTreeMap<String, ViteTransform>,
-) -> Result<(), JavascriptFrontendError> {
-    let mut payload = serde_json::to_vec(transforms).map_err(JavascriptFrontendError::Serialize)?;
-    payload.push(b'\n');
-    atomic_write(&generated.join("vite-transforms.json"), &payload)?;
-    let adapter = "import { createHash } from 'node:crypto';\n\
-import { mkdirSync, readFileSync } from 'node:fs';\n\
+fn write_vitest_commands(generated: &Path) -> Result<(), JavascriptFrontendError> {
+    let adapter = "import { mkdirSync } from 'node:fs';\n\
 import { relative, resolve, sep } from 'node:path';\n\
 import { atomicWriteFileSync } from './node_modules/atomic.mjs';\n\
 import { inferTestProvenance } from './node_modules/provenance.mjs';\n\
-const transforms = JSON.parse(readFileSync(new URL('./vite-transforms.json', import.meta.url), 'utf8'));\n\
-const sha256 = value => createHash('sha256').update(value).digest('hex');\n\
 // Browser Mode runs the test file in the browser, where none of this is\n\
 // reachable: no node:fs to write evidence, no project root to relativise a\n\
 // path against, no env to read. Vitest's own browser command channel carries\n\
@@ -1576,28 +1423,8 @@ export function supercovBrowserCommands(root) {\n\
       atomicWriteFileSync(resolve(directory, 'mcdc.json'), JSON.stringify(complete) + '\\n');\n\
     },\n\
   };\n\
-}\n\
-export function supercovViteInstrumentation(root) {\n\
-  const runtimePath = resolve(root, '.supercov/node_modules/applicationRuntime.mjs');\n\
-  return {\n\
-    name: 'supercov-rust-instrumentation',\n\
-    enforce: 'pre',\n\
-    resolveId(id) { return id === 'virtual:supercov-runtime' ? runtimePath : null; },\n\
-    transform(code, rawId) {\n\
-      const id = rawId.split('?')[0] ?? rawId;\n\
-      const local = relative(root, id).split(sep).join('/');\n\
-      const transformed = transforms[local];\n\
-      if (!transformed) return null;\n\
-      if (sha256(code) !== transformed.sourceSha256)\n\
-        throw new Error('Supercov source changed before Rust instrumentation: ' + local);\n\
-      return { code: transformed.code, map: transformed.map ?? null };\n\
-    },\n\
-  };\n\
 }\n";
-    atomic_write(
-        &generated.join("viteInstrumentation.mjs"),
-        adapter.as_bytes(),
-    )
+    atomic_write(&generated.join("vitestCommands.mjs"), adapter.as_bytes())
 }
 
 /// Prepare the complete JavaScript frontend inside an isolated workspace.
@@ -1622,7 +1449,6 @@ pub fn prepare_javascript_frontend(
     let configuration_started = Instant::now();
     configure_playwright_runtime(&runtime_directory, project)?;
     let playwright_config_path = write_playwright_config(workspace, project, &generated)?;
-    let vite_config_path = write_vite_config(workspace, &generated)?;
     let vitest_config_path = write_vitest_config(workspace, project, &generated)?;
     account(&SETUP.config_ns, configuration_started);
 
@@ -1631,7 +1457,6 @@ pub fn prepare_javascript_frontend(
     let mut points = BTreeMap::new();
     let mut branches = BTreeMap::new();
     let mut limitations = BTreeMap::new();
-    let mut vite_transforms = BTreeMap::new();
     for limitation in &project.source_limitations {
         limitations.insert(limitation.id.clone(), limitation_from_source(limitation));
     }
@@ -1650,20 +1475,9 @@ pub fn prepare_javascript_frontend(
         let path = checked_source_path(workspace, file)?;
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
         let capability_wrapper = runtime_specifier(file, "capability.mjs")?;
-        let elide = crate::typescript_imports::elides_type_imports(
-            workspace,
-            file,
-            command,
-            &project.build_command,
-        );
+        let elide = crate::typescript_imports::elides_type_imports(workspace, file, command);
         let instrumented = timed(&SETUP.instrument_ns, || {
-            instrument_with_import_policy(
-                &source,
-                file,
-                &capability_wrapper,
-                project.build_adapter == BuildAdapter::Direct,
-                elide,
-            )
+            instrument_with_import_policy(&source, file, &capability_wrapper, elide)
         });
         let mut output = match instrumented {
             Ok(output) => output,
@@ -1693,10 +1507,6 @@ pub fn prepare_javascript_frontend(
                 });
             }
         };
-        if project.build_adapter == BuildAdapter::Generic {
-            let runtime = generic_runtime_binding(workspace, project, &path, &generated)?;
-            output.code = output.code.replace("virtual:supercov-runtime", &runtime);
-        }
         // A directly run TypeScript file names its helpers' types from the
         // runtime's declarations, which sit beside the runtime in the
         // workspace.
@@ -1710,51 +1520,36 @@ pub fn prepare_javascript_frontend(
             );
         }
         bootstrap_runtime(&mut output, &standalone_runtime, browser_suite);
-        if project.build_adapter == BuildAdapter::Direct && !browser_suite {
+        if !browser_suite {
             bootstrap_loader(&mut output, file)?;
         }
-        // Direct commands can compile TypeScript themselves (`npm test` may
-        // begin with `tsc`), so they need the same generated-source exemption
-        // as Supercov's separately orchestrated generic build. Instrumentation
-        // necessarily changes control-flow expressions in ways the host type
-        // checker cannot narrow through, while source syntax remains covered
-        // by the parser before this banner is applied.
-        if project.build_adapter != BuildAdapter::Vite
-            && matches!(
-                path.extension().and_then(|value| value.to_str()),
-                Some("ts" | "tsx" | "mts" | "cts")
-            )
-        {
+        // The command can compile TypeScript itself (`npm test` may begin
+        // with `tsc`), and a probe's own code is not the project's to have
+        // type-checked: the banner exempts the file, while what it exports
+        // keeps the types it has in the source.
+        if matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("ts" | "tsx" | "mts" | "cts")
+        ) {
             output.code = generated_source_banner(&output.code);
         }
-        if project.build_adapter == BuildAdapter::Vite {
-            vite_transforms.insert(
-                file.clone(),
-                ViteTransform {
-                    source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())),
-                    code: output.code.clone(),
-                    map: output.map.clone(),
-                },
-            );
-        } else {
-            // Attach the instrumentation source map inline, pointed at the
-            // ORIGINAL project file with the original text embedded. Node runs
-            // with --enable-source-maps, and tsx/esbuild chain input maps, so
-            // stack traces show the user's real path and line numbers instead
-            // of instrumented workspace positions -- Supercov stays invisible
-            // in errors. Without this the map was generated and then dropped.
-            let code = match inline_instrumentation_map(
-                &output.code,
-                output.map.as_ref(),
-                &project.root.join(file),
-                &source,
-            ) {
-                Some(code) => code,
-                None => output.code.clone(),
-            };
-            keep_authored(workspace, &mut authored, file, &source)?;
-            atomic_write(&path, code.as_bytes())?;
-        }
+        // Attach the instrumentation source map inline, pointed at the
+        // ORIGINAL project file with the original text embedded. Node runs
+        // with --enable-source-maps, and tsx/esbuild chain input maps, so
+        // stack traces show the user's real path and line numbers instead
+        // of instrumented workspace positions -- Supercov stays invisible
+        // in errors. Without this the map was generated and then dropped.
+        let code = match inline_instrumentation_map(
+            &output.code,
+            output.map.as_ref(),
+            &project.root.join(file),
+            &source,
+        ) {
+            Some(code) => code,
+            None => output.code.clone(),
+        };
+        keep_authored(workspace, &mut authored, file, &source)?;
+        atomic_write(&path, code.as_bytes())?;
         exclusions.extend(output.excluded_statements);
         for value in output.decisions {
             decisions.insert(value.id.clone(), value);
@@ -1770,7 +1565,7 @@ pub fn prepare_javascript_frontend(
         }
     }
     account(&SETUP.sources_ns, sources_started);
-    write_vite_transforms(&generated, &vite_transforms)?;
+    write_vitest_commands(&generated)?;
 
     let assertions_started = Instant::now();
     let mut assertion_calls = 0;
@@ -1802,10 +1597,7 @@ pub fn prepare_javascript_frontend(
                     });
                 }
             };
-        let coverage_transformed_by_vite = project.build_adapter == BuildAdapter::Vite
-            && project.source_files.contains(&entry.file);
-        if (output.assertions > 0 || output.capability_imports > 0) && !coverage_transformed_by_vite
-        {
+        if output.assertions > 0 || output.capability_imports > 0 {
             keep_authored(workspace, &mut authored, &entry.file, &source)?;
             atomic_write(&path, output.code.as_bytes())?;
             assertion_calls += output.assertions;
@@ -1879,7 +1671,6 @@ pub fn prepare_javascript_frontend(
         manifest_path,
         preload_path: generated.join("node_modules/register.mjs"),
         playwright_config_path,
-        vite_config_path,
         vitest_config_path,
         assertion_calls,
     })
@@ -1918,8 +1709,8 @@ mod tests {
     #[test]
     fn browser_mode_gets_a_browser_setup_and_the_command_that_carries_its_evidence() {
         let generated = temporary("browser-mode-config");
-        write_vite_transforms(&generated, &BTreeMap::new()).unwrap();
-        let adapter = fs::read_to_string(generated.join("viteInstrumentation.mjs")).unwrap();
+        write_vitest_commands(&generated).unwrap();
+        let adapter = fs::read_to_string(generated.join("vitestCommands.mjs")).unwrap();
         // Evidence leaves the browser over Vitest's own command channel. The
         // dev-server endpoint this replaced was reachable by anything loaded in
         // that realm and took the test file's identity on the browser's word.
@@ -2029,12 +1820,6 @@ mod tests {
         assert!(prepared.manifest_path.is_file());
         assert!(prepared.preload_path.is_file());
         assert!(prepared.playwright_config_path.is_file());
-        assert!(prepared.vite_config_path.is_file());
-        assert!(
-            fs::read_to_string(&prepared.vite_config_path)
-                .unwrap()
-                .contains("logLevel: ['1', 'true', 'yes'].includes")
-        );
         assert!(prepared.vitest_config_path.is_file());
         assert_eq!(prepared.assertion_calls, 0);
         let cache = read_javascript_frontend_cache(&workspace, "cache-test").unwrap();

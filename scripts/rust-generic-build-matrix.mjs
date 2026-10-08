@@ -64,9 +64,10 @@ function verify(name, project, sourceFile, runId) {
   const original = readFileSync(resolve(project, sourceFile), 'utf8');
   const run = rust('__run-js-direct', {
     root: project,
-    // Supercov runs the command and no build of its own: the bundler reads
-    // the instrumented files like any others.
-    command: ['sh', '-c', 'npm run build && npm test'],
+    // The fixture builds in a `pretest` script. Supercov runs the command and
+    // no build of its own: the bundler reads the instrumented files like any
+    // others.
+    command: ['npm', 'test'],
     runId,
     startedAt: `2026-08-25T00:00:${runId.endsWith('webpack') ? '08' : '09'}.000Z`,
   });

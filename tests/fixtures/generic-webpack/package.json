@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "webpack --config webpack.config.cjs",
+    "pretest": "npm run build",
     "test": "node --test"
   }
 }

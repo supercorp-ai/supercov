@@ -15,7 +15,6 @@ use supercov_contracts::{
 };
 
 use crate::{
-    build_cache::{build_cache_key, read_build_cache, reuse_paths, write_build_cache},
     coverage_report::{PersistedCoverageModel, RawTestResult, javascript_coverage_model},
     evidence_archive::{
         EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
@@ -36,10 +35,8 @@ use crate::{
     process_supervision::{
         CommandSpec, ForwardedSignal, ProcessSupervisor, SupervisionOptions, positive_milliseconds,
     },
-    project_discovery::{BuildAdapter, discover_coverage_project},
-    run_store::{
-        InstrumentedBuildCache, RawEvidenceMetadata, RunIntegrity, RunMetadata, RunTimings,
-    },
+    project_discovery::discover_coverage_project,
+    run_store::{RawEvidenceMetadata, RunIntegrity, RunMetadata, RunTimings},
     workspace::{
         cached_workspace_path, prepare_cached_workspace, prune_cached_workspace_sources,
         sync_command_outputs, workspace_output_baseline,
@@ -552,9 +549,7 @@ pub fn run_direct_javascript(
         "javascript",
         crate::integrity::javascript_assertion_paths(&root, &project).map_err(|e| e.to_string())?,
     )?;
-    let build_cache_key = build_cache_key(&integrity, &project)?;
-    // The root too: a generic build's sources import the runtime by
-    // absolute path, which a moved project must not reuse. And the files that
+    // The root too, which a moved project must not reuse. And the files that
     // are instrumented: the fingerprint digests every first-party file
     // whatever its classification, so SUPERCOV_SOURCE_ROOTS set on a project
     // that had already run was silently ignored until the workspace was
@@ -568,18 +563,11 @@ pub fn run_direct_javascript(
         crate::source_manifest::digest(&(&project.source_files, &source_roots))
     );
     let prior_workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
-    let reusable_build = if project.build_adapter == BuildAdapter::Direct {
-        None
-    } else {
-        read_build_cache(&prior_workspace, &build_cache_key)
-    };
     let reusable_frontend = read_javascript_frontend_cache(&prior_workspace, &frontend_cache_key);
-    let mut cached_paths = reusable_build.as_ref().map(reuse_paths).unwrap_or_default();
-    if let Some(frontend) = &reusable_frontend {
-        cached_paths.extend(javascript_frontend_reuse_paths(frontend));
-        cached_paths.sort();
-        cached_paths.dedup();
-    }
+    let cached_paths = reusable_frontend
+        .as_ref()
+        .map(javascript_frontend_reuse_paths)
+        .unwrap_or_default();
     let initialization_ms = elapsed_ms(initialization_started);
 
     let workspace_started = Instant::now();
@@ -646,7 +634,7 @@ pub fn run_direct_javascript(
     let evidence_directory = workspace.join(&evidence_relative);
     let server_evidence_root = workspace.join(".supercov/server-evidence");
     let diagnostic_owner = workspace.join(format!(".supercov/diagnostic-owner-{run_id}"));
-    let mut overrides = BTreeMap::from([
+    let mut overrides: BTreeMap<String, String> = BTreeMap::from([
         ("NODE_OPTIONS".into(), node_options(&frontend.preload_path)),
         ("SUPERCOV_CJS_INTERCEPT".into(), "1".into()),
         ("SUPERCOV_DIRECT_INSTRUMENTATION".into(), "1".into()),
@@ -729,7 +717,6 @@ pub fn run_direct_javascript(
             original.display().to_string(),
         );
     }
-    overrides.extend(project.build_environment.clone());
     // A tool that judges source as text, started without a package manager
     // or installed outside the project, is found through PATH.
     if let Some(path) = crate::source_tools::path_with_launchers(&workspace)
@@ -753,59 +740,9 @@ pub fn run_direct_javascript(
         serde_json::to_vec(&settings).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("{}: {error}", settings_path.display()))?;
-    let preparation = if reusable_build.is_some() {
-        writeln!(
-            diagnostics,
-            "[supercov] reusing exact-fingerprint instrumented build {}",
-            &build_cache_key[..12]
-        )
-        .map_err(|error| error.to_string())?;
-        Vec::new()
-    } else if project.build_adapter != BuildAdapter::Direct {
-        let mut arguments = project.build_command[1..]
-            .iter()
-            .map(OsString::from)
-            .collect::<Vec<_>>();
-        if project.build_adapter == BuildAdapter::Vite {
-            // npm hands a script the arguments after `--`; Yarn, pnpm and Bun
-            // hand it every argument after the script's name.
-            let npm = Path::new(&project.build_command[0])
-                .file_stem()
-                .is_some_and(|name| name.eq_ignore_ascii_case("npm"));
-            if npm {
-                arguments.push(OsString::from("--"));
-            }
-            arguments.extend([
-                OsString::from("--config"),
-                OsString::from(".supercov/vite.config.mjs"),
-                OsString::from("--logLevel"),
-                OsString::from("error"),
-            ]);
-        }
-        let mut build_overrides = overrides.clone();
-        build_overrides.insert("NODE_ENV".into(), "production".into());
-        build_overrides.insert("npm_config_loglevel".into(), "error".into());
-        let build_environment = environment_with(build_overrides);
-        vec![ExecutionPhase {
-            name: "build".into(),
-            kind: PhaseKind::Build,
-            command: CommandSpec {
-                program: project.build_command[0].clone().into(),
-                arguments,
-                cwd: workspace.clone(),
-                environment: Some(build_environment),
-                captured_output: Some(
-                    workspace
-                        .join(".supercov")
-                        .join(format!("build-output-{run_id}.log")),
-                ),
-            },
-        }]
-    } else {
-        Vec::new()
-    };
+    // The command, and nothing before it.
     let plan = ExecutionPlan {
-        preparation,
+        preparation: Vec::new(),
         test: ExecutionPhase {
             name: "test".into(),
             kind: PhaseKind::Test,
@@ -833,10 +770,10 @@ pub fn run_direct_javascript(
         options,
         diagnostics,
         |phase, diagnostics| {
-            let status = if phase.kind == PhaseKind::Test {
-                // The snapshot boundary sits after Supercov's own build phase
-                // and before the user's command, so only the command's own
-                // effects flow back to the real project afterwards.
+            {
+                // The snapshot boundary sits before the user's command, so
+                // only the command's own effects flow back to the real
+                // project afterwards.
                 *output_baseline.borrow_mut() =
                     Some(workspace_output_baseline(&workspace).map_err(|error| {
                         OrchestrationError::PhaseSetup {
@@ -864,26 +801,13 @@ pub fn run_direct_javascript(
                     phase: phase.name.clone(),
                     reason: error.to_string(),
                 })?;
-                RunStateStatus::Testing
-            } else {
-                writeln!(
-                    diagnostics,
-                    "[supercov] building the instrumented copy first: {} (named by {})",
-                    project.build_command.join(" "),
-                    crate::project_discovery::BUILD_COMMAND_VARIABLE
-                )
-                .map_err(|error| OrchestrationError::PhaseSetup {
+            }
+            update_run_state(&root, &run_id, RunStateStatus::Testing, &started_at, None).map_err(
+                |error| OrchestrationError::PhaseSetup {
                     phase: phase.name.clone(),
                     reason: error.to_string(),
-                })?;
-                RunStateStatus::Building
-            };
-            update_run_state(&root, &run_id, status, &started_at, None).map_err(|error| {
-                OrchestrationError::PhaseSetup {
-                    phase: phase.name.clone(),
-                    reason: error.to_string(),
-                }
-            })?;
+                },
+            )?;
             Ok(())
         },
     ) {
@@ -904,49 +828,11 @@ pub fn run_direct_javascript(
             return Err(message.into());
         }
     };
-    let instrumented_build_ms = execution
-        .phases
-        .iter()
-        .find(|phase| phase.kind == PhaseKind::Build)
-        .map_or(0.0, |phase| phase.duration_ms as f64);
     let test_command_ms = execution
         .phases
         .iter()
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
-    let build_succeeded = execution
-        .phases
-        .iter()
-        .find(|phase| phase.kind == PhaseKind::Build)
-        .is_some_and(|phase| phase.result.exit_code() == 0);
-    if project.build_adapter != BuildAdapter::Direct && reusable_build.is_none() && build_succeeded
-    {
-        write_build_cache(&root, &workspace, &build_cache_key, &started_at)?;
-    }
-    // The tests never started, and the build's own output is all there is to
-    // read: a type error `next build` found in the instrumented copy read as
-    // one in the project's code, and nothing said the build was Supercov's to
-    // begin with or how to name another.
-    if execution
-        .phases
-        .iter()
-        .any(|phase| phase.kind == PhaseKind::Build && phase.result.exit_code() != 0)
-    {
-        let _ = writeln!(
-            diagnostics,
-            "[supercov] the build failed, so the tests did not run. Supercov ran `{}` on the instrumented copy of the project before the tests; if it passes in the project itself, the error comes from the copy. {}=<command> names the build to run instead.",
-            project.build_command.join(" "),
-            crate::project_discovery::BUILD_COMMAND_VARIABLE
-        );
-        // Seeing what the build read took four more runs that copied files
-        // out of the workspace one at a time.
-        cleanup.keep_workspace = true;
-        let _ = writeln!(
-            diagnostics,
-            "[supercov] the instrumented copy is kept until the next run, to inspect: {}",
-            workspace.display()
-        );
-    }
     // The copy starts without build output: `dist/`, `build/`, `.next/` and
     // the like are not copied, since they hold code that was never
     // instrumented. A suite that needs it fails on a missing file, which
@@ -973,7 +859,7 @@ pub fn run_direct_javascript(
                 initialization_ms: rounded_millisecond(initialization_ms),
                 workspace_preparation_ms: rounded_millisecond(workspace_preparation_ms),
                 adapter_setup_ms: rounded_millisecond(adapter_setup_ms),
-                instrumented_build_ms: rounded_millisecond(instrumented_build_ms),
+                instrumented_build_ms: 0.0,
                 test_command_ms: rounded_millisecond(test_command_ms),
                 evidence_publication_ms: 0.0,
             },
@@ -1062,7 +948,7 @@ pub fn run_direct_javascript(
         initialization_ms: rounded_millisecond(initialization_ms),
         workspace_preparation_ms: rounded_millisecond(workspace_preparation_ms),
         adapter_setup_ms: rounded_millisecond(adapter_setup_ms),
-        instrumented_build_ms: rounded_millisecond(instrumented_build_ms),
+        instrumented_build_ms: 0.0,
         test_command_ms: rounded_millisecond(test_command_ms),
         evidence_publication_ms: rounded_millisecond(evidence_publication_ms),
     };
@@ -1082,10 +968,7 @@ pub fn run_direct_javascript(
             compressed_bytes: raw.compressed_bytes,
         },
         isolated_build: Some(true),
-        instrumented_build_cache: Some(InstrumentedBuildCache {
-            key: build_cache_key,
-            reused: reusable_build.is_some(),
-        }),
+        instrumented_build_cache: None,
         timings: Some(timings),
         merged: None,
         parents: None,

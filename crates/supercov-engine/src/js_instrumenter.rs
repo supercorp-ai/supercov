@@ -3510,17 +3510,12 @@ pub fn instrument_with_import_policy(
     source: &str,
     file: &str,
     capability_wrapper: &str,
-    direct: bool,
     elide_type_imports: bool,
 ) -> Result<CandidateOutput, CandidateError> {
     instrument_candidate_with_binding(
         source,
         file,
-        if direct {
-            RuntimeBinding::DirectGlobal
-        } else {
-            RuntimeBinding::ModuleImport
-        },
+        RuntimeBinding::DirectGlobal,
         Some(capability_wrapper),
         elide_type_imports,
     )
@@ -10943,11 +10938,10 @@ mod tests {
             "export function main(logger: Logger, value: DefaultType, t: Types.Row) { return run(logger); }\n",
         );
         let preserved =
-            instrument_with_import_policy(source, "src/main.ts", "./capability.mjs", true, false)
+            instrument_with_import_policy(source, "src/main.ts", "./capability.mjs", false)
                 .unwrap();
         let erased =
-            instrument_with_import_policy(source, "src/main.ts", "./capability.mjs", true, true)
-                .unwrap();
+            instrument_with_import_policy(source, "src/main.ts", "./capability.mjs", true).unwrap();
         assert_eq!(
             erased
                 .excluded_statements
@@ -10972,9 +10966,8 @@ mod tests {
         }
         // JavaScript value imports and type queries with runtime uses remain.
         let source = "import { Factory } from './types.js'; type T = typeof Factory; export const f = () => new Factory();";
-        let mixed =
-            instrument_with_import_policy(source, "src/mixed.ts", "./capability.mjs", true, true)
-                .unwrap();
+        let mixed = instrument_with_import_policy(source, "src/mixed.ts", "./capability.mjs", true)
+            .unwrap();
         assert!(mixed.excluded_statements.is_empty());
     }
 

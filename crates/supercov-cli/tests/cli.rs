@@ -3382,7 +3382,6 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         said.contains("starts without build output") && said.contains("npm run build && npm test"),
         "{said}"
     );
-    assert!(!said.contains("building the instrumented copy"), "{said}");
 
     // With the build in the command, it compiles the instrumented copy, and
     // what the tests run is measured.
@@ -3394,20 +3393,6 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         .supercov(&["runs", "latest", "line", "src/fee.js:2"])
         .succeeds();
     assert!(line.contains("small orders pay"), "{line}");
-
-    // Named, the build is Supercov's to run first.
-    let named = project.supercov_with(
-        &["--", "npm", "test"],
-        &[("SUPERCOV_BUILD_COMMAND", "npm run build")],
-    );
-    let said = format!("{}{}", named.stdout(), named.stderr());
-    assert_eq!(named.code(), 0, "{said}");
-    assert!(
-        said.contains(
-            "building the instrumented copy first: npm run build (named by SUPERCOV_BUILD_COMMAND)"
-        ),
-        "{said}"
-    );
 }
 
 #[cfg(unix)]

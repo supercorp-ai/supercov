@@ -317,12 +317,10 @@ const expectedCache = resolve(
   ".supercov/workspaces/workspace/generic-playwright",
 );
 
-// The build is named, so this run makes the instrumented build the next one
-// has to reuse.
 const child = spawn(
   process.execPath,
   [launcher, "--", process.execPath, "-e", "setInterval(() => {}, 1000)"],
-  { cwd: root, env: { ...rustEnvironment, SUPERCOV_BUILD_COMMAND: "npm run build" }, stdio: ["ignore", "pipe", "pipe"] },
+  { cwd: root, env: rustEnvironment, stdio: ["ignore", "pipe", "pipe"] },
 );
 let output = "";
 let signalled = false;
@@ -378,13 +376,10 @@ const storedRunsRoot = resolve(root, ".supercov/runs");
 const storedRunsBefore = new Set(
   existsSync(storedRunsRoot) ? readdirSync(storedRunsRoot) : [],
 );
-// Deliberately an opaque runner with a named build: Supercov runs a build
-// only when one is named, and only a build it ran itself has instrumented
-// output to keep and reuse.
 const successful = spawnSync(
   process.execPath,
   [launcher, "--", "npm", "run", "test:opaque"],
-  { cwd: root, env: { ...rustEnvironment, SUPERCOV_BUILD_COMMAND: "npm run build" }, encoding: "utf8", stdio: "pipe" },
+  { cwd: root, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },
 );
 if (successful.status !== 0)
   throw new Error(
@@ -406,12 +401,9 @@ const publishedFiles = new Set(
 const publishedMetadata = JSON.parse(
   readFileSync(resolve(storedRunsRoot, publishedRuns[0], "run.json"), "utf8"),
 );
-if (publishedMetadata.instrumentedBuildCache?.reused !== true)
-  throw new Error("unchanged source did not reuse the exact-fingerprint build");
-if (publishedMetadata.timings?.instrumentedBuildMs > 10)
-  throw new Error(
-    `reused build still spent ${publishedMetadata.timings?.instrumentedBuildMs}ms in the build phase`,
-  );
+// Supercov runs the command and no build of its own.
+if (publishedMetadata.timings?.instrumentedBuildMs !== 0)
+  throw new Error("Supercov ran a build the command did not ask for");
 for (const required of [
   "evidence.raw.gz",
   "run.json",

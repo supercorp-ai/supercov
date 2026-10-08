@@ -86,7 +86,6 @@ assert.ok(scope.unclassifiedSource.roots.includes('simulators'));
 const e2e = supercov(['--', 'npm', 'run', 'test:e2e'], { SUPERCOV_TEST_KIND: 'e2e' });
 assert.equal(e2e.status, 0, e2e.output);
 assert.match(e2e.output, /3 passed/);
-assert.doesNotMatch(e2e.output, /building the instrumented copy/);
 assert.match(e2e.output, /stayed in the isolated workspace[^\n]*\.next\/ \d+/);
 assert.ok(!existsSync(resolve(fixture, '.next')), 'an instrumented build reached the project');
 const e2eRun = latest();

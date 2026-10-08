@@ -127,18 +127,10 @@ pub(crate) fn config_paths(root: &Path, files: &[String]) -> BTreeSet<PathBuf> {
         .collect()
 }
 
-pub(crate) fn elides_type_imports(
-    root: &Path,
-    file: &str,
-    command: &[String],
-    build: &[String],
-) -> bool {
+pub(crate) fn elides_type_imports(root: &Path, file: &str, command: &[String]) -> bool {
     let root_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
     let root = root_path.as_path();
-    let commands = [
-        expanded_command(root, command),
-        expanded_command(root, build),
-    ];
+    let commands = [expanded_command(root, command)];
     let text = commands.join(" ");
     let tokens = text
         .split(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
@@ -299,7 +291,7 @@ mod tests {
         ] {
             fs::write(root.join("tsconfig.json"), config).unwrap();
             assert_eq!(
-                elides_type_imports(&root, "src/main.ts", &command, &[]),
+                elides_type_imports(&root, "src/main.ts", &command),
                 expected,
                 "{config}"
             );
@@ -308,14 +300,12 @@ mod tests {
         assert!(!elides_type_imports(
             &root,
             "src/main.ts",
-            &["node".into(), "--experimental-strip-types".into()],
-            &[]
+            &["node".into(), "--experimental-strip-types".into()]
         ));
         assert!(!elides_type_imports(
             &root,
             "src/main.ts",
-            &["tsx".into(), "--tsconfig".into(), "other.json".into()],
-            &[]
+            &["tsx".into(), "--tsconfig".into(), "other.json".into()]
         ));
         fs::write(
             root.join("tsconfig.build.json"),
@@ -323,19 +313,18 @@ mod tests {
         )
         .unwrap();
         let build = vec!["tsc".into(), "-p".into(), "tsconfig.build.json".into()];
-        assert!(elides_type_imports(&root, "src/main.ts", &command, &build));
+        assert!(elides_type_imports(&root, "src/main.ts", &build));
         fs::write(
             root.join("tsconfig.build.json"),
             r#"{"extends":"./base.json"}"#,
         )
         .unwrap();
-        assert!(!elides_type_imports(&root, "src/main.ts", &command, &build));
+        assert!(!elides_type_imports(&root, "src/main.ts", &build));
         assert!(config_paths(&root, &["src/main.ts".into()]).contains(&root.join("base.json")));
         assert!(!elides_type_imports(
             &root,
             "src/main.ts",
-            &["node".into(), "script.js".into(), "tsx".into()],
-            &[]
+            &["node".into(), "script.js".into(), "tsx".into()]
         ));
         fs::remove_dir_all(root).unwrap();
     }

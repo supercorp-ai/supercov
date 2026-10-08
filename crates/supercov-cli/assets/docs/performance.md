@@ -1,8 +1,9 @@
 # Speed and storage
 
-A Supercov run includes your test command and evidence publication, and a
-build only when you name one with `SUPERCOV_BUILD_COMMAND`. A build the command
-runs itself is part of the command's time.
+A Supercov run includes your test command and evidence publication, and for a
+compiled language an instrumented build, which repeated passes can reuse when
+the relevant inputs have not changed. A JavaScript project has no such build:
+the command runs as given, and a build inside it is part of the command's time.
 
 ## See where the time went
 
@@ -17,7 +18,7 @@ The summary separates:
 | Initialization | Recovery, project discovery, and input checks |
 | Workspace preparation | Refreshing the isolated project copy |
 | Adapter setup | Preparing the runner integration |
-| Instrumented build | A build named with `SUPERCOV_BUILD_COMMAND`, or almost nothing on a cache hit; 0 otherwise |
+| Instrumented build | Building measured source for a compiled language, or almost nothing on a cache hit; 0 for JavaScript |
 | Test command | The wrapped command, including browser, VM, or remote latency |
 | Evidence publication | Validating and storing the completed run |
 
@@ -39,11 +40,11 @@ before Supercov starts and is not coverage-engine overhead.
 - Use a focused test command while iterating when appropriate, but finish with
   the same complete command used for the baseline.
 
-Supercov reuses a build named with `SUPERCOV_BUILD_COMMAND` only when source,
-dependencies, configuration, toolchain, build mode, and instrumenter identity
-match. A possible mismatch triggers a fresh build rather than risking stale
-coverage. A build inside the command runs every time, as it does without
-Supercov.
+Supercov reuses an instrumented build only when source, dependencies,
+configuration, toolchain, build mode, and instrumenter identity match. A
+possible mismatch triggers a fresh build rather than risking stale coverage. A
+build inside a JavaScript project's command is the command's own and runs every
+time, as it does without Supercov.
 
 ## Use focused runs carefully
 
