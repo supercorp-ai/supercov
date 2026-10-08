@@ -900,46 +900,81 @@ fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFr
     }
     atomic_write(
         &generated.join("runtime.d.mts"),
-        // Generated files must be immune to the HOST project's lint policy --
-        // the same rule the Rust runtime enforces with #[allow(warnings)].
-        // Next.js runs the project's eslint over the build graph, and
-        // @typescript-eslint/no-explicit-any turned every `any` below into a
-        // hard "Failed to compile" for a real monorepo.
-        b"/* eslint-disable */\n\
-export declare function coverageHit(...args: any[]): any;\n\
-export declare function selectionBegin(...args: any[]): any;\n\
-export declare function selectionRight(...args: any[]): any;\n\
-export declare function selectionEnd(...args: any[]): any;\n\
-export declare function optionalSelect(...args: any[]): any;\n\
-export declare function optionalCallBegin(...args: any[]): any;\n\
-export declare function optionalCallReached(...args: any[]): any;\n\
-export declare function optionalCallContinued(...args: any[]): any;\n\
-export declare function optionalCallEnd(...args: any[]): any;\n\
-export declare function defaultSelected(...args: any[]): any;\n\
-export declare function defaultEntered(...args: any[]): any;\n\
-export declare function defaultSelectedV2(...args: any[]): any;\n\
-export declare function defaultEnteredV2(...args: any[]): any;\n\
-export declare function optionalSelectV2(...args: any[]): any;\n\
-export declare function selectShortV2(...args: any[]): any;\n\
-export declare function selectRightV2(...args: any[]): any;\n\
-export declare function selectNamedRightV2(...args: any[]): any;\n\
-export declare function selectAssignEndV2(...args: any[]): any;\n\
-export declare function selectPathV2(...args: any[]): any;\n\
-export declare function optionalCallEndV2(...args: any[]): any;\n\
-export declare function tryBegin(...args: any[]): any;\n\
-export declare function tryCatch(...args: any[]): any;\n\
-export declare function tryEnd(...args: any[]): any;\n\
-export declare function loopBegin(...args: any[]): any;\n\
-export declare function loopEntered(...args: any[]): any;\n\
-export declare function loopEnd(...args: any[]): any;\n\
-export declare function mcdcBegin(...args: any[]): any;\n\
-export declare function mcdcCondition(...args: any[]): any;\n\
-export declare function mcdcEnd(...args: any[]): any;\n\
-export declare function registerProbeV2(...args: any[]): any;\n\
-export declare function coverageHitV2(...args: any[]): any;\n\
-export declare function mcdcEndV2(...args: any[]): any;\n",
+        runtime_declarations().as_bytes(),
     )?;
     Ok(())
+}
+
+/// The runtime's helpers as TypeScript sees them from an instrumented file.
+///
+/// A helper that hands a value back is generic over it. Every helper used to
+/// be `(...args: any[]): any`, so whatever passed through one became `any`:
+/// `shared = false` read `shared?: any` once its default was wrapped, a
+/// Next.js route handler read `const GET: any`, and under
+/// `isolatedDeclarations` h3 failed to compile. The instrumented file is
+/// `@ts-nocheck`, but the types its exports are inferred to have are what
+/// every other file in the program sees.
+fn runtime_declarations() -> String {
+    // (helper, how many arguments come before the value it returns)
+    const VALUES: &[(&str, usize)] = &[
+        ("selectionRight", 1),
+        ("selectionEnd", 1),
+        ("optionalSelect", 2),
+        ("optionalCallReached", 1),
+        ("optionalCallEnd", 1),
+        ("defaultSelected", 1),
+        ("tryCatch", 1),
+        ("mcdcCondition", 2),
+        ("mcdcEnd", 1),
+        ("defaultSelectedV2", 2),
+        ("optionalSelectV2", 2),
+        ("selectShortV2", 2),
+        ("selectRightV2", 2),
+        ("selectNamedRightV2", 2),
+        ("selectAssignEndV2", 2),
+        ("selectPathV2", 1),
+        ("optionalCallEndV2", 2),
+        ("renderedValueV2", 2),
+        ("parenthesizedAssignmentValue", 0),
+        ("withRequestPhase", 0),
+    ];
+    const OTHERS: &[&str] = &[
+        "coverageHit",
+        "selectionBegin",
+        "optionalCallBegin",
+        "optionalCallContinued",
+        "defaultEntered",
+        "defaultEnteredV2",
+        "tryBegin",
+        "tryEnd",
+        "loopBegin",
+        "loopEntered",
+        "loopEnd",
+        "mcdcBegin",
+        "registerProbeV2",
+        "coverageHitV2",
+        "mcdcEndV2",
+    ];
+    // Generated files must be immune to the HOST project's lint policy --
+    // the same rule the Rust runtime enforces with #[allow(warnings)].
+    // Next.js runs the project's eslint over the build graph, and
+    // @typescript-eslint/no-explicit-any turned every `any` below into a
+    // hard "Failed to compile" for a real monorepo.
+    let mut text = String::from("/* eslint-disable */\n");
+    for (name, before) in VALUES {
+        let leading = (0..*before)
+            .map(|index| format!("a{index}: any, "))
+            .collect::<String>();
+        text.push_str(&format!(
+            "export declare function {name}<T>({leading}value: T, ...rest: any[]): T;\n"
+        ));
+    }
+    for name in OTHERS {
+        text.push_str(&format!(
+            "export declare function {name}(...args: any[]): any;\n"
+        ));
+    }
+    text
 }
 
 fn generic_runtime_binding(
@@ -1641,6 +1676,18 @@ pub fn prepare_javascript_frontend(
         if project.build_adapter == BuildAdapter::Generic {
             let runtime = generic_runtime_binding(workspace, project, &path, &generated)?;
             output.code = output.code.replace("virtual:supercov-runtime", &runtime);
+        }
+        // A directly run TypeScript file names its helpers' types from the
+        // runtime's declarations, which sit beside the runtime in the
+        // workspace.
+        if output
+            .code
+            .contains(crate::js_instrumenter::RUNTIME_TYPES_MODULE)
+        {
+            output.code = output.code.replace(
+                crate::js_instrumenter::RUNTIME_TYPES_MODULE,
+                &runtime_specifier(file, "runtime.mjs")?,
+            );
         }
         bootstrap_runtime(&mut output, &standalone_runtime, browser_suite);
         if project.build_adapter == BuildAdapter::Direct && !browser_suite {

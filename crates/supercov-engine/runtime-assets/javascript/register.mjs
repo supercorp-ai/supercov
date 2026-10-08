@@ -390,7 +390,16 @@ function skipCoverageThresholds(tool) {
             console.error(`[supercov] ${tool}'s coverage thresholds stay as configured`, error);
     }
 }
-register(new URL("./resolve-loader.mjs", import.meta.url));
+// A handler for `.ts` in the CommonJS loader that is not Node's own is a
+// transpiler's require hook: ts-node/register, @swc/register and the like.
+// It was there before this preload, and it is how the project's TypeScript
+// loads. Any `--import` sends the entry point through the module loader
+// instead, where such a file is read as an ES module and the hook never
+// sees it; the loader is told so it can hand those files back.
+const typescriptHandler = Module._extensions[".ts"];
+register(new URL("./resolve-loader.mjs", import.meta.url), {
+    data: { typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS" },
+});
 if (process.env.SUPERCOV_DEBUG === "1") {
     console.error("[supercov] preload", { entrypoint });
 }

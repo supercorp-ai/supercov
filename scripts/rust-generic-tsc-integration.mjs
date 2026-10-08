@@ -211,8 +211,85 @@ try {
   assert.equal(directSummary.data.tests, 6);
   assert.equal(directSummary.data.coverage.lines.percentage, 100);
   assert.equal(directSummary.data.coverage.branches.percentage, 100);
+  // The types other files see. A default wrapped by a probe read `any`, since
+  // every runtime helper was declared to return it, and under
+  // `isolatedDeclarations` the wrapped parameter did not compile at all
+  // (TS9011, which `@ts-nocheck` does not silence). The test reads the
+  // declarations the command's own `tsc` wrote from the instrumented copy.
+  const typesProject = resolve(temporary, 'types');
+  mkdirSync(resolve(typesProject, 'src'), { recursive: true });
+  mkdirSync(resolve(typesProject, 'tests'), { recursive: true });
+  mkdirSync(resolve(typesProject, 'node_modules/.bin'), { recursive: true });
+  symlinkSync(
+    resolve(repository, 'node_modules/typescript'),
+    resolve(typesProject, 'node_modules/typescript'),
+  );
+  symlinkSync(
+    resolve(repository, 'node_modules/.bin/tsc'),
+    resolve(typesProject, 'node_modules/.bin/tsc'),
+  );
+  writeFileSync(
+    resolve(typesProject, 'package.json'),
+    JSON.stringify({
+      name: 'supercov-rust-types-fixture',
+      private: true,
+      type: 'module',
+      scripts: { test: 'tsc -p tsconfig.json && node --test' },
+    }) + '\n',
+  );
+  writeFileSync(
+    resolve(typesProject, 'tsconfig.json'),
+    JSON.stringify({
+      compilerOptions: {
+        target: 'ES2022',
+        module: 'NodeNext',
+        moduleResolution: 'NodeNext',
+        rootDir: 'src',
+        outDir: 'types',
+        strict: true,
+        declaration: true,
+        emitDeclarationOnly: true,
+        isolatedDeclarations: true,
+      },
+      include: ['src/**/*.ts'],
+    }) + '\n',
+  );
+  writeFileSync(
+    resolve(typesProject, 'src/label.ts'),
+    [
+      "export function label(count: number, strict = false, unit = 'item'): string {",
+      "  return count > 1 && strict ? `${count} ${unit}s` : unit;",
+      '}',
+      "export function decode<E extends 'utf8' | 'hex' = 'utf8'>(text: string, encoding = 'utf8' as E): string {",
+      "  return encoding === 'hex' ? text.toUpperCase() : text;",
+      '}',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    resolve(typesProject, 'tests/types.test.js'),
+    [
+      "import assert from 'node:assert/strict';",
+      "import { readFileSync } from 'node:fs';",
+      "import test from 'node:test';",
+      "test('the declarations say what the source says', () => {",
+      "  const declared = readFileSync('types/label.d.ts', 'utf8');",
+      "  assert.match(declared, /label\\(count: number, strict\\?: boolean, unit\\?: string\\): string/);",
+      "  assert.match(declared, /encoding\\?: E\\)/);",
+      "  assert.doesNotMatch(declared, /\\bany\\b/);",
+      '});',
+      '',
+    ].join('\n'),
+  );
+  const typesRun = rust('__run-js-direct', {
+    root: typesProject,
+    command: ['npm', 'test'],
+    runId: 'rust-direct-types',
+    startedAt: '2026-08-25T00:00:09.000Z',
+  });
+  assert.equal(typesRun.exitCode, 0, typesRun.output);
   console.log(
-    '[rust-generic-tsc] Rust preserves strict rootDir compilation for generic and direct commands with exact Node attribution',
+    '[rust-generic-tsc] Rust preserves strict rootDir compilation for generic and direct commands with exact Node attribution, and the types a wrapped default declares',
   );
 } finally {
   if (process.env.SUPERCOV_KEEP_FIXTURE === '1')
