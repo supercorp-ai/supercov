@@ -68,6 +68,7 @@ pub mod security_candidates;
 pub mod source_capture;
 pub mod source_discovery;
 pub mod source_manifest;
+pub mod source_tools;
 pub mod source_units;
 mod typescript_imports;
 pub mod workspace;

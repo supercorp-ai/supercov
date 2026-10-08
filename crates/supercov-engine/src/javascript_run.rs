@@ -730,6 +730,13 @@ pub fn run_direct_javascript(
         );
     }
     overrides.extend(project.build_environment.clone());
+    // A tool that judges source as text, started without a package manager
+    // or installed outside the project, is found through PATH.
+    if let Some(path) = crate::source_tools::path_with_launchers(&workspace)
+        && let Some(path) = path.to_str()
+    {
+        overrides.insert("PATH".into(), path.to_owned());
+    }
     // What bootstrap.cjs installs in a process that runs the workspace without
     // these settings: one started in a container or VM the workspace is
     // mounted into. It moves `root` to where it sees the workspace from.
