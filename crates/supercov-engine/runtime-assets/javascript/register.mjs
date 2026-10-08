@@ -8,7 +8,7 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
 };
 import Module, { register, syncBuiltinESMExports } from "node:module";
 import fs, { closeSync, openSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
@@ -205,6 +205,8 @@ function installAuthoredSourceView() {
         authored = new Set();
     }
     const authoredRoot = fileURLToPath(new URL("./.authored/", import.meta.url));
+    // What a tool of the command wrote to a rewritten file: `--fix`, `--write`.
+    const changedRoot = fileURLToPath(new URL("./.changed/", import.meta.url));
     const workspace = fileURLToPath(new URL("../../", import.meta.url));
     const roots = [...new Set([workspace, (() => {
                 try {
@@ -231,9 +233,28 @@ function installAuthoredSourceView() {
         }
         return undefined;
     };
+    const { existsSync: exists, mkdirSync: makeDirectory } = fs;
+    // A rewritten file reads as the command has it now: what one of its
+    // tools made of it, or what its author wrote.
     const authoredPath = (path) => {
         const local = inside(path);
-        return local !== undefined && authored.has(local) ? resolve(authoredRoot, local) : path;
+        if (local === undefined || !authored.has(local))
+            return path;
+        const changed = resolve(changedRoot, local);
+        return exists(changed) ? changed : resolve(authoredRoot, local);
+    };
+    // And it is written beside the instrumented copy, never over it. Prettier
+    // with `--write` and ESLint with `--fix` replaced the copy with the
+    // source they had read: the file then ran unmeasured, and one whose tests
+    // passed read 0% covered. Supercov gives the project the change when the
+    // command ends.
+    const changedPath = (path) => {
+        const local = inside(path);
+        if (local === undefined || !authored.has(local))
+            return path;
+        const changed = resolve(changedRoot, local);
+        makeDirectory(dirname(changed), { recursive: true });
+        return changed;
     };
     // A recursive listing names nested entries by relative path, or as
     // entries whose parent is inside .supercov.
@@ -250,7 +271,17 @@ function installAuthoredSourceView() {
         ? entries
         : entries.filter((entry) => !hidden(entry));
     const { readFileSync: readSync, readFile: readCallback, readdirSync: listSync, readdir: listCallback } = fs;
-    const { readFile: readPromise, readdir: listPromise } = fs.promises;
+    const { readFile: readPromise, readdir: listPromise, writeFile: writePromise } = fs.promises;
+    const { writeFileSync: writeSync, writeFile: writeCallback } = fs;
+    fs.writeFileSync = function writeFileSync(path, ...rest) {
+        return Reflect.apply(writeSync, this, [changedPath(path), ...rest]);
+    };
+    fs.writeFile = function writeFile(path, ...rest) {
+        return Reflect.apply(writeCallback, this, [changedPath(path), ...rest]);
+    };
+    fs.promises.writeFile = function writeFile(path, ...rest) {
+        return Reflect.apply(writePromise, this, [changedPath(path), ...rest]);
+    };
     fs.readFileSync = function readFileSync(path, ...rest) {
         return Reflect.apply(readSync, this, [authoredPath(path), ...rest]);
     };

@@ -35,6 +35,7 @@ const FRONTEND_CACHE_DIRECTORY: &str = ".supercov/frontend-cache-artifacts";
 /// walk into.
 const AUTHORED_DIRECTORY: &str = ".supercov/node_modules/.authored";
 const AUTHORED_LIST: &str = ".supercov/node_modules/authored-sources.json";
+const CHANGED_DIRECTORY: &str = ".supercov/node_modules/.changed";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.mjs",
     "ava.mjs",
@@ -417,6 +418,17 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
 /// Where the authored text of the rewritten project file `file` is kept.
 pub fn authored_path(workspace: &Path, file: &Path) -> PathBuf {
     workspace.join(AUTHORED_DIRECTORY).join(file)
+}
+
+/// Where the text a tool of the command gave the rewritten project file
+/// `file` is kept, beside the instrumented copy and never over it.
+pub fn changed_path(workspace: &Path, file: &Path) -> PathBuf {
+    workspace.join(CHANGED_DIRECTORY).join(file)
+}
+
+/// The directory of every such text.
+pub fn changed_directory(workspace: &Path) -> PathBuf {
+    workspace.join(CHANGED_DIRECTORY)
 }
 
 /// The project files this run rewrote, as the authored list records them.

@@ -740,6 +740,9 @@ pub fn run_direct_javascript(
         serde_json::to_vec(&settings).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("{}: {error}", settings_path.display()))?;
+    // What the tools of a command before this one changed in the source has
+    // been applied or let go; this command starts from the project as it is.
+    let _ = crate::source_tools::clear_source_changes(&workspace);
     // The command, and nothing before it.
     let plan = ExecutionPlan {
         preparation: Vec::new(),
@@ -893,6 +896,36 @@ pub fn run_direct_javascript(
                 outputs.skipped_instrumented.len(),
                 crate::workspace::summarize_paths(&outputs.skipped_instrumented)
             );
+        }
+        // A formatter or a fixer the command ran changed source files. The
+        // tests ran the copy instrumented from the text before, so that is
+        // what this run measured; the project gets the change, as it does
+        // when the command runs alone.
+        match crate::source_tools::apply_source_changes(&root, &workspace) {
+            Ok(changes) => {
+                if !changes.applied.is_empty() {
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] the command's tools changed {} source file(s), now changed in the project too: {}; this run measured them as they were before",
+                        changes.applied.len(),
+                        crate::workspace::summarize_paths(&changes.applied)
+                    );
+                }
+                if !changes.kept_back.is_empty() {
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] the command's tools changed {} source file(s) that were edited in the project while it ran; those changes were not applied: {}",
+                        changes.kept_back.len(),
+                        crate::workspace::summarize_paths(&changes.kept_back)
+                    );
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    diagnostics,
+                    "[supercov] the source changes the command's tools made could not be applied to the project: {error}"
+                );
+            }
         }
         if !outputs.deleted_in_workspace.is_empty() {
             let _ = writeln!(
