@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A value that passes through a probe keeps its type. Every runtime helper was declared to return `any`, so in the instrumented copy `strict = false` read `strict?: any`, a Next.js route handler read `const GET: any`, and whatever else a file exported through one could change for every file that imports it. The helpers are generic now, in directly run projects too. Across nine TypeScript projects (4,344 declarations) 29 differed from the source; 12 do now, and the rest wait on how decisions are rewritten.
+- A wrapped default compiles under `isolatedDeclarations`: a parameter whose default is a literal or `x as T` is given that type, which is what TypeScript inferred. h3 failed with `TS9011`, which `@ts-nocheck` does not silence.
+- `(buffer[0] as string) += child` is printed as an assignment that parses. It came out as `buffer[0] as string += child`, and two of hono's files could be read by neither TypeScript nor a bundler.
+- A file with a `// @__NO_SIDE_EFFECTS__` annotation before a documentation comment is instrumented. The printer writes the two in the other order and the comment check gave up, so zod could not be measured: `252 comments in the source, 245 after instrumenting`.
+- `node -r ts-node/register --test` works in a package without `"type"`. Supercov's preload made Node load the TypeScript entry point as an ES module, past the require hook that compiles it, and the first extensionless import failed with `ERR_MODULE_NOT_FOUND`.
+
 ## 3.0.5
 
 **Added**

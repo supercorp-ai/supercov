@@ -134,31 +134,42 @@ fn restore_comment_text(
     let mut edits = Vec::<(usize, usize, String)>::new();
     for emitted in &reparsed.program.comments {
         let emitted_text = emitted.span.source_text(generated);
-        let (index, original) = loop {
-            let Some(original) = program.comments.get(original_index) else {
-                // The counts are usually equal here, so reporting them alone
-                // says the opposite of what happened: nothing was dropped, one
-                // comment was not recognised. Name it.
-                return Err(CandidateError::CommentPreservation {
-                    expected: program.comments.len(),
-                    actual: reparsed.program.comments.len(),
-                    detail: format!(
-                        "no source comment matches the generated comment {emitted_text:?}                          (matched {} before it)",
-                        edits.len()
-                    ),
-                });
-            };
-            let index = original_index;
-            original_index += 1;
-            if original.kind == emitted.kind
+        let same = |index: usize| {
+            let original = &program.comments[index];
+            original.kind == emitted.kind
                 && equal_ignoring_whitespace(
                     original.span.source_text(program.source_text),
                     emitted_text,
                 )
-            {
-                break (index, original);
-            }
         };
+        // Comments come out in source order, with one exception: the printer
+        // writes a `@__NO_SIDE_EFFECTS__` annotation after the documentation
+        // comment it stood before. Looking only forward gave up there, and
+        // zod's `v4/core/api.ts` could not be instrumented at all. A comment
+        // the forward scan stepped over is still waiting behind it.
+        let index = match (original_index..program.comments.len()).find(|index| same(*index)) {
+            Some(index) => {
+                original_index = index + 1;
+                index
+            }
+            None => match (0..original_index).find(|index| !matched[*index] && same(*index)) {
+                Some(index) => index,
+                // The counts are usually equal here, so reporting them alone
+                // says the opposite of what happened: nothing was dropped, one
+                // comment was not recognised. Name it.
+                None => {
+                    return Err(CandidateError::CommentPreservation {
+                        expected: program.comments.len(),
+                        actual: reparsed.program.comments.len(),
+                        detail: format!(
+                            "no source comment matches the generated comment {emitted_text:?}                          (matched {} before it)",
+                            edits.len()
+                        ),
+                    });
+                }
+            },
+        };
+        let original = &program.comments[index];
         matched[index] = true;
         edits.push((
             emitted.span.start as usize,
@@ -2976,6 +2987,118 @@ fn expression_is_anonymous_definition(expression: &Expression<'_>) -> bool {
     }
 }
 
+/// Takes a type assertion off an assignment target before the program is
+/// printed.
+///
+/// The printer writes `(buffer[0] as string) += child` without its
+/// parentheses, and `buffer[0] as string += child` does not parse: hono's
+/// `src/jsx/base.ts` and `src/helper/html/index.ts` came out as files neither
+/// TypeScript nor a bundler could read. An assertion on a target says nothing
+/// at run time, and the instrumented file is not type-checked, so the target
+/// is printed without it.
+struct AssertedTargetTransformer<'a> {
+    ast: AstBuilder<'a>,
+}
+
+impl<'a> AssertedTargetTransformer<'a> {
+    fn target(
+        expression: Expression<'a>,
+    ) -> Result<oxc_ast::ast::SimpleAssignmentTarget<'a>, Expression<'a>> {
+        Ok(match expression {
+            Expression::Identifier(identifier) => {
+                oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier)
+            }
+            Expression::ComputedMemberExpression(member) => {
+                oxc_ast::ast::SimpleAssignmentTarget::ComputedMemberExpression(member)
+            }
+            Expression::StaticMemberExpression(member) => {
+                oxc_ast::ast::SimpleAssignmentTarget::StaticMemberExpression(member)
+            }
+            Expression::PrivateFieldExpression(member) => {
+                oxc_ast::ast::SimpleAssignmentTarget::PrivateFieldExpression(member)
+            }
+            Expression::TSAsExpression(asserted) => {
+                oxc_ast::ast::SimpleAssignmentTarget::TSAsExpression(asserted)
+            }
+            Expression::TSSatisfiesExpression(asserted) => {
+                oxc_ast::ast::SimpleAssignmentTarget::TSSatisfiesExpression(asserted)
+            }
+            Expression::TSNonNullExpression(asserted) => {
+                oxc_ast::ast::SimpleAssignmentTarget::TSNonNullExpression(asserted)
+            }
+            Expression::TSTypeAssertion(asserted) => {
+                oxc_ast::ast::SimpleAssignmentTarget::TSTypeAssertion(asserted)
+            }
+            Expression::ParenthesizedExpression(parenthesized) => {
+                return Self::target(parenthesized.unbox().expression);
+            }
+            other => return Err(other),
+        })
+    }
+}
+
+impl<'a> VisitMut<'a> for AssertedTargetTransformer<'a> {
+    fn visit_simple_assignment_target(
+        &mut self,
+        target: &mut oxc_ast::ast::SimpleAssignmentTarget<'a>,
+    ) {
+        loop {
+            let inner = match target {
+                oxc_ast::ast::SimpleAssignmentTarget::TSAsExpression(asserted) => {
+                    &mut asserted.expression
+                }
+                oxc_ast::ast::SimpleAssignmentTarget::TSSatisfiesExpression(asserted) => {
+                    &mut asserted.expression
+                }
+                _ => break,
+            };
+            match Self::target(inner.take_in(self.ast.allocator)) {
+                Ok(bare) => *target = bare,
+                Err(kept) => {
+                    // Not a target the grammar allows; print it as it came.
+                    match target {
+                        oxc_ast::ast::SimpleAssignmentTarget::TSAsExpression(asserted) => {
+                            asserted.expression = kept;
+                        }
+                        oxc_ast::ast::SimpleAssignmentTarget::TSSatisfiesExpression(asserted) => {
+                            asserted.expression = kept;
+                        }
+                        _ => unreachable!("the target was matched above"),
+                    }
+                    break;
+                }
+            }
+        }
+        walk_mut::walk_simple_assignment_target(self, target);
+    }
+}
+
+/// The module a directly run TypeScript file names its helpers' types from.
+/// The frontend replaces it with the path to the runtime beside the file.
+pub const RUNTIME_TYPES_MODULE: &str = "virtual:supercov-helper-types";
+
+/// `typeof import("…").helper`, as the annotation of the variable a helper is
+/// bound to.
+fn runtime_helper_type<'a>(
+    allocator: &'a Allocator,
+    source_type: SourceType,
+    helper: &str,
+) -> Option<oxc_allocator::Box<'a, oxc_ast::ast::TSTypeAnnotation<'a>>> {
+    let text = allocator.alloc_str(&format!(
+        "var helper: typeof import(\"{RUNTIME_TYPES_MODULE}\").{helper};"
+    ));
+    let mut parsed = Parser::new(allocator, text, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+    match parsed.program.body.first_mut()? {
+        Statement::VariableDeclaration(declaration) => {
+            declaration.declarations.first_mut()?.type_annotation.take()
+        }
+        _ => None,
+    }
+}
+
 struct AssignmentNameSafetyTransformer<'a> {
     ast: AstBuilder<'a>,
     parenthesized_assignment_value: String,
@@ -3229,6 +3352,10 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     branches.extend(extended_analysis.branches);
     branches.extend(logical_analysis.branches);
     branches.extend(switch_analysis.branches);
+    AssertedTargetTransformer {
+        ast: AstBuilder::new(&allocator),
+    }
+    .visit_program(&mut parsed.program);
     let (generated, map) = generate_candidate(&parsed.program, file)?;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
@@ -3690,6 +3817,7 @@ fn instrument_candidate_with_binding(
         active_declaration: Vec::new(),
         parameter_pattern_depth: 0,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        typescript,
     };
     default_transformer.visit_program(&mut parsed.program);
     let mut extended_transformer = ExtendedTransformer {
@@ -3817,8 +3945,18 @@ fn instrument_candidate_with_binding(
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
     }
     if runtime_binding == RuntimeBinding::DirectGlobal || parsed.program.source_type.is_script() {
+        // Read off an untyped global, every helper is `any` to TypeScript,
+        // whatever the runtime's declarations say, and so is each value that
+        // passes through one. A directly run TypeScript file names each
+        // helper's type where it binds it. Declaring the global's type for
+        // the program instead collided with the declaration every rewritten
+        // test file carries for its assertion helpers.
+        let typed = typescript && runtime_binding == RuntimeBinding::DirectGlobal;
         let declarators =
             ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
+                let annotation = typed
+                    .then(|| runtime_helper_type(&allocator, parsed.program.source_type, imported))
+                    .flatten();
                 let global_runtime =
                     Expression::StaticMemberExpression(ast.alloc_static_member_expression(
                         Span::default(),
@@ -3844,7 +3982,7 @@ fn instrument_candidate_with_binding(
                     Span::default(),
                     runtime_declaration_kind,
                     ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
-                    NONE,
+                    annotation,
                     Some(runtime_helper),
                     false,
                 )
@@ -3886,6 +4024,10 @@ fn instrument_candidate_with_binding(
     }
     let limitations = Vec::new();
     mark_generated_statements(ast, &mut parsed.program);
+    AssertedTargetTransformer {
+        ast: AstBuilder::new(&allocator),
+    }
+    .visit_program(&mut parsed.program);
     let (code, map) = generate_candidate(&parsed.program, file)?;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
@@ -4783,9 +4925,50 @@ struct DefaultTransformer<'a> {
     active_declaration: Vec<SpanKey>,
     parameter_pattern_depth: usize,
     source_sensitive_functions: HashSet<SpanKey>,
+    typescript: bool,
 }
 
 impl<'a> DefaultTransformer<'a> {
+    /// The type a default names by its own syntax: a literal's primitive, or
+    /// the type it is asserted to (`"utf8" as E`).
+    ///
+    /// Under `isolatedDeclarations` a parameter needs no annotation while its
+    /// default is such an expression. Wrapped in a call it does, and h3 failed
+    /// to compile with `TS9011`, an error `@ts-nocheck` does not silence. The
+    /// annotation says what TypeScript inferred already.
+    fn default_type(&self, value: &Expression<'a>) -> Option<oxc_ast::ast::TSType<'a>> {
+        let span = Span::default();
+        let mut value = value;
+        while let Expression::ParenthesizedExpression(parenthesized) = value {
+            value = &parenthesized.expression;
+        }
+        match value {
+            // `'x' as const` is the literal's own type, which no keyword names.
+            Expression::TSAsExpression(asserted) => {
+                (!asserted.type_annotation.is_const_type_reference())
+                    .then(|| asserted.type_annotation.clone_in(self.ast.allocator))
+            }
+            Expression::TSTypeAssertion(asserted) => {
+                (!asserted.type_annotation.is_const_type_reference())
+                    .then(|| asserted.type_annotation.clone_in(self.ast.allocator))
+            }
+            Expression::BooleanLiteral(_) => Some(self.ast.ts_type_boolean_keyword(span)),
+            Expression::NumericLiteral(_) => Some(self.ast.ts_type_number_keyword(span)),
+            Expression::BigIntLiteral(_) => Some(self.ast.ts_type_big_int_keyword(span)),
+            Expression::StringLiteral(_) => Some(self.ast.ts_type_string_keyword(span)),
+            Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
+                Some(self.ast.ts_type_string_keyword(span))
+            }
+            Expression::UnaryExpression(unary)
+                if unary.operator == UnaryOperator::UnaryNegation
+                    && matches!(unary.argument, Expression::NumericLiteral(_)) =>
+            {
+                Some(self.ast.ts_type_number_keyword(span))
+            }
+            _ => None,
+        }
+    }
+
     fn identifier(&self, name: &str) -> Expression<'a> {
         self.ast
             .expression_identifier(Span::default(), self.ast.ident(name))
@@ -4986,6 +5169,17 @@ impl<'a> VisitMut<'a> for DefaultTransformer<'a> {
             self.visit_ts_type_annotation(annotation);
         }
         if let Some(initializer) = &mut parameter.initializer {
+            if self.typescript
+                && outer.is_some()
+                && parameter.type_annotation.is_none()
+                && matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
+            {
+                let named = self.default_type(initializer);
+                if let Some(named) = named {
+                    parameter.type_annotation =
+                        Some(self.ast.alloc_ts_type_annotation(Span::default(), named));
+                }
+            }
             self.visit_expression(initializer);
             if let Some(target) = outer {
                 let value = initializer.take_in(self.ast.allocator);
@@ -9482,6 +9676,116 @@ mod tests {
         let rendered = format!("{error:?}");
         assert!(rendered.contains("no source comment matches"), "{rendered}");
         assert!(rendered.contains("matched 97 before it"), "{rendered}");
+    }
+
+    #[test]
+    fn a_wrapped_default_keeps_the_type_its_syntax_names() {
+        // Wrapped in a call, `strict = false` is no longer a default
+        // `isolatedDeclarations` can read a type from, and h3 failed with
+        // TS9011. The annotation says what was inferred before.
+        let source = concat!(
+            "export function f(a: number, strict = false, limit = 10, name = `x`, big = 1n, low = -1) { return a; }\n",
+            "export function g<E extends 'utf8' | false = 'utf8'>(encoding = 'utf8' as E, list = [1], kept: string = 'a') { return encoding; }\n",
+            "export const h = ({ open = false }, mode = 'x' as const) => open;\n",
+        );
+        let output = instrument_candidate(source, "src/defaults.ts").unwrap();
+        for annotated in [
+            "strict: boolean = ",
+            "limit: number = ",
+            "name: string = ",
+            "big: bigint = ",
+            "low: number = ",
+            "encoding: E = ",
+            "kept: string = ",
+        ] {
+            assert!(
+                output.code.contains(annotated),
+                "{annotated}\n{}",
+                output.code
+            );
+        }
+        // Nothing is said where the syntax names no type: an array, a
+        // destructured parameter, `as const`.
+        for bare in ["list = ", "mode = "] {
+            assert!(output.code.contains(bare), "{bare}\n{}", output.code);
+        }
+        assert!(!output.code.contains("list:"), "{}", output.code);
+        assert!(!output.code.contains("mode:"), "{}", output.code);
+        // A JavaScript file has no annotations to give.
+        let script = instrument_candidate(
+            "export function f(strict = false) { return strict; }\n",
+            "src/defaults.js",
+        )
+        .unwrap();
+        assert!(!script.code.contains("strict:"), "{}", script.code);
+    }
+
+    #[test]
+    fn an_asserted_assignment_target_is_printed_as_a_target() {
+        // `(buffer[0] as string) += child` came out as
+        // `buffer[0] as string += child`, which does not parse: two of hono's
+        // files could not be read by TypeScript or by a bundler.
+        let source = concat!(
+            "export function join(buffer: [unknown], child: string, n: { v?: number }) {\n",
+            "  ;(buffer[0] as string) += child\n",
+            "  ;(buffer[0] as string) = child\n",
+            "  ;(n.v as number)++\n",
+            "  ;(n.v satisfies number | undefined) = 1\n",
+            "  ;[(buffer[0] as string)] = [child]\n",
+            "  for ((buffer[0] as string) of [child]) {}\n",
+            "  return buffer\n",
+            "}\n",
+        );
+        let output = instrument_candidate(source, "src/targets.ts").unwrap();
+        assert!(!output.code.contains(" as string"), "{}", output.code);
+        assert!(!output.code.contains("satisfies"), "{}", output.code);
+        assert!(
+            output.code.contains("buffer[0] += child"),
+            "{}",
+            output.code
+        );
+        assert!(output.code.contains("n.v++"), "{}", output.code);
+        let allocator = Allocator::default();
+        let reparsed = Parser::new(&allocator, &output.code, SourceType::ts()).parse();
+        assert!(
+            reparsed.errors.is_empty(),
+            "{:?}\n{}",
+            reparsed.errors,
+            output.code
+        );
+    }
+
+    #[test]
+    fn a_comment_the_printer_moves_is_still_recognised() {
+        // The printer writes a `@__NO_SIDE_EFFECTS__` annotation after the
+        // documentation comment it stood before. The restore looked only
+        // forward for each printed comment, did not find the annotation, and
+        // zod's `v4/core/api.ts` could not be instrumented.
+        let source = concat!(
+            "// first\n",
+            "// @__NO_SIDE_EFFECTS__\n",
+            "/** documented\n */\n",
+            "export function f(a: number) {\n",
+            "  return a > 1 ? a : 0;\n",
+            "}\n",
+            "\n",
+            "// second\n",
+            "export type T = number;\n",
+        );
+        let output = instrument_candidate(source, "src/annotated.ts").unwrap();
+        for comment in [
+            "// first",
+            "// @__NO_SIDE_EFFECTS__",
+            "/** documented\n */",
+            "// second",
+        ] {
+            assert_eq!(
+                output.code.matches(comment).count(),
+                1,
+                "{comment}\n{}",
+                output.code
+            );
+        }
     }
 
     #[test]

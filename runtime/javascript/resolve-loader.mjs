@@ -1,4 +1,5 @@
-import { resolve as resolvePath } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 const GENERATED_TARGET = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const TARGET = process.env.SUPERCOV_PLAYWRIGHT_MODULE ??
@@ -24,6 +25,41 @@ function belongsToProject(parentURL) {
     const projectURL = pathToFileURL(PROJECT_ROOT).href.replace(/\/?$/, "/");
     const generatedURL = `${projectURL}.supercov/`;
     return (parentURL.startsWith(projectURL) && !parentURL.startsWith(generatedURL));
+}
+let typescriptRequireHook = false;
+export function initialize(data) {
+    typescriptRequireHook = data?.typescriptRequireHook === true;
+}
+const packageTypes = new Map();
+function packageType(directory) {
+    if (packageTypes.has(directory))
+        return packageTypes.get(directory);
+    let type;
+    try {
+        type = JSON.parse(readFileSync(resolvePath(directory, "package.json"), "utf8")).type ?? "commonjs";
+    }
+    catch {
+        const parent = dirname(directory);
+        type = parent === directory ? "commonjs" : packageType(parent);
+    }
+    packageTypes.set(directory, type);
+    return type;
+}
+// `node -r ts-node/register --test tests/a.test.ts` in a package without
+// `"type"` passed alone and failed here with ERR_MODULE_NOT_FOUND on an
+// extensionless import: the preload made Node load the entry point as an ES
+// module, past the require hook that compiles it. A TypeScript file of a
+// CommonJS package is given back to the CommonJS loader, where that hook is.
+function throughRequireHook(resolved) {
+    if (!typescriptRequireHook || !resolved?.url?.startsWith("file:") || resolved.url.includes("/node_modules/"))
+        return resolved;
+    if (!/\.(?:ts|tsx|cts)$/.test(resolved.url) || /\.d\.c?ts$/.test(resolved.url))
+        return resolved;
+    if (resolved.format === "module" || resolved.format === "module-typescript")
+        return resolved;
+    if (!resolved.url.endsWith(".cts") && packageType(dirname(fileURLToPath(resolved.url))) === "module")
+        return resolved;
+    return { ...resolved, format: "commonjs" };
 }
 export async function resolve(specifier, context, nextResolve) {
     // Some transpilers preserve the source-relative runtime import while moving
@@ -73,7 +109,7 @@ export async function resolve(specifier, context, nextResolve) {
         }
         return nextResolve(REPLACEMENT, context);
     }
-    return nextResolve(specifier, context);
+    return throughRequireHook(await nextResolve(specifier, context));
 }
 
 // Node's own test coverage filters files by `--test-coverage-include` and
