@@ -805,7 +805,6 @@ pub fn create_run_integrity(
             ("executionShim", frontend_execution.as_bytes()),
         ],
     );
-    let build_environment = frontend_map_bytes(&project.build_environment);
     // `execution` describes the run's setup, not who instrumented it. Supercov's
     // own source used to be folded in here as well, so upgrading Supercov made
     // every stored run stale for a checkout that had not changed. Its identity
@@ -819,7 +818,10 @@ pub fn create_run_integrity(
             ("source", source.as_bytes()),
             ("dependencies", dependency_digest.as_bytes()),
             ("configuration", configuration_digest.as_bytes()),
-            ("buildEnvironment", &build_environment),
+            // Supercov once inferred settings for a build it ran. The field
+            // stays in the hash, empty, so a run stored before still compares
+            // equal to the same checkout now.
+            ("buildEnvironment", &[]),
         ],
     );
     let combined = domain_hash(
@@ -952,17 +954,6 @@ pub fn create_explicit_run_integrity(
         stale: None,
         stale_reasons: None,
     })
-}
-
-fn frontend_map_bytes(values: &std::collections::BTreeMap<String, String>) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for (key, value) in values {
-        bytes.extend_from_slice(&key.len().to_le_bytes());
-        bytes.extend_from_slice(key.as_bytes());
-        bytes.extend_from_slice(&value.len().to_le_bytes());
-        bytes.extend_from_slice(value.as_bytes());
-    }
-    bytes
 }
 
 #[cfg(test)]
@@ -1475,21 +1466,13 @@ mod tests {
         let mut environment = BTreeMap::new();
         environment.insert("SUPERCOV_SOURCE_ROOTS".into(), "src,packages/ui/src".into());
         let project = discover_coverage_project(&root, &environment, &[]).unwrap();
-        let mut project_with_build_environment = project.clone();
-        project_with_build_environment
-            .build_environment
-            .insert("MODE".into(), "test".into());
-        let changed =
-            create_run_integrity(&root, &project_with_build_environment, &frontend(&shim)).unwrap();
         let baseline = create_run_integrity(&root, &project, &frontend(&shim)).unwrap();
-        assert_ne!(
-            baseline.fingerprint.execution,
-            changed.fingerprint.execution
-        );
-        assert_eq!(baseline.fingerprint.combined, changed.fingerprint.combined);
-        assert_eq!(
-            compare_run_integrity(Some(&baseline), &changed).reasons,
-            ["execution environment changed"]
+        let again = create_run_integrity(&root, &project, &frontend(&shim)).unwrap();
+        assert_eq!(baseline.fingerprint.execution, again.fingerprint.execution);
+        assert!(
+            compare_run_integrity(Some(&baseline), &again)
+                .reasons
+                .is_empty()
         );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(shim).unwrap();

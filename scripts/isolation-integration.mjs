@@ -376,10 +376,6 @@ const storedRunsRoot = resolve(root, ".supercov/runs");
 const storedRunsBefore = new Set(
   existsSync(storedRunsRoot) ? readdirSync(storedRunsRoot) : [],
 );
-// Deliberately an opaque runner rather than `test:unit`: Vitest transforms
-// source in-process, so Supercov correctly skips the project's production
-// build for it, and a skipped build has no instrumented artifacts to reuse.
-// Build-cache reuse is only meaningful for a command that actually builds.
 const successful = spawnSync(
   process.execPath,
   [launcher, "--", "npm", "run", "test:opaque"],
@@ -405,12 +401,9 @@ const publishedFiles = new Set(
 const publishedMetadata = JSON.parse(
   readFileSync(resolve(storedRunsRoot, publishedRuns[0], "run.json"), "utf8"),
 );
-if (publishedMetadata.instrumentedBuildCache?.reused !== true)
-  throw new Error("unchanged source did not reuse the exact-fingerprint build");
-if (publishedMetadata.timings?.instrumentedBuildMs > 10)
-  throw new Error(
-    `reused build still spent ${publishedMetadata.timings?.instrumentedBuildMs}ms in the build phase`,
-  );
+// Supercov runs the command and no build of its own.
+if (publishedMetadata.timings?.instrumentedBuildMs !== 0)
+  throw new Error("Supercov ran a build the command did not ask for");
 for (const required of [
   "evidence.raw.gz",
   "run.json",

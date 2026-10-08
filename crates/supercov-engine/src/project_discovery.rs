@@ -8,13 +8,11 @@ use std::{
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, BinaryExpression, CallExpression, Expression,
-    ImportDeclarationSpecifier, ImportExpression, ImportOrExportKind, Program, Statement,
-    StaticMemberExpression,
+    Argument, ArrayExpressionElement, CallExpression, Expression, ImportDeclarationSpecifier,
+    ImportExpression, ImportOrExportKind, Program, Statement,
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
-use oxc_syntax::operator::BinaryOperator;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -52,17 +50,6 @@ const JEST_CONFIGS: &[&str] = &[
     "jest.config.cjs",
 ];
 const TEST_DIRECTORIES: &[&str] = &["test", "tests", "e2e", "spec", "specs"];
-const GENERIC_COMMAND_TERMS: &[&str] = &[
-    "bin", "bun", "exec", "node", "npm", "pnpm", "run", "script", "test", "tests", "yarn",
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BuildAdapter {
-    Vite,
-    Generic,
-    Direct,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -84,17 +71,14 @@ pub struct CoverageProject {
     /// script-style file carries the runtime the page otherwise lacks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub browser_runner: bool,
-    /// The build compiles each source into another directory -- tsc, tshy,
-    /// babel, swc -- where a later step may bundle the output, so an
-    /// instrumented source imports the runtime by absolute path.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub relocating_build: bool,
     pub playwright_module: String,
     pub playwright_test_export: String,
     pub playwright_exports: Vec<String>,
-    pub build_adapter: BuildAdapter,
-    pub build_command: Vec<String>,
-    pub build_environment: BTreeMap<String, String>,
+    /// The project's build, when the tests may need its output and the
+    /// command does not run it: what a failed run names. Supercov runs the
+    /// command it is given and no build of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrun_build: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -408,15 +392,6 @@ pub fn expanded_command(root: &Path, command: &[String]) -> String {
     joined
 }
 
-fn words(value: &str) -> BTreeSet<String> {
-    value
-        .to_ascii_lowercase()
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|word| word.len() > 1 && !GENERIC_COMMAND_TERMS.contains(word))
-        .map(str::to_owned)
-        .collect()
-}
-
 fn relative_build_output(source: &str) -> bool {
     let mut rest = source;
     let mut relative = false;
@@ -617,123 +592,6 @@ fn tests_require_build_output(root: &Path, manifest: &Value) -> bool {
         .any(|directory| visit(&root.join(directory), &build_output_scripts))
 }
 
-fn identifier(expression: &Expression<'_>, name: &str) -> bool {
-    matches!(expression, Expression::Identifier(identifier) if identifier.name == name)
-}
-
-fn static_process_env(member: &StaticMemberExpression<'_>) -> bool {
-    member.property.name == "env" && identifier(&member.object, "process")
-}
-
-fn environment_reference(expression: &Expression<'_>) -> Option<String> {
-    match expression {
-        Expression::StaticMemberExpression(member) => {
-            let Expression::StaticMemberExpression(object) = &member.object else {
-                return None;
-            };
-            static_process_env(object).then(|| member.property.name.to_string())
-        }
-        Expression::ComputedMemberExpression(member) => {
-            let Expression::StaticMemberExpression(object) = &member.object else {
-                return None;
-            };
-            let Expression::StringLiteral(property) = &member.expression else {
-                return None;
-            };
-            static_process_env(object).then(|| property.value.to_string())
-        }
-        _ => None,
-    }
-}
-
-#[derive(Default)]
-struct BuildEnvironmentScanner {
-    values: BTreeMap<String, String>,
-}
-
-impl<'a> Visit<'a> for BuildEnvironmentScanner {
-    fn visit_binary_expression(&mut self, expression: &BinaryExpression<'a>) {
-        if matches!(
-            expression.operator,
-            BinaryOperator::Equality | BinaryOperator::StrictEquality
-        ) && let Some(name) = environment_reference(&expression.left)
-            && name
-                .bytes()
-                .next()
-                .is_some_and(|byte| byte.is_ascii_uppercase())
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-            && let Some(value) = string_expression(&expression.right)
-        {
-            self.values.insert(name, value.into());
-        }
-        walk::walk_binary_expression(self, expression);
-    }
-}
-
-fn referenced_build_environment(root: &Path) -> BTreeMap<String, String> {
-    let Ok(entries) = read_directory(root) else {
-        return BTreeMap::new();
-    };
-    let mut values = BTreeMap::new();
-    for entry in entries {
-        let path = entry.path();
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if !entry.file_type().is_ok_and(|file_type| file_type.is_file())
-            || !["vite", "webpack", "rollup", "remix", "next", "nuxt"]
-                .iter()
-                .any(|tool| name.starts_with(&format!("{tool}.config.")))
-            || !source_file(&path)
-        {
-            continue;
-        }
-        let Ok(source) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let allocator = Allocator::default();
-        let Some(program) = parse_program(&allocator, &path, &source) else {
-            continue;
-        };
-        let mut scanner = BuildEnvironmentScanner::default();
-        scanner.visit_program(&program);
-        values.extend(scanner.values);
-    }
-    values
-}
-
-fn infer_build_environment(
-    root: &Path,
-    command: &[String],
-    environment: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let command_words = words(&expanded_command(root, command));
-    if command_words.is_empty() {
-        return BTreeMap::new();
-    }
-    let mut values = referenced_build_environment(root)
-        .into_iter()
-        .filter(|(name, _)| {
-            !environment.contains_key(name)
-                && words(name).iter().any(|word| command_words.contains(word))
-        })
-        .collect::<BTreeMap<_, _>>();
-    // These overrides affect TypeScript emission and must participate in run
-    // and frontend-cache identity even when no build script references them.
-    for name in [
-        "TS_NODE_COMPILER_OPTIONS",
-        "TS_NODE_PROJECT",
-        "TSX_TSCONFIG_PATH",
-    ] {
-        if let Some(value) = environment.get(name) {
-            values.insert(name.into(), value.clone());
-        }
-    }
-    values
-}
-
 fn command_tokens(value: &str) -> Vec<String> {
     value
         .split_whitespace()
@@ -816,29 +674,6 @@ fn build_package_manager(command: &[String]) -> String {
         .unwrap_or_else(|| "npm".into())
 }
 
-/// The build a project names in `SUPERCOV_BUILD_COMMAND`, as words or as a
-/// JSON array of arguments.
-///
-/// A monorepo's root `build` builds every package: Actual's ran `lage build`
-/// across the repository when its browser tests needed one target. Naming
-/// the build, such as `yarn workspace @actual-app/web build`, is the answer
-/// no discovery can give, because which target a suite needs is not written
-/// down anywhere Supercov reads.
-pub fn declared_build_command(environment: &BTreeMap<String, String>) -> Option<Vec<String>> {
-    let value = environment.get(BUILD_COMMAND_VARIABLE)?.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if value.starts_with('[') {
-        return serde_json::from_str::<Vec<String>>(value)
-            .ok()
-            .filter(|words| !words.is_empty());
-    }
-    Some(value.split_whitespace().map(str::to_owned).collect())
-}
-
-pub const BUILD_COMMAND_VARIABLE: &str = "SUPERCOV_BUILD_COMMAND";
-
 pub fn discover_coverage_project(
     root: &Path,
     environment: &BTreeMap<String, String>,
@@ -901,18 +736,24 @@ pub fn discover_coverage_project(
     let executes_source_directly = (source_transforming_runner
         || (node_test && typescript_test && !owns_build))
         && !tests_require_build_output(root, &manifest);
-    let build_command = if let Some(declared) = declared_build_command(environment) {
-        declared
-    } else if script(&manifest, "build").is_some() && !executes_source_directly {
+    // Supercov runs the command it is given and no build of its own. It used
+    // to run the project's `build` script first whenever the tests might
+    // need its output: twenty seconds nobody asked for before a suite that
+    // builds the application itself, in two of five popular repositories,
+    // and a run cancelled when that build failed. The build is only what a
+    // failed run names, when the command does not already reach it.
+    let build_script = script(&manifest, "build")
+        .map(command_tokens)
+        .unwrap_or_default();
+    let command_builds = !build_script.is_empty()
+        && build_script
+            .iter()
+            .all(|token| script_tokens.contains(token));
+    let unrun_build = if !build_script.is_empty() && !command_builds && !executes_source_directly {
         vec![build_package_manager(command), "run".into(), "build".into()]
     } else {
         Vec::new()
     };
-    let build_tokens = command_tokens(&expanded_command(root, &build_command));
-    let relocating_build = ["tsc", "tshy", "babel", "swc"]
-        .iter()
-        .any(|tool| has_tool(&reachable_script_tokens(&manifest, &build_tokens), tool));
-    let uses_vite_build = has_tool(&build_tokens, "vite") || has_tool(&build_tokens, "vite-node");
     let playwright_exports = if playwright_module == discovered_playwright.module {
         discovered_playwright.exports
     } else {
@@ -929,19 +770,10 @@ pub fn discover_coverage_project(
         jest_config,
         uses_jest,
         browser_runner,
-        relocating_build,
         playwright_module,
         playwright_test_export,
         playwright_exports,
-        build_adapter: if build_command.is_empty() {
-            BuildAdapter::Direct
-        } else if uses_vite_build {
-            BuildAdapter::Vite
-        } else {
-            BuildAdapter::Generic
-        },
-        build_command,
-        build_environment: infer_build_environment(root, command, environment),
+        unrun_build,
     })
 }
 
@@ -1004,43 +836,10 @@ mod tests {
         assert_eq!(discovered.playwright_module, "@playwright/test");
         assert_eq!(discovered.playwright_test_export, "test");
         assert_eq!(discovered.playwright_exports, ["test"]);
-        assert_eq!(discovered.build_adapter, BuildAdapter::Vite);
-        assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
+        // The command runs as given: the project\'s build is only what a
+        // failed run names.
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_build_that_compiles_into_another_directory_is_told_from_a_bundler() {
-        // lru-cache: `npm run build` runs `npm run prepare`, which runs tshy.
-        let relocating = project(
-            "tshy",
-            &[
-                (
-                    "package.json",
-                    r#"{"scripts":{"build":"npm run prepare","prepare":"tshy && bash scripts/build.sh","test":"tap"}}"#,
-                ),
-                ("src/index.ts", "export const ready = true"),
-            ],
-        );
-        let command = ["npm".to_owned(), "test".to_owned()];
-        let discovered =
-            discover_coverage_project(&relocating, &BTreeMap::new(), &command).unwrap();
-        assert!(discovered.relocating_build);
-        let bundled = project(
-            "next-build",
-            &[
-                (
-                    "package.json",
-                    r#"{"scripts":{"build":"next build","test":"playwright test"}}"#,
-                ),
-                (
-                    "app/page.jsx",
-                    "export default function Page() { return null }",
-                ),
-            ],
-        );
-        let discovered = discover_coverage_project(&bundled, &BTreeMap::new(), &command).unwrap();
-        assert!(!discovered.relocating_build);
     }
 
     #[test]
@@ -1091,14 +890,13 @@ mod tests {
             let discovered =
                 discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"]))
                     .unwrap();
-            assert_eq!(discovered.build_adapter, BuildAdapter::Direct, "{label}");
-            assert!(discovered.build_command.is_empty(), "{label}");
+            assert!(discovered.unrun_build.is_empty(), "{label}");
             fs::remove_dir_all(root).unwrap();
         }
     }
 
     #[test]
-    fn builds_with_the_package_manager_the_tests_were_started_with() {
+    fn names_the_build_with_the_package_manager_the_tests_were_started_with() {
         let root = project(
             "yarn-build",
             &[
@@ -1113,52 +911,12 @@ mod tests {
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["yarn", "test"]))
                 .unwrap();
-        assert_eq!(discovered.build_command, command(&["yarn", "run", "build"]));
+        assert_eq!(discovered.unrun_build, command(&["yarn", "run", "build"]));
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn a_declared_build_replaces_the_root_one() {
-        // Actual's root build is `lage build` across the monorepo; its
-        // browser tests need one workspace built.
-        let root = project(
-            "declared-build",
-            &[
-                (
-                    "package.json",
-                    r#"{"scripts":{"build":"lage build","test":"playwright test"}}"#,
-                ),
-                ("src/index.ts", "export const ready = true"),
-            ],
-        );
-        for (value, expected) in [
-            (
-                "yarn workspace @actual-app/web build",
-                command(&["yarn", "workspace", "@actual-app/web", "build"]),
-            ),
-            (
-                r#"["node", ".yarn/releases/yarn-4.cjs", "workspace", "web", "build"]"#,
-                command(&[
-                    "node",
-                    ".yarn/releases/yarn-4.cjs",
-                    "workspace",
-                    "web",
-                    "build",
-                ]),
-            ),
-        ] {
-            let environment = BTreeMap::from([(BUILD_COMMAND_VARIABLE.into(), value.into())]);
-            let discovered =
-                discover_coverage_project(&root, &environment, &command(&["yarn", "test"]))
-                    .unwrap();
-            assert_eq!(discovered.build_command, expected);
-            assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
-        }
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn retains_the_build_when_tests_import_compiled_output() {
+    fn names_the_build_when_tests_import_compiled_output() {
         let root = project(
             "compiled",
             &[
@@ -1172,13 +930,13 @@ mod tests {
         );
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
-        assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
         assert!(discovered.uses_jest);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn retains_the_build_when_source_direct_tests_spawn_a_compiled_package_script() {
+    fn names_the_build_when_source_direct_tests_spawn_a_compiled_package_script() {
         let root = project(
             "spawned-compiled-script",
             &[
@@ -1195,13 +953,12 @@ mod tests {
         );
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
-        assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
-        assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn retains_the_build_when_tests_exec_a_compiled_package_script_as_one_string() {
+    fn names_the_build_when_tests_exec_a_compiled_package_script_as_one_string() {
         // `execSync("npm run start")` hands the shell a single string. It is
         // how most suites start the server they test against, and the
         // array-only match let it through to the same hang as an unbuilt
@@ -1222,8 +979,7 @@ mod tests {
         );
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
-        assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
-        assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1245,8 +1001,7 @@ mod tests {
         );
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
-        assert_eq!(discovered.build_adapter, BuildAdapter::Direct);
-        assert!(discovered.build_command.is_empty());
+        assert!(discovered.unrun_build.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1286,35 +1041,6 @@ mod tests {
                 "expect",
                 "fixtureValue"
             ]
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn infers_only_unset_build_flags_referenced_by_the_project_ast() {
-        let root = project(
-            "environment",
-            &[
-                (
-                    "package.json",
-                    r#"{"scripts":{"build":"vite build","test:isolated":"node tools/run.js"}}"#,
-                ),
-                ("app/root.ts", "export const ready = true"),
-                (
-                    "vite.config.ts",
-                    "const isolated = process.env.TEST_ISOLATED === 'true'; const bracket = process.env['TEST_BRACKET'] == \"yes\"; const ignored = 'x' === process.env.REVERSED; export default { isolated, bracket, ignored }",
-                ),
-            ],
-        );
-        let discovered = discover_coverage_project(
-            &root,
-            &BTreeMap::new(),
-            &command(&["npm", "run", "test:isolated"]),
-        )
-        .unwrap();
-        assert_eq!(
-            discovered.build_environment,
-            BTreeMap::from([("TEST_ISOLATED".into(), "true".into())])
         );
         fs::remove_dir_all(root).unwrap();
     }

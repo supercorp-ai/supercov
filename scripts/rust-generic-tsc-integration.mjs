@@ -116,7 +116,9 @@ try {
 
   const run = rust('__run-js-direct', {
     root: project,
-    command: ['npm', 'test'],
+    // The tests read `dist/`, so the command builds it: Supercov runs the
+    // command and no build of its own.
+    command: ['sh', '-c', 'npm run build && npm test'],
     runId: 'rust-generic-tsc',
     startedAt: '2026-08-25T00:00:07.000Z',
   });
@@ -124,7 +126,7 @@ try {
   // One call site in the table-driven loop, one per narrowing test.
   assert.equal(run.assertionCalls, 3);
   assert.equal(readFileSync(resolve(project, 'src/permission.ts'), 'utf8'), application);
-  assert.ok(run.metadata.timings.instrumentedBuildMs > 0);
+  assert.equal(run.metadata.timings.instrumentedBuildMs, 0);
   const summary = rust('__query-stored-run', {
     root: project,
     query: {

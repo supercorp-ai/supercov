@@ -9,7 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::lifecycle::{LifecycleError, ProjectLock, atomic_rename, remove_stored_tree_deferred};
@@ -42,7 +42,6 @@ pub enum WorkspaceError {
     UnsupportedEntry(PathBuf),
     MissingLock,
     Lifecycle(LifecycleError),
-    InvalidCacheMetadata(serde_json::Error),
     UnsupportedPlatform(&'static str),
 }
 
@@ -65,9 +64,6 @@ impl std::fmt::Display for WorkspaceError {
                 "isolated workspace preparation requires the active project lock"
             ),
             Self::Lifecycle(error) => write!(formatter, "{error}"),
-            Self::InvalidCacheMetadata(error) => {
-                write!(formatter, "invalid build-cache metadata: {error}")
-            }
             Self::UnsupportedPlatform(reason) => {
                 write!(formatter, "unsupported workspace platform: {reason}")
             }
@@ -1091,31 +1087,6 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
     result
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BuildCacheMetadata {
-    #[serde(default)]
-    artifact_paths: Vec<String>,
-}
-
-fn retain_cached_artifact_roots(
-    keep: &mut BTreeSet<String>,
-    artifact_paths: impl IntoIterator<Item = String>,
-) {
-    for artifact in artifact_paths {
-        if let Some(top) = Path::new(&artifact)
-            .components()
-            .next()
-            .and_then(|component| match component {
-                Component::Normal(value) => value.to_str(),
-                _ => None,
-            })
-        {
-            keep.insert(top.into());
-        }
-    }
-}
-
 /// The state of every regular file in the mirror the moment before the
 /// wrapped command starts: relative path to (length, modified time). Cheap to
 /// take (stat only) and precise enough to attribute changes to the command.
@@ -1586,10 +1557,14 @@ fn unaccompanied_install_manifest(root: &Path, workspace: &Path, relative: &Path
 /// names the generated runtime, which lives only inside a workspace, or it is
 /// compiled code that calls the probes. A bundler that inlines the runtime
 /// leaves no path to it in a chunk (Turbopack's name it only in their source
-/// maps), but the probe calls are still there.
+/// maps), but the probe calls are still there. A minifier renames the
+/// probes' local names and cannot rename the global they are read from: a
+/// Vite production build of the instrumented copy held none of the first
+/// two, and was synced over the project's `dist/`.
 fn built_from_instrumented_source(path: &Path, compiled: bool) -> Result<bool, WorkspaceError> {
     const RUNTIME: &[u8] = b".supercov/node_modules/";
     const PROBE: &[u8] = b"__supercov";
+    const GLOBAL: &[u8] = b"__SUPERCOV_DIRECT_RUNTIME__";
     let contents = match fs::read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -1600,7 +1575,7 @@ fn built_from_instrumented_source(path: &Path, compiled: bool) -> Result<bool, W
             .windows(marker.len())
             .any(|window| window == marker)
     };
-    Ok(holds(RUNTIME) || (compiled && holds(PROBE)))
+    Ok(holds(RUNTIME) || (compiled && (holds(PROBE) || holds(GLOBAL))))
 }
 
 pub fn prune_cached_workspace_sources(
@@ -1612,13 +1587,7 @@ pub fn prune_cached_workspace_sources(
     if fs::symlink_metadata(&workspace).is_err() {
         return Ok(Vec::new());
     }
-    let mut keep = BTreeSet::from(["node_modules".to_owned(), ".supercov".to_owned()]);
-    let metadata_path = workspace.join(".supercov/build-cache.json");
-    if let Ok(bytes) = fs::read(&metadata_path) {
-        let metadata: BuildCacheMetadata =
-            serde_json::from_slice(&bytes).map_err(WorkspaceError::InvalidCacheMetadata)?;
-        retain_cached_artifact_roots(&mut keep, metadata.artifact_paths);
-    }
+    let keep = BTreeSet::from(["node_modules".to_owned(), ".supercov".to_owned()]);
     let mut removed = Vec::new();
     for entry in fs::read_dir(&workspace).map_err(|error| io_error(&workspace, error))? {
         let entry = entry.map_err(|error| io_error(&workspace, error))?;
@@ -1957,6 +1926,44 @@ mod tests {
         assert_eq!(sync.skipped_instrumented.len(), 2);
         assert_eq!(
             fs::read_to_string(root.join(".next/BUILD_ID")).unwrap(),
+            "mine\n"
+        );
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_minified_build_of_the_instrumented_copy_stays_in_the_workspace() {
+        let (root, workspace) = writeback_fixture("built-minified");
+        let initialized = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        if !initialized.status.success() {
+            fs::remove_dir_all(root.parent().unwrap()).unwrap();
+            return;
+        }
+        fs::write(root.join(".gitignore"), "dist\n").unwrap();
+        fs::create_dir_all(root.join("dist")).unwrap();
+        fs::write(root.join("dist/index.html"), "mine\n").unwrap();
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("dist/assets")).unwrap();
+        fs::write(
+            workspace.join("dist/assets/index-DzZxFCVp.js"),
+            // A minifier renames each probe's local name. The global they
+            // are read from is a property name, which it leaves.
+            "const e=globalThis.__SUPERCOV_DIRECT_RUNTIME__.coverageHitV2;e(t,0);\n",
+        )
+        .unwrap();
+        fs::write(workspace.join("dist/index.html"), "instrumented\n").unwrap();
+
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+
+        assert_eq!(sync.synced, 0);
+        assert_eq!(sync.skipped_instrumented.len(), 2);
+        assert_eq!(
+            fs::read_to_string(root.join("dist/index.html")).unwrap(),
             "mine\n"
         );
         fs::remove_dir_all(root.parent().unwrap()).unwrap();

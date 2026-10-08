@@ -126,14 +126,16 @@ try {
 
   const run = rust('__run-js-direct', {
     root: project,
-    command: ['npm', 'test'],
+    // The suite serves what `vite build` made, so the command builds it:
+    // Supercov runs the command and no build of its own.
+    command: ['sh', '-c', 'npm run build && npm test'],
     runId: 'rust-vite-playwright',
     startedAt: '2026-08-25T00:00:04.000Z',
   });
   assert.equal(run.exitCode, 0, run.output);
   assert.equal(run.assertionCalls, 1);
   assert.equal(readFileSync(resolve(project, 'src/app.js'), 'utf8'), application);
-  assert.ok(run.metadata.timings.instrumentedBuildMs > 0);
+  assert.equal(run.metadata.timings.instrumentedBuildMs, 0);
   const summary = rust('__query-stored-run', {
     root: project,
     query: {

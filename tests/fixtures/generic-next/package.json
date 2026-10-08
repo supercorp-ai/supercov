@@ -4,6 +4,6 @@
   "type": "module",
   "scripts": {
     "build": "next build",
-    "test": "node --test"
+    "test": "next build && node --test"
   }
 }
