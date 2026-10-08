@@ -42,8 +42,7 @@ and the instrumented copy is not what you wrote:
   (a report, a cache) is the command's output like any other. A change it
   makes to a source file (`--write`, `--fix`) is not applied during a measured
   run, and the run says so. To have another tool that reads source as text run
-  the same way, name it: `SUPERCOV_SOURCE_TOOLS=typos,stylelint`. On Windows
-  these tools still read the instrumented copy.
+  the same way, name it: `SUPERCOV_SOURCE_TOOLS=typos,stylelint`.
 - Coverage tools the command runs itself (tap, c8, nyc, Jest's and Vitest's
   `--coverage`) still collect and report coverage. They measure the
   instrumented copy, and report close to what they report without Supercov,

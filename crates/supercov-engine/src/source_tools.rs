@@ -53,7 +53,7 @@ pub fn source_tools() -> BTreeSet<String> {
     tools
 }
 
-/// The launcher that stands in for `tool` in the workspace's `.bin`.
+/// The launcher that stands in for `tool` where a shell starts it.
 pub fn launcher(binary: &Path, tool: &Path) -> String {
     let quoted = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
     format!(
@@ -68,35 +68,149 @@ pub fn launcher(binary: &Path, tool: &Path) -> String {
     )
 }
 
+/// The same for `cmd.exe`, which is what npm runs a script with on Windows.
+fn command_launcher(binary: &Path, tool: &Path) -> String {
+    format!(
+        "@ECHO off\r\n\"{}\" {SOURCE_TOOL_COMMAND} \"{}\" %*\r\n",
+        binary.display(),
+        tool.display()
+    )
+}
+
+/// The same for PowerShell.
+fn powershell_launcher(binary: &Path, tool: &Path) -> String {
+    let quoted = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "''"));
+    format!(
+        "& {} {SOURCE_TOOL_COMMAND} {} @args\r\nexit $LASTEXITCODE\r\n",
+        quoted(binary),
+        quoted(tool)
+    )
+}
+
+/// What stands in a workspace's `.bin` for the file `name` of the project's
+/// `.bin` at `tools`, when that file starts a tool that judges source.
+///
+/// On Windows a tool is three files: the shim `cmd.exe` runs, one for
+/// PowerShell and one for a POSIX shell. Each gets a launcher in its own
+/// language, and all three run the `.cmd`.
+pub fn launcher_for(
+    judges: &BTreeSet<String>,
+    binary: &Path,
+    tools: &Path,
+    name: &OsStr,
+) -> Option<String> {
+    launcher_on(cfg!(windows), judges, binary, tools, name)
+}
+
+fn launcher_on(
+    windows: bool,
+    judges: &BTreeSet<String>,
+    binary: &Path,
+    tools: &Path,
+    name: &OsStr,
+) -> Option<String> {
+    let name = name.to_str()?;
+    if windows {
+        let (tool, kind) = match name.rsplit_once('.') {
+            Some((tool, extension)) if extension.eq_ignore_ascii_case("cmd") => (tool, 1),
+            Some((tool, extension)) if extension.eq_ignore_ascii_case("ps1") => (tool, 2),
+            _ => (name, 0),
+        };
+        if !judges.contains(tool) {
+            return None;
+        }
+        let shim = tools.join(format!("{tool}.cmd"));
+        return shim.is_file().then(|| match kind {
+            1 => command_launcher(binary, &shim),
+            2 => powershell_launcher(binary, &shim),
+            _ => launcher(binary, &shim),
+        });
+    }
+    judges
+        .contains(name)
+        .then(|| launcher(binary, &tools.join(name)))
+}
+
+/// This binary, by a path a shell and `cmd.exe` can both be given.
+pub fn launching_binary() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(crate::workspace::simplified)
+}
+
+/// Write a launcher where `path` is, replacing what is there. Never through
+/// it: in a workspace whose dependencies are hard links, the file there is
+/// the project's own.
+pub fn write_launcher(path: &Path, text: &str) -> io::Result<()> {
+    remove(path)?;
+    fs::write(path, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// Put launchers in a `.bin` the workspace already has as a directory of its
+/// own, which is how a workspace package's dependencies are laid out: for
+/// each source tool the project's `.bin` at `tools` has, in place of the
+/// entry the copy at `to` has for it.
+pub fn place_launchers(tools: &Path, to: &Path) -> io::Result<()> {
+    let judges = source_tools();
+    let (Some(binary), Ok(entries)) = (launching_binary(), fs::read_dir(tools)) else {
+        return Ok(());
+    };
+    if !fs::symlink_metadata(to).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        return Ok(());
+    }
+    for entry in entries {
+        let name = entry?.file_name();
+        if let Some(text) = launcher_for(&judges, &binary, tools, &name) {
+            write_launcher(&to.join(&name), &text)?;
+        }
+    }
+    Ok(())
+}
+
 /// PATH for the test command with launchers first for the source tools it
 /// has: a package manager's script finds a project's own tool in the
 /// workspace's `.bin`, but `supercov -- biome check`, and a tool installed
 /// for the whole machine, are found here. A name that is not on PATH gets no
 /// launcher, so a script that asks whether a tool is installed hears what it
 /// heard.
-#[cfg(unix)]
 pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
-    use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH")?;
-    let binary = std::env::current_exe().ok()?;
+    let binary = launching_binary()?;
     let directory = workspace.join(".supercov/node_modules/.tools");
     remove(&directory).ok()?;
+    // The forms a tool is installed in, in the order the system tries them,
+    // and the launcher that answers to the name.
+    let forms: &[&str] = if cfg!(windows) {
+        &[".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
     let mut found = false;
     for name in source_tools() {
         let Some(tool) = std::env::split_paths(&path)
-            .map(|directory| directory.join(&name))
-            .find(|candidate| {
-                fs::metadata(candidate).is_ok_and(|metadata| {
-                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
-                })
+            .flat_map(|directory| {
+                forms
+                    .iter()
+                    .map(|form| directory.join(format!("{name}{form}")))
+                    .collect::<Vec<_>>()
             })
+            .find(|candidate| executable(candidate))
         else {
             continue;
         };
-        let link = directory.join(&name);
         fs::create_dir_all(&directory).ok()?;
-        fs::write(&link, launcher(&binary, &tool)).ok()?;
-        fs::set_permissions(&link, fs::Permissions::from_mode(0o755)).ok()?;
+        if cfg!(windows) {
+            let launcher = command_launcher(&binary, &tool);
+            write_launcher(&directory.join(format!("{name}.cmd")), &launcher).ok()?;
+        } else {
+            write_launcher(&directory.join(&name), &launcher(&binary, &tool)).ok()?;
+        }
         found = true;
     }
     if !found {
@@ -105,9 +219,16 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
     std::env::join_paths(std::iter::once(directory).chain(std::env::split_paths(&path))).ok()
 }
 
+#[cfg(unix)]
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
 #[cfg(not(unix))]
-pub fn path_with_launchers(_workspace: &Path) -> Option<OsString> {
-    None
+fn executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Where the source view of a workspace is kept: beside the directory that
@@ -142,28 +263,26 @@ fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
+/// Where a file's identity is not to be had, two hard links to one file are
+/// told by what they share: its length and the moment it was last written.
 #[cfg(not(unix))]
-fn same_file(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
-    false
+fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.len() == right.len()
+        && left.modified().is_ok()
+        && left.modified().ok() == right.modified().ok()
 }
 
-#[cfg(unix)]
-fn link_directory(target: &Path, link: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(not(unix))]
-fn link_directory(_target: &Path, _link: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "a source view needs symbolic links",
-    ))
+/// A link at `link` to `target`: a symbolic link, or on Windows a junction
+/// for a directory, which needs no privilege.
+fn link_to(target: &Path, link: &Path) -> io::Result<()> {
+    crate::workspace::create_link(target, link, target.is_dir())
 }
 
 fn remove(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
+        // A link to a directory is removed as a directory on Windows.
+        Ok(_) => fs::remove_file(path).or_else(|_| fs::remove_dir(path)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
@@ -175,7 +294,7 @@ fn point(link: &Path, target: &Path) -> io::Result<()> {
         return Ok(());
     }
     remove(link)?;
-    link_directory(target, link)
+    link_to(target, link)
 }
 
 /// Make the file at `to` the file at `from`.
@@ -341,7 +460,7 @@ fn reconcile_directory(
             && fs::symlink_metadata(&to).is_err()
             && let Ok(target) = fs::read_link(&from)
         {
-            link_directory(&target, &to)?;
+            link_to(&target, &to)?;
         }
     }
     Ok(())
@@ -384,9 +503,11 @@ pub fn run_source_tool(tool: &Path, arguments: &[OsString]) -> i32 {
     let Some(named) = std::env::var_os("SUPERCOV_PROJECT_ROOT").map(PathBuf::from) else {
         return run_as_is();
     };
+    // By paths a child process can be started in: Windows' own canonical
+    // form is one `cmd.exe` refuses as a working directory.
     let (Ok(workspace), Ok(directory)) = (
-        fs::canonicalize(&named),
-        std::env::current_dir().and_then(fs::canonicalize),
+        crate::workspace::canonicalize_simplified(&named),
+        std::env::current_dir().and_then(crate::workspace::canonicalize_simplified),
     ) else {
         return run_as_is();
     };
@@ -424,7 +545,9 @@ pub fn run_source_tool(tool: &Path, arguments: &[OsString]) -> i32 {
         // workspace is Supercov's, the preload in NODE_OPTIONS included, and
         // belongs to the workspace still.
         let name_text = name.to_string_lossy();
-        if matches!(&*name_text, "PWD" | "OLDPWD" | "INIT_CWD" | "PATH")
+        if ["PWD", "OLDPWD", "INIT_CWD", "PATH"]
+            .iter()
+            .any(|location| name_text.eq_ignore_ascii_case(location))
             || name_text.starts_with("npm_")
         {
             let translated = in_view(&value, &names, &view);
@@ -582,6 +705,85 @@ mod tests {
             text.contains("exec '/opt/it'\\''s here/supercov' __source-tool '/work/app/node_modules/.bin/biome' \"$@\"\n"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_windows_tool_gets_a_launcher_for_each_of_its_shims() {
+        // npm writes three files for a tool on Windows: one `cmd.exe` runs,
+        // one for PowerShell, one for a POSIX shell. Each is replaced in its
+        // own language, and each runs the `.cmd`.
+        let (workspace, ..) = workspace();
+        let tools = workspace.join("node_modules/.bin");
+        for file in ["biome", "biome.cmd", "biome.ps1", "jest.cmd"] {
+            fs::write(tools.join(file), "").unwrap();
+        }
+        let judges = BTreeSet::from(["biome".to_owned()]);
+        let binary = Path::new("C:/Program Files/supercov.exe");
+        let shim = tools.join("biome.cmd");
+        let launcher = |name: &str| launcher_on(true, &judges, binary, &tools, OsStr::new(name));
+        assert_eq!(
+            launcher("biome.cmd").unwrap(),
+            format!(
+                "@ECHO off\r\n\"C:/Program Files/supercov.exe\" __source-tool \"{}\" %*\r\n",
+                shim.display()
+            )
+        );
+        assert_eq!(
+            launcher("biome.ps1").unwrap(),
+            format!(
+                "& 'C:/Program Files/supercov.exe' __source-tool '{}' @args\r\nexit $LASTEXITCODE\r\n",
+                shim.display()
+            )
+        );
+        assert!(launcher("biome").unwrap().starts_with("#!/bin/sh\n"));
+        assert!(
+            launcher("biome")
+                .unwrap()
+                .contains(&format!("'{}'", shim.display()))
+        );
+        // A tool that runs code is started as it is.
+        assert_eq!(launcher("jest.cmd"), None);
+        // Elsewhere a tool is one file, started by its name.
+        assert!(launcher_on(false, &judges, binary, &tools, OsStr::new("biome")).is_some());
+        assert_eq!(
+            launcher_on(false, &judges, binary, &tools, OsStr::new("biome.cmd")),
+            None
+        );
+        fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_package_bin_of_its_own_gets_launchers_in_place() {
+        // A workspace package's dependencies are a tree of their own in the
+        // workspace, hard links to the project's files where the filesystem
+        // has no clones. A launcher replaces the entry: written through it,
+        // it would have been written into the project.
+        let (workspace, _, dependencies) = workspace();
+        let tools = dependencies.join(".bin");
+        fs::create_dir_all(&tools).unwrap();
+        fs::write(tools.join("oxlint"), "the project's own\n").unwrap();
+        fs::write(tools.join("jest"), "runs code\n").unwrap();
+        let copy = workspace.join("packages/app/node_modules/.bin");
+        fs::create_dir_all(&copy).unwrap();
+        fs::hard_link(tools.join("oxlint"), copy.join("oxlint")).unwrap();
+        fs::hard_link(tools.join("jest"), copy.join("jest")).unwrap();
+
+        place_launchers(&tools, &copy).unwrap();
+
+        assert!(
+            fs::read_to_string(copy.join("oxlint"))
+                .unwrap()
+                .contains("__source-tool"),
+        );
+        assert_eq!(
+            fs::read_to_string(tools.join("oxlint")).unwrap(),
+            "the project's own\n"
+        );
+        assert_eq!(
+            fs::read_to_string(copy.join("jest")).unwrap(),
+            "runs code\n"
+        );
+        fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
 
     #[test]
