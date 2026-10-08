@@ -817,8 +817,21 @@ fn inline_instrumentation_map(
     // prologue or a banner left that line unmapped. `AAAA` keeps every
     // relative field at zero, so the rest reads the same, and `C` leaves the
     // rest of the line unmapped, so the prologue is no statement of the user's.
+    //
+    // c8 also takes a range whose own start is unmapped to start where its
+    // line's first column maps. The line that loads the runtime has a block
+    // that never runs where the preload already has, and as the first line
+    // it was an uncovered branch on line 1 of every such file. The mapping
+    // then goes on an empty line of its own, where no range starts. `C` is
+    // still there, past that line's end: Node's own coverage looks back
+    // across lines for the mapping before a position.
+    let mut code = std::borrow::Cow::Borrowed(code);
     if !code.starts_with("#!") && mappings.starts_with(';') {
         mappings.insert_str(0, "AAAA,C");
+        if code.starts_with(crate::js_instrumenter::RUNTIME_LOADER_START) {
+            code = std::borrow::Cow::Owned(format!("\n{code}"));
+            mappings.insert(6, ';');
+        }
     }
     // So does the directive line below, with the last position mapped, where
     // that range ends.

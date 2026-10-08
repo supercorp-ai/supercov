@@ -130,5 +130,44 @@
   {
     "file": "differential/expression-arrow-parameter-defaults.ts",
     "source": "const effects = [];\nconst choose = ({ value = (effects.push('default'), 'fallback') } = {}) => value;\nfunction run() { return [choose(), choose({}), choose({ value: 'given' })]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/loop-outcomes.js",
+    "source": "const effects = [];\nfunction scan(limit, stop) {\n  let i = 0;\n  walk: while (i < limit && limit < 9) {\n    i++;\n    if (i === stop) break walk;\n    if (i % 2) continue walk;\n    effects.push(i);\n  }\n  return i;\n}\nfunction drain(n) {\n  let i = n;\n  outer: inner: do {\n    i--;\n    if (i === 5) break outer;\n  } while (i > 0 || n < 0);\n  return i;\n}\nfunction sum(n) {\n  let total = 0;\n  for (let j = 0; j < n; j++) total += j;\n  return total;\n}\nfunction retried(sources) {\n  const seen = [];\n  for (const source of sources) {\n    try {\n      let i = 0;\n      do i++; while (source.more(i));\n      seen.push(i);\n    } catch (error) {\n      seen.push(error.message);\n    }\n  }\n  return seen;\n}\nfunction run() {\n  return [\n    scan(3, 0), scan(4, 2), scan(0, 0), drain(2), drain(7), sum(2), sum(0),\n    retried([{ more() { throw new Error('the test threw'); } }, { more: (i) => i < 2 }]),\n  ];\n}\nfunction observe() { return effects; }\n",
+    "outcomes": [
+      "0 8 true",
+      "1 1 false",
+      "2 2 true",
+      "0 8 true",
+      "1 1 false",
+      "2 1 false",
+      "0 8 true",
+      "1 1 false",
+      "2 2 true",
+      "0 1 false",
+      "0 8 true",
+      "1 1 false",
+      "2 2 true",
+      "0 8 true",
+      "1 2 true",
+      "0 1 false",
+      "4 1 false",
+      "3 2 true",
+      "4 1 false",
+      "3 4 false",
+      "4 1 false",
+      "3 2 true",
+      "4 2 true",
+      "5 2 true",
+      "5 2 true",
+      "5 1 false",
+      "5 1 false",
+      "6 2 true",
+      "6 1 false"
+    ]
+  },
+  {
+    "file": "differential/decision-scopes.js",
+    "source": "const effects = [];\nfunction pick(\n  n,\n  kind = class {\n    static label = 'none';\n    static {\n      if (n > 1 && n < 9) this.label = 'middle';\n      else if (n) this.label = 'edge';\n    }\n  },\n  tag = n > 5 ? (n > 7 ? 'high' : 'upper') : 'low',\n) {\n  effects.push(kind.label);\n  return [kind.label, tag];\n}\nfunction run() { return [0, 1, 2, 6, 8, 9].map((n) => pick(n)); }\nfunction observe() { return effects; }\n"
   }
 ]

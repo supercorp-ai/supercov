@@ -612,10 +612,45 @@ impl<'a> VisitMut<'a> for GeneratedStatementSpans<'a, '_> {
     }
 }
 
+/// Node's own coverage looks a range's start up on the wrong line half the
+/// time when the range starts a line: with a source map, a line of the
+/// generated file ends, for it, where the next one starts, and its search
+/// takes whichever of the two it reaches first, which the length of the file
+/// decides. From the line before, it reads one column past that line's end,
+/// which gives the mapping before it: a top-level function was reported a
+/// line early, or lost its range and with it a branch, where the same file a
+/// line longer or shorter was reported right.
+///
+/// Only a function or class declaration at the top level starts a range at
+/// column 0. Each gets an empty statement on the line before it, which
+/// `map_closing_lines` maps to where the declaration starts: both lines then
+/// give the same answer, and nothing else is ever looked up on a line that
+/// holds only `;`.
+fn separate_top_level_declarations<'a>(ast: AstBuilder<'a>, program: &mut Program<'a>, span: Span) {
+    let starts_a_range = |statement: &Statement<'a>| match statement {
+        Statement::FunctionDeclaration(function) => !function.declare,
+        Statement::ClassDeclaration(class) => !class.declare,
+        _ => false,
+    };
+    // Overload signatures stay next to their implementation.
+    let signature = |statement: &Statement<'a>| matches!(statement, Statement::FunctionDeclaration(function) if function.body.is_none());
+    let mut separated = ast.vec_with_capacity(program.body.len());
+    let mut after_signature = false;
+    for statement in program.body.take_in(ast.allocator) {
+        if starts_a_range(&statement) && !after_signature {
+            separated.push(ast.statement_empty(span));
+        }
+        after_signature = signature(&statement);
+        separated.push(statement);
+    }
+    program.body = separated;
+}
+
 fn mark_generated_statements<'a>(ast: AstBuilder<'a>, program: &mut Program<'a>) {
     let Some(span) = generated_statement_span(program.source_text) else {
         return;
     };
+    separate_top_level_declarations(ast, program, span);
     GeneratedStatementSpans {
         ast,
         source: program.source_text,
@@ -699,6 +734,28 @@ fn map_closing_lines(
         let first = next;
         while next < tokens.len() && tokens[next].get_dst_line() == line {
             next += 1;
+        }
+        // The line `separate_top_level_declarations` put before a
+        // declaration maps to where that declaration starts.
+        if text == ";"
+            && next == first + 1
+            && tokens[first].get_source_id().is_none()
+            && let Some(declaration) = tokens.get(next)
+            && declaration.get_dst_col() == 0
+            && declaration.get_source_id().is_some()
+        {
+            let separator = oxc_sourcemap::Token::new(
+                line,
+                0,
+                declaration.get_src_line(),
+                declaration.get_src_col(),
+                declaration.get_source_id(),
+                None,
+            );
+            patched.push(separator);
+            previous = Some(separator);
+            added = true;
+            continue;
         }
         let column = (text.len() - text.trim_start().len()) as u32;
         if text.trim_start().starts_with(['}', ')', ']'])
@@ -2023,6 +2080,9 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
 /// requires the bootstrap relative to the file the stack's first frame names.
 const RUNTIME_LOADER_BODY: &str = r#""const host = globalThis.process; if (!host || !host.getBuiltinModule) return; const frame = /(?:file:\\/\\/)?((?:\\/|[A-Za-z]:[\\\\/])[^\\s()]+?)(?=:\\d+:\\d+)/.exec(String(stack)); if (!frame) return; host.getBuiltinModule(\"node:module\").createRequire(frame[0].startsWith(\"file:\") ? frame[0] : frame[1])(specifier);""#;
 
+/// How the statement [`runtime_loader`] writes starts.
+pub(crate) const RUNTIME_LOADER_START: &str = "if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {";
+
 /// One statement that loads the run's bootstrap where no runtime is
 /// installed. It has to be valid in a module, a CommonJS file and a browser,
 /// pass a strict TypeScript check with or without Node's types, and survive
@@ -2033,7 +2093,7 @@ const RUNTIME_LOADER_BODY: &str = r#""const host = globalThis.process; if (!host
 pub(crate) fn runtime_loader(bootstrap: &str) -> String {
     let specifier = serde_json::to_string(bootstrap).expect("a path string serializes");
     format!(
-        "if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {{ new Function(\"stack\", \"specifier\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
+        "{RUNTIME_LOADER_START} new Function(\"stack\", \"specifier\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
     )
 }
 
@@ -3845,6 +3905,9 @@ fn instrument_candidate_with_binding(
         decision_index: 0,
         parameter_depth: 0,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        after_statement: None,
+        label_body: false,
+        inline_names: None,
     };
     transformer.visit_program(&mut parsed.program);
     let mut logical_transformer = LogicalValueTransformer {
@@ -6431,6 +6494,16 @@ struct ControlProbeV2Transformer<'a, 's> {
     decision_index: usize,
     parameter_depth: usize,
     source_sensitive_functions: HashSet<SpanKey>,
+    /// What goes around a statement whose false outcome is recorded after
+    /// it: the statement that records it, and for a `do … while` one before
+    /// the loop.
+    after_statement: Option<(Option<Statement<'a>>, Statement<'a>)>,
+    /// The statement being visited is the body of a label, which has to stay
+    /// on it: what goes after the statement goes after the label.
+    label_body: bool,
+    /// The temporaries of a decision inside a parameter default, for the
+    /// arrow that has to declare them around its conditional expression.
+    inline_names: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -6438,6 +6511,15 @@ struct DecisionPlan {
     index: usize,
     condition_count: usize,
     inline_frame: bool,
+}
+
+/// A decision whose conditions have been rewritten, and the temporaries its
+/// outcome is recorded from.
+struct AppliedDecision {
+    index: usize,
+    frame: String,
+    values: Vec<String>,
+    inline: bool,
 }
 
 impl<'a> ControlProbeV2Transformer<'a, '_> {
@@ -6609,115 +6691,214 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         )
     }
 
+    fn assign(&self, name: &str, value: Expression<'a>) -> Expression<'a> {
+        self.ast.expression_assignment(
+            Span::default(),
+            AssignmentOperator::Assign,
+            self.assignment_target(name),
+            value,
+        )
+    }
+
+    /// One condition of a decision, as `(_f += w, _v = C)`.
+    ///
+    /// The assignment comes last because TypeScript narrows through an
+    /// assignment's right side and through a comma's last operand, and through
+    /// nothing else here. The condition used to end in its temporary
+    /// (`(_v = C, _f += …, _v)`), which narrows nothing: `if (client) return
+    /// client` returned `Client | null`, and a file that Supercov never
+    /// touched failed to compile against the widened type.
+    ///
+    /// The first condition carries the decision's bookkeeping, since a comma
+    /// around the whole decision would hide its `&&` and `||` from the same
+    /// analysis: the frame starts at this condition's weight, and the other
+    /// conditions' temporaries are cleared, so one that is not evaluated adds
+    /// nothing when the outcome is recorded.
     fn instrument_condition(
         &self,
         expression: Expression<'a>,
-        frame_name: &str,
-        temporary_name: &str,
+        applied: &AppliedDecision,
         index: usize,
     ) -> Expression<'a> {
-        let assign_value = self.ast.expression_assignment(
-            Span::default(),
-            AssignmentOperator::Assign,
-            self.assignment_target(temporary_name),
-            expression,
-        );
-        // `weight * (1 + +!!V)`: 1 for a false condition, 2 for a true one, in
-        // this condition's base-3 digit. Written as `V ? 2w : w` it was a
-        // branch of its own to a coverage tool the tests run (nyc, c8, Jest,
-        // Vitest), which counted it against the user's line.
-        let weight = 3_u64.pow(index as u32);
-        let truth = self.ast.expression_unary(
-            Span::default(),
-            UnaryOperator::UnaryPlus,
-            self.ast.expression_unary(
-                Span::default(),
-                UnaryOperator::LogicalNot,
-                self.ast.expression_unary(
-                    Span::default(),
-                    UnaryOperator::LogicalNot,
-                    self.identifier(temporary_name),
-                ),
-            ),
-        );
-        let one_or_two = self.ast.expression_binary(
-            Span::default(),
-            self.number(1),
-            BinaryOperator::Addition,
-            truth,
-        );
-        let digit = if weight == 1 {
-            one_or_two
+        let mut steps = self.ast.vec();
+        if index == 0 {
+            steps.push(self.assign(&applied.frame, self.number(1)));
+            for name in &applied.values[1..] {
+                steps.push(self.assign(name, self.number(0)));
+            }
         } else {
-            self.ast.expression_binary(
+            steps.push(self.ast.expression_assignment(
                 Span::default(),
-                self.number(weight),
-                BinaryOperator::Multiplication,
-                self.ast
-                    .expression_parenthesized(Span::default(), one_or_two),
-            )
-        };
-        let add_digit = self.ast.expression_assignment(
-            Span::default(),
-            AssignmentOperator::Addition,
-            self.assignment_target(frame_name),
-            digit,
-        );
-        self.ast.expression_sequence(
-            Span::default(),
-            self.ast
-                .vec_from_array([assign_value, add_digit, self.identifier(temporary_name)]),
-        )
+                AssignmentOperator::Addition,
+                self.assignment_target(&applied.frame),
+                self.number(3_u64.pow(index as u32)),
+            ));
+        }
+        steps.push(self.assign(&applied.values[index], expression));
+        self.ast.expression_sequence(Span::default(), steps)
     }
 
     fn instrument_conditions(
         &self,
         expression: &mut Expression<'a>,
-        frame_name: &str,
-        temporary_names: &[String],
+        applied: &AppliedDecision,
         next_index: &mut usize,
     ) {
         match expression {
-            Expression::ParenthesizedExpression(parenthesized) => self.instrument_conditions(
-                &mut parenthesized.expression,
-                frame_name,
-                temporary_names,
-                next_index,
-            ),
+            Expression::ParenthesizedExpression(parenthesized) => {
+                self.instrument_conditions(&mut parenthesized.expression, applied, next_index)
+            }
             Expression::LogicalExpression(logical)
                 if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
             {
-                self.instrument_conditions(
-                    &mut logical.left,
-                    frame_name,
-                    temporary_names,
-                    next_index,
-                );
-                self.instrument_conditions(
-                    &mut logical.right,
-                    frame_name,
-                    temporary_names,
-                    next_index,
-                );
+                self.instrument_conditions(&mut logical.left, applied, next_index);
+                self.instrument_conditions(&mut logical.right, applied, next_index);
             }
             Expression::UnaryExpression(unary)
                 if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
             {
-                self.instrument_conditions(
-                    &mut unary.argument,
-                    frame_name,
-                    temporary_names,
-                    next_index,
-                );
+                self.instrument_conditions(&mut unary.argument, applied, next_index);
             }
             _ => {
                 let index = *next_index;
                 *next_index += 1;
                 let original = expression.take_in(self.ast.allocator);
-                *expression =
-                    self.instrument_condition(original, frame_name, &temporary_names[index], index);
+                *expression = self.instrument_condition(original, applied, index);
             }
         }
+    }
+
+    /// The decision's vector in base 3, from its temporaries: nothing for a
+    /// condition that was not evaluated, its weight for a false one, twice
+    /// that for a true one. `_f` holds the weights of the conditions that
+    /// were evaluated; `+!!_v` adds the second for each true one.
+    fn encoded(&self, applied: &AppliedDecision) -> Expression<'a> {
+        let mut sum = self.identifier(&applied.frame);
+        for (index, name) in applied.values.iter().enumerate() {
+            let truth = self.ast.expression_unary(
+                Span::default(),
+                UnaryOperator::UnaryPlus,
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.ast.expression_unary(
+                        Span::default(),
+                        UnaryOperator::LogicalNot,
+                        self.identifier(name),
+                    ),
+                ),
+            );
+            let term = if index == 0 {
+                truth
+            } else {
+                self.ast.expression_binary(
+                    Span::default(),
+                    self.number(3_u64.pow(index as u32)),
+                    BinaryOperator::Multiplication,
+                    truth,
+                )
+            };
+            sum = self
+                .ast
+                .expression_binary(Span::default(), sum, BinaryOperator::Addition, term);
+        }
+        sum
+    }
+
+    /// `mcdcEndV2(file, decision, vector, outcome)`, where the outcome is
+    /// known from where the call stands: the branch that was taken.
+    fn outcome(&self, applied: &AppliedDecision, outcome: bool) -> Expression<'a> {
+        self.ast.expression_call(
+            Span::default(),
+            self.identifier(&self.mcdc_end_v2),
+            NONE,
+            self.ast.vec_from_array([
+                Argument::from(self.identifier(&self.probe_file_v2)),
+                Argument::from(self.number(applied.index as u64)),
+                Argument::from(self.encoded(applied)),
+                Argument::from(
+                    self.ast
+                        .expression_boolean_literal(Span::default(), outcome),
+                ),
+            ]),
+            false,
+        )
+    }
+
+    /// Put `first` at the head of a branch or a loop body, making it a block
+    /// if it is a single statement.
+    fn prepend_statement(&self, body: &mut Statement<'a>, first: Statement<'a>) {
+        if let Statement::BlockStatement(block) = body {
+            block.body.insert(0, first);
+            return;
+        }
+        let original = body.take_in(self.ast.allocator);
+        *body = self
+            .ast
+            .statement_block(Span::default(), self.ast.vec_from_array([first, original]));
+    }
+
+    /// What records the true outcome where the false one is recorded after
+    /// the statement: `mcdcEndV2(…, true), _f = 0`. The frame is at least 1
+    /// once a test has run, so cleared it says the outcome has been recorded.
+    fn settled(&self, applied: &AppliedDecision) -> Expression<'a> {
+        self.ast.expression_sequence(
+            Span::default(),
+            self.ast.vec_from_array([
+                self.outcome(applied, true),
+                self.assign(&applied.frame, self.number(0)),
+            ]),
+        )
+    }
+
+    fn when_unsettled(&self, applied: &AppliedDecision, record: Expression<'a>) -> Statement<'a> {
+        self.ast.statement_expression(
+            Span::default(),
+            self.ast.expression_logical(
+                Span::default(),
+                self.identifier(&applied.frame),
+                LogicalOperator::And,
+                record,
+            ),
+        )
+    }
+
+    /// Record the false outcome after the statement, when nothing runs for
+    /// it inside: an `if` without an `else`, a loop its test ended.
+    ///
+    /// An `else` made for the call would be a branch of its own to a coverage
+    /// tool the tests run, and the `if` would end at a brace nobody wrote:
+    /// istanbul lost the statement and its implicit `else` with it. A `break`
+    /// leaves a loop from its body, where the outcome is already recorded.
+    fn record_false_after(&mut self, applied: &AppliedDecision, before: Option<Statement<'a>>) {
+        let after = self.when_unsettled(applied, self.outcome(applied, false));
+        self.after_statement = Some((before, after));
+    }
+
+    /// A loop's true outcome is recorded where its body starts.
+    fn loop_outcomes(
+        &mut self,
+        body: &mut Statement<'a>,
+        applied: &AppliedDecision,
+        tested_after: bool,
+    ) {
+        if !tested_after {
+            let entered = self
+                .ast
+                .statement_expression(Span::default(), self.settled(applied));
+            self.prepend_statement(body, entered);
+            self.record_false_after(applied, None);
+            return;
+        }
+        // A `do … while` body runs before its test: the frame says whether a
+        // test came before this iteration. It is cleared before the loop,
+        // because a test that threw the last time the loop ran left it set.
+        let entered = self.when_unsettled(applied, self.settled(applied));
+        self.prepend_statement(body, entered);
+        let before = self
+            .ast
+            .statement_expression(Span::default(), self.assign(&applied.frame, self.number(0)));
+        self.record_false_after(applied, Some(before));
     }
 
     fn instrument_condition_v1(
@@ -6781,7 +6962,14 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         plan
     }
 
-    fn apply_decision(&mut self, test: &mut Expression<'a>, plan: DecisionPlan) {
+    /// Rewrite a decision's conditions. What records the outcome is left to
+    /// the caller, which knows the branches; a decision too wide for the
+    /// encoding keeps the call-based form and returns nothing.
+    fn apply_decision(
+        &mut self,
+        test: &mut Expression<'a>,
+        plan: DecisionPlan,
+    ) -> Option<AppliedDecision> {
         if plan.condition_count > 32 {
             let frame_name = self.scratch_for("_supercovMcdcFrame", plan.inline_frame);
             let mut next_index = 0;
@@ -6825,60 +7013,21 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             } else {
                 observed
             };
-            return;
+            return None;
         }
 
-        let frame_name = self.scratch_for("_supercovMcdcFrame", plan.inline_frame);
-        let result_name = self.scratch_for("_supercovMcdcResult", plan.inline_frame);
-        let temporary_names = (0..plan.condition_count)
-            .map(|_| self.scratch_for("_supercovMcdcValue", plan.inline_frame))
-            .collect::<Vec<_>>();
-        let mut next_index = 0;
-        self.instrument_conditions(test, &frame_name, &temporary_names, &mut next_index);
-        debug_assert_eq!(next_index, plan.condition_count);
-
-        let original = test.take_in(self.ast.allocator);
-        let assign_frame = self.ast.expression_assignment(
-            Span::default(),
-            AssignmentOperator::Assign,
-            self.assignment_target(&frame_name),
-            self.number(0),
-        );
-        let assign_result = self.ast.expression_assignment(
-            Span::default(),
-            AssignmentOperator::Assign,
-            self.assignment_target(&result_name),
-            original,
-        );
-        let arguments = self.ast.vec_from_array([
-            Argument::from(self.identifier(&self.probe_file_v2)),
-            Argument::from(self.number(plan.index as u64)),
-            Argument::from(self.identifier(&frame_name)),
-            Argument::from(self.identifier(&result_name)),
-        ]);
-        let record = self.ast.expression_call(
-            Span::default(),
-            self.identifier(&self.mcdc_end_v2),
-            NONE,
-            arguments,
-            false,
-        );
-        let observed = self.ast.expression_sequence(
-            Span::default(),
-            self.ast.vec_from_array([
-                assign_frame,
-                assign_result,
-                record,
-                self.identifier(&result_name),
-            ]),
-        );
-        *test = if plan.inline_frame {
-            let mut names = vec![frame_name, result_name];
-            names.extend(temporary_names);
-            self.wrap_inline_frame(observed, &names)
-        } else {
-            observed
+        let applied = AppliedDecision {
+            index: plan.index,
+            frame: self.scratch_for("_supercovMcdcFrame", plan.inline_frame),
+            values: (0..plan.condition_count)
+                .map(|_| self.scratch_for("_supercovMcdcValue", plan.inline_frame))
+                .collect(),
+            inline: plan.inline_frame,
         };
+        let mut next_index = 0;
+        self.instrument_conditions(test, &applied, &mut next_index);
+        debug_assert_eq!(next_index, plan.condition_count);
+        Some(applied)
     }
 }
 
@@ -6933,38 +7082,126 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
     // intercept probe identifiers (see `enter_with_statement`).
     fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
 
+    // A statement whose false outcome is recorded after it becomes a block
+    // of the two, so it can stand wherever one statement can. A label stays
+    // on its statement, where `break` and `continue` look for it, and the
+    // block goes around the outermost label.
+    fn visit_statement(&mut self, statement: &mut Statement<'a>) {
+        let label_body = self.label_body;
+        self.label_body = matches!(statement, Statement::LabeledStatement(_));
+        walk_mut::walk_statement(self, statement);
+        self.label_body = false;
+        if label_body {
+            return;
+        }
+        if let Some((before, after)) = self.after_statement.take() {
+            let decided = statement.take_in(self.ast.allocator);
+            let mut recorded = self.ast.vec_with_capacity(3);
+            recorded.extend(before);
+            recorded.push(decided);
+            recorded.push(after);
+            *statement = self.ast.statement_block(Span::default(), recorded);
+        }
+    }
+
+    // A static block is a scope of its own for the temporaries: inside a
+    // parameter default there is no function body between it and the
+    // parameter list, and a statement cannot be wrapped in an arrow.
+    fn visit_static_block(&mut self, block: &mut oxc_ast::ast::StaticBlock<'a>) {
+        let outer_parameter_depth = self.parameter_depth;
+        self.parameter_depth = 0;
+        self.enter_declaration_scope();
+        walk_mut::walk_static_block(self, block);
+        let declarations = self.leave_declaration_scope();
+        self.prepend_declarations(declarations, &mut block.body);
+        self.parameter_depth = outer_parameter_depth;
+    }
+
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        walk_mut::walk_expression(self, expression);
+        if let Some(names) = self.inline_names.take()
+            && matches!(expression, Expression::ConditionalExpression(_))
+        {
+            let conditional = expression.take_in(self.ast.allocator);
+            *expression = self.wrap_inline_frame(conditional, &names);
+        }
+    }
+
     fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
         let plan = decision_outcome_is_variable(&statement.test)
             .then(|| self.reserve_decision(&statement.test));
         self.visit_expression(&mut statement.test);
-        if let Some(plan) = plan {
-            self.apply_decision(&mut statement.test, plan);
-        }
+        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan));
         self.visit_statement(&mut statement.consequent);
         if let Some(alternate) = &mut statement.alternate {
             self.visit_statement(alternate);
         }
+        let Some(applied) = applied else {
+            return;
+        };
+        let Some(alternate) = &mut statement.alternate else {
+            let taken = self
+                .ast
+                .statement_expression(Span::default(), self.settled(&applied));
+            self.prepend_statement(&mut statement.consequent, taken);
+            self.record_false_after(&applied, None);
+            return;
+        };
+        let skipped = self
+            .ast
+            .statement_expression(Span::default(), self.outcome(&applied, false));
+        self.prepend_statement(alternate, skipped);
+        let taken = self
+            .ast
+            .statement_expression(Span::default(), self.outcome(&applied, true));
+        self.prepend_statement(&mut statement.consequent, taken);
     }
 
     fn visit_conditional_expression(&mut self, expression: &mut ConditionalExpression<'a>) {
         let plan = decision_outcome_is_variable(&expression.test)
             .then(|| self.reserve_decision(&expression.test));
         self.visit_expression(&mut expression.test);
-        if let Some(plan) = plan {
-            self.apply_decision(&mut expression.test, plan);
-        }
+        let applied = plan.and_then(|plan| self.apply_decision(&mut expression.test, plan));
         self.visit_expression(&mut expression.consequent);
         self.visit_expression(&mut expression.alternate);
+        let Some(applied) = applied else {
+            return;
+        };
+        // A coverage tool the tests run reads where a branch starts from the
+        // source map, and the printer maps neither a sequence nor a call:
+        // the branch started at whatever token came before it. `void` is
+        // mapped, and here it is mapped to the branch's own start.
+        for (branch, outcome) in [
+            (&mut expression.consequent, true),
+            (&mut expression.alternate, false),
+        ] {
+            let value = branch.take_in(self.ast.allocator);
+            let start = value.span().start;
+            let record = self.ast.expression_unary(
+                Span::new(start, start + 1),
+                UnaryOperator::Void,
+                self.outcome(&applied, outcome),
+            );
+            *branch = self
+                .ast
+                .expression_sequence(Span::default(), self.ast.vec_from_array([record, value]));
+        }
+        if applied.inline {
+            let mut names = vec![applied.frame];
+            names.extend(applied.values);
+            self.inline_names = Some(names);
+        }
     }
 
     fn visit_while_statement(&mut self, statement: &mut WhileStatement<'a>) {
         let plan = decision_outcome_is_variable(&statement.test)
             .then(|| self.reserve_decision(&statement.test));
         self.visit_expression(&mut statement.test);
-        if let Some(plan) = plan {
-            self.apply_decision(&mut statement.test, plan);
-        }
+        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan));
         self.visit_statement(&mut statement.body);
+        if let Some(applied) = applied {
+            self.loop_outcomes(&mut statement.body, &applied, false);
+        }
     }
 
     fn visit_do_while_statement(&mut self, statement: &mut DoWhileStatement<'a>) {
@@ -6972,8 +7209,9 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
             .then(|| self.reserve_decision(&statement.test));
         self.visit_statement(&mut statement.body);
         self.visit_expression(&mut statement.test);
-        if let Some(plan) = plan {
-            self.apply_decision(&mut statement.test, plan);
+        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan));
+        if let Some(applied) = applied {
+            self.loop_outcomes(&mut statement.body, &applied, true);
         }
     }
 
@@ -6986,14 +7224,18 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         if let Some(init) = &mut statement.init {
             self.visit_for_statement_init(init);
         }
+        let mut applied = None;
         if let (Some(test), Some(plan)) = (&mut statement.test, plan) {
             self.visit_expression(test);
-            self.apply_decision(test, plan);
+            applied = self.apply_decision(test, plan);
         }
         if let Some(update) = &mut statement.update {
             self.visit_expression(update);
         }
         self.visit_statement(&mut statement.body);
+        if let Some(applied) = applied {
+            self.loop_outcomes(&mut statement.body, &applied, false);
+        }
     }
 }
 
@@ -10048,6 +10290,181 @@ mod tests {
         assert!(output.code.contains("const live = 1"));
     }
 
+    /// The instrumented code with what records a decision's outcome written
+    /// `END(`, and the decisions' temporaries named `t0`, `t1`, … in the order
+    /// they are declared.
+    fn decision_shape(source: &str, file: &str) -> String {
+        let output = instrument_candidate(source, file).unwrap();
+        let runtime = output.runtime.as_ref().expect("candidate runtime binding");
+        let call = format!("{}(", runtime.mcdc_end_v2);
+        let start = output.code.find(&call).expect("an outcome is recorded") + call.len();
+        let probe_file = &output.code[start..start + output.code[start..].find(',').unwrap()];
+        let code = output
+            .code
+            .replace(&format!("{call}{probe_file}, "), "END(");
+        let mut names: Vec<&str> = Vec::new();
+        let mut shaped = String::new();
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find("_supercovMcdc") {
+            shaped.push_str(&rest[..at]);
+            let tail = &rest[at..];
+            // The runtime's own helpers are bound to `__supercovMcdc…`.
+            if shaped.ends_with('_') {
+                shaped.push_str("_supercovMcdc");
+                rest = &tail["_supercovMcdc".len()..];
+                continue;
+            }
+            let length = tail
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .unwrap_or(tail.len());
+            let name = &tail[..length];
+            let index = names
+                .iter()
+                .position(|known| *known == name)
+                .unwrap_or_else(|| {
+                    names.push(name);
+                    names.len() - 1
+                });
+            shaped.push_str(&format!("t{index}"));
+            rest = &tail[length..];
+        }
+        shaped.push_str(rest);
+        shaped
+    }
+
+    #[test]
+    fn a_decision_stays_the_test_it_was() {
+        // TypeScript narrows through `&&` and `||` only where they are the
+        // condition itself, through an assignment's right side, and through a
+        // comma's last operand. The decision used to be the right side of an
+        // assignment inside a comma, and each condition ended in its
+        // temporary: `if (client) return client` returned `Client | null`,
+        // and a file Supercov never touched failed to compile against it.
+        let shaped = decision_shape(
+            concat!(
+                "export function pick(client: { id: number } | null, strict: boolean) {\n",
+                "  if (client && strict) return client;\n",
+                "  return null;\n",
+                "}\n",
+                "export function size(list: string[] | null) {\n",
+                "  if (!list) { return 0; } else { return list.length; }\n",
+                "}\n",
+                "export function first(list: string[] | null) {\n",
+                "  return list ? list[0] : undefined;\n",
+                "}\n",
+            ),
+            "src/pick.ts",
+        );
+        for expected in [
+            // The bookkeeping rides inside the first condition, and every
+            // condition ends in the assignment of its own value.
+            "if ((t0 = 1, t2 = 0, t1 = client) && (t0 += 3, t2 = strict)) {\n\t\t\tEND(0, t0 + +!!t1 + 3 * +!!t2, true), t0 = 0;",
+            // Without an `else` there is nowhere inside the statement for the
+            // false outcome, and an `else` made for it would be a branch to
+            // a coverage tool the tests run: it is recorded after the `if`,
+            // when the frame says it has not been.
+            "\t\t}\n\t\tt0 && END(0, t0 + +!!t1 + 3 * +!!t2, false);\n\t}",
+            "if (t3 = 1, t4 = !list) {\n\t\tEND(1, t3 + +!!t4, true);",
+            "} else {\n\t\tEND(1, t3 + +!!t4, false);",
+            "return (t5 = 1, t6 = list) ? (void END(2, t5 + +!!t6, true), list[0]) : (void END(2, t5 + +!!t6, false), undefined);",
+        ] {
+            assert!(shaped.contains(expected), "{expected}\n{shaped}");
+        }
+    }
+
+    #[test]
+    fn a_loop_records_its_last_test_after_itself() {
+        // A loop's true outcome is recorded where its body starts. Nothing
+        // runs when the test is false, so the statement after the loop
+        // records that, and only when the test, not a `break`, ended it.
+        let shaped = decision_shape(
+            concat!(
+                "export function scan(limit: number) {\n",
+                "  let i = 0;\n",
+                "  walk: while (i < limit) { i++; if (i > 5) break walk; }\n",
+                "  do i--; while (i > 0);\n",
+                "  for (let j = 0; j < limit; j++) i += j;\n",
+                "  return i;\n",
+                "}\n",
+            ),
+            "src/scan.ts",
+        );
+        for expected in [
+            // The label stays on its loop, for `continue walk`.
+            "{\n\t\twalk: while (t0 = 1, t1 = i < limit) {\n\t\t\tEND(0, t0 + +!!t1, true), t0 = 0;",
+            "\t\t}\n\t\tt0 && END(0, t0 + +!!t1, false);\n\t}",
+            // A `do … while` body runs before its test: the frame says whether
+            // one came before this iteration, and starts cleared.
+            "{\n\t\tt4 = 0;\n\t\tdo {\n\t\t\tt4 && (END(2, t4 + +!!t5, true), t4 = 0);",
+            "} while (t4 = 1, t5 = i > 0);\n\t\tt4 && END(2, t4 + +!!t5, false);\n\t}",
+            "for (let j = 0; t6 = 1, t7 = j < limit; j++) {\n\t\t\tEND(3, t6 + +!!t7, true), t6 = 0;",
+            "\t\t}\n\t\tt6 && END(3, t6 + +!!t7, false);\n\t}",
+        ] {
+            assert!(shaped.contains(expected), "{expected}\n{shaped}");
+        }
+    }
+
+    #[test]
+    fn a_decision_without_a_function_body_around_it_declares_its_own_temporaries() {
+        let shaped = decision_shape(
+            concat!(
+                "export function pick(\n",
+                "  n: number,\n",
+                "  kind = class { static label = 'none'; static { if (n > 1) this.label = 'some'; } },\n",
+                "  tag = n > 5 ? 'high' : 'low',\n",
+                ") {\n",
+                "  return [kind.label, tag];\n",
+                "}\n",
+            ),
+            "src/defaults.ts",
+        );
+        for expected in [
+            "static {\n\t\tlet t0, t1;\n",
+            "if (t0 = 1, t1 = n > 1) {\n\t\t\t\tEND(0, t0 + +!!t1, true), t0 = 0;",
+            // A parameter default has no body to declare in: the arrow holds
+            // the whole conditional expression, so its branches still see
+            // what the test narrowed.
+            "(() => {\n\tlet t2, t3;\n\treturn (t2 = 1, t3 = n > 5) ? (void END(1, t2 + +!!t3, true), \"high\") : (void END(1, t2 + +!!t3, false), \"low\");\n})()",
+        ] {
+            assert!(shaped.contains(expected), "{expected}\n{shaped}");
+        }
+    }
+
+    #[test]
+    fn a_top_level_declaration_has_a_line_of_its_own_before_it() {
+        // See `separate_top_level_declarations`. An overload signature stays
+        // next to its implementation.
+        let output = instrument_candidate(
+            concat!(
+                "const one = 1;\n",
+                "function plain() { return one; }\n",
+                "class Box {}\n",
+                "function over(value: string): string;\n",
+                "function over(value: number): number;\n",
+                "function over(value: any) { return value; }\n",
+                "export function exported() { return plain(); }\n",
+            ),
+            "src/declarations.ts",
+        )
+        .unwrap();
+        for expected in [
+            "\n;\nfunction plain() {",
+            "\n;\nclass Box {",
+            "\n;\nfunction over(value: string): string;\nfunction over(value: number): number;\nfunction over(value: any) {",
+        ] {
+            assert!(
+                output.code.contains(expected),
+                "{expected}\n{}",
+                output.code
+            );
+        }
+        assert!(
+            !output.code.contains(";\nexport function"),
+            "{}",
+            output.code
+        );
+    }
+
     #[test]
     fn exposes_the_complete_probe_v2_instrumenter_contract() {
         let output = instrument_candidate(SOURCE, "app/decide.ts").unwrap();
@@ -10057,8 +10474,7 @@ mod tests {
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
         assert!(output.code.contains("_supercovMcdcFrame"));
-        assert!(output.code.contains("_supercovMcdcResult"));
-        assert!(output.code.contains("+= 1 + +!!_supercovMcdcValue"));
+        assert!(output.code.contains("_supercovMcdcValue"));
         assert_eq!(output.decisions.len(), 1);
         assert!(output.points.iter().any(|point| point.kind == "statement"));
         assert!(output.points.iter().any(|point| point.kind == "function"));
