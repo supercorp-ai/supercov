@@ -3472,6 +3472,85 @@ fn a_tool_that_judges_source_reads_it_as_it_was_written() {
 
 #[cfg(unix)]
 #[test]
+fn a_tools_change_to_source_reaches_the_project_and_the_file_stays_measured() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = Project::empty("fixed");
+    project.write(
+        "package.json",
+        r#"{ "name": "fixed", "scripts": { "test": "prettier --write src/fee.js && oxlint --fix src && node --test test/fee.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  var rate=5;\n  return sum > 100 ? 0 : rate;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    // A formatter that runs on Node and writes through `fs`, and a native
+    // linter that fixes what it reads, which has to be the formatted text.
+    project.write(
+        "node_modules/.bin/prettier",
+        "#!/usr/bin/env node\nconst fs = require('node:fs');\nconst file = process.argv[3];\nfs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('rate=5', 'rate = 5'));\n",
+    );
+    project.write(
+        "node_modules/.bin/oxlint",
+        "#!/bin/sh\nif grep -rl supercov \"$2\"; then exit 3; fi\ngrep -q 'var rate = 5' \"$2\"/fee.js || exit 4\nsed 's/var rate/const rate/' \"$2\"/fee.js > fixed.tmp && mv fixed.tmp \"$2\"/fee.js\n",
+    );
+    for tool in ["prettier", "oxlint"] {
+        std::fs::set_permissions(
+            project.root.join(format!("node_modules/.bin/{tool}")),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    project.git(&["init", "-q"]);
+
+    // Prettier with `--write` and ESLint with `--fix` wrote the source they
+    // had read over the instrumented copy, so the file ran unmeasured and
+    // read 0% covered under passing tests, and a native tool's fix was
+    // dropped. Each change is kept beside the copy, the next tool reads it,
+    // and the project has it when the command ends.
+    let run = project.supercov(&["--", "npm", "test"]);
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(
+        run.stderr()
+            .contains("the command's tools changed 1 source file(s)"),
+        "{}",
+        run.stderr()
+    );
+    assert_eq!(
+        project.read("src/fee.js"),
+        "function fee(sum) {\n  const rate = 5;\n  return sum > 100 ? 0 : rate;\n}\nmodule.exports = { fee };\n"
+    );
+    assert!(!project.root.join("fixed.tmp").exists());
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/fee.js:3"])
+        .succeeds();
+    assert!(line.contains("small orders pay"), "{line}");
+
+    // The next run starts from the fixed source: nothing is left to change,
+    // and it measures the file as the project now has it.
+    project.write(
+        "node_modules/.bin/oxlint",
+        "#!/bin/sh\ngrep -q 'const rate = 5' \"$2\"/fee.js\n",
+    );
+    let again = project.supercov(&["--", "npm", "test"]);
+    assert_eq!(again.code(), 0, "{}{}", again.stdout(), again.stderr());
+    assert!(
+        !again.stderr().contains("source file(s)"),
+        "{}",
+        again.stderr()
+    );
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/fee.js:3"])
+        .succeeds();
+    assert!(line.contains("small orders pay"), "{line}");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_workspace_packages_own_tool_reads_source_as_it_was_written() {
     use std::os::unix::fs::PermissionsExt;
     let project = Project::empty("judged-package");

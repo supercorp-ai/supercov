@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A file a formatter or a fixer rewrites during the command is still measured. With `prettier --write src && node --test`, Prettier wrote the source it had read over the instrumented copy: the tests passed and the file read 0% covered. `eslint --fix` did the same, and the next step failed on code that was already fixed. The change is kept beside the copy now, and the tests run the copy.
+- A fix a tool makes during the command reaches your project. `prettier --write`, `eslint --fix`, `biome check --write` and `dprint fmt` change your files when the command ends, as they do without Supercov, and a tool later in the same command reads the changed text. The run measured each file as it was before, says which files changed, and reads as stale; the next run measures them as they are. A file you edited while the command ran keeps your edit.
+
 ## 4.0.0
 
 **Breaking**

@@ -13,6 +13,15 @@
 //! directory beside the workspace with a hard link to each file the run did
 //! not rewrite, and the authored text of each one it did. What the tool
 //! writes there is the workspace's too, as if it had run in it.
+//!
+//! A tool that changes a source file, a formatter with `--write` or a linter
+//! with `--fix`, changes the authored text. The workspace holds what was
+//! instrumented from the text before, and written over that file the change
+//! would leave it unmeasured: Prettier did exactly that through the preload,
+//! and a file whose tests passed read 0% covered. The new text is kept
+//! beside the instrumented copy instead. Tools that run later in the command
+//! read it, the tests run the copy that is measured, and when the command
+//! ends the change is the project's, as the command meant it to be.
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -21,7 +30,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::javascript_frontend::{authored_path, rewritten_files};
+use crate::javascript_frontend::{authored_path, changed_directory, changed_path, rewritten_files};
 
 /// The hidden command a launcher runs: `supercov __source-tool <tool> <args>`.
 pub const SOURCE_TOOL_COMMAND: &str = "__source-tool";
@@ -248,6 +257,17 @@ pub fn source_view_path(workspace: &Path) -> Option<PathBuf> {
 /// `.git` is no repository, and it looks further up, as it did.
 const BOUNDARY: &str = ".git";
 
+/// A rewritten file's text as the command has it now: what one of its tools
+/// made of it, or what its author wrote.
+fn current_source(workspace: &Path, file: &Path) -> PathBuf {
+    let changed = changed_path(workspace, file);
+    if changed.is_file() {
+        changed
+    } else {
+        authored_path(workspace, file)
+    }
+}
+
 /// What a file of the view is, to tell afterwards what the tool did to it.
 #[derive(Default)]
 struct View {
@@ -376,7 +396,7 @@ fn refresh_directory(
             }
             refresh_directory(workspace, view, dependencies, &path, rewritten, state)?;
         } else if file_type.is_file() {
-            let authored = authored_path(workspace, &path);
+            let authored = current_source(workspace, &path);
             if rewritten.contains(&path) && authored.is_file() {
                 copy_file(&authored, &to)?;
                 state.authored.insert(path);
@@ -402,37 +422,37 @@ fn refresh_directory(
     Ok(())
 }
 
-/// What the tool left in the view that the workspace does not have.
-#[derive(Default)]
-struct Outcome {
-    /// Rewritten files whose authored text the tool changed.
-    changed_sources: Vec<PathBuf>,
-}
-
 /// Give the workspace what the tool wrote in its view: new files, files it
 /// replaced, and the removal of files it deleted. A file it changed in place
 /// is the workspace's own file already.
 ///
-/// The authored text of a rewritten file is the exception. The workspace
-/// holds what was instrumented from it, so a formatter's or a fixer's change
-/// has nowhere to go during a measured run, and is reported instead.
-fn reconcile(workspace: &Path, view: &Path, state: &View) -> io::Result<Outcome> {
-    let mut outcome = Outcome::default();
+/// The text of a rewritten file is the exception: the workspace holds what
+/// was instrumented from it. A change to it is kept beside that copy, for
+/// the tools that run next and for the project when the command ends.
+/// Returns how many files the tool changed that way.
+fn reconcile(workspace: &Path, view: &Path, state: &View) -> io::Result<usize> {
+    let mut changed = 0;
     for path in &state.linked {
         if fs::symlink_metadata(view.join(path)).is_err() {
             remove(&workspace.join(path))?;
         }
     }
     for path in &state.authored {
-        let unchanged = fs::read(view.join(path))
-            .and_then(|current| Ok(current == fs::read(authored_path(workspace, path))?))
-            .unwrap_or(false);
-        if !unchanged {
-            outcome.changed_sources.push(path.clone());
+        let Ok(text) = fs::read(view.join(path)) else {
+            continue;
+        };
+        if fs::read(current_source(workspace, path)).is_ok_and(|current| current == text) {
+            continue;
         }
+        let kept = changed_path(workspace, path);
+        if let Some(parent) = kept.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&kept, text)?;
+        changed += 1;
     }
     reconcile_directory(workspace, view, Path::new(""), state)?;
-    Ok(outcome)
+    Ok(changed)
 }
 
 fn reconcile_directory(
@@ -557,33 +577,76 @@ pub fn run_source_tool(tool: &Path, arguments: &[OsString]) -> i32 {
         }
     }
     let code = status(&mut command);
-    match reconcile(&workspace, &view, &state) {
-        Ok(outcome) if !outcome.changed_sources.is_empty() => {
-            let listed = outcome
-                .changed_sources
-                .iter()
-                .take(3)
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            eprintln!(
-                "[supercov] {} changed {} source file(s) ({listed}{}); a measured run does not apply a tool's changes to source, so run it without Supercov to keep them",
-                tool.file_name().unwrap_or_default().to_string_lossy(),
-                outcome.changed_sources.len(),
-                if outcome.changed_sources.len() > 3 {
-                    ", …"
-                } else {
-                    ""
-                },
-            );
-        }
-        Ok(_) => {}
-        Err(error) => eprintln!(
+    if let Err(error) = reconcile(&workspace, &view, &state) {
+        eprintln!(
             "[supercov] what {} wrote could not be brought into the workspace: {error}",
             tool.display()
-        ),
+        );
     }
     code
+}
+
+/// The source files the command's tools changed, by what became of each.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SourceChanges {
+    /// Changed in the project, as the command meant.
+    pub applied: Vec<PathBuf>,
+    /// Left alone: the project's file is no longer the one the run started
+    /// from, and the change was made to that one.
+    pub kept_back: Vec<PathBuf>,
+}
+
+/// Forget the changes a command before this one left behind.
+pub fn clear_source_changes(workspace: &Path) -> io::Result<()> {
+    remove(&changed_directory(workspace))
+}
+
+/// Give the project the changes the command's tools made to its source
+/// files. Each was made to the text the run started from, so it is applied
+/// only where the project still has that text.
+pub fn apply_source_changes(root: &Path, workspace: &Path) -> io::Result<SourceChanges> {
+    let mut changes = SourceChanges::default();
+    let directory = changed_directory(workspace);
+    if directory.is_dir() {
+        apply_directory(root, workspace, &directory, Path::new(""), &mut changes)?;
+        remove(&directory)?;
+    }
+    changes.applied.sort();
+    changes.kept_back.sort();
+    Ok(changes)
+}
+
+fn apply_directory(
+    root: &Path,
+    workspace: &Path,
+    directory: &Path,
+    local: &Path,
+    changes: &mut SourceChanges,
+) -> io::Result<()> {
+    for entry in fs::read_dir(directory.join(local))? {
+        let entry = entry?;
+        let path = local.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            apply_directory(root, workspace, directory, &path, changes)?;
+            continue;
+        }
+        let text = fs::read(entry.path())?;
+        let started_from = fs::read(authored_path(workspace, &path)).ok();
+        // A tool that writes every file it formats, changed or not.
+        if started_from.as_ref() == Some(&text) {
+            continue;
+        }
+        let project = root.join(&path);
+        if started_from.is_some() && fs::read(&project).ok() == started_from {
+            // Written in place, as a formatter writes it: the file keeps its
+            // mode and whatever links to it.
+            fs::write(&project, text)?;
+            changes.applied.push(path);
+        } else {
+            changes.kept_back.push(path);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
@@ -653,7 +716,7 @@ mod tests {
         fs::write(view.join("reports/lint.json"), "[]").unwrap();
         fs::remove_file(view.join("README.md")).unwrap();
         fs::write(view.join("README.md"), "replaced\n").unwrap();
-        let outcome = reconcile(&workspace, &view, &state).unwrap();
+        let changed = reconcile(&workspace, &view, &state).unwrap();
         assert_eq!(
             fs::read_to_string(workspace.join("reports/lint.json")).unwrap(),
             "[]"
@@ -662,7 +725,7 @@ mod tests {
             fs::read_to_string(workspace.join("README.md")).unwrap(),
             "replaced\n"
         );
-        assert!(outcome.changed_sources.is_empty());
+        assert_eq!(changed, 0);
         assert!(!workspace.join(".git").exists());
         // The instrumented file stays what was instrumented.
         assert_eq!(
@@ -670,27 +733,94 @@ mod tests {
             "probe(); const a = 1;\n"
         );
 
-        // A change to authored text has nowhere to go, and is named.
+        // A change to a source file is kept beside the instrumented copy,
+        // which stays what the tests run, and the authored text stays what
+        // the run started from.
         fs::write(view.join("src/a.js"), "const a = 1\n").unwrap();
-        let outcome = reconcile(&workspace, &view, &state).unwrap();
-        assert_eq!(outcome.changed_sources, [PathBuf::from("src/a.js")]);
+        assert_eq!(reconcile(&workspace, &view, &state).unwrap(), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.join(".supercov/node_modules/.changed/src/a.js")).unwrap(),
+            "const a = 1\n"
+        );
         assert_eq!(
             fs::read_to_string(workspace.join(".supercov/node_modules/.authored/src/a.js"))
                 .unwrap(),
             "const a = 1;\n"
         );
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/a.js")).unwrap(),
+            "probe(); const a = 1;\n"
+        );
+        // Nothing more to keep when the next tool leaves it as it found it.
+        assert_eq!(reconcile(&workspace, &view, &state).unwrap(), 0);
 
         // The next tool starts from the workspace again.
         fs::remove_file(workspace.join("reports/lint.json")).unwrap();
         let state = refresh(&workspace, &view, &dependencies).unwrap();
         assert!(!view.join("reports/lint.json").exists());
+        // And from the source as the tool before it left it.
         assert_eq!(
             fs::read_to_string(view.join("src/a.js")).unwrap(),
-            "const a = 1;\n"
+            "const a = 1\n"
         );
         fs::remove_file(view.join("README.md")).unwrap();
         reconcile(&workspace, &view, &state).unwrap();
         assert!(!workspace.join("README.md").exists());
+        fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_tools_change_to_source_is_the_projects_when_the_command_ends() {
+        let (workspace, _, dependencies) = workspace();
+        let root = dependencies.parent().unwrap().to_path_buf();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(workspace.join("lib")).unwrap();
+        // Three rewritten files a formatter wrote. One of them was edited in
+        // the project while the command ran, and one was written as it was.
+        for (file, authored, project, written) in [
+            (
+                "src/a.js",
+                "const a = 1;\n",
+                "const a = 1;\n",
+                "const a = 1\n",
+            ),
+            (
+                "src/b.js",
+                "const b = 2;\n",
+                "const b = 3;\n",
+                "const b = 2\n",
+            ),
+            (
+                "src/c.js",
+                "const c = 4\n",
+                "const c = 4\n",
+                "const c = 4\n",
+            ),
+        ] {
+            fs::write(authored_path(&workspace, Path::new(file)), authored).unwrap();
+            fs::write(root.join(file), project).unwrap();
+            let changed = changed_path(&workspace, Path::new(file));
+            fs::create_dir_all(changed.parent().unwrap()).unwrap();
+            fs::write(changed, written).unwrap();
+        }
+
+        let changes = apply_source_changes(&root, &workspace).unwrap();
+
+        assert_eq!(changes.applied, [PathBuf::from("src/a.js")]);
+        assert_eq!(changes.kept_back, [PathBuf::from("src/b.js")]);
+        assert_eq!(
+            fs::read_to_string(root.join("src/a.js")).unwrap(),
+            "const a = 1\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("src/b.js")).unwrap(),
+            "const b = 3;\n"
+        );
+        // Applied once: the next command starts with nothing to apply.
+        assert_eq!(
+            apply_source_changes(&root, &workspace).unwrap(),
+            SourceChanges::default()
+        );
         fs::remove_dir_all(workspace.ancestors().nth(3).unwrap()).unwrap();
     }
 

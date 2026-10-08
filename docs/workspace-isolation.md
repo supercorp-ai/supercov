@@ -39,10 +39,16 @@ and the instrumented copy is not what you wrote:
 - Biome, oxlint, dprint, cspell and knip run on your source as you wrote it:
   the copy's `node_modules/.bin` starts each of them in a view of the copy
   that holds every file in its original text. A file the tool writes there
-  (a report, a cache) is the command's output like any other. A change it
-  makes to a source file (`--write`, `--fix`) is not applied during a measured
-  run, and the run says so. To have another tool that reads source as text run
-  the same way, name it: `SUPERCOV_SOURCE_TOOLS=typos,stylelint`.
+  (a report, a cache) is the command's output like any other. To have another
+  tool that reads source as text run the same way, name it:
+  `SUPERCOV_SOURCE_TOOLS=typos,stylelint`.
+- A change one of these tools makes to a source file (`prettier --write`,
+  `eslint --fix`, `biome check --write`, `dprint fmt`) is made in your
+  project when the command ends, and a tool later in the same command reads
+  the changed text. The tests ran the copy instrumented before the change, so
+  the run measured the file as it was, says so, and reads as stale; the next
+  run measures the changed file. A file you edited yourself while the command
+  ran keeps your edit, and the run names it.
 - Coverage tools the command runs itself (tap, c8, nyc, Jest's and Vitest's
   `--coverage`) still collect and report coverage. They measure the
   instrumented copy, and report close to what they report without Supercov,
