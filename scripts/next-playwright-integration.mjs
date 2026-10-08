@@ -80,12 +80,13 @@ assert.ok(!scope.roots.includes('next-env.d.ts'), scope.roots.join(', '));
 assert.deepEqual(scope.unclassifiedSource.directories, [{ directory: 'simulators', files: 1 }]);
 assert.ok(scope.unclassifiedSource.roots.includes('simulators'));
 
-// The end-to-end suite: Supercov builds the application first, and the
-// suite's own web server builds it again.
+// The end-to-end suite, whose own web server builds the application.
+// Supercov runs the command and no build of its own: it used to run the
+// project's `build` script first, twenty seconds before a suite that builds.
 const e2e = supercov(['--', 'npm', 'run', 'test:e2e'], { SUPERCOV_TEST_KIND: 'e2e' });
 assert.equal(e2e.status, 0, e2e.output);
 assert.match(e2e.output, /3 passed/);
-assert.match(e2e.output, /building the instrumented copy first: npm run build/);
+assert.doesNotMatch(e2e.output, /building the instrumented copy/);
 assert.match(e2e.output, /stayed in the isolated workspace[^\n]*\.next\/ \d+/);
 assert.ok(!existsSync(resolve(fixture, '.next')), 'an instrumented build reached the project');
 const e2eRun = latest();

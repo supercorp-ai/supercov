@@ -317,10 +317,12 @@ const expectedCache = resolve(
   ".supercov/workspaces/workspace/generic-playwright",
 );
 
+// The build is named, so this run makes the instrumented build the next one
+// has to reuse.
 const child = spawn(
   process.execPath,
   [launcher, "--", process.execPath, "-e", "setInterval(() => {}, 1000)"],
-  { cwd: root, env: rustEnvironment, stdio: ["ignore", "pipe", "pipe"] },
+  { cwd: root, env: { ...rustEnvironment, SUPERCOV_BUILD_COMMAND: "npm run build" }, stdio: ["ignore", "pipe", "pipe"] },
 );
 let output = "";
 let signalled = false;
@@ -376,14 +378,13 @@ const storedRunsRoot = resolve(root, ".supercov/runs");
 const storedRunsBefore = new Set(
   existsSync(storedRunsRoot) ? readdirSync(storedRunsRoot) : [],
 );
-// Deliberately an opaque runner rather than `test:unit`: Vitest transforms
-// source in-process, so Supercov correctly skips the project's production
-// build for it, and a skipped build has no instrumented artifacts to reuse.
-// Build-cache reuse is only meaningful for a command that actually builds.
+// Deliberately an opaque runner with a named build: Supercov runs a build
+// only when one is named, and only a build it ran itself has instrumented
+// output to keep and reuse.
 const successful = spawnSync(
   process.execPath,
   [launcher, "--", "npm", "run", "test:opaque"],
-  { cwd: root, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },
+  { cwd: root, env: { ...rustEnvironment, SUPERCOV_BUILD_COMMAND: "npm run build" }, encoding: "utf8", stdio: "pipe" },
 );
 if (successful.status !== 0)
   throw new Error(

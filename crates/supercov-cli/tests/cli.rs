@@ -3350,6 +3350,66 @@ fn typescript_tests_compiled_into_another_directory_run_and_are_measured() {
     assert!(line.contains("small orders pay ["), "{line}");
 }
 
+#[test]
+fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
+    let project = Project::empty("built");
+    project.write(
+        "package.json",
+        r#"{ "name": "built", "scripts": { "build": "node build.js", "test": "node --test test/fee.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\ndist\n.supercov\n");
+    project.write(
+        "build.js",
+        "const fs = require('node:fs');\nfs.mkdirSync('dist', { recursive: true });\nfs.copyFileSync('src/fee.js', 'dist/fee.js');\n",
+    );
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../dist/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    project.git(&["init", "-q"]);
+
+    // Supercov used to run `npm run build` first here, unasked. The command
+    // runs as given now, in a copy that starts without build output, and a
+    // run that fails says what that means.
+    let unbuilt = project.supercov(&["--", "npm", "test"]);
+    assert_ne!(unbuilt.code(), 0, "{}", unbuilt.stdout());
+    let said = format!("{}{}", unbuilt.stdout(), unbuilt.stderr());
+    assert!(
+        said.contains("starts without build output") && said.contains("npm run build && npm test"),
+        "{said}"
+    );
+    assert!(!said.contains("building the instrumented copy"), "{said}");
+
+    // With the build in the command, it compiles the instrumented copy, and
+    // what the tests run is measured.
+    let built = project
+        .supercov(&["--", "sh", "-c", "npm run build && npm test"])
+        .succeeds();
+    assert!(!built.contains("starts without build output"), "{built}");
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/fee.js:2"])
+        .succeeds();
+    assert!(line.contains("small orders pay"), "{line}");
+
+    // Named, the build is Supercov's to run first.
+    let named = project.supercov_with(
+        &["--", "npm", "test"],
+        &[("SUPERCOV_BUILD_COMMAND", "npm run build")],
+    );
+    let said = format!("{}{}", named.stdout(), named.stderr());
+    assert_eq!(named.code(), 0, "{said}");
+    assert!(
+        said.contains(
+            "building the instrumented copy first: npm run build (named by SUPERCOV_BUILD_COMMAND)"
+        ),
+        "{said}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_tool_that_judges_source_reads_it_as_it_was_written() {

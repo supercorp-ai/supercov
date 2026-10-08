@@ -64,14 +64,16 @@ function verify(name, project, sourceFile, runId) {
   const original = readFileSync(resolve(project, sourceFile), 'utf8');
   const run = rust('__run-js-direct', {
     root: project,
-    command: ['npm', 'test'],
+    // Supercov runs the command and no build of its own: the bundler reads
+    // the instrumented files like any others.
+    command: ['sh', '-c', 'npm run build && npm test'],
     runId,
     startedAt: `2026-08-25T00:00:${runId.endsWith('webpack') ? '08' : '09'}.000Z`,
   });
   assert.equal(run.exitCode, 0, `${name} test command failed\n${run.output}`);
   assert.equal(run.assertionCalls, 1);
   assert.equal(readFileSync(resolve(project, sourceFile), 'utf8'), original);
-  assert.ok(run.metadata.timings.instrumentedBuildMs > 0);
+  assert.equal(run.metadata.timings.instrumentedBuildMs, 0);
   const summary = rust('__query-stored-run', {
     root: project,
     query: {

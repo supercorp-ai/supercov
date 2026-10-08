@@ -7,6 +7,9 @@ import { coverageQuery, localRustEnvironment } from "./coverage-test-helpers.mjs
 
 const fixture = resolve("tests/fixtures/generic-playwright");
 const runsRoot = resolve(fixture, ".supercov/runs");
+// Supercov runs a build only when one is named, and only a build it ran
+// itself has instrumented output to keep and reuse.
+const namedBuild = { SUPERCOV_BUILD_COMMAND: "npm run build" };
 // The run below must reuse an instrumented build of this source made for
 // another command. Other gates share the fixture and one ends by cleaning its
 // cache, so this gate makes that build itself rather than counting on the
@@ -14,7 +17,7 @@ const runsRoot = resolve(fixture, ".supercov/runs");
 const primed = spawnSync(
   process.execPath,
   [resolve("bin/supercov.js"), "--", "npm", "run", "test:opaque:esm"],
-  { cwd: fixture, env: { ...process.env, ...localRustEnvironment }, encoding: "utf8", stdio: "pipe" },
+  { cwd: fixture, env: { ...process.env, ...localRustEnvironment, ...namedBuild }, encoding: "utf8", stdio: "pipe" },
 );
 if (primed.status !== 0)
   throw new Error(`priming the instrumented build failed:\n${primed.stderr}\n${primed.stdout}`);
@@ -22,7 +25,7 @@ const before = new Set(existsSync(runsRoot) ? readdirSync(runsRoot) : []);
 const result = spawnSync(
   process.execPath,
   [resolve("bin/supercov.js"), "--", "npm", "run", "test:opaque"],
-  { cwd: fixture, env: { ...process.env, ...localRustEnvironment }, encoding: "utf8", stdio: "pipe" },
+  { cwd: fixture, env: { ...process.env, ...localRustEnvironment, ...namedBuild }, encoding: "utf8", stdio: "pipe" },
 );
 if (result.status !== 0) {
   throw new Error(

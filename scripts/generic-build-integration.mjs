@@ -15,6 +15,9 @@ for (const adapter of ["esbuild", "webpack", "swc"]) {
       stdio: "inherit",
       env: {
         ...process.env,
+        // Supercov runs a build only when one is named, and only a build it
+        // ran itself has instrumented output to keep and reuse.
+        SUPERCOV_BUILD_COMMAND: "npm run build",
         PATH: `${resolve("node_modules/.bin")}${delimiter}${process.env.PATH ?? ""}`,
         ...(adapter === "swc" ? { SUPERCOV_SOURCE_ROOTS: "src" } : {}),
       },

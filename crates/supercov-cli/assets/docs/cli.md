@@ -531,8 +531,8 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_SOURCE_ROOTS` | Comma-separated directories or files that hold your own code, in any language; everything else is left out |
 | `SUPERCOV_TEST_KIND` | Label the wrapped command as a test level such as `unit` or `e2e` |
 | `SUPERCOV_SOURCE_TOOLS` | Comma-separated names of tools the test command runs that read source as text, such as a linter or a spell checker, besides Biome, oxlint, dprint, cspell and knip. Each is run on your source as you wrote it instead of on the instrumented copy |
-| `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran. It is kept without this when the build Supercov runs before the tests fails |
-| `SUPERCOV_BUILD_COMMAND` | The build a JavaScript project's tests need, as words or a JSON array, such as `yarn workspace web build` in a monorepo whose root `build` builds every package. Without it Supercov runs the project's `build` script, through the package manager that started the tests, when the tests need built output |
+| `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran. It is kept without this when a build named with `SUPERCOV_BUILD_COMMAND` before the tests fails |
+| `SUPERCOV_BUILD_COMMAND` | A build to run in the instrumented copy before the command, as words or a JSON array, such as `yarn workspace web build`. Supercov runs no build unless you name one here; putting it in the command, as in `supercov -- sh -c "npm run build && npm test"`, measures the same. A build named here is kept and reused while source, dependencies and configuration are unchanged |
 
 Examples:
 

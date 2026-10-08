@@ -80,7 +80,7 @@ try {
       scripts: {
         build: 'vite build',
         preview: 'vite preview',
-        test: 'playwright test',
+        test: 'vite build && playwright test',
       },
     }) + '\n',
   );

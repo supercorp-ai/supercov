@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Changed**
+
+- Supercov runs the command you give it, and no build of its own. It used to run the project's `build` script first whenever the tests might need its output: that happened in 114 of 272 test scripts of popular repositories, was redundant in 53 of them, took twenty seconds before a suite that builds the application itself, and cancelled the run when the build failed. If your tests read build output, put the build in the command, as in `supercov -- sh -c "npm run build && npm test"`; a failed run in a project that has a `build` script says so. Coverage is the same either way: measured on esbuild, webpack, SWC, tsc, Vite with Playwright, and Next.js. `SUPERCOV_BUILD_COMMAND` still names a build for Supercov to run first, and only that build is kept and reused between runs.
+
 **Fixed**
 
 - Biome, oxlint, dprint, cspell and knip judge your source as you wrote it. A test script that ran one of them first failed under Supercov: Biome on probe calls it would format otherwise, cspell on Supercov's names, knip on the runtime the files import, and oxlint and dprint found no file at all, because the copy lives under a directory the project's `.gitignore` names. ESLint and Prettier are Node programs and are handed the authored text of each file they read; a native program cannot be. The copy's own `node_modules/.bin` now starts each of these tools in a view of the copy that holds every file in its original text, and what the tool writes there is the command's output like any other. `SUPERCOV_SOURCE_TOOLS=typos,stylelint` runs other tools the same way. Not on Windows yet, and not for a tool installed only in a workspace package's own `node_modules`.

@@ -94,6 +94,10 @@ pub struct CoverageProject {
     pub playwright_exports: Vec<String>,
     pub build_adapter: BuildAdapter,
     pub build_command: Vec<String>,
+    /// The project's build, when it has one that the tests may need the
+    /// output of and nothing ran it: what a failed run names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrun_build: Vec<String>,
     pub build_environment: BTreeMap<String, String>,
 }
 
@@ -901,9 +905,18 @@ pub fn discover_coverage_project(
     let executes_source_directly = (source_transforming_runner
         || (node_test && typescript_test && !owns_build))
         && !tests_require_build_output(root, &manifest);
-    let build_command = if let Some(declared) = declared_build_command(environment) {
-        declared
-    } else if script(&manifest, "build").is_some() && !executes_source_directly {
+    // Supercov runs the command it is given, and nothing before it that was
+    // not asked for. It used to run the project's `build` script first
+    // whenever the tests might need its output: twenty seconds nobody asked
+    // for before a suite that builds the application itself, in two of five
+    // popular repositories, and a run cancelled when that build failed. A
+    // project whose tests need build output has the build in its command, or
+    // names it here.
+    let build_command = declared_build_command(environment).unwrap_or_default();
+    let unrun_build = if build_command.is_empty()
+        && script(&manifest, "build").is_some()
+        && !executes_source_directly
+    {
         vec![build_package_manager(command), "run".into(), "build".into()]
     } else {
         Vec::new()
@@ -941,6 +954,7 @@ pub fn discover_coverage_project(
             BuildAdapter::Generic
         },
         build_command,
+        unrun_build,
         build_environment: infer_build_environment(root, command, environment),
     })
 }
@@ -1004,13 +1018,23 @@ mod tests {
         assert_eq!(discovered.playwright_module, "@playwright/test");
         assert_eq!(discovered.playwright_test_export, "test");
         assert_eq!(discovered.playwright_exports, ["test"]);
+        // The command runs as given: the project's build is only what a
+        // failed run would name.
+        assert_eq!(discovered.build_adapter, BuildAdapter::Direct);
+        assert!(discovered.build_command.is_empty());
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
+        // Named, it runs first, through Vite.
+        let named = BTreeMap::from([(BUILD_COMMAND_VARIABLE.into(), "npm run build".into())]);
+        let discovered = discover_coverage_project(&root, &named, &[]).unwrap();
         assert_eq!(discovered.build_adapter, BuildAdapter::Vite);
         assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
+        assert!(discovered.unrun_build.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn a_build_that_compiles_into_another_directory_is_told_from_a_bundler() {
+        let named = BTreeMap::from([(BUILD_COMMAND_VARIABLE.into(), "npm run build".into())]);
         // lru-cache: `npm run build` runs `npm run prepare`, which runs tshy.
         let relocating = project(
             "tshy",
@@ -1023,8 +1047,7 @@ mod tests {
             ],
         );
         let command = ["npm".to_owned(), "test".to_owned()];
-        let discovered =
-            discover_coverage_project(&relocating, &BTreeMap::new(), &command).unwrap();
+        let discovered = discover_coverage_project(&relocating, &named, &command).unwrap();
         assert!(discovered.relocating_build);
         let bundled = project(
             "next-build",
@@ -1039,7 +1062,7 @@ mod tests {
                 ),
             ],
         );
-        let discovered = discover_coverage_project(&bundled, &BTreeMap::new(), &command).unwrap();
+        let discovered = discover_coverage_project(&bundled, &named, &command).unwrap();
         assert!(!discovered.relocating_build);
     }
 
@@ -1093,12 +1116,13 @@ mod tests {
                     .unwrap();
             assert_eq!(discovered.build_adapter, BuildAdapter::Direct, "{label}");
             assert!(discovered.build_command.is_empty(), "{label}");
+            assert!(discovered.unrun_build.is_empty(), "{label}");
             fs::remove_dir_all(root).unwrap();
         }
     }
 
     #[test]
-    fn builds_with_the_package_manager_the_tests_were_started_with() {
+    fn names_the_build_with_the_package_manager_the_tests_were_started_with() {
         let root = project(
             "yarn-build",
             &[
@@ -1113,7 +1137,8 @@ mod tests {
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["yarn", "test"]))
                 .unwrap();
-        assert_eq!(discovered.build_command, command(&["yarn", "run", "build"]));
+        assert!(discovered.build_command.is_empty());
+        assert_eq!(discovered.unrun_build, command(&["yarn", "run", "build"]));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1158,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn retains_the_build_when_tests_import_compiled_output() {
+    fn names_the_build_when_tests_import_compiled_output() {
         let root = project(
             "compiled",
             &[
@@ -1172,13 +1197,14 @@ mod tests {
         );
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
-        assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
+        assert_eq!(discovered.build_adapter, BuildAdapter::Direct);
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
         assert!(discovered.uses_jest);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn retains_the_build_when_source_direct_tests_spawn_a_compiled_package_script() {
+    fn names_the_build_when_source_direct_tests_spawn_a_compiled_package_script() {
         let root = project(
             "spawned-compiled-script",
             &[
@@ -1195,13 +1221,13 @@ mod tests {
         );
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
-        assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
-        assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
+        assert_eq!(discovered.build_adapter, BuildAdapter::Direct);
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn retains_the_build_when_tests_exec_a_compiled_package_script_as_one_string() {
+    fn names_the_build_when_tests_exec_a_compiled_package_script_as_one_string() {
         // `execSync("npm run start")` hands the shell a single string. It is
         // how most suites start the server they test against, and the
         // array-only match let it through to the same hang as an unbuilt
@@ -1222,8 +1248,8 @@ mod tests {
         );
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
-        assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
-        assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
+        assert_eq!(discovered.build_adapter, BuildAdapter::Direct);
+        assert_eq!(discovered.unrun_build, command(&["npm", "run", "build"]));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1246,6 +1272,7 @@ mod tests {
         let discovered =
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
         assert_eq!(discovered.build_adapter, BuildAdapter::Direct);
+        assert!(discovered.unrun_build.is_empty());
         assert!(discovered.build_command.is_empty());
         fs::remove_dir_all(root).unwrap();
     }

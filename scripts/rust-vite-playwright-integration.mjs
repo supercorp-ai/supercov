@@ -16,11 +16,12 @@ const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug
 const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-rust-vite-playwright-'));
 const project = resolve(temporary, 'project');
 
-function rust(command, request) {
+function rust(command, request, environment = {}) {
   const result = spawnSync(binary, [command], {
     cwd: repository,
     encoding: 'utf8',
     input: JSON.stringify(request),
+    env: { ...process.env, ...environment },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const value = JSON.parse(result.stdout.trim().split('\n').at(-1));
@@ -129,7 +130,9 @@ try {
     command: ['npm', 'test'],
     runId: 'rust-vite-playwright',
     startedAt: '2026-08-25T00:00:04.000Z',
-  });
+    // A named build is the one Supercov runs, through Vite's own transform,
+    // which leaves the files on disk as they were written.
+  }, { SUPERCOV_BUILD_COMMAND: 'npm run build' });
   assert.equal(run.exitCode, 0, run.output);
   assert.equal(run.assertionCalls, 1);
   assert.equal(readFileSync(resolve(project, 'src/app.js'), 'utf8'), application);

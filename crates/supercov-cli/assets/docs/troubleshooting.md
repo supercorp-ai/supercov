@@ -142,6 +142,21 @@ Its lines, methods and simple branches stay measured; everything that needs a
 probe is declared as a measurement limit for that file. Please report the file,
 since Supercov aims to instrument every Ruby source correctly.
 
+## The tests cannot find `dist/` or a production build
+
+Supercov runs your command in a copy of the project, and the copy starts
+without build output: `dist/`, `build/`, `.next/` and the like are not copied,
+because they hold code that was never instrumented. Supercov does not run your
+`build` script for you (earlier versions did). If the tests read build output, put
+the build in the command:
+
+```bash
+npx supercov -- sh -c "npm run build && npm test"
+```
+
+A `pretest` script, or a Playwright `webServer` that builds, does the same. The
+build then compiles the instrumented copy, and what the tests run is measured.
+
 ## A test that reads your source fails under Supercov
 
 A test that opens your source files and asserts on their text sees the probes,
@@ -220,10 +235,8 @@ runs remain intact.
 
 ## The first run is slow
 
-The first run may include the npm download, browser or toolchain startup,
-workspace creation, and an instrumented build. Repeated runs can reuse the
-isolated build when source, dependencies, configuration, toolchain, and build
-mode still match.
+The first run may include the npm download, browser or toolchain startup, and
+workspace creation.
 
 Inspect the recorded phases with:
 

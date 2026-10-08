@@ -66,9 +66,20 @@ outputs.
 The run prints where the synced files went, what stayed behind and what the
 command deleted, by top-level directory (`test-results/ 6`, `.next/ 2547`).
 
-When the build Supercov runs before the tests fails, the instrumented copy is
-left in `.supercov/workspaces/` until the next run, and the run prints its
-path. `SUPERCOV_KEEP_WORKSPACE=1` leaves it after any run.
+The copy starts without build output: `dist/`, `build/`, `.next/` and the
+like are not copied, because they hold code that was never instrumented.
+Supercov runs the command you give it and no build of its own, so a suite that
+needs build output has the build in its command:
+
+```bash
+npx supercov -- sh -c "npm run build && npm test"
+```
+
+When a run fails in a project that has a `build` script, it says this. A build
+named with `SUPERCOV_BUILD_COMMAND` runs before the command instead; when it
+fails, the instrumented copy is left in `.supercov/workspaces/` until the next
+run, and the run prints its path. `SUPERCOV_KEEP_WORKSPACE=1` leaves it after
+any run.
 
 ## Files Supercov creates
 
@@ -89,8 +100,9 @@ fallback instead of adopting or deleting it.
 ## Repeated runs and the build cache
 
 When source, dependencies, configuration, toolchain, and build mode still
-match, Supercov can reuse the isolated instrumented build. Test-only changes do
-not force an unrelated application rebuild.
+match, Supercov can reuse a build named with `SUPERCOV_BUILD_COMMAND`, so
+test-only changes do not force an unrelated application rebuild. A build inside
+the command is the command's own and runs every time.
 
 Workspace refreshes are prepared separately and become active only when
 complete. An interrupted refresh does not replace the last complete cache with

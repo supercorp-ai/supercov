@@ -16,11 +16,12 @@ const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug
 const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-rust-tsc-'));
 const project = resolve(temporary, 'project');
 
-function rust(command, request) {
+function rust(command, request, environment = {}) {
   const result = spawnSync(binary, [command], {
     cwd: repository,
     encoding: 'utf8',
     input: JSON.stringify(request),
+    env: { ...process.env, ...environment },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const value = JSON.parse(result.stdout.trim().split('\n').at(-1));
@@ -119,7 +120,10 @@ try {
     command: ['npm', 'test'],
     runId: 'rust-generic-tsc',
     startedAt: '2026-08-25T00:00:07.000Z',
-  });
+    // The tests read `dist/` and the command does not build it: the build
+    // is named, which is the one case Supercov runs it. The projects below
+    // have it in their own test script.
+  }, { SUPERCOV_BUILD_COMMAND: 'npm run build' });
   assert.equal(run.exitCode, 0, run.output);
   // One call site in the table-driven loop, one per narrowing test.
   assert.equal(run.assertionCalls, 3);

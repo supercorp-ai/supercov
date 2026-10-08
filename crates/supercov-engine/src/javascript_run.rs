@@ -866,21 +866,11 @@ pub fn run_direct_javascript(
                 })?;
                 RunStateStatus::Testing
             } else {
-                // A build nobody asked for, of twenty seconds, ran before a
-                // suite that builds the application itself, with nothing to
-                // say what it was or why.
                 writeln!(
                     diagnostics,
-                    "[supercov] building the instrumented copy first: {} ({})",
+                    "[supercov] building the instrumented copy first: {} (named by {})",
                     project.build_command.join(" "),
-                    if crate::project_discovery::declared_build_command(&environment).is_some() {
-                        format!("named by {}", crate::project_discovery::BUILD_COMMAND_VARIABLE)
-                    } else {
-                        format!(
-                            "the project has a build script and the command may need its output; {}=<command> names another",
-                            crate::project_discovery::BUILD_COMMAND_VARIABLE
-                        )
-                    }
+                    crate::project_discovery::BUILD_COMMAND_VARIABLE
                 )
                 .map_err(|error| OrchestrationError::PhaseSetup {
                     phase: phase.name.clone(),
@@ -955,6 +945,21 @@ pub fn run_direct_javascript(
             diagnostics,
             "[supercov] the instrumented copy is kept until the next run, to inspect: {}",
             workspace.display()
+        );
+    }
+    // The copy starts without build output: `dist/`, `build/`, `.next/` and
+    // the like are not copied, since they hold code that was never
+    // instrumented. A suite that needs it fails on a missing file, which
+    // reads as the project's own fault.
+    if execution.exit_code != 0
+        && execution.interrupted_signal.is_none()
+        && !project.unrun_build.is_empty()
+    {
+        let build = project.unrun_build.join(" ");
+        let _ = writeln!(
+            diagnostics,
+            "[supercov] the command failed. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `supercov -- sh -c \"{build} && {}\"`",
+            request.command.join(" ")
         );
     }
     if let Some(signal) = execution.interrupted_signal {
