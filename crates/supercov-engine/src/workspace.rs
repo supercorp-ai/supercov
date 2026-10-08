@@ -389,12 +389,12 @@ impl WorkspaceOperations for SystemWorkspaceOperations {
 }
 
 #[cfg(unix)]
-fn create_link(target: &Path, destination: &Path, _directory: bool) -> io::Result<()> {
+pub(crate) fn create_link(target: &Path, destination: &Path, _directory: bool) -> io::Result<()> {
     std::os::unix::fs::symlink(target, destination)
 }
 
 #[cfg(windows)]
-fn create_link(target: &Path, destination: &Path, directory: bool) -> io::Result<()> {
+pub(crate) fn create_link(target: &Path, destination: &Path, directory: bool) -> io::Result<()> {
     if directory {
         // Junctions work on ordinary NTFS installations without requiring
         // Developer Mode or SeCreateSymbolicLinkPrivilege. This is the common
@@ -561,6 +561,10 @@ fn copy_tree<Operations: WorkspaceOperations>(
             #[cfg(unix)]
             if name_text == "node_modules" && !root_level {
                 if clone_directory(&from, &to) || hard_link_tree(&from, &to) {
+                    // A workspace package's own tools are started from its
+                    // own `.bin`, which comes before the root's on PATH.
+                    crate::source_tools::place_launchers(&from.join(".bin"), &to.join(".bin"))
+                        .map_err(|error| io_error(&to, error))?;
                     continue;
                 }
                 fs::create_dir_all(&to).map_err(|error| io_error(&to, error))?;
@@ -571,12 +575,20 @@ fn copy_tree<Operations: WorkspaceOperations>(
                 packages.sort_by_key(fs::DirEntry::file_name);
                 for package in packages {
                     let link_destination = to.join(package.file_name());
+                    if package.file_name() == ".bin" && package.path().is_dir() {
+                        link_tools(&package.path(), &link_destination, operations)?;
+                        continue;
+                    }
                     create_link(&package.path(), &link_destination, false)
                         .map_err(|error| io_error(&link_destination, error))?;
                 }
                 continue;
             }
             copy_tree(&from, &to, roots, false, operations)?;
+            if name_text == "node_modules" && !root_level {
+                crate::source_tools::place_launchers(&from.join(".bin"), &to.join(".bin"))
+                    .map_err(|error| io_error(&to, error))?;
+            }
         } else if metadata.file_type().is_symlink() {
             let link = fs::read_link(&from).map_err(|error| io_error(&from, error))?;
             let unresolved_target = if link.is_absolute() {
@@ -739,12 +751,16 @@ fn link_package(
 /// the source as it was written (see `source_tools`). Package managers put
 /// this directory first on a script's PATH, so nothing else decides what
 /// `biome` in a test script is.
-#[cfg(unix)]
-fn link_tools(tools: &Path, to: &Path) -> Result<(), WorkspaceError> {
-    use std::os::unix::fs::PermissionsExt;
+fn link_tools<Operations: WorkspaceOperations>(
+    tools: &Path,
+    to: &Path,
+    operations: &mut Operations,
+) -> Result<(), WorkspaceError> {
+    #[cfg(unix)]
+    let _ = &operations;
     fs::create_dir_all(to).map_err(|error| io_error(to, error))?;
     let judges = crate::source_tools::source_tools();
-    let binary = std::env::current_exe().ok();
+    let binary = crate::source_tools::launching_binary();
     let mut entries = fs::read_dir(tools)
         .map_err(|error| io_error(tools, error))?
         .collect::<Result<Vec<_>, _>>()
@@ -752,17 +768,22 @@ fn link_tools(tools: &Path, to: &Path) -> Result<(), WorkspaceError> {
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let (tool, link) = (entry.path(), to.join(entry.file_name()));
-        let judge = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| judges.contains(name));
-        match &binary {
-            Some(binary) if judge => {
-                fs::write(&link, crate::source_tools::launcher(binary, &tool))
-                    .and_then(|()| fs::set_permissions(&link, fs::Permissions::from_mode(0o755)))
-                    .map_err(|error| io_error(&link, error))?;
-            }
-            _ => create_link(&tool, &link, false).map_err(|error| io_error(&link, error))?,
+        let launcher = binary.as_deref().and_then(|binary| {
+            crate::source_tools::launcher_for(&judges, binary, tools, &entry.file_name())
+        });
+        if let Some(launcher) = launcher {
+            crate::source_tools::write_launcher(&link, &launcher)
+                .map_err(|error| io_error(&link, error))?;
+            continue;
+        }
+        // A link, where one needs no privilege. On Windows the shims are
+        // small files that find their package from where they are, which
+        // the workspace's `node_modules` has a link for.
+        #[cfg(unix)]
+        create_link(&tool, &link, false).map_err(|error| io_error(&link, error))?;
+        #[cfg(windows)]
+        if fs::metadata(&tool).is_ok_and(|metadata| metadata.is_file()) {
+            operations.copy_file(&tool, &link)?;
         }
     }
     Ok(())
@@ -811,11 +832,10 @@ fn link_node_modules<Operations: WorkspaceOperations>(
     for entry in entries {
         let target = entry.path();
         let to = destination.join(entry.file_name());
-        #[cfg(unix)]
         if entry.file_name() == ".bin"
             && fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir())
         {
-            link_tools(&target, &to)?;
+            link_tools(&target, &to, operations)?;
             continue;
         }
         #[cfg(unix)]

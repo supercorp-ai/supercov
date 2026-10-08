@@ -3472,6 +3472,86 @@ fn a_tool_that_judges_source_reads_it_as_it_was_written() {
 
 #[cfg(unix)]
 #[test]
+fn a_workspace_packages_own_tool_reads_source_as_it_was_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = Project::empty("judged-package");
+    project.write(
+        "package.json",
+        r#"{ "name": "judged-package", "private": true, "workspaces": ["packages/*"], "scripts": { "test": "cd packages/app && npm test" } }"#,
+    );
+    project.write(
+        "packages/app/package.json",
+        r#"{ "name": "app", "scripts": { "test": "oxlint src && node --test test/fee.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "packages/app/src/fee.js",
+        "function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "packages/app/test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    // pnpm, and npm without hoisting, give a package its tools in a `.bin`
+    // of its own, which is first on PATH when its scripts run.
+    project.write(
+        "packages/app/node_modules/.bin/oxlint",
+        "#!/bin/sh\nif grep -rl supercov \"$1\"; then exit 3; fi\ngrep -c '' \"$1\"/fee.js > lint-report.txt\n",
+    );
+    std::fs::set_permissions(
+        project.root.join("packages/app/node_modules/.bin/oxlint"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    project.git(&["init", "-q"]);
+
+    project.supercov(&["--", "npm", "test"]).succeeds();
+    assert_eq!(project.read("packages/app/lint-report.txt"), "4\n");
+    // The project's own tool is what it was.
+    assert!(
+        project
+            .read("packages/app/node_modules/.bin/oxlint")
+            .starts_with("#!/bin/sh\nif grep"),
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_tool_that_judges_source_reads_it_as_it_was_written_on_windows() {
+    let project = Project::empty("judged");
+    project.write(
+        "package.json",
+        r#"{ "name": "judged", "scripts": { "test": "oxlint src && node --test test/fee.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    // What a native linter does, as far as it matters here: it reads the
+    // files itself, fails on a line nobody wrote, and leaves a report. npm
+    // runs a script with cmd.exe, which starts the `.cmd` shim.
+    project.write(
+        "node_modules/.bin/oxlint.cmd",
+        "@ECHO off\r\nfindstr /S /M /C:\"supercov\" \"%1\\*\" >NUL 2>NUL && exit /b 3\r\necho judged> lint-report.txt\r\nexit /b 0\r\n",
+    );
+    project.git(&["init", "-q"]);
+
+    let run = project.supercov(&["--", "npm", "test"]);
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    assert!(project.read("lint-report.txt").starts_with("judged"));
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/fee.js:2"])
+        .succeeds();
+    assert!(line.contains("small orders pay"), "{line}");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_workspace_package_another_package_imports_is_measured_through_that_import() {
     let project = Project::empty("monorepo");
     project.write(
