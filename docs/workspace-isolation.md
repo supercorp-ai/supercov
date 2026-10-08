@@ -36,6 +36,14 @@ and the instrumented copy is not what you wrote:
   the like) read each file as you wrote it, and don't see `.supercov`.
 - The type check `next build` runs reads each file as you wrote it too, while
   the build itself compiles the instrumented copy.
+- Biome, oxlint, dprint, cspell and knip run on your source as you wrote it:
+  the copy's `node_modules/.bin` starts each of them in a view of the copy
+  that holds every file in its original text. A file the tool writes there
+  (a report, a cache) is the command's output like any other. A change it
+  makes to a source file (`--write`, `--fix`) is not applied during a measured
+  run, and the run says so. To have another tool that reads source as text run
+  the same way, name it: `SUPERCOV_SOURCE_TOOLS=typos,stylelint`. On Windows
+  these tools still read the instrumented copy.
 - Coverage tools the command runs itself (tap, c8, nyc, Jest's and Vitest's
   `--coverage`) still collect and report coverage. They measure the
   instrumented copy, and report close to what they report without Supercov,

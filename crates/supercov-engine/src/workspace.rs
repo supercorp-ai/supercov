@@ -738,6 +738,40 @@ fn link_package(
     create_link(target, to, false).map_err(|error| io_error(to, error))
 }
 
+/// The workspace's own `node_modules/.bin`: every tool of the project's, and
+/// in place of each that judges source as text a launcher that runs it on
+/// the source as it was written (see `source_tools`). Package managers put
+/// this directory first on a script's PATH, so nothing else decides what
+/// `biome` in a test script is.
+#[cfg(unix)]
+fn link_tools(tools: &Path, to: &Path) -> Result<(), WorkspaceError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(to).map_err(|error| io_error(to, error))?;
+    let judges = crate::source_tools::source_tools();
+    let binary = std::env::current_exe().ok();
+    let mut entries = fs::read_dir(tools)
+        .map_err(|error| io_error(tools, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| io_error(tools, error))?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for entry in entries {
+        let (tool, link) = (entry.path(), to.join(entry.file_name()));
+        let judge = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| judges.contains(name));
+        match &binary {
+            Some(binary) if judge => {
+                fs::write(&link, crate::source_tools::launcher(binary, &tool))
+                    .and_then(|()| fs::set_permissions(&link, fs::Permissions::from_mode(0o755)))
+                    .map_err(|error| io_error(&link, error))?;
+            }
+            _ => create_link(&tool, &link, false).map_err(|error| io_error(&link, error))?,
+        }
+    }
+    Ok(())
+}
+
 fn link_node_modules<Operations: WorkspaceOperations>(
     root: &Path,
     workspace: &Path,
@@ -781,6 +815,13 @@ fn link_node_modules<Operations: WorkspaceOperations>(
     for entry in entries {
         let target = entry.path();
         let to = destination.join(entry.file_name());
+        #[cfg(unix)]
+        if entry.file_name() == ".bin"
+            && fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir())
+        {
+            link_tools(&target, &to)?;
+            continue;
+        }
         #[cfg(unix)]
         link_package(root, workspace, &target, &to)?;
         #[cfg(windows)]

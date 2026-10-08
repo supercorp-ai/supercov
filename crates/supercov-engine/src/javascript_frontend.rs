@@ -419,6 +419,11 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
     artifacts
 }
 
+/// Where the authored text of the rewritten project file `file` is kept.
+pub fn authored_path(workspace: &Path, file: &Path) -> PathBuf {
+    workspace.join(AUTHORED_DIRECTORY).join(file)
+}
+
 /// The project files this run rewrote, as the authored list records them.
 pub fn rewritten_files(workspace: &Path) -> Vec<String> {
     fs::read(workspace.join(AUTHORED_LIST))

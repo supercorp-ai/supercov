@@ -3352,6 +3352,81 @@ fn typescript_tests_compiled_into_another_directory_run_and_are_measured() {
 
 #[cfg(unix)]
 #[test]
+fn a_tool_that_judges_source_reads_it_as_it_was_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = Project::empty("judged");
+    let script = |tool: &str| {
+        format!(
+            r#"{{ "name": "judged", "scripts": {{ "test": "{tool} src && node --test test/fee.test.js" }} }}"#
+        )
+    };
+    project.write("package.json", &script("oxlint"));
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    // What a native linter does, as far as it matters here: it reads the
+    // files itself, fails on a line nobody wrote, and leaves a report.
+    let linter = "#!/bin/sh\nif grep -rl supercov \"$1\"; then exit 3; fi\ngrep -c '' \"$1\"/fee.js > lint-report.txt\n";
+    for tool in ["oxlint", "housestyle"] {
+        let path = format!("node_modules/.bin/{tool}");
+        project.write(&path, linter);
+        std::fs::set_permissions(
+            project.root.join(&path),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    project.git(&["init", "-q"]);
+
+    // Biome, oxlint, dprint, cspell and knip read the instrumented files and
+    // failed a test script that ran them first. The workspace's own `.bin`
+    // starts such a tool on the source as it was written, and what it writes
+    // is the command's output like any other.
+    project.supercov(&["--", "npm", "test"]).succeeds();
+    assert_eq!(project.read("lint-report.txt"), "4\n");
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/fee.js:2"])
+        .succeeds();
+    assert!(line.contains("small orders pay"), "{line}");
+
+    // The same tool installed for the whole machine, and started without a
+    // package manager, is found through PATH.
+    let machine = project.root.join("machine-tools");
+    std::fs::create_dir(&machine).unwrap();
+    std::fs::rename(
+        project.root.join("node_modules/.bin/oxlint"),
+        machine.join("oxlint"),
+    )
+    .unwrap();
+    let path = format!(
+        "{}:{}",
+        machine.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    project
+        .supercov_with(&["--", "sh", "-c", "oxlint src"], &[("PATH", &path)])
+        .succeeds();
+
+    // A tool Supercov does not know reads what is there, until it is named.
+    project.write("package.json", &script("housestyle"));
+    let unnamed = project.supercov(&["--", "npm", "test"]);
+    assert_ne!(unnamed.code(), 0, "{}", unnamed.stdout());
+    project
+        .supercov_with(
+            &["--", "npm", "test"],
+            &[("SUPERCOV_SOURCE_TOOLS", "housestyle")],
+        )
+        .succeeds();
+}
+
+#[cfg(unix)]
+#[test]
 fn a_workspace_package_another_package_imports_is_measured_through_that_import() {
     let project = Project::empty("monorepo");
     project.write(
