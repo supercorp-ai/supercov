@@ -612,10 +612,45 @@ impl<'a> VisitMut<'a> for GeneratedStatementSpans<'a, '_> {
     }
 }
 
+/// Node's own coverage looks a range's start up on the wrong line half the
+/// time when the range starts a line: with a source map, a line of the
+/// generated file ends, for it, where the next one starts, and its search
+/// takes whichever of the two it reaches first, which the length of the file
+/// decides. From the line before, it reads one column past that line's end,
+/// which gives the mapping before it: a top-level function was reported a
+/// line early, or lost its range and with it a branch, where the same file a
+/// line longer or shorter was reported right.
+///
+/// Only a function or class declaration at the top level starts a range at
+/// column 0. Each gets an empty statement on the line before it, which
+/// `map_closing_lines` maps to where the declaration starts: both lines then
+/// give the same answer, and nothing else is ever looked up on a line that
+/// holds only `;`.
+fn separate_top_level_declarations<'a>(ast: AstBuilder<'a>, program: &mut Program<'a>, span: Span) {
+    let starts_a_range = |statement: &Statement<'a>| match statement {
+        Statement::FunctionDeclaration(function) => !function.declare,
+        Statement::ClassDeclaration(class) => !class.declare,
+        _ => false,
+    };
+    // Overload signatures stay next to their implementation.
+    let signature = |statement: &Statement<'a>| matches!(statement, Statement::FunctionDeclaration(function) if function.body.is_none());
+    let mut separated = ast.vec_with_capacity(program.body.len());
+    let mut after_signature = false;
+    for statement in program.body.take_in(ast.allocator) {
+        if starts_a_range(&statement) && !after_signature {
+            separated.push(ast.statement_empty(span));
+        }
+        after_signature = signature(&statement);
+        separated.push(statement);
+    }
+    program.body = separated;
+}
+
 fn mark_generated_statements<'a>(ast: AstBuilder<'a>, program: &mut Program<'a>) {
     let Some(span) = generated_statement_span(program.source_text) else {
         return;
     };
+    separate_top_level_declarations(ast, program, span);
     GeneratedStatementSpans {
         ast,
         source: program.source_text,
@@ -699,6 +734,28 @@ fn map_closing_lines(
         let first = next;
         while next < tokens.len() && tokens[next].get_dst_line() == line {
             next += 1;
+        }
+        // The line `separate_top_level_declarations` put before a
+        // declaration maps to where that declaration starts.
+        if text == ";"
+            && next == first + 1
+            && tokens[first].get_source_id().is_none()
+            && let Some(declaration) = tokens.get(next)
+            && declaration.get_dst_col() == 0
+            && declaration.get_source_id().is_some()
+        {
+            let separator = oxc_sourcemap::Token::new(
+                line,
+                0,
+                declaration.get_src_line(),
+                declaration.get_src_col(),
+                declaration.get_source_id(),
+                None,
+            );
+            patched.push(separator);
+            previous = Some(separator);
+            added = true;
+            continue;
         }
         let column = (text.len() - text.trim_start().len()) as u32;
         if text.trim_start().starts_with(['}', ')', ']'])
@@ -2023,6 +2080,9 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
 /// requires the bootstrap relative to the file the stack's first frame names.
 const RUNTIME_LOADER_BODY: &str = r#""const host = globalThis.process; if (!host || !host.getBuiltinModule) return; const frame = /(?:file:\\/\\/)?((?:\\/|[A-Za-z]:[\\\\/])[^\\s()]+?)(?=:\\d+:\\d+)/.exec(String(stack)); if (!frame) return; host.getBuiltinModule(\"node:module\").createRequire(frame[0].startsWith(\"file:\") ? frame[0] : frame[1])(specifier);""#;
 
+/// How the statement [`runtime_loader`] writes starts.
+pub(crate) const RUNTIME_LOADER_START: &str = "if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {";
+
 /// One statement that loads the run's bootstrap where no runtime is
 /// installed. It has to be valid in a module, a CommonJS file and a browser,
 /// pass a strict TypeScript check with or without Node's types, and survive
@@ -2033,7 +2093,7 @@ const RUNTIME_LOADER_BODY: &str = r#""const host = globalThis.process; if (!host
 pub(crate) fn runtime_loader(bootstrap: &str) -> String {
     let specifier = serde_json::to_string(bootstrap).expect("a path string serializes");
     format!(
-        "if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {{ new Function(\"stack\", \"specifier\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
+        "{RUNTIME_LOADER_START} new Function(\"stack\", \"specifier\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
     )
 }
 
@@ -10046,6 +10106,41 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(statements, ["const live = 1;"]);
         assert!(output.code.contains("const live = 1"));
+    }
+
+    #[test]
+    fn a_top_level_declaration_has_a_line_of_its_own_before_it() {
+        // See `separate_top_level_declarations`. An overload signature stays
+        // next to its implementation.
+        let output = instrument_candidate(
+            concat!(
+                "const one = 1;\n",
+                "function plain() { return one; }\n",
+                "class Box {}\n",
+                "function over(value: string): string;\n",
+                "function over(value: number): number;\n",
+                "function over(value: any) { return value; }\n",
+                "export function exported() { return plain(); }\n",
+            ),
+            "src/declarations.ts",
+        )
+        .unwrap();
+        for expected in [
+            "\n;\nfunction plain() {",
+            "\n;\nclass Box {",
+            "\n;\nfunction over(value: string): string;\nfunction over(value: number): number;\nfunction over(value: any) {",
+        ] {
+            assert!(
+                output.code.contains(expected),
+                "{expected}\n{}",
+                output.code
+            );
+        }
+        assert!(
+            !output.code.contains(";\nexport function"),
+            "{}",
+            output.code
+        );
     }
 
     #[test]

@@ -23,9 +23,11 @@
 //   coverage, Jest and Vitest read the same figures on code with every probe
 //   form, and Node's thresholds judge that same report.
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
@@ -572,6 +574,59 @@ ${body}});
   const missed = supercov(reports, ['--', ...thresholds(1)]);
   assert.notEqual(missed.status, 0, missed.output);
   assert.match(missed.output, /line coverage does not meet threshold/, missed.output);
+  // c8 reads V8's ranges through v8-to-istanbul, which takes a range whose
+  // own start is unmapped to start where the first column of its line maps.
+  // The line that loads the runtime has a block that never runs where the
+  // preload already has; as the file's first line, which maps its first
+  // column for the range of the whole file, it was an uncovered branch on
+  // line 1 of every file run directly.
+  const v8ToIstanbul = createRequire(resolve(repository, 'package.json'))('v8-to-istanbul');
+  const throughV8 = async (run) => {
+    const directory = mkdtempSync(resolve(temporary, 'v8-'));
+    run({ NODE_V8_COVERAGE: directory });
+    const branches = { total: 0, covered: 0 };
+    for (const name of readdirSync(directory)) {
+      for (const script of JSON.parse(readFileSync(resolve(directory, name), 'utf8')).result) {
+        if (!script.url.endsWith('/src/mixed.js')) continue;
+        const converter = v8ToIstanbul(fileURLToPath(script.url));
+        await converter.load();
+        converter.applyCoverage(script.functions);
+        for (const hits of Object.values(Object.values(converter.toIstanbul())[0].b)) {
+          branches.total += hits.length;
+          branches.covered += hits.filter(Boolean).length;
+        }
+      }
+    }
+    return branches;
+  };
+  const tests = [process.execPath, '--test', 'test/node.test.js'];
+  const plainBranches = await throughV8((env) => spawnSync(tests[0], tests.slice(1), { cwd: reports, env: { ...process.env, ...env } }));
+  assert.ok(plainBranches.total > 10, JSON.stringify(plainBranches));
+  const measuredBranches = await throughV8((env) => supercov(reports, ['--', ...tests], { ...env, SUPERCOV_KEEP_WORKSPACE: '1' }));
+  assert.deepEqual(measuredBranches, plainBranches, 'v8-to-istanbul under Supercov');
+  // Node finds the line a range starts on by a search the length of the
+  // generated file decides, and from the line before a top-level function it
+  // read another mapping: with the file a line longer or shorter, `mixed`
+  // lost its range and a branch with it, or `unused` was reported a line
+  // early. At six more lengths the file reads as it does without Supercov.
+  const mixedSource = readFileSync(resolve(reports, 'src/mixed.js'), 'utf8');
+  const lcov = [process.execPath, '--test', '--experimental-test-coverage', '--test-reporter=lcov', 'test/node.test.js'];
+  const records = (output) => {
+    const lines = output.split('\n');
+    const start = lines.findIndex((line) => /^SF:.*mixed\.js$/.test(line));
+    return lines.slice(start + 1, lines.indexOf('end_of_record', start))
+      .filter((line) => /^(FN|FNDA|FNF|FNH|BRDA|BRF|BRH|LF|LH):/.test(line)).join('\n');
+  };
+  for (let padding = 1; padding <= 6; padding += 1) {
+    const lines = Array.from({ length: padding }, (_, index) => `const padding${index} = ${index};\n`).join('');
+    write(reports, 'src/mixed.js', mixedSource.replace('module.exports', `${lines}module.exports`));
+    const plain = spawnSync(lcov[0], lcov.slice(1), { cwd: reports, encoding: 'utf8', env: { ...process.env, CI: '1', NO_COLOR: '1' } });
+    assert.match(records(plain.stdout), /^FN:1,mixed$/m, `${plain.stdout}\n${plain.stderr}`);
+    const measured = supercov(reports, ['--', ...lcov]);
+    assert.equal(measured.status, 0, measured.output);
+    assert.equal(records(measured.output), records(plain.stdout), `node, the file ${padding} line(s) longer:\n${measured.output}`);
+  }
+  write(reports, 'src/mixed.js', mixedSource);
   console.log('top package failure classes pass through the public command');
 } finally {
   rmSync(temporary, { recursive: true, force: true });
