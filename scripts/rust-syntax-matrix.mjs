@@ -159,6 +159,13 @@ function installRuntime(target) {
     selectPathV2(_file, value) {
       return value;
     },
+    selectEnd2V2(_file, _first, value) {
+      return value;
+    },
+    selectEndV2(_file, _tree, value) {
+      return value;
+    },
+    selectNextV2() {},
     optionalCallEndV2(_file, _first, value) {
       return value;
     },
@@ -215,6 +222,9 @@ const runtimeExports = [
   "selectNamedRightV2",
   "selectAssignEndV2",
   "selectPathV2",
+  "selectEnd2V2",
+  "selectEndV2",
+  "selectNextV2",
   "optionalCallEndV2",
   "tryBegin",
   "tryCatch",
@@ -363,6 +373,9 @@ async function runBrowser(name) {
               selectNamedRightV2(_file, _first, value, inferredName) { return applyInferredName(value, inferredName); },
               selectAssignEndV2(_file, _first, value) { return value; },
               selectPathV2(_file, value) { return value; },
+              selectEnd2V2(_file, _first, value) { return value; },
+              selectEndV2(_file, _tree, value) { return value; },
+              selectNextV2() {},
               optionalCallEndV2(_file, _first, value) { return value; },
               tryBegin(successId, catchId) { return { successId, catchId, caught: false }; },
               tryCatch(frame, value) { frame.caught = true; return value; },

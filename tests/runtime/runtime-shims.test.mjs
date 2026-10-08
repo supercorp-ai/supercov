@@ -830,6 +830,56 @@ test("a nested selection's leaves record every selection their value decides", a
   );
 });
 
+test("a tree recorded around itself records what a call around each leaf did", async () => {
+  const { registerProbeV2, selectPathV2, selectRightV2, selectShortV2, selectEnd2V2, selectEndV2, selectNextV2, resetCoverage, coverageSnapshot } = await import(
+    "../../runtime/javascript/runtime.mjs"
+  );
+  // `(a && b) || c` again, and `a ?? b`, points 8-11. The leaves are the
+  // program's own expressions in a comma that names them in a frame; the
+  // call around the tree records for the leaf that produced its value, and
+  // what `a` or `b` decided before `c` is recorded where `c` starts.
+  const definition = {
+    file: "src/ok.js",
+    pointIds: ["or:short", "or:short", "or:right", "or:right", "and:short", "and:short", "and:right", "and:right", "nn:short", "nn:short", "nn:right", "nn:right"],
+    decisions: [],
+    selectionPoints: [0, 3],
+    // The steps of each leaf, and what `a` (leaf 0) or `b` (leaf 1) decided
+    // by the time `c` (leaf 2) starts: the `&&` short and falsy, or right
+    // and falsy.
+    selectionTrees: [[[[4 * 4 + 1, 0 * 4 + 0], [4 * 4 + 3, 0 * 4 + 0], [0 * 4 + 3]], [[], [], [[4], [6]]]]],
+  };
+  const each = registerProbeV2(definition);
+  const whole = registerProbeV2(definition);
+  let frame;
+  const forms = {
+    each: {
+      ok: (a, b, c) => (selectPathV2(each, a, 4 * 4 + 1, 0 * 4 + 0) && selectPathV2(each, b, 4 * 4 + 3, 0 * 4 + 0)) || selectRightV2(each, 0, c),
+      either: (a, b) => selectShortV2(each, 8, a, 2) ?? selectRightV2(each, 8, b),
+    },
+    whole: {
+      ok: (a, b, c) => selectEndV2(whole, 0,
+        ((frame = 0, a) && (frame = 1, b)) || (selectNextV2(whole, 0, frame, 2), frame = 2, c), frame),
+      either: (a, b) => selectEnd2V2(whole, 8, (frame = 0, a) ?? (frame = 1, b), frame),
+    },
+  };
+  const values = [1, 0, null, undefined, "", "x"];
+  const recorded = (form, name, args) => {
+    resetCoverage(`tree-${name}-${JSON.stringify(args)}`);
+    const value = forms[form][name](...args);
+    return [value, coverageSnapshot().logicals.map((logical) => [logical.id, logical.vectors.map((vector) => [vector.right, vector.truthy])]).sort()];
+  };
+  let compared = 0;
+  for (const a of values) for (const b of values) {
+    assert.deepEqual(recorded("whole", "either", [a, b]), recorded("each", "either", [a, b]), JSON.stringify([a, b]));
+    for (const c of values) {
+      assert.deepEqual(recorded("whole", "ok", [a, b, c]), recorded("each", "ok", [a, b, c]), JSON.stringify([a, b, c]));
+      compared += 1;
+    }
+  }
+  assert.equal(compared, 216);
+  assert.deepEqual(recorded("whole", "ok", [0, 1, "c"])[1], [["and", [[false, false]]], ["or", [[true, true]]]]);
+});
+
 test("V2 logical assignments record the outcomes their frame-based form recorded", async () => {
   const { registerProbeV2, selectRightV2, selectNamedRightV2, selectAssignEndV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"
