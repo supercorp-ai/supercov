@@ -946,6 +946,8 @@ fn runtime_declarations() -> String {
         ("selectNamedRightV2", 2),
         ("selectAssignEndV2", 2),
         ("selectPathV2", 1),
+        ("selectEnd2V2", 2),
+        ("selectEndV2", 2),
         ("optionalCallEndV2", 2),
         ("renderedValueV2", 2),
         ("parenthesizedAssignmentValue", 0),

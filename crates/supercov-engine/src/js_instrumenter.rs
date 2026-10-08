@@ -871,6 +871,9 @@ pub struct CandidateRuntime {
     pub select_named_right_v2: String,
     pub select_assign_end_v2: String,
     pub select_path_v2: String,
+    pub select_end2_v2: String,
+    pub select_end_v2: String,
+    pub select_next_v2: String,
     pub rendered_value_v2: String,
     pub optional_call_end_v2: String,
     pub default_selected_v2: String,
@@ -3689,6 +3692,9 @@ fn instrument_candidate_with_binding(
     let select_named_right_v2 = names.allocate("__supercovSelectNamedRightV2");
     let select_assign_end_v2 = names.allocate("__supercovSelectAssignEndV2");
     let select_path_v2 = names.allocate("__supercovSelectPathV2");
+    let select_end2_v2 = names.allocate("__supercovSelectEnd2V2");
+    let select_end_v2 = names.allocate("__supercovSelectEndV2");
+    let select_next_v2 = names.allocate("__supercovSelectNextV2");
     let rendered_value_v2 = names.allocate("__supercovRenderedValueV2");
     let optional_call_end_v2 = names.allocate("__supercovOptionalCallEndV2");
     let default_selected_v2 = names.allocate("__supercovDefaultSelectedV2");
@@ -3917,10 +3923,18 @@ fn instrument_candidate_with_binding(
         select_named_right_v2: select_named_right_v2.clone(),
         select_assign_end_v2: select_assign_end_v2.clone(),
         select_path_v2: select_path_v2.clone(),
+        select_end2_v2: select_end2_v2.clone(),
+        select_end_v2: select_end_v2.clone(),
+        select_next_v2: select_next_v2.clone(),
+        coverage_hit_v2: coverage_hit_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
         typescript,
         names: CandidateNames::within(source, &namespace),
         scope_declarations: Vec::new(),
+        frameless: 0,
+        trees: Vec::new(),
+        aliasing: false,
+        after_declaration: Vec::new(),
         logical_targets: selection_targets,
         assignment_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
@@ -3957,6 +3971,7 @@ fn instrument_candidate_with_binding(
         "decisionVectorCounts": &collector.decision_vector_counts,
         "defaultCount": default_count,
         "selectionPoints": [selection_first, selection_count],
+        "selectionTrees": &logical_transformer.trees,
     });
     let registration_call = ast.expression_call(
         Span::default(),
@@ -3999,6 +4014,9 @@ fn instrument_candidate_with_binding(
         ("selectNamedRightV2", &select_named_right_v2),
         ("selectAssignEndV2", &select_assign_end_v2),
         ("selectPathV2", &select_path_v2),
+        ("selectEnd2V2", &select_end2_v2),
+        ("selectEndV2", &select_end_v2),
+        ("selectNextV2", &select_next_v2),
         ("renderedValueV2", &rendered_value_v2),
         ("optionalCallEndV2", &optional_call_end_v2),
         ("defaultSelectedV2", &default_selected_v2),
@@ -4119,6 +4137,9 @@ fn instrument_candidate_with_binding(
             select_named_right_v2,
             select_assign_end_v2,
             select_path_v2,
+            select_end2_v2,
+            select_end_v2,
+            select_next_v2,
             rendered_value_v2,
             optional_call_end_v2,
             default_selected_v2,
@@ -4596,8 +4617,30 @@ impl<'a> OptionalMemberTransformer<'a> {
             // A call that is not measured leaves nothing to read.
             links &= !LINK_AFTER_CALL;
         }
-        let operand = object.take_in(self.ast.allocator);
-        *object = self.instrument_operand(operand, first, links, call_frame.as_deref());
+        // `a?.b` narrows `a`, and TypeScript reads that through a comma's last
+        // operand but not through a call: `if (user?.name) return user`
+        // returned `User | undefined`. A name or `this` is read again after
+        // the call that records it. Anything else may run code when read, a
+        // getter or a proxy, and is read once, through the call.
+        let again = match &*object {
+            Expression::Identifier(identifier) => Some(
+                self.ast
+                    .expression_identifier(identifier.span, identifier.name),
+            ),
+            Expression::ThisExpression(this) => Some(self.ast.expression_this(this.span)),
+            _ => None,
+        };
+        let mut operand = object.take_in(self.ast.allocator);
+        if again.is_some() {
+            *operand.span_mut() = Span::default();
+        }
+        let recorded = self.instrument_operand(operand, first, links, call_frame.as_deref());
+        *object = match again {
+            Some(again) => self
+                .ast
+                .expression_sequence(Span::default(), self.ast.vec_from_array([recorded, again])),
+            None => recorded,
+        };
     }
 }
 
@@ -5560,6 +5603,89 @@ impl<'a> VisitMut<'a> for ExtendedTransformer<'a, '_> {
     }
 }
 
+/// A tree of selections used for its value, its leaves numbered in the order
+/// they are evaluated.
+enum SelectionShape {
+    Leaf(usize),
+    Selection {
+        first: usize,
+        kind: usize,
+        left: Box<SelectionShape>,
+        right: Box<SelectionShape>,
+    },
+}
+
+impl SelectionShape {
+    fn leftmost(&self) -> usize {
+        match self {
+            Self::Leaf(leaf) => *leaf,
+            Self::Selection { left, .. } => left.leftmost(),
+        }
+    }
+
+    /// The leaves whose value can be this subtree's when that value is
+    /// truthy, or when it is not, each with the points it hits on its way up
+    /// through the subtree: what `selectPathV2` records for the leaf's steps
+    /// below the subtree's parent. A left side decides only by cutting its
+    /// selection short, which `||` does on a truthy value, `&&` on a falsy
+    /// one, and `??` on any that is not nullish.
+    fn deciders(&self, truthy: bool, nullish: bool) -> Vec<(usize, Vec<usize>)> {
+        match self {
+            Self::Leaf(leaf) => vec![(*leaf, Vec::new())],
+            Self::Selection {
+                first,
+                kind,
+                left,
+                right,
+            } => {
+                let mut deciders = Vec::new();
+                let short = match kind {
+                    0 => truthy,
+                    1 => !truthy,
+                    _ => !nullish,
+                };
+                if short {
+                    for (leaf, mut hits) in left.deciders(truthy, nullish) {
+                        hits.push(first + usize::from(truthy));
+                        deciders.push((leaf, hits));
+                    }
+                }
+                for (leaf, mut hits) in right.deciders(truthy, nullish) {
+                    hits.push(first + 2 + usize::from(truthy));
+                    deciders.push((leaf, hits));
+                }
+                deciders
+            }
+        }
+    }
+
+    /// For each leaf but the first, the leaves that can have been evaluated
+    /// just before it, with what each decided by then. Evaluation reaches the
+    /// right side of a selection when its left side did not cut it short:
+    /// truthy for `&&`, falsy for `||`, and nullish, so falsy, for `??`.
+    fn before(&self, before: &mut Vec<Vec<(usize, Vec<usize>)>>) {
+        let Self::Selection {
+            kind, left, right, ..
+        } = self
+        else {
+            return;
+        };
+        before[right.leftmost()] = left.deciders(*kind == 1, *kind == 2);
+        left.before(before);
+        right.before(before);
+    }
+}
+
+type SelectionTable = (Vec<Vec<usize>>, Vec<Vec<Vec<usize>>>);
+
+/// A tree whose leaves are named: the helper that records its value, the
+/// selection or the table entry it records for, and the tree's frame.
+struct SelectionSite {
+    helper: String,
+    index: usize,
+    frame: String,
+}
+
 struct LogicalValueTransformer<'a, 's> {
     ast: AstBuilder<'a>,
     select_short_v2: String,
@@ -5567,10 +5693,29 @@ struct LogicalValueTransformer<'a, 's> {
     select_named_right_v2: String,
     select_assign_end_v2: String,
     select_path_v2: String,
+    select_end2_v2: String,
+    select_end_v2: String,
+    select_next_v2: String,
+    coverage_hit_v2: String,
     probe_file_v2: String,
     typescript: bool,
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
+    /// Inside a parameter default or a class member's initializer, where no
+    /// function body can declare a tree's frame: a parameter list cannot see
+    /// its function's body, and an initializer's enclosing scope is shared by
+    /// every instance being constructed.
+    frameless: usize,
+    /// For each tree with more than two leaves, the runtime's table: the
+    /// steps of each leaf, and for each leaf the points each leaf that can
+    /// come before it has decided by then, where more than one can.
+    trees: Vec<SelectionTable>,
+    /// The statement being visited is a `const` declaration in a list of
+    /// statements, where another can follow it.
+    aliasing: bool,
+    /// What records the values of the trees the declaration just visited
+    /// keeps as its initializers, to go after it.
+    after_declaration: Vec<Expression<'a>>,
     /// A selection's four outcomes -- short falsy, short truthy, right falsy,
     /// right truthy -- are consecutive V2 points from this index.
     logical_targets: HashMap<SpanKey, usize>,
@@ -5628,8 +5773,8 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         statements.insert(0, probe_temporaries(self.ast, names, self.typescript));
     }
 
-    fn scratch(&mut self) -> String {
-        let name = self.names.allocate("_supercovAssignedRight");
+    fn scratch(&mut self, base: &str) -> String {
+        let name = self.names.allocate(base);
         self.scope_declarations
             .last_mut()
             .expect("logical expression must be inside a program or function")
@@ -5731,6 +5876,203 @@ impl<'a> LogicalValueTransformer<'a, '_> {
     /// a frame per evaluation is gone. `T` is a temporary of the enclosing
     /// function, set after the right side evaluates, so a recursive call there
     /// has its own; the end records the short outcome when it is still 0.
+    /// The shape of the tree at `expression`, taking its selections out of
+    /// the targets, and each leaf's steps as `selectPathV2` takes them.
+    fn shape(
+        &mut self,
+        expression: &Expression<'a>,
+        path: &[usize],
+        leaves: &mut Vec<Vec<usize>>,
+    ) -> SelectionShape {
+        let mut inner = expression;
+        while let Expression::ParenthesizedExpression(parenthesized) = inner {
+            inner = &parenthesized.expression;
+        }
+        if let Expression::LogicalExpression(logical) = inner
+            && let Some(first) = self.logical_targets.remove(&span_key(logical.span))
+        {
+            let kind = match logical.operator {
+                LogicalOperator::Or => 0,
+                LogicalOperator::And => 1,
+                LogicalOperator::Coalesce => 2,
+            };
+            let mut left_path = vec![first * 4 + kind];
+            left_path.extend_from_slice(path);
+            let mut right_path = vec![first * 4 + 3];
+            right_path.extend_from_slice(path);
+            let left = Box::new(self.shape(&logical.left, &left_path, leaves));
+            let right = Box::new(self.shape(&logical.right, &right_path, leaves));
+            return SelectionShape::Selection {
+                first,
+                kind,
+                left,
+                right,
+            };
+        }
+        leaves.push(path.to_vec());
+        SelectionShape::Leaf(leaves.len() - 1)
+    }
+
+    fn hits(&self, points: &[usize]) -> Option<Expression<'a>> {
+        let mut hits = self.ast.vec_from_iter(points.iter().map(|point| {
+            self.call(
+                &self.coverage_hit_v2,
+                self.ast.vec_from_array([
+                    Argument::from(self.identifier(&self.probe_file_v2)),
+                    Argument::from(numeric(self.ast, *point)),
+                ]),
+            )
+        }));
+        match hits.len() {
+            0 => None,
+            1 => hits.pop(),
+            _ => Some(self.ast.expression_sequence(Span::default(), hits)),
+        }
+    }
+
+    /// What the leaf evaluated before this one decided. Where only one leaf
+    /// can come before, its points are hit there. Where several can, the
+    /// frame says which, and the runtime reads its points from the tree's
+    /// table: a choice written out here would be a branch of the user's line
+    /// to a coverage tool the tests run.
+    fn recorded_before(
+        &self,
+        frame: &str,
+        tree: Option<usize>,
+        leaf: usize,
+        deciders: &[(usize, Vec<usize>)],
+    ) -> Option<Expression<'a>> {
+        if deciders.iter().all(|(_, points)| points.is_empty()) {
+            return None;
+        }
+        if let [(_, points)] = deciders {
+            return self.hits(points);
+        }
+        let tree = tree.expect("a tree with a choice of leaves has a table");
+        Some(self.call(
+            &self.select_next_v2,
+            self.ast.vec_from_array([
+                Argument::from(self.identifier(&self.probe_file_v2)),
+                Argument::from(numeric(self.ast, tree)),
+                Argument::from(self.identifier(frame)),
+                Argument::from(numeric(self.ast, leaf)),
+            ]),
+        ))
+    }
+
+    fn name_leaves(
+        &mut self,
+        expression: &mut Expression<'a>,
+        shape: &SelectionShape,
+        frame: &str,
+        tree: Option<usize>,
+        before: &[Vec<(usize, Vec<usize>)>],
+    ) {
+        let leaf = match shape {
+            SelectionShape::Leaf(leaf) => *leaf,
+            SelectionShape::Selection { left, right, .. } => {
+                let mut inner = expression;
+                while let Expression::ParenthesizedExpression(parenthesized) = inner {
+                    inner = &mut parenthesized.expression;
+                }
+                let Expression::LogicalExpression(logical) = inner else {
+                    panic!("a selection must remain a logical expression");
+                };
+                self.name_leaves(&mut logical.left, left, frame, tree, before);
+                self.name_leaves(&mut logical.right, right, frame, tree, before);
+                return;
+            }
+        };
+        self.visit_expression(expression);
+        let value = expression.take_in(self.ast.allocator);
+        let mut steps = self.ast.vec_with_capacity(3);
+        steps.extend(self.recorded_before(frame, tree, leaf, &before[leaf]));
+        steps.push(self.ast.expression_assignment(
+            Span::default(),
+            AssignmentOperator::Assign,
+            self.assignment_target(frame),
+            numeric(self.ast, leaf),
+        ));
+        steps.push(value);
+        *expression = self.ast.expression_sequence(Span::default(), steps);
+    }
+
+    /// `a && a.b` as `selectEnd2V2(file, first, (_f = 0, a) && (_f = 1, a.b),
+    /// _f)`: each leaf is still the program's own expression, as the last
+    /// operand of a comma, so it has the type, the contextual type and the
+    /// narrowing it has in the source. With a call around each leaf, as in
+    /// `instrument_tree`, `a.b` was read from an `a` that nothing had
+    /// narrowed: an error the instrumented copy does not report, and `any`
+    /// when a member of `a`'s type has no `b`, for everything that reads the
+    /// value.
+    ///
+    /// The frame names the leaf being evaluated. The call around the tree
+    /// records the outcomes of the leaf that produced its value. What an
+    /// earlier leaf decided is known from where evaluation went next, and is
+    /// recorded there: the same points, in the same order, as before, a tree
+    /// that throws half-way included.
+    fn instrument_value_tree(&mut self, expression: &mut Expression<'a>) {
+        let site = self.name_tree(expression);
+        let tree = expression.take_in(self.ast.allocator);
+        *expression = self.record_tree(&site, tree);
+    }
+
+    /// The call that records a named tree's value, around that value.
+    fn record_tree(&self, site: &SelectionSite, value: Expression<'a>) -> Expression<'a> {
+        self.call(
+            &site.helper,
+            self.ast.vec_from_array([
+                Argument::from(self.identifier(&self.probe_file_v2)),
+                Argument::from(numeric(self.ast, site.index)),
+                Argument::from(value),
+                Argument::from(self.identifier(&site.frame)),
+            ]),
+        )
+    }
+
+    /// Name the leaves of the tree at `expression`.
+    fn name_tree(&mut self, expression: &mut Expression<'a>) -> SelectionSite {
+        let mut leaves = Vec::new();
+        let shape = self.shape(expression, &[], &mut leaves);
+        let SelectionShape::Selection { first, .. } = shape else {
+            panic!("a selection tree starts at a selection");
+        };
+        let mut before = vec![Vec::new(); leaves.len()];
+        shape.before(&mut before);
+        let frame = self.scratch("_supercovSelected");
+        let tree = (leaves.len() > 2).then(|| {
+            // The table for `selectNextV2`, by the leaf reached and the one
+            // before it.
+            let choices = before
+                .iter()
+                .map(|deciders| {
+                    let mut by_leaf = Vec::new();
+                    if deciders.len() > 1 {
+                        for (leaf, points) in deciders {
+                            if by_leaf.len() <= *leaf {
+                                by_leaf.resize(*leaf + 1, Vec::new());
+                            }
+                            by_leaf[*leaf] = points.clone();
+                        }
+                    }
+                    by_leaf
+                })
+                .collect();
+            self.trees.push((leaves, choices));
+            self.trees.len() - 1
+        });
+        self.name_leaves(expression, &shape, &frame, tree, &before);
+        let (helper, index) = match tree {
+            Some(tree) => (self.select_end_v2.clone(), tree),
+            None => (self.select_end2_v2.clone(), first),
+        };
+        SelectionSite {
+            helper,
+            index,
+            frame,
+        }
+    }
+
     fn instrument_assignment(
         &mut self,
         assignment: oxc_allocator::Box<'a, AssignmentExpression<'a>>,
@@ -5746,7 +6088,7 @@ impl<'a> LogicalValueTransformer<'a, '_> {
             }
             _ => None,
         };
-        let right_evaluated = self.scratch();
+        let right_evaluated = self.scratch("_supercovAssignedRight");
         let set = |value| {
             self.ast.expression_assignment(
                 Span::default(),
@@ -5798,9 +6140,85 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
     }
 
     fn visit_function_body(&mut self, body: &mut FunctionBody<'a>) {
+        let frameless = std::mem::take(&mut self.frameless);
         self.enter_scope();
         walk_mut::walk_function_body(self, body);
         self.leave_scope(&mut body.statements);
+        self.frameless = frameless;
+    }
+
+    fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        let mut index = 0;
+        while index < statements.len() {
+            let declaration = match &statements[index] {
+                Statement::VariableDeclaration(declaration) => Some(&**declaration),
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(Declaration::VariableDeclaration(declaration)) => Some(&**declaration),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let aliasing = std::mem::replace(
+                &mut self.aliasing,
+                declaration.is_some_and(|declaration| declaration.kind.is_const()),
+            );
+            self.visit_statement(&mut statements[index]);
+            self.aliasing = aliasing;
+            for recorded in std::mem::take(&mut self.after_declaration) {
+                index += 1;
+                statements.insert(
+                    index,
+                    self.ast.statement_expression(Span::default(), recorded),
+                );
+            }
+            index += 1;
+        }
+    }
+
+    // `const ok = a && b; if (ok) …` narrows `a` and `b`, but only while the
+    // tree is the initializer itself: its value is recorded by a statement
+    // after the declaration, from the constant.
+    fn visit_variable_declarator(&mut self, declarator: &mut VariableDeclarator<'a>) {
+        let aliasing = std::mem::take(&mut self.aliasing);
+        if aliasing
+            && self.frameless == 0
+            && let BindingPattern::BindingIdentifier(name) = &declarator.id
+            && let Some(initializer) = &mut declarator.init
+        {
+            let mut tree = &mut *initializer;
+            while let Expression::ParenthesizedExpression(parenthesized) = tree {
+                tree = &mut parenthesized.expression;
+            }
+            if matches!(tree, Expression::LogicalExpression(_))
+                && self.logical_targets.contains_key(&span_key(tree.span()))
+            {
+                let site = self.name_tree(tree);
+                let recorded = self.record_tree(&site, self.identifier(&name.name));
+                self.after_declaration.push(recorded);
+                self.aliasing = aliasing;
+                return;
+            }
+        }
+        walk_mut::walk_variable_declarator(self, declarator);
+        self.aliasing = aliasing;
+    }
+
+    fn visit_formal_parameters(&mut self, parameters: &mut FormalParameters<'a>) {
+        self.frameless += 1;
+        walk_mut::walk_formal_parameters(self, parameters);
+        self.frameless -= 1;
+    }
+
+    fn visit_property_definition(&mut self, property: &mut oxc_ast::ast::PropertyDefinition<'a>) {
+        self.frameless += 1;
+        walk_mut::walk_property_definition(self, property);
+        self.frameless -= 1;
+    }
+
+    fn visit_accessor_property(&mut self, property: &mut oxc_ast::ast::AccessorProperty<'a>) {
+        self.frameless += 1;
+        walk_mut::walk_accessor_property(self, property);
+        self.frameless -= 1;
     }
 
     fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
@@ -5832,7 +6250,11 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
         if matches!(expression, Expression::LogicalExpression(_))
             && self.logical_targets.contains_key(&key)
         {
-            self.instrument_tree(expression, &[]);
+            if self.frameless > 0 {
+                self.instrument_tree(expression, &[]);
+            } else {
+                self.instrument_value_tree(expression);
+            }
             return;
         }
         walk_mut::walk_expression(self, expression);
@@ -10633,43 +11055,303 @@ mod tests {
         }
     }
 
+    /// The instrumented code with the calls that record a value tree written
+    /// `END2(`, `END(` and `HIT(`, and the trees' frames named `s0`, `s1`, …
+    fn value_shape(source: &str, file: &str) -> String {
+        let output = instrument_candidate(source, file).unwrap();
+        let runtime = output.runtime.as_ref().expect("candidate runtime binding");
+        let call = format!("{}(", runtime.select_end2_v2);
+        let start = output.code.find(&call).expect("a value tree is recorded") + call.len();
+        let probe_file = &output.code[start..start + output.code[start..].find(',').unwrap()];
+        let mut code = output.code.clone();
+        for (helper, short) in [
+            (&runtime.select_end2_v2, "END2("),
+            (&runtime.select_end_v2, "END("),
+            (&runtime.select_next_v2, "NEXT("),
+            (&runtime.coverage_hit_v2, "HIT("),
+            (&runtime.select_right_v2, "RIGHT("),
+            (&runtime.select_short_v2, "SHORT("),
+        ] {
+            code = code.replace(&format!("{helper}({probe_file}, "), short);
+        }
+        let mut names: Vec<&str> = Vec::new();
+        let mut shaped = String::new();
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find("_supercovSelected") {
+            shaped.push_str(&rest[..at]);
+            let tail = &rest[at..];
+            let length = tail
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .unwrap_or(tail.len());
+            let name = &tail[..length];
+            let index = names
+                .iter()
+                .position(|known| *known == name)
+                .unwrap_or_else(|| {
+                    names.push(name);
+                    names.len() - 1
+                });
+            shaped.push_str(&format!("s{index}"));
+            rest = &tail[length..];
+        }
+        shaped.push_str(rest);
+        shaped
+    }
+
+    /// Every tree of up to `leaves` leaves over the three operators, with
+    /// its selections' points 10 apart.
+    fn selection_shapes(
+        leaves: usize,
+        next_leaf: &mut usize,
+        next_first: &mut usize,
+    ) -> Vec<(SelectionShape, usize, usize)> {
+        if leaves == 1 {
+            let shape = SelectionShape::Leaf(*next_leaf);
+            return vec![(shape, *next_leaf + 1, *next_first)];
+        }
+        let mut shapes = Vec::new();
+        for left_leaves in 1..leaves {
+            for kind in 0..3 {
+                let first = *next_first;
+                let mut after_first = first + 10;
+                for (left, leaf_after_left, first_after_left) in
+                    selection_shapes(left_leaves, next_leaf, &mut after_first)
+                {
+                    let mut leaf = leaf_after_left;
+                    let mut first_right = first_after_left;
+                    for (right, leaf_after, first_after) in
+                        selection_shapes(leaves - left_leaves, &mut leaf, &mut first_right)
+                    {
+                        shapes.push((
+                            SelectionShape::Selection {
+                                first,
+                                kind,
+                                left: Box::new(copy_shape(&left)),
+                                right: Box::new(right),
+                            },
+                            leaf_after,
+                            first_after,
+                        ));
+                    }
+                }
+            }
+        }
+        shapes
+    }
+
+    fn copy_shape(shape: &SelectionShape) -> SelectionShape {
+        match shape {
+            SelectionShape::Leaf(leaf) => SelectionShape::Leaf(*leaf),
+            SelectionShape::Selection {
+                first,
+                kind,
+                left,
+                right,
+            } => SelectionShape::Selection {
+                first: *first,
+                kind: *kind,
+                left: Box::new(copy_shape(left)),
+                right: Box::new(copy_shape(right)),
+            },
+        }
+    }
+
+    /// A leaf's steps, as `LogicalValueTransformer::shape` builds them.
+    fn leaf_steps(shape: &SelectionShape, path: &[usize], steps: &mut Vec<Vec<usize>>) {
+        match shape {
+            SelectionShape::Leaf(_) => steps.push(path.to_vec()),
+            SelectionShape::Selection {
+                first,
+                kind,
+                left,
+                right,
+            } => {
+                let mut left_path = vec![first * 4 + kind];
+                left_path.extend_from_slice(path);
+                let mut right_path = vec![first * 4 + 3];
+                right_path.extend_from_slice(path);
+                leaf_steps(left, &left_path, steps);
+                leaf_steps(right, &right_path, steps);
+            }
+        }
+    }
+
+    /// Evaluate a tree over values that are truthy (2), falsy (1) or nullish
+    /// (0): its value, and the leaves evaluated, in order.
+    fn evaluate(shape: &SelectionShape, values: &[u8], evaluated: &mut Vec<usize>) -> u8 {
+        match shape {
+            SelectionShape::Leaf(leaf) => {
+                evaluated.push(*leaf);
+                values[*leaf]
+            }
+            SelectionShape::Selection {
+                kind, left, right, ..
+            } => {
+                let value = evaluate(left, values, evaluated);
+                let short = match kind {
+                    0 => value == 2,
+                    1 => value != 2,
+                    _ => value != 0,
+                };
+                if short {
+                    value
+                } else {
+                    evaluate(right, values, evaluated)
+                }
+            }
+        }
+    }
+
+    /// What the runtime records for a leaf's steps and its value.
+    fn record_steps(steps: &[usize], value: u8, recorded: &mut Vec<usize>) {
+        for step in steps {
+            let (first, code) = (step / 4, step % 4);
+            let truthy = usize::from(value == 2);
+            if code == 3 {
+                recorded.push(first + 2 + truthy);
+            } else if match code {
+                0 => value == 2,
+                1 => value != 2,
+                _ => value != 0,
+            } {
+                recorded.push(first + truthy);
+            } else {
+                break;
+            }
+        }
+    }
+
     #[test]
-    fn nested_selections_stay_one_tree_of_the_programs_operators() {
-        let source =
-            "export const ok = (total, name, force) => (total > 0 && name !== 'x') || !!force;\n";
-        let output = instrument_candidate(source, "app/ok.js").unwrap();
-        let runtime = output.runtime.expect("candidate runtime binding");
-        // The two leaves of `total > 0 && name !== 'x'` also decide the `||`;
-        // `!!force` is its right side alone.
-        assert_eq!(
-            output
-                .code
-                .matches(&format!("{}(", runtime.select_path_v2))
-                .count(),
-            2
+    fn a_value_tree_records_what_a_call_around_each_leaf_recorded() {
+        // The points a leaf decided are written out where evaluation goes
+        // on from it, from the tree's shape alone. Every tree of up to five
+        // leaves, under every combination of truthy, falsy and nullish
+        // values, records the points `selectPathV2` recorded around each
+        // leaf, in the same order.
+        let mut checked = 0;
+        for leaves in 2..=5 {
+            for (shape, ..) in selection_shapes(leaves, &mut 0, &mut 0) {
+                let mut steps = Vec::new();
+                leaf_steps(&shape, &[], &mut steps);
+                let mut before = vec![Vec::new(); leaves];
+                shape.before(&mut before);
+                for combination in 0..3_usize.pow(leaves as u32) {
+                    let values = (0..leaves)
+                        .map(|leaf| (combination / 3_usize.pow(leaf as u32) % 3) as u8)
+                        .collect::<Vec<_>>();
+                    let mut evaluated = Vec::new();
+                    evaluate(&shape, &values, &mut evaluated);
+                    let mut each_leaf = Vec::new();
+                    for leaf in &evaluated {
+                        record_steps(&steps[*leaf], values[*leaf], &mut each_leaf);
+                    }
+                    let mut tree = Vec::new();
+                    for pair in evaluated.windows(2) {
+                        // As `recorded_before` writes it: the only leaf that
+                        // can come before, or the one the frame names.
+                        let deciders = &before[pair[1]];
+                        let (_, points) = match &deciders[..] {
+                            [only] => only,
+                            several => several
+                                .iter()
+                                .find(|(leaf, _)| *leaf == pair[0])
+                                .expect("the leaf before is one the table has"),
+                        };
+                        tree.extend(points);
+                    }
+                    let last = *evaluated.last().unwrap();
+                    record_steps(&steps[last], values[last], &mut tree);
+                    assert_eq!(tree, each_leaf, "{values:?} over {steps:?}");
+                    assert!(
+                        evaluated
+                            .windows(2)
+                            .all(|pair| before[pair[1]].iter().any(|(leaf, _)| *leaf == pair[0])),
+                        "{values:?} over {steps:?}: {before:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 100_000, "{checked}");
+    }
+
+    #[test]
+    fn a_constant_keeps_its_tree_and_a_named_chain_its_name() {
+        let shaped = value_shape(
+            concat!(
+                "export function text(value: string | number) {\n",
+                "  const isText = typeof value === 'string' && value.length > 0;\n",
+                "  if (isText) return value;\n",
+                "  return null;\n",
+                "}\n",
+                "export const both = text(1) ?? text('a');\n",
+                "export class Owner {\n",
+                "  pet?: { name: string };\n",
+                "  named(other?: Owner) { return [other?.pet, this?.pet, this.pet?.name]; }\n",
+                "}\n",
+            ),
+            "src/alias.ts",
         );
-        assert_eq!(
-            output
-                .code
-                .matches(&format!("{}(", runtime.select_right_v2))
-                .count(),
-            1
+        for expected in [
+            // TypeScript narrows through a constant only when the condition
+            // is its initializer: the value is recorded by the statement
+            // after, from the constant.
+            "const isText = (s1 = 0, typeof value === \"string\") && (s1 = 1, value.length > 0);\n\tEND2(9, isText, s1);\n",
+            "export const both = (s0 = 0, text(1)) ?? (s0 = 1, text(\"a\"));\nEND2(13, both, s0);\n",
+            // A name and `this` are read again after the call that records
+            // them, so the chain narrows them.
+            ", other)?.pet",
+            ", this)?.pet",
+        ] {
+            assert!(shaped.contains(expected), "{expected}\n{shaped}");
+        }
+        // A member may run a getter: it is read once, through the call.
+        assert!(shaped.contains(", this.pet)?.name"), "{shaped}");
+        assert!(!shaped.contains(", this.pet), this.pet)"), "{shaped}");
+    }
+
+    #[test]
+    fn a_value_tree_keeps_its_leaves_the_programs_own_expressions() {
+        // With a call around each leaf, `user.name` was read from a `user`
+        // nothing had narrowed: `any`, when a member of its type has no
+        // `name`, for everything that reads the value. A leaf is the last
+        // operand of a comma now, and the call goes around the tree.
+        let shaped = value_shape(
+            concat!(
+                "export function name(user: { name: string } | false) {\n",
+                "  return user && user.name;\n",
+                "}\n",
+                "export function ok(total: number, name: string, force: boolean) {\n",
+                "  return (total > 0 && name !== 'x') || !!force;\n",
+                "}\n",
+                "export function pick(a: number | null, b: number | null, c: number) {\n",
+                "  return a ?? b ?? c;\n",
+                "}\n",
+                "export function held(list: string[] | null, fallback = list || []) {\n",
+                "  return fallback;\n",
+                "}\n",
+            ),
+            "src/values.ts",
         );
-        assert!(
-            !output
-                .code
-                .contains(&format!("{}(", runtime.select_short_v2)),
-            "{}",
-            output.code
-        );
-        let allocator = Allocator::default();
-        let reparsed = Parser::new(&allocator, &output.code, SourceType::mjs()).parse();
-        assert!(reparsed.errors.is_empty(), "{:?}", reparsed.errors);
-        let text = &output.code;
-        let or = text
-            .find(") || ")
-            .expect("the `||` stays between the two sides");
-        assert!(text[..or].contains(" && "), "{text}");
+        for expected in [
+            "let s0: any;\n",
+            "return END2(10, (s0 = 0, user) && (s0 = 1, user.name), s0);",
+            // More than two leaves: the tree's own operators stay between
+            // them, so a coverage tool the tests run reads one branch, and
+            // what `total > 0` or `name !== 'x'` decided is recorded where
+            // evaluation went on to `!!force`, by which of them it left:
+            // the runtime looks that up, because a choice written out here
+            // would be a branch of this line to that tool.
+            "return END(0, (s1 = 0, total > 0) && (s1 = 1, name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!force), s1);",
+            // Only `b` can come before `c`: a first `??` that kept `a` ends
+            // the second.
+            "return END(1, (s2 = 0, a) ?? (s2 = 1, b) ?? (HIT(24), s2 = 2, c), s2);",
+            // A parameter list cannot see a frame its function's body
+            // declares: the leaves keep their calls there.
+            "SHORT(30, list, 0) || RIGHT(30, [])",
+        ] {
+            assert!(shaped.contains(expected), "{expected}\n{shaped}");
+        }
     }
 
     #[test]

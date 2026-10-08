@@ -1402,6 +1402,10 @@ function registerProbeV2(definition) {
     // A selection's outcomes -- short falsy, short truthy, right falsy, right
     // truthy -- are four consecutive points per site from the first index.
     selectionPoints: definition.selectionPoints,
+    // What selectEndV2 and selectNextV2 read, for each tree of more than two
+    // leaves.
+    selectionSteps: (definition.selectionTrees || []).map((tree) => tree[0]),
+    selectionChoices: (definition.selectionTrees || []).map((tree) => tree[1]),
     none: optionalCallEmptySpread
   };
   state.probeV2Files.add(file);
@@ -1625,6 +1629,44 @@ function selectPathV2(file, value) {
       break;
   }
   return value;
+}
+// A selection tree whose leaves stay the program's own expressions: each is
+// the last operand of a comma that names it in the site's frame, so a type
+// checker reading the instrumented copy narrows through `a && a.b` as it does
+// in the source, and the tree's value is recorded here, once, for the leaf
+// that produced it. What a leaf before the last decided on the way is known
+// from where evaluation went next, and is recorded there as plain hits.
+// Two leaves: the left one is last only when it decided the result.
+function selectEnd2V2(file, first, value, right) {
+  coverageHitV2(file, first + (right ? 2 : 0) + (value ? 1 : 0));
+  return value;
+}
+// More: the leaf's steps, the ones selectPathV2 takes as arguments, come from
+// the file's table, whose entry for a tree is `[steps of each leaf, for each
+// leaf the points each leaf before it has decided by then]`.
+function selectEndV2(file, tree, value, leaf) {
+  const steps = file.selectionSteps[tree][leaf];
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index];
+    const code = step & 3;
+    const first = (step - code) / 4;
+    if (code === 3)
+      coverageHitV2(file, value ? first + 3 : first + 2);
+    else if (code === 0 ? value : code === 1 ? !value : value !== null && value !== void 0)
+      coverageHitV2(file, value ? first + 1 : first);
+    else
+      break;
+  }
+  return value;
+}
+// Where one of several leaves can come before a leaf, the frame says which.
+// Written out in the program as a choice, it would be a branch of the user's
+// line to a coverage tool the tests run.
+function selectNextV2(file, tree, from, to) {
+  const points = file.selectionChoices[tree][to][from];
+  if (points)
+    for (let index = 0; index < points.length; index += 1)
+      coverageHitV2(file, points[index]);
 }
 // `x ||= y`, `x &&= y`, `x ??= y` keep their operator and their single
 // evaluation of the target: the right side goes through selectRightV2 (or the
@@ -1851,6 +1893,9 @@ const directRuntimeApi = {
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,
+  selectEnd2V2,
+  selectEndV2,
+  selectNextV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,
@@ -1913,6 +1958,9 @@ export {
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,
+  selectEnd2V2,
+  selectEndV2,
+  selectNextV2,
   takeNodeAssertionPhases,
   tryBegin,
   tryCatch,
