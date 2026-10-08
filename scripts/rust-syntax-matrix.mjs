@@ -39,7 +39,11 @@ if (candidates.length !== cases.length)
 // This is a semantics-only collector. Real evidence transport is exercised by
 // the ordinary fixture matrix; these helpers preserve the exact operand,
 // receiver, spread, default, and inferred-name behavior while discarding hits.
+// Decision outcomes are the exception: a case that names the ones it expects
+// has them compared, in the order they were recorded.
+let outcomes = [];
 function installRuntime(target) {
+  outcomes = [];
   const pendingDefaults = new Map();
   const emptySpread = {
     [Symbol.iterator]() {
@@ -80,7 +84,8 @@ function installRuntime(target) {
     },
     coverageHitV2() {},
     renderedValueV2(_file, _index, value) { return value; },
-    mcdcEndV2(_file, _index, _encoded, value) {
+    mcdcEndV2(_file, index, encoded, value) {
+      outcomes.push(`${index} ${encoded} ${Boolean(value)}`);
       return value;
     },
     selectionBegin(shortId, rightId) {
@@ -287,6 +292,10 @@ async function runNode() {
     if (JSON.stringify(instrumented) !== JSON.stringify(original))
       throw new Error(
         `node ${process.version} changed ${testCase.file}\noriginal=${JSON.stringify(original)}\ninstrumented=${JSON.stringify(instrumented)}`,
+      );
+    if (testCase.outcomes && JSON.stringify(outcomes) !== JSON.stringify(testCase.outcomes))
+      throw new Error(
+        `node ${process.version} recorded other decision outcomes for ${testCase.file}\nexpected=${JSON.stringify(testCase.outcomes)}\nrecorded=${JSON.stringify(outcomes)}`,
       );
   }
   console.log(`[rust-syntax-matrix] node ${process.version}: ${cases.length} cases preserve behavior`);
