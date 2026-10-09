@@ -65,6 +65,7 @@ const unitRun = latest();
 const scope = json(['runs', unitRun, 'scope', '--limit', '100']);
 const status = Object.fromEntries(scope.entries.map((entry) => [entry.file, entry.status]));
 for (const file of [
+  'app/api/edge/route.ts',
   'app/api/widget/test/route.ts',
   'app/page.tsx',
   'components/greeting.tsx',
@@ -85,7 +86,7 @@ assert.ok(scope.unclassifiedSource.roots.includes('simulators'));
 // project's `build` script first, twenty seconds before a suite that builds.
 const e2e = supercov(['--', 'npm', 'run', 'test:e2e'], { SUPERCOV_TEST_KIND: 'e2e' });
 assert.equal(e2e.status, 0, e2e.output);
-assert.match(e2e.output, /3 passed/);
+assert.match(e2e.output, /4 passed/);
 assert.match(e2e.output, /stayed in the isolated workspace[^\n]*\.next\/ \d+/);
 assert.ok(!existsSync(resolve(fixture, '.next')), 'an instrumented build reached the project');
 const e2eRun = latest();
@@ -93,11 +94,19 @@ const e2eRun = latest();
 const route = supercov(['runs', e2eRun, 'file', 'app/api/widget/test/route.ts']);
 assert.equal(route.status, 0, route.output);
 assert.match(route.output, /Lines not executed\s+0/, route.output);
+// A route with `runtime = 'edge'` runs in a VM context of Next's own, where
+// nothing had installed the runtime: `next build` failed collecting its page
+// data, and a middleware.ts failed every request. It is measured there, and
+// what a test's request runs is that test's.
+const edge = supercov(['runs', e2eRun, 'line', 'app/api/edge/route.ts:5']);
+assert.equal(edge.status, 0, edge.output);
+assert.match(edge.output, /COVERED/, edge.output);
+assert.match(edge.output, /edge route grades a value/, edge.output);
 // Server start-up ran before any test: the kind's row and the run's total
 // differ by exactly what no test ran.
 const summary = json(['runs', e2eRun]);
 const kind = summary.coverageByKind.find((entry) => entry.kind === 'e2e');
-assert.equal(kind.tests, 3);
+assert.equal(kind.tests, 4);
 assert.equal(summary.coverageByTests.lines.covered, kind.summary.lines.covered);
 assert.ok(summary.coverage.lines.covered > summary.coverageByTests.lines.covered, JSON.stringify(summary.coverage.lines));
 const text = supercov(['runs', e2eRun]);
