@@ -85,6 +85,34 @@ if (process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1" ||
     // and may evaluate before any ESM instrumented file imports it.
     globalThis.__supercovRuntime ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
 }
+// Next.js runs a middleware and a route with `runtime = "edge"` in a VM
+// context of its own, the Edge Runtime's, and that context's global is not
+// this one. An instrumented file found no runtime there: every request to an
+// application with a middleware.ts failed on "Cannot read properties of
+// undefined (reading 'mcdcBegin')", and `next build` failed collecting page
+// data for an edge route. Such a context reads this process's runtime, so
+// what runs there is measured like the rest of the server.
+const virtualMachine = Module._load("node:vm", undefined, false);
+const createContext = virtualMachine.createContext;
+virtualMachine.createContext = function createContextWithRuntime(...parameters) {
+    const context = Reflect.apply(createContext, this, parameters);
+    if (parameters[1]?.name === "Edge Runtime") {
+        try {
+            Object.defineProperty(context, "__SUPERCOV_DIRECT_RUNTIME__", {
+                configurable: true,
+                enumerable: false,
+                get: () => globalThis.__SUPERCOV_DIRECT_RUNTIME__ ?? process.__SUPERCOV_DIRECT_RUNTIME__,
+                set(value) {
+                    Object.defineProperty(context, "__SUPERCOV_DIRECT_RUNTIME__", {
+                        configurable: true, enumerable: false, writable: true, value,
+                    });
+                },
+            });
+        }
+        catch { }
+    }
+    return context;
+};
 // Workers are independent Node processes and an explicit `execArgv: []`
 // otherwise strips the preload that supplies the isolated runtime. Preserve
 // every user option while adding exactly one Supercov import.

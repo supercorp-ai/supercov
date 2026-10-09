@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Next.js application with a `middleware.ts`, or a route with `runtime = 'edge'`, runs again. Since 4.0.0 every request to one with a middleware failed on `Cannot read properties of undefined (reading 'mcdcBegin')`, and `next build` failed collecting page data for an edge route: Next runs that code in a context of its own, where nothing had installed Supercov's runtime.
+- Code that runs in Next's edge runtime is measured, and what a test's request runs there is attributed to that test. It read 0% before 4.0.0.
+
 ## 4.0.1
 
 **Fixed**

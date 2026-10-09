@@ -14,3 +14,8 @@ test('home page greets', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('h1')).toHaveText('Hello pong');
 });
+
+test('edge route grades a value', async ({ request }) => {
+  const response = await request.get('/api/edge?value=11');
+  expect(await response.json()).toEqual({ grade: 'high' });
+});
