@@ -709,6 +709,33 @@ test("a lexical wrapper's two frames are the author's one frame again", async ()
     "    at async checkAll (/workspace/tests/failing.test.js:12:35)",
     "    at async /workspace/tests/failing.test.js:9:3",
   ]);
+  // Jest names a frame by what is called at its position, from a source map:
+  // the added frame is `toBe` and the author's `withNodeAssertionPhase`. The
+  // first is what the author's line reads as without Supercov.
+  const named = new Error("failed");
+  named.stack = [
+    "Error: failed",
+    "    at toBe (/workspace/tests/failing.test.js:12:35)",
+    "    at withNodeAssertionPhase (/workspace/.supercov/node_modules/runtime.mjs:940:20)",
+    "    at withNodeAssertionPhase (/workspace/tests/failing.test.js:12:7)",
+    "    at Object.<anonymous> (/workspace/tests/failing.test.js:9:3)",
+  ].join("\n");
+  assert.deepEqual(runtime.cleanInstrumentationStack(named, true).stack.split("\n").slice(1), [
+    "    at toBe (/workspace/tests/failing.test.js:12:35)",
+    "    at Object.<anonymous> (/workspace/tests/failing.test.js:9:3)",
+  ]);
+  // An error from somewhere else keeps every frame that is not the runtime's.
+  const foreign = new Error("failed");
+  foreign.stack = [
+    "Error: failed",
+    "    at ok (node:assert:1:1)",
+    "    at withNodeAssertionPhase (/workspace/.supercov/node_modules/runtime.mjs:940:20)",
+    "    at /workspace/tests/failing.test.js:12:7",
+  ].join("\n");
+  assert.deepEqual(runtime.cleanInstrumentationStack(foreign, true).stack.split("\n").slice(1), [
+    "    at ok (node:assert:1:1)",
+    "    at /workspace/tests/failing.test.js:12:7",
+  ]);
   // A wrapper that calls the author's own function added none: both stay,
   // and only the runtime's own frames go.
   assert.deepEqual(cleaned("    at /workspace/tests/failing.test.js:12:7", false), [

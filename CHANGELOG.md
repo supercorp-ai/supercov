@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Jest failure reads as it does without Supercov, on Jest 29 and 30 with Babel, ts-jest and @swc/jest. An application frame printed as `../../../../src/crypto.js:10:11`, the code under a test file's frame was the line Supercov had wrapped, and a wrapped `expect` had a second frame.
+- Under ts-jest a frame names the line you wrote. ts-jest compiles the text it is given and reads no source map in it, so a frame read `src/crypto.ts:51:10` for line 10 and no code was printed under it.
+- Jest's lcov report names a file as your project does: `SF:src/crypto.js`, where it read `SF:../../../../src/crypto.js`.
+- A project of a Vitest workspace prints failures like the root project does. 4.1.0 fixed the root project only.
+
+**Changed**
+
+- Under Vitest, `coverage-final.json` has named a file by its path in Supercov's copy since 4.1.0, where it named the project's. The lcov report reads `SF:src/index.js` since then, where it read `SF:../../../../src/index.js`.
+
 ## 4.1.0
 
 **Fixed**

@@ -1151,6 +1151,66 @@ impl TokenClass {
     }
 }
 
+/// Whether a word can be the name of something: a compiler names a segment
+/// for an identifier, never for a keyword or a number. Naming `await` printed
+/// a test's own frame as `at Object.await`.
+fn names_something(word: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "as",
+        "async",
+        "await",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "continue",
+        "debugger",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "enum",
+        "export",
+        "extends",
+        "false",
+        "finally",
+        "for",
+        "from",
+        "function",
+        "if",
+        "implements",
+        "import",
+        "in",
+        "instanceof",
+        "interface",
+        "let",
+        "new",
+        "null",
+        "of",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "return",
+        "static",
+        "super",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "type",
+        "typeof",
+        "var",
+        "void",
+        "while",
+        "with",
+        "yield",
+    ];
+    !word.starts_with(|first: char| first.is_ascii_digit()) && !KEYWORDS.contains(&word)
+}
+
 fn apply_text_edits(
     source: &str,
     mut edits: Vec<TextEdit>,
@@ -1202,20 +1262,34 @@ fn apply_text_edits(
                 // one inside a wrapped assertion at the statement's start:
                 // Vitest printed `:12:7` where it prints `:12:35` without
                 // Supercov. Each word and each mark starts a segment.
+                // A word also carries its own text as the segment's name:
+                // a compiler that reads this map keeps a name only where the
+                // map it reads has one, and Jest names a frame by it. With
+                // @swc/jest `at toBe (a.test.ts:12:35)` lost its `toBe`.
                 let (mut offset, mut before) = (0u32, TokenClass::Space);
-                for unit in piece.chars() {
+                for (index, unit) in piece.char_indices() {
                     let class = TokenClass::of(unit);
                     if offset > 0
                         && class != TokenClass::Space
                         && (class != before || class == TokenClass::Mark)
                     {
+                        let name = (class == TokenClass::Word)
+                            .then(|| {
+                                let rest = &piece[index..];
+                                let end = rest
+                                    .find(|next| TokenClass::of(next) != TokenClass::Word)
+                                    .unwrap_or(rest.len());
+                                &rest[..end]
+                            })
+                            .filter(|word| names_something(word))
+                            .map(|word| builder.add_name(word));
                         builder.add_token(
                             *line,
                             *column + offset,
                             *source_line,
                             *source_column + offset,
                             Some(source_id),
-                            None,
+                            name,
                         );
                     }
                     before = class;
@@ -9819,6 +9893,18 @@ mod tests {
         assert_eq!(original(0, 7), Some((0, 7)));
         // The text the wrapper added maps to where the line began.
         assert_eq!(original(1, 4), Some((1, 0)));
+        // An identifier carries its name, which a compiler reading this map
+        // keeps and Jest prints (`at toBe (…)`); a keyword carries none.
+        let name_at = |line: u32, column: u32| {
+            map.get_tokens()
+                .find(|token| token.get_dst_line() == line && token.get_dst_col() == column)
+                .and_then(|token| token.get_name_id())
+                .and_then(|id| map.get_name(id))
+                .map(|name| name.to_string())
+        };
+        assert_eq!(name_at(1, matcher).as_deref(), Some("toBe"));
+        assert_eq!(name_at(0, 9).as_deref(), Some("expect"));
+        assert_eq!(name_at(0, 18), None, "`from` is a keyword");
     }
 
     #[test]

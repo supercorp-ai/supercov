@@ -252,6 +252,21 @@ try {
   assert.deepEqual(measured, plain);
   assert.ok(plain.some((line) => /❯ \S*decrypt src\/crypto\.js:10:11$/u.test(line)), plain.join('\n'));
 
+  // A project of a workspace has a server of its own, which the root's
+  // configuration does not reach: its failures read the same.
+  mkdirSync(resolve(project, 'packages/unit/tests'), { recursive: true });
+  writeFileSync(resolve(project, 'packages/unit/vitest.config.js'), "export default { test: { name: 'unit' } };\n");
+  writeFileSync(
+    resolve(project, 'packages/unit/tests/failing.test.js'),
+    readFileSync(resolve(project, 'tests/failing.test.js'), 'utf8').replace('../src/crypto.js', '../../../src/crypto.js'),
+  );
+  writeFileSync(resolve(project, 'workspace.config.js'), "export default { test: { projects: ['packages/*'] } };\n");
+  const workspace = ['run', '--config', 'workspace.config.js'];
+  const plainWorkspace = failure(vitest, workspace);
+  assert.deepEqual(failure(binary, ['--', vitest, ...workspace]), plainWorkspace);
+  // Printed from the project's own directory.
+  assert.ok(plainWorkspace.some((line) => /❯ \S*decrypt \.\.\/\.\.\/src\/crypto\.js:10:11$/u.test(line)), plainWorkspace.join('\n'));
+
   console.log(
     '[rust-direct-vitest] Rust-owned zero-config npm test run is valid and structurally complete',
   );
