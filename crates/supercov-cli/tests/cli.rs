@@ -123,6 +123,7 @@ fn a_measured_suite_reads_back_through_every_query() {
     assert_eq!(area["covered"]["lines"], 10);
     assert_eq!(area["byKind"][0]["kind"], "unit");
     assert_eq!(area["byKind"][0]["covered"]["lines"], 10);
+    assert_eq!(area["coveredByTests"]["lines"], 10);
     let files = project
         .supercov(&["runs", "latest", "files", "--json"])
         .json();
@@ -3468,6 +3469,140 @@ fn a_tool_that_judges_source_reads_it_as_it_was_written() {
             &[("SUPERCOV_SOURCE_TOOLS", "housestyle")],
         )
         .succeeds();
+}
+
+#[test]
+fn tests_that_recorded_no_coverage_can_be_listed() {
+    let project = Project::empty("unevidenced");
+    project.write(
+        "package.json",
+        r#"{ "name": "unevidenced", "scripts": { "test": "node --test test/fee.test.js test/static.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    project.write(
+        "test/static.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\ntest('two is two', () => equal(1 + 1, 2));\ntest('names are strings', () => equal(typeof 'a', 'string'));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "npm", "test"]).succeeds();
+
+    // The summary named one test for 63 and no query named the rest.
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &[
+            "2 tests made assertions, but Supercov received no source-coverage evidence:",
+            "    All of them: ",
+            "tests without-evidence",
+        ],
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "tests", "without-evidence"])
+        .succeeds();
+    contains_all(
+        &listed,
+        &[
+            "Tests that made assertions and recorded no coverage: 2",
+            "test/static.test.js > names are strings [",
+            "test/static.test.js > two is two [",
+            "passed, 1 assertion",
+            "showing 1-2 of 2",
+        ],
+    );
+    assert!(!listed.contains("small orders pay"), "{listed}");
+    let page = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "tests",
+            "without-evidence",
+            "--limit",
+            "1",
+            "--json",
+        ])
+        .json();
+    assert_eq!(page["command"], "coverage.tests-without-evidence");
+    assert_eq!(page["pagination"]["total"], 2);
+    assert_eq!(page["data"]["tests"][0]["name"], "names are strings");
+    assert_eq!(page["data"]["tests"][0]["file"], "test/static.test.js");
+    assert_eq!(page["data"]["tests"][0]["assertions"], 1);
+    // `tests affected` is still the other query under `tests`.
+    let other = project.supercov(&["runs", "latest", "tests", "nonsense"]);
+    assert_eq!(other.code(), 2);
+}
+
+#[test]
+fn a_directory_says_what_ran_while_no_test_was_running() {
+    let project = Project::empty("rollup");
+    project.write(
+        "package.json",
+        r#"{ "name": "rollup", "scripts": { "test": "node --test test/fee.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "boot.js",
+        "const settings = { rate: 5 };\nconst limit = 100;\nmodule.exports = { settings, limit };\n",
+    );
+    project.write(
+        "src/app/fee.js",
+        "const { settings, limit } = require('../../boot.js');\nfunction fee(sum) {\n  return sum > limit ? 0 : settings.rate;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/app/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    project.git(&["init", "-q"]);
+    project
+        .supercov_with(
+            &["--", "npm", "test"],
+            &[
+                ("SUPERCOV_SOURCE_ROOTS", "src,boot.js"),
+                ("SUPERCOV_TEST_KIND", "unit"),
+            ],
+        )
+        .succeeds();
+
+    // `.` read unit 0.00% and All 100.00%, and `src` 50.00% and 100.00%: a
+    // total above every kind, with nothing to say where the rest came from.
+    // The files were loaded before the first test started.
+    let areas = project
+        .supercov(&["runs", "latest", "files", "--group", "dir"])
+        .succeeds();
+    contains_all(
+        &areas,
+        &[
+            "Directory  Files  Lines    unit  no test      All",
+            "src            1      4  50.00%   50.00%  100.00%",
+            ".              1      3   0.00%  100.00%  100.00%",
+            "\"no test\" is code that ran only while no test was running",
+        ],
+    );
+    let json = project
+        .supercov(&["runs", "latest", "files", "--group", "dir", "--json"])
+        .json();
+    let root = json["data"]["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|area| area["directory"] == ".")
+        .unwrap();
+    assert_eq!(root["covered"]["lines"], 3);
+    assert_eq!(root["coveredByTests"]["lines"], 0);
+    // One kind asked for is that kind's coverage, with nothing to compare.
+    let unit = project
+        .supercov(&[
+            "runs", "latest", "files", "--group", "dir", "--kind", "unit",
+        ])
+        .succeeds();
+    assert!(!unit.contains("no test"), "{unit}");
 }
 
 #[cfg(unix)]

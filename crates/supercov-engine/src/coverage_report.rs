@@ -1166,17 +1166,34 @@ pub fn coverage_summary_for_file(
     summary_for_results(&decisions, &points, &branches, &lines, None)
 }
 
-/// What the tests of a view cover between them, leaving out what ran while
-/// no test was running: start-up and setup, module loading, work between
-/// tests. A setup scope is not a test: a kind's row counts tests, and a run
-/// whose server starts in a setup scope showed that code in the total only.
-pub(crate) fn summary_for_tests(view: &CoverageView) -> Result<CoverageSummary, ReportError> {
-    let selected = view
+/// The entries whose coverage a kind's row counts: every test of the view,
+/// and the setup scopes of a kind that has tests. A kind's row counts both.
+/// Leaving a test file's own setup out of this put one line in the `unit` row
+/// and in `no test`, and the rows added up to more than the run's total. A
+/// setup scope of a kind with no test has no row: a server started there is
+/// in the total only, and that is what `no test` is for.
+pub(crate) fn entries_in_kind_rows(view: &CoverageView) -> BTreeSet<String> {
+    let with_tests = view
         .tests
         .iter()
-        .filter(|test| test.role == "test" && coverage_is_its_own(&test.attribution))
-        .map(|test| test.id.clone())
+        .filter(|test| test.role == "test")
+        .map(|test| test.provenance.kind.as_str())
         .collect::<BTreeSet<_>>();
+    view.tests
+        .iter()
+        .filter(|test| {
+            coverage_is_its_own(&test.attribution)
+                && (test.role == "test"
+                    || (test.role == "setup" && with_tests.contains(test.provenance.kind.as_str())))
+        })
+        .map(|test| test.id.clone())
+        .collect()
+}
+
+/// What the tests of a view cover between them, leaving out what ran while
+/// no test was running: start-up, module loading, work between tests.
+pub(crate) fn summary_for_tests(view: &CoverageView) -> Result<CoverageSummary, ReportError> {
+    let selected = entries_in_kind_rows(view);
     summary_for_results(
         &view.decisions,
         &view.points,

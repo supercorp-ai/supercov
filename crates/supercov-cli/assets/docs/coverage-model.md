@@ -106,6 +106,14 @@ By test kind
   no test                    lines  17.14%  branches   0.00%  MC/DC   0.00%
 ```
 
+`files --group dir` has the same figure as a `no test` column wherever a
+directory has any, so a directory's `All` never stands above its kinds
+unexplained.
+
+A test that made assertions and has no covered line to its name is counted in
+a warning on the summary. `npx supercov runs latest tests without-evidence`
+lists every such test, with its file, kind and outcome.
+
 See [Supported suites](supported-suites.md) for the attribution available from
 each runner.
 

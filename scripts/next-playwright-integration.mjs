@@ -89,6 +89,9 @@ assert.equal(e2e.status, 0, e2e.output);
 assert.match(e2e.output, /4 passed/);
 assert.match(e2e.output, /stayed in the isolated workspace[^\n]*\.next\/ \d+/);
 assert.ok(!existsSync(resolve(fixture, '.next')), 'an instrumented build reached the project');
+// Next warns about more than one lockfile above it. The copy's own, inside
+// the project, is not one of them.
+assert.doesNotMatch(e2e.output, /\* .*\.supercov\/workspaces\/[^\n]*lock/, e2e.output);
 const e2eRun = latest();
 // A route under a folder named `test` is served, measured and covered.
 const route = supercov(['runs', e2eRun, 'file', 'app/api/widget/test/route.ts']);

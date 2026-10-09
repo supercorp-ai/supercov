@@ -125,7 +125,7 @@ fn source_roots_hint(unclassified: &supercov_engine::coverage_query::Unclassifie
     )
 }
 
-fn diagnostic_lines(diagnostic: &CoverageDiagnostic) -> Vec<String> {
+fn diagnostic_lines(diagnostic: &CoverageDiagnostic, list: Option<&str>) -> Vec<String> {
     if diagnostic.code == "TEST_EVIDENCE_MISSING" {
         let test_count = diagnostic
             .message
@@ -137,16 +137,23 @@ fn diagnostic_lines(diagnostic: &CoverageDiagnostic) -> Vec<String> {
             .split_once("First: ")
             .map(|(_, value)| value.trim());
         if let (Some(test_count), Some(first)) = (test_count, first) {
-            return vec![
+            let mut lines = vec![
                 format!(
                     "  {} {} made assertions, but Supercov received no source-coverage evidence:",
                     count(test_count),
                     if test_count == 1 { "test" } else { "tests" }
                 ),
                 format!("    Example: {first}"),
+            ];
+            // One example for 63 tests left nothing to follow up.
+            if let Some(list) = list.filter(|_| test_count > 1) {
+                lines.push(format!("    All of them: {list}"));
+            }
+            lines.extend([
                 "  Possible causes: the code under test is outside the measured source (see `scope`), uninstrumented data, shared setup, lost async context, or missing probe transport. Missing evidence does not prove the code did not execute.".into(),
                 "  Inspect the test's coverage and assertion details to distinguish missing execution from missing attribution.".into(),
-            ];
+            ]);
+            return lines;
         }
     }
     vec![format!("  {}", diagnostic.message)]
@@ -279,10 +286,24 @@ fn render_areas(
             total,
         )
     };
+    // `All` above every kind shown read as an error: `.` at e2e 18.18%, the
+    // other kinds 0.00%, All 100.00%. The rest ran while no test was running,
+    // and a column says so wherever some did.
+    let outside = |area: &supercov_engine::coverage_query::CoverageArea| {
+        area.covered_by_tests.as_ref().map(|tested| {
+            dimension_for_metric(&area.covered, metric)
+                .saturating_sub(dimension_for_metric(tested, metric))
+        })
+    };
+    let no_test = data
+        .areas
+        .iter()
+        .any(|area| outside(area).is_some_and(|only| only > 0));
     let mut table = vec![
         ["Directory".to_owned(), "Files".into(), heading.into()]
             .into_iter()
             .chain(data.kinds.iter().cloned())
+            .chain(no_test.then(|| "no test".to_owned()))
             .chain(["All".to_owned()])
             .collect::<Vec<_>>(),
     ];
@@ -296,6 +317,7 @@ fn render_areas(
                         .iter()
                         .map(|kind| percent(dimension_for_metric(&kind.covered, metric), total)),
                 )
+                .chain(no_test.then(|| percent(outside(area).unwrap_or(0), total)))
                 .chain([percent(dimension_for_metric(&area.covered, metric), total)])
                 .collect(),
         );
@@ -335,6 +357,9 @@ fn render_areas(
             .trim_end()
             .to_owned()
     }));
+    if no_test {
+        lines.push("\"no test\" is code that ran only while no test was running: start-up and setup, module loading, work between tests. It counts in All and in no kind.".into());
+    }
     lines.push(page_label(page));
     let base = format!(
         "{} --group dir{}",
@@ -1040,7 +1065,14 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             if !data.diagnostics.is_empty() {
                 lines.extend([String::new(), "Warnings".into()]);
                 for diagnostic in &data.diagnostics {
-                    lines.extend(diagnostic_lines(diagnostic));
+                    lines.extend(diagnostic_lines(
+                        diagnostic,
+                        Some(&coverage_command(
+                            &data.run,
+                            request,
+                            "tests without-evidence",
+                        )),
+                    ));
                 }
             }
             if !data.hints.is_empty() {
@@ -1747,6 +1779,63 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             }
             lines.join("\n")
         }
+        IndexedQueryData::TestsWithoutEvidence(data) => {
+            let page = page.expect("tests are paginated");
+            let label = filter_label(request);
+            let mut lines = vec![format!(
+                "Tests that made assertions and recorded no coverage: {}{}",
+                count(page.total),
+                if label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {label}")
+                }
+            )];
+            if data.tests.is_empty() {
+                return lines.join("\n");
+            }
+            lines.push(String::new());
+            for test in &data.tests {
+                // A runner that names a test by its titles alone leaves out
+                // where it is.
+                let place = test
+                    .file
+                    .as_deref()
+                    .filter(|file| {
+                        let name = file.rsplit('/').next().unwrap_or(file);
+                        !test.name.contains(name)
+                    })
+                    .map_or_else(String::new, |file| format!("{file} > "));
+                lines.push(format!(
+                    "  {place}{} [{}] — {}/{}, {}, {} assertion{}",
+                    test.name,
+                    test.id,
+                    test.kind,
+                    test.runner,
+                    test.outcome,
+                    count(test.assertions),
+                    if test.assertions == 1 { "" } else { "s" },
+                ));
+            }
+            lines.push(page_label(page));
+            let base = coverage_command(&data.run, request, "tests without-evidence");
+            if page.offset + page.returned < page.total {
+                lines.push(format!(
+                    "next page: {base} --offset {} --limit {}",
+                    page.offset + page.returned,
+                    page.limit
+                ));
+            }
+            lines.extend([
+                String::new(),
+                "Each ran and checked something, and no line of the measured source is linked to it: the code it checks is outside the measured source (see `scope`), ran in shared setup, or its evidence did not arrive. Missing evidence does not prove the code did not execute.".into(),
+                format!(
+                    "One test in detail: {}",
+                    coverage_command(&data.run, request, "test <id>")
+                ),
+            ]);
+            lines.join("\n")
+        }
         IndexedQueryData::Diff(data) => {
             let page = page.expect("diff is paginated");
             let signed = |value: f64| format!("{}{value}", if value >= 0.0 { "+" } else { "" });
@@ -2013,12 +2102,35 @@ mod tests {
     }
 
     #[test]
+    fn missing_evidence_for_several_tests_names_the_query_that_lists_them() {
+        let lines = diagnostic_lines(
+            &CoverageDiagnostic {
+                code: "TEST_EVIDENCE_MISSING".into(),
+                severity: "warning".into(),
+                message: "63 test(s) recorded assertion phases but attributed zero coverage evidence; possible causes follow. First: safety.spec.ts > checks the VM".into(),
+            },
+            Some("supercov runs 'run_1' tests without-evidence"),
+        );
+        assert_eq!(
+            lines[..3],
+            [
+                "  63 tests made assertions, but Supercov received no source-coverage evidence:",
+                "    Example: safety.spec.ts > checks the VM",
+                "    All of them: supercov runs 'run_1' tests without-evidence",
+            ]
+        );
+    }
+
+    #[test]
     fn missing_test_evidence_is_explained_without_internal_codes() {
-        let lines = diagnostic_lines(&CoverageDiagnostic {
-            code: "TEST_EVIDENCE_MISSING".into(),
-            severity: "warning".into(),
-            message: "1 test(s) recorded assertion phases but attributed zero coverage evidence; this is valid for assertions over static or uninstrumented data, but may otherwise indicate missing probe transport. First: safety.spec.ts > checks the VM".into(),
-        });
+        let lines = diagnostic_lines(
+            &CoverageDiagnostic {
+                code: "TEST_EVIDENCE_MISSING".into(),
+                severity: "warning".into(),
+                message: "1 test(s) recorded assertion phases but attributed zero coverage evidence; this is valid for assertions over static or uninstrumented data, but may otherwise indicate missing probe transport. First: safety.spec.ts > checks the VM".into(),
+            },
+            Some("supercov runs 'run_1' tests without-evidence"),
+        );
         assert_eq!(
             lines,
             vec![

@@ -339,6 +339,7 @@ pub enum IndexedQueryData {
     Gaps(Box<CoverageGapsData>),
     Minimize(Box<CoverageMinimizeData>),
     Diff(Box<CoverageDiffData>),
+    TestsWithoutEvidence(Box<crate::coverage_query::TestsWithoutEvidenceData>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -381,8 +382,18 @@ pub fn query_indexed(
     let gaps_only = match request.command.as_str() {
         "files" => Some(false),
         "gaps" => Some(true),
-        "file-decisions" | "kinds" | "runners" | "summary" | "scope" | "line" | "test"
-        | "decision" | "file-detail" | "minimize" | "diff" => None,
+        "file-decisions"
+        | "kinds"
+        | "runners"
+        | "summary"
+        | "scope"
+        | "line"
+        | "test"
+        | "decision"
+        | "file-detail"
+        | "minimize"
+        | "diff"
+        | "tests-without-evidence" => None,
         _ => {
             return Err(IndexedQueryError::UnsupportedCommand(
                 request.command.clone(),
@@ -577,6 +588,25 @@ pub fn query_indexed(
         return Ok(IndexedQueryOutput {
             command: "coverage.file",
             data: IndexedQueryData::FileDetail(Box::new(data)),
+            pagination: Some(page),
+        });
+    }
+
+    if request.command == "tests-without-evidence" {
+        let (data, page) = crate::coverage_query::tests_without_evidence_query(
+            index,
+            crate::coverage_query::TestsWithoutEvidenceOptions {
+                run: &request.run_id,
+                view,
+                kind: request.kind.as_deref(),
+                runner: request.runner.as_deref(),
+                offset: request.offset,
+                limit: request.limit,
+            },
+        )?;
+        return Ok(IndexedQueryOutput {
+            command: "coverage.tests-without-evidence",
+            data: IndexedQueryData::TestsWithoutEvidence(Box::new(data)),
             pagination: Some(page),
         });
     }

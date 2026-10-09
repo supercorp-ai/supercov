@@ -2029,7 +2029,16 @@ fn execute_public_query(
     }
 }
 
-fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
+fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
+    // `tests without-evidence` reads the run's index like any other query;
+    // `tests affected` compares the run with the working tree.
+    if command == "runs"
+        && arguments.get(1).is_some_and(|a| a == "tests")
+        && arguments.get(2).is_some_and(|a| a == "without-evidence")
+    {
+        arguments.remove(2);
+        arguments[1] = "tests-without-evidence".into();
+    }
     if command == "runs" && arguments.get(1).is_some_and(|a| a == "assertions") {
         return assertions_command::command(&arguments);
     }

@@ -886,21 +886,40 @@ function finishAssertionPhase(phase, error) {
     phase.error = error instanceof Error ? error.message : String(error);
 }
 
-function cleanInstrumentationStack(error) {
+const INSTRUMENTATION_FRAME = /[\\/]\.supercov[\\/](?:node_modules[\\/])?(?:playwright|nodeTest|vitest|runtime|launchSupervisor|nodeAssert|nodeAssertStrict|nodeAssertAdapter|register|resolve-loader)\.(?:js|mjs)(?::|\))/u;
+// A lexical wrapper runs the assertion in a function of its own, so its
+// stack had two frames where the author wrote one: the function Supercov
+// added, at the assertion, and below the runtime's frames the function the
+// author wrote, at the wrapper. Vitest printed both, `:12:35` and `:12:1`.
+// They are one frame again: the author's function, where the assertion is.
+function cleanInstrumentationStack(error, lexical = false) {
   if (!error || typeof error !== "object" || typeof error.stack !== "string")
     return error;
   const lines = error.stack.split("\n");
-  const visible = lines.filter((line, index) => index === 0 || !/[\\/]\.supercov[\\/](?:node_modules[\\/])?(?:playwright|nodeTest|vitest|runtime|launchSupervisor|nodeAssert|nodeAssertStrict|nodeAssertAdapter|register|resolve-loader)\.(?:js|mjs)(?::|\))/u.test(line));
-  if (visible.length !== lines.length) {
-    try {
-      error.stack = visible.join("\n");
-    } catch (e) {
-    }
+  const hidden = lines.map((line, index) => index > 0 && INSTRUMENTATION_FRAME.test(line));
+  const first = hidden.indexOf(true);
+  if (first < 0)
+    return error;
+  const last = hidden.lastIndexOf(true);
+  let visible;
+  const frame = /^(\s*at (?:async )?)(?:(.*?) \()?(.*?:\d+:\d+)\)?$/;
+  const added = lexical && first > 1 ? frame.exec(lines[first - 1]) : null;
+  const written = added && last + 1 < lines.length ? frame.exec(lines[last + 1]) : null;
+  if (added && written && added[2] === void 0 && !/^node:/.test(written[3])) {
+    const merged = written[2] === void 0 ? lines[first - 1] : `${written[1]}${written[2]} (${added[3]})`;
+    visible = [...lines.slice(0, first - 1), merged, ...lines.slice(last + 2)];
+  } else {
+    visible = lines.filter((line, index) => !hidden[index]);
+  }
+  try {
+    error.stack = visible.join("\n");
+  } catch (e) {
   }
   return error;
 }
 function withNodeAssertionPhase(operation, source, callback) {
   var _a8;
+  const lexical = typeof source === "string";
   const context = currentRequestContext();
   const scope = context.scope;
   if (!scope)
@@ -944,13 +963,13 @@ function withNodeAssertionPhase(operation, source, callback) {
         return value;
       }, (error) => {
         finishAssertionPhase(phase, error);
-        throw cleanInstrumentationStack(error);
+        throw cleanInstrumentationStack(error, lexical);
       });
     finishAssertionPhase(phase);
     return result;
   } catch (error) {
     finishAssertionPhase(phase, error);
-    throw cleanInstrumentationStack(error);
+    throw cleanInstrumentationStack(error, lexical);
   }
 }
 // Callee binding preserves receiver, getter/evaluation order, spreads and the

@@ -183,6 +183,75 @@ try {
   assert.equal(test.data.tests[0].phases.length, 1);
   assert.equal(test.data.tests[0].phases[0].operation, 'expect.toBe');
   assert.ok(test.data.tests[0].phases[0].lines > 0);
+  // A failure reads as it does without Supercov: the project's paths, the
+  // columns Vitest reports, and the code under the nearest frame. In the copy
+  // an application frame printed as `../../../../src/crypto.js:3:11`, a test
+  // file's frames sat in column 1 or at the statement's start, and a failed
+  // `expect` printed no code at all.
+  writeFileSync(
+    resolve(project, 'src/crypto.js'),
+    [
+      'const reversed = (value) => {',
+      "  const letters = value.split('');",
+      '  letters.reverse();',
+      "  return letters.join('');",
+      '};',
+      '',
+      'export function decrypt(value, key) {',
+      '  const text = reversed(value);',
+      '  if (!key) {',
+      "    throw new Error('missing key');",
+      '  }',
+      '  return text + key.length;',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    resolve(project, 'tests/failing.test.js'),
+    [
+      "import { expect, test } from 'vitest';",
+      "import { decrypt } from '../src/crypto.js';",
+      '',
+      "test('decrypt needs a key', () => {",
+      "  decrypt('abc', undefined);",
+      '});',
+      '',
+      "test('decrypt reverses', async () => {",
+      '  await Promise.all(',
+      "    ['a'].map(async (value) => {",
+      '      await Promise.resolve();',
+      "      expect(decrypt(value, 'k')).toBe('a2');",
+      '    }),',
+      '  );',
+      '});',
+      '',
+    ].join('\n'),
+  );
+  // Frames, the code Vitest prints under one, and the caret; not the summary
+  // lines, which carry durations and the directory the suite ran in.
+  const failure = (command, args) => {
+    const result = spawnSync(command, args, {
+      cwd: project,
+      encoding: 'utf8',
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1' },
+    });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    const lines = `${result.stdout}${result.stderr}`
+      // eslint-disable-next-line no-control-regex
+      .replace(/\u001b\[[0-9;]*[A-Za-z]/gu, '')
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => /^\s*(?:❯ \S+:\d+:\d+|❯ \S+ \S+:\d+:\d+|\d+\||\|\s*\^)/u.test(line));
+    assert.ok(lines.length >= 8, result.stdout + result.stderr);
+    return lines;
+  };
+  const vitest = resolve(project, 'node_modules/.bin/vitest');
+  const plain = failure(vitest, ['run', 'tests/failing.test.js']);
+  const measured = failure(binary, ['--', vitest, 'run', 'tests/failing.test.js']);
+  assert.deepEqual(measured, plain);
+  assert.ok(plain.some((line) => /❯ \S*decrypt src\/crypto\.js:10:11$/u.test(line)), plain.join('\n'));
+
   console.log(
     '[rust-direct-vitest] Rust-owned zero-config npm test run is valid and structurally complete',
   );
