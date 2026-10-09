@@ -1130,6 +1130,27 @@ impl TextEdit {
 /// Edits never add or remove a line break, so a directive, a comment and a
 /// stack-trace line number all stay where the author put them. The source map
 /// maps every copied run of the original back to itself.
+/// What a character is to a position in a line: part of a word, a mark of
+/// its own, or the space between.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenClass {
+    Word,
+    Mark,
+    Space,
+}
+
+impl TokenClass {
+    fn of(unit: char) -> Self {
+        if unit.is_whitespace() {
+            Self::Space
+        } else if unit.is_alphanumeric() || unit == '_' || unit == '$' {
+            Self::Word
+        } else {
+            Self::Mark
+        }
+    }
+}
+
 fn apply_text_edits(
     source: &str,
     mut edits: Vec<TextEdit>,
@@ -1176,10 +1197,33 @@ fn apply_text_edits(
                     Some(source_id),
                     None,
                 );
+                // A position reads as its segment's start, so one mapping for
+                // a line put every frame of a test file in column 1, and the
+                // one inside a wrapped assertion at the statement's start:
+                // Vitest printed `:12:7` where it prints `:12:35` without
+                // Supercov. Each word and each mark starts a segment.
+                let (mut offset, mut before) = (0u32, TokenClass::Space);
+                for unit in piece.chars() {
+                    let class = TokenClass::of(unit);
+                    if offset > 0
+                        && class != TokenClass::Space
+                        && (class != before || class == TokenClass::Mark)
+                    {
+                        builder.add_token(
+                            *line,
+                            *column + offset,
+                            *source_line,
+                            *source_column + offset,
+                            Some(source_id),
+                            None,
+                        );
+                    }
+                    before = class;
+                    offset += unit.len_utf16() as u32;
+                }
                 code.push_str(piece);
-                let width = piece.encode_utf16().count() as u32;
-                *column += width;
-                *source_column += width;
+                *column += offset;
+                *source_column += offset;
             }
         }
     };
@@ -9733,6 +9777,48 @@ mod tests {
                 kind: "if".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn a_test_files_unchanged_text_keeps_its_columns() {
+        // One mapping for a line put every frame of a test file in column 1,
+        // and one inside a wrapped assertion at the statement's start: Vitest
+        // printed `:2:3` where it prints `:2:22` without Supercov.
+        let source = "import { expect } from 'vitest';\n  expect(value(1)).toBe(2);\n";
+        let wrapper = "wrap(() => ";
+        let edits = vec![
+            TextEdit {
+                start: source.find("expect(value").unwrap(),
+                end: source.find("expect(value").unwrap(),
+                text: wrapper.into(),
+                rank: 0,
+            },
+            TextEdit {
+                start: source.rfind(';').unwrap(),
+                end: source.rfind(';').unwrap(),
+                text: ")".into(),
+                rank: 0,
+            },
+        ];
+        let (code, map) = apply_text_edits(source, edits, "a.test.js").unwrap();
+        assert_eq!(
+            code,
+            "import { expect } from 'vitest';\n  wrap(() => expect(value(1)).toBe(2));\n"
+        );
+        let original = |line: u32, column: u32| {
+            map.get_tokens()
+                .filter(|token| token.get_dst_line() == line && token.get_dst_col() <= column)
+                .max_by_key(|token| token.get_dst_col())
+                .map(|token| (token.get_src_line(), token.get_src_col()))
+        };
+        // `toBe`, past the text the wrapper added.
+        let matcher = code.lines().nth(1).unwrap().find("toBe").unwrap() as u32;
+        assert_eq!(original(1, matcher), Some((1, 19)));
+        // A word and a mark of a line nothing was added to.
+        assert_eq!(original(0, 9), Some((0, 9)));
+        assert_eq!(original(0, 7), Some((0, 7)));
+        // The text the wrapper added maps to where the line began.
+        assert_eq!(original(1, 4), Some((1, 0)));
     }
 
     #[test]

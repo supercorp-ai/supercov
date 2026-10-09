@@ -2704,6 +2704,11 @@ pub struct CoverageArea {
     pub totals: IndexedGapDimensions,
     pub covered: IndexedGapDimensions,
     pub by_kind: Vec<CoverageAreaKind>,
+    /// What the tests of every kind cover together. The rest of `covered`
+    /// ran while no test was running. Absent where the query names a kind or
+    /// a runner, and for a run stored before this was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_by_tests: Option<IndexedGapDimensions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2821,6 +2826,7 @@ pub fn coverage_areas_query(
                         covered: NO_DIMENSIONS,
                     })
                     .collect(),
+                covered_by_tests: None,
             });
         area.files += 1;
         add_dimensions(&mut area.totals, &file.totals);
@@ -2830,6 +2836,22 @@ pub fn coverage_areas_query(
         for file in index.file_gaps(options.view, Some(kind), None)? {
             if let Some(area) = areas.get_mut(&area_directory(&file.file, options.depth)) {
                 add_dimensions(&mut area.by_kind[position].covered, &file.covered);
+            }
+        }
+    }
+    if !kinds.is_empty() {
+        let tested = index.file_gaps(options.view, Some(crate::coverage_index::ALL_TESTS), None)?;
+        if !tested.is_empty() {
+            for area in areas.values_mut() {
+                area.covered_by_tests = Some(NO_DIMENSIONS);
+            }
+            for file in tested {
+                if let Some(sum) = areas
+                    .get_mut(&area_directory(&file.file, options.depth))
+                    .and_then(|area| area.covered_by_tests.as_mut())
+                {
+                    add_dimensions(sum, &file.covered);
+                }
             }
         }
     }
@@ -2863,6 +2885,109 @@ pub fn coverage_areas_query(
             depth: options.depth,
             kinds,
             areas: page,
+        },
+        pagination(options.offset, options.limit, returned, total),
+    ))
+}
+
+/// A test that made assertions and has no line, hit or decision to its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestWithoutEvidence {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    pub kind: String,
+    pub runner: String,
+    pub outcome: String,
+    pub assertions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestsWithoutEvidenceData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub tests: Vec<TestWithoutEvidence>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TestsWithoutEvidenceOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+/// Every test the run's summary counts under "made assertions, but Supercov
+/// received no source-coverage evidence". The summary names one of them; 63
+/// tests behind one example could not be followed up.
+pub fn tests_without_evidence_query(
+    index: &CoverageIndex<'_>,
+    options: TestsWithoutEvidenceOptions<'_>,
+) -> Result<(TestsWithoutEvidenceData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let mut assertions = BTreeMap::<String, usize>::new();
+    for phase in index.phase_summaries(options.view)? {
+        *assertions.entry(phase.test).or_insert(0) += 1;
+    }
+    let mut tests = index
+        .test_details(options.view)?
+        .into_iter()
+        .filter(|test| {
+            test.summary.role == "test"
+                && test.lines.is_empty()
+                && test.hits.is_empty()
+                && test.decisions.is_empty()
+                && options
+                    .kind
+                    .is_none_or(|kind| test.summary.provenance.kind == kind)
+                && options
+                    .runner
+                    .is_none_or(|runner| test.summary.provenance.runner == runner)
+        })
+        .filter_map(|test| {
+            let assertions = *assertions.get(&test.summary.id)?;
+            Some(TestWithoutEvidence {
+                id: test.summary.id,
+                name: test.summary.name,
+                file: test.summary.file,
+                kind: test.summary.provenance.kind,
+                runner: test.summary.provenance.runner,
+                outcome: test.summary.outcome,
+                assertions,
+            })
+        })
+        .collect::<Vec<_>>();
+    tests.sort_by(|left, right| {
+        (&left.file, &left.name, &left.id).cmp(&(&right.file, &right.name, &right.id))
+    });
+    let total = tests.len();
+    let page = tests
+        .into_iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .collect::<Vec<_>>();
+    let returned = page.len();
+    Ok((
+        TestsWithoutEvidenceData {
+            run: options.run.into(),
+            filters: CoverageQueryFilters {
+                outcome: match options.view {
+                    CoverageViewId::All => "all",
+                    CoverageViewId::Passed => "passed",
+                    CoverageViewId::Failed => "failed",
+                }
+                .into(),
+                kind: options.kind.map(str::to_owned),
+                runner: options.runner.map(str::to_owned),
+            },
+            tests: page,
         },
         pagination(options.offset, options.limit, returned, total),
     ))

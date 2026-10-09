@@ -47,6 +47,10 @@ test never asked, always stays. Without an assessment both narrowing options
 list every affected test.
 
 Exit 0 when the run has a record to answer from; exit 2 otherwise.
+
+Also: supercov runs <run> tests without-evidence
+  The tests that made assertions and recorded no coverage, which the run's
+  summary counts and names one of.
 "#;
 
 /// Working-tree differences the per-test record cannot see: every test is

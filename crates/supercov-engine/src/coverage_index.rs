@@ -836,6 +836,9 @@ fn file_gap_record(
 /// projection, and a tree of long test names answered each by comparing them.
 type Selected = crate::interned::FastSet<String>;
 
+/// The kind a file's coverage by every test together is filed under.
+pub const ALL_TESTS: &str = "";
+
 fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, Selected)> {
     let kinds = view
         .tests
@@ -2325,6 +2328,25 @@ pub fn coverage_index_sections(
                     &gap,
                     kind.as_deref(),
                     runner.as_deref(),
+                    &mut strings,
+                )?);
+            }
+        }
+        // What the tests cover of each file, all kinds together: a directory
+        // read e2e 18.18%, every other kind 0.00% and 100.00% in all, and
+        // nothing said that the rest ran while no test was running. Filed
+        // under the name the tests' own dimension has, which no kind can be.
+        let tested = crate::coverage_report::entries_in_kind_rows(view)
+            .into_iter()
+            .collect::<Selected>();
+        if !tested.is_empty() {
+            for (file, gap) in file_gaps(view, Some(&tested))? {
+                gaps.extend_from_slice(&file_gap_record(
+                    id,
+                    &file,
+                    &gap,
+                    Some(ALL_TESTS),
+                    None,
                     &mut strings,
                 )?);
             }

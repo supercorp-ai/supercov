@@ -224,6 +224,32 @@ else if (/\/node_modules\/next\/dist\/compiled\/jest-worker\/processChild\.js$/.
         return Reflect.apply(compile, this, [content, filename, ...rest]);
     };
 }
+// Next.js looks for lockfiles from its directory upwards, takes the outermost
+// as its workspace root, and warns when it finds more than one. The copy
+// holds the project's lockfile and lies inside the project, so every build
+// under Supercov warned twice that the root "may not be correct", naming the
+// copy's lockfile. The root Next picks is the project, which is right: it
+// holds the copy and the dependencies. The copy's lockfile is left out of
+// what the warning counts, and one the project really has twice still warns.
+if (/\/node_modules\/(?:\.bin\/next$|next\/dist\/)/.test(entrypoint)) {
+    const copy = fileURLToPath(new URL("../../", import.meta.url));
+    const copies = [...new Set([copy, (() => {
+                try {
+                    return realpathSync(copy);
+                }
+                catch {
+                    return copy;
+                }
+            })()])];
+    const declared = "function warnDuplicatedLockFiles(lockFiles) {";
+    const compile = Module.prototype._compile;
+    Module.prototype._compile = function _compile(content, filename, ...rest) {
+        if (typeof content === "string" && /[\\/]next[\\/]dist[\\/]lib[\\/]find-root\.js$/.test(filename)) {
+            content = content.replace(declared, `${declared} lockFiles = lockFiles.filter((file, index) => index === lockFiles.length - 1 || !${JSON.stringify(copies)}.some((copy) => file.startsWith(copy)));`);
+        }
+        return Reflect.apply(compile, this, [content, filename, ...rest]);
+    };
+}
 function installAuthoredSourceView() {
     let authored;
     try {

@@ -678,6 +678,48 @@ test("instrumentation stack cleanup keeps the user's first frame", async () => {
   );
 });
 
+test("a lexical wrapper's two frames are the author's one frame again", async () => {
+  const runtime = await import("../../runtime/javascript/runtime.mjs");
+  // The wrapper runs the assertion in a function of its own. Vitest printed
+  // `failing.test.js:12:35` and then `failing.test.js:12:1` for one line the
+  // author wrote, where it prints the first alone without Supercov.
+  const stack = (written) => [
+    "AssertionError: expected 'a1' to be 'a2'",
+    "    at Proxy.<anonymous> (/workspace/node_modules/chai/index.js:1706:17)",
+    "    at /workspace/tests/failing.test.js:12:35",
+    "    at withCoverageCarrier (/workspace/.supercov/node_modules/runtime.mjs:980:12)",
+    "    at AsyncLocalStorage.run (node:internal/async_local_storage/async_context_frame:65:14)",
+    "    at withNodeAssertionPhase (/workspace/.supercov/node_modules/runtime.mjs:940:20)",
+    written,
+    "    at async /workspace/tests/failing.test.js:9:3",
+  ].join("\n");
+  const cleaned = (written, lexical) => {
+    const error = new Error("failed");
+    error.stack = stack(written);
+    return runtime.cleanInstrumentationStack(error, lexical).stack.split("\n").slice(1);
+  };
+  assert.deepEqual(cleaned("    at /workspace/tests/failing.test.js:12:7", true), [
+    "    at Proxy.<anonymous> (/workspace/node_modules/chai/index.js:1706:17)",
+    "    at /workspace/tests/failing.test.js:12:35",
+    "    at async /workspace/tests/failing.test.js:9:3",
+  ]);
+  // The author's function keeps its name, at the assertion.
+  assert.deepEqual(cleaned("    at async checkAll (/workspace/tests/failing.test.js:12:7)", true), [
+    "    at Proxy.<anonymous> (/workspace/node_modules/chai/index.js:1706:17)",
+    "    at async checkAll (/workspace/tests/failing.test.js:12:35)",
+    "    at async /workspace/tests/failing.test.js:9:3",
+  ]);
+  // A wrapper that calls the author's own function added none: both stay,
+  // and only the runtime's own frames go.
+  assert.deepEqual(cleaned("    at /workspace/tests/failing.test.js:12:7", false), [
+    "    at Proxy.<anonymous> (/workspace/node_modules/chai/index.js:1706:17)",
+    "    at /workspace/tests/failing.test.js:12:35",
+    "    at AsyncLocalStorage.run (node:internal/async_local_storage/async_context_frame:65:14)",
+    "    at /workspace/tests/failing.test.js:12:7",
+    "    at async /workspace/tests/failing.test.js:9:3",
+  ]);
+});
+
 test("server evidence transport failure is explicit and fail-closed", () => {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-transport-failure-"));
   try {

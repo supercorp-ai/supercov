@@ -147,6 +147,7 @@ npx supercov runs <run-id> [query] [options]
 | `decision <id \| path:line>` | Understand missing boolean outcomes and MC/DC witnesses |
 | `line <path:line>` | See one line's state, obligations, and covering tests |
 | `test <id \| name>` | See the coverage attributed to one test |
+| `tests without-evidence` | List the tests that made assertions and recorded no coverage, which the summary counts in a warning |
 | `kinds` | Group coverage by test level, such as unit or E2E |
 | `runners` | Group coverage by test runner |
 | `scope` | See what is source and what is not, by directory and reason; `--files` lists every file |
@@ -175,11 +176,15 @@ npx supercov runs latest files --group dir --depth 2 --metric branches
 ```
 
 ```
-Directory   Files  Lines     e2e    unit      All
-app             4     15  86.67%   0.00%  100.00%
-lib             1     10  90.00%  40.00%   90.00%
-components      1      2 100.00%   0.00%  100.00%
+Directory   Files  Lines      e2e    unit  no test      All
+app             5     23   86.96%   0.00%    8.70%   95.65%
+lib             1     10   90.00%  40.00%    0.00%   90.00%
+.               2      8   75.00%   0.00%   25.00%  100.00%
+components      1      2  100.00%   0.00%    0.00%  100.00%
 ```
+
+`no test` is what ran only while no test was running, such as a server
+starting before the first test. The column is there when a directory has any.
 
 In `--json`, every file of `files` and `gaps` carries `totals` and `covered`
 for each metric beside what is missing, so a percentage can be worked out for

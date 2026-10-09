@@ -6,6 +6,15 @@
 
 - A Next.js application with a `middleware.ts`, or a route with `runtime = 'edge'`, runs again. Since 4.0.0 every request to one with a middleware failed on `Cannot read properties of undefined (reading 'mcdcBegin')`, and `next build` failed collecting page data for an edge route: Next runs that code in a context of its own, where nothing had installed Supercov's runtime.
 - Code that runs in Next's edge runtime is measured, and what a test's request runs there is attributed to that test. It read 0% before 4.0.0.
+- A Vitest failure reads as it does without Supercov. Application frames printed as `../../../../lib/crypto.ts:3:11`, a test file's frames sat in column 1 or at the statement's start (`:12:7` for `:12:35`), and the code under the failing line was missing for a failed `expect` and for any application frame. On Vitest 4 a test file's positions were also mapped twice, to `:12:0`.
+- A failed assertion has one stack frame where you wrote one line. A wrapped `expect` added a second frame on the same line.
+- The `no test` row is what no kind's row counts. A line a test file's own setup ran was in both: a Vitest run read `unit 9.30%` and `no test 2.33%` under a total of 9.30%.
+- Next.js no longer warns that its workspace root "may not be correct" because of the copy's lockfile. A lockfile your project really has twice still warns.
+
+**Added**
+
+- `supercov runs <run> tests without-evidence` lists the tests that made assertions and recorded no coverage. The summary's warning named one of them and now names this query.
+- `files --group dir` has a `no test` column wherever code ran while no test was running, so a directory's `All` no longer stands above every kind unexplained: `.` read `e2e 18.18%`, the other kinds `0.00%`, `All 100.00%`. In `--json` each directory has `coveredByTests`.
 
 ## 4.0.1
 
