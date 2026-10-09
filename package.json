@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "description": "Coverage, security and code quality for coding agents",
   "keywords": [
     "coverage",
@@ -119,14 +119,14 @@
     "test:windows-tls": "node scripts/windows-tls-test.mjs"
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "4.1.1",
-    "@supercov/cli-darwin-x64": "4.1.1",
-    "@supercov/cli-linux-arm64-gnu": "4.1.1",
-    "@supercov/cli-linux-arm64-musl": "4.1.1",
-    "@supercov/cli-linux-x64-gnu": "4.1.1",
-    "@supercov/cli-linux-x64-musl": "4.1.1",
-    "@supercov/cli-win32-arm64": "4.1.1",
-    "@supercov/cli-win32-x64": "4.1.1"
+    "@supercov/cli-darwin-arm64": "4.2.0",
+    "@supercov/cli-darwin-x64": "4.2.0",
+    "@supercov/cli-linux-arm64-gnu": "4.2.0",
+    "@supercov/cli-linux-arm64-musl": "4.2.0",
+    "@supercov/cli-linux-x64-gnu": "4.2.0",
+    "@supercov/cli-linux-x64-musl": "4.2.0",
+    "@supercov/cli-win32-arm64": "4.2.0",
+    "@supercov/cli-win32-x64": "4.2.0"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",
