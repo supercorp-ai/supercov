@@ -905,8 +905,12 @@ function cleanInstrumentationStack(error, lexical = false) {
   const frame = /^(\s*at (?:async )?)(?:(.*?) \()?(.*?:\d+:\d+)\)?$/;
   const added = lexical && first > 1 ? frame.exec(lines[first - 1]) : null;
   const written = added && last + 1 < lines.length ? frame.exec(lines[last + 1]) : null;
-  if (added && written && added[2] === void 0 && !/^node:/.test(written[3])) {
-    const merged = written[2] === void 0 ? lines[first - 1] : `${written[1]}${written[2]} (${added[3]})`;
+  const file = (location) => location.replace(/:\d+:\d+$/, "");
+  // Both are frames of the author's file, or the error is another's. A name
+  // on the added one comes from a source map (Jest names a frame by what is
+  // called at its position), and it is the name the author's line would have.
+  if (added && written && file(added[3]) === file(written[3])) {
+    const merged = added[2] !== void 0 || written[2] === void 0 ? lines[first - 1] : `${written[1]}${written[2]} (${added[3]})`;
     visible = [...lines.slice(0, first - 1), merged, ...lines.slice(last + 2)];
   } else {
     visible = lines.filter((line, index) => !hidden[index]);

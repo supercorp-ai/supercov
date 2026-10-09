@@ -113,7 +113,7 @@ try {
       '',
     ].join('\n'),
   );
-  const install = spawnSync(windows ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--silent', 'jest@29', 'babel-jest@29', 'jest-environment-jsdom@29', '@babel/core@7', '@babel/plugin-transform-modules-commonjs@7'], {
+  const install = spawnSync(windows ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--silent', 'jest@29', 'babel-jest@29', 'jest-environment-jsdom@29', '@babel/core@7', '@babel/plugin-transform-modules-commonjs@7', 'ts-jest@29', 'typescript@5'], {
     cwd: project,
     encoding: 'utf8',
     shell: windows,
@@ -226,6 +226,83 @@ try {
   assert.equal(twiceSummary.data.tests, 5, 'the same five tests, run twice');
   assert.equal(twiceSummary.data.testOutcomes.passed, 4, JSON.stringify(twiceSummary.data.testOutcomes));
   assert.equal(twiceSummary.data.testOutcomes.flaky, 1, JSON.stringify(twiceSummary.data.testOutcomes));
+
+  // A failure reads as it does without Supercov: the project's paths, the
+  // author's lines and columns, and the code under the frame. In the copy an
+  // application frame printed as `../../../../src/secret.js:10:11`, the code
+  // under a test file's frame was the line Supercov had wrapped, and a
+  // wrapped `expect` had a second frame. Under ts-jest, which compiles what it
+  // is given and reads no map in it, the frame was the rewritten file's:
+  // `src/cipher.ts:51:10`.
+  const cipher = (types) => [
+    `const reversed = (value${types ? ': string' : ''})${types ? ': string' : ''} => {`,
+    "  const letters = value.split('');",
+    '  letters.reverse();',
+    "  return letters.join('');",
+    '};',
+    '',
+    `function decrypt(value${types ? ': string' : ''}, key${types ? ': string | undefined' : ''})${types ? ': string' : ''} {`,
+    '  const text = reversed(value);',
+    '  if (!key) {',
+    "    throw new Error('missing key');",
+    '  }',
+    '  return text + key.length;',
+    '}',
+    '',
+    types ? 'export { decrypt };' : 'module.exports = { decrypt };',
+    '',
+  ].join('\n');
+  const failing = (load) => [
+    load,
+    '',
+    "test('decrypt needs a key', () => {",
+    "  decrypt('abc', undefined);",
+    '});',
+    '',
+    "test('decrypt reverses', async () => {",
+    '  await Promise.all(',
+    "    ['a'].map(async (value) => {",
+    '      await Promise.resolve();',
+    "      expect(decrypt(value, 'k')).toBe('a2');",
+    '    }),',
+    '  );',
+    '});',
+    '',
+  ].join('\n');
+  writeFileSync(resolve(project, 'src/secret.js'), cipher(false));
+  writeFileSync(resolve(project, 'tests/failing.test.js'), failing("const { decrypt } = require('../src/secret.js');"));
+  writeFileSync(resolve(project, 'src/cipher.ts'), cipher(true));
+  writeFileSync(resolve(project, 'tests/failing-types.test.ts'), failing("import { decrypt } from '../src/cipher';"));
+  writeFileSync(resolve(project, 'failure.config.js'),
+    "module.exports = { rootDir: __dirname, testEnvironment: 'node', testMatch: ['**/failing.test.js'] };\n");
+  writeFileSync(resolve(project, 'failure-types.config.js'),
+    "module.exports = { rootDir: __dirname, testEnvironment: 'node', testMatch: ['**/failing-types.test.ts'], transform: { '^.+\\\\.ts$': ['ts-jest', { diagnostics: false }] } };\n");
+  // What a failure prints: the messages, the code and the frames. Not the
+  // lines that carry a duration, a count, or Supercov's own notes.
+  const failure = (command, args) => {
+    const result = spawnSync(command, args, {
+      cwd: project,
+      encoding: 'utf8',
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1' },
+    });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    const lines = `${result.stdout}${result.stderr}`
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => line !== '' && !/^\[(?:supercov|coverage)\]|^(?:Time|Tests|Test Suites|Snapshots):|^Ran all|[✕✓]|ts-jest\[/u.test(line));
+    assert.ok(lines.length >= 20, result.stdout + result.stderr);
+    return lines;
+  };
+  const jest = resolve(project, 'node_modules/jest/bin/jest.js');
+  for (const [config, frame] of [
+    ['failure.config.js', /^\s+at decrypt \(src\/secret\.js:10:11\)$/u],
+    ['failure-types.config.js', /^\s+at decrypt \(src\/cipher\.ts:10:11\)$/u],
+  ]) {
+    const plain = failure(process.execPath, [jest, '--config', config]);
+    const measured = failure(binary, ['--', process.execPath, jest, '--config', config]);
+    assert.deepEqual(measured, plain, config);
+    assert.ok(plain.some((line) => frame.test(line)), plain.join('\n'));
+  }
 
   console.log('[rust-direct-jest] a Jest suite has exact per-test identity, reporter outcomes, its own setup file and assertion phases for the global expect');
 } finally {

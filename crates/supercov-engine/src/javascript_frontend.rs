@@ -1150,7 +1150,7 @@ fn write_vitest_config(
          }};\n\
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
-         import SupercovVitestReporter, {{ supercovSourceMaps }} from './node_modules/vitestReporter.mjs';\n\
+         import SupercovVitestReporter from './node_modules/vitestReporter.mjs';\n\
          import {{ supercovBrowserCommands }} from './vitestCommands.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
@@ -1208,7 +1208,6 @@ fn write_vitest_config(
            const loaded = originalPath ? await loadConfigFromFile(env, originalPath, process.cwd()) : undefined;\n\
            const config = mergeConfig(loaded?.config ?? {{}}, {{\n\
              cacheDir: resolve(process.cwd(), '.supercov/vitest-cache'),\n\
-             plugins: [supercovSourceMaps()],\n\
              test: {{ setupFiles: [resolve(process.cwd(), supercovSetupFile(loaded?.config))], maxConcurrency: 1, ...supercovBrowserTest(loaded?.config) }},\n\
            }});\n\
            supercovSkipCoverageThresholds(config.test?.coverage);\n\

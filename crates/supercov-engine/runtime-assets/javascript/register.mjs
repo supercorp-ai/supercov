@@ -8,7 +8,7 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
 };
 import Module, { register, syncBuiltinESMExports } from "node:module";
 import fs, { closeSync, openSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import path, { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
@@ -224,6 +224,258 @@ else if (/\/node_modules\/next\/dist\/compiled\/jest-worker\/processChild\.js$/.
         return Reflect.apply(compile, this, [content, filename, ...rest]);
     };
 }
+// A runner prints a failure with the files it names read from disk, and with
+// their paths relative to its root. Both are the copy's: the code under a
+// frame was Supercov's, and a file whose map names the project's own (so that
+// a Node stack trace reads as the project's) printed as
+// `../../../../src/crypto.js:10:11`. A runner's own printing reads a
+// rewritten file as the text it was rewritten from, and names it as it lies
+// in the copy. What runs is read as it is.
+//
+// Jest keeps the function it reads with from before any test loads, so its
+// processes are set up here, when they start. Its setup file and Vitest's
+// reporter ask again, which is what a process that only turns out to run a
+// suite gets.
+const failureOutput = { readers: [], installed: false };
+process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
+    const reader = {
+        // Its message formatter reads the file under a frame and makes each
+        // frame's path relative to the root directory. So does the reporter
+        // that writes the tracefile coverage services read, where a file was
+        // `SF:../../../../src/crypto.js`.
+        jest: { prints: /[\\/](?:jest-message-util|istanbul-reports)[\\/]/, names: false, composes: true },
+        // Its own code reads the file under a frame, and Vitest 4 also looks in
+        // it for a source map, mapping positions a second time. Vite, which
+        // loads what runs, gets a map that names the file itself: frames then
+        // name the copy's file, and coverage reports it by its path in the
+        // project's layout.
+        vitest: { prints: /[\\/]vitest[\\/]dist[\\/]/, names: true },
+    }[runner];
+    // Asked with no runner, the reads are in place and change nothing until
+    // one is named: a process that may yet run a suite.
+    if (reader && !failureOutput.readers.includes(reader.prints.source)) {
+        failureOutput.readers.push(reader.prints.source);
+        failureOutput.prints = new RegExp(failureOutput.readers.join("|"));
+        failureOutput.names || (failureOutput.names = reader.names);
+        failureOutput.composes || (failureOutput.composes = reader.composes === true);
+    }
+    if (failureOutput.installed)
+        return;
+    failureOutput.installed = true;
+    let rewritten;
+    const copies = (() => {
+        const copy = fileURLToPath(new URL("../../", import.meta.url));
+        try {
+            return [...new Set([copy, `${realpathSync(copy)}${sep}`])];
+        }
+        catch {
+            return [copy];
+        }
+    })();
+    // The copy lies in the project at .supercov/workspaces/workspace/<name>.
+    const projects = copies
+        .filter((copy) => /[\\/]\.supercov[\\/]workspaces[\\/]workspace[\\/][^\\/]+[\\/]$/.test(copy))
+        .map((copy) => resolve(copy, "../../../..") + sep);
+    // The path inside the copy of a rewritten file that lies under one of `roots`.
+    const rewrittenUnder = (roots, file) => {
+        if (typeof file !== "string")
+            return undefined;
+        if (rewritten === undefined) {
+            try {
+                rewritten = new Set(JSON.parse(readFileSync(new URL("./authored-sources.json", import.meta.url), "utf8")));
+            }
+            catch {
+                rewritten = new Set();
+            }
+        }
+        for (const root of roots) {
+            if (file.startsWith(root)) {
+                const local = file.slice(root.length).split(sep).join("/");
+                return rewritten.has(local) ? local : undefined;
+            }
+        }
+        return undefined;
+    };
+    const kept = (name, file) => fileURLToPath(new URL(`./${name}/${file}`, import.meta.url));
+    const calledByPrinter = (above) => {
+        const holder = {};
+        const limit = Error.stackTraceLimit;
+        try {
+            Error.stackTraceLimit = 1;
+            Error.captureStackTrace(holder, above);
+        }
+        finally {
+            Error.stackTraceLimit = limit;
+        }
+        return failureOutput.prints.test(String(holder.stack).split("\n")[1] ?? "");
+    };
+    const mapComment = "\n//# sourceMappingURL=data:application/json;base64,";
+    const namedForItself = (file, contents) => {
+        const text = typeof contents === "string" ? contents : contents.toString("utf8");
+        const found = text.lastIndexOf(mapComment);
+        if (found < 0)
+            return contents;
+        const encoded = text.slice(found + mapComment.length).trimEnd();
+        if (/\s/.test(encoded))
+            return contents;
+        try {
+            const map = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+            map.sources = [basename(file)];
+            const renamed = `${text.slice(0, found + mapComment.length)}${Buffer.from(JSON.stringify(map)).toString("base64")}\n`;
+            return typeof contents === "string" ? renamed : Buffer.from(renamed, "utf8");
+        }
+        catch {
+            return contents;
+        }
+    };
+    // A transformer that compiles what it is given and reads no map in it
+    // (ts-jest) leaves Jest a map from its output to the rewritten file, so a
+    // frame read `src/crypto.ts:51:10` for line 10 of what the author wrote.
+    // Such a map is taken through the rewritten file's own before Jest reads
+    // it. One that already carries the author's text went through it in the
+    // transformer, as Babel's and SWC's do.
+    const digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const decoded = (mappings) => {
+        const lines = [];
+        const state = [0, 0, 0, 0, 0];
+        for (const line of mappings.split(";")) {
+            const segments = [];
+            state[0] = 0;
+            for (const text of line.split(",")) {
+                if (text === "")
+                    continue;
+                const fields = [];
+                let value = 0, shift = 0;
+                for (const digit of text) {
+                    const bits = digits.indexOf(digit);
+                    value += (bits & 31) << shift;
+                    if (bits & 32) {
+                        shift += 5;
+                        continue;
+                    }
+                    fields.push(value & 1 ? -(value >> 1) : value >> 1);
+                    value = shift = 0;
+                }
+                segments.push(fields.map((field, index) => (state[index] += field)));
+            }
+            lines.push(segments);
+        }
+        return lines;
+    };
+    const encoded = (lines) => {
+        const state = [0, 0, 0, 0, 0];
+        const number = (value) => {
+            let rest = value < 0 ? (-value << 1) | 1 : value << 1;
+            let text = "";
+            do {
+                const bits = rest & 31;
+                rest >>>= 5;
+                text += digits[rest > 0 ? bits | 32 : bits];
+            } while (rest > 0);
+            return text;
+        };
+        return lines.map((segments) => {
+            state[0] = 0;
+            return segments.map((fields) => fields.map((field, index) => {
+                const text = number(field - state[index]);
+                state[index] = field;
+                return text;
+            }).join("")).join(",");
+        }).join(";");
+    };
+    const ownMap = (file) => {
+        const text = readSync(file, "utf8");
+        const found = text.lastIndexOf(mapComment);
+        return found < 0 ? undefined : JSON.parse(Buffer.from(text.slice(found + mapComment.length).trimEnd(), "base64").toString("utf8"));
+    };
+    const composed = (text) => {
+        let map;
+        try {
+            map = JSON.parse(text);
+            if (map?.version !== 3 || typeof map.mappings !== "string" || !Array.isArray(map.sources))
+                return text;
+            const through = map.sources.map((source, index) => {
+                if (typeof source !== "string" || rewrittenUnder(copies, source) === undefined)
+                    return undefined;
+                const own = ownMap(source);
+                if (!own || own.sourcesContent?.[0] === undefined || map.sourcesContent?.[index] === own.sourcesContent[0])
+                    return undefined;
+                return { own, lines: decoded(own.mappings) };
+            });
+            if (!through.some(Boolean))
+                return text;
+            const lines = decoded(map.mappings).map((segments) => segments.map((fields) => {
+                const inner = fields.length >= 4 ? through[fields[1]] : undefined;
+                if (!inner)
+                    return fields;
+                // The segment of the rewritten file's line that starts at or
+                // before the position; one that maps nothing is Supercov's.
+                const found = (inner.lines[fields[2]] ?? []).filter((segment) => segment[0] <= fields[3]).pop();
+                if (!found || found.length < 4)
+                    return [fields[0]];
+                return [fields[0], fields[1], found[2], found[3], ...fields.slice(4)];
+            }));
+            through.forEach((inner, index) => {
+                if (!inner)
+                    return;
+                const source = inner.own.sources?.[0];
+                if (typeof source === "string" && isAbsolute(source))
+                    map.sources[index] = source;
+                map.sourcesContent ?? (map.sourcesContent = []);
+                map.sourcesContent[index] = inner.own.sourcesContent[0];
+            });
+            map.mappings = encoded(lines);
+            return JSON.stringify(map);
+        }
+        catch {
+            return text;
+        }
+    };
+    const { readFileSync: readSync, existsSync: exists } = fs;
+    const { readFile: readPromise } = fs.promises;
+    const { relative: relativePath } = path;
+    function supercovReadFileSync(file, ...rest) {
+        if (!failureOutput.prints)
+            return Reflect.apply(readSync, this, [file, ...rest]);
+        const local = rewrittenUnder(copies, file);
+        if (local === undefined) {
+            const contents = Reflect.apply(readSync, this, [file, ...rest]);
+            return failureOutput.composes && typeof contents === "string" && typeof file === "string" && file.endsWith(".map")
+                ? composed(contents)
+                : contents;
+        }
+        if (calledByPrinter(supercovReadFileSync)) {
+            const changed = kept(".changed", local);
+            return Reflect.apply(readSync, this, [exists(changed) ? changed : kept(".authored", local), ...rest]);
+        }
+        const contents = Reflect.apply(readSync, this, [file, ...rest]);
+        return failureOutput.names ? namedForItself(file, contents) : contents;
+    }
+    fs.readFileSync = supercovReadFileSync;
+    fs.promises.readFile = async function supercovReadFile(file, ...rest) {
+        const contents = await Reflect.apply(readPromise, this, [file, ...rest]);
+        return failureOutput.names && rewrittenUnder(copies, file) !== undefined && (typeof contents === "string" || Buffer.isBuffer(contents))
+            ? namedForItself(file, contents)
+            : contents;
+    };
+    function supercovRelative(from, to) {
+        if (!failureOutput.prints)
+            return Reflect.apply(relativePath, this, [from, to]);
+        const local = rewrittenUnder(copies, to) === undefined ? rewrittenUnder(projects, to) : undefined;
+        return local !== undefined && calledByPrinter(supercovRelative)
+            ? Reflect.apply(relativePath, this, [from, copies[0] + local.split("/").join(sep)])
+            : Reflect.apply(relativePath, this, [from, to]);
+    }
+    path.relative = supercovRelative;
+    syncBuiltinESMExports();
+};
+// Jest itself prints from here on. A worker may be Jest's or another tool's
+// (a bundler minifies in the same kind of process): Jest's setup file names
+// the runner when a test file loads there.
+if (isJestEntrypoint)
+    process.__SUPERCOV_FAILURE_OUTPUT__("jest");
+else if (process.env.JEST_WORKER_ID)
+    process.__SUPERCOV_FAILURE_OUTPUT__();
 // Next.js looks for lockfiles from its directory upwards, takes the outermost
 // as its workspace root, and warns when it finds more than one. The copy
 // holds the project's lockfile and lies inside the project, so every build
