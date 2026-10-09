@@ -926,8 +926,16 @@ function withNodeAssertionPhase(operation, source, callback) {
   const lexical = typeof source === "string";
   const context = currentRequestContext();
   const scope = context.scope;
-  if (!scope)
-    return callback();
+  // No test is known to be running: a runner Supercov has no adapter in, such
+  // as Jest started from another tool's process. The assertion still fails
+  // with the frames its author would see.
+  if (!scope) {
+    try {
+      return callback();
+    } catch (error) {
+      throw cleanInstrumentationStack(error, lexical);
+    }
+  }
   // A lexically instrumented occurrence is an authored assertion site in its
   // own right, even when it runs inside another assertion's callback: the
   // validator passed to assert.throws is the ordinary case, and its inner

@@ -747,6 +747,31 @@ test("a lexical wrapper's two frames are the author's one frame again", async ()
   ]);
 });
 
+test("an assertion that fails where no test is known keeps only its author's frames", async () => {
+  const runtime = await import("../../runtime/javascript/runtime.mjs");
+  // Jest started from another tool's process has no adapter of Supercov's,
+  // so no test is known to be running: the wrapper called the assertion and
+  // let its error through, with `at Module.withNodeAssertionPhase
+  // (…/runtime.mjs:931:12)` and the wrapper's own frame in the stack.
+  const failed = new Error("failed");
+  failed.stack = [
+    "Error: failed",
+    "    at toBe (/workspace/tests/failing.test.js:12:35)",
+    "    at Module.withNodeAssertionPhase (file:///workspace/.supercov/node_modules/runtime.mjs:931:12)",
+    "    at withNodeAssertionPhase (/workspace/tests/failing.test.js:12:7)",
+    "    at Object.<anonymous> (/workspace/tests/failing.test.js:9:3)",
+  ].join("\n");
+  assert.throws(
+    () => runtime.withNodeAssertionPhase("expect.toBe", "tests/failing.test.js:12:7", () => { throw failed; }),
+    (error) => error === failed,
+  );
+  assert.deepEqual(failed.stack.split("\n").slice(1), [
+    "    at toBe (/workspace/tests/failing.test.js:12:35)",
+    "    at Object.<anonymous> (/workspace/tests/failing.test.js:9:3)",
+  ]);
+  assert.equal(runtime.withNodeAssertionPhase("expect.toBe", "tests/a.test.js:1:1", () => 7), 7);
+});
+
 test("server evidence transport failure is explicit and fail-closed", () => {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-transport-failure-"));
   try {

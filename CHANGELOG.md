@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Jest failure reads as it does without Supercov also when another tool runs Jest in its own process (`require("jest").run()`, as react-scripts and Vue's CLI do). With a single test file, or `--runInBand`, the code under a test file's frame was still the line Supercov had wrapped, and an assertion's stack showed Supercov's own frames.
+- Next.js no longer warns about the copy's lockfile however it is started. 4.1.0 took the warning out only in a process Next's own command had started, and only on Next 16; it is gone from a server of your own and from Next 15.4 and 15.5 too.
+
+**Added**
+
+- `supercov diff` says when both runs measured the same source. What differs is then not a change in the code: two end-to-end runs of one commit read "lost: 11 lines, 31 branches" with nothing to mark it. In `--json`, `inputs.sourceChanged` and `inputs.testsChanged`.
+
 ## 4.1.1
 
 **Fixed**
