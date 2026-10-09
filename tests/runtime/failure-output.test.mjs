@@ -35,6 +35,7 @@ function project(t) {
     const path = require("node:path");
     module.exports = {
       read: (file) => fs.readFileSync(file, "utf8"),
+      through: (read, file) => read(file, "utf8"),
       relative: (from, to) => path.relative(from, to),
     };
   `;
@@ -57,6 +58,22 @@ function project(t) {
         map: process.argv[4] ? from("jest-runner/build/runTest.cjs").read(process.argv[4]) : null,
       }));
     })();
+  `);
+  // A tool that runs Jest in its own process: it has read files through
+  // graceful-fs, which copied \`fs\` when it loaded, before it loads Jest.
+  write("node_modules/graceful-fs/graceful-fs.js", "module.exports = Object.assign({}, require('node:fs'));\n");
+  write("node_modules/jest/index.js", "module.exports = {};\n");
+  write("node_modules/jest-worker/index.js", "module.exports = {};\n");
+  write("tool.cjs", `
+    const graceful = require("./node_modules/graceful-fs/graceful-fs.js");
+    require(process.argv[2]);
+    const print = new Function("read", "file", "return read(file, 'utf8')");
+    const formatter = require("./node_modules/jest-message-util/build/index.cjs");
+    process.stdout.write(JSON.stringify({
+      // Jest's formatter keeps the function graceful-fs had when Jest started.
+      kept: (() => { const read = graceful.readFileSync; return formatter.through(read, process.argv[3]); })(),
+      direct: formatter.read(process.argv[3]),
+    }));
   `);
   return { root, copy, write };
 }
@@ -127,4 +144,24 @@ test("a map from a transformer that read none is taken through the rewritten fil
   write("cache/crypto.map", transformed("authored one\nauthored two\n"));
   const kept = run(copy, "jest", resolve(copy, "cache/crypto.map")).map;
   assert.equal(kept, transformed("authored one\nauthored two\n"));
+});
+
+test("a process is Jest's from the moment it loads Jest", t => {
+  // react-scripts and Vue's CLI call Jest's API in their own process. With
+  // one test file Jest runs it there, and the code under a test file's frame
+  // was the line Supercov had wrapped. A minifier's worker loads jest-worker
+  // and never Jest: it reads everything as it is.
+  const { copy } = project(t);
+  const tool = (loads) => {
+    const result = spawnSync(process.execPath, [
+      `--import=${pathToFileURL(resolve(copy, ".supercov/node_modules/register.mjs")).href}`,
+      resolve(copy, "tool.cjs"), loads, resolve(copy, "lib/crypto.ts"),
+    ], { cwd: copy, encoding: "utf8", timeout: 15000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  assert.deepEqual(tool("jest"), { kept: "authored one\nauthored two\n", direct: "authored one\nauthored two\n" });
+  const other = tool("jest-worker");
+  assert.match(other.kept, /^probe\n/);
+  assert.match(other.direct, /^probe\n/);
 });

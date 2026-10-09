@@ -3471,6 +3471,86 @@ fn a_tool_that_judges_source_reads_it_as_it_was_written() {
         .succeeds();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_comparison_says_when_both_runs_measured_the_same_source() {
+    let project = Project::empty("steady");
+    project.write(
+        "package.json",
+        r#"{ "name": "steady", "scripts": { "test": "node --test test/*.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  if (sum > 100) {\n    return 0;\n  }\n  return 5;\n}\nmodule.exports = { fee };\n",
+    );
+    // What the test reaches depends on something outside the code, as an
+    // end-to-end suite's does on timing.
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\nconst large = process.env.ORDER === 'large';\ntest('pays', () => equal(fee(large ? 500 : 1), large ? 0 : 5));\n",
+    );
+    project.git(&["init", "-q"]);
+    let run = |order: &str| {
+        project
+            .supercov_with(&["--", "npm", "test"], &[("ORDER", order)])
+            .succeeds();
+        project.supercov(&["runs", "--limit", "1", "--json"]).json()["data"]["runs"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    // Two end-to-end runs of one commit read "lost: 11 lines, 31 branches",
+    // and nothing said that no code had changed between them.
+    let (small, large) = (run("small"), run("large"));
+    let same = project.supercov(&["diff", &small, &large]).succeeds();
+    contains_all(
+        &same,
+        &[
+            "gained: 1 lines, 1 branches",
+            "lost: 1 lines, 1 branches",
+            "Both runs measured the same source with the same test files",
+            "Run again before acting on a loss.",
+        ],
+    );
+    let json = project.supercov(&["diff", &small, &large, "--json"]).json();
+    assert_eq!(json["data"]["inputs"]["sourceChanged"], false);
+    assert_eq!(json["data"]["inputs"]["testsChanged"], false);
+    // Nothing differs, nothing to explain.
+    let again = run("large");
+    let equal = project.supercov(&["diff", &large, &again]).succeeds();
+    assert!(!equal.contains("Both runs measured"), "{equal}");
+
+    // A test added, as an agent adds one: what differs is still not the code.
+    project.write(
+        "test/other.test.js",
+        "const { test } = require('node:test');\ntest('other', () => {});\n",
+    );
+    let added = run("small");
+    let tests = project.supercov(&["diff", &large, &added]).succeeds();
+    contains_all(
+        &tests,
+        &["Both runs measured the same source, and the test files differ."],
+    );
+
+    // The code changed: a loss may be the change's.
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  if (sum > 200) {\n    return 0;\n  }\n  return 5;\n}\nmodule.exports = { fee };\n",
+    );
+    let changed = run("large");
+    let source = project.supercov(&["diff", &added, &changed]).succeeds();
+    assert!(source.contains("gained: 1 lines"), "{source}");
+    assert!(!source.contains("Both runs measured"), "{source}");
+    assert_eq!(
+        project
+            .supercov(&["diff", &added, &changed, "--json"])
+            .json()["data"]["inputs"]["sourceChanged"],
+        true
+    );
+}
+
 #[test]
 fn tests_that_recorded_no_coverage_can_be_listed() {
     let project = Project::empty("unevidenced");

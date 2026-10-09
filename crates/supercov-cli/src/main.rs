@@ -1873,6 +1873,7 @@ fn execute_public_query(
             request.test_exit_code = run.metadata.test_exit_code;
             let current = current_integrity_for_run(root, run);
             let mut warnings = Vec::new();
+            let mut diff_inputs = None;
             if let Some(current) = current.as_ref() {
                 let comparison = compare_run_integrity(Some(&run.metadata.integrity), current);
                 request.stale.get_or_insert(comparison.stale);
@@ -1938,6 +1939,21 @@ fn execute_public_query(
                             ));
                         }
                     }
+                    let (older, newer) = (
+                        &run.metadata.integrity.fingerprint,
+                        &newer_run.metadata.integrity.fingerprint,
+                    );
+                    if older.algorithm == newer.algorithm
+                        && !older.source.is_empty()
+                        && !newer.source.is_empty()
+                    {
+                        diff_inputs = Some(supercov_engine::coverage_query::CoverageDiffInputs {
+                            source_changed: older.source != newer.source
+                                || older.dependencies != newer.dependencies
+                                || older.configuration != newer.configuration,
+                            tests_changed: older.tests != newer.tests,
+                        });
+                    }
                     let comparison_progress = ProgressLine::start("loading comparison run");
                     newer_container = open_or_rebuild_query_index(newer_run).map_err(|error| {
                         internal_agent_error(format!(
@@ -1970,6 +1986,11 @@ fn execute_public_query(
                             request.stale.unwrap_or(false),
                             data,
                         );
+                    }
+                    if let supercov_engine::indexed_query::IndexedQueryData::Diff(data) =
+                        &mut output.data
+                    {
+                        data.inputs = diff_inputs;
                     }
                     match &mut output.data {
                         supercov_engine::indexed_query::IndexedQueryData::FileDetail(data) => {

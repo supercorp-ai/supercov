@@ -1856,6 +1856,24 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     data.lost.line_count, data.lost.branch_count, data.lost.mcdc_count
                 ),
             ];
+            // Two runs of one commit differ a little wherever what runs
+            // depends on timing, and a difference read as a regression.
+            let differs = data.gained.line_count
+                + data.gained.branch_count
+                + data.gained.mcdc_count
+                + data.lost.line_count
+                + data.lost.branch_count
+                + data.lost.mcdc_count
+                > 0;
+            match data.inputs {
+                Some(inputs) if differs && !inputs.source_changed && !inputs.tests_changed => lines.push(
+                    "Both runs measured the same source with the same test files, so nothing here is a change in the code: the runs themselves differ (timing, order, outside state). Run again before acting on a loss.".into(),
+                ),
+                Some(inputs) if differs && !inputs.source_changed => lines.push(
+                    "Both runs measured the same source, and the test files differ. A loss is not a change in the code: a test that reached it changed, or the runs themselves differ (timing, order, outside state). Run again before acting on a loss.".into(),
+                ),
+                _ => {}
+            }
             let gained = data
                 .gained
                 .lines

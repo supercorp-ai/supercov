@@ -303,6 +303,17 @@ try {
     assert.deepEqual(measured, plain, config);
     assert.ok(plain.some((line) => frame.test(line)), plain.join('\n'));
   }
+  // A tool that runs Jest in its own process, as react-scripts and Vue's CLI
+  // do: with one test file Jest runs it right there. It has no adapter of
+  // Supercov's, and the failure still reads as plain Jest prints it.
+  mkdirSync(resolve(project, 'tools'), { recursive: true });
+  writeFileSync(resolve(project, 'tools/run-in-place.js'),
+    "require('graceful-fs');\nrequire('jest').run(['--config', process.argv[2], '--runInBand']);\n");
+  for (const config of ['failure.config.js', 'failure-types.config.js']) {
+    const place = [resolve(project, 'tools/run-in-place.js'), config];
+    const plain = failure(process.execPath, place);
+    assert.deepEqual(failure(binary, ['--', process.execPath, ...place]), plain, `in place, ${config}`);
+  }
 
   console.log('[rust-direct-jest] a Jest suite has exact per-test identity, reporter outcomes, its own setup file and assertion phases for the global expect');
 } finally {

@@ -49,6 +49,11 @@ and file paths in place of the examples. For example,
 Rust projects can use `cargo test`, Python projects `pytest`, and Ruby projects
 `bundle exec rspec`. Keep the baseline and verification commands identical.
 
+A loss in the comparison is not always a regression. An end-to-end suite
+reaches slightly different code from one run to the next, and adding a test
+changes no source: when `diff` notes that both runs measured the same source,
+rerun before treating a loss as real.
+
 The `line` query is useful before writing a test because it shows which tests
 already reach that line. Extending a nearby test is often better than adding a
 duplicate.

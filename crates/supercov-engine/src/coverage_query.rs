@@ -2226,6 +2226,21 @@ pub struct CoverageDiffData {
     pub delta: CoverageDiffDelta,
     pub gained: CoverageDiffSide,
     pub lost: CoverageDiffSide,
+    /// Whether what the two runs measured differs, from their fingerprints.
+    /// Absent where a run has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<CoverageDiffInputs>,
+}
+
+/// What two runs of a comparison had in common. With the same source, a
+/// difference between them is not a change in the code: two e2e runs of one
+/// commit read "lost: 11 lines, 31 branches" with nothing to say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageDiffInputs {
+    /// The measured source, its dependencies or its configuration.
+    pub source_changed: bool,
+    pub tests_changed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2435,6 +2450,7 @@ pub fn coverage_diff_query(
             },
             gained,
             lost,
+            inputs: None,
         },
         pagination(options.offset, options.limit, returned, total),
     ))

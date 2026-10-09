@@ -356,6 +356,13 @@ npx supercov diff <older-run> <newer-run>
 expected behavior became covered without an unexplained regression elsewhere.
 Neither input run is changed.
 
+Two runs of the same code can differ a little: what an end-to-end suite
+reaches depends on timing, on the order of tests, and on state outside the
+code. When both runs measured the same source, `diff` says so under the
+totals, and a loss it lists is not a change in the code. Run again before
+acting on one. In `--json`, `inputs.sourceChanged` and `inputs.testsChanged`
+say what differed between the two runs.
+
 The same filters can focus a comparison:
 
 ```sh supercov

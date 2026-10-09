@@ -452,6 +452,16 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
         return failureOutput.names ? namedForItself(file, contents) : contents;
     }
     fs.readFileSync = supercovReadFileSync;
+    // graceful-fs, which Jest reads through, copies `fs` when it loads, and a
+    // tool that runs Jest in its own process has usually loaded it by then.
+    for (const [file, cached] of Object.entries(Module._cache)) {
+        if (/[\\/]graceful-fs[\\/]graceful-fs\.js$/.test(file) && typeof cached?.exports?.readFileSync === "function") {
+            try {
+                cached.exports.readFileSync = supercovReadFileSync;
+            }
+            catch { }
+        }
+    }
     fs.promises.readFile = async function supercovReadFile(file, ...rest) {
         const contents = await Reflect.apply(readPromise, this, [file, ...rest]);
         return failureOutput.names && rewrittenUnder(copies, file) !== undefined && (typeof contents === "string" || Buffer.isBuffer(contents))
@@ -469,35 +479,69 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
     path.relative = supercovRelative;
     syncBuiltinESMExports();
 };
-// Jest itself prints from here on. A worker may be Jest's or another tool's
-// (a bundler minifies in the same kind of process): Jest's setup file names
-// the runner when a test file loads there.
+// Jest itself prints from here on. Any other process is Jest's from the
+// moment it loads Jest: a worker of its, or a tool that runs Jest in its own
+// process (`require("jest").run()`, as react-scripts and Vue's CLI do), where
+// a failure in a single test file still printed the line Supercov had
+// wrapped. A worker of another tool's (a bundler minifies in the same kind
+// of process) never loads it.
 if (isJestEntrypoint)
     process.__SUPERCOV_FAILURE_OUTPUT__("jest");
-else if (process.env.JEST_WORKER_ID)
-    process.__SUPERCOV_FAILURE_OUTPUT__();
+else {
+    const jest = /(?:^|[\\/])(?:jest|jest-cli|@jest[\\/]core|jest-runner)(?:[\\/]|$)/;
+    const load = Module._load;
+    let loaded = false;
+    Module._load = function supercovJestLoad(request, ...rest) {
+        if (!loaded && typeof request === "string" && request.includes("jest") && jest.test(request)) {
+            loaded = true;
+            process.__SUPERCOV_FAILURE_OUTPUT__("jest");
+        }
+        return Reflect.apply(load, this, [request, ...rest]);
+    };
+}
 // Next.js looks for lockfiles from its directory upwards, takes the outermost
 // as its workspace root, and warns when it finds more than one. The copy
 // holds the project's lockfile and lies inside the project, so every build
 // under Supercov warned twice that the root "may not be correct", naming the
 // copy's lockfile. The root Next picks is the project, which is right: it
-// holds the copy and the dependencies. The copy's lockfile is left out of
-// what the warning counts, and one the project really has twice still warns.
-if (/\/node_modules\/(?:\.bin\/next$|next\/dist\/)/.test(entrypoint)) {
+// holds the copy and the dependencies. The copy's lockfile is taken out of
+// the warning, which is not printed when no other is left; one the project
+// really has twice still warns.
+//
+// The warning is recognised by its text where Next prints it, in whatever
+// process loads Next: started by its own command, by a server of the
+// project's, or from a script. Next 15.4 to 16.4 print it through `warnOnce`.
+{
     const copy = fileURLToPath(new URL("../../", import.meta.url));
     const copies = [...new Set([copy, (() => {
                 try {
-                    return realpathSync(copy);
+                    return `${realpathSync(copy)}${sep}`;
                 }
                 catch {
                     return copy;
                 }
             })()])];
-    const declared = "function warnDuplicatedLockFiles(lockFiles) {";
+    const quieted = `
+;try { typeof warnOnce === "function" && (warnOnce = ((print) => function (...message) {
+    const text = message[0];
+    if (typeof text !== "string" || !text.includes("multiple lockfiles"))
+        return print.apply(this, message);
+    const copies = ${JSON.stringify(copies)};
+    const lines = text.split("\\n");
+    const listed = (line) => /^\\s+\\* \\S/.test(line);
+    const kept = lines.filter((line) => !listed(line) || !copies.some((copy) => line.trim().slice(2).startsWith(copy)));
+    if (!kept.some(listed))
+        return undefined;
+    return print.apply(this, [kept.join("\\n"), ...message.slice(1)]);
+})(warnOnce)); } catch {}
+`.replace(/\n\s*/g, " ");
     const compile = Module.prototype._compile;
     Module.prototype._compile = function _compile(content, filename, ...rest) {
-        if (typeof content === "string" && /[\\/]next[\\/]dist[\\/]lib[\\/]find-root\.js$/.test(filename)) {
-            content = content.replace(declared, `${declared} lockFiles = lockFiles.filter((file, index) => index === lockFiles.length - 1 || !${JSON.stringify(copies)}.some((copy) => file.startsWith(copy)));`);
+        if (typeof content === "string" && typeof filename === "string" && filename.endsWith("log.js") &&
+            /[\\/]next[\\/]dist[\\/]build[\\/]output[\\/]log\.js$/.test(filename)) {
+            // After the last statement, before the source map's line.
+            const map = content.lastIndexOf("\n//# sourceMappingURL=");
+            content = map < 0 ? `${content}${quieted}` : `${content.slice(0, map)}${quieted}${content.slice(map)}`;
         }
         return Reflect.apply(compile, this, [content, filename, ...rest]);
     };
