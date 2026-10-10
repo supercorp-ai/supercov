@@ -3478,6 +3478,51 @@ fn a_tool_that_judges_source_reads_it_as_it_was_written() {
         .succeeds();
 }
 
+#[test]
+fn nothing_is_still_being_deleted_when_the_command_has_ended() {
+    let project = Project::empty("swept");
+    project.write(
+        "package.json",
+        r#"{ "name": "swept", "scripts": { "test": "node --test test/fee.test.js" } }"#,
+    );
+    project.write(".gitignore", ".supercov\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('small orders pay', () => equal(fee(1), 5));\n",
+    );
+    // A project of some size: the copy a run replaces takes a while to unlink.
+    for directory in 0..60 {
+        let assets = project.root.join(format!("assets/d{directory}"));
+        std::fs::create_dir_all(&assets).unwrap();
+        for file in 0..100 {
+            std::fs::write(assets.join(format!("f{file}.txt")), "x").unwrap();
+        }
+    }
+    project.git(&["init", "-q"]);
+
+    // The copy went to `.supercov/.trash` before the command started and was
+    // unlinked only after it ended, by a process Supercov waited a tenth of a
+    // second for. It was still going when the next command began, and one
+    // that walks the project met a directory on its way out: AVA, which looks
+    // for test files in every directory, failed on `EINVAL: invalid argument,
+    // scandir '.supercov/.trash/...'`.
+    for _ in 0..3 {
+        project.supercov(&["--", "npm", "test"]).succeeds();
+        let left = match std::fs::read_dir(project.root.join(".supercov/.trash")) {
+            Ok(entries) => entries
+                .map(|entry| entry.unwrap().file_name())
+                .filter(|name| name != ".deleter.lock")
+                .collect::<Vec<_>>(),
+            Err(_) => Vec::new(),
+        };
+        assert!(left.is_empty(), "{left:?}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_comparison_says_when_both_runs_measured_the_same_source() {

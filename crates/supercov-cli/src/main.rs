@@ -1267,7 +1267,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         };
         let mut diagnostics = std::io::stderr().lock();
         let result = supercov_engine::rust_run::run_direct_rust(&request, &mut diagnostics);
-        spawn_trash_sweeper(&root);
+        finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
                 println!(
@@ -1306,7 +1306,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         };
         let mut diagnostics = std::io::stderr().lock();
         let result = supercov_engine::go_run::run_direct_go(&request, &mut diagnostics);
-        spawn_trash_sweeper(&root);
+        finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
                 println!(
@@ -1372,7 +1372,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         };
         let mut diagnostics = std::io::stderr().lock();
         let result = supercov_engine::jvm_run::run_direct_jvm(&request, &mut diagnostics);
-        spawn_trash_sweeper(&root);
+        finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
                 println!(
@@ -1410,7 +1410,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         };
         let mut diagnostics = std::io::stderr().lock();
         let result = supercov_engine::python_run::run_direct_python(&request, &mut diagnostics);
-        spawn_trash_sweeper(&root);
+        finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
                 println!(
@@ -1451,7 +1451,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         };
         let mut diagnostics = std::io::stderr().lock();
         let result = supercov_engine::ruby_run::run_direct_ruby(&request, &mut diagnostics);
-        spawn_trash_sweeper(&root);
+        finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
                 println!(
@@ -1495,7 +1495,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     };
     let mut diagnostics = std::io::stderr().lock();
     let result = supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics);
-    spawn_trash_sweeper(&root);
+    finish_trash_sweep(&root);
     match result {
         Ok(result) => {
             println!(
@@ -2282,7 +2282,31 @@ fn supervise() -> ExitCode {
     }
 }
 
+/// How long a command waits for the trash to be empty before it goes on
+/// without knowing: at its start, when what is there is another run's and
+/// the work has yet to begin.
+const TRASH_PATIENCE_AT_START: Duration = Duration::from_millis(100);
+/// And at its end, when the next thing to run is the user's. Nothing of
+/// Supercov's should still be changing the project once it has exited: a
+/// tenth of a second was not that. The run empties most of the trash while
+/// the command runs, so this is rarely waited for.
+const TRASH_PATIENCE_AT_END: Duration = Duration::from_secs(10);
+
 fn spawn_trash_sweeper(root: &Path) {
+    sweep_trash_within(root, TRASH_PATIENCE_AT_START);
+}
+
+/// Empty the trash before the command's own process ends.
+fn finish_trash_sweep(root: &Path) {
+    let started = std::time::Instant::now();
+    supercov_engine::lifecycle::finish_background_sweep(TRASH_PATIENCE_AT_END);
+    sweep_trash_within(
+        root,
+        TRASH_PATIENCE_AT_END.saturating_sub(started.elapsed()),
+    );
+}
+
+fn sweep_trash_within(root: &Path, patience: Duration) {
     let Ok(executable) = std::env::current_exe() else {
         return;
     };
@@ -2305,15 +2329,16 @@ fn spawn_trash_sweeper(root: &Path) {
     let Ok(mut child) = command.spawn() else {
         return;
     };
-    // Most sweeps complete in a few milliseconds. Give that fast path a
-    // bounded opportunity to finish so a command launched immediately after
-    // Supercov cannot discover copied config files in deferred trash. Slow
-    // filesystems remain asynchronous, and the independent process group lets
-    // the best-effort child survive the parent CLI exiting on Unix.
-    for _ in 0..10 {
+    // The sweep is given until `patience` runs out to finish, so that a
+    // command launched right after Supercov does not find the trash on its
+    // way out. Past that it goes on by itself: the independent process group
+    // lets the child survive the parent CLI exiting on Unix.
+    let deadline = std::time::Instant::now() + patience;
+    loop {
         match child.try_wait() {
             Ok(Some(_)) | Err(_) => return,
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) if std::time::Instant::now() >= deadline => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
         }
     }
 }

@@ -8,6 +8,7 @@
 - The next-page command `diff` prints keeps `--kind` and `--runner`.
 - Under Playwright with Chromium, what a page runs while it loads is counted for the action that loaded it. The page was never told its phase before it ran, so those hits were placed by their time, and one stamped with the millisecond `page.goto` resolved went to the `expect` that followed. In a four-test suite some lines did in 8 of 12 runs, and now and then all of a test's.
 - A hit with no phase of its own, stamped with the millisecond one phase ended and the next began, is the ending phase's. Other browsers still place a page's first hits by time.
+- Nothing of Supercov's is still being deleted when `supercov` exits. The copy a run replaces goes to `.supercov/.trash`, and it was unlinked only after the command had ended, by a process Supercov waited a tenth of a second for. A command started right after that walks the project could meet a directory on its way out: AVA, which looks for test files in every directory, failed on `EINVAL: invalid argument, scandir '.supercov/.trash/…'`. The trash is emptied while the tests run, and Supercov waits for what is left before it exits.
 
 ## 4.2.0
 
