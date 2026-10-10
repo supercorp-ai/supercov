@@ -3488,7 +3488,7 @@ fn a_comparison_says_when_both_runs_measured_the_same_source() {
     // end-to-end suite's does on timing.
     project.write(
         "test/fee.test.js",
-        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\nconst large = process.env.ORDER === 'large';\ntest('pays', () => equal(fee(large ? 500 : 1), large ? 0 : 5));\n",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\nconst order = process.env.ORDER;\ntest('pays', () => {\n  if (order !== 'small') equal(fee(500), 0);\n  if (order !== 'large') equal(fee(1), 5);\n});\n",
     );
     project.git(&["init", "-q"]);
     let run = |order: &str| {
@@ -3514,9 +3514,34 @@ fn a_comparison_says_when_both_runs_measured_the_same_source() {
             "Run again before acting on a loss.",
         ],
     );
+    // What was lost is listed, before what was gained. The text listed gains
+    // alone: "lost: 2 lines, 12 branches" stood over 73 gains.
+    let lost = same.find("- line src/fee.js:5").expect(&same);
+    assert!(
+        lost < same.find("+ line src/fee.js:3").expect(&same),
+        "{same}"
+    );
+    contains_all(
+        &same,
+        &["- branch src/fee.js:2 false", "+ branch src/fee.js:2 true"],
+    );
     let json = project.supercov(&["diff", &small, &large, "--json"]).json();
     assert_eq!(json["data"]["inputs"]["sourceChanged"], false);
     assert_eq!(json["data"]["inputs"]["testsChanged"], false);
+    // A comparison with nothing but losses had an empty body.
+    let both = run("both");
+    let only = project.supercov(&["diff", &both, &small]).succeeds();
+    contains_all(
+        &only,
+        &[
+            "gained: 0 lines, 0 branches",
+            "lost: 1 lines, 1 branches",
+            "- line src/fee.js:3",
+            "- branch src/fee.js:2 true",
+            "showing 1-1 of 1 per category",
+        ],
+    );
+    assert!(!only.contains("\n+ "), "{only}");
     // Nothing differs, nothing to explain.
     let again = run("large");
     let equal = project.supercov(&["diff", &large, &again]).succeeds();
