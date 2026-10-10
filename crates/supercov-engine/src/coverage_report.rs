@@ -1306,18 +1306,43 @@ fn tree_slot<'m, V: Default>(map: &'m mut BTreeMap<String, V>, key: &str) -> &'m
     map.get_mut(key).expect("slot was inserted")
 }
 
-/// The phase an event belongs to: its own, or the last to start before it.
+/// The phase an event belongs to: its own, or the one it falls in by time.
 fn correlate_event<'a>(
     event: &'a RuntimeEvent,
     ordered_phases: &'a [CoveragePhase],
 ) -> Option<&'a str> {
-    event.phase_id.as_deref().or_else(|| {
-        ordered_phases
-            .iter()
-            .take_while(|phase| phase.started_at_ms <= event.timestamp_ms)
-            .last()
-            .map(|phase| phase.id.as_str())
-    })
+    event
+        .phase_id
+        .as_deref()
+        .or_else(|| phase_at(ordered_phases, event.timestamp_ms))
+}
+
+/// The phase an event with none of its own falls in: the last to start at or
+/// before it. Times are whole milliseconds, and one phase often ends in the
+/// millisecond the next begins: `page.goto` resolves and the test's `expect`
+/// starts. What a page ran while it loaded, stamped with that millisecond,
+/// went to the `expect`, and now and then all of it did. Work a phase waited
+/// for comes before the phase ends, so in that millisecond it is the ending
+/// phase's.
+fn phase_at(ordered_phases: &[CoveragePhase], timestamp_ms: i64) -> Option<&str> {
+    let started = ordered_phases
+        .iter()
+        .take_while(|phase| phase.started_at_ms <= timestamp_ms)
+        .count();
+    let last = ordered_phases[..started].last()?;
+    let handed_over = last.started_at_ms == timestamp_ms
+        && started >= 2
+        && ordered_phases[started - 2].ended_at_ms == Some(timestamp_ms)
+        && ordered_phases[started - 2].started_at_ms < timestamp_ms;
+    Some(
+        if handed_over {
+            &ordered_phases[started - 2]
+        } else {
+            last
+        }
+        .id
+        .as_str(),
+    )
 }
 
 /// One lookup per hit while ingesting evidence. All hit relations share these
@@ -1684,13 +1709,10 @@ fn create_coverage_view_with_model(
         }
 
         let correlate = |event: &RuntimeEvent| {
-            event.phase_id.clone().or_else(|| {
-                ordered_phases
-                    .iter()
-                    .take_while(|phase| phase.started_at_ms <= event.timestamp_ms)
-                    .last()
-                    .map(|phase| phase.id.clone())
-            })
+            event
+                .phase_id
+                .clone()
+                .or_else(|| phase_at(&ordered_phases, event.timestamp_ms).map(str::to_owned))
         };
 
         let snapshots = raw
@@ -3468,6 +3490,39 @@ mod tests {
         let explicit = create_coverage_view(&manifest, &[attempt], "time").unwrap();
         assert_eq!(explicit.points[0].confidence.level, "executed");
         assert!(!explicit.points[0].confidence.asserted);
+    }
+
+    #[test]
+    fn an_event_in_the_millisecond_one_phase_ended_and_the_next_began_is_the_first_ones() {
+        let phase = |id: &str, started_at_ms: i64, ended_at_ms: i64| CoveragePhase {
+            id: id.into(),
+            kind: "action".into(),
+            operation: id.into(),
+            source: None,
+            caused_by_phase_id: None,
+            started_at_ms,
+            ended_at_ms: Some(ended_at_ms),
+            status: Some("passed".into()),
+            error: None,
+        };
+        // `page.goto` resolved and the test's `expect` began in millisecond
+        // 200. What the page ran while loading carried that time and no phase,
+        // and all of it was the `expect`'s: the action that loaded the page
+        // read as having run nothing.
+        let handed_over = [phase("goto", 100, 200), phase("expect", 200, 214)];
+        assert_eq!(phase_at(&handed_over, 199), Some("goto"));
+        assert_eq!(phase_at(&handed_over, 200), Some("goto"));
+        assert_eq!(phase_at(&handed_over, 201), Some("expect"));
+        assert_eq!(phase_at(&handed_over, 99), None);
+        // A phase that begins after a gap has its first millisecond to itself.
+        let apart = [phase("goto", 100, 150), phase("click", 200, 214)];
+        assert_eq!(phase_at(&apart, 200), Some("click"));
+        // One inside another, still running, keeps what happens as it begins.
+        let inside = [phase("step", 100, 300), phase("expect", 200, 220)];
+        assert_eq!(phase_at(&inside, 200), Some("expect"));
+        // Two that both lie within the millisecond: the later, as before.
+        let instant = [phase("first", 200, 200), phase("second", 200, 210)];
+        assert_eq!(phase_at(&instant, 200), Some("second"));
     }
 
     #[test]
