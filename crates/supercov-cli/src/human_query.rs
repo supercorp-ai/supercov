@@ -1874,27 +1874,27 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 ),
                 _ => {}
             }
-            let gained = data
-                .gained
-                .lines
-                .iter()
-                .map(|line| format!("+ line {line}"))
-                .chain(
-                    data.gained
-                        .branches
-                        .iter()
-                        .map(|item| format!("+ branch {item}")),
-                )
-                .chain(
-                    data.gained
-                        .mcdc
-                        .iter()
-                        .map(|item| format!("+ MC/DC {item}")),
-                )
-                .collect::<Vec<_>>();
-            if gained.is_empty() {
+            // What was lost comes first, marked `-`: it is what a reader acts
+            // on. The text listed gains alone, so "lost: 2 lines, 12 branches"
+            // stood over 73 items that were all gains, and a comparison with
+            // nothing but losses had an empty body.
+            let listed = |side: &supercov_engine::coverage_query::CoverageDiffSide, mark: &str| {
+                side.lines
+                    .iter()
+                    .map(|item| format!("{mark} line {item}"))
+                    .chain(
+                        side.branches
+                            .iter()
+                            .map(|item| format!("{mark} branch {item}")),
+                    )
+                    .chain(side.mcdc.iter().map(|item| format!("{mark} MC/DC {item}")))
+                    .collect::<Vec<_>>()
+            };
+            let (lost, gained) = (listed(&data.lost, "-"), listed(&data.gained, "+"));
+            if lost.is_empty() && gained.is_empty() {
                 lines.push(String::new());
             } else {
+                lines.extend(lost);
                 lines.extend(gained);
             }
             lines.push(format!("{} per category", page_label(page)));
@@ -1906,6 +1906,12 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             );
             if request.filter != "all" {
                 base.push_str(&format!(" --filter {}", request.filter));
+            }
+            if let Some(kind) = &request.kind {
+                base.push_str(&format!(" --kind {}", shell_quote(kind)));
+            }
+            if let Some(runner) = &request.runner {
+                base.push_str(&format!(" --runner {}", shell_quote(runner)));
             }
             if let Some(next) = next_page(&base, page) {
                 lines.push(format!("next page: {next}"));
