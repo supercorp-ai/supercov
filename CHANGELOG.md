@@ -6,6 +6,8 @@
 
 - `supercov diff` lists what was lost. Its text printed the count and then gains only: "lost: 2 lines, 12 branches" stood over 73 items that were all gains, and a comparison with nothing but losses had an empty body. Losses come first, marked `-`, then gains, marked `+`. `--json` always had both.
 - The next-page command `diff` prints keeps `--kind` and `--runner`.
+- Under Playwright with Chromium, what a page runs while it loads is counted for the action that loaded it. The page was never told its phase before it ran, so those hits were placed by their time, and one stamped with the millisecond `page.goto` resolved went to the `expect` that followed. In a four-test suite some lines did in 8 of 12 runs, and now and then all of a test's.
+- A hit with no phase of its own, stamped with the millisecond one phase ended and the next began, is the ending phase's. Other browsers still place a page's first hits by time.
 
 ## 4.2.0
 

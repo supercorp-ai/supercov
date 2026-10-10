@@ -169,6 +169,20 @@ try {
       phase => phase.operation.endsWith('Page.goto') && phase.lines > 0,
     ),
   );
+  // The page runs its code while it loads, so every line is the navigation's
+  // and none is the assertion's that follows. A document did not know its
+  // phase, and what it ran was placed by its time: a hit stamped with the
+  // millisecond `page.goto` resolved and `expect` began went to the `expect`,
+  // some of them in most runs and now and then all of them.
+  for (const name of ['admin', 'owner', 'both', 'neither']) {
+    const [attempt] = rust('__query-stored-run', {
+      root: project,
+      query: { runId: run.runId, filter: 'passed', command: 'test', selector: name },
+    }).data.tests;
+    const lines = operation => attempt.phases.find(phase => phase.operation.endsWith(operation)).lines;
+    assert.ok(lines('Page.goto') > 0, `${name}: ${JSON.stringify(attempt.phases)}`);
+    assert.equal(lines('expect.toHaveText'), 0, `${name}: ${JSON.stringify(attempt.phases)}`);
+  }
   console.log(
     '[rust-vite-playwright] Rust instruments, builds, runs, attributes, and queries browser application coverage',
   );
