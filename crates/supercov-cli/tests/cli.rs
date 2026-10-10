@@ -3246,8 +3246,15 @@ fn ava_tests_running_at_once_are_attributed_each_to_its_own() {
         .current_dir(&project.root)
         .output()
         .unwrap();
+    // AVA on its own, with nothing of Supercov's. When it fails it says why
+    // on the other stream, and this printed an empty string.
     let output = String::from_utf8_lossy(&selected.stdout);
-    assert!(output.contains("1 test passed"), "{output}");
+    assert!(
+        output.contains("1 test passed"),
+        "{:?}\n{output}\n{}",
+        selected.status,
+        String::from_utf8_lossy(&selected.stderr)
+    );
 }
 
 #[cfg(unix)]

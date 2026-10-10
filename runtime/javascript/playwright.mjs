@@ -198,6 +198,7 @@ class CoveragePhaseController {
     cdpSessions = new Map();
     newDocumentScriptIds = new Map();
     pendingRegistrations = new Set();
+    pageRegistrations = new WeakMap();
     scriptUpdate = Promise.resolve();
     proxyCache = new WeakMap();
     runtimeSnapshots;
@@ -381,8 +382,27 @@ class CoveragePhaseController {
             }
         }
     }
-    async registerPage(page) {
-        if (this.pages.has(page) || this.disposed)
+    /**
+     * A page is registered once, and whoever asks while that is under way
+     * waits for it. Playwright announces a page to the context's listener
+     * before the fixture that hands it to the test has it, so the listener
+     * started the registration and the fixture, finding the page known,
+     * returned at once: the test's first `page.goto` began before the page had
+     * the session a phase is installed through. The document it loaded did not
+     * know its phase, and its hits were left to be placed by their time.
+     */
+    registerPage(page) {
+        if (this.disposed)
+            return Promise.resolve();
+        let registration = this.pageRegistrations.get(page);
+        if (!registration) {
+            registration = this.registerNewPage(page);
+            this.pageRegistrations.set(page, registration);
+        }
+        return registration;
+    }
+    async registerNewPage(page) {
+        if (this.pages.has(page))
             return;
         timingCount("registerPage");
         this.pages.add(page);
@@ -393,8 +413,15 @@ class CoveragePhaseController {
             adopted: !this.contexts.has(context) && tracked && !headersKnown,
         });
         const cdp = await page.context().newCDPSession(page).catch(() => undefined);
-        if (cdp)
+        if (cdp) {
+            // Chromium runs a session's new-document scripts only once the
+            // session has enabled the Page domain. Without it the script that
+            // tells a document its phase was accepted and never ran: a page
+            // learned its phase only from the next action, after it had
+            // loaded, and everything it ran while loading was placed by time.
+            await cdp.send("Page.enable").catch(() => undefined);
             this.cdpSessions.set(page, cdp);
+        }
         const phaseId = this.requestPhaseId();
         if (phaseId)
             await this.activatePage(page, phaseId);
