@@ -576,6 +576,8 @@ pub fn run_direct_javascript(
         .map_err(|error| error.to_string())?;
     drop(workspace_progress);
     cleanup.set_workspace(workspace.clone());
+    // The workspace this one replaced is in the trash now.
+    crate::lifecycle::sweep_trash_in_background(&root);
     if let Err(error) = crate::workspace::mirror_git_repository(&root, &workspace)
         && std::env::var_os("SUPERCOV_DEBUG").is_some()
     {

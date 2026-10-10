@@ -271,6 +271,52 @@ pub fn remove_stored_tree_deferred(
     Ok(Some(destination))
 }
 
+static BACKGROUND_SWEEP: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
+/// Empty the trash while the command runs.
+///
+/// A run moves the workspace it replaces into the trash before the command
+/// starts, and nothing unlinked it until the command had ended: Supercov then
+/// started a sweeper, waited a tenth of a second and exited, and the tree went
+/// on being deleted for most of a second after. A command started in that
+/// time that walks the project met a directory on its way out. AVA looks for
+/// test files in every directory, `.supercov` included, and failed on
+/// `EINVAL: invalid argument, scandir '.supercov/.trash/…'`.
+///
+/// The tree is not needed from the moment it is in the trash, so it goes while
+/// the tests run.
+pub fn sweep_trash_in_background(project_root: &Path) {
+    let root = project_root.to_owned();
+    let sweep = std::thread::spawn(move || {
+        let _ = sweep_trash(&root);
+    });
+    if let Ok(mut running) = BACKGROUND_SWEEP.lock() {
+        *running = Some(sweep);
+    }
+}
+
+/// Wait for the sweep the run started, for as long as `patience`. True when
+/// there is none left running.
+pub fn finish_background_sweep(patience: Duration) -> bool {
+    let Some(sweep) = BACKGROUND_SWEEP
+        .lock()
+        .ok()
+        .and_then(|mut running| running.take())
+    else {
+        return true;
+    };
+    let deadline = std::time::Instant::now() + patience;
+    while !sweep.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = sweep.join();
+    true
+}
+
 /// Retryable trash unlinking. Public commands execute this in a child.
 pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
     let root = absolute_root(project_root)?;
