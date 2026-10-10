@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `supercov diff` lists what was lost. Its text printed the count and then gains only: "lost: 2 lines, 12 branches" stood over 73 items that were all gains, and a comparison with nothing but losses had an empty body. Losses come first, marked `-`, then gains, marked `+`. `--json` always had both.
+- The next-page command `diff` prints keeps `--kind` and `--runner`.
+
 ## 4.2.0
 
 **Fixed**

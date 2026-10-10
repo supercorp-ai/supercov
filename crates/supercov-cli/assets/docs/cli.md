@@ -354,7 +354,17 @@ npx supercov diff <older-run> <newer-run>
 
 `diff` reports gains and losses. Use it after adding a test to prove that the
 expected behavior became covered without an unexplained regression elsewhere.
-Neither input run is changed.
+Neither input run is changed. Under the totals it lists what was lost, marked
+`-`, and then what was gained, marked `+`:
+
+```
+gained: 1 lines, 1 branches, 0 MC/DC conditions
+lost: 1 lines, 1 branches, 0 MC/DC conditions
+- line src/fee.js:5
+- branch src/fee.js:2 false
++ line src/fee.js:3
++ branch src/fee.js:2 true
+```
 
 Two runs of the same code can differ a little: what an end-to-end suite
 reaches depends on timing, on the order of tests, and on state outside the
