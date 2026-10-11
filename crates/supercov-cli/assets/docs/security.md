@@ -183,6 +183,12 @@ many of its measured lines no test reached. A handler that builds a query from
 request input is one thing; the same handler that no test ever executes is a
 stronger claim, and one that needs both halves of this product to make.
 
+When the run's assertions were assessed (`runs <run> assertions assess`), the
+report also says which flagged lines a test is judged to catch a change to, and
+which flagged files tests run without catching any line of. A run that was not
+assessed says so instead: nobody asked its tests, which is not the same as
+their catching nothing.
+
 ## What a change introduced
 
 ```bash

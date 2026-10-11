@@ -913,6 +913,85 @@ fn a_source_root_puts_files_in_and_everything_else_stays_out() {
 }
 
 #[test]
+fn a_file_coverage_measures_is_a_file_quality_and_security_read() {
+    // A Next.js application as `create-next-app` lays it out. Coverage
+    // measured the "test connection" handlers and everything under
+    // `components`; the rules here called the handlers tests, for the
+    // `test` in their URL, and left `components` and `proxy.ts` unclassified.
+    let temp = Temp::new();
+    temp.write(
+        "package.json",
+        "{\"dependencies\": {\"next\": \"16.0.0\"}}\n",
+    );
+    temp.write(
+        "app/api/wordpress/test/route.ts",
+        "export async function POST() {}\n",
+    );
+    temp.write(
+        "app/dashboard/page.tsx",
+        "export default function Page() {}\n",
+    );
+    temp.write(
+        "app/__tests__/page.test.tsx",
+        "test('renders', () => {});\n",
+    );
+    temp.write("components/ui/button.tsx", "export function Button() {}\n");
+    temp.write("lib/math.ts", "export const add = (a, b) => a + b;\n");
+    temp.write("proxy.ts", "export function proxy() {}\n");
+    temp.write("scripts/deploy.ts", "console.log('deploy');\n");
+    temp.write("test/math.test.ts", "test('adds', () => {});\n");
+    // Somebody else's code stays out wherever coverage puts it.
+    temp.write("lib/chart.min.js", "var a=1;\n");
+
+    let measured: BTreeSet<String> =
+        supercov_engine::source_discovery::discover_source_scope(&temp.0, None)
+            .unwrap()
+            .source_files
+            .into_iter()
+            .collect();
+    assert!(measured.contains("app/api/wordpress/test/route.ts"));
+    for instrument in [Instrument::Catalog, Instrument::Security] {
+        let found = discover_for(&temp.0, &here(), instrument).unwrap();
+        let view = scope_for(&temp.0, &found, instrument);
+        let included: BTreeSet<String> = view.included().map(|e| e.path.clone()).collect();
+        let reason = |path: &str| {
+            let entry = view.entries.iter().find(|e| e.path == path).unwrap();
+            (entry.status, entry.reason.as_str())
+        };
+        assert_eq!(view.ambiguous(), 0, "{:?}", view.entries);
+        for file in measured.iter().filter(|file| *file != "lib/chart.min.js") {
+            assert!(included.contains(file), "{file} is measured and not read");
+        }
+        assert_eq!(
+            view.roots,
+            ["app", "components", "lib", "proxy.ts"],
+            "the roots coverage measures under are named"
+        );
+        assert_eq!(
+            reason("app/__tests__/page.test.tsx"),
+            (scope::Status::Excluded, "test")
+        );
+        assert_eq!(
+            reason("test/math.test.ts"),
+            (scope::Status::Excluded, "test")
+        );
+        assert_eq!(
+            reason("scripts/deploy.ts"),
+            (scope::Status::Excluded, "tool script")
+        );
+        assert_eq!(reason("lib/chart.min.js").0, scope::Status::Excluded);
+    }
+
+    // A root a project names is not second-guessed by its own name, as
+    // coverage does not: `scripts` here, which is a tool script anywhere else.
+    let roots = vec!["scripts".to_string()];
+    let found = discover(&temp.0, &[PathBuf::from(".")]).unwrap();
+    let view = scope::classify(&temp.0, &found, Some(&roots));
+    let included: Vec<&str> = view.included().map(|e| e.path.as_str()).collect();
+    assert_eq!(included, ["scripts/deploy.ts"]);
+}
+
+#[test]
 fn declared_roots_replace_discovery_and_leave_nothing_ambiguous() {
     let temp = Temp::new();
     temp.write("package.json", "{}\n");
@@ -2421,6 +2500,29 @@ fn a_security_answer_is_never_scored_and_sorts_by_what_fired() {
     assert_eq!(present, ["injection_sink", "secret_in_source"]);
     // The same answers under the quality instrument would have a health.
     assert!(scored(&flagged, Instrument::Catalog)["health"].is_number());
+}
+
+#[test]
+fn a_run_that_was_not_assessed_is_not_said_to_catch_nothing() {
+    // With no assessment on the run no test was asked. The report used to
+    // word that as every flagged file being run by tests that catch nothing.
+    let report = json!({
+        "counts": {"assessed": 1, "flagged": 1},
+        "catalog_version": "security-v3", "model": "jev-1.13.0", "id": "q_0123456789abcdef",
+        "run": "run_1", "flagged_in_untested_code": 0,
+        "run_assertions": {"assessed": false, "assess": "supercov runs run_1 assertions assess"},
+        "files": [
+            {"path": "src/routes.ts", "status": "completed",
+             "present": [{"check": "injection_sink", "value": 0.93, "tier": "file"}],
+             "coverage": {"in_run": true, "uncovered_lines": 0}}
+        ]
+    });
+    let text = human_security(&report);
+    assert!(
+        text.contains("0 flagged files have lines no test in run run_1 executed.\n  Run run_1 has no assertion assessment, so whether its tests would catch a change to a flagged line is not reported. Assess it with `supercov runs run_1 assertions assess`.\n"),
+        "{text}"
+    );
+    assert!(!text.contains("judged to catch"), "{text}");
 }
 
 #[test]

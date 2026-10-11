@@ -61,7 +61,8 @@ the score is arithmetic this command does over the answers. Text reports a band,
 `good`, `fair` or `weak`; `--json` carries the number and every check with what
 is known about it. `--all` includes test files, generated output and anything
 outside a source root, all of which are left out by default. `--dry-run` prints
-the exact requests and contacts nothing.
+the exact requests and contacts nothing; how many there are and what they cost
+is one line on stderr.
 
 `quality diff` reports what changed between two assessments: which files lost
 or gained health, each check that moved in them with its value before and after,
@@ -506,6 +507,11 @@ npx supercov merge <shard-a> <shard-b> <shard-c>
 Merge creates a new run. The inputs must describe the same source,
 configuration, toolchain, schema, and coverage denominator. Supercov rejects an
 incompatible merge rather than publishing a misleading aggregate.
+
+`assertions assess` assesses a merged run across every suite merged into it,
+reusing the answers saved when its parts were assessed. `tests affected` is
+asked of the runs that were merged, which hold the record of what each test
+ran.
 
 ## Clean local data
 

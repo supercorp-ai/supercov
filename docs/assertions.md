@@ -86,6 +86,8 @@ npx supercov runs latest assertions
 Supercov renders what the test ran -- its code, its helpers, and the source it
 executed -- and asks [Jev](https://typesafe.ai) whether the test would fail for
 each statement's change. It prints an estimate first; `--dry-run` sends nothing.
+The estimate gives the first round and the most the pass can send, which is
+what it sends when no test is judged to catch anything.
 It needs a TypeSafe AI API key in `TYPESAFE_API_KEY`.
 
 `assertions` reads the saved result with no network and no key, a page at a

@@ -297,10 +297,53 @@ pub fn load_manifest(run: &StoredRun) -> Result<RunManifest, String> {
         "This run has no source manifest. Run tests once with this version of Supercov".into()
     })
 }
-fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String> {
-    if run.metadata.merged == Some(true) {
-        return Err("Use a single run; merged runs have multiple source manifests".into());
+/// An archive entry's name as its run wrote it. A merged run keeps each
+/// parent's entries under `shards/<n>/`, and a parent that was itself merged
+/// brings its own level along.
+fn unsharded(path: &str) -> &str {
+    let mut rest = path;
+    while let Some((shard, inner)) = rest
+        .strip_prefix("shards/")
+        .and_then(|after| after.split_once('/'))
+    {
+        if shard.is_empty() || !shard.bytes().all(|byte| byte.is_ascii_digit()) {
+            break;
+        }
+        rest = inner;
     }
+    rest
+}
+/// The one value every entry of this name holds. The runs a merge accepts
+/// measured the same source, tests, dependencies and configuration, so each
+/// recorded the same manifest and the merged run has one; a merged run whose
+/// parents did not is not one run's code and is refused.
+fn the_one(
+    entries: &[crate::evidence_archive::EvidenceArchiveEntry],
+    named: impl Fn(&str) -> bool,
+) -> Result<Option<Value>, String> {
+    let mut found: Option<(&[u8], Value)> = None;
+    for entry in entries.iter().filter(|entry| named(&entry.path)) {
+        match &found {
+            Some((bytes, _)) if *bytes == entry.contents.as_slice() => {}
+            Some((_, value)) => {
+                let other: Value =
+                    serde_json::from_slice(&entry.contents).map_err(|e| e.to_string())?;
+                if other != *value {
+                    return Err("The runs merged into this one recorded different source manifests; use one of them instead".into());
+                }
+            }
+            None => {
+                found = Some((
+                    &entry.contents,
+                    serde_json::from_slice(&entry.contents).map_err(|e| e.to_string())?,
+                ));
+            }
+        }
+    }
+    Ok(found.map(|(_, value)| value))
+}
+fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String> {
+    let merged = run.metadata.merged == Some(true);
     let bytes = fs::read(&run.evidence_path).map_err(|e| e.to_string())?;
     let evidence_digest = format!("{:x}", Sha256::digest(&bytes));
     if let Some(cached) = fs::read(run.directory.join(MANIFEST_CACHE_FILE))
@@ -315,14 +358,20 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
             statement_exclusions: cached.statement_exclusions,
         }));
     }
+    let named = |path: &str, name: &str| {
+        if merged {
+            unsharded(path) == name
+        } else {
+            path == name
+        }
+    };
     let entries = read_archive_selected(&run.evidence_path, |path| {
-        path == ARCHIVE_PATH || path == "statement-exclusions.json"
+        named(path, ARCHIVE_PATH) || named(path, "statement-exclusions.json")
     })
     .map_err(|e| e.to_string())?;
-    let Some(input) = entries.iter().find(|e| e.path == ARCHIVE_PATH) else {
+    let Some(value) = the_one(&entries, |path| named(path, ARCHIVE_PATH))? else {
         return Ok(None);
     };
-    let value: Value = serde_json::from_slice(&input.contents).map_err(|e| e.to_string())?;
     if value["schemaVersion"].as_u64() != Some(u64::from(MANIFEST_SCHEMA)) {
         return Err(
             "Unsupported source manifest schema; rerun tests with this version of Supercov".into(),
@@ -336,10 +385,8 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
     Ok(Some(RunManifest {
         manifest,
         evidence_digest,
-        statement_exclusions: entries
-            .iter()
-            .find(|e| e.path == "statement-exclusions.json")
-            .map(|entry| serde_json::from_slice(&entry.contents).map_err(|e| e.to_string()))
+        statement_exclusions: the_one(&entries, |path| named(path, "statement-exclusions.json"))?
+            .map(|value| serde_json::from_value(value).map_err(|e| e.to_string()))
             .transpose()?
             .unwrap_or_default(),
     }))
@@ -381,7 +428,8 @@ fn write_json(
 /// run directory; the lifecycle publishes them with the run in one rename.
 ///
 /// `analysed` is the run's coverage when the caller has already analysed its
-/// evidence. Merged runs and archives without a manifest have neither.
+/// evidence. Merged runs and archives without a manifest have neither: a
+/// merged run is analysed by the first query that needs it, not by `merge`.
 pub(crate) fn prepare_publication_with(
     root: &Path,
     directory: &Path,
@@ -577,6 +625,17 @@ pub fn executions(
 /// added since -- and the run's dependencies and configuration, which the
 /// working-tree check answers for.
 pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
+    // What each test ran is recorded when a run is published, beside the
+    // code it ran, and a merge records nothing: its parts hold the records.
+    if run.metadata.merged == Some(true) {
+        return Err(match run.metadata.parents.as_deref() {
+            Some(parents) if !parents.is_empty() => format!(
+                "A merged run keeps no record of what each test ran; ask the runs it was merged from: {}",
+                parents.join(", ")
+            ),
+            _ => "A merged run keeps no record of what each test ran; ask the runs it was merged from".into(),
+        });
+    }
     let stored = load_manifest(run)?;
     let executions: Executions = fs::read(run.directory.join(EXECUTIONS_FILE))
         .ok()
@@ -1056,6 +1115,57 @@ mod tests {
     fn recorded(run: &StoredRun) -> Executions {
         serde_json::from_slice(&fs::read(run.directory.join(EXECUTIONS_FILE)).expect("a record"))
             .unwrap()
+    }
+
+    #[test]
+    fn a_merged_run_has_the_manifest_its_parents_share() {
+        // `shards/<n>/` is where a merge puts each parent's entries; a parent
+        // that was merged itself brings its own level.
+        assert_eq!(unsharded("source-inputs.json"), "source-inputs.json");
+        assert_eq!(
+            unsharded("shards/0/source-inputs.json"),
+            "source-inputs.json"
+        );
+        assert_eq!(
+            unsharded("shards/12/shards/1/source-inputs.json"),
+            "source-inputs.json"
+        );
+        assert_eq!(
+            unsharded("shards/x/source-inputs.json"),
+            "shards/x/source-inputs.json"
+        );
+        assert_eq!(
+            unsharded("shards/source-inputs.json"),
+            "shards/source-inputs.json"
+        );
+
+        let entry = |path: &str, contents: &str| crate::evidence_archive::EvidenceArchiveEntry {
+            path: path.into(),
+            contents: contents.as_bytes().to_vec(),
+        };
+        let named = |path: &str| unsharded(path) == ARCHIVE_PATH;
+        // The same manifest three times, once spelled differently, is one.
+        let same = [
+            entry("shards/0/source-inputs.json", r#"{"files":{"a.js":1}}"#),
+            entry("shards/1/source-inputs.json", r#"{"files":{"a.js":1}}"#),
+            entry("shards/2/source-inputs.json", r#"{ "files": {"a.js": 1} }"#),
+            entry("shards/0/tests.jsonl", "not read"),
+        ];
+        assert_eq!(
+            the_one(&same, named).unwrap(),
+            Some(json!({"files": {"a.js": 1}}))
+        );
+        // Two different ones are refused: the merged run is not one run's code.
+        let different = [
+            entry("shards/0/source-inputs.json", r#"{"files":{"a.js":1}}"#),
+            entry("shards/1/source-inputs.json", r#"{"files":{"a.js":2}}"#),
+        ];
+        assert!(
+            the_one(&different, named)
+                .unwrap_err()
+                .contains("different source manifests")
+        );
+        assert_eq!(the_one(&[], named).unwrap(), None);
     }
 
     /// `byte_column` as it was before it took line starts.
