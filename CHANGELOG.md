@@ -10,7 +10,7 @@
 
 **Added**
 
-- A merged run can be assessed. `assertions assess` refused one for holding "multiple source manifests", which were the same manifest once per run merged, so a project whose suites run as separate commands had an asserted share for each suite and none overall. Answers saved when the parts were assessed are reused. `tests affected` reads a merged run too.
+- A merged run can be assessed. `assertions assess` refused one for holding "multiple source manifests", which were the same manifest once per run merged, so a project whose suites run as separate commands had an asserted share for each suite and none overall. Answers saved when the parts were assessed are reused. `tests affected` on a merged run names the runs to ask instead.
 - `quality --dry-run` and `security --dry-run` print how many requests there are and what they cost, on stderr beside the requests themselves, and both commands end by saying what the assessment was charged.
 
 ## 4.2.1

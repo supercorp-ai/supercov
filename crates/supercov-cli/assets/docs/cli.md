@@ -508,9 +508,10 @@ Merge creates a new run. The inputs must describe the same source,
 configuration, toolchain, schema, and coverage denominator. Supercov rejects an
 incompatible merge rather than publishing a misleading aggregate.
 
-A merged run is a run like any other: `assertions assess` assesses it across
-every suite merged into it, reusing the answers saved when its parts were
-assessed, and `tests affected` reads it.
+`assertions assess` assesses a merged run across every suite merged into it,
+reusing the answers saved when its parts were assessed. `tests affected` is
+asked of the runs that were merged, which hold the record of what each test
+ran.
 
 ## Clean local data
 

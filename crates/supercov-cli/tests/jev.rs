@@ -391,13 +391,28 @@ fn a_merged_run_is_assessed_like_the_runs_it_was_made_from() {
         .succeeds();
     assert!(by_test.contains("src/cart.js"), "{by_test}");
 
-    // And a merged run answers which of its tests a change reaches.
-    project.edit("src/cart.js", "join(\", \")", "join(\"; \")");
-    let affected = project
-        .supercov(&["runs", &merged, "tests", "affected"])
-        .succeeds();
-    assert!(affected.contains("1 of 4 tests affected"), "{affected}");
-    assert!(affected.contains("describe names the items"), "{affected}");
+    // Merging computes nothing a query has not asked for: what each test ran
+    // stays with the runs that recorded it, and the refusal names them.
+    for derived in ["source-manifest.cache.json", "test-executions.json"] {
+        assert!(
+            !project
+                .root
+                .join(".supercov/runs")
+                .join(&merged)
+                .join(derived)
+                .exists(),
+            "{derived} was written by the merge"
+        );
+    }
+    let affected = project.supercov(&["runs", &merged, "tests", "affected"]);
+    assert_ne!(affected.code(), 0);
+    assert!(
+        affected.stderr().contains(&format!(
+            "A merged run keeps no record of what each test ran; ask the runs it was merged from: {unit}, {integration}"
+        )),
+        "{}",
+        affected.stderr()
+    );
 }
 
 #[test]

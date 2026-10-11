@@ -428,7 +428,8 @@ fn write_json(
 /// run directory; the lifecycle publishes them with the run in one rename.
 ///
 /// `analysed` is the run's coverage when the caller has already analysed its
-/// evidence. An archive without a manifest has neither file.
+/// evidence. Merged runs and archives without a manifest have neither: a
+/// merged run is analysed by the first query that needs it, not by `merge`.
 pub(crate) fn prepare_publication_with(
     root: &Path,
     directory: &Path,
@@ -436,6 +437,9 @@ pub(crate) fn prepare_publication_with(
     analysed: Option<&CoverageReport>,
     archived: Option<RunManifest>,
 ) -> Result<(), String> {
+    if metadata.merged == Some(true) {
+        return Ok(());
+    }
     let run = StoredRun {
         id: metadata.id.clone(),
         directory: directory.into(),
@@ -621,6 +625,17 @@ pub fn executions(
 /// added since -- and the run's dependencies and configuration, which the
 /// working-tree check answers for.
 pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
+    // What each test ran is recorded when a run is published, beside the
+    // code it ran, and a merge records nothing: its parts hold the records.
+    if run.metadata.merged == Some(true) {
+        return Err(match run.metadata.parents.as_deref() {
+            Some(parents) if !parents.is_empty() => format!(
+                "A merged run keeps no record of what each test ran; ask the runs it was merged from: {}",
+                parents.join(", ")
+            ),
+            _ => "A merged run keeps no record of what each test ran; ask the runs it was merged from".into(),
+        });
+    }
     let stored = load_manifest(run)?;
     let executions: Executions = fs::read(run.directory.join(EXECUTIONS_FILE))
         .ok()
