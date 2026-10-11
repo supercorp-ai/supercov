@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `security --run` no longer says a run's tests catch nothing when nobody asked them. Beside a run with no assertion assessment it printed "102 are executed by tests that are not judged to catch any line of them", and under almost every flagged file "no test is judged to catch a change to any line of it"; beside the same suite assessed the number was 5. A run that was not assessed now says so and names the command that assesses it.
+- `quality` and `security` read every JavaScript and TypeScript file a coverage run measures. They kept path rules of their own, which called the App Router handler `app/api/wordpress/test/route.ts` a test, left `components/` and `proxy.ts` of a Next.js application unclassified, and second-guessed a root named in `SUPERCOV_SOURCE_ROOTS` by its name. Coverage's decision is now taken for the files it measures; generated and vendored files stay out.
+- The most `assertions assess --dry-run` says an assessment can send is the most it can send. It counted one request for each test, where a test whose statements other tests also run is asked again each round: a suite of end-to-end tests was told "at most 404 requests" and sent 741. The figure is now the pass itself with every answer a no.
+
+**Added**
+
+- A merged run can be assessed. `assertions assess` refused one for holding "multiple source manifests", which were the same manifest once per run merged, so a project whose suites run as separate commands had an asserted share for each suite and none overall. Answers saved when the parts were assessed are reused. `tests affected` reads a merged run too.
+- `quality --dry-run` and `security --dry-run` print how many requests there are and what they cost, on stderr beside the requests themselves, and both commands end by saying what the assessment was charged.
+
 ## 4.2.1
 
 **Fixed**

@@ -29,8 +29,31 @@ fn quality_assesses_once_and_reads_back_without_the_network() {
         ],
     );
     assert!(seen.lock().unwrap().is_empty(), "a dry run sends nothing");
+    // The requests are megabytes on a real project; the count and the cost
+    // are one line beside them.
+    let estimate = project.supercov_with(&["quality", "--dry-run"], &jev);
+    assert!(
+        estimate
+            .stderr()
+            .contains("[supercov] quality: 1 requests to 127.0.0.1 (typesafe/jev-1.13), about "),
+        "{}",
+        estimate.stderr()
+    );
+    assert!(
+        estimate.stderr().contains(") if none is cached"),
+        "{}",
+        estimate.stderr()
+    );
 
-    let assessed = project.supercov_with(&["quality"], &jev).succeeds();
+    let first = project.supercov_with(&["quality"], &jev);
+    assert!(
+        first
+            .stderr()
+            .contains("[supercov] quality: 100 input tokens this run ($0.0000); 0 more were answered from the cache"),
+        "{}",
+        first.stderr()
+    );
+    let assessed = first.succeeds();
     contains_all(
         &assessed,
         &[
@@ -229,14 +252,152 @@ fn security_reads_a_coverage_run_beside_its_findings() {
         &[
             "have lines no test in run",
             "3 of its measured lines are not covered by the run",
+            // Nobody asked the run's tests what they catch, which is not the
+            // same as their catching nothing.
+            "has no assertion assessment, so whether its tests would catch a change to a flagged line is not reported",
         ],
     );
+    assert!(!with_run.contains("judged to catch"), "{with_run}");
     let scope = project.supercov(&["security", "scope"]).succeeds();
     assert!(scope.contains("Roots: src"), "{scope}");
     let file = project
         .supercov(&["security", "file", "src/cart.js"])
         .succeeds();
     assert!(file.contains("injection_sink"), "{file}");
+}
+
+#[test]
+fn an_assessment_sends_no_more_than_its_estimate_says_it_can() {
+    // Three journeys that share most of the steps they run, as end-to-end
+    // tests do. A statement goes to one test per round of requests, so a test
+    // is asked again about what the others did not settle; the estimate
+    // counted one request a test, said "at most 3" here, and the pass sent 5.
+    let project = Project::empty("assess-estimate");
+    project.write(
+        "package.json",
+        r#"{ "name": "journeys", "private": true, "type": "module" }"#,
+    );
+    let steps: String = (0..12)
+        .map(|i| format!("export function step{i}(x) {{\n  return x + {i};\n}}\n"))
+        .collect();
+    project.write("src/steps.js", &steps);
+    let journey = |name: usize, steps: &[usize]| {
+        let calls: Vec<String> = steps
+            .iter()
+            .map(|step| format!("steps.step{step}({name})"))
+            .collect();
+        format!(
+            "test(\"journey {name}\", () => {{ {}; assert.ok(true); }});\n",
+            calls.join("; ")
+        )
+    };
+    project.write(
+        "test/journeys.test.js",
+        &format!(
+            "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport * as steps from \"../src/steps.js\";\n\n{}{}{}",
+            journey(0, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            journey(1, &[4, 5, 6, 7, 8, 9, 10, 11]),
+            journey(2, &[8, 9, 10, 11, 0, 1]),
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("journeys");
+    let run = project.measure(&["test/journeys.test.js"]);
+
+    let estimate = project
+        .supercov(&["runs", &run, "assertions", "assess", "--dry-run", "--json"])
+        .json();
+    let most = estimate["data"]["atMost"]["requests"].as_u64().unwrap();
+    assert!(
+        estimate["data"]["firstRound"]["requests"].as_u64().unwrap() < most,
+        "{estimate}"
+    );
+
+    // No test is judged to catch anything: the most the pass can ask.
+    let (base, seen) = gateway(MODEL, answer_no);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    assert_eq!(seen.lock().unwrap().len() as u64, most, "{estimate}");
+    assert_eq!(most, 5, "{estimate}");
+
+    // And every test catches everything: the least, inside the estimate.
+    let (base, seen) = gateway(MODEL, answer_yes);
+    project
+        .supercov_with(
+            &["runs", &run, "assertions", "assess", "--refresh"],
+            &through(&base),
+        )
+        .succeeds();
+    assert_eq!(
+        seen.lock().unwrap().len() as u64,
+        estimate["data"]["firstRound"]["requests"].as_u64().unwrap()
+    );
+}
+
+#[test]
+fn a_merged_run_is_assessed_like_the_runs_it_was_made_from() {
+    // Suites that cannot run as one command are measured apart and merged.
+    // The merged run was refused for holding "multiple source manifests":
+    // the same manifest, once per run.
+    let project = Project::cart("assess-merged");
+    project.write(
+        "integration/describe.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { describe } from \"../src/cart.js\";\n\ntest(\"describe names the items\", () => {\n  assert.equal(describe([{ name: \"a\" }, { name: \"b\" }]), \"a, b\");\n});\n",
+    );
+    project.commit("an integration suite");
+    let measure = |kind: &str, file: &str| {
+        project
+            .supercov_with(
+                &["--", "node", "--test", file],
+                &[("SUPERCOV_TEST_KIND", kind)],
+            )
+            .succeeds();
+        project.latest()
+    };
+    let unit = measure("unit", "test/cart.test.js");
+    let integration = measure("integration", "integration/describe.test.js");
+    project.supercov(&["merge", &unit, &integration]).succeeds();
+    let merged = project.latest();
+    assert!(merged != unit && merged != integration);
+
+    // What the run's own page says to do next has to work.
+    let unassessed = project
+        .supercov(&["runs", &merged, "assertions"])
+        .succeeds();
+    let hint = format!("runs {merged} assertions assess");
+    assert!(unassessed.contains(&hint), "{unassessed}");
+    project
+        .supercov(&["runs", &merged, "assertions", "assess", "--dry-run"])
+        .succeeds();
+
+    let (base, _) = gateway(MODEL, answer_yes);
+    let assessed = project
+        .supercov_with(&["runs", &merged, "assertions", "assess"], &through(&base))
+        .succeeds();
+    // The unit suite runs 8 statements and the integration suite one more.
+    assert!(
+        assessed.contains("100% asserted (9 of 9 executed statements)"),
+        "{assessed}"
+    );
+    let by_test = project
+        .supercov(&[
+            "runs",
+            &merged,
+            "assertions",
+            "--test",
+            "describe names the items",
+        ])
+        .succeeds();
+    assert!(by_test.contains("src/cart.js"), "{by_test}");
+
+    // And a merged run answers which of its tests a change reaches.
+    project.edit("src/cart.js", "join(\", \")", "join(\"; \")");
+    let affected = project
+        .supercov(&["runs", &merged, "tests", "affected"])
+        .succeeds();
+    assert!(affected.contains("1 of 4 tests affected"), "{affected}");
+    assert!(affected.contains("describe names the items"), "{affected}");
 }
 
 #[test]

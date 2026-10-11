@@ -153,6 +153,12 @@ Source roots come from your package manifests and from what they declare, so a
 Test files, generated output, tool scripts, examples, benchmarks and
 documentation are left out, each with its reason. `--all` includes everything.
 
+A JavaScript or TypeScript file a coverage run would measure is always read,
+by `quality` and by `security`: the App Router handler at
+`app/api/wordpress/test/route.ts` is a route, not a test, and a root named in
+`SUPERCOV_SOURCE_ROOTS` is not second-guessed by its own name. Generated and
+vendored files stay out.
+
 If some of your code sits somewhere none of that recognises, Supercov asks Jev
 about those paths with your whole tree as context, and says how many it decided
 that way. To decide yourself:

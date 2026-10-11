@@ -3,8 +3,10 @@
 //! This mirrors the coverage side's source scope rather than inventing a second
 //! answer, because a reviewer reading `runs patch` and `quality patch` together
 //! should be looking at the same set of files. The engine's own
-//! `discover_source_scope` cannot be reused: it matches JavaScript extensions
-//! only, and a quality assessment covers every language the CLI can read.
+//! `discover_source_scope` answers for JavaScript and TypeScript only, and a
+//! quality assessment covers every language the CLI can read, so the rules
+//! below stand beside it. Where the engine does answer, its answer is taken: a
+//! file a coverage run would measure is read here too (see `Measured`).
 //!
 //! Three decisions, in the engine's vocabulary:
 //!
@@ -585,6 +587,37 @@ fn relative(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// What a coverage run of this project would measure: the engine's own source
+/// scope, which is where the rules for one framework's layout live.
+///
+/// The rules here once stood alone and fell behind it. An App Router handler
+/// at `app/api/wordpress/test/route.ts` was measured by coverage and left out
+/// here as a test, in a security review of the handlers that take a caller's
+/// credentials; `components/` and `proxy.ts` were source to coverage and
+/// unclassified here; and a root a project named was still second-guessed by
+/// its own name. A file coverage measures is first-party code a test can run,
+/// so it is in scope unless it is generated or somebody else's.
+struct Measured {
+    files: BTreeSet<PathBuf>,
+    roots: Vec<PathBuf>,
+}
+
+impl Measured {
+    /// Nothing, when the engine cannot read the tree: the rules below decide.
+    fn of(root: &Path, configured: Option<&[String]>) -> Self {
+        match supercov_engine::source_discovery::discover_source_scope(root, configured) {
+            Ok(found) => Self {
+                files: found.source_files.iter().map(|f| root.join(f)).collect(),
+                roots: found.source_roots.iter().map(|r| root.join(r)).collect(),
+            },
+            Err(_) => Self {
+                files: BTreeSet::new(),
+                roots: Vec::new(),
+            },
+        }
+    }
+}
+
 /// Decide the scope for a set of already-discovered source files.
 ///
 /// `files` are absolute paths the caller found; this classifies them and says
@@ -592,6 +625,7 @@ fn relative(root: &Path, path: &Path) -> String {
 /// anything outside them is excluded rather than left ambiguous.
 pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -> Scope {
     let explicit = configured.is_some_and(|roots| !roots.is_empty());
+    let measured = Measured::of(root, configured.filter(|_| explicit));
     let roots: BTreeSet<PathBuf> = if explicit {
         configured
             .unwrap_or_default()
@@ -653,13 +687,20 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
             reason: reason.to_owned(),
             package_root: nearest(path),
         };
-        if let Some(skipped) = super::skipped_path(&file) {
+        // Where a file sits can say it is a test, a script or an example; a
+        // coverage run that measures it has already settled that it is not.
+        let measured = measured.files.contains(path);
+        let by_place = !measured;
+        if let Some(skipped) = super::skipped_path(&file)
+            .filter(|skipped| by_place || *skipped != super::Skipped::Test)
+        {
             entries.push(entry(Status::Excluded, skipped.reason()));
-        } else if let Some(reason) = beside_the_product(&file) {
+        } else if let Some(reason) = beside_the_product(&file).filter(|_| by_place) {
             entries.push(entry(Status::Excluded, reason));
         } else if let Some(reason) = third_party(path, &file) {
             entries.push(entry(Status::Excluded, reason));
-        } else if roots.iter().any(|dir| path.starts_with(dir))
+        } else if measured
+            || roots.iter().any(|dir| path.starts_with(dir))
             || (path.extension().is_some_and(|e| e == "go")
                 && modules.iter().any(|module| path.starts_with(module)))
         {
@@ -678,6 +719,20 @@ pub fn classify(root: &Path, files: &[PathBuf], configured: Option<&[String]>) -
         }
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
+    // The roots coverage measures files under are named with the ones found
+    // here, since those files are in scope: `components` and `proxy.ts` of a
+    // Next.js application, which no other ecosystem's conventions name. One
+    // it measures nothing under is a directory it only looked in, such as the
+    // `src` of a package kept as a test fixture.
+    let roots: BTreeSet<&PathBuf> = roots
+        .iter()
+        .chain(
+            measured
+                .roots
+                .iter()
+                .filter(|dir| measured.files.iter().any(|file| file.starts_with(dir))),
+        )
+        .collect();
     Scope {
         mode: if explicit { "explicit" } else { "automatic" },
         roots: roots.iter().map(|path| relative(root, path)).collect(),

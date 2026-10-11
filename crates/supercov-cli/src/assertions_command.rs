@@ -483,6 +483,108 @@ impl Pass<'_> {
     }
 }
 
+/// How a pass treats the answers it has and the ones it gets.
+struct Asking {
+    /// Read no saved answer.
+    refresh: bool,
+    /// Save each answer for later passes. An estimate answers its own
+    /// questions and keeps none of them.
+    keep: bool,
+}
+
+/// What one request came back with: the answer to each of its questions in
+/// the order asked, where it gave one, and the input tokens it was charged.
+type Reply = Result<(Vec<Option<f64>>, u64), String>;
+
+struct Sent {
+    requests: usize,
+    tokens: u64,
+    /// Saved answers taken up as the pass widened.
+    reused: usize,
+}
+
+/// The pass from its first round to its last. `ask` answers a round's
+/// requests: Jev for an assessment, a no to everything for the estimate of
+/// what one can cost at most, so both plan, split and group their requests
+/// the same way.
+///
+/// A round's requests are planned from the answers so far, so its size
+/// decides how many questions early stopping saves; how many are in flight
+/// decides only the wait. 40 is what eight workers planned; with 24 in flight
+/// the three largest measured projects took half the time for the same cost.
+fn run_pass(
+    pass: &mut Pass,
+    cache: &mut Cache,
+    asking: Asking,
+    mut ask: impl FnMut(&Pass, &[(usize, Vec<usize>)]) -> Result<Vec<Reply>, String>,
+    mut after_round: impl FnMut(usize, usize),
+) -> Result<Sent, String> {
+    let population = pass.population;
+    let n = population.statements.len();
+    let mut sent = Sent {
+        requests: 0,
+        tokens: 0,
+        reused: 0,
+    };
+    let mut failures = 0usize;
+    loop {
+        // Nothing left to ask in this round, or undecided statements no test
+        // is left to ask about (the rest were over Jev's limit): widen, and
+        // after the last widening stop.
+        let planned = if (0..n).all(|s| !pass.undecided(s)) {
+            Vec::new()
+        } else {
+            pass.plan(ROUND_REQUESTS)
+        };
+        if planned.is_empty() {
+            if pass.round == 2 {
+                break;
+            }
+            pass.widen();
+            if !asking.refresh {
+                sent.reused += pass.seed(cache);
+            }
+            continue;
+        }
+        let batch = within_limits(population, pass, planned);
+        if batch.is_empty() {
+            continue;
+        }
+        let replies = ask(pass, &batch)?;
+        for ((t, asked), reply) in batch.iter().zip(replies) {
+            sent.requests += 1;
+            let (answers, tokens) = match reply {
+                Ok(reply) => reply,
+                Err(e) => {
+                    failures += 1;
+                    if failures > MAX_FAILURES {
+                        if asking.keep {
+                            cache.save()?;
+                        }
+                        return Err(format!("stopped after {failures} failed requests: {e}"));
+                    }
+                    continue;
+                }
+            };
+            failures = 0;
+            sent.tokens += tokens;
+            for (&s, p) in asked.iter().zip(answers) {
+                let Some(p) = p else { continue };
+                pass.answers[s].push((*t, p));
+                if asking.keep {
+                    let k = pass.key(s, *t);
+                    cache.answers.insert(k, p);
+                }
+            }
+        }
+        if asking.keep {
+            cache.save()?;
+        }
+        after_round(sent.requests, (0..n).filter(|&s| pass.undecided(s)).count());
+    }
+    Ok(sent)
+}
+
 /// What changes every answer at once: the run's dependencies and test/build
 /// configuration. (The `execution` fingerprint also folds in the source, so it
 /// moves with every edit and would re-ask everything.)
@@ -550,125 +652,96 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     };
     let key = quality::setting("TYPESAFE_API_KEY");
     let progress = !options.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let (mut requests, mut tokens, mut failures) = (0usize, 0u64, 0usize);
     if options.dry_run {
-        let plan = pass.plan(usize::MAX);
+        let undecided = (0..n).filter(|&s| pass.undecided(s)).count();
+        let planned = pass.plan(usize::MAX);
+        let plan = within_limits(&population, &mut pass, planned);
         let bytes: usize = plan
             .iter()
-            .map(|(t, asked)| {
-                serde_json::to_vec(&population.request(*t, asked, pass.model))
-                    .map(|b| quality::estimated_tokens(&b))
-                    .unwrap_or(0)
-            })
+            .map(|(t, asked)| tokens(&population.request(*t, asked, pass.model)))
             .sum();
-        let undecided = (0..n).filter(|&s| pass.undecided(s)).count();
-        // The most the pass can ask: every undecided statement asked of as
-        // many tests as it widens to, grouped by test as the rounds group
-        // them. A fixed "1.5 to 3 times the first round" was 4x on
-        // supergateway, where most statements need more than their first tests.
-        let mut per_test = BTreeMap::<usize, usize>::new();
-        for s in (0..n).filter(|&s| pass.undecided(s)) {
-            let more = population.order(s, MORE_TESTS);
-            let last = population.last_order(s, &more, LAST_TESTS);
-            for t in more.into_iter().chain(last) {
-                *per_test.entry(t).or_default() += 1;
-            }
-        }
-        let most: usize = per_test.values().map(|c| c.div_ceil(MAX_QUESTIONS)).sum();
-        let most = most.max(plan.len());
-        let most_tokens = if plan.is_empty() {
-            0
-        } else {
-            bytes * most / plan.len()
-        };
+        // The most the pass can ask is the pass itself with every answer a
+        // no: each statement goes to every test it widens to, in requests
+        // planned, split and grouped as the rounds do it. Counting each
+        // test's statements once instead fell well short where tests share
+        // most of what they run, as end-to-end tests do (404 against the 741
+        // one such suite sent): a statement goes to one test per round of
+        // requests, so a test is asked again and again about what the others
+        // did not settle.
+        let most = run_pass(
+            &mut pass,
+            &mut cache,
+            Asking {
+                refresh: options.refresh,
+                keep: false,
+            },
+            |pass, batch| {
+                Ok(batch
+                    .iter()
+                    .map(|(t, asked)| {
+                        let request = pass.population.request(*t, asked, pass.model);
+                        Ok((vec![Some(0.0); asked.len()], tokens(&request) as u64))
+                    })
+                    .collect())
+            },
+            |_, _| {},
+        )?;
+        let most_requests = most.requests.max(plan.len());
+        let most_tokens = (most.tokens as usize).max(bytes);
         let cost = |tokens: usize| tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS;
         return Ok(json!({
             "run": run.id, "dryRun": true, "statements": n, "answeredFromCache": n - undecided,
             "firstRound": {"requests": plan.len(), "inputTokens": bytes, "costUsd": cost(bytes)},
-            "atMost": {"requests": most, "inputTokens": most_tokens, "costUsd": cost(most_tokens)},
-            "note": "Statements their first tests are not judged to catch are asked of more tests, so the pass costs between the first round and the most.",
+            "atMost": {"requests": most_requests, "inputTokens": most_tokens, "costUsd": cost(most_tokens)},
+            "note": "Statements their first tests are not judged to catch are asked of more tests, so the pass costs between the first round and the most, which is what it sends when no test is judged to catch anything.",
         }));
     }
     let endpoint = quality::endpoint()?;
     let agent = quality::client();
-    // A round's requests are planned from the answers so far, so its size
-    // decides how many questions early stopping saves; how many are in
-    // flight decides only the wait. 40 is what eight workers planned; with
-    // 24 in flight the three largest measured projects took half the time
-    // for the same cost.
-    let batch_size = ROUND_REQUESTS;
-    loop {
-        if (0..n).all(|s| !pass.undecided(s)) {
-            if pass.round == 2 {
-                break;
+    let sent = run_pass(
+        &mut pass,
+        &mut cache,
+        Asking {
+            refresh: options.refresh,
+            keep: true,
+        },
+        |pass, batch| {
+            let key = key
+                .as_deref()
+                .ok_or("set TYPESAFE_API_KEY to ask Jev, or use --dry-run for an estimate")?;
+            let bodies = batch
+                .iter()
+                .map(|(t, asked)| pass.population.request(*t, asked, pass.model))
+                .collect::<Vec<_>>();
+            Ok(send_all(&agent, endpoint, key, &bodies, options.workers)
+                .into_iter()
+                .zip(batch)
+                .map(|(result, (_, asked))| {
+                    let response = result?;
+                    let answers = (0..asked.len())
+                        .map(|i| {
+                            (0..2)
+                                .filter_map(|j| match response.answers.get(&format!("q{i}_{j}")) {
+                                    Some(quality::Answer::Noul { noul }) => Some(*noul),
+                                    _ => None,
+                                })
+                                .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))))
+                        })
+                        .collect();
+                    Ok((answers, response.usage.input_tokens))
+                })
+                .collect())
+        },
+        |requests, left| {
+            if progress {
+                eprintln!(
+                    "[supercov] assertions: {requests} requests, {left} statements still being asked"
+                );
             }
-            pass.widen();
-            if !options.refresh {
-                reused += pass.seed(&cache);
-            }
-            continue;
-        }
-        let key = key
-            .as_deref()
-            .ok_or("set TYPESAFE_API_KEY to ask Jev, or use --dry-run for an estimate")?;
-        let planned = pass.plan(batch_size);
-        if planned.is_empty() {
-            // Undecided statements no test is left to ask about (the rest
-            // were over Jev's limit): widen once, then stop.
-            if pass.round == 2 {
-                break;
-            }
-            pass.widen();
-            if !options.refresh {
-                reused += pass.seed(&cache);
-            }
-            continue;
-        }
-        let batch = within_limits(&population, &mut pass, planned);
-        if batch.is_empty() {
-            continue;
-        }
-        let bodies = batch
-            .iter()
-            .map(|(t, asked)| population.request(*t, asked, pass.model))
-            .collect::<Vec<_>>();
-        let results = send_all(&agent, endpoint, key, &bodies, options.workers);
-        for ((t, asked), result) in batch.iter().zip(results) {
-            requests += 1;
-            let response = match result {
-                Ok(r) => r,
-                Err(e) => {
-                    failures += 1;
-                    if failures > MAX_FAILURES {
-                        cache.save()?;
-                        return Err(format!("stopped after {failures} failed requests: {e}"));
-                    }
-                    continue;
-                }
-            };
-            failures = 0;
-            tokens += response.usage.input_tokens;
-            for (i, &s) in asked.iter().enumerate() {
-                let p = (0..2)
-                    .filter_map(|j| match response.answers.get(&format!("q{i}_{j}")) {
-                        Some(quality::Answer::Noul { noul }) => Some(*noul),
-                        _ => None,
-                    })
-                    .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))));
-                let Some(p) = p else { continue };
-                pass.answers[s].push((*t, p));
-                let k = pass.key(s, *t);
-                cache.answers.insert(k, p);
-            }
-        }
-        cache.save()?;
-        if progress {
-            let left = (0..n).filter(|&s| pass.undecided(s)).count();
-            eprintln!(
-                "[supercov] assertions: {requests} requests, {left} statements still being asked"
-            );
-        }
-    }
+        },
+    )?;
+    reused += sent.reused;
+    let (requests, tokens) = (sent.requests, sent.tokens);
     let result = summary(run, &population, &pass, requests, tokens, reused);
     let _ = std::fs::write(
         run.directory.join(RESULT_FILE),
@@ -955,20 +1028,19 @@ pub(crate) fn saved(run: &StoredRun) -> Option<Value> {
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
 }
 
-/// The lines of the statements judged asserted in a run, by file.
-pub(crate) fn asserted_lines(run: &StoredRun) -> BTreeMap<String, BTreeSet<u64>> {
+/// The lines of the statements judged asserted in a run, by file; `None`
+/// when the run has no saved assessment.
+pub(crate) fn asserted_lines(run: &StoredRun) -> Option<BTreeMap<String, BTreeSet<u64>>> {
+    let result = saved(run)?;
     let mut out = BTreeMap::<String, BTreeSet<u64>>::new();
-    for s in saved(run)
-        .and_then(|r| r["statements"].as_array().cloned())
-        .unwrap_or_default()
-    {
+    for s in result["statements"].as_array().into_iter().flatten() {
         if s["asserted"] == true
             && let (Some(file), Some(line)) = (s["file"].as_str(), s["line"].as_u64())
         {
             out.entry(file.to_owned()).or_default().insert(line);
         }
     }
-    out
+    Some(out)
 }
 
 /// What the run's saved assessment says about one file, for the coverage

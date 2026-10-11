@@ -912,11 +912,12 @@ pub(crate) fn load_run_view(
 }
 
 /// Which lines of which files a saved run's assessed assertions cover: the
-/// statements `assertions assess` judged asserted. Empty when the run was not
-/// assessed; that is not an error.
+/// statements `assertions assess` judged asserted. `None` when the run was not
+/// assessed, which is not an error and is not the same as nothing asserted:
+/// no test was asked.
 pub(crate) fn load_asserted_lines(
     selector: Option<&str>,
-) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<u64>>, String> {
+) -> Result<Option<std::collections::BTreeMap<String, std::collections::BTreeSet<u64>>>, String> {
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;

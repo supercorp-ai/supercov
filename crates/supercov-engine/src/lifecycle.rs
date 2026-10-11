@@ -805,9 +805,7 @@ pub(crate) fn publish_run_with_fault(
         query_index_path: staging.join(crate::run_store::RUST_QUERY_INDEX_FILE),
         metadata: metadata.clone(),
     };
-    let analysed = if metadata.merged == Some(true) {
-        None
-    } else if archived.report.is_some() {
+    let analysed = if archived.report.is_some() {
         archived.report
     } else {
         crate::run_store::analyze_stored_run(&staged).ok()
@@ -1510,17 +1508,24 @@ mod tests {
     }
 
     #[test]
-    fn a_merged_run_is_indexed_by_its_first_query() {
-        // Publication does not analyse a merged run; its first query does.
+    fn a_merged_run_is_published_like_any_other() {
+        // It used to be left for its first query to analyse, and with that
+        // went everything publication derives from the analysis.
         let root = project();
         let id = "2026-01-01T00-00-00-300Z";
         let (evidence, mut metadata) = analysable_evidence(&root, id);
         metadata.merged = Some(true);
         let published = publish_run(&root, &metadata, &evidence).unwrap();
-        let index = published.join(crate::run_store::RUST_QUERY_INDEX_FILE);
-        assert!(!index.exists());
-        crate::run_store::open_or_rebuild_query_index(&stored(&root, id)).unwrap();
-        assert!(index.is_file());
+        assert!(
+            published
+                .join(crate::run_store::RUST_QUERY_INDEX_FILE)
+                .is_file()
+        );
+        assert!(
+            published
+                .join(crate::run_store::ASSESSMENT_INPUT_FILE)
+                .is_file()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

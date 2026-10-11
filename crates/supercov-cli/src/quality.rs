@@ -1714,6 +1714,34 @@ fn estimated_cost(pending: &[(Slot, Value, Vec<u8>)]) -> (usize, f64) {
     (tokens, tokens as f64 / 1e6 * USD_PER_MILLION_INPUT_TOKENS)
 }
 
+/// The estimate as one line: how many requests go where, and what they cost
+/// if no answer is already saved.
+fn estimate_line(instrument: Instrument, requests: usize, tokens: usize) -> String {
+    format!(
+        "[supercov] {}: {requests} requests to {} ({}), about {tokens} input tokens \
+         (${:.4}) if none is cached",
+        instrument.lane(),
+        endpoint().map_or("?", host),
+        model(),
+        tokens as f64 / 1e6 * USD_PER_MILLION_INPUT_TOKENS
+    )
+}
+
+/// What an assessment was charged, for the end of its report: the estimate
+/// before it counts requests nobody has sent yet, and for security only the
+/// first of its passes.
+fn spent_line(report: &Value, instrument: Instrument) -> Option<String> {
+    let spent = report["usage_this_run"]["input_tokens"].as_u64()?;
+    let cached = report["usage_from_cache"]["input_tokens"].as_u64()?;
+    (spent + cached > 0).then(|| {
+        format!(
+            "[supercov] {}: {spent} input tokens this run (${:.4}); {cached} more were answered from the cache",
+            instrument.lane(),
+            spent as f64 / 1e6 * USD_PER_MILLION_INPUT_TOKENS
+        )
+    })
+}
+
 /// Send every subject, a few at a time, reusing the scan cache and retry path.
 type Asked = (Vec<Answers>, Usage, Usage);
 
@@ -1756,15 +1784,8 @@ fn ask_smells(
         });
     }
     if progress && key.is_some() {
-        let (tokens, usd) = estimated_cost(&pending);
-        eprintln!(
-            "[supercov] {}: {} requests to {} ({}), about {tokens} input tokens \
-             (${usd:.4}) if none is cached",
-            instrument.lane(),
-            pending.len(),
-            endpoint().map_or("?", host),
-            model()
-        );
+        let (tokens, _) = estimated_cost(&pending);
+        eprintln!("{}", estimate_line(instrument, pending.len(), tokens));
     }
     let answered = answer_all(
         root,
@@ -3077,6 +3098,23 @@ fn run_health(
         }
     }
     if options.dry_run {
+        // The requests are megabytes of JSON on a real project; how many
+        // there are and what they cost is the line a person wants from a dry
+        // run, and it was printed only once the money was being spent.
+        let sendable: Vec<usize> = subjects
+            .iter()
+            .filter_map(|subject| within_budget(&subject.request).ok().flatten())
+            .map(|bytes| estimated_tokens(&bytes))
+            .collect();
+        eprintln!(
+            "{}{}",
+            estimate_line(instrument, sendable.len(), sendable.iter().sum()),
+            if instrument == Instrument::Security {
+                "; what fires is then asked about line by line, which this does not count"
+            } else {
+                ""
+            }
+        );
         return Ok((
             json!({
                 "instrument": instrument.name(),
@@ -3566,6 +3604,11 @@ fn human_security(report: &Value) -> String {
             )),
             None => out.push_str(".\n"),
         }
+        if let Some(assess) = report["run_assertions"]["assess"].as_str() {
+            out.push_str(&format!(
+                "  Run {run} has no assertion assessment, so whether its tests would catch a change to a flagged line is not reported. Assess it with `{assess}`.\n"
+            ));
+        }
     }
     if let Some(limitation) = report["limitation"].as_str() {
         out.push_str(&format!("\n{limitation}\n"));
@@ -3809,9 +3852,14 @@ fn cross_with_coverage(
     let view = crate::load_run_view(selector)?;
     // Assertion credit is the third shelf, and only the security view asks
     // for it: a change review already says what appeared and where tests do
-    // not go. A run whose assertions were not assessed leaves every file on the second.
-    let asserted = (file_flag == "flagged_and_untested")
-        .then(|| crate::load_asserted_lines(selector).unwrap_or_default());
+    // not go. A run whose assertions were not assessed has no third shelf: no
+    // test was asked, which is not a judgment that the tests catch nothing.
+    let security = file_flag == "flagged_and_untested";
+    let asserted = if security {
+        crate::load_asserted_lines(selector)?
+    } else {
+        None
+    };
     let mut both = 0usize;
     let mut unasserted = 0usize;
     let empty = Vec::new();
@@ -3879,6 +3927,15 @@ fn cross_with_coverage(
     report[total_key] = json!(both);
     if asserted.is_some() {
         report["flagged_executed_unasserted"] = json!(unasserted);
+    } else if security {
+        report["run_assertions"] = json!({
+            "assessed": false,
+            "assess": format!(
+                "{} runs {} assertions assess",
+                crate::launcher_command(),
+                view.run
+            ),
+        });
     }
     Ok(())
 }
@@ -4042,10 +4099,15 @@ fn dispatch(arguments: Vec<String>, instrument: Instrument) -> ExitCode {
                         "{}",
                         serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
                     );
-                } else if instrument.scores() {
-                    print!("{}", human_quality(&report));
                 } else {
-                    print!("{}", human_security(&report));
+                    if instrument.scores() {
+                        print!("{}", human_quality(&report));
+                    } else {
+                        print!("{}", human_security(&report));
+                    }
+                    if let Some(spent) = spent_line(&report, instrument) {
+                        eprintln!("{spent}");
+                    }
                 }
                 if let Some(note) = unassessed_note(&report) {
                     eprintln!("{note}");
