@@ -15,6 +15,7 @@ on:
       - 'Cargo*'
       - 'runtime/javascript/**'
       - 'scripts/next-playwright-integration.mjs'
+      - 'scripts/jev-stand-in.mjs'
       - 'tests/fixtures/next-playwright/**'
       - '.github/workflows/next-compatibility.yml'
 
