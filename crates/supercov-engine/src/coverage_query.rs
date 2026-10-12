@@ -2218,7 +2218,33 @@ pub struct CoverageDiffSide {
     pub mcdc: Vec<String>,
 }
 
+/// How much of a comparison falls in one file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageDiffFile {
+    pub file: String,
+    pub lost: CoverageDiffCounts,
+    pub gained: CoverageDiffCounts,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct CoverageDiffCounts {
+    pub lines: usize,
+    pub branches: usize,
+    pub mcdc: usize,
+}
+
+impl CoverageDiffCounts {
+    fn total(&self) -> usize {
+        self.lines + self.branches + self.mcdc
+    }
+}
+
+/// The files of a comparison that are listed whole; the rest are counted.
+const DIFF_FILES: usize = 20;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CoverageDiffData {
     pub filters: CoverageQueryFilters,
     pub older: String,
@@ -2226,6 +2252,11 @@ pub struct CoverageDiffData {
     pub delta: CoverageDiffDelta,
     pub gained: CoverageDiffSide,
     pub lost: CoverageDiffSide,
+    /// How many files the difference is in, and the ones with the most lost,
+    /// whatever page of items is shown. A list of 79 rows does not say that
+    /// 45 of its 63 lost lines are one component that did not render.
+    pub files: usize,
+    pub by_file: Vec<CoverageDiffFile>,
     /// Whether what the two runs measured differs, from their fingerprints.
     /// Absent where a run has none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2383,6 +2414,43 @@ pub fn coverage_diff_query(
     ] {
         values.sort_by(|left, right| js_string_cmp(left, right));
     }
+    // Every label starts `file:line`, and a file's path holds no space.
+    let mut by_file = BTreeMap::<&str, (CoverageDiffCounts, CoverageDiffCounts)>::new();
+    for (values, count) in [
+        (&lost_lines, 0),
+        (&lost_branches, 1),
+        (&lost_mcdc, 2),
+        (&gained_lines, 3),
+        (&gained_branches, 4),
+        (&gained_mcdc, 5),
+    ] {
+        for label in values {
+            let place = label.split(' ').next().unwrap_or(label);
+            let file = place.rsplit_once(':').map_or(place, |(file, _)| file);
+            let (lost, gained) = by_file.entry(file).or_default();
+            let side = if count < 3 { lost } else { gained };
+            match count % 3 {
+                0 => side.lines += 1,
+                1 => side.branches += 1,
+                _ => side.mcdc += 1,
+            }
+        }
+    }
+    let files = by_file.len();
+    let mut by_file = by_file
+        .into_iter()
+        .map(|(file, (lost, gained))| CoverageDiffFile {
+            file: file.to_owned(),
+            lost,
+            gained,
+        })
+        .collect::<Vec<_>>();
+    by_file.sort_by(|left, right| {
+        (right.lost.total(), right.gained.total())
+            .cmp(&(left.lost.total(), left.gained.total()))
+            .then_with(|| js_string_cmp(&left.file, &right.file))
+    });
+    by_file.truncate(DIFF_FILES);
     let total = [
         gained_lines.len(),
         gained_branches.len(),
@@ -2450,6 +2518,8 @@ pub fn coverage_diff_query(
             },
             gained,
             lost,
+            files,
+            by_file,
             inputs: None,
         },
         pagination(options.offset, options.limit, returned, total),

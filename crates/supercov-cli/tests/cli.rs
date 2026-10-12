@@ -3525,6 +3525,66 @@ fn nothing_is_still_being_deleted_when_the_command_has_ended() {
 
 #[cfg(unix)]
 #[test]
+fn a_comparison_says_which_files_the_difference_is_in() {
+    // Two end-to-end runs of one commit differed by 79 rows, and 45 of the 63
+    // lost lines were one component that rendered in one run and not in the
+    // other. The rows said so only once they were counted by hand.
+    let project = Project::empty("where");
+    project.write(
+        "package.json",
+        r#"{ "name": "where", "scripts": { "test": "node --test test/*.test.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/panel.js",
+        "function panel(rows) {\n  const out = [];\n  for (const row of rows) {\n    out.push(row.name);\n  }\n  out.sort();\n  return out.join(',');\n}\nmodule.exports = { panel };\n",
+    );
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  if (sum > 100) {\n    return 0;\n  }\n  return 5;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/app.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\nconst { panel } = require('../src/panel.js');\nconst state = process.env.STATE;\ntest('renders', () => {\n  if (state === 'full') equal(panel([{ name: 'a' }]), 'a');\n  equal(fee(state === 'full' ? 1 : 500), state === 'full' ? 5 : 0);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    let run = |state: &str| {
+        project
+            .supercov_with(&["--", "npm", "test"], &[("STATE", state)])
+            .succeeds();
+        project.supercov(&["runs", "--limit", "1", "--json"]).json()["data"]["runs"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (full, bare) = (run("full"), run("bare"));
+    let text = project.supercov(&["diff", &full, &bare]).succeeds();
+    // The file that lost most comes first, with what each lost and gained.
+    contains_all(
+        &text,
+        &[
+            "in 2 files, most lost first:\n  src/panel.js: lost 6 lines, 1 branches\n  src/fee.js: lost 1 lines, 1 branches; gained 1 lines, 1 branches\n",
+            "- line src/panel.js:2",
+        ],
+    );
+    assert!(
+        text.find("in 2 files").unwrap() < text.find("- line").unwrap(),
+        "{text}"
+    );
+    let json = project.supercov(&["diff", &full, &bare, "--json"]).json();
+    assert_eq!(json["data"]["files"], 2, "{json}");
+    assert_eq!(json["data"]["byFile"][0]["file"], "src/panel.js");
+    assert_eq!(json["data"]["byFile"][0]["lost"]["lines"], 6);
+    assert_eq!(json["data"]["byFile"][1]["gained"]["branches"], 1);
+    // The summary counts the whole difference, not the page shown.
+    let paged = project
+        .supercov(&["diff", &full, &bare, "--limit", "1", "--json"])
+        .json();
+    assert_eq!(paged["data"]["byFile"][0]["lost"]["lines"], 6);
+}
+
+#[cfg(unix)]
+#[test]
 fn a_comparison_says_when_both_runs_measured_the_same_source() {
     let project = Project::empty("steady");
     project.write(
@@ -3577,6 +3637,8 @@ fn a_comparison_says_when_both_runs_measured_the_same_source() {
         &same,
         &["- branch src/fee.js:2 false", "+ branch src/fee.js:2 true"],
     );
+    // A difference in one file is its own summary.
+    assert!(!same.contains("most lost first"), "{same}");
     let json = project.supercov(&["diff", &small, &large, "--json"]).json();
     assert_eq!(json["data"]["inputs"]["sourceChanged"], false);
     assert_eq!(json["data"]["inputs"]["testsChanged"], false);

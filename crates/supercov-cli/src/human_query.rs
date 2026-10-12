@@ -1874,6 +1874,40 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 ),
                 _ => {}
             }
+            // Where the difference is, before what it is: 45 of 63 lost lines
+            // in one file is a component that did not render, and the rows
+            // below do not say so until they are counted.
+            if data.files > 1 {
+                const SHOWN: usize = 10;
+                let counted = |counts: &supercov_engine::coverage_query::CoverageDiffCounts| {
+                    [
+                        (counts.lines, "lines"),
+                        (counts.branches, "branches"),
+                        (counts.mcdc, "MC/DC"),
+                    ]
+                    .into_iter()
+                    .filter(|(count, _)| *count > 0)
+                    .map(|(count, noun)| format!("{count} {noun}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+                };
+                lines.push(format!("in {} files, most lost first:", data.files));
+                for file in data.by_file.iter().take(SHOWN) {
+                    let sides = [
+                        ("lost", counted(&file.lost)),
+                        ("gained", counted(&file.gained)),
+                    ]
+                    .into_iter()
+                    .filter(|(_, counts)| !counts.is_empty())
+                    .map(|(side, counts)| format!("{side} {counts}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                    lines.push(format!("  {}: {sides}", file.file));
+                }
+                if data.files > SHOWN {
+                    lines.push(format!("  ... and {} more files", data.files - SHOWN));
+                }
+            }
             // What was lost comes first, marked `-`: it is what a reader acts
             // on. The text listed gains alone, so "lost: 2 lines, 12 branches"
             // stood over 73 items that were all gains, and a comparison with

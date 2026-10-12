@@ -22,6 +22,7 @@ npx supercov --help
 | Find what is not asserted in one file | `npx supercov runs latest assertions <path>` |
 | See each test's answer for one statement | `npx supercov runs latest assertions <path>:<line>` |
 | See what one test is judged to catch | `npx supercov runs latest assertions --test <name>` |
+| List what is asserted on a weak answer | `npx supercov runs latest assertions --weak` |
 | Read matching current source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Open an interactive report | `npx supercov report` |
@@ -366,6 +367,19 @@ lost: 1 lines, 1 branches, 0 MC/DC conditions
 + line src/fee.js:3
 + branch src/fee.js:2 true
 ```
+
+When the difference is in more than one file, the files come first, the one
+that lost most at the top, so a component that did not render in one run reads
+as one row and not as forty:
+
+```
+in 2 files, most lost first:
+  src/panel.js: lost 6 lines, 1 branches
+  src/fee.js: lost 1 lines, 1 branches; gained 1 lines, 1 branches
+```
+
+The counts are of the whole difference, whatever page of it is shown. In
+`--json`, `files` and `byFile`.
 
 Two runs of the same code can differ a little: what an end-to-end suite
 reaches depends on timing, on the order of tests, and on state outside the

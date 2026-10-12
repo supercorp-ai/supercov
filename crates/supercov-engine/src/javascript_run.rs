@@ -432,6 +432,14 @@ fn environment_with(values: BTreeMap<String, String>) -> Vec<(OsString, OsString
     environment.into_iter().collect()
 }
 
+/// Where Playwright is told to keep the test files it compiles.
+const PLAYWRIGHT_CACHE_VARIABLE: &str = "PWTEST_CACHE_DIR";
+
+/// Beside the copies whose files it holds, and removed with them.
+pub fn playwright_transform_cache(root: &Path) -> PathBuf {
+    crate::workspace::workspace_container(root).join("caches/playwright-transform")
+}
+
 fn node_options(preload: &Path) -> String {
     // The register import must be ABSOLUTE: node resolves a relative
     // `--import` against each child process's OWN working directory, and
@@ -685,6 +693,21 @@ pub fn run_direct_javascript(
             root.display().to_string(),
         ),
     ]);
+    // Playwright keeps each test file it compiles in the system's temporary
+    // directory, the code in one file and its source map in another, and
+    // takes the code without looking for the map. macOS removes files there
+    // that nothing has read for three days, and the two are not read alike:
+    // the maps went, and every frame and test location of a suite came out
+    // at the compiled code's lines (`app.spec.ts:50:1` for line 17, a code
+    // frame of other tests' lines) until the code was three days unread too.
+    // The copy's compiled files are kept with the copy instead. A cache
+    // someone chose is theirs.
+    if std::env::var_os(PLAYWRIGHT_CACHE_VARIABLE).is_none_or(|value| value.is_empty()) {
+        overrides.insert(
+            PLAYWRIGHT_CACHE_VARIABLE.into(),
+            playwright_transform_cache(&root).display().to_string(),
+        );
+    }
     // A wrapped npm/pnpm/yarn script can launch either runner several process
     // generations later. The preload is the discovery boundary, so always
     // provide both generated configs; each runner ignores the unrelated one.

@@ -127,7 +127,25 @@ ones most likely written for the statement: tests whose name shares words with
 the statement's line (`corsOrigin: a false value` for
 `return corsOrigin(origin)`), and among those the tests that ran the least
 other code. A statement many tests run can still be caught by one that was
-never asked; the statement view (`assertions <file>:<line>`) says how many were.
+never asked; the statement view (`assertions <file>:<line>`) says how many were,
+and names the test files none of whose tests were asked, which is where to look
+before writing a test that may already exist.
+
+An asserted statement is a judgment too: some test was judged to fail if it
+changed, and the pass stops at the first that is. How strong that answer was
+says how far to trust it. Checked by applying each change and running the
+tests, an asserted verdict was wrong 22 times in 1,169 on an answer of 75% or
+more, and 33 times in 711 on a weaker one. The overview says how many of the
+asserted rest on a weaker answer, and `--weak` lists them:
+
+```bash
+npx supercov runs latest assertions --weak                 # the files by statements asserted on a weak answer
+npx supercov runs latest assertions src/adapters.ts --weak # those statements, the least certain first
+```
+
+What reads as covered and is not is most often a deferred effect: a flag set
+or an entry removed whose only consequence is what happens on a later event,
+run by a test that asserts on the immediate reply.
 
 ## Which tests check a change
 

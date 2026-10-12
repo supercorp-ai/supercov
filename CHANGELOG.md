@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `supercov diff` says which files a difference is in. When it is in more than one, they come first, the one that lost most at the top: 45 of 63 lost lines in one component reads as one row. The counts are of the whole difference, whatever page is shown; in `--json`, `files` and `byFile`.
+- `assertions --weak` lists the statements asserted on the strength of an answer under 75%, by file and, with a file, the least certain first. The overview and each file say how many there are. Checked by applying each change, an asserted verdict was wrong 22 times in 1,169 on an answer of 75% or more and 33 times in 711 on a weaker one.
+- A statement no asked test catches names the test files none of whose tests were asked. "18 of 132 asked" did not say that all eighteen came from one file. It is recorded when the run is assessed, so an earlier assessment does not have it.
+
+**Fixed**
+
+- A Playwright failure names the line you wrote also when the test file has not changed for three days. Playwright keeps the code it compiles and its source map as two files in the system's temporary directory, and uses the code without checking for the map; macOS removes files there that nothing has read for three days, and removed the maps first. Until the code went too, every frame and test location was the compiled code's: `app.spec.ts:50:1` for line 17, over a code frame of another test's lines. Supercov now has Playwright keep the copy's compiled files with the copy. A `PWTEST_CACHE_DIR` of your own is left alone.
+- `assertions --limit 0` lists every row, as it does for `quality` and `security`. It was refused, and the same thing was spelled `--all`.
+
 ## 4.3.0
 
 **Fixed**
