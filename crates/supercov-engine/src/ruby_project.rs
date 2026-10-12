@@ -172,9 +172,15 @@ pub fn prepare_ruby_project(
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<PreparedRubyProject, String> {
     let mut files = discover_ruby_files(root)?;
-    if let Some(roots) = roots {
-        roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
-        roots.refuse_if_empty(files.sources.len(), "Ruby")?;
+    match roots {
+        Some(roots) => {
+            roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
+            roots.refuse_if_empty(files.sources.len(), "Ruby")?;
+        }
+        None => crate::source_discovery::leave_out_what_lies_beside(
+            &mut files.sources,
+            &mut files.excluded,
+        ),
     }
     if files.sources.is_empty() && files.tests.is_empty() {
         return Err(
@@ -355,6 +361,38 @@ mod tests {
             .map(|root| (*root).to_owned())
             .collect::<Vec<_>>();
         crate::source_discovery::ExplicitSourceRoots::resolve(root, &roots).unwrap()
+    }
+
+    #[test]
+    fn benchmarks_and_examples_beside_the_gem_are_not_measured_unless_named() {
+        // addressable keeps two benchmark scripts beside `lib`, hashie three:
+        // nothing a test runs, and counted with the gem's own files.
+        let root = fixture("beside");
+        write(&root, "Gemfile", "source 'https://rubygems.org'\n");
+        write(&root, "lib/app.rb", "def f(a)\n  a && 1\nend\n");
+        write(&root, "lib/app/examples.rb", "def g\n  1\nend\n");
+        write(&root, "benchmark/template_bench.rb", "require 'app'\n");
+        write(&root, "examples/usage.rb", "require 'app'\n");
+
+        let project = prepare_ruby_project(&root, None).unwrap();
+        assert_eq!(
+            project.files.sources,
+            ["lib/app.rb", "lib/app/examples.rb"],
+            "{:?}",
+            project.files
+        );
+        assert!(
+            project
+                .files
+                .excluded
+                .contains(&("benchmark/template_bench.rb".into(), "benchmark")),
+            "{:?}",
+            project.files.excluded
+        );
+        let named =
+            prepare_ruby_project(&root, Some(&explicit_roots(&root, &["examples"]))).unwrap();
+        assert_eq!(named.files.sources, ["examples/usage.rb"]);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

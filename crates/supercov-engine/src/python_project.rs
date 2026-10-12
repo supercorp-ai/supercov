@@ -219,9 +219,15 @@ pub fn prepare_python_project(
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<PreparedPythonProject, String> {
     let mut files = discover_python_files(root)?;
-    if let Some(roots) = roots {
-        roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
-        roots.refuse_if_empty(files.sources.len(), "Python")?;
+    match roots {
+        Some(roots) => {
+            roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
+            roots.refuse_if_empty(files.sources.len(), "Python")?;
+        }
+        None => crate::source_discovery::leave_out_what_lies_beside(
+            &mut files.sources,
+            &mut files.excluded,
+        ),
     }
     if files.sources.is_empty() && files.tests.is_empty() {
         return Err(
@@ -479,6 +485,61 @@ mod tests {
         assert_eq!(
             scope_of(&project).mode,
             crate::source_discovery::SourceScopeMode::Automatic
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn what_lies_beside_the_package_is_not_measured_unless_it_is_named() {
+        // h11 as it is laid out: the package, and beside it the files that
+        // build its documentation, show its use and time it. They were all
+        // source, none is run by a test, and the package's 99% read 69%.
+        let root = fixture("beside");
+        write(&root, "h11/_connection.py", "def send(x):\n    return x\n");
+        // A package of the product can be called `examples` too.
+        write(
+            &root,
+            "h11/examples/echo.py",
+            "def echo(x):\n    return x\n",
+        );
+        write(&root, "docs/source/conf.py", "project = 'h11'\n");
+        write(&root, "examples/basic-client.py", "import h11\n");
+        write(&root, "bench/benchmarks/benchmarks.py", "import h11\n");
+        write(&root, "fuzz/afl-server.py", "import h11\n");
+        write(&root, "h11/tests/test_connection.py", "import h11\n");
+
+        let project = prepare_python_project(&root, None).unwrap();
+        assert_eq!(
+            project.files.sources,
+            ["h11/_connection.py", "h11/examples/echo.py"],
+            "{:?}",
+            project.files
+        );
+        let scope = scope_of(&project);
+        let reason = |file: &str| {
+            let entry = scope
+                .entries
+                .iter()
+                .find(|entry| entry.file == file)
+                .unwrap();
+            assert_eq!(entry.status, SourceScopeStatus::Excluded, "{file}");
+            entry.reason.clone()
+        };
+        assert_eq!(reason("docs/source/conf.py"), "documentation");
+        assert_eq!(reason("examples/basic-client.py"), "example");
+        assert_eq!(reason("bench/benchmarks/benchmarks.py"), "benchmark");
+        assert_eq!(reason("fuzz/afl-server.py"), "fuzz harness");
+
+        // Whoever names `examples` as a root has said it is source.
+        let named =
+            prepare_python_project(&root, Some(&explicit(&root, &["examples", "h11"]))).unwrap();
+        assert_eq!(
+            named.files.sources,
+            [
+                "examples/basic-client.py",
+                "h11/_connection.py",
+                "h11/examples/echo.py"
+            ]
         );
         fs::remove_dir_all(root).ok();
     }

@@ -8,6 +8,10 @@
 - `assertions --weak` lists the statements asserted on the strength of an answer under 75%, by file and, with a file, the least certain first. The overview and each file say how many there are. Checked by applying each change, an asserted verdict was wrong 22 times in 1,169 on an answer of 75% or more and 33 times in 711 on a weaker one.
 - A statement no asked test catches names the test files none of whose tests were asked. "18 of 132 asked" did not say that all eighteen came from one file. It is recorded when the run is assessed, so an earlier assessment does not have it.
 
+**Changed**
+
+- Python and Ruby coverage no longer counts what lies beside the package: top-level `docs/`, `examples/`, benchmark directories and `fuzz/`. No test runs these, and they were in the denominator: h11 read 68.8% of lines and reads 98.2%, and click measured thirteen such files of thirty. A run made before this reads as stale. Name a directory in `SUPERCOV_SOURCE_ROOTS` to have it measured.
+
 **Fixed**
 
 - A Playwright failure names the line you wrote also when the test file has not changed for three days. Playwright keeps the code it compiles and its source map as two files in the system's temporary directory, and uses the code without checking for the map; macOS removes files there that nothing has read for three days, and removed the maps first. Until the code went too, every frame and test location was the compiled code's: `app.spec.ts:50:1` for line 17, over a code frame of another test's lines. Supercov now has Playwright keep the copy's compiled files with the copy. A `PWTEST_CACHE_DIR` of your own is left alone.

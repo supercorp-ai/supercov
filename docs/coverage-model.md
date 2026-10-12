@@ -176,6 +176,13 @@ without a conventional source directory is measured as a whole. Functions passed
 to compile-time style macros (`stylex.create(...)`) are left as written because
 the bundler consumes them at build time; nothing about them runs.
 
+In a Python or Ruby project every source file outside test directories,
+virtual environments and build output is measured, except what lies beside
+the package at the top of the project: `docs/`, `examples/`, benchmark
+directories (`bench/`, `benchmarks/`) and `fuzz/`. A test runs none of it, and
+counted in, a package covered to 99% reads 69%. Name one of them in
+`SUPERCOV_SOURCE_ROOTS` and it is source.
+
 Inside the roots, tests, fixtures, tool scripts and configuration files are
 still recognised by their path and left out. A root you name settles what it
 names: with `SUPERCOV_SOURCE_ROOTS=src,scripts` the `scripts/` directory is

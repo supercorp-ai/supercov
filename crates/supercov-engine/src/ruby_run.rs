@@ -167,10 +167,16 @@ pub fn current_ruby_integrity(
     let mut files = crate::ruby_project::discover_ruby_files(&root)?;
     // The roots the run was measured under, not this shell's: the run
     // digested the files they kept, and nothing else would match it.
-    if let Some(configured) = source_roots.filter(|roots| !roots.is_empty()) {
-        crate::source_discovery::ExplicitSourceRoots::resolve(&root, configured)
-            .map_err(|error| error.to_string())?
-            .narrow(&mut files.sources, &mut files.excluded, String::as_str);
+    match source_roots.filter(|roots| !roots.is_empty()) {
+        Some(configured) => {
+            crate::source_discovery::ExplicitSourceRoots::resolve(&root, configured)
+                .map_err(|error| error.to_string())?
+                .narrow(&mut files.sources, &mut files.excluded, String::as_str);
+        }
+        None => crate::source_discovery::leave_out_what_lies_beside(
+            &mut files.sources,
+            &mut files.excluded,
+        ),
     }
     let mut inputs = ruby_integrity_inputs(&files, command);
     crate::source_discovery::fold_roots_into_configuration(
