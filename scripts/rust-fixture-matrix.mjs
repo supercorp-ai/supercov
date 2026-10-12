@@ -67,7 +67,8 @@ if (frame[2].length - 1 !== frame[1].indexOf("toBe"))
 // kept with the copy, each with its map.
 const compiled = resolve("tests/fixtures/generic-playwright/.supercov/workspaces/caches/playwright-transform");
 const kept = readdirSync(compiled, { recursive: true }).map(String);
-const specs = kept.filter((name) => name.endsWith("_appspec.js"));
+// Playwright 1.55 names an entry `appspec_<hash>`, 1.62 `<hash>_appspec`.
+const specs = kept.filter((name) => /(?:^|[\\/_])appspec[_.][^\\/]*$/.test(name) && name.endsWith(".js"));
 if (specs.length === 0)
   throw new Error(`Playwright compiled no test file into ${compiled}:\n${kept.join("\n")}`);
 for (const code of specs)
