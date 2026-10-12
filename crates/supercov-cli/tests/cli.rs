@@ -3550,10 +3550,16 @@ fn a_report_the_command_writes_names_the_project_and_not_the_copy() {
     project.git(&["init", "-q"]);
     let run = project.supercov(&["--", "npm", "test"]);
     assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
-    let root = project.root.display().to_string();
+    // Windows spells the test's own directory `\\?\C:\…`; a tool spells it
+    // without the prefix.
+    let plain = |path: &std::path::Path| {
+        let text = path.display().to_string();
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+    };
+    let root = plain(&project.root);
     let report: serde_json::Value =
         serde_json::from_str(&project.read("coverage/coverage-final.json")).unwrap();
-    let file = project.root.join("src/fee.js").display().to_string();
+    let file = plain(&project.root.join("src").join("fee.js"));
     assert_eq!(report[&file]["path"], file, "{report}");
     assert_eq!(
         project.read("coverage/cobertura.xml"),
