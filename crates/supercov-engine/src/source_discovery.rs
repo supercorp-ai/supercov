@@ -712,6 +712,36 @@ pub fn leave_out_what_lies_beside(
     });
 }
 
+/// The scope a frontend records when nothing named its roots: each file it
+/// measures, and each file it left out with why. `runs <id> scope` lists it,
+/// and for a Go, Rust or JVM run had nothing to list: the summary offered the
+/// command and the command answered that the run held no inventory.
+pub fn automatic_scope(
+    measured: impl IntoIterator<Item = (String, String)>,
+    left_out: impl IntoIterator<Item = (String, String)>,
+) -> SourceScope {
+    let entry = |status: SourceScopeStatus| {
+        move |(file, reason)| SourceScopeEntry {
+            file,
+            status: status.clone(),
+            reason,
+            package_root: None,
+        }
+    };
+    let mut entries = measured
+        .into_iter()
+        .map(entry(SourceScopeStatus::Included))
+        .chain(left_out.into_iter().map(entry(SourceScopeStatus::Excluded)))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.file.cmp(&right.file));
+    SourceScope {
+        version: 1,
+        mode: SourceScopeMode::Automatic,
+        roots: vec![".".into()],
+        entries,
+    }
+}
+
 /// A benchmark: Vitest's `*.bench.ts` beside the code it measures, or a file
 /// under a `bench`/`benchmarks` directory. It runs the product; it is not the
 /// product. jshttp/cookie keeps four `src/*.bench.ts` files, which were

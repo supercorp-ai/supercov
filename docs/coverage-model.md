@@ -183,6 +183,14 @@ directories (`bench/`, `benchmarks/`) and `fuzz/`. A test runs none of it, and
 counted in, a package covered to 99% reads 69%. Name one of them in
 `SUPERCOV_SOURCE_ROOTS` and it is source.
 
+In a Go module every `.go` file the toolchain compiles is measured: not
+`vendor/` or `testdata/`, not a nested module, and not a file or directory
+whose name begins with `_` or `.`, which `go build ./...` walks past. The
+programs under a top-level `examples/` are left out too. A Rust run measures
+what the build compiled, so a bench or an example `cargo test` does not build
+is listed as not compiled. A Maven or Gradle project is measured by its source
+sets: `src/main` is source, `src/test` is tests.
+
 Inside the roots, tests, fixtures, tool scripts and configuration files are
 still recognised by their path and left out. A root you name settles what it
 names: with `SUPERCOV_SOURCE_ROOTS=src,scripts` the `scripts/` directory is

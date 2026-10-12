@@ -12,7 +12,8 @@
 //     RSpec and test-unit listed the runtime's frames under the test's.
 //   - Go: a panic named the copy's file, at `crypto.go:24` for line 23, and
 //     `./...` listed Supercov's runtime package.
-//   - Rust: a panic was reported at `src/lib.rs:9:84` for `8:9`.
+//   - Rust: a panic was reported at `src/lib.rs:9:84` for `8:9`, each failed
+//     test had a report of its own and a test that passed no line at all.
 //   - Python: unittest printed its wrapper's frames, and its own, over the
 //     test's line.
 //   - node:test: a failing test had no frame of its own file, and a rewritten
@@ -43,13 +44,15 @@ function project(files) {
 }
 
 // What a run printed, without what differs between any two runs.
-function printed(root, command, args, tidy) {
+function printed(root, command, args, tidy, { passes = false } = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: 'utf8',
     env: { ...process.env, NO_COLOR: '1', CI: '1' },
   });
-  assert.notEqual(result.status, 0, `${command} ${args.join(' ')} passed:\n${result.stdout}${result.stderr}`);
+  assert.equal(result.error, undefined, `${command} did not start: ${result.error}`);
+  if (passes) assert.equal(result.status, 0, `${command} ${args.join(' ')} failed:\n${result.stdout}${result.stderr}`);
+  else assert.notEqual(result.status, 0, `${command} ${args.join(' ')} passed:\n${result.stdout}${result.stderr}`);
   return `${result.stdout}${result.stderr}`
     .split('\n')
     .map((line) => tidy(line.trimEnd()))
@@ -175,19 +178,45 @@ const languages = {
   rust() {
     const root = project({
       'Cargo.toml': '[package]\nname = "shop"\nversion = "0.1.0"\nedition = "2021"\n',
-      'src/lib.rs': 'pub fn first(key: &str) -> char {\n    key.chars().next().unwrap()\n}\n\npub fn seal(key: &str, body: &str) -> String {\n    if key.len() < 4 {\n        panic!("key too short");\n    }\n    body.to_uppercase()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn refuses_a_short_key() {\n        let sealed = seal("ab", "x");\n        assert_eq!(sealed, "X");\n    }\n\n    #[test]\n    fn compares() {\n        assert_eq!(seal("abcd", "y"), "Z");\n    }\n}\n',
+      'src/lib.rs': '/// Seals a body.\n///\n/// ```\n/// assert_eq!(shop::seal("abcd", "x"), "X");\n/// ```\n///\n/// ```\n/// assert_eq!(shop::seal("abcd", "y"), "Z");\n/// ```\npub fn seal(key: &str, body: &str) -> String {\n    if key.len() < 4 {\n        panic!("key too short");\n    }\n    body.to_uppercase()\n}\n\npub fn first(key: &str) -> char {\n    key.chars().next().unwrap()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn seals_a_body() {\n        assert_eq!(seal("abcd", "x"), "X");\n    }\n\n    #[test]\n    fn refuses_a_short_key() {\n        let sealed = seal("ab", "x");\n        assert_eq!(sealed, "X");\n    }\n\n    #[test]\n    fn compares() {\n        assert_eq!(seal("abcd", "y"), "Z");\n    }\n\n    #[test]\n    #[ignore = "slow"]\n    fn is_slow() {}\n}\n',
+      'tests/outside.rs': '#[test]\nfn seals_from_outside() {\n    assert_eq!(shop::seal("abcd", "q"), "Q");\n}\n',
     });
-    // Supercov runs each test in a process of its own, so the lines libtest
-    // prints around the tests are not the same; where each panicked is.
-    const panics = (lines) => lines.filter((line) => line.includes('panicked at')).map((line) => line.replace(/\(\d+\) /u, '')).sort();
-    const plain = panics(printed(root, 'cargo', ['test', '--lib'], (line) => line));
-    // rustc names the file with the platform's separator.
-    assert.deepEqual(plain, [
-      `thread 'tests::compares' panicked at src${sep}lib.rs:24:9:`,
-      `thread 'tests::refuses_a_short_key' panicked at src${sep}lib.rs:7:9:`,
-    ]);
-    assert.deepEqual(panics(printed(root, binary, ['--', 'cargo', 'test', '--lib'], (line) => line)), plain, 'cargo test');
-    console.log('[failure-output] cargo test panics where it does without Supercov');
+    // Cargo writes its own lines on one stream and libtest's on the other, and
+    // libtest lists tests as they finish, so the two runs are compared as the
+    // lines each printed and not in an order neither has. Before this a run
+    // under Supercov had a report for each failed test (`running 1 test`,
+    // `2 filtered out`), no line for a test that passed and none of what a
+    // failed doctest printed.
+    const tidy = (line) => line
+      .replace(/\(\d+\) panicked/u, 'panicked')
+      .replace(/-[0-9a-f]{16}(?:\.exe)?\)$/u, '-HASH)')
+      .replace(/finished in [\d.]+s$/u, 'finished');
+    const lines = (command, args, outcome) => printed(root, command, args, tidy, outcome)
+      .filter((line) => !/^\s+(?:Compiling|Finished|Blocking|Locking)\b|^error: |^\s+`--/u.test(line))
+      .sort();
+    const plain = lines('cargo', ['test', '--no-fail-fast']);
+    for (const expected of [
+      // rustc names the file with the platform's separator.
+      `thread 'tests::refuses_a_short_key' panicked at src${sep}lib.rs:12:9:`,
+      `thread 'tests::compares' panicked at src${sep}lib.rs:38:9:`,
+      'running 4 tests',
+      'test tests::seals_a_body ... ok',
+      'test tests::is_slow ... ignored, slow',
+      'test result: FAILED. 1 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished',
+      '   Doc-tests shop',
+    ]) assert.ok(plain.includes(expected), `cargo test: ${expected}\n${plain.join('\n')}`);
+    assert.deepEqual(lines(binary, ['--', 'cargo', 'test', '--no-fail-fast']), plain, 'cargo test');
+    // The tests marked `#[ignore]` alone: two binaries and the doctests each
+    // report that they ran none of theirs. This failed outright, on "the pass
+    // for doctest … ran 0 doctest(s) instead of that one alone".
+    const ignored = lines('cargo', ['test', '--', '--ignored'], { passes: true });
+    for (const expected of [
+      'running 1 test',
+      'test tests::is_slow ... ok',
+      'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished',
+    ]) assert.ok(ignored.includes(expected), `cargo test -- --ignored: ${expected}\n${ignored.join('\n')}`);
+    assert.deepEqual(lines(binary, ['--', 'cargo', 'test', '--', '--ignored'], { passes: true }), ignored, 'cargo test -- --ignored');
+    console.log('[failure-output] cargo test reads as it does without Supercov');
   },
 };
 

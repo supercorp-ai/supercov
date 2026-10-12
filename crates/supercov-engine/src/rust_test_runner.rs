@@ -1311,6 +1311,53 @@ pub(crate) fn io_error(error: impl std::fmt::Display) -> RustTestRunnerError {
 
 /// A libtest case that exited cleanly but ran nothing, or ran its one test as
 /// ignored, was skipped rather than passed.
+/// Cargo's line for a test binary: `Running unittests src/lib.rs (target/…)`.
+/// The source is named from its package and the binary from the workspace, as
+/// Cargo names them.
+fn running_line(workspace: &Path, target: &Path, artifact: &TestArtifact) -> String {
+    let source = workspace.join(&artifact.source);
+    let source = source
+        .strip_prefix(&artifact.package_directory)
+        .map_or_else(
+            |_| PathBuf::from(&artifact.source),
+            |local| local.iter().collect::<PathBuf>(),
+        );
+    // Supercov builds into a target directory of its own; the binary is named
+    // where Cargo would have put it.
+    let executable = artifact.executable.strip_prefix(target).map_or_else(
+        |_| artifact.executable.clone(),
+        |built| Path::new("target").join(built),
+    );
+    format!(
+        "     Running {}{} ({})",
+        if artifact.kind == "integration" {
+            ""
+        } else {
+            "unittests "
+        },
+        source.display(),
+        executable.display()
+    )
+}
+
+/// `cargo test -q`.
+fn cargo_quiet(invocation: &CargoTestInvocation) -> bool {
+    invocation.arguments[invocation.command_position() + 1..]
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "-q" | "--quiet"))
+}
+
+/// libtest's own `-q` or `--format terse`: a character for each test.
+fn libtest_quiet(invocation: &CargoTestInvocation) -> bool {
+    let runner = &invocation.runner_arguments;
+    runner
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "-q" | "--quiet" | "--format=terse"))
+        || runner
+            .windows(2)
+            .any(|pair| pair[0] == "--format" && pair[1] == "terse")
+}
+
 pub(crate) fn libtest_skipped(exit: i32, stdout: &str) -> bool {
     exit == 0 && (stdout.contains("running 0 tests") || stdout.contains("; 1 ignored;"))
 }
@@ -1419,6 +1466,27 @@ fn decline_uncompiled_sources(
             .and_then(|file| file.as_str())
             .is_none_or(|file| !declined.contains(file))
     });
+    // And the scope says so, file by file.
+    if let Some(entries) = manifest
+        .scope
+        .as_mut()
+        .and_then(|scope| scope.get_mut("entries"))
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for entry in entries {
+            let named = entry
+                .get("file")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|file| declined.contains(file));
+            if named && let Some(entry) = entry.as_object_mut() {
+                entry.insert("status".into(), "excluded".into());
+                entry.insert(
+                    "reason".into(),
+                    crate::rust_project::RUST_NOT_COMPILED.into(),
+                );
+            }
+        }
+    }
     (manifest, declined)
 }
 
@@ -1554,12 +1622,22 @@ pub fn run_prepared_rust_tests(
     } else {
         rustc_target_libdir()?
     };
+    // A binary none of whose tests were asked for, and how many it has.
+    let mut unasked = Vec::new();
     for (artifact_index, artifact) in artifacts.iter().enumerate() {
         let tests = list_tests(
             &artifact.executable,
             &libtest_selection.list_arguments,
             &dynamic_library_environment(&target_libdir, &artifact.executable),
         )?;
+        if tests.is_empty() {
+            let all = list_tests(
+                &artifact.executable,
+                &["--include-ignored".to_owned()],
+                &dynamic_library_environment(&target_libdir, &artifact.executable),
+            )?;
+            unasked.push((artifact, all.len()));
+        }
         let contexts = preflight_rust_test_contexts(tests.clone())
             .map_err(|error| RustTestRunnerError::Context(error.to_string()))?;
         for (test_index, test) in tests.into_iter().enumerate() {
@@ -1643,6 +1721,74 @@ pub fn run_prepared_rust_tests(
         .map(|result| result.map_err(RustTestRunnerError::Launch))
         .collect::<Result<Vec<_>, _>>()?;
     outcomes.sort_by_key(|outcome| outcome.task.ordinal);
+    // What `cargo test` prints for each binary: every test, the failures
+    // together, one result.
+    // Cargo's `-q` drops its own line for the binary and asks libtest for
+    // its terse form; libtest's own `-q` is the terse form alone.
+    let unannounced = cargo_quiet(&invocation);
+    let terse = unannounced || libtest_quiet(&invocation);
+    let announced = |artifact: &TestArtifact| {
+        if unannounced {
+            String::new()
+        } else {
+            format!(
+                "{}\n",
+                running_line(&project.workspace_root, &project.target_directory, artifact)
+            )
+        }
+    };
+    // In Cargo's order: unit tests, then each integration test by name.
+    let mut reports = Vec::new();
+    for binary in
+        outcomes.chunk_by(|left, right| left.task.artifact_index == right.task.artifact_index)
+    {
+        let texts = binary
+            .iter()
+            .map(|outcome| {
+                (
+                    String::from_utf8_lossy(&outcome.output.stdout),
+                    String::from_utf8_lossy(&outcome.output.stderr),
+                )
+            })
+            .collect::<Vec<_>>();
+        let cases = binary
+            .iter()
+            .zip(&texts)
+            .map(
+                |(outcome, (stdout, stderr))| crate::rust_libtest_report::CaseOutput {
+                    name: &outcome.task.test,
+                    exit: outcome.output.status.code().unwrap_or(1),
+                    stdout,
+                    stderr,
+                },
+            )
+            .collect::<Vec<_>>();
+        let artifact = &binary[0].task.artifact;
+        reports.push((
+            (artifact.kind == "integration", artifact.name.clone()),
+            format!(
+                "{}{}",
+                announced(artifact),
+                crate::rust_libtest_report::libtest_report(&cases, terse)
+            ),
+        ));
+    }
+    for (artifact, all) in unasked {
+        reports.push((
+            (artifact.kind == "integration", artifact.name.clone()),
+            format!(
+                "{}{}",
+                announced(artifact),
+                crate::rust_libtest_report::unasked_report(all)
+            ),
+        ));
+    }
+    reports.sort();
+    for (_, report) in reports {
+        diagnostics
+            .write_all(report.as_bytes())
+            .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+    }
     for outcome in outcomes {
         let ProcessTask {
             artifact_index,
@@ -1662,14 +1808,6 @@ pub fn run_prepared_rust_tests(
         let exit = output.status.code().unwrap_or(1);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let skipped = libtest_skipped(exit, &stdout);
-        if exit != 0 {
-            writeln!(diagnostics, "[supercov] Rust test failed: {test_id}")
-                .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
-            diagnostics
-                .write_all(&output.stdout)
-                .and_then(|_| diagnostics.write_all(&output.stderr))
-                .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
-        }
         if exit != 0 {
             overall_exit = exit;
         }

@@ -1427,9 +1427,14 @@ fn scope_entry_records(
         .and_then(serde_json::Value::as_array)
         .ok_or(CoverageIndexError::InvalidRecord("source-scope entries"))?;
     let mut limitations = BTreeMap::<&str, (usize, u32)>::new();
+    // As the file table reads them: a kind of a language's own -- Go's
+    // `loop-without-condition`, a file that does not parse -- is one more
+    // limitation of its file, under a kind this table does not name. Go, Rust
+    // and JVM runs record a scope now, and refusing such a kind here refused
+    // the whole run.
     for limitation in &view.limitations {
         let Some((file, kind)) = limitation_kind(limitation) else {
-            return Err(CoverageIndexError::InvalidRecord("coverage limitation"));
+            continue;
         };
         let value = limitations.entry(file).or_default();
         value.0 += 1;
@@ -1437,11 +1442,7 @@ fn scope_entry_records(
             "dynamic-code" => 1,
             "semantic-safety" => 2,
             "source-scope" => 4,
-            _ => {
-                return Err(CoverageIndexError::InvalidRecord(
-                    "coverage limitation kind",
-                ));
-            }
+            _ => 8,
         };
     }
     entries
@@ -3180,7 +3181,7 @@ impl<'a> CoverageIndex<'a> {
             let measurement_limitations = usize::try_from(get_u64(record, 16))
                 .map_err(|_| CoverageIndexError::SizeOverflow)?;
             let mask = get_u32(record, 24);
-            if mask & !7 != 0 || (measurement_limitations == 0) != (mask == 0) {
+            if mask & !15 != 0 || (measurement_limitations == 0) != (mask == 0) {
                 return Err(CoverageIndexError::InvalidRecord(
                     "source-scope limitation annotation",
                 ));
@@ -3190,6 +3191,7 @@ impl<'a> CoverageIndex<'a> {
                 (1, "dynamic-code"),
                 (2, "semantic-safety"),
                 (4, "source-scope"),
+                (8, "unknown"),
             ] {
                 if mask & bit != 0 {
                     limitation_kinds.push(kind.into());
@@ -4455,6 +4457,52 @@ mod tests {
         assert_eq!(source_scope.kind, "source-discovery");
         assert_eq!(source_scope.included, 1);
         assert_eq!(index.scope_entries(CoverageViewId::All).unwrap().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_scope_entry_carries_a_limitation_of_its_language_s_own_kind() {
+        // Go records `loop-without-condition`; with a scope recorded for a Go
+        // run, a kind this table did not name refused the whole index:
+        // "invalid coverage index: coverage limitation kind".
+        let mut report = report();
+        let scope = serde_json::json!({
+            "version": 1,
+            "mode": "automatic",
+            "roots": ["."],
+            "entries": [{ "file": "mux.go", "status": "included", "reason": "Go application source" }]
+        });
+        for view in [
+            &mut report.view,
+            &mut report.filters.passed,
+            &mut report.filters.failed,
+        ] {
+            view.scope = Some(scope.clone());
+            view.model.language = "go".into();
+            view.limitations = vec![serde_json::json!({
+                "id": "go-loop-1",
+                "kind": "loop-without-condition",
+                "file": "mux.go",
+                "line": 4,
+                "column": 1,
+                "source": "for {",
+                "reason": "a loop with no condition has no decision to measure"
+            })];
+        }
+        let root = root();
+        let path = root.join("query-index.go.bin");
+        write_query_index(
+            &coverage_index_sections(&report).unwrap(),
+            &identity(),
+            &path,
+        )
+        .unwrap();
+        let container = QueryIndex::open(&path, &identity()).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        let entries = index.scope_entries(CoverageViewId::All).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].measurement_limitations, 1);
+        assert_eq!(entries[0].limitation_kinds, ["unknown"]);
         fs::remove_dir_all(root).unwrap();
     }
 

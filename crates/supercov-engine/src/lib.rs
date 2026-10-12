@@ -54,6 +54,7 @@ pub mod rust_build_cache;
 mod rust_cargo_config_model;
 pub mod rust_cargo_configuration;
 pub mod rust_instrumenter;
+mod rust_libtest_report;
 pub mod rust_owned_doctests;
 pub mod rust_owned_nextest;
 pub mod rust_probe_transport;

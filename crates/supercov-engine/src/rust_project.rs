@@ -20,6 +20,14 @@ use crate::{
     rust_runtime::render_rust_runtime,
 };
 
+const RUST_APPLICATION_SOURCE: &str = "Rust application source";
+/// A test, benchmark or example target, or a test module in a file of its
+/// own: read for where its assertions stand, and not measured.
+const RUST_TEST_CODE: &str = "test, benchmark or example code";
+/// Why a file the module tree reaches is not measured: a bench or an example
+/// `cargo test` does not build, or a module behind a `#[cfg]` that is off.
+pub const RUST_NOT_COMPILED: &str = "not compiled by this build";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedRustProject {
     pub workspace_root: PathBuf,
@@ -938,17 +946,31 @@ pub fn prepare_rust_project_for(
             target_directory.display().to_string(),
         ));
     }
-    // Only when roots shaped what is measured, so default output is unchanged.
-    if let Some(source_roots) = source_roots {
-        let kept = sources.keys().cloned().collect::<Vec<_>>();
-        let scope = source_roots
+    let kept = sources.keys().cloned().collect::<Vec<_>>();
+    let scope = match source_roots {
+        Some(source_roots) => source_roots
             .scope(&kept, &outside)
-            .map_err(|error| RustProjectError::SourceRoots(error.to_string()))?;
-        manifest.scope = Some(
-            serde_json::to_value(scope)
-                .map_err(|error| RustProjectError::SourceRoots(error.to_string()))?,
-        );
-    }
+            .map_err(|error| RustProjectError::SourceRoots(error.to_string()))?,
+        // What the build then does not compile is taken out where the build
+        // is known: see `RUST_NOT_COMPILED`.
+        None => {
+            let (test_code, measured) = kept
+                .into_iter()
+                .partition::<Vec<_>, _>(|file| tests.contains(file) || test_code_path(file));
+            crate::source_discovery::automatic_scope(
+                measured
+                    .into_iter()
+                    .map(|file| (file, RUST_APPLICATION_SOURCE.to_owned())),
+                test_code
+                    .into_iter()
+                    .map(|file| (file, RUST_TEST_CODE.to_owned())),
+            )
+        }
+    };
+    manifest.scope = Some(
+        serde_json::to_value(scope)
+            .map_err(|error| RustProjectError::SourceRoots(error.to_string()))?,
+    );
     Ok(PreparedRustProject {
         workspace_root: workspace,
         target_directory,
