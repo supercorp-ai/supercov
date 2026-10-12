@@ -83,9 +83,11 @@ npx supercov runs latest assertions
 ```
 
 `assertions assess` works it out and saves the result to the run. For each test,
-Supercov renders what the test ran -- its code, its helpers, and the source it
-executed -- and asks [Jev](https://typesafe.ai) whether the test would fail for
-each statement's change. It prints an estimate first; `--dry-run` sends nothing.
+Supercov renders what the test ran -- its code and the source it executed --
+and asks [Jev](https://typesafe.ai) whether the test would fail for each
+statement's change. In JavaScript, TypeScript and Python the source shown is
+the function each asked statement is in; in the other languages it is all the
+test ran in the statement's file, with the helper files the test imports. It prints an estimate first; `--dry-run` sends nothing.
 The estimate gives the first round and the most the pass can send, which is
 what it sends when no test is judged to catch anything.
 It needs a TypeSafe AI API key in `TYPESAFE_API_KEY`.
@@ -160,7 +162,7 @@ Answers are kept in `.supercov/assertions/`. Each is stored under the exact text
 Jev saw for that statement and test, and reused only when a new run would ask
 the same question with the same text. Nothing decides whether a change could
 matter: a change to the statement, to code around it that the test ran, to the
-test or its helpers, or to which tests run it, asks again. A dependency or
+test, or to which tests run it, asks again. A dependency or
 configuration change asks everything again. After a typical commit only a few
 dozen questions are asked; the rest are reused.
 
