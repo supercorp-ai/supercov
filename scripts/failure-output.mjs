@@ -132,14 +132,15 @@ const languages = {
     if (available('test-unit')) {
       const unit = project({
         'lib/crypto.rb': source,
-        'test/crypto_unit_test.rb': 'require "test/unit"\nrequire_relative "../lib/crypto"\n\nclass CryptoUnit < Test::Unit::TestCase\n  def test_refuses_a_short_key\n    puts "run from #{caller.grep(/test-suite-runner\\.rb/).first.to_s[/test-suite-runner\\.rb:\\d+/]}"\n    sealed = Crypto.seal("ab", "x")\n    assert_equal "X", sealed[:body]\n  end\n\n  def test_compares\n    assert_equal "Z", Crypto.seal("abcd", "y")[:body]\n  end\nend\n',
+        'test/crypto_unit_test.rb': 'require "test/unit"\nrequire_relative "../lib/crypto"\n\nclass CryptoUnit < Test::Unit::TestCase\n  def test_refuses_a_short_key\n    puts "run from #{caller.grep(/test-?suite(?:-runner)?\\.rb/).first.to_s[/[\\w-]+\\.rb:\\d+/]}"\n    sealed = Crypto.seal("ab", "x")\n    assert_equal "X", sealed[:body]\n  end\n\n  def test_compares\n    assert_equal "Z", Crypto.seal("abcd", "y")[:body]\n  end\nend\n',
       });
       compare('test-unit', unit, ruby, ['test/crypto_unit_test.rb', '--no-use-color'], {
         tidy: (line) => (/^Finished in|tests\/s/u.test(line) ? '' : line),
         // test-unit reads the parameters of a test's `run` to tell one a
         // script overrode for an older release, and calls that one another
-        // way. Supercov's `run(*args)` read as such an override.
-        expects: [/^test\/crypto_unit_test\.rb:12:in /u, /run from test-suite-runner\.rb:\d+$/u],
+        // way. Supercov's `run(*args)` read as such an override. The file
+        // that calls a test is `testsuite.rb` in older releases.
+        expects: [/^test\/crypto_unit_test\.rb:12:in /u, /run from test-?suite(?:-runner)?\.rb:\d+$/u],
       });
     }
   },
