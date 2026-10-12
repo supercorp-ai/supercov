@@ -769,7 +769,7 @@ func itoa(n int) string {
 
     // The blocking select keeps exactly the cases its author wrote.
     assert!(
-        !instrumented.contains("default:\n__supercov.A"),
+        !instrumented.contains("default: __supercov.A"),
         "no default may be added to a select:\n{instrumented}"
     );
     // Both selects are still measured, by the cases they actually have.

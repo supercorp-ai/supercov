@@ -779,9 +779,23 @@ impl<'a> Collector<'a> {
                             }
                         }
                         None => {
-                            // Before the switch's closing brace.
+                            // Before the switch's closing brace, and on its
+                            // line: three lines of its own moved every line
+                            // below the switch, so a failure further down
+                            // the file was reported three lines late. The
+                            // `;` ends whatever the last clause holds when
+                            // the switch is written on one line; a switch
+                            // with no clause has nothing to end.
                             let at = node.end_byte().saturating_sub(1);
-                            self.edit(at, 100, format!("\ndefault:\n{alias}.A({probe})\n"));
+                            let after_a_clause = cases.iter().any(|(_, clause)| clause.is_some());
+                            self.edit(
+                                at,
+                                100,
+                                format!(
+                                    "{}default: {alias}.A({probe}) ",
+                                    if after_a_clause { "; " } else { "" }
+                                ),
+                            );
                         }
                     }
                 }
@@ -1082,6 +1096,29 @@ func classify(a int, b bool) string {
         parse(&out)
             .unwrap_or_else(|error| panic!("rewritten source does not parse: {error}\n{out}"));
         out
+    }
+
+    #[test]
+    fn a_switch_given_a_default_keeps_its_lines() {
+        // The `default` Supercov adds to a switch that has none took three
+        // lines, so every line below the switch was three further down:
+        // go-version's constraint.go grew from 307 lines to 310.
+        const SOURCE: &str = "package main\n\nfunc kind(key string) int {\n\tswitch {\n\tcase len(key) == 0:\n\t\treturn 0\n\tcase len(key) < 4:\n\t\treturn 1\n\t}\n\tswitch len(key) { case 4: return 2 }\n\tswitch key {\n\t}\n\treturn 3\n}\n";
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations = build_go_obligations("kind.go", SOURCE, &mut next, &mut decisions)
+            .expect("obligations");
+        let rewritten = rewrite(SOURCE, &obligations.edits);
+        assert_eq!(
+            rewritten.lines().count(),
+            SOURCE.lines().count(),
+            "{rewritten}"
+        );
+        assert_eq!(rewritten.matches("default: ").count(), 3, "{rewritten}");
+        // One that follows a clause ends it; one in an empty switch has
+        // nothing to end, and `;` alone is not a clause.
+        assert_eq!(rewritten.matches("; default: ").count(), 2, "{rewritten}");
+        parse(&rewritten.replace(RUNTIME_IMPORT, "example.com/kind/supercov")).expect("still Go");
     }
 
     #[test]

@@ -150,7 +150,10 @@ const languages = {
   go() {
     const root = project({
       'go.mod': 'module example.com/shop\n\ngo 1.22\n',
-      'crypto.go': 'package shop\n\nimport (\n\t"errors"\n\t"strings"\n)\n\nfunc Seal(key, body string) (string, error) {\n\tif len(key) < 4 {\n\t\treturn "", errors.New("key too short")\n\t}\n\treturn strings.ToUpper(body), nil\n}\n\nfunc MustSeal(key, body string) string {\n\tsealed, err := Seal(key, body)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\treturn sealed\n}\n',
+      // Switches with no `default` first, one of them on one line and one
+      // with no clause: the clause Supercov adds to each took three lines, and
+      // everything below was reported three lines late for each.
+      'crypto.go': 'package shop\n\nimport (\n\t"errors"\n\t"strings"\n)\n\nfunc Kind(key string) int {\n\tswitch {\n\tcase len(key) == 0:\n\t\treturn 0\n\tcase len(key) < 4:\n\t\treturn 1\n\t}\n\tswitch len(key) { case 4: return 2 }\n\tswitch key {\n\t}\n\treturn 3\n}\n\nfunc Seal(key, body string) (string, error) {\n\tif len(key) < 4 {\n\t\treturn "", errors.New("key too short")\n\t}\n\treturn strings.ToUpper(body), nil\n}\n\nfunc MustSeal(key, body string) string {\n\tsealed, err := Seal(key, body)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\treturn sealed\n}\n',
       'crypto_test.go': 'package shop\n\nimport "testing"\n\nfunc TestSealsABody(t *testing.T) {\n\tif got := MustSeal("abcd", "x"); got != "X" {\n\t\tt.Fatalf("got %q", got)\n\t}\n}\n\nfunc TestCompares(t *testing.T) {\n\tif got := MustSeal("abcd", "y"); got != "Z" {\n\t\tt.Errorf("got %q, want %q", got, "Z")\n\t}\n}\n\nfunc TestRefusesAShortKey(t *testing.T) {\n\tsealed := MustSeal("ab", "x")\n\tif sealed != "X" {\n\t\tt.Fatalf("got %q", sealed)\n\t}\n}\n',
     });
     compare('go test', root, 'go', ['test', './...'], {
@@ -165,7 +168,7 @@ const languages = {
           .replace(/\s+\+0x$/u, '')
           .replace(/\s[\d.]+s$/u, '')
           .replace(/\(\d+\.\d+s\)/u, ''),
-      expects: [/^\s+crypto_test\.go:13: got "Y", want "Z"$/u, /[\\/]crypto\.go:18$/u, /[\\/]crypto_test\.go:18$/u],
+      expects: [/^\s+crypto_test\.go:13: got "Y", want "Z"$/u, /[\\/]crypto\.go:31$/u, /[\\/]crypto_test\.go:18$/u],
     });
     // And what the command writes is in the project when it ends: the
     // coverage profile stayed in Supercov's copy, and a step after the
@@ -178,7 +181,10 @@ const languages = {
   rust() {
     const root = project({
       'Cargo.toml': '[package]\nname = "shop"\nversion = "0.1.0"\nedition = "2021"\n',
-      'src/lib.rs': '/// Seals a body.\n///\n/// ```\n/// assert_eq!(shop::seal("abcd", "x"), "X");\n/// ```\n///\n/// ```\n/// assert_eq!(shop::seal("abcd", "y"), "Z");\n/// ```\npub fn seal(key: &str, body: &str) -> String {\n    if key.len() < 4 {\n        panic!("key too short");\n    }\n    body.to_uppercase()\n}\n\npub fn first(key: &str) -> char {\n    key.chars().next().unwrap()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn seals_a_body() {\n        assert_eq!(seal("abcd", "x"), "X");\n    }\n\n    #[test]\n    fn refuses_a_short_key() {\n        let sealed = seal("ab", "x");\n        assert_eq!(sealed, "X");\n    }\n\n    #[test]\n    fn compares() {\n        assert_eq!(seal("abcd", "y"), "Z");\n    }\n\n    #[test]\n    #[ignore = "slow"]\n    fn is_slow() {}\n}\n',
+      // A `match` and a loop first: their probes took lines of their own, and
+      // every panic and doctest below them was reported two lines down for
+      // each (arrayvec's doctest at line 302 read `(line 304)`).
+      'src/lib.rs': 'pub fn kind(key: &str) -> u8 {\n    match key.len() {\n        0 => 0,\n        n if n < 4 => {\n            1\n        }\n        _ => 2,\n    }\n}\n\npub fn scan(key: &str, limit: usize) -> usize {\n    let mut seen = 0;\n    while seen < limit && seen < key.len() {\n        if key.as_bytes()[seen] == b\'-\' || seen > 8 {\n            break;\n        } else {\n            seen += 1;\n        }\n    }\n    seen\n}\n\n/// Seals a body.\n///\n/// ```\n/// assert_eq!(shop::seal("abcd", "x"), "X");\n/// ```\n///\n/// ```\n/// assert_eq!(shop::seal("abcd", "y"), "Z");\n/// ```\npub fn seal(key: &str, body: &str) -> String {\n    if key.len() < 4 {\n        panic!("key too short");\n    }\n    body.to_uppercase()\n}\n\npub fn first(key: &str) -> char {\n    key.chars().next().unwrap()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn seals_a_body() {\n        assert_eq!(seal("abcd", "x"), "X");\n        assert_eq!(kind("abcd"), 2);\n        assert_eq!(scan("ab-cd", 9), 2);\n    }\n\n    #[test]\n    fn refuses_a_short_key() {\n        let sealed = seal("ab", "x");\n        assert_eq!(sealed, "X");\n    }\n\n    #[test]\n    fn compares() {\n        assert_eq!(seal("abcd", "y"), "Z");\n    }\n\n    #[test]\n    #[ignore = "slow"]\n    fn is_slow() {}\n}\n',
       'tests/outside.rs': '#[test]\nfn seals_from_outside() {\n    assert_eq!(shop::seal("abcd", "q"), "Q");\n}\n',
     });
     // Cargo writes its own lines on one stream and libtest's on the other, and
@@ -197,8 +203,8 @@ const languages = {
     const plain = lines('cargo', ['test', '--no-fail-fast']);
     for (const expected of [
       // rustc names the file with the platform's separator.
-      `thread 'tests::refuses_a_short_key' panicked at src${sep}lib.rs:12:9:`,
-      `thread 'tests::compares' panicked at src${sep}lib.rs:38:9:`,
+      `thread 'tests::refuses_a_short_key' panicked at src${sep}lib.rs:34:9:`,
+      `thread 'tests::compares' panicked at src${sep}lib.rs:62:9:`,
       'running 4 tests',
       'test tests::seals_a_body ... ok',
       'test tests::is_slow ... ignored, slow',

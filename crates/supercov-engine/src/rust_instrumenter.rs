@@ -1782,10 +1782,10 @@ fn instrument_let_chain(
     }
     let mut entry = String::new();
     if broke.is_some() {
-        entry.push_str(&format!("\n{mark}"));
+        entry.push_str(&format!(" {mark}"));
     }
     entry.push_str(&format!(
-        "\n{runtime_path}::decision_chain(&mut {frame}, true, {table});"
+        " {runtime_path}::decision_chain(&mut {frame}, true, {table});"
     ));
     push_direct(insertions, body_offset, entry);
     if let Some(broke) = &broke {
@@ -1804,7 +1804,7 @@ fn instrument_let_chain(
         match expression.else_branch() {
             Some(ast::ElseBranch::Block(block)) => {
                 if let Some(offset) = block_entry_offset(&block) {
-                    push_direct(insertions, offset, format!("\n{record_false}"));
+                    push_direct(insertions, offset, format!(" {record_false}"));
                 }
             }
             Some(ast::ElseBranch::IfExpr(nested)) => {
@@ -2245,7 +2245,10 @@ pub fn instrument_rust_file(
         push_direct(
             &mut insertions,
             table_offset,
-            format!("\nconst {table}: &[&str] = &[{entries}];"),
+            // On the brace's line, as every probe is: a line of its own
+            // moved each line below it, and with them where a panic or a
+            // doctest further down the file is reported.
+            format!(" const {table}: &[&str] = &[{entries}];"),
         );
         for (index, arm) in arms.iter().enumerate() {
             let Some(body) = arm.expr() else {
@@ -2255,7 +2258,7 @@ pub fn instrument_rust_file(
             match &body {
                 ast::Expr::BlockExpr(block) if plain_block(block) => {
                     if let Some(offset) = block_entry_offset(block) {
-                        push_direct(&mut insertions, offset, format!("\n{call}"));
+                        push_direct(&mut insertions, offset, format!(" {call}"));
                     }
                 }
                 _ => push_wrapper(
@@ -2372,7 +2375,7 @@ pub fn instrument_rust_file(
             &mut insertions,
             offset,
             format!(
-                "\n{runtime_path}::entered(&mut {flag}, {:?});",
+                " {runtime_path}::entered(&mut {flag}, {:?});",
                 format!("{id}:entered")
             ),
         );
@@ -2677,6 +2680,53 @@ mod __supercov_runtime_v1 {
         let output = Command::new(&binary).output().unwrap();
         fs::remove_dir_all(directory).unwrap();
         output
+    }
+
+    #[test]
+    fn a_match_and_a_loop_take_no_line_of_their_own() {
+        // The table of a `match`'s arms, the hit of an arm that is a block,
+        // a loop's entry and the two ends of an `if` over `&&` each took a
+        // line. arrayvec's doctest at line 302 was named `(line 304)`, and a
+        // panic below a `match` was reported two lines down.
+        let source = r#"fn kind(key: &str) -> u8 {
+    match key.len() {
+        0 => 0,
+        n if n < 4 => {
+            1
+        }
+        _ => 2,
+    }
+}
+
+fn scan(key: &str, limit: usize) -> usize {
+    let mut seen = 0;
+    while seen < limit && seen < key.len() {
+        if key.as_bytes()[seen] == b'-' || seen > 8 {
+            break;
+        } else {
+            seen += 1;
+        }
+    }
+    for _ in 0..limit {
+        seen += 0;
+    }
+    seen
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/scan.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert_eq!(
+            transformed.code.lines().count(),
+            source.lines().count(),
+            "{}",
+            transformed.code
+        );
+        // And each line still ends as its author ended it.
+        for (written, rewritten) in source.lines().zip(transformed.code.lines()) {
+            let end = written.trim().trim_end_matches(['{', ';', ',']).trim();
+            let last = end.rsplit(' ').next().unwrap_or_default();
+            assert!(rewritten.contains(last), "{written:?} became {rewritten:?}");
+        }
     }
 
     #[test]
