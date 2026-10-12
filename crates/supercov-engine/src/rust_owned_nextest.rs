@@ -127,6 +127,13 @@ pub(crate) fn run_nextest(
     validate_nextest_version(&version).map_err(|error| {
         RustTestRunnerError::UnsupportedCommand(format!("cargo-nextest {version}: {error}"))
     })?;
+    if crate::rust_runner_attempt::newer_than_checked(&version) {
+        writeln!(
+            diagnostics,
+            "[supercov] cargo-nextest {version} is newer than the releases Supercov is tested with; it runs as they do, and a test it does not name to its runner stops the run"
+        )
+        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+    }
 
     // The target runner configuration: one entry per target nextest may run
     // for, each wrapping whatever runner the user had configured.

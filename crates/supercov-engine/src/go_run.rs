@@ -204,10 +204,17 @@ fn named_for_the_project(project: &Path, relative: &str, text: &str) -> String {
         return text.to_owned();
     }
     let position = package.start_position();
+    // With the platform's separator all along: Go writes the file's name as
+    // it is given here, and on Windows `pkg/inner/inner.go` after the
+    // project's directory came out as `pkg/inner/inner.go` in a compile
+    // error where Go alone writes `pkg\inner\inner.go`.
+    let named = relative
+        .split('/')
+        .fold(project.to_path_buf(), |path, part| path.join(part));
     format!(
         "{}{LINE_DIRECTIVE}{}:{}:{}*/{}",
         &text[..at],
-        project.join(relative).display(),
+        named.display(),
         position.row + 1,
         position.column + 1,
         &text[at..]

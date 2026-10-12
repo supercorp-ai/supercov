@@ -1325,13 +1325,26 @@ fn running_line(
     artifact: &TestArtifact,
     coloured: bool,
 ) -> String {
-    let source = workspace.join(&artifact.source);
-    let source = source
-        .strip_prefix(&artifact.package_directory)
-        .map_or_else(
-            |_| PathBuf::from(&artifact.source),
-            |local| local.iter().collect::<PathBuf>(),
-        );
+    // Both as text with one separator and no `\\?\` prefix, which Windows
+    // puts on one of them and not the other: the source then came out
+    // whole and with `/`, `tests/outside.rs` where Cargo writes
+    // `tests\outside.rs`.
+    let text = |path: &Path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        text.strip_prefix("//?/").unwrap_or(&text).to_owned()
+    };
+    let package = text(&artifact.package_directory);
+    let package = package
+        .strip_prefix(&text(workspace))
+        .map_or("", |inside| inside.trim_matches('/'));
+    let source = artifact
+        .source
+        .strip_prefix(package)
+        .map_or(artifact.source.as_str(), |local| {
+            local.trim_start_matches('/')
+        })
+        .split('/')
+        .collect::<PathBuf>();
     // Supercov builds into a target directory of its own; the binary is named
     // where Cargo would have put it.
     let executable = artifact.executable.strip_prefix(target).map_or_else(
@@ -1994,6 +2007,68 @@ mod tests {
         frontend_protocol::validate_frontend_report_request,
         rust_project::prepare_rust_project,
     };
+
+    #[test]
+    fn a_test_binary_is_announced_as_cargo_announces_it() {
+        // The source from its package, the binary from where Cargo would
+        // have built it, and neither with the prefix Windows puts on a path
+        // it has resolved.
+        let artifact = |package: &str, source: &str, kind: &str| TestArtifact {
+            executable: PathBuf::from(
+                "/work/copy/.supercov/cache/rust-target/debug/deps/shop-0123456789abcdef",
+            ),
+            name: "shop".into(),
+            kind: kind.into(),
+            source: source.into(),
+            package_directory: PathBuf::from(package),
+        };
+        let line = |artifact: &TestArtifact| {
+            running_line(
+                Path::new("/work/copy"),
+                Path::new("/work/copy/.supercov/cache/rust-target"),
+                artifact,
+                false,
+            )
+            .replace('\\', "/")
+        };
+        assert_eq!(
+            line(&artifact("/work/copy", "src/lib.rs", "unit")),
+            "     Running unittests src/lib.rs (target/debug/deps/shop-0123456789abcdef)"
+        );
+        assert_eq!(
+            line(&artifact(
+                "/work/copy/crates/shop",
+                "crates/shop/tests/outside.rs",
+                "integration"
+            )),
+            "     Running tests/outside.rs (target/debug/deps/shop-0123456789abcdef)"
+        );
+        // As Windows gives them: the package resolved, the workspace not.
+        let windows = running_line(
+            Path::new("C:\\work\\copy"),
+            Path::new("C:\\work\\copy\\target"),
+            &artifact(
+                "\\\\?\\C:\\work\\copy\\crates\\shop",
+                "crates/shop/src/lib.rs",
+                "unit",
+            ),
+            false,
+        )
+        .replace('\\', "/");
+        assert!(
+            windows.starts_with("     Running unittests src/lib.rs ("),
+            "{windows}"
+        );
+        assert!(
+            running_line(
+                Path::new("/work/copy"),
+                Path::new("/work/copy/.supercov/cache/rust-target"),
+                &artifact("/work/copy", "src/lib.rs", "unit"),
+                true,
+            )
+            .starts_with("\u{1b}[1m\u{1b}[92m     Running\u{1b}[0m unittests ")
+        );
+    }
 
     #[test]
     fn cargo_and_libtest_selection_is_preserved_without_presentation_guessing() {

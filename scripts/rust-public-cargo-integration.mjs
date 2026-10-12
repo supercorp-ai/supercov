@@ -67,16 +67,17 @@ function supercov(args, env = environment()) {
   });
 }
 
-// The runner's nextest contract is verified against 0.9.138, 0.9.140 and
-// 0.9.148. This leg used to skip when cargo-nextest was not on PATH, which is
+// Any nextest from 0.9.138 runs; the runner's contract is checked here under
+// 0.9.140 and 0.9.148. This leg used to skip when cargo-nextest was not on PATH, which is
 // how a runner that refused every nextest command passed this gate locally
 // while CI failed (1c8bf35). It runs under each of the releases below: the one
 // on PATH when it is that release, otherwise the published build, fetched
 // once into the temp directory. A platform with no published build runs the
 // release it has on PATH. The leg never skips.
 //
-// 0.9.148 was the current release when it was added, and Supercov refused it:
-// a project on today's nextest could not be measured at all.
+// 0.9.148 was the current release when it was added, and Supercov, which
+// then accepted only the releases named here, refused it: a project on that
+// day's nextest could not be measured at all.
 const NEXTEST_VERSIONS = ['0.9.140', '0.9.148'];
 async function nextestEnvironment(NEXTEST_VERSION) {
   const VERIFIED_NEXTEST = new RegExp(`cargo-nextest ${NEXTEST_VERSION.replaceAll('.', '\\.')}\\b`);
