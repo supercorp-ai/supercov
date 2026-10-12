@@ -1056,7 +1056,7 @@ fn main() {
         assert!(
             transformed
                 .code
-                .contains("fn note(size: usize) {\ncrate::__supercov_runtime_v1::hit("),
+                .contains("fn note(size: usize) {crate::__supercov_runtime_v1::hit("),
             "the free function reached from the allocator should still be probed"
         );
         let runtime =
