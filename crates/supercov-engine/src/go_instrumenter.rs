@@ -876,8 +876,10 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
 }
 
 /// The import rewritten source needs, placed straight after the package
-/// clause. Go rejects an unused import, so this is only added to a file that
-/// gained at least one probe.
+/// clause and on its line: a line of its own moved every line below it, and
+/// with it every line Go reports, `crypto.go:24` in a panic for line 23. Go
+/// rejects an unused import, so this is only added to a file that gained at
+/// least one probe.
 pub fn import_edit(source: &str, alias: &str, path: &str) -> Option<GoEdit> {
     let tree = parse(source).ok()?;
     let mut cursor = tree.root_node().walk();
@@ -888,7 +890,7 @@ pub fn import_edit(source: &str, alias: &str, path: &str) -> Option<GoEdit> {
     Some(GoEdit {
         at: package.end_byte(),
         rank: 0,
-        text: format!("\nimport {alias} \"{path}\""),
+        text: format!("; import {alias} \"{path}\""),
     })
 }
 

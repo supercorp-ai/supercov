@@ -2,8 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import * as native from "node:test";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
-import { callerLocation, runnerExecutionScope, runnerTestId, writeRunnerEvidence, } from "./runnerEvidence.mjs";
+import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, withStackRoom, } from "./runtime.mjs";
+import { callerLocation, runnerExecutionScope, runnerTestId, stackAsWritten, writeRunnerEvidence, } from "./runnerEvidence.mjs";
 function callbackIndex(args) {
     for (let index = args.length - 1; index >= 0; index -= 1)
         if (typeof args[index] === "function")
@@ -65,11 +65,7 @@ function restoreUserError(error, depth = 0) {
         : text;
     try {
         if (typeof error.stack === "string")
-            error.stack = remap(error.stack
-                .split("\n")
-                .filter((line) => !(line.trimStart().startsWith("at ") &&
-                line.includes("/.supercov/")))
-                .join("\n"));
+            error.stack = stackAsWritten(error.stack);
         if (typeof error.message === "string")
             error.message = remap(error.message);
     }
@@ -227,9 +223,9 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
                         finishBody();
                         done?.(error);
                     };
-                    return withCoverageCarrier({ version: 1, scope }, () => Reflect.apply(callback, callbackThis, [contextProxy, callbackDone]));
+                    return withStackRoom(() => withCoverageCarrier({ version: 1, scope }, () => Reflect.apply(callback, callbackThis, [contextProxy, callbackDone])));
                 }
-                const result = withCoverageCarrier({ version: 1, scope }, () => Reflect.apply(callback, callbackThis, [contextProxy]));
+                const result = withStackRoom(() => withCoverageCarrier({ version: 1, scope }, () => Reflect.apply(callback, callbackThis, [contextProxy])));
                 if (result && typeof result.then === "function")
                     return Promise.resolve(result).then((value) => {
                         finishBody();

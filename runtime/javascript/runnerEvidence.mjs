@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { appendEvidenceRecord } from "./atomic.mjs";
 import { inferTestProvenance } from "./provenance.mjs";
 import { serverEvidencePath } from "./transport.mjs";
@@ -132,4 +132,79 @@ export function writeRunnerEvidence(identity, status, scope, evidenceDirectoryOv
             : readScopedServerEvidence(scope),
     };
     appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), identity.runner.replace(/[^A-Za-z0-9_-]/g, "_"), payload);
+}
+
+// A failing test's stack as its author would have seen it, for the runners
+// that print a stack as it is (node:test, AVA).
+//
+// - A frame of Supercov's is one in a file of its own, straight under a
+//   `.supercov` directory or its `node_modules`. The copy lies under a
+//   `.supercov` directory too, and every frame in it was once dropped for
+//   that: a failing node:test test printed no frame of its own file.
+//   `AsyncLocalStorage.run` is Node's frame for running a test under
+//   Supercov, and goes with the frames around it.
+// - The test ran in the copy, and a frame of a test file named it there.
+// - Node names a module's file by its URL and a CommonJS file by its path.
+//   A rewritten file is named through its source map, by path either way:
+//   `at seal (/home/me/shop/src/crypto.js:3:11)` for `file:///home/…`.
+// - What is left is cut to the length the author's limit allows; the
+//   runtime made room for its own frames while they were on the stack.
+const OWN_FRAME = /[\\/]\.supercov[\\/](?:node_modules[\\/])?[^\\/:]+\.[cm]?js:\d+/u;
+const CARRIER_FRAME = /^\s*at AsyncLocalStorage\.run \(node:internal\//u;
+const FRAME_PATH = /^(\s*at (?:.*? \()?)((?:\/|[A-Za-z]:[\\/])[^()]*?)(:\d+:\d+\)?)$/u;
+const packageTypes = new Map();
+function loadedAsModule(file) {
+    if (/\.m[jt]sx?$/u.test(file))
+        return true;
+    if (/\.c[jt]sx?$/u.test(file))
+        return false;
+    const visited = [];
+    let directory = dirname(file);
+    let type;
+    for (;;) {
+        if (packageTypes.has(directory)) {
+            type = packageTypes.get(directory);
+            break;
+        }
+        visited.push(directory);
+        try {
+            type = JSON.parse(readFileSync(resolve(directory, "package.json"), "utf8")).type === "module";
+            break;
+        }
+        catch {
+            // No manifest here, or not one that parses: the next directory up.
+        }
+        const parent = dirname(directory);
+        if (parent === directory) {
+            type = false;
+            break;
+        }
+        directory = parent;
+    }
+    for (const seen of visited)
+        packageTypes.set(seen, type);
+    return type;
+}
+//
+// `whereItRan` leaves each file where the stack has it: for a printer that
+// takes its working directory off a frame itself, and would not know the
+// project's.
+export function stackAsWritten(stack, whereItRan = false) {
+    const copy = process.env["SUPERCOV_PROJECT_ROOT"];
+    const project = whereItRan ? undefined : process.env["SUPERCOV_SOURCE_PROJECT_ROOT"];
+    const placed = (text) => copy && project && copy !== project ? text.split(copy).join(project) : text;
+    const lines = stack.split("\n");
+    const own = lines.map((line) => /^\s*at /u.test(line) && OWN_FRAME.test(line));
+    const limit = Error.stackTraceLimit;
+    let frames = 0;
+    return lines
+        .filter((line, index) => !own[index] && !(CARRIER_FRAME.test(line) && (own[index - 1] || own[index + 1])))
+        .map((line) => {
+        const frame = FRAME_PATH.exec(placed(line));
+        if (!frame || !project || !isAbsolute(frame[2]) || !frame[2].startsWith(project + sep) || !loadedAsModule(frame[2]))
+            return placed(line);
+        return `${frame[1]}${pathToFileURL(frame[2]).href}${frame[3]}`;
+    })
+        .filter((line) => !/^\s*at /u.test(line) || typeof limit !== "number" || !Number.isFinite(limit) || ++frames <= limit)
+        .join("\n");
 }

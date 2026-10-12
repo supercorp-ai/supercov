@@ -14,6 +14,14 @@ import unittest.case
 RUNNER = "unittest"
 WORKER = "main"
 
+# unittest leaves its own frames out of a failure's traceback, and knows them
+# by this name in a module's globals. The wrappers below are on the way to
+# every test method and every assertion, so each failure printed
+# `File ".../supercov_unittest.py", line 67, in wrapper` and unittest's own
+# `_callTestMethod` above the test's line, and a failed assertion ended in the
+# wrapper where it ends at the test. pytest reads the same name for a TestCase.
+__unittest = True
+
 
 def _source_file(test):
     """Where the test method is defined.

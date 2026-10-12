@@ -815,13 +815,43 @@ module Supercov
           methods.each do |method_name|
             define_method(method_name) do |*args, **options, &block|
               runtime.assertion
-              super(*args, **options, &block)
+              begin
+                super(*args, **options, &block)
+              rescue Exception => error # rubocop:disable Lint/RescueException
+                runtime.without_own_frames(error)
+                raise
+              end
             end
           end
         end
         owner.prepend(hook)
         @assertion_hooks[name] = true
       end
+    end
+
+    # A failed assertion passes through the method hooked above, so its
+    # backtrace held a frame of this file between the library's and the
+    # test's. Minitest names a failure by the first frame that is not its
+    # own: `CryptoTest#test_compares [.supercov/…/supercov_runtime.rb:818]`
+    # for `[test/crypto_test.rb:15]`. The frame is taken out before anything
+    # reads the backtrace, with any other frame of the runtime's own
+    # directory. Ruby 3.4 keeps the locations when given them.
+    def without_own_frames(error)
+      own = "#{File.dirname(File.expand_path(__FILE__))}/"
+      locations = error.backtrace_locations
+      if locations && RUBY_VERSION >= "3.4"
+        # A method defined from text has a path and no absolute path.
+        kept = locations.reject { |location| (location.absolute_path || location.path).to_s.start_with?(own) }
+        error.set_backtrace(kept) if kept.size != locations.size
+        return
+      end
+      frames = error.backtrace
+      return if frames.nil?
+
+      kept = frames.reject { |frame| frame.start_with?(own) }
+      error.set_backtrace(kept) if kept.size != frames.size
+    rescue StandardError
+      nil
     end
 
     def child_environment

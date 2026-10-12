@@ -1484,6 +1484,37 @@ pub fn build_rust_manifest(
         .collect(&parsed.tree, &parsed.assertions, &parsed.matches)
 }
 
+/// Where the probe of a statement that starts at `offset` goes.
+///
+/// Rust reports a panic by line and column, `src/lib.rs:8:9`. A probe put
+/// straight before a statement moved it along its line, to `:8:84`, and one
+/// put on a line of its own moved every line below. A statement that begins
+/// its line has only blank space between it and the token before it, and
+/// anywhere in that space is the same place in the program: its probe goes
+/// to the far end, after that token, and the statement stays where it was
+/// written. One that shares its line with code before it has no such room,
+/// and its probe stays in front of it.
+fn before_its_line(root: &ra_ap_syntax::SyntaxNode, source: &str, offset: usize) -> usize {
+    let line = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+    if line == 0 || !source[line..offset].chars().all(char::is_whitespace) {
+        return offset;
+    }
+    let Ok(at) = u32::try_from(offset) else {
+        return offset;
+    };
+    let mut before = root
+        .token_at_offset(ra_ap_syntax::TextSize::from(at))
+        .right_biased()
+        .and_then(|token| token.prev_token());
+    while let Some(token) = &before {
+        if !token.kind().is_trivia() {
+            return usize::from(token.text_range().end());
+        }
+        before = token.prev_token();
+    }
+    offset
+}
+
 fn block_entry_offset(block: &ast::BlockExpr) -> Option<usize> {
     let list = block.stmt_list()?;
     list.attrs()
@@ -1942,7 +1973,7 @@ pub fn instrument_rust_file(
         if !has_attrs {
             push_direct(
                 insertions,
-                usize::from(range.start()),
+                before_its_line(root, source, usize::from(range.start())),
                 format!("{runtime_path}::hit({id:?});"),
             );
             return;
@@ -1954,11 +1985,7 @@ pub fn instrument_rust_file(
         if let ast::Expr::BlockExpr(block) = &expression
             && let Some(offset) = block_entry_offset(block)
         {
-            push_direct(
-                insertions,
-                offset,
-                format!("\n{runtime_path}::hit({id:?});"),
-            );
+            push_direct(insertions, offset, format!("{runtime_path}::hit({id:?});"));
             return;
         }
         // A brace-delimited macro call closing a block without a semicolon
@@ -2148,7 +2175,7 @@ pub fn instrument_rust_file(
             push_direct(
                 &mut insertions,
                 offset,
-                format!("\n{runtime_path}::hit({id:?});"),
+                format!("{runtime_path}::hit({id:?});"),
             );
         }
     }
@@ -2166,7 +2193,7 @@ pub fn instrument_rust_file(
                 push_direct(
                     &mut insertions,
                     offset,
-                    format!("\n{runtime_path}::hit({id:?});"),
+                    format!("{runtime_path}::hit({id:?});"),
                 );
             }
         } else {
@@ -2650,6 +2677,78 @@ mod __supercov_runtime_v1 {
         let output = Command::new(&binary).output().unwrap();
         fs::remove_dir_all(directory).unwrap();
         output
+    }
+
+    #[test]
+    fn a_panic_is_reported_where_its_author_wrote_it() {
+        // Rust reports a panic by line and column. The probe at a function's
+        // start took a line of its own, so every line after the first
+        // function was one further down for each function above it, and the
+        // probe before a statement moved it along its line: `src/lib.rs:8:9`
+        // read `9:84`. A program's panics are where they were.
+        let source = r#"fn check(key: &str) -> usize {
+    if key.len() < 4 {
+        panic!("key too short");
+    }
+    key.len()
+}
+
+fn later(values: &[usize]) -> usize {
+    let first = values[0];
+    let total: usize = values.iter().sum();
+    assert!(total > first, "nothing but the first");
+    total
+}
+
+fn main() {
+    let mode = std::env::args().nth(1).unwrap_or_default();
+    if mode == "later" {
+        later(&[3]);
+    }
+    let closure = |key: &str| {
+        check(key)
+    };
+    closure("ab");
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert_eq!(
+            transformed.code.lines().count(),
+            source.lines().count(),
+            "{}",
+            transformed.code
+        );
+        // Every line of the program still holds what it held, where it was.
+        for (number, (written, rewritten)) in
+            source.lines().zip(transformed.code.lines()).enumerate()
+        {
+            let code = written.trim_start();
+            // Where the statement begins: its first word.
+            let word = code.split(['(', ' ']).next().unwrap_or(code);
+            if matches!(word, "panic!" | "assert!" | "let") {
+                assert_eq!(
+                    rewritten.find(word),
+                    written.find(word),
+                    "line {}: {rewritten}",
+                    number + 1
+                );
+            }
+        }
+        let location = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .find(|line| line.contains("panicked at"))
+                .map(|line| line[line.find("main.rs").unwrap()..].to_owned())
+                .expect("a panic")
+        };
+        let original = compile_and_run(source, "panic-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "panic-instrumented",
+        );
+        assert_eq!(location(&original), "main.rs:3:9:");
+        assert_eq!(location(&instrumented), location(&original));
     }
 
     #[test]
@@ -3726,10 +3825,9 @@ fn main() {
         assert!(
             transformed
                 .code
-                .contains("{\n\ncrate::__supercov_runtime_v1::hit(")
-                || transformed
-                    .code
-                    .contains("{\ncrate::__supercov_runtime_v1::hit(")
+                .contains("{crate::__supercov_runtime_v1::hit("),
+            "{}",
+            transformed.code
         );
 
         // An attributed `let` takes the probe inside its initializer, an

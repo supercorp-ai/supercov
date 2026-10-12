@@ -51,10 +51,12 @@ use crate::{
 
 /// Where the runtime package lands inside the workspace.
 ///
-/// A plain directory rather than something hidden: the Go tool ignores any
-/// directory whose name begins with `.` or `_`, so a runtime placed out of
-/// sight would also be out of the build.
-const RUNTIME_DIRECTORY: &str = "supercov_runtime";
+/// A directory whose name begins with `_`: the Go tool leaves those out of
+/// `./...` and builds them when a file imports one, which every rewritten
+/// file does. Under a plain name the package was listed with the project's
+/// own in every run, `?  example.com/shop/supercov_runtime  [no test files]`.
+/// Go 1.22 to 1.27 import it alike.
+const RUNTIME_DIRECTORY: &str = "_supercov_runtime";
 
 const RUNTIME_SOURCE: &str = include_str!("../runtime-assets/go/supercov/supercov.go");
 
@@ -174,6 +176,46 @@ fn read(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// A copy's file under the name Go is to report it by: the project's own.
+///
+/// Go puts a file's path, as the compiler read it, into every stack trace,
+/// so a panic under Supercov named the copy: `…/.supercov/workspaces/
+/// workspace/shop/crypto.go:24`. A line directive is how Go is told that a
+/// file stands for another. It is the comment form, in front of the package
+/// clause on the clause's own line and naming that line, so the file gains
+/// no line: what reads the file as it lies, a coverage profile, counts the
+/// same lines as what reads it through the directive, a stack trace. The
+/// rewriting adds no line of its own either.
+fn named_for_the_project(project: &Path, relative: &str, text: &str) -> String {
+    let Ok(tree) = crate::go_instrumenter::parse(text) else {
+        return text.to_owned();
+    };
+    let mut cursor = tree.root_node().walk();
+    let Some(package) = tree
+        .root_node()
+        .children(&mut cursor)
+        .find(|child| child.kind() == "package_clause")
+    else {
+        return text.to_owned();
+    };
+    let at = package.start_byte();
+    let line = text[..at].rfind('\n').map_or(0, |end| end + 1);
+    if text[line..at].starts_with(LINE_DIRECTIVE) {
+        return text.to_owned();
+    }
+    let position = package.start_position();
+    format!(
+        "{}{LINE_DIRECTIVE}{}:{}:{}*/{}",
+        &text[..at],
+        project.join(relative).display(),
+        position.row + 1,
+        position.column + 1,
+        &text[at..]
+    )
+}
+
+const LINE_DIRECTIVE: &str = "/*line ";
+
 fn write(path: &Path, contents: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
@@ -194,6 +236,7 @@ fn evidence_name(directory: &str) -> String {
 /// Rewrite the workspace in place: instrumented sources, the runtime package
 /// they import, a probe array per package, and a harness per test package.
 fn instrument_workspace(
+    project_root: &Path,
     workspace: &Path,
     evidence_directory: &Path,
     serialised: bool,
@@ -258,7 +301,10 @@ fn instrument_workspace(
                 .entry(directory_of(relative))
                 .or_insert(name);
         }
-        write(&path, &instrumented)?;
+        write(
+            &path,
+            &named_for_the_project(project_root, relative, &instrumented),
+        )?;
     }
     for (directory, package) in &source_packages {
         write(
@@ -338,12 +384,15 @@ fn instrument_workspace(
                 declared_in.insert(test.clone(), relative.clone());
             }
             unattributed.extend(file.unattributed.iter().cloned());
-            if !file.edits.is_empty() {
-                write(
-                    &path,
+            // Written also when nothing in it changed, for its name.
+            write(
+                &path,
+                &named_for_the_project(
+                    project_root,
+                    relative,
                     &rewrite(&source, &file.edits).replace(RUNTIME_IMPORT, import_for(relative)),
-                )?;
-            }
+                ),
+            )?;
         }
         let Some(package) = harness_package else {
             continue;
@@ -551,8 +600,13 @@ pub fn run_direct_go(
             &root, &workspace, &ambient,
         )
         .map_err(|error| error.to_string())?;
-        let instrumented =
-            instrument_workspace(&workspace, &evidence_directory, serialised, roots.as_ref())?;
+        let instrumented = instrument_workspace(
+            &root,
+            &workspace,
+            &evidence_directory,
+            serialised,
+            roots.as_ref(),
+        )?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
         writeln!(
@@ -636,9 +690,36 @@ pub fn run_direct_go(
             },
         };
         let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
+        // What is in the copy now is Supercov's; what the command adds to
+        // it or changes is the command's, and belongs in the project.
+        let before = crate::workspace::workspace_output_baseline(&workspace)
+            .map_err(|error| error.to_string())?;
         let execution = execute_plan(&plan, options, diagnostics, |_, _| Ok(()))
             .map_err(|error| error.to_string())?;
         let test_command_ms = elapsed_ms(test_started);
+        // `go test -coverprofile=cover.out` left no `cover.out` in the
+        // project, a golden file a test rewrote stayed in the copy, and a
+        // step after the tests that reads either found the old one or none.
+        // Every Go file in the copy is rewritten and stays there.
+        let rewritten = instrumented
+            .project
+            .files
+            .sources
+            .iter()
+            .chain(&instrumented.project.files.tests)
+            .map(PathBuf::from)
+            .collect::<BTreeSet<_>>();
+        let outputs = crate::workspace::sync_outputs_of(
+            crate::workspace::CommandOutputs::Go,
+            &root,
+            &workspace,
+            &before,
+            &rewritten,
+        )
+        .map_err(|error| error.to_string())?;
+        for line in crate::workspace::describe_command_outputs(&outputs) {
+            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+        }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
                 "the test command was interrupted by {signal:?}; no run was published"

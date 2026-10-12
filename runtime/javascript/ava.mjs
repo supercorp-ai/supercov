@@ -11,7 +11,7 @@ import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
-import { runnerExecutionScope, writeRunnerEvidence } from "./runnerEvidence.mjs";
+import { runnerExecutionScope, stackAsWritten, writeRunnerEvidence } from "./runnerEvidence.mjs";
 
 // The installed ava package the entrypoint belongs to.
 function avaRoot(entrypoint) {
@@ -24,6 +24,24 @@ function avaRoot(entrypoint) {
     }
     const at = real.lastIndexOf("/node_modules/ava/");
     return at < 0 ? undefined : real.slice(0, at + "/node_modules/ava".length);
+}
+
+function asWritten(failure, depth = 0) {
+    if (!failure || typeof failure !== "object" || depth > 4)
+        return;
+    try {
+        // AVA prints the stack of an error a test threw as it is, and
+        // shortens a failed assertion's by its own working directory, which
+        // is the copy. A thrown error reaches here as an assertion's cause.
+        const shortened = failure.type === "ava" && !(failure.originalError?.cause instanceof Error);
+        if (typeof failure.stack === "string")
+            failure.stack = stackAsWritten(failure.stack, shortened);
+        for (const inner of Array.isArray(failure.errors) ? failure.errors : [])
+            asWritten(inner, depth + 1);
+    }
+    catch {
+        // A stack that cannot be written is printed as it is.
+    }
 }
 
 export async function adaptAva(entrypoint) {
@@ -66,6 +84,20 @@ export async function adaptAva(entrypoint) {
         });
     };
     Runner.prototype.runTest.supercovAva = true;
+    // AVA prints a failure's stack as it is. The test ran in the copy, so a
+    // frame of the test file named it there, and a frame of a rewritten
+    // module was named by its path where Node names a module by its URL:
+    // `at seal (/home/me/shop/src/crypto.js:3:11)` over
+    // `at file:///home/me/shop/.supercov/workspaces/…/test/crypto.test.js:5:18`.
+    // A failure is told to the reporter as a state change; its stack is put
+    // right on the way.
+    const emit = Runner.prototype.emit;
+    if (typeof emit === "function")
+        Runner.prototype.emit = function supercovAvaEmit(name, data, ...rest) {
+            if (name === "stateChange" && data?.err)
+                asWritten(data.err);
+            return Reflect.apply(emit, this, [name, data, ...rest]);
+        };
     // A skipped or todo test never reaches runTest; AVA announces it.
     const start = Runner.prototype.start;
     if (typeof start === "function")

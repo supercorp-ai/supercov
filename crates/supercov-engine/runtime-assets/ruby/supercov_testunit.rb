@@ -8,13 +8,6 @@ module Supercov
     RUNNER = "test-unit"
 
     module TestCaseHooks
-      def run(*args, &block)
-        Supercov::TestUnitAdapter.start(self)
-        super
-      ensure
-        Supercov::TestUnitAdapter.finish(self)
-      end
-
       def run_setup(&block)
         Supercov::TestUnitAdapter.enter(self, "setup")
         super
@@ -32,6 +25,17 @@ module Supercov
 
       def run_teardown
         Supercov::TestUnitAdapter.enter(self, "teardown")
+        super
+      end
+
+      private
+
+      # The hooks above are on the way to every test, so an error's backtrace
+      # ended in three frames of this file, `…#run_test`, `…#run_setup` and
+      # `…#run`, printed under the test's own. test-unit leaves out its own
+      # frames by where they lie; these are taken out before it reads them.
+      def handle_exception(exception)
+        Supercov::TestUnitAdapter.without_own_frames(exception)
         super
       end
     end
@@ -61,6 +65,10 @@ module Supercov
     @runtime = nil
     @state = {}
 
+    def self.without_own_frames(exception)
+      @runtime&.without_own_frames(exception)
+    end
+
     def self.install(runtime)
       return if @runtime
 
@@ -69,6 +77,23 @@ module Supercov
       # the result hooks off, so no failure was ever noted, and declared a
       # blocking limitation on every run.
       require "test/unit/testresult"
+      # `run` is given the parameters test-unit's own has. test-unit tells a
+      # `run` overridden by a script written for an older release by them
+      # (its arity up to 3.6, its first parameter's name from 3.7), and under
+      # `run(*args)` every test went down the path kept for those scripts,
+      # without its runner class or worker.
+      written = ::Test::Unit::TestCase.instance_method(:run).parameters
+      names = written.select { |kind, _| kind == :req }.map { |_, name| name.to_s }
+      names << "*rest" if written.any? { |kind, _| %i[opt rest].include?(kind) }
+      names << "**options" if written.any? { |kind, _| %i[key keyreq keyrest].include?(kind) }
+      TestCaseHooks.module_eval(<<~RUBY, __FILE__, __LINE__ + 1)
+        def run(#{[*names, "&block"].join(", ")})
+          Supercov::TestUnitAdapter.start(self)
+          super
+        ensure
+          Supercov::TestUnitAdapter.finish(self)
+        end
+      RUBY
       ::Test::Unit::TestResult.prepend(ResultHooks)
       ::Test::Unit::TestCase.prepend(TestCaseHooks)
       @runtime = runtime
