@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -58,6 +59,21 @@ if (!frame)
 // The caret sits under the matcher, as Playwright puts it without Supercov.
 if (frame[2].length - 1 !== frame[1].indexOf("toBe"))
   throw new Error(`the code frame's caret is not under the matcher:\n${frame[1]}\n${frame[2]}`);
+// That frame depends on a source map Playwright keeps beside the code it
+// compiled, and reads without checking it is there. In the system's
+// temporary directory macOS removed the maps three days after they were
+// written and left the code, and this very check failed with every line of
+// the suite reported at the compiled code's. The copy's compiled files are
+// kept with the copy, each with its map.
+const compiled = resolve("tests/fixtures/generic-playwright/.supercov/workspaces/caches/playwright-transform");
+const kept = readdirSync(compiled, { recursive: true }).map(String);
+// Playwright 1.55 names an entry `appspec_<hash>`, 1.62 `<hash>_appspec`.
+const specs = kept.filter((name) => /(?:^|[\\/_])appspec[_.][^\\/]*$/.test(name) && name.endsWith(".js"));
+if (specs.length === 0)
+  throw new Error(`Playwright compiled no test file into ${compiled}:\n${kept.join("\n")}`);
+for (const code of specs)
+  if (!kept.includes(code.replace(/\.js$/, ".map")))
+    throw new Error(`${code} was kept without its source map`);
 if (printed.includes("__supercov"))
   throw new Error("a printed code frame shows Supercov's instrumented copy");
 for (const script of [

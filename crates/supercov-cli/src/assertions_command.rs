@@ -19,7 +19,7 @@ use supercov_engine::{
     source_manifest as maps,
 };
 
-const HELP: &str = r#"Usage: supercov runs <run> assertions [<file> | <file>:<line> | --test <name>] [--offset N] [--limit N | --all] [--json]
+const HELP: &str = r#"Usage: supercov runs <run> assertions [<file> | <file>:<line> | --test <name>] [--weak] [--offset N] [--limit N | --all] [--json]
        supercov runs <run> assertions assess [--changed] [--refresh] [--dry-run] [--workers N] [--json]
 
 How much of the executed code the tests assert: a statement counts as asserted
@@ -47,9 +47,13 @@ Reading the saved result goes from the run down, a page at a time:
                             answer
   assertions --test <name>  the statements one test was asked about, and which
                             of them it was judged to catch
+  assertions --weak         the files by how many of their statements are
+                            asserted on the strength of an answer under 75%,
+                            where a verdict is wrong more often; with a file,
+                            those statements, the least certain first
 
 --offset N    Start the listing at its Nth entry (default 0).
---limit N     List N entries (default 20).
+--limit N     List N entries (default 20); 0 lists every entry.
 --all         List every entry.
 --changed     (assess) Only the statements in code changed since the run,
               asked of every test that ran them rather than until one
@@ -149,6 +153,24 @@ enum Target {
     File(String),
     Line(String, u64),
     Test(String),
+    /// The overview, by statements asserted on a weak answer.
+    Weak,
+    /// One file's statements asserted on a weak answer.
+    WeakFile(String),
+}
+
+/// An asserted verdict rests on its strongest answer, and how strong that is
+/// says how far to trust it. Checked by applying each change and running the
+/// tests, an asserted verdict was wrong 22 times in 1,169 on an answer of
+/// 0.75 or more and 33 times in 711 under it. A label, not a rule: raising
+/// the bar for "asserted" to here was measured and made the verdicts worse.
+const WEAK_ANSWER: f64 = 0.75;
+
+fn weakly_asserted(statement: &Value) -> bool {
+    statement["asserted"] == true
+        && statement["answer"]
+            .as_f64()
+            .is_some_and(|p| p < WEAK_ANSWER)
 }
 
 /// Entries a listing shows unless told otherwise, as the other `runs`
@@ -252,6 +274,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         workers: 24,
     };
     let mut i = 0;
+    let mut weak = false;
     if args.first().is_some_and(|a| a == "assess") {
         o.assess = true;
         i = 1;
@@ -295,24 +318,46 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--refresh" => o.refresh = true,
             "--changed" => o.changed = true,
             "--json" => o.json = true,
+            "--weak" if o.assess => {
+                return Err(
+                    "--weak reads a saved result: `assertions --weak` after the assessment".into(),
+                );
+            }
+            "--weak" => weak = true,
             "--all" => o.limit = None,
-            "--limit" | "--workers" => {
-                let flag = args[i].clone();
-                let value = args
+            // `--limit 0` is every row, as `quality` and `security` spell it;
+            // it was refused here, where the same thing was `--all` alone.
+            "--limit" => {
+                let rows = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .ok_or("--limit needs a number of rows, or 0 for all of them")?;
+                o.limit = (rows > 0).then_some(rows);
+                i += 1;
+            }
+            "--workers" => {
+                o.workers = args
                     .get(i + 1)
                     .and_then(|v| v.parse::<usize>().ok())
                     .filter(|v| *v > 0)
-                    .ok_or_else(|| format!("{flag} needs a positive number"))?;
-                if flag == "--limit" {
-                    o.limit = Some(value)
-                } else {
-                    o.workers = value.min(64)
-                }
+                    .ok_or("--workers needs a positive number")?
+                    .min(64);
                 i += 1;
             }
             other => return Err(format!("Unknown option: {other}")),
         }
         i += 1;
+    }
+    if weak {
+        o.target = match o.target {
+            Target::Overview => Target::Weak,
+            Target::File(file) => Target::WeakFile(file),
+            _ => {
+                return Err(
+                    "--weak lists a run's or a file's statements; give a file or nothing".into(),
+                );
+            }
+        };
     }
     Ok(o)
 }
@@ -982,10 +1027,32 @@ fn summary(
         .enumerate()
         .map(|(s, st)| {
             let best = pass.answers[s].iter().cloned().fold(None, |m: Option<(usize, f64)>, a| match m { Some(m) if m.1 >= a.1 => Some(m), _ => Some(a) });
+            // For a statement no asked test catches: how many tests that run
+            // it were not asked, and the test files none was asked from.
+            let not_asked = (!pass.asserted(s) && pass.answers[s].len() < st.tests.len()).then(|| {
+                let asked = pass.answers[s].iter().map(|(t, _)| *t).collect::<BTreeSet<_>>();
+                let mut files = BTreeMap::<&str, (usize, usize)>::new();
+                for t in &st.tests {
+                    let entry = files.entry(population.tests[*t].file.as_str()).or_default();
+                    entry.0 += 1;
+                    entry.1 += usize::from(asked.contains(t));
+                }
+                let mut untouched = files
+                    .iter()
+                    .filter(|(_, (_, asked))| *asked == 0)
+                    .map(|(file, (tests, _))| (*tests, *file))
+                    .collect::<Vec<_>>();
+                untouched.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+                json!({
+                    "tests": st.tests.len() - asked.len(),
+                    "files": untouched.iter().map(|(tests, file)| json!({"file": file, "tests": tests})).collect::<Vec<_>>(),
+                })
+            });
             json!({
                 "file": st.file, "line": st.line, "text": st.text.lines().next().unwrap_or("").trim(),
                 "change": change_name(st.change, population.language), "replacement": st.replacement,
                 "asserted": pass.asserted(s),
+                "notAsked": not_asked,
                 "answer": best.map(|b| b.1),
                 "test": best.map(|(t, _)| json!({"file": population.tests[t].file, "name": population.tests[t].name})),
                 "testsAsked": pass.answers[s].len(), "testsRunningIt": st.tests.len(),
@@ -1182,38 +1249,85 @@ fn view(
         .ok_or("the saved assessment is not a JSON object")?;
     data.remove("statements");
     match target {
-        Target::Overview => {
-            let mut files = BTreeMap::<String, (u64, u64)>::new();
+        Target::Overview | Target::Weak => {
+            let by_weak = *target == Target::Weak;
+            let mut files = BTreeMap::<String, (u64, u64, u64)>::new();
             for statement in &all {
                 let entry = files
                     .entry(statement["file"].as_str().unwrap_or("").to_owned())
                     .or_default();
                 entry.0 += 1;
                 entry.1 += u64::from(statement["asserted"] == true);
+                entry.2 += u64::from(weakly_asserted(statement));
             }
+            let weak: u64 = files.values().map(|counts| counts.2).sum();
             let mut rows = files
                 .into_iter()
-                .map(|(file, (total, asserted))| {
+                .filter(|(_, counts)| !by_weak || counts.2 > 0)
+                .map(|(file, (total, asserted, weak))| {
                     json!({
                         "file": file,
                         "statements": total,
                         "asserted": asserted,
                         "notAsserted": total - asserted,
+                        "weaklyAsserted": weak,
                         "percentage": percentage(asserted, total),
                     })
                 })
                 .collect::<Vec<_>>();
+            let first = if by_weak {
+                "weaklyAsserted"
+            } else {
+                "notAsserted"
+            };
             rows.sort_by(|a, b| {
-                b["notAsserted"]
+                b[first]
                     .as_u64()
-                    .cmp(&a["notAsserted"].as_u64())
+                    .cmp(&a[first].as_u64())
                     .then_with(|| a["file"].as_str().cmp(&b["file"].as_str()))
             });
             let total = rows.len();
             let shown = window(rows, offset, limit);
-            data.insert("view".into(), json!("files"));
+            // Counted when read, so a result saved before the count existed has it.
+            if let Some(summary) = data.get_mut("summary").and_then(Value::as_object_mut) {
+                summary.insert("weaklyAsserted".into(), json!(weak));
+            }
+            data.insert("weakAnswerUnder".into(), json!(WEAK_ANSWER));
+            data.insert("view".into(), json!(if by_weak { "weak" } else { "files" }));
             data.insert("page".into(), page(offset, limit, shown.len(), total));
             data.insert("files".into(), json!(shown));
+        }
+        Target::WeakFile(file) => {
+            let mut weak = all
+                .iter()
+                .filter(|statement| statement["file"] == file.as_str())
+                .filter(|statement| weakly_asserted(statement))
+                .map(slim)
+                .collect::<Vec<_>>();
+            if !all
+                .iter()
+                .any(|statement| statement["file"] == file.as_str())
+            {
+                return Err(format!(
+                    "no assessed statement in {file}; `{} runs {run} assertions` lists the assessed files",
+                    crate::launcher_command()
+                ));
+            }
+            // The least certain first: where a check is most likely to pay.
+            weak.sort_by(|a, b| {
+                a["answer"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    .total_cmp(&b["answer"].as_f64().unwrap_or(0.0))
+                    .then_with(|| a["line"].as_u64().cmp(&b["line"].as_u64()))
+            });
+            let total = weak.len();
+            let shown = window(weak, offset, limit);
+            data.insert("weakAnswerUnder".into(), json!(WEAK_ANSWER));
+            data.insert("view".into(), json!("weakFile"));
+            data.insert("file".into(), json!(file));
+            data.insert("page".into(), page(offset, limit, shown.len(), total));
+            data.insert("weaklyAsserted".into(), json!(shown));
         }
         Target::File(file) => {
             let here = all
@@ -1227,6 +1341,7 @@ fn view(
                 ));
             }
             let asserted = here.iter().filter(|s| s["asserted"] == true).count() as u64;
+            let weak = here.iter().filter(|s| weakly_asserted(s)).count();
             let mut not = here
                 .iter()
                 .filter(|s| s["asserted"] == false)
@@ -1243,9 +1358,11 @@ fn view(
                     "statements": here.len(),
                     "asserted": asserted,
                     "notAsserted": here.len() as u64 - asserted,
+                    "weaklyAsserted": weak,
                     "percentage": percentage(asserted, here.len() as u64),
                 }),
             );
+            data.insert("weakAnswerUnder".into(), json!(WEAK_ANSWER));
             data.insert("page".into(), page(offset, limit, shown.len(), total));
             data.insert("notAsserted".into(), json!(shown));
         }
@@ -1467,6 +1584,8 @@ fn render(data: &Value) -> String {
     let run = data["run"].as_str().unwrap_or("");
     let mut out = match data["view"].as_str() {
         Some("file") => render_file(run, data),
+        Some("weak") => render_weak(run, data),
+        Some("weakFile") => render_weak_file(run, data),
         Some("statement") => render_statement(run, data),
         Some("test") => render_test(run, data),
         _ => render_files(run, data),
@@ -1523,6 +1642,14 @@ fn render_files(run: &str, data: &Value) -> String {
         s["asserted"],
         s["statements"]
     );
+    out.push_str(&weak_line(
+        &s["weaklyAsserted"],
+        &format!(
+            "{} runs {} assertions --weak",
+            crate::launcher_command(),
+            quote(run)
+        ),
+    ));
     let files = data["files"].as_array().cloned().unwrap_or_default();
     if files.is_empty() {
         return out;
@@ -1557,6 +1684,106 @@ fn render_files(run: &str, data: &Value) -> String {
     out
 }
 
+/// How many asserted verdicts rest on a weak answer, and where to read them.
+/// "98.7% asserted" reads as a measurement; a third of it can be one test's
+/// answer a little over even.
+fn weak_line(count: &Value, command: &str) -> String {
+    match count.as_u64() {
+        Some(n) if n > 0 => format!(
+            "{n} of the asserted rest on an answer under {:.0}%, where a verdict is wrong more often: `{command}`\n",
+            WEAK_ANSWER * 100.0
+        ),
+        _ => String::new(),
+    }
+}
+
+fn render_weak(run: &str, data: &Value) -> String {
+    let s = &data["summary"];
+    let mut out = format!(
+        "Run {run}: {} of {} asserted statements rest on an answer under {:.0}%\n",
+        s["weaklyAsserted"],
+        s["asserted"],
+        WEAK_ANSWER * 100.0
+    );
+    let files = data["files"].as_array().cloned().unwrap_or_default();
+    if files.is_empty() {
+        return out;
+    }
+    out.push_str("\nAn asserted statement is one some test was judged to catch; the judgment is the test's strongest answer. Checked by applying each change, a verdict on an answer under 75% was wrong about 1 time in 20, and one on a stronger answer about 1 in 50. Files, most such statements first:\n  WEAK  ASSERTED  FILE\n");
+    for file in &files {
+        out.push_str(&format!(
+            " {:>5}  {:>8}  {}\n",
+            file["weaklyAsserted"].as_u64().unwrap_or(0),
+            file["asserted"].as_u64().unwrap_or(0),
+            file["file"].as_str().unwrap_or("")
+        ));
+    }
+    out.push_str(&page_footer(
+        data,
+        &format!(
+            "{} runs {} assertions --weak",
+            crate::launcher_command(),
+            quote(run)
+        ),
+    ));
+    if let Some(first) = files.first() {
+        out.push_str(&format!(
+            "inspect a file: {} runs {} assertions {} --weak\n",
+            crate::launcher_command(),
+            quote(run),
+            quote(first["file"].as_str().unwrap_or(""))
+        ));
+    }
+    out
+}
+
+fn render_weak_file(run: &str, data: &Value) -> String {
+    let file = data["file"].as_str().unwrap_or("");
+    let weak = data["weaklyAsserted"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut out = format!(
+        "Run {run}: {file}: {} asserted statement(s) rest on an answer under {:.0}%\n",
+        data["page"]["total"],
+        WEAK_ANSWER * 100.0
+    );
+    if weak.is_empty() {
+        return out;
+    }
+    out.push_str("\nThe least certain first. Each was settled by the test named, at the answer shown; the tests not asked were not judged.\n  LINE  STATEMENT  (change)  answer  tests asked  test\n");
+    for st in &weak {
+        out.push_str(&format!(
+            " {:>5}  {}  ({})  {:.0}%  {} of {}  {}\n",
+            st["line"].as_u64().unwrap_or(0),
+            st["text"].as_str().unwrap_or(""),
+            st["change"].as_str().unwrap_or(""),
+            st["answer"].as_f64().unwrap_or(0.0) * 100.0,
+            st["testsAsked"],
+            st["testsRunningIt"],
+            st["test"]["name"].as_str().unwrap_or("")
+        ));
+    }
+    out.push_str(&page_footer(
+        data,
+        &format!(
+            "{} runs {} assertions {} --weak",
+            crate::launcher_command(),
+            quote(run),
+            quote(file)
+        ),
+    ));
+    if let Some(first) = weak.first() {
+        out.push_str(&format!(
+            "inspect a statement: {} runs {} assertions {}\n",
+            crate::launcher_command(),
+            quote(run),
+            quote(&format!("{file}:{}", first["line"]))
+        ));
+    }
+    out
+}
+
 fn render_file(run: &str, data: &Value) -> String {
     let file = data["file"].as_str().unwrap_or("");
     let s = &data["fileSummary"];
@@ -1567,10 +1794,21 @@ fn render_file(run: &str, data: &Value) -> String {
         s["statements"]
     );
     let not = data["notAsserted"].as_array().cloned().unwrap_or_default();
+    let weak = weak_line(
+        &s["weaklyAsserted"],
+        &format!(
+            "{} runs {} assertions {} --weak",
+            crate::launcher_command(),
+            quote(run),
+            quote(file)
+        ),
+    );
     if s["notAsserted"].as_u64() == Some(0) {
         out.push_str("Every statement this file ran is asserted.\n");
+        out.push_str(&weak);
         return out;
     }
+    out.push_str(&weak);
     out.push_str(&format!("\nNot asserted: none of the tests asked was judged to fail if they changed. Up to {MAX_TESTS} of the tests that run a statement are asked; one never asked can still catch it.\n  LINE  STATEMENT  (change)  tests asked  closest test\n"));
     for st in &not {
         let closest = st["test"]["name"]
@@ -1656,6 +1894,31 @@ fn render_statement(run: &str, data: &Value) -> String {
                 },
                 answer["name"].as_str().unwrap_or(""),
                 answer["file"].as_str().unwrap_or("")
+            ));
+        }
+        // Where a test that catches it may already be: the files none of
+        // whose tests were asked, before anyone writes one that exists.
+        let untouched = st["notAsked"]["files"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !untouched.is_empty() {
+            const NAMED: usize = 5;
+            let named = untouched
+                .iter()
+                .take(NAMED)
+                .map(|f| format!("{} ({})", f["file"].as_str().unwrap_or(""), f["tests"]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "    Not asked: {} test(s). No test was asked from {} file(s) that run it: {named}{}\n",
+                st["notAsked"]["tests"],
+                untouched.len(),
+                if untouched.len() > NAMED {
+                    format!(", and {} more", untouched.len() - NAMED)
+                } else {
+                    String::new()
+                }
             ));
         }
     }
@@ -1759,5 +2022,107 @@ mod tests {
         assert_eq!(test["statements"][0]["catches"], true);
         assert!(view(result.clone(), &Target::File("c.js".into()), 0, None).is_err());
         assert!(view(result, &Target::Test("o".into()), 0, None).is_err());
+    }
+
+    /// From a real assessment: 98.7% asserted, and twelve of the asserted
+    /// were noticed by no test when the change was made. Each had been
+    /// settled by one to three tests on an answer between 0.51 and 0.77.
+    #[test]
+    fn asserted_on_a_weak_answer_is_counted_and_listed_least_certain_first() {
+        let statement = |file: &str, line: u64, asserted: bool, answer: f64| json!({"file": file, "line": line, "text": "x;", "change": "skipped", "asserted": asserted, "answer": answer, "testsAsked": 1, "testsRunningIt": 17, "test": {"file": "t.js", "name": "one"}, "answers": [{"file": "t.js", "name": "one", "p": answer}]});
+        let result = json!({"run": "run_x", "summary": {"asserted": 5, "statements": 6, "percentage": 83.3}, "statements": [
+            statement("peer.js", 90, true, 0.69),
+            statement("peer.js", 433, true, 0.51),
+            statement("peer.js", 12, true, 0.93),
+            statement("peer.js", 13, false, 0.31),
+            statement("catalog.js", 116, true, 0.53),
+            statement("solid.js", 1, true, 0.75),
+        ]});
+        // The overview says how much of the share is a weak answer.
+        let files = view(result.clone(), &Target::Overview, 0, Some(PAGE)).unwrap();
+        assert_eq!(files["summary"]["weaklyAsserted"], 3);
+        let text = render(&files);
+        assert!(text.contains("3 of the asserted rest on an answer under 75%, where a verdict is wrong more often: `supercov runs 'run_x' assertions --weak`"), "{text}");
+        // By file, most first, and only the files that have any.
+        let weak = view(result.clone(), &Target::Weak, 0, Some(PAGE)).unwrap();
+        let listed = weak["files"].as_array().unwrap();
+        assert_eq!(listed.len(), 2, "{weak}");
+        assert_eq!(listed[0]["file"], "peer.js");
+        assert_eq!(listed[0]["weaklyAsserted"], 2);
+        assert!(
+            render(&weak).contains("     2         3  peer.js"),
+            "{}",
+            render(&weak)
+        );
+        // One file's, the least certain first, without the answers.
+        let file = view(
+            result.clone(),
+            &Target::WeakFile("peer.js".into()),
+            0,
+            Some(PAGE),
+        )
+        .unwrap();
+        let lines = file["weaklyAsserted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["line"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(lines, [433, 90]);
+        assert!(file["weaklyAsserted"][0].get("answers").is_none());
+        let text = render(&file);
+        assert!(
+            text.contains("   433  x;  (skipped)  51%  1 of 17  one"),
+            "{text}"
+        );
+        assert!(
+            text.contains("inspect a statement: supercov runs 'run_x' assertions 'peer.js:433'"),
+            "{text}"
+        );
+        // A file's own page points at them, also when nothing is not asserted.
+        let solid = view(
+            result.clone(),
+            &Target::File("catalog.js".into()),
+            0,
+            Some(PAGE),
+        )
+        .unwrap();
+        assert!(render(&solid).contains("Every statement this file ran is asserted.\n1 of the asserted rest on an answer under 75%"), "{}", render(&solid));
+        let none = view(
+            result.clone(),
+            &Target::WeakFile("solid.js".into()),
+            0,
+            Some(PAGE),
+        )
+        .unwrap();
+        assert_eq!(none["page"]["total"], 0);
+        assert!(view(result, &Target::WeakFile("c.js".into()), 0, None).is_err());
+        assert!(parse(&["--weak".into(), "--test".into(), "one".into()]).is_err());
+        assert!(parse(&["assess".into(), "--weak".into()]).is_err());
+        assert_eq!(
+            parse(&["a.js".into(), "--weak".into()]).unwrap().target,
+            Target::WeakFile("a.js".into())
+        );
+        // Every row, spelled as `quality` spells it.
+        assert_eq!(parse(&["--limit".into(), "0".into()]).unwrap().limit, None);
+    }
+
+    /// A statement eighteen tests were asked about, all from one test file,
+    /// while fourteen other files ran it: the reader was not told where the
+    /// test that catches it might already be.
+    #[test]
+    fn a_statement_names_the_test_files_none_of_whose_tests_were_asked() {
+        let result = json!({"run": "run_x", "summary": {}, "statements": [{
+            "file": "request.js", "line": 75, "text": "transport.onerror = (error) =>", "change": "skipped",
+            "asserted": false, "answer": 0.36, "testsAsked": 2, "testsRunningIt": 132,
+            "answers": [{"file": "http.test.js", "name": "one", "p": 0.36}, {"file": "http.test.js", "name": "two", "p": 0.2}],
+            "notAsked": {"tests": 130, "files": [
+                {"file": "relay.test.js", "tests": 40}, {"file": "safety.test.js", "tests": 22}, {"file": "a.test.js", "tests": 9},
+                {"file": "b.test.js", "tests": 8}, {"file": "c.test.js", "tests": 7}, {"file": "d.test.js", "tests": 4}, {"file": "e.test.js", "tests": 1},
+            ]},
+        }]});
+        let line = view(result, &Target::Line("request.js".into(), 75), 0, None).unwrap();
+        let text = render(&line);
+        assert!(text.contains("    Not asked: 130 test(s). No test was asked from 7 file(s) that run it: relay.test.js (40), safety.test.js (22), a.test.js (9), b.test.js (8), c.test.js (7), and 2 more\n"), "{text}");
     }
 }

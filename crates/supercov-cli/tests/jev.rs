@@ -336,6 +336,80 @@ fn an_assessment_sends_no_more_than_its_estimate_says_it_can() {
 }
 
 #[test]
+fn a_statement_no_asked_test_catches_says_which_test_files_were_not_asked() {
+    // One function forty tests run, in four files. Eighteen are asked at
+    // most, so some of the four may never be asked: the statement's page said
+    // "18 of 40 asked" and not where the other 22 are.
+    let project = Project::empty("not-asked");
+    project.write(
+        "package.json",
+        r#"{ "name": "shared", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/rate.js",
+        "export function rate(amount) {\n  return amount * 2;\n}\n",
+    );
+    let files = ["alpha", "beta", "gamma", "delta"];
+    for file in files {
+        let tests: String = (0..10)
+            .map(|i| format!("test(\"{file} {i}\", () => {{ rate({i}); assert.ok(true); }});\n"))
+            .collect();
+        project.write(
+            &format!("test/{file}.test.js"),
+            &format!("import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport {{ rate }} from \"../src/rate.js\";\n\n{tests}"),
+        );
+    }
+    project.git(&["init", "-q"]);
+    project.commit("shared");
+    let run = project.measure(&[]);
+    let (base, _) = gateway(MODEL, answer_no);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+
+    let view = project
+        .supercov(&["runs", &run, "assertions", "src/rate.js:2", "--json"])
+        .json();
+    let statement = &view["data"]["statements"][0];
+    assert_eq!(statement["asserted"], false, "{view}");
+    assert_eq!(statement["testsRunningIt"], 40);
+    let asked = statement["testsAsked"].as_u64().unwrap();
+    assert_eq!(statement["notAsked"]["tests"], 40 - asked, "{statement}");
+    let asked_files: std::collections::BTreeSet<&str> = statement["answers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|answer| answer["file"].as_str().unwrap())
+        .collect();
+    let untouched = statement["notAsked"]["files"].as_array().unwrap();
+    // Every test file is either one a test was asked from, or named as not.
+    assert_eq!(
+        asked_files.len() + untouched.len(),
+        files.len(),
+        "{statement}"
+    );
+    for file in untouched {
+        assert!(
+            !asked_files.contains(file["file"].as_str().unwrap()),
+            "{statement}"
+        );
+        assert_eq!(file["tests"], 10);
+    }
+    let text = project
+        .supercov(&["runs", &run, "assertions", "src/rate.js:2"])
+        .succeeds();
+    assert_eq!(
+        text.contains("No test was asked from"),
+        !untouched.is_empty(),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("Not asked: {} test(s).", 40 - asked)) || untouched.is_empty(),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_merged_run_is_assessed_like_the_runs_it_was_made_from() {
     // Suites that cannot run as one command are measured apart and merged.
     // The merged run was refused for holding "multiple source manifests":

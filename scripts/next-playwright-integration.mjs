@@ -1,6 +1,8 @@
 // A Next.js application with a Vitest suite and a Playwright suite that
 // builds and serves the application itself, measured the way its developer
-// would: unit, then end to end, then merged.
+// would: unit, then end to end, then merged, and then the merged run through
+// everything that reads one: its assertions assessed, `quality`, and
+// `security` beside it.
 //
 // Supercov 3.0.4 failed such an application at two consecutive steps before
 // an end-to-end test ran, and scoped it wrongly on top. Each property of the
@@ -17,9 +19,10 @@
 // - `components/`, `proxy.ts` and `instrumentation.ts` at the root were
 //   unclassified, and `app/api/widget/test/route.ts` was left out as a test.
 import assert from 'node:assert/strict';
-import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
@@ -33,17 +36,46 @@ function run(command, args, env = {}) {
     timeout: 600_000,
     maxBuffer: 64 * 1024 * 1024,
   });
-  return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
+  return { status: result.status, stdout: result.stdout, output: `${result.stdout}\n${result.stderr}` };
 }
 
 function supercov(args, env) {
   return run(binary, args, env);
 }
 
-function json(args) {
-  const result = supercov([...args, '--json']);
+// A server answering as Jev does, yes or no to everything, and the
+// environment that sends a command's questions to it. `asked()` is how many
+// requests it has answered.
+async function standIn(answer) {
+  const seen = resolve(mkdtempSync(resolve(tmpdir(), 'supercov-jev-')), 'seen');
+  const child = spawn(process.execPath, [resolve(repository, 'scripts/jev-stand-in.mjs')], {
+    env: { ...process.env, ANSWER: answer, SEEN: seen },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  const port = await new Promise((settle, fail) => {
+    child.stdout.once('data', (chunk) => settle(String(chunk).trim()));
+    child.once('error', fail);
+    child.once('exit', (code) => fail(new Error(`the stand-in exited with ${code}`)));
+  });
+  return {
+    env: {
+      TYPESAFE_BASE_URL: `http://127.0.0.1:${port}`,
+      TYPESAFE_API_KEY: 'sk-stand-in',
+      TYPESAFE_DEFAULT_MODEL: 'typesafe/jev-1.13',
+    },
+    asked: () => (existsSync(seen) ? Number(readFileSync(seen, 'utf8')) : 0),
+    stop: () => child.kill(),
+  };
+}
+
+function parsed(args, env) {
+  const result = supercov([...args, '--json'], env);
   assert.equal(result.status, 0, result.output);
-  return JSON.parse(result.output.slice(result.output.indexOf('{'))).data;
+  return JSON.parse(result.stdout.slice(result.stdout.indexOf('{')));
+}
+
+function json(args, env) {
+  return parsed(args, env).data;
 }
 
 function latest() {
@@ -136,6 +168,88 @@ const mergedSummary = json(['runs', mergedRun]);
 assert.equal(files.reduce((sum, file) => sum + file.totals.lines, 0), mergedSummary.coverage.lines.total);
 assert.equal(files.reduce((sum, file) => sum + file.covered.lines, 0), mergedSummary.coverage.lines.covered);
 
+// The merged run, read by every command that reads a run. Each was tested on
+// a three-test project of one suite, and the first application to put them
+// together found four defects in a row: `assess` refused a merged run, the
+// run's own page named the command that refused, `security --run` took "not
+// assessed" for "no test catches it", and `quality` and `security` left out
+// files coverage measures. Jev is a local server here, so what is checked is
+// that the commands agree with each other, not what Jev thinks.
+const included = Object.keys(status).filter((file) => status[file] === 'included');
+const no = await standIn('no');
+const yes = await standIn('yes');
+try {
+  // What the run's page says to do next works when it is done.
+  const unassessed = supercov(['runs', mergedRun, 'assertions']);
+  assert.equal(unassessed.status, 0, unassessed.output);
+  const hint = unassessed.output.match(/Assess it with `supercov ([^`]+)`/);
+  assert.ok(hint, unassessed.output);
+  assert.equal(hint[1], `runs ${mergedRun} assertions assess`);
+  // Nobody has asked the run's tests what they catch, which is not the same
+  // as their catching nothing.
+  const before = supercov(['security', '--run', mergedRun], yes.env);
+  assert.equal(before.status, 0, before.output);
+  assert.match(before.output, /has no assertion assessment, so whether its tests would catch/, before.output);
+  assert.doesNotMatch(before.output, /judged to catch/, before.output);
+
+  // The estimate's most is what the pass sends when every answer is a no.
+  const estimate = json(['runs', mergedRun, 'assertions', 'assess', '--dry-run']);
+  assert.ok(estimate.firstRound.requests > 0, JSON.stringify(estimate));
+  const refused = supercov(hint[1].split(' '), no.env);
+  assert.equal(refused.status, 0, refused.output);
+  assert.match(refused.output, /\b0% asserted/, refused.output);
+  assert.equal(no.asked(), estimate.atMost.requests, refused.output);
+  // And the least is the first round, when every test catches everything.
+  const sentBefore = yes.asked();
+  const assessed = supercov([...hint[1].split(' '), '--refresh'], yes.env);
+  assert.equal(assessed.status, 0, assessed.output);
+  assert.match(assessed.output, /\b100% asserted \((\d+) of \1 executed statements\)/, assessed.output);
+  assert.equal(yes.asked() - sentBefore, estimate.firstRound.requests, assessed.output);
+  // Both suites' tests were asked: the pages only the end-to-end suite runs
+  // and the library only the unit suite runs are assessed in one result.
+  const assertedFiles = json(['runs', mergedRun, 'assertions', '--all']).files.map((file) => file.file);
+  for (const file of ['app/page.tsx', 'lib/client.ts'])
+    assert.ok(assertedFiles.includes(file), `${file}\n${assertedFiles.join('\n')}`);
+  assert.match(supercov(['runs', mergedRun]).output, /Assertions\s+100%/);
+
+  // `quality` and `security` read every file coverage measures, the route
+  // under `test/` among them, and leave unclassified what coverage does.
+  for (const command of ['quality', 'security']) {
+    const view = parsed([command, 'scope', '--limit', '0']);
+    assert.equal(view.total_not_included, view.not_included.length, JSON.stringify(view.summary));
+    const left = new Map(view.not_included.map((entry) => [entry.path, entry]));
+    for (const file of included) assert.ok(!left.has(file), `${command} leaves out ${file}: ${JSON.stringify(left.get(file))}`);
+    assert.deepEqual(view.summary.roots, scope.roots, command);
+    for (const file of ['scripts/use.ts', 'tests/unit/client.test.ts'])
+      assert.equal(left.get(file)?.status, 'excluded', `${command} ${file}`);
+    const dry = supercov([command, '--dry-run'], yes.env);
+    assert.equal(dry.status, 0, dry.output.slice(-2000));
+    assert.match(dry.output, new RegExp(`\\[supercov\\] ${command}: \\d+ requests to 127\\.0\\.0\\.1 .* if none is cached`), dry.output.slice(-2000));
+  }
+  const quality = parsed(['quality'], yes.env);
+  const read = quality.files.map((file) => file.path);
+  for (const file of included) assert.ok(read.includes(file), `quality did not read ${file}`);
+
+  // Beside the assessed run, security says what the tests catch.
+  const beside = parsed(['security', '--run', mergedRun], yes.env);
+  assert.equal(beside.run, mergedRun);
+  assert.equal(beside.run_assertions, undefined, JSON.stringify(beside.run_assertions));
+  assert.equal(beside.flagged_executed_unasserted, 0);
+  const handler = beside.files.find((file) => file.path === 'app/api/widget/test/route.ts');
+  assert.ok(handler, beside.files.map((file) => file.path).join('\n'));
+  assert.equal(handler.coverage.in_run, true, JSON.stringify(handler.coverage));
+
+  // A merge computes nothing nobody asked for, and says where the record of
+  // what each test ran is kept.
+  const affected = supercov(['runs', mergedRun, 'tests', 'affected']);
+  assert.notEqual(affected.status, 0, affected.output);
+  assert.match(affected.output, new RegExp(`ask the runs it was merged from: ${unitRun}, ${e2eRun}`), affected.output);
+  assert.equal(supercov(['runs', unitRun, 'tests', 'affected']).status, 0);
+} finally {
+  no.stop();
+  yes.stop();
+}
+
 // Roots named now, on the workspace the runs above left, take effect.
 const named = supercov(['--', 'npm', 'run', 'test:unit'], {
   SUPERCOV_SOURCE_ROOTS: 'app,components,lib,simulators,proxy.ts,instrumentation.ts',
@@ -146,4 +260,4 @@ assert.equal(namedScope.mode, 'explicit');
 assert.equal(namedScope.counts.ambiguous, 0);
 assert.equal(namedScope.unclassifiedSource, undefined);
 
-console.log('[next-playwright] a Next.js application is measured through its unit and end-to-end suites, merged and read by directory');
+console.log('[next-playwright] a Next.js application is measured through its unit and end-to-end suites, merged, read by directory, and assessed for assertions, quality and security');

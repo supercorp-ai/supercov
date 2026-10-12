@@ -3,5 +3,6 @@
   "engineMedianMsMax": 50,
   "engineP95MsMax": 75,
   "monorepoFiles": 50000,
-  "monorepoExtrapolatedMsMax": 5000
+  "monorepoExtrapolatedMsMax": 5000,
+  "againstReleaseMax": 1.1
 }
