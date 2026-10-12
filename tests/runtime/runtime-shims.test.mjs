@@ -777,14 +777,39 @@ test("a lexical wrapper's two frames are the author's one frame again", async ()
     "    at Context.<anonymous> (/workspace/test/crypto.test.js:6:20)",
   ]);
   // A wrapper that calls the author's own function added none: both stay,
-  // and only the runtime's own frames go.
+  // and only the runtime's own frames go, with Node's frame for running
+  // code under Supercov, which lies among them.
   assert.deepEqual(cleaned("    at /workspace/tests/failing.test.js:12:7", false), [
     "    at Proxy.<anonymous> (/workspace/node_modules/chai/index.js:1706:17)",
     "    at /workspace/tests/failing.test.js:12:35",
-    "    at AsyncLocalStorage.run (node:internal/async_local_storage/async_context_frame:65:14)",
     "    at /workspace/tests/failing.test.js:12:7",
     "    at async /workspace/tests/failing.test.js:9:3",
   ]);
+  // An error with more frames than its author's limit keeps that many, once
+  // the runtime's are out: there was room for them while they were there.
+  const long = new Error("failed");
+  long.stack = [
+    "Error: failed",
+    "    at check (/workspace/tests/failing.test.js:12:35)",
+    "    at withNodeAssertionPhase (/workspace/.supercov/node_modules/runtime.mjs:940:20)",
+    ...Array.from({ length: 14 }, (_, index) => `    at step${index} (/workspace/src/steps.js:${index + 1}:3)`),
+  ].join("\n");
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 10;
+  try {
+    const kept = runtime.cleanInstrumentationStack(long, false).stack.split("\n").slice(1);
+    assert.equal(kept.length, 10);
+    assert.equal(kept[0], "    at check (/workspace/tests/failing.test.js:12:35)");
+    assert.equal(kept[9], "    at step8 (/workspace/src/steps.js:9:3)");
+    // And the limit is raised only while the callback runs.
+    assert.equal(runtime.withStackRoom(() => Error.stackTraceLimit), 34);
+    assert.equal(Error.stackTraceLimit, 10);
+    // A limit the callback sets is its own to keep.
+    runtime.withStackRoom(() => { Error.stackTraceLimit = 50; });
+    assert.equal(Error.stackTraceLimit, 50);
+  } finally {
+    Error.stackTraceLimit = limit;
+  }
 });
 
 test("an assertion that fails where no test is known keeps only its author's frames", async () => {

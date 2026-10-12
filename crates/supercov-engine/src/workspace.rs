@@ -1580,11 +1580,18 @@ pub fn sync_outputs_of(
                     }
                 }
                 // Any Rust file in the copy may have been rewritten, the
-                // tests among them for their assertions.
+                // tests among them for their assertions. And the lockfile
+                // Cargo writes when a project has none is what the run's
+                // dependencies are read from: returned, it made the run
+                // that wrote it stale the moment it ended, and every test
+                // affected by a change to one line.
                 CommandOutputs::Rust => {
                     if relative
                         .extension()
                         .is_some_and(|extension| extension == "rs")
+                        || relative
+                            .file_name()
+                            .is_some_and(|name| name == "Cargo.lock")
                     {
                         built.insert(relative.clone());
                     }
@@ -2177,12 +2184,13 @@ mod tests {
                 CommandOutputs::Rust,
                 "rust",
                 &[
-                    ("Cargo.lock", b"# lock"),
                     ("src/snapshots/sealed.snap", b"SNAP"),
+                    ("report.json", b"{}"),
+                    ("Cargo.lock", b"# lock"),
                     ("src/generated.rs", b"pub fn made() {}"),
                 ]
             ),
-            ["Cargo.lock", "src/snapshots/sealed.snap"]
+            ["src/snapshots/sealed.snap", "report.json"]
         );
     }
 

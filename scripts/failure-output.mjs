@@ -1,7 +1,7 @@
 // What a failing test prints is what it prints without Supercov: the same
 // file, line and column under every failure, and no frame of Supercov's.
 //
-//   node scripts/failure-output.mjs python ruby go rust
+//   node scripts/failure-output.mjs python ruby go rust node ava
 //
 // Each language gets the same small project: a function that refuses a short
 // key, a test that meets the refusal, and a test whose comparison fails. Its
@@ -13,10 +13,15 @@
 //   - Go: a panic named the copy's file, at `crypto.go:24` for line 23, and
 //     `./...` listed Supercov's runtime package.
 //   - Rust: a panic was reported at `src/lib.rs:9:84` for `8:9`.
+//   - Python: unittest printed its wrapper's frames, and its own, over the
+//     test's line.
+//   - node:test: a failing test had no frame of its own file, and a rewritten
+//     module was named by its path where Node names a module by its URL.
+//   - AVA: a frame of the test file named Supercov's copy.
 // pytest already read the same. A language whose toolchain is not installed
 // is refused, not skipped: a gate that runs nothing proves nothing.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -86,6 +91,16 @@ const languages = {
     compare('pytest', root, pythonWithPytest(), ['-m', 'pytest', '-q', '-p', 'no:cacheprovider'], {
       tidy: (line) => line.replace(/ in [\d.]+s/u, ''),
       expects: [/^shop[\\/]crypto\.py:3: ValueError$/u, /^tests[\\/]test_crypto\.py:10: AssertionError$/u],
+    });
+    const unit = project({
+      'shop/__init__.py': '',
+      'shop/crypto.py': 'def seal(key, body):\n    if len(key) < 4:\n        raise ValueError("key too short")\n    return {"key": key, "body": body.upper()}\n',
+      'tests/__init__.py': '',
+      'tests/test_unit.py': 'import unittest\n\nfrom shop.crypto import seal\n\n\nclass CryptoTest(unittest.TestCase):\n    def test_refuses_a_short_key(self):\n        sealed = seal("ab", "x")\n        self.assertEqual(sealed["body"], "X")\n\n    def test_compares(self):\n        self.assertEqual(seal("abcd", "y")["body"], "Z")\n',
+    });
+    compare('unittest', unit, pythonWithPytest(), ['-m', 'unittest', 'tests.test_unit'], {
+      tidy: (line) => line.replace(/ in [\d.]+s/u, ''),
+      expects: [/test_unit\.py", line 12, in test_compares$/u, /crypto\.py", line 3, in seal$/u],
     });
   },
   ruby() {
@@ -166,6 +181,33 @@ const languages = {
     assert.deepEqual(panics(printed(root, binary, ['--', 'cargo', 'test', '--lib'], (line) => line)), plain, 'cargo test');
     console.log('[failure-output] cargo test panics where it does without Supercov');
   },
+};
+
+const moduleSource = 'export function seal(key, body) {\n  if (key.length < 4) {\n    throw new Error("key too short");\n  }\n  return { key, body: body.toUpperCase() };\n}\n';
+languages.node = () => {
+  const root = project({
+    'package.json': '{ "name": "shop", "private": true, "type": "module" }\n',
+    'src/crypto.js': moduleSource,
+    'test/crypto.test.js': 'import test from "node:test";\nimport assert from "node:assert/strict";\nimport { seal } from "../src/crypto.js";\n\ntest("refuses a short key", () => {\n  const sealed = seal("ab", "x");\n  assert.equal(sealed.body, "X");\n});\n\ntest("compares", () => {\n  assert.equal(seal("abcd", "y").body, "Z");\n});\n\ntest("fails later", async () => {\n  await new Promise((settle) => setTimeout(settle, 1));\n  assert.deepEqual(seal("abcd", "z"), { key: "abcd", body: "z" });\n});\n',
+  });
+  compare('node:test', root, process.execPath, ['--test', '--test-reporter=spec', 'test/crypto.test.js'], {
+    tidy: (line) => line.replace(/\(\d+(?:\.\d+)?ms\)/u, '').replace(/duration_ms [\d.]+/u, 'duration_ms'),
+    expects: [/^\s+at seal \(file:\/\/.*\/src\/crypto\.js:3:11\)$/u, /^\s+at TestContext\.<anonymous> \(file:\/\/.*\/test\/crypto\.test\.js:11:10\)$/u],
+  });
+};
+// AVA is the repository's own; a project reaches it as an installed one would.
+languages.ava = () => {
+  const root = project({
+    'package.json': '{ "name": "shop", "private": true, "type": "module" }\n',
+    '.gitignore': 'node_modules\n.supercov\n',
+    'src/crypto.js': moduleSource,
+    'test/crypto.test.js': 'import test from "ava";\nimport { seal } from "../src/crypto.js";\n\ntest("refuses a short key", (t) => {\n  const sealed = seal("ab", "x");\n  t.is(sealed.body, "X");\n});\n\ntest("compares", (t) => {\n  t.is(seal("abcd", "y").body, "Z");\n});\n',
+  });
+  symlinkSync(resolve(repository, 'node_modules'), resolve(root, 'node_modules'), 'junction');
+  compare('AVA', root, process.execPath, [resolve(root, 'node_modules/ava/entrypoints/cli.js'), '--serial'], {
+    tidy: (line) => line.replace(/\(\d+(?:\.\d+)?m?s\)/u, ''),
+    expects: [/^\s+at seal \(file:\/\/.*\/src\/crypto\.js:3:11\)$/u, /file:\/\/test\/crypto\.test\.js:10:5$/u],
+  });
 };
 
 const asked = process.argv.slice(2);

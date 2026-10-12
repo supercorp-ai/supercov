@@ -343,8 +343,8 @@ pub fn run_direct_rust(
             diagnostics,
         )
         .map_err(|error| error.to_string())?;
-        // A snapshot a test accepted, a `Cargo.lock` Cargo wrote, a report:
-        // they stayed in the copy, and the project had the old ones or none.
+        // A snapshot a test accepted, a report: they stayed in the copy, and
+        // the project had the old ones or none.
         let outputs = crate::workspace::sync_outputs_of(
             crate::workspace::CommandOutputs::Rust,
             &root,
@@ -353,7 +353,12 @@ pub fn run_direct_rust(
             &BTreeSet::new(),
         )
         .map_err(|error| error.to_string())?;
-        for line in crate::workspace::describe_command_outputs(&outputs) {
+        // What stayed is the lockfile and the sources, which nobody asked
+        // for: only what flowed back is said.
+        for line in crate::workspace::describe_command_outputs(&outputs)
+            .into_iter()
+            .filter(|line| !line.contains("stayed in the isolated workspace"))
+        {
             writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
         }
         write_rust_build_cache(

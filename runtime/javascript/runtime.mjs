@@ -899,6 +899,35 @@ const INSTRUMENTATION_FRAME = /[\\/]\.supercov[\\/](?:node_modules[\\/])?(?:play
 // for `AsyncLocalStorage.run` lies among those below it: Mocha printed the
 // added function, that frame and the author's function, three for one.
 const NODE_FRAME = /^\s*at .*\(?node:internal\//u;
+const CARRIER_FRAME = /^\s*at AsyncLocalStorage\.run \(node:internal\//u;
+// An error keeps as many frames as `Error.stackTraceLimit` says, ten unless
+// someone changed it, counted from where it was made. The runtime's frames
+// were counted among them, so the author's own fell off the end: a failed
+// `node:assert` under node:test kept the function Supercov added and lost
+// the test's, and a test's stack lost the runner's frames below it. While
+// the runtime's frames are on the stack there is room for them, and what is
+// left when they are taken out is cut to the length the author asked for.
+const OWN_ROOM = 24;
+function withStackRoom(callback) {
+  const limit = Error.stackTraceLimit;
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0)
+    return callback();
+  Error.stackTraceLimit = limit + OWN_ROOM;
+  try {
+    return callback();
+  } finally {
+    // Unless the code it ran set a limit of its own.
+    if (Error.stackTraceLimit === limit + OWN_ROOM)
+      Error.stackTraceLimit = limit;
+  }
+}
+function withinStackLimit(lines) {
+  const limit = Error.stackTraceLimit;
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 0)
+    return lines;
+  let frames = 0;
+  return lines.filter((line) => !/^\s*at /.test(line) || ++frames <= limit);
+}
 function cleanInstrumentationStack(error, lexical = false) {
   if (!error || typeof error !== "object" || typeof error.stack !== "string")
     return error;
@@ -941,10 +970,14 @@ function cleanInstrumentationStack(error, lexical = false) {
       return [merged.text];
     if (merged && index > at && index <= merged.last)
       return [];
+    // Node's frame for running code under Supercov goes with the runtime's
+    // frames around it.
+    if (CARRIER_FRAME.test(line) && (hidden[index - 1] || hidden[index + 1]))
+      return [];
     return hidden[index] ? [] : [line];
   });
   try {
-    error.stack = visible.join("\n");
+    error.stack = withinStackLimit(visible).join("\n");
   } catch (e) {
   }
   return error;
@@ -959,7 +992,7 @@ function withNodeAssertionPhase(operation, source, callback) {
   // with the frames its author would see.
   if (!scope) {
     try {
-      return callback();
+      return withStackRoom(callback);
     } catch (error) {
       throw cleanInstrumentationStack(error, lexical);
     }
@@ -996,7 +1029,7 @@ function withNodeAssertionPhase(operation, source, callback) {
   attempt.phases.push(phase);
   attempt.phaseIds.add(phase.id);
   try {
-    const result = withCoverageCarrier({ version: 1, scope, phaseId: phase.id }, callback);
+    const result = withStackRoom(() => withCoverageCarrier({ version: 1, scope, phaseId: phase.id }, callback));
     if (result && typeof result.then === "function")
       return Promise.resolve(result).then((value) => {
         finishAssertionPhase(phase);
@@ -1914,6 +1947,7 @@ const directRuntimeApi = {
   coverageContextEnvironment,
   coverageContextHeaders,
   cleanInstrumentationStack,
+  withStackRoom,
   coverageHit,
   coverageHitV2,
   coverageSnapshot,
@@ -1978,6 +2012,7 @@ export {
   coverageContextEnvironment,
   coverageContextHeaders,
   cleanInstrumentationStack,
+  withStackRoom,
   coverageHit,
   coverageHitV2,
   coverageSnapshot,
