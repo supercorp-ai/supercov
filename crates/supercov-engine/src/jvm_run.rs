@@ -1631,9 +1631,41 @@ pub fn run_direct_jvm(
             },
         };
         let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
+        // What is in the copy now is Supercov's; what the command adds to
+        // it or changes is the command's, and belongs in the project.
+        let before = crate::workspace::workspace_output_baseline(&workspace)
+            .map_err(|error| error.to_string())?;
         let execution = execute_plan(&plan, options, diagnostics, |_, _| Ok(()))
             .map_err(|error| error.to_string())?;
         let test_command_ms = elapsed_ms(test_started);
+        // `mvn test` left no `target/surefire-reports` in the project and
+        // Gradle no `build/test-results`: a step after the tests that
+        // publishes them found none. The reports flow back; what the build
+        // compiled from the rewritten sources, and its own state, stay.
+        let rewritten = instrumented
+            .project
+            .files
+            .sources
+            .iter()
+            .chain(&instrumented.project.files.tests)
+            .map(|(file, _)| PathBuf::from(file))
+            .collect::<BTreeSet<_>>();
+        let outputs = crate::workspace::sync_outputs_of(
+            crate::workspace::CommandOutputs::Jvm,
+            &root,
+            &workspace,
+            &before,
+            &rewritten,
+        )
+        .map_err(|error| error.to_string())?;
+        // What stayed is every class the build compiled: a count of them
+        // tells nobody anything, so only what flowed back is said.
+        for line in crate::workspace::describe_command_outputs(&outputs)
+            .into_iter()
+            .filter(|line| !line.contains("stayed in the isolated workspace"))
+        {
+            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+        }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
                 "the test command was interrupted by {signal:?}; no run was published"

@@ -331,6 +331,10 @@ pub fn run_direct_rust(
             }
         )
         .map_err(|error| error.to_string())?;
+        // What is in the copy now is Supercov's; what the command adds to
+        // it or changes is the command's, and belongs in the project.
+        let before = crate::workspace::workspace_output_baseline(&workspace)
+            .map_err(|error| error.to_string())?;
         let run = run_prepared_rust_tests(
             &project,
             &request.command,
@@ -339,6 +343,19 @@ pub fn run_direct_rust(
             diagnostics,
         )
         .map_err(|error| error.to_string())?;
+        // A snapshot a test accepted, a `Cargo.lock` Cargo wrote, a report:
+        // they stayed in the copy, and the project had the old ones or none.
+        let outputs = crate::workspace::sync_outputs_of(
+            crate::workspace::CommandOutputs::Rust,
+            &root,
+            &workspace,
+            &before,
+            &BTreeSet::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        for line in crate::workspace::describe_command_outputs(&outputs) {
+            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+        }
         write_rust_build_cache(
             &root,
             &workspace,

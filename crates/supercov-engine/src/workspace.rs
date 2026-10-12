@@ -1425,6 +1425,113 @@ pub fn sync_command_outputs(
     baseline: &WorkspaceOutputBaseline,
     protected: &BTreeSet<PathBuf>,
 ) -> Result<CommandOutputSync, WorkspaceError> {
+    sync_outputs_of(
+        CommandOutputs::JavaScript,
+        root,
+        workspace,
+        baseline,
+        protected,
+    )
+}
+
+/// Whose command ran in the copy, for what of its output is the copy's own.
+///
+/// A JavaScript build carries the instrumentation in what it compiles, and
+/// is recognised by the runtime it imports. Go builds nothing into the tree
+/// unless asked, and what it is asked to build holds the runtime's package.
+/// Maven and Gradle compile into the tree, `target/` and `build/`, and what
+/// they compile there is the copy's: only the reports they write beside it
+/// are the command's own. Cargo builds outside the copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutputs {
+    JavaScript,
+    Go,
+    Jvm,
+    Rust,
+}
+
+/// A Go binary built in the copy: it links the runtime, whose package path
+/// is in it.
+fn links_the_go_runtime(path: &Path) -> Result<bool, WorkspaceError> {
+    const MARKER: &[u8] = b"_supercov_runtime";
+    let bytes = fs::read(path).map_err(|error| io_error(path, error))?;
+    Ok(bytes.contains(&0) && bytes.windows(MARKER.len()).any(|window| window == MARKER))
+}
+
+/// The directories a JVM build writes its reports to, inside its output.
+const JVM_REPORTS: &[&str] = &[
+    "surefire-reports",
+    "failsafe-reports",
+    "test-results",
+    "reports",
+    "site",
+];
+
+/// Whether a file a JVM build wrote is the build's own state or what it
+/// compiled, rather than a report: anything in Gradle's own directory, and
+/// anything in a module's output directory outside the report directories.
+/// An output directory is `target` beside a `pom.xml` and `build` beside a
+/// Gradle build file, so a package named `build` is not one.
+fn jvm_build_state(workspace: &Path, relative: &Path) -> bool {
+    let parts = relative
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if parts.first().is_some_and(|first| first == ".gradle") {
+        return true;
+    }
+    // The copy's build files carry what Supercov added to them.
+    if parts.last().is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "pom.xml"
+                | "build.gradle"
+                | "build.gradle.kts"
+                | "settings.gradle"
+                | "settings.gradle.kts"
+        )
+    }) {
+        return true;
+    }
+    if relative
+        .extension()
+        .is_some_and(|extension| extension == "class" || extension == "jar")
+    {
+        return true;
+    }
+    let mut module = workspace.to_path_buf();
+    for (index, part) in parts.iter().enumerate() {
+        let output = match part.as_str() {
+            "target" => module.join("pom.xml").is_file(),
+            "build" => [
+                "build.gradle",
+                "build.gradle.kts",
+                "settings.gradle",
+                "settings.gradle.kts",
+            ]
+            .iter()
+            .any(|file| module.join(file).is_file()),
+            _ => false,
+        };
+        if output {
+            return !parts[index + 1..]
+                .iter()
+                .any(|inside| JVM_REPORTS.contains(&inside.as_str()));
+        }
+        module.push(part);
+    }
+    false
+}
+
+/// `sync_command_outputs` for a command of any of the languages that run in
+/// a copy.
+pub fn sync_outputs_of(
+    kind: CommandOutputs,
+    root: &Path,
+    workspace: &Path,
+    baseline: &WorkspaceOutputBaseline,
+    protected: &BTreeSet<PathBuf>,
+) -> Result<CommandOutputSync, WorkspaceError> {
     let mut current = BTreeMap::new();
     walk_output_files(workspace, workspace, &mut current)?;
     let mut sync = CommandOutputSync::default();
@@ -1448,15 +1555,39 @@ pub fn sync_command_outputs(
             continue;
         }
         if !protected.contains(relative) {
-            // Compiled code marks a build. A report that quotes a stack frame
-            // of the runtime does not: the screenshots and traces beside a
-            // failed Playwright test's `error-context.md` are the command's
-            // own output.
-            let compiled = compiled_javascript(relative);
-            if built_from_instrumented_source(&workspace.join(relative), compiled)? {
-                built.insert(relative.clone());
-                if compiled {
-                    built_directories.add(relative);
+            match kind {
+                CommandOutputs::JavaScript => {
+                    // Compiled code marks a build. A report that quotes a
+                    // stack frame of the runtime does not: the screenshots
+                    // and traces beside a failed Playwright test's
+                    // `error-context.md` are the command's own output.
+                    let compiled = compiled_javascript(relative);
+                    if built_from_instrumented_source(&workspace.join(relative), compiled)? {
+                        built.insert(relative.clone());
+                        if compiled {
+                            built_directories.add(relative);
+                        }
+                    }
+                }
+                CommandOutputs::Go => {
+                    if links_the_go_runtime(&workspace.join(relative))? {
+                        built.insert(relative.clone());
+                    }
+                }
+                CommandOutputs::Jvm => {
+                    if jvm_build_state(workspace, relative) {
+                        built.insert(relative.clone());
+                    }
+                }
+                // Any Rust file in the copy may have been rewritten, the
+                // tests among them for their assertions.
+                CommandOutputs::Rust => {
+                    if relative
+                        .extension()
+                        .is_some_and(|extension| extension == "rs")
+                    {
+                        built.insert(relative.clone());
+                    }
                 }
             }
         }
@@ -1501,6 +1632,33 @@ pub fn sync_command_outputs(
         }
     }
     Ok(sync)
+}
+
+/// What flowed back and what stayed, as the lines a run prints about it.
+pub fn describe_command_outputs(outputs: &CommandOutputSync) -> Vec<String> {
+    let mut lines = Vec::new();
+    if outputs.synced > 0 {
+        lines.push(format!(
+            "[supercov] synced {} file(s) the command created or changed back to the project: {}",
+            outputs.synced,
+            summarize_paths(&outputs.synced_paths)
+        ));
+    }
+    if !outputs.skipped_instrumented.is_empty() {
+        lines.push(format!(
+            "[supercov] {} file(s) stayed in the isolated workspace: they are instrumented copies, or were built from them, and must not overwrite your project: {}",
+            outputs.skipped_instrumented.len(),
+            summarize_paths(&outputs.skipped_instrumented)
+        ));
+    }
+    if !outputs.deleted_in_workspace.is_empty() {
+        lines.push(format!(
+            "[supercov] the command deleted {} file(s) in the isolated workspace; deletions are not propagated to the project: {}",
+            outputs.deleted_in_workspace.len(),
+            summarize_paths(&outputs.deleted_in_workspace)
+        ));
+    }
+    lines
 }
 
 /// Give the workspace a git repository of its own, as the project has one.
@@ -1931,6 +2089,101 @@ mod tests {
                 .contains(&copy)
         );
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn what_a_go_jvm_or_rust_command_writes_flows_back_and_what_it_builds_stays() {
+        // Only JavaScript's command had its files returned. `go test
+        // -coverprofile=cover.out` left no `cover.out` in the project, `mvn
+        // test` no `target/surefire-reports`, and a snapshot a Rust test
+        // accepted stayed in the copy.
+        let write = |workspace: &Path, file: &str, contents: &[u8]| {
+            let path = workspace.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        };
+        let flows = |kind: CommandOutputs, name: &str, files: &[(&str, &[u8])]| {
+            let (root, workspace) = writeback_fixture(name);
+            // The build files are the copy's before the command runs.
+            write(&workspace, "pom.xml", b"<project/>");
+            write(&workspace, "app/build.gradle.kts", b"plugins {}");
+            let baseline = workspace_output_baseline(&workspace).unwrap();
+            for (file, contents) in files {
+                write(&workspace, file, contents);
+            }
+            let sync =
+                sync_outputs_of(kind, &root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+            let synced = files
+                .iter()
+                .filter(|(file, _)| root.join(file).is_file())
+                .map(|(file, _)| (*file).to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(sync.synced, synced.len(), "{sync:?}");
+            fs::remove_dir_all(root.parent().unwrap()).unwrap();
+            synced
+        };
+        let mut binary = b"\x7fELF\0\0example.com/shop/_supercov_runtime\0".to_vec();
+        binary.extend([0u8; 16]);
+        assert_eq!(
+            flows(
+                CommandOutputs::Go,
+                "go",
+                &[
+                    ("cover.out", b"mode: set\n"),
+                    ("testdata/golden.png", b"\x89PNG\0\0"),
+                    ("shop.test", &binary),
+                ]
+            ),
+            ["cover.out", "testdata/golden.png"]
+        );
+        assert_eq!(
+            flows(
+                CommandOutputs::Jvm,
+                "jvm",
+                &[
+                    (
+                        "target/surefire-reports/TEST-shop.CryptoTest.xml",
+                        b"<testsuite/>"
+                    ),
+                    ("target/site/jacoco/index.html", b"<html/>"),
+                    ("app/build/test-results/test/TEST-a.xml", b"<testsuite/>"),
+                    ("app/build/reports/tests/test/index.html", b"<html/>"),
+                    ("src/test/resources/approved/output.txt", b"approved"),
+                    // What the build compiled, and its own state.
+                    ("target/classes/shop/Crypto.class", b"\xca\xfe\xba\xbe"),
+                    (
+                        "target/maven-status/compile/createdFiles.lst",
+                        b"shop/Crypto.class"
+                    ),
+                    ("app/build/classes/kotlin/main/A.class", b"\xca\xfe\xba\xbe"),
+                    ("app/build/tmp/compileKotlin/cache.txt", b"state"),
+                    (".gradle/8.10/fileHashes/fileHashes.lock", b"lock"),
+                    ("pom.xml", b"<project><!-- changed --></project>"),
+                    // A package named `build` is not a build's output.
+                    ("src/build/notes.txt", b"kept"),
+                ]
+            ),
+            [
+                "target/surefire-reports/TEST-shop.CryptoTest.xml",
+                "target/site/jacoco/index.html",
+                "app/build/test-results/test/TEST-a.xml",
+                "app/build/reports/tests/test/index.html",
+                "src/test/resources/approved/output.txt",
+                "src/build/notes.txt",
+            ]
+        );
+        assert_eq!(
+            flows(
+                CommandOutputs::Rust,
+                "rust",
+                &[
+                    ("Cargo.lock", b"# lock"),
+                    ("src/snapshots/sealed.snap", b"SNAP"),
+                    ("src/generated.rs", b"pub fn made() {}"),
+                ]
+            ),
+            ["Cargo.lock", "src/snapshots/sealed.snap"]
+        );
     }
 
     #[test]

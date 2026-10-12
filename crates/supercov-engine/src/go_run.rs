@@ -181,19 +181,40 @@ fn read(path: &Path) -> Result<String, String> {
 /// Go puts a file's path, as the compiler read it, into every stack trace,
 /// so a panic under Supercov named the copy: `…/.supercov/workspaces/
 /// workspace/shop/crypto.go:24`. A line directive is how Go is told that a
-/// file stands for another, and from it on a line is the project's line: the
-/// rewriting adds none of its own.
+/// file stands for another. It is the comment form, in front of the package
+/// clause on the clause's own line and naming that line, so the file gains
+/// no line: what reads the file as it lies, a coverage profile, counts the
+/// same lines as what reads it through the directive, a stack trace. The
+/// rewriting adds no line of its own either.
 fn named_for_the_project(project: &Path, relative: &str, text: &str) -> String {
-    if text.starts_with(LINE_DIRECTIVE) {
+    let Ok(tree) = crate::go_instrumenter::parse(text) else {
+        return text.to_owned();
+    };
+    let mut cursor = tree.root_node().walk();
+    let Some(package) = tree
+        .root_node()
+        .children(&mut cursor)
+        .find(|child| child.kind() == "package_clause")
+    else {
+        return text.to_owned();
+    };
+    let at = package.start_byte();
+    let line = text[..at].rfind('\n').map_or(0, |end| end + 1);
+    if text[line..at].starts_with(LINE_DIRECTIVE) {
         return text.to_owned();
     }
+    let position = package.start_position();
     format!(
-        "{LINE_DIRECTIVE}{}:1\n{text}",
-        project.join(relative).display()
+        "{}{LINE_DIRECTIVE}{}:{}:{}*/{}",
+        &text[..at],
+        project.join(relative).display(),
+        position.row + 1,
+        position.column + 1,
+        &text[at..]
     )
 }
 
-const LINE_DIRECTIVE: &str = "//line ";
+const LINE_DIRECTIVE: &str = "/*line ";
 
 fn write(path: &Path, contents: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -669,9 +690,36 @@ pub fn run_direct_go(
             },
         };
         let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
+        // What is in the copy now is Supercov's; what the command adds to
+        // it or changes is the command's, and belongs in the project.
+        let before = crate::workspace::workspace_output_baseline(&workspace)
+            .map_err(|error| error.to_string())?;
         let execution = execute_plan(&plan, options, diagnostics, |_, _| Ok(()))
             .map_err(|error| error.to_string())?;
         let test_command_ms = elapsed_ms(test_started);
+        // `go test -coverprofile=cover.out` left no `cover.out` in the
+        // project, a golden file a test rewrote stayed in the copy, and a
+        // step after the tests that reads either found the old one or none.
+        // Every Go file in the copy is rewritten and stays there.
+        let rewritten = instrumented
+            .project
+            .files
+            .sources
+            .iter()
+            .chain(&instrumented.project.files.tests)
+            .map(PathBuf::from)
+            .collect::<BTreeSet<_>>();
+        let outputs = crate::workspace::sync_outputs_of(
+            crate::workspace::CommandOutputs::Go,
+            &root,
+            &workspace,
+            &before,
+            &rewritten,
+        )
+        .map_err(|error| error.to_string())?;
+        for line in crate::workspace::describe_command_outputs(&outputs) {
+            writeln!(diagnostics, "{line}").map_err(|error| error.to_string())?;
+        }
         if let Some(signal) = execution.interrupted_signal {
             return Err(format!(
                 "the test command was interrupted by {signal:?}; no run was published"

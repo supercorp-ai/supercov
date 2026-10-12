@@ -16,7 +16,7 @@
 // pytest already read the same. A language whose toolchain is not installed
 // is refused, not skipped: a gate that runs nothing proves nothing.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -142,6 +142,13 @@ const languages = {
           .replace(/\(\d+\.\d+s\)/u, ''),
       expects: [/^\s+crypto_test\.go:13: got "Y", want "Z"$/u, /[\\/]crypto\.go:18$/u, /[\\/]crypto_test\.go:18$/u],
     });
+    // And what the command writes is in the project when it ends: the
+    // coverage profile stayed in Supercov's copy, and a step after the
+    // tests that reads it found none.
+    const profiled = spawnSync(binary, ['--', 'go', 'test', '-coverprofile=cover.out', '-run', 'TestSealsABody', './...'], { cwd: root, encoding: 'utf8' });
+    assert.equal(profiled.status, 0, `${profiled.stdout}${profiled.stderr}`);
+    assert.match(readFileSync(resolve(root, 'cover.out'), 'utf8'), /^mode: set\nexample\.com\/shop\/crypto\.go:8\./u);
+    console.log('[failure-output] go test leaves its coverage profile in the project');
   },
   rust() {
     const root = project({
