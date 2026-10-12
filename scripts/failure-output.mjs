@@ -21,7 +21,7 @@
 // pytest already read the same. A language whose toolchain is not installed
 // is refused, not skipped: a gate that runs nothing proves nothing.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -30,7 +30,10 @@ const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 
 function project(files) {
-  const root = resolve(mkdtempSync(resolve(tmpdir(), 'supercov-failure-output-')), 'shop');
+  // The directory's own name: on Windows the temporary directory is given by
+  // its short name (`RUNNER~1`), which a run would print where Supercov, that
+  // resolves the project, prints the long one.
+  const root = resolve(mkdtempSync(resolve(realpathSync.native(tmpdir()), 'supercov-failure-output-')), 'shop');
   for (const [file, text] of Object.entries(files)) {
     mkdirSync(dirname(resolve(root, file)), { recursive: true });
     writeFileSync(resolve(root, file), text);
@@ -129,11 +132,14 @@ const languages = {
     if (available('test-unit')) {
       const unit = project({
         'lib/crypto.rb': source,
-        'test/crypto_unit_test.rb': 'require "test/unit"\nrequire_relative "../lib/crypto"\n\nclass CryptoUnit < Test::Unit::TestCase\n  def test_refuses_a_short_key\n    sealed = Crypto.seal("ab", "x")\n    assert_equal "X", sealed[:body]\n  end\n\n  def test_compares\n    assert_equal "Z", Crypto.seal("abcd", "y")[:body]\n  end\nend\n',
+        'test/crypto_unit_test.rb': 'require "test/unit"\nrequire_relative "../lib/crypto"\n\nclass CryptoUnit < Test::Unit::TestCase\n  def test_refuses_a_short_key\n    puts "run from #{caller.grep(/test-suite-runner\\.rb/).first.to_s[/test-suite-runner\\.rb:\\d+/]}"\n    sealed = Crypto.seal("ab", "x")\n    assert_equal "X", sealed[:body]\n  end\n\n  def test_compares\n    assert_equal "Z", Crypto.seal("abcd", "y")[:body]\n  end\nend\n',
       });
       compare('test-unit', unit, ruby, ['test/crypto_unit_test.rb', '--no-use-color'], {
         tidy: (line) => (/^Finished in|tests\/s/u.test(line) ? '' : line),
-        expects: [/^test\/crypto_unit_test\.rb:11:in /u],
+        // test-unit reads the parameters of a test's `run` to tell one a
+        // script overrode for an older release, and calls that one another
+        // way. Supercov's `run(*args)` read as such an override.
+        expects: [/^test\/crypto_unit_test\.rb:12:in /u, /run from test-suite-runner\.rb:\d+$/u],
       });
     }
   },

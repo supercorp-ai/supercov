@@ -840,7 +840,8 @@ module Supercov
       own = "#{File.dirname(File.expand_path(__FILE__))}/"
       locations = error.backtrace_locations
       if locations && RUBY_VERSION >= "3.4"
-        kept = locations.reject { |location| location.absolute_path.to_s.start_with?(own) }
+        # A method defined from text has a path and no absolute path.
+        kept = locations.reject { |location| (location.absolute_path || location.path).to_s.start_with?(own) }
         error.set_backtrace(kept) if kept.size != locations.size
         return
       end
