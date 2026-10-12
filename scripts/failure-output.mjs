@@ -1,7 +1,7 @@
 // What a failing test prints is what it prints without Supercov: the same
 // file, line and column under every failure, and no frame of Supercov's.
 //
-//   node scripts/failure-output.mjs python ruby go rust node ava
+//   node scripts/failure-output.mjs python ruby go rust node ava tap
 //
 // Each language gets the same small project: a function that refuses a short
 // key, a test that meets the refusal, and a test whose comparison fails. Its
@@ -12,7 +12,8 @@
 //     RSpec and test-unit listed the runtime's frames under the test's.
 //   - Go: a panic named the copy's file, at `crypto.go:24` for line 23, and
 //     `./...` listed Supercov's runtime package.
-//   - Rust: a panic was reported at `src/lib.rs:9:84` for `8:9`.
+//   - Rust: a panic was reported at `src/lib.rs:9:84` for `8:9`, each failed
+//     test had a report of its own and a test that passed no line at all.
 //   - Python: unittest printed its wrapper's frames, and its own, over the
 //     test's line.
 //   - node:test: a failing test had no frame of its own file, and a rewritten
@@ -43,13 +44,15 @@ function project(files) {
 }
 
 // What a run printed, without what differs between any two runs.
-function printed(root, command, args, tidy) {
+function printed(root, command, args, tidy, { passes = false } = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: 'utf8',
     env: { ...process.env, NO_COLOR: '1', CI: '1' },
   });
-  assert.notEqual(result.status, 0, `${command} ${args.join(' ')} passed:\n${result.stdout}${result.stderr}`);
+  assert.equal(result.error, undefined, `${command} did not start: ${result.error}`);
+  if (passes) assert.equal(result.status, 0, `${command} ${args.join(' ')} failed:\n${result.stdout}${result.stderr}`);
+  else assert.notEqual(result.status, 0, `${command} ${args.join(' ')} passed:\n${result.stdout}${result.stderr}`);
   return `${result.stdout}${result.stderr}`
     .split('\n')
     .map((line) => tidy(line.trimEnd()))
@@ -147,7 +150,10 @@ const languages = {
   go() {
     const root = project({
       'go.mod': 'module example.com/shop\n\ngo 1.22\n',
-      'crypto.go': 'package shop\n\nimport (\n\t"errors"\n\t"strings"\n)\n\nfunc Seal(key, body string) (string, error) {\n\tif len(key) < 4 {\n\t\treturn "", errors.New("key too short")\n\t}\n\treturn strings.ToUpper(body), nil\n}\n\nfunc MustSeal(key, body string) string {\n\tsealed, err := Seal(key, body)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\treturn sealed\n}\n',
+      // Switches with no `default` first, one of them on one line and one
+      // with no clause: the clause Supercov adds to each took three lines, and
+      // everything below was reported three lines late for each.
+      'crypto.go': 'package shop\n\nimport (\n\t"errors"\n\t"strings"\n)\n\nfunc Kind(key string) int {\n\tswitch {\n\tcase len(key) == 0:\n\t\treturn 0\n\tcase len(key) < 4:\n\t\treturn 1\n\t}\n\tswitch len(key) { case 4: return 2 }\n\tswitch key {\n\t}\n\treturn 3\n}\n\nfunc Seal(key, body string) (string, error) {\n\tif len(key) < 4 {\n\t\treturn "", errors.New("key too short")\n\t}\n\treturn strings.ToUpper(body), nil\n}\n\nfunc MustSeal(key, body string) string {\n\tsealed, err := Seal(key, body)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\treturn sealed\n}\n',
       'crypto_test.go': 'package shop\n\nimport "testing"\n\nfunc TestSealsABody(t *testing.T) {\n\tif got := MustSeal("abcd", "x"); got != "X" {\n\t\tt.Fatalf("got %q", got)\n\t}\n}\n\nfunc TestCompares(t *testing.T) {\n\tif got := MustSeal("abcd", "y"); got != "Z" {\n\t\tt.Errorf("got %q, want %q", got, "Z")\n\t}\n}\n\nfunc TestRefusesAShortKey(t *testing.T) {\n\tsealed := MustSeal("ab", "x")\n\tif sealed != "X" {\n\t\tt.Fatalf("got %q", sealed)\n\t}\n}\n',
     });
     compare('go test', root, 'go', ['test', './...'], {
@@ -162,7 +168,7 @@ const languages = {
           .replace(/\s+\+0x$/u, '')
           .replace(/\s[\d.]+s$/u, '')
           .replace(/\(\d+\.\d+s\)/u, ''),
-      expects: [/^\s+crypto_test\.go:13: got "Y", want "Z"$/u, /[\\/]crypto\.go:18$/u, /[\\/]crypto_test\.go:18$/u],
+      expects: [/^\s+crypto_test\.go:13: got "Y", want "Z"$/u, /[\\/]crypto\.go:31$/u, /[\\/]crypto_test\.go:18$/u],
     });
     // And what the command writes is in the project when it ends: the
     // coverage profile stayed in Supercov's copy, and a step after the
@@ -171,23 +177,82 @@ const languages = {
     assert.equal(profiled.status, 0, `${profiled.stdout}${profiled.stderr}`);
     assert.match(readFileSync(resolve(root, 'cover.out'), 'utf8'), /^mode: set\nexample\.com\/shop\/crypto\.go:8\./u);
     console.log('[failure-output] go test leaves its coverage profile in the project');
+    // A project that does not compile: Go names the file from where it runs
+    // and by line and column. It read `../../../../crypto.go:4:38` for
+    // `./crypto.go:4:15`, the copy's directory and a column moved by the probe
+    // before it. Packages build at once, so the lines are compared sorted.
+    const broken = project({
+      'go.mod': 'module example.com/shop\n\ngo 1.22\n',
+      'crypto.go': 'package shop\n\nfunc Seal(key string) string {\n\treturn key + undefinedThing\n}\n',
+      'crypto_test.go': 'package shop\n\nimport "testing"\n\nfunc TestSeal(t *testing.T) { _ = Seal("a") }\n',
+      'pkg/inner/inner.go': 'package inner\n\nfunc Up(s string) int {\n\treturn s\n}\n',
+      'pkg/inner/inner_test.go': 'package inner\n\nimport "testing"\n\nfunc TestUp(t *testing.T) { _ = Up("a") }\n',
+    });
+    const errors = (command, args) => printed(broken, command, args, (line) => line).sort();
+    const plain = errors('go', ['test', './...']);
+    for (const expected of [`.${sep}crypto.go:4:15: undefined: undefinedThing`, /^pkg[\\/]inner[\\/]inner\.go:4:9: cannot use s /u])
+      assert.ok(plain.some((line) => (typeof expected === 'string' ? line === expected : expected.test(line))), `go test: ${expected}\n${plain.join('\n')}`);
+    assert.deepEqual(errors(binary, ['--', 'go', 'test', './...']), plain, 'a Go project that does not compile');
+    console.log('[failure-output] a Go compile error reads as it does without Supercov');
   },
   rust() {
     const root = project({
       'Cargo.toml': '[package]\nname = "shop"\nversion = "0.1.0"\nedition = "2021"\n',
-      'src/lib.rs': 'pub fn first(key: &str) -> char {\n    key.chars().next().unwrap()\n}\n\npub fn seal(key: &str, body: &str) -> String {\n    if key.len() < 4 {\n        panic!("key too short");\n    }\n    body.to_uppercase()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn refuses_a_short_key() {\n        let sealed = seal("ab", "x");\n        assert_eq!(sealed, "X");\n    }\n\n    #[test]\n    fn compares() {\n        assert_eq!(seal("abcd", "y"), "Z");\n    }\n}\n',
+      // A `match` and a loop first: their probes took lines of their own, and
+      // every panic and doctest below them was reported two lines down for
+      // each (arrayvec's doctest at line 302 read `(line 304)`).
+      'src/lib.rs': 'pub fn kind(key: &str) -> u8 {\n    match key.len() {\n        0 => 0,\n        n if n < 4 => {\n            1\n        }\n        _ => 2,\n    }\n}\n\npub fn scan(key: &str, limit: usize) -> usize {\n    let mut seen = 0;\n    while seen < limit && seen < key.len() {\n        if key.as_bytes()[seen] == b\'-\' || seen > 8 {\n            break;\n        } else {\n            seen += 1;\n        }\n    }\n    seen\n}\n\n/// Seals a body.\n///\n/// ```\n/// assert_eq!(shop::seal("abcd", "x"), "X");\n/// ```\n///\n/// ```\n/// assert_eq!(shop::seal("abcd", "y"), "Z");\n/// ```\npub fn seal(key: &str, body: &str) -> String {\n    if key.len() < 4 {\n        panic!("key too short");\n    }\n    body.to_uppercase()\n}\n\npub fn first(key: &str) -> char {\n    key.chars().next().unwrap()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn seals_a_body() {\n        assert_eq!(seal("abcd", "x"), "X");\n        assert_eq!(kind("abcd"), 2);\n        assert_eq!(scan("ab-cd", 9), 2);\n    }\n\n    #[test]\n    fn refuses_a_short_key() {\n        let sealed = seal("ab", "x");\n        assert_eq!(sealed, "X");\n    }\n\n    #[test]\n    fn compares() {\n        assert_eq!(seal("abcd", "y"), "Z");\n    }\n\n    #[test]\n    #[ignore = "slow"]\n    fn is_slow() {}\n}\n',
+      'tests/outside.rs': '#[test]\nfn seals_from_outside() {\n    assert_eq!(shop::seal("abcd", "q"), "Q");\n}\n',
     });
-    // Supercov runs each test in a process of its own, so the lines libtest
-    // prints around the tests are not the same; where each panicked is.
-    const panics = (lines) => lines.filter((line) => line.includes('panicked at')).map((line) => line.replace(/\(\d+\) /u, '')).sort();
-    const plain = panics(printed(root, 'cargo', ['test', '--lib'], (line) => line));
-    // rustc names the file with the platform's separator.
-    assert.deepEqual(plain, [
-      `thread 'tests::compares' panicked at src${sep}lib.rs:24:9:`,
-      `thread 'tests::refuses_a_short_key' panicked at src${sep}lib.rs:7:9:`,
-    ]);
-    assert.deepEqual(panics(printed(root, binary, ['--', 'cargo', 'test', '--lib'], (line) => line)), plain, 'cargo test');
-    console.log('[failure-output] cargo test panics where it does without Supercov');
+    // Cargo writes its own lines on one stream and libtest's on the other, and
+    // libtest lists tests as they finish, so the two runs are compared as the
+    // lines each printed and not in an order neither has. Before this a run
+    // under Supercov had a report for each failed test (`running 1 test`,
+    // `2 filtered out`), no line for a test that passed and none of what a
+    // failed doctest printed.
+    const tidy = (line) => line
+      .replace(/\(\d+\) panicked/u, 'panicked')
+      .replace(/-[0-9a-f]{16}(?:\.exe)?\)$/u, '-HASH)')
+      .replace(/finished in [\d.]+s$/u, 'finished');
+    // Cargo colours its own lines where it is told to (`CARGO_TERM_COLOR`,
+    // as CI sets it), and so does Supercov's line for a binary: the colours
+    // are compared, and read through only to tell which lines are Cargo's.
+    const uncoloured = (line) => line.replace(/\u001b\[[0-9;]*m/gu, '');
+    const lines = (command, args, outcome) => printed(root, command, args, tidy, outcome)
+      .filter((line) => !/^\s+(?:Compiling|Finished|Blocking|Locking)\b|^error: |^\s+`--/u.test(uncoloured(line)))
+      .sort();
+    const plain = lines('cargo', ['test', '--no-fail-fast']);
+    for (const expected of [
+      // rustc names the file with the platform's separator.
+      `thread 'tests::refuses_a_short_key' panicked at src${sep}lib.rs:34:9:`,
+      `thread 'tests::compares' panicked at src${sep}lib.rs:62:9:`,
+      'running 4 tests',
+      'test tests::seals_a_body ... ok',
+      'test tests::is_slow ... ignored, slow',
+      'test result: FAILED. 1 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished',
+      '   Doc-tests shop',
+    ]) assert.ok(plain.map(uncoloured).includes(expected), `cargo test: ${expected}\n${plain.join('\n')}`);
+    assert.deepEqual(lines(binary, ['--', 'cargo', 'test', '--no-fail-fast']), plain, 'cargo test');
+    // What a binary reports is on standard output and Cargo's line for it on
+    // standard error, so `cargo test > results.txt` holds the reports alone.
+    // Supercov wrote both to standard error.
+    const reported = spawnSync(binary, ['--', 'cargo', 'test', '--no-fail-fast'], { cwd: root, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', CI: '1' } });
+    assert.match(reported.stdout, /^running 4 tests$/mu, reported.stdout);
+    assert.match(reported.stdout, /^test result: FAILED\. 1 passed; 2 failed; 1 ignored;/mu, reported.stdout);
+    assert.doesNotMatch(reported.stdout, /Running|Doc-tests/u, reported.stdout);
+    assert.match(uncoloured(reported.stderr), /^ {5}Running unittests src[\\/]lib\.rs /mu, reported.stderr);
+    assert.doesNotMatch(reported.stderr, /^running \d+ tests?$/mu, reported.stderr);
+    // The tests marked `#[ignore]` alone: two binaries and the doctests each
+    // report that they ran none of theirs. This failed outright, on "the pass
+    // for doctest … ran 0 doctest(s) instead of that one alone".
+    const ignored = lines('cargo', ['test', '--', '--ignored'], { passes: true });
+    for (const expected of [
+      'running 1 test',
+      'test tests::is_slow ... ok',
+      'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished',
+    ]) assert.ok(ignored.map(uncoloured).includes(expected), `cargo test -- --ignored: ${expected}\n${ignored.join('\n')}`);
+    assert.deepEqual(lines(binary, ['--', 'cargo', 'test', '--', '--ignored'], { passes: true }), ignored, 'cargo test -- --ignored');
+    console.log('[failure-output] cargo test reads as it does without Supercov');
   },
 };
 
@@ -216,6 +281,41 @@ languages.ava = () => {
     tidy: (line) => line.replace(/\(\d+(?:\.\d+)?m?s\)/u, ''),
     expects: [/^\s+at seal \(file:\/\/.*\/src\/crypto\.js:3:11\)$/u, /file:\/\/test\/crypto\.test\.js:10:5$/u],
   });
+};
+
+// tap is installed from the registry into the project, as the Mocha gate
+// installs Mocha: 21, which prints through @tapjs/stack and its own
+// reporter, and 16, which prints through libtap and stack-utils.
+//
+// Before this an application frame under tap 21 read
+// `../../../../src/crypto.js:3:11`. Under tap 16 it was the project's whole
+// path, with tap's own frames listed after it: Supercov loaded libtap before
+// tap had told it which frames are tap's.
+languages.tap = () => {
+  const windows = process.platform === 'win32';
+  for (const [version, files, args] of [
+    ['21', {
+      'package.json': '{ "name": "shop", "private": true, "type": "module" }\n',
+      'src/crypto.js': moduleSource,
+      'test/crypto.test.js': 'import t from "tap";\nimport { seal } from "../src/crypto.js";\n\nt.test("refuses a short key", async (t) => {\n  const sealed = seal("ab", "x");\n  t.equal(sealed.body, "X");\n});\n\nt.test("compares", async (t) => {\n  t.equal(seal("abcd", "y").body, "Z");\n});\n',
+    }, ['run', '--disable-coverage', '--reporter=base', 'test/crypto.test.js']],
+    ['16', {
+      'package.json': '{ "name": "shop", "private": true }\n',
+      'src/crypto.js': 'function seal(key, body) {\n  if (key.length < 4) {\n    throw new Error("key too short");\n  }\n  return { key, body: body.toUpperCase() };\n}\nmodule.exports = { seal };\n',
+      'test/crypto.test.js': 'const t = require("tap");\nconst { seal } = require("../src/crypto.js");\n\nt.test("refuses a short key", async (t) => {\n  const sealed = seal("ab", "x");\n  t.equal(sealed.body, "X");\n});\n\nt.test("compares", async (t) => {\n  t.equal(seal("abcd", "y").body, "Z");\n});\n',
+    }, ['--no-coverage', '--reporter=base', 'test/crypto.test.js']],
+  ]) {
+    const root = project({ ...files, '.gitignore': 'node_modules\n.supercov\n.tap\n.nyc_output\n' });
+    const install = spawnSync(windows ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--silent', `tap@${version}`], { cwd: root, encoding: 'utf8', shell: windows });
+    assert.equal(install.status, 0, `installing tap ${version}: ${install.stdout}\n${install.stderr}`);
+    const entry = JSON.parse(readFileSync(resolve(root, 'node_modules/tap/package.json'), 'utf8')).bin;
+    compare(`tap ${version}`, root, process.execPath, [resolve(root, 'node_modules/tap', typeof entry === 'string' ? entry : entry.tap), ...args], {
+      // How long the file and the run took; tap 16 writes zero-width
+      // spaces around a figure.
+      tidy: (line) => line.replace(/[\s\u200b]*[\d.]+m?s\u200b*$/u, ''),
+      expects: [/^\s*seal \(src[\\/]crypto\.js:3:11\)$/u, /^\s*(?:> )?3\s*\|?\s+throw new Error\("key too short"\);$/u],
+    });
+  }
 };
 
 const asked = process.argv.slice(2);

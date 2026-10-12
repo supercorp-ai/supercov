@@ -95,6 +95,245 @@ pub struct CommandSpec {
     /// When set, stdout and stderr are merged into this newly-created file.
     /// The orchestration layer owns publication and cleanup of the file.
     pub captured_output: Option<PathBuf>,
+    /// When set, what the command prints is passed on with these names put
+    /// right. A stream that is a terminal is still the command's own.
+    pub console: Option<ConsoleNames>,
+}
+
+/// How what a command prints names the project where it named Supercov's
+/// copy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConsoleNames {
+    /// Each spelling of the copy's directory with the project's, longest
+    /// first.
+    pub places: Vec<(String, String)>,
+    /// How a tool that names a file from where it runs reaches the project
+    /// from the copy: `../../../../`.
+    pub up_to_the_project: Option<String>,
+}
+
+impl ConsoleNames {
+    /// One line as the command would have printed it in the project.
+    pub fn line<'a>(&self, line: &'a str) -> std::borrow::Cow<'a, str> {
+        let named = crate::workspace::project_named(line, &self.places);
+        let text = named.as_deref().unwrap_or(line);
+        let Some(up) = self.up_to_the_project.as_deref() else {
+            return named.map_or(line.into(), Into::into);
+        };
+        let Some(relative) = relative_to_the_project(text, up) else {
+            return named.map_or(line.into(), Into::into);
+        };
+        relative.into()
+    }
+}
+
+/// A path written from the copy up to the project (`../../../../pkg/a.go`),
+/// as it is written from the project: `pkg/a.go`, and `./a.go` for a file of
+/// the directory itself, which is how Go writes one. Either separator.
+fn relative_to_the_project(text: &str, up: &str) -> Option<String> {
+    let other = up.replace('/', "\\");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut changed = false;
+    while let Some((at, prefix)) = [up, other.as_str()]
+        .into_iter()
+        .filter_map(|prefix| Some((rest.find(prefix)?, prefix)))
+        .min_by_key(|(at, _)| *at)
+    {
+        let before = &rest[..at];
+        let after = &rest[at + prefix.len()..];
+        // Where a path begins, and not further up than the project.
+        let begins = before.chars().next_back().is_none_or(|last| {
+            !(last.is_alphanumeric() || matches!(last, '.' | '/' | '\\' | '_' | '-'))
+        });
+        if !begins || after.starts_with("..") {
+            out.push_str(&rest[..at + prefix.len()]);
+            rest = after;
+            continue;
+        }
+        out.push_str(before);
+        let name = after
+            .split(|next: char| next == ':' || next.is_whitespace())
+            .next()
+            .unwrap_or_default();
+        if !name.contains(['/', '\\']) {
+            out.push('.');
+            out.push_str(&prefix[prefix.len() - 1..]);
+        }
+        rest = after;
+        changed = true;
+    }
+    out.push_str(rest);
+    changed.then_some(out)
+}
+
+/// The streams of a child whose output is passed on line by line.
+struct Relays(Vec<std::sync::mpsc::Receiver<()>>);
+
+/// Where each relayed stream is passed on to: this process's own output, by
+/// a handle of its own. Rust's `stderr()` is one lock, the caller that
+/// reports the run holds it for as long as the command runs, and a relay
+/// writing through it waited for the command to end before its first line.
+#[derive(Default)]
+struct RelayTargets {
+    stdout: Option<std::fs::File>,
+    stderr: Option<std::fs::File>,
+    /// Both streams go to one place (`2>&1`, a CI log), and the command
+    /// writes both down this one pipe: two pipes read by two threads would
+    /// pass its lines on in an order it did not write them in.
+    both: Option<io::PipeReader>,
+}
+
+/// Whether two handles are one file, pipe or device.
+#[cfg(unix)]
+fn one_place(left: &std::fs::File, right: &std::fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (left.metadata(), right.metadata()) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn one_place(_left: &std::fs::File, _right: &std::fs::File) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn own_handle(stream: &impl std::os::fd::AsFd) -> Option<std::fs::File> {
+    stream.as_fd().try_clone_to_owned().ok().map(Into::into)
+}
+
+#[cfg(windows)]
+fn own_handle(stream: &impl std::os::windows::io::AsHandle) -> Option<std::fs::File> {
+    stream.as_handle().try_clone_to_owned().ok().map(Into::into)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn own_handle<T>(_stream: &T) -> Option<std::fs::File> {
+    None
+}
+
+/// How long a stream is still read after the command has ended. It ends with
+/// the command unless a process the command left behind holds it open.
+const RELAY_GRACE: Duration = Duration::from_secs(2);
+
+impl Relays {
+    /// Ask for a pipe on each stream that is not a terminal and can be
+    /// written to by a handle of its own.
+    fn request(command: &mut Command, names: Option<&ConsoleNames>) -> RelayTargets {
+        use std::io::IsTerminal;
+        let mut targets = RelayTargets::default();
+        if names.is_none() {
+            return targets;
+        }
+        if !io::stdout().is_terminal() {
+            targets.stdout = own_handle(&io::stdout());
+        }
+        if !io::stderr().is_terminal() {
+            targets.stderr = own_handle(&io::stderr());
+        }
+        if let (Some(stdout), Some(stderr)) = (&targets.stdout, &targets.stderr)
+            && one_place(stdout, stderr)
+            && let Ok((reader, writer)) = io::pipe()
+            && let Ok(second) = writer.try_clone()
+        {
+            command.stdout(writer).stderr(second);
+            targets.both = Some(reader);
+            return targets;
+        }
+        if targets.stdout.is_some() {
+            command.stdout(Stdio::piped());
+        }
+        if targets.stderr.is_some() {
+            command.stderr(Stdio::piped());
+        }
+        targets
+    }
+
+    fn start(
+        child: &mut std::process::Child,
+        targets: RelayTargets,
+        names: Option<&ConsoleNames>,
+    ) -> Self {
+        let mut relays = Vec::new();
+        let Some(names) = names else {
+            return Self(relays);
+        };
+        if let Some(pipe) = targets.both {
+            if let Some(to) = targets.stderr.or(targets.stdout) {
+                relays.push(relay(pipe, to, names.clone()));
+            }
+            return Self(relays);
+        }
+        if let (Some(pipe), Some(to)) = (child.stdout.take(), targets.stdout) {
+            relays.push(relay(pipe, to, names.clone()));
+        }
+        if let (Some(pipe), Some(to)) = (child.stderr.take(), targets.stderr) {
+            relays.push(relay(pipe, to, names.clone()));
+        }
+        Self(relays)
+    }
+
+    fn finish(self) {
+        for ended in self.0 {
+            let _ = ended.recv_timeout(RELAY_GRACE);
+        }
+    }
+}
+
+/// A line longer than this is passed on in pieces.
+const RELAY_LINE_LIMIT: usize = 64 * 1024;
+
+fn relay(
+    mut pipe: impl Read + Send + 'static,
+    mut to: impl Write + Send + 'static,
+    names: ConsoleNames,
+) -> std::sync::mpsc::Receiver<()> {
+    let (ended, wait) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut pass = |bytes: &[u8]| -> io::Result<()> {
+            match std::str::from_utf8(bytes) {
+                Ok(text) => to.write_all(names.line(text).as_bytes())?,
+                Err(_) => to.write_all(bytes)?,
+            }
+            to.flush()
+        };
+        let mut pending = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = match pipe.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            pending.extend_from_slice(&buffer[..read]);
+            let mut passed = 0;
+            while let Some(end) = pending[passed..].iter().position(|byte| *byte == b'\n') {
+                // Whoever reads this has gone: the command is told so by
+                // its next write, as it would have been.
+                if pass(&pending[passed..=passed + end]).is_err() {
+                    let _ = ended.send(());
+                    return;
+                }
+                passed += end + 1;
+            }
+            pending.drain(..passed);
+            if pending.len() > RELAY_LINE_LIMIT {
+                if pass(&pending).is_err() {
+                    let _ = ended.send(());
+                    return;
+                }
+                pending.clear();
+            }
+        }
+        if !pending.is_empty() {
+            let _ = pass(&pending);
+        }
+        let _ = ended.send(());
+    });
+    wait
 }
 
 impl CommandSpec {
@@ -1079,12 +1318,19 @@ impl ProcessSupervisor {
             });
         }
         let mut command = spec.command()?;
+        let targets = Relays::request(&mut command, spec.console.as_ref());
         let (mut child, _parent_death_guard) = spawn_contained(
             &mut command,
             &spec.program,
             self.watchdog_program.as_deref(),
         )?;
-        self.monitor(&mut child, options, writer)
+        // This process's ends of a pipe the child was given go with the
+        // command; held, the pipe would never end.
+        drop(command);
+        let relays = Relays::start(&mut child, targets, spec.console.as_ref());
+        let result = self.monitor(&mut child, options, writer);
+        relays.finish();
+        result
     }
 
     pub fn supervise_captured(
@@ -1246,6 +1492,7 @@ impl ProcessSupervisor {
             });
         }
         let mut command = spec.command()?;
+        let targets = Relays::request(&mut command, spec.console.as_ref());
         let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
             program: spec.program.clone(),
             source,
@@ -1260,7 +1507,13 @@ impl ProcessSupervisor {
             let _ = child.wait();
             return Err(error);
         }
-        self.monitor(&mut child, options, writer)
+        // This process's ends of a pipe the child was given go with the
+        // command; held, the pipe would never end.
+        drop(command);
+        let relays = Relays::start(&mut child, targets, spec.console.as_ref());
+        let result = self.monitor(&mut child, options, writer);
+        relays.finish();
+        result
     }
 
     pub fn supervise_captured(
@@ -1451,6 +1704,49 @@ pub fn supervise_captured_command(
 mod tests {
     use super::*;
 
+    /// Somewhere a relay can write that the test can read afterwards.
+    #[derive(Clone, Default)]
+    struct Kept(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Kept {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn what_a_command_prints_names_the_project() {
+        // Go names a file in a compile error from where it runs, Maven and
+        // Gradle end a failed run with the address of a report, and each
+        // named Supercov's copy.
+        let names = ConsoleNames {
+            places: vec![(
+                "/home/me/shop/.supercov/workspaces/workspace/shop".into(),
+                "/home/me/shop".into(),
+            )],
+            up_to_the_project: Some("../../../../".into()),
+        };
+        let printed = "# example.com/shop [example.com/shop.test]\n../../../../crypto.go:4:15: undefined: undefinedThing\n../../../../pkg/inner/inner.go:4:9: cannot use s\n\tat ../../../../../elsewhere.go:1 and a/../../../../b.go\n[ERROR] Please refer to /home/me/shop/.supercov/workspaces/workspace/shop/target/surefire-reports for the individual test results.\nlast line, with no end";
+        let kept = Kept::default();
+        let ended = relay(
+            io::Cursor::new(printed.as_bytes().to_vec()),
+            kept.clone(),
+            names,
+        );
+        ended
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the relay ends with its input");
+        assert_eq!(
+            String::from_utf8(kept.0.lock().unwrap().clone()).unwrap(),
+            "# example.com/shop [example.com/shop.test]\n./crypto.go:4:15: undefined: undefinedThing\npkg/inner/inner.go:4:9: cannot use s\n\tat ../../../../../elsewhere.go:1 and a/../../../../b.go\n[ERROR] Please refer to /home/me/shop/target/surefire-reports for the individual test results.\nlast line, with no end"
+        );
+    }
+
     fn scratch_directory(label: &str) -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -1539,6 +1835,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap(),
             environment: Some(environment),
             captured_output: None,
+            console: None,
         };
         let mut diagnostics = Vec::new();
         let result =
@@ -1589,6 +1886,7 @@ mod tests {
             cwd: root,
             environment: None,
             captured_output: None,
+            console: None,
         };
         let mut diagnostics = Vec::new();
         let result =
@@ -1610,6 +1908,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap(),
             environment: None,
             captured_output: None,
+            console: None,
         };
         let mut diagnostics = Vec::new();
         let output =
@@ -1630,6 +1929,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap(),
             environment: None,
             captured_output: None,
+            console: None,
         };
         let mut diagnostics = Vec::new();
         let result =
@@ -1649,6 +1949,7 @@ mod tests {
             cwd: root,
             environment: None,
             captured_output: None,
+            console: None,
         };
         let mut diagnostics = Vec::new();
         let result = supervise_command(
@@ -1710,6 +2011,7 @@ mod tests {
             cwd: root,
             environment: Some(environment),
             captured_output: None,
+            console: None,
         };
         let mut diagnostics = Vec::new();
         let result = supervise_command(
@@ -1805,6 +2107,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap(),
             environment: None,
             captured_output: None,
+            console: None,
         };
         let result = supervise_command(
             &spec,

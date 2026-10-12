@@ -1672,28 +1672,26 @@ fn a_change_more_tests_ran_than_are_asked_says_so() {
 }
 
 #[test]
-fn a_fixture_imported_by_a_tsconfig_alias_is_shown_with_the_test() {
-    let project = Project::empty("alias-fixture");
-    project.write(
-        "package.json",
-        r##"{ "name": "alias", "type": "module", "imports": { "#f/*": "./test/fixtures/*" } }"##,
-    );
-    // tsconfig.json allows comments; the alias is read past them.
-    project.write(
-        "tsconfig.json",
-        "{\n  // fixtures are imported by alias\n  \"compilerOptions\": { \"paths\": { \"#f/*\": [\"./test/fixtures/*\"] } }\n}\n",
-    );
+fn a_javascript_request_shows_the_function_a_statement_is_in_and_no_helper() {
+    // What a request held was mostly the code the test ran, all of it in
+    // every file a question was about, and the files the test imports. Cut to
+    // the function each asked statement is in, with no helper, a request is
+    // 28 to 81% of the tokens and as accurate (eight projects, 2026-10-13).
+    let project = Project::empty("within-the-function");
+    project.write("package.json", r#"{ "name": "cart", "type": "module" }"#);
     project.write(
         "src/cart.js",
-        "export function total(items) {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+        "export function total(items) {\n  const sum = items.reduce((all, item) => all + item.price, 0);\n  return sum;\n}\n\nexport function shipping(weight) {\n  const rate = weight > 10 ? 9 : 4;\n  return rate;\n}\n\nexport function describe(order) {\n  const lines = order.items.map((item) => item.name);\n  const head = `order ${order.id}`;\n  const body = lines.join(\", \");\n  const tail = `to ${order.city}`;\n  return [head, body, tail].join(\"; \");\n}\n",
     );
     project.write(
-        "test/fixtures/cart.js",
-        "export const items = [{ price: 2 }, { price: 3 }]; // the fixture\n",
+        "test/fixtures.js",
+        "export const items = [{ price: 2, name: \"tea\" }, { price: 3, name: \"cup\" }]; // the fixture\n",
     );
+    // The second test runs more, so it is asked first and about `shipping`;
+    // the first is then asked about `total` alone, though it ran both.
     project.write(
         "test/cart.test.js",
-        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total } from \"../src/cart.js\";\nimport { items } from \"#f/cart.js\";\n\ntest(\"totals the fixture\", () => assert.equal(total(items), 5));\n",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { total, shipping, describe } from \"../src/cart.js\";\nimport { items } from \"./fixtures.js\";\n\ntest(\"totals and ships\", () => {\n  assert.equal(total(items), 5);\n  assert.equal(shipping(12), 9);\n});\n\ntest(\"ships and describes\", () => {\n  assert.equal(shipping(2), 4);\n  assert.equal(describe({ id: 7, city: \"Kaunas\", items }), \"order 7; tea, cup; to Kaunas\");\n});\n",
     );
     project.git(&["init", "-q"]);
     let run = project.measure(&[]);
@@ -1701,29 +1699,38 @@ fn a_fixture_imported_by_a_tsconfig_alias_is_shown_with_the_test() {
     project
         .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
         .succeeds();
-    let helpers = |seen: &common::Seen| {
-        seen.lock()
-            .unwrap()
-            .iter()
-            .rev()
-            .find(|(_, _, request)| request["state"]["test"]["name"] == "totals the fixture")
-            .map(|(_, _, request)| request["state"]["helpers"].clone())
-            .expect("the test was asked about")
-    };
-    let shown = helpers(&seen);
+    let seen = seen.lock().unwrap();
+    let request = seen
+        .iter()
+        .find(|(_, _, request)| request["state"]["test"]["name"] == "totals and ships")
+        .map(|(_, _, request)| request.clone())
+        .expect("the first test was asked about");
+    let state = &request["state"];
+    let shown = state["code_run"]["src/cart.js"]
+        .as_str()
+        .expect("the file the questions are about");
+    assert!(shown.contains("const sum = items.reduce"), "{shown}");
+    // It ran `shipping` too, and is asked nothing about it.
+    assert!(!shown.contains("const rate"), "{shown}");
+    assert!(shown.ends_with("lines not shown"), "{shown}");
     assert!(
-        shown["test/fixtures/cart.js"]
-            .as_str()
-            .is_some_and(|text| text.contains("[{ price: 2 }, { price: 3 }]")),
-        "{shown}"
+        request["questions"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|question| question["instructions"]["task"]
+                .as_str()
+                .is_some_and(
+                    |task| task.starts_with("src/cart.js:2:") || task.starts_with("src/cart.js:3:")
+                )),
+        "{request}"
     );
-    // Without the alias the import names nothing Supercov can find.
-    std::fs::remove_file(project.root.join("tsconfig.json")).unwrap();
-    let run = project.measure(&[]);
-    let (base, seen) = gateway(MODEL, answer_yes);
-    project
-        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
-        .succeeds();
-    let shown = helpers(&seen);
-    assert!(shown.get("test/fixtures/cart.js").is_none(), "{shown}");
+    // Nor is the file the test imports sent with it.
+    assert!(state.get("helpers").is_none(), "{state}");
+    assert!(
+        state["test_code"]
+            .as_str()
+            .is_some_and(|code| code.contains("totals and ships")),
+        "{state}"
+    );
 }

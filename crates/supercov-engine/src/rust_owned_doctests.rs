@@ -98,6 +98,9 @@ pub struct PackageDoctests {
     pub package: String,
     pub manifest_dir: PathBuf,
     pub cases: Vec<DoctestCase>,
+    /// How many doctests the package has, selected or not.
+    #[serde(default)]
+    pub listed: usize,
     /// rustdoc's combined exit code over every pass.
     pub exit_code: i32,
 }
@@ -137,6 +140,100 @@ struct ChildRecord {
 }
 
 // ------------------------------------------------------------ engine side
+
+/// rustdoc's reports on Cargo's standard output, one for each package under
+/// the `Doc-tests <package>` line Cargo wrote for it on standard error. Cargo
+/// runs the packages one after another, so both are in that order, and a
+/// report is its package's while every doctest it names is one of that
+/// package's. When the two cannot be paired the reports are given as they
+/// came.
+fn doctest_reports(
+    stdout: &str,
+    stderr: &str,
+    packages: &[PackageDoctests],
+    quiet: bool,
+) -> Vec<crate::rust_libtest_report::Announced> {
+    use crate::rust_libtest_report::Announced;
+    let mut reports = Vec::<String>::new();
+    for line in stdout.split_inclusive('\n') {
+        if line.starts_with("running ") || reports.is_empty() {
+            reports.push(String::new());
+        }
+        reports
+            .last_mut()
+            .expect("a report was just started")
+            .push_str(line);
+    }
+    reports.retain(|report| !report.trim().is_empty());
+    let named = |name: &str| name.replace('-', "_");
+    // Cargo may colour its word for the line.
+    let plain = |line: &str| {
+        let mut text = String::with_capacity(line.len());
+        let mut rest = line;
+        while let Some(at) = rest.find('\u{1b}') {
+            text.push_str(&rest[..at]);
+            rest = rest[at..].find('m').map_or("", |end| &rest[at + end + 1..]);
+        }
+        text.push_str(rest);
+        text
+    };
+    let headings = stderr
+        .lines()
+        .filter(|line| plain(line).trim_start().starts_with("Doc-tests "))
+        .collect::<Vec<_>>();
+    // Under `cargo test -q` Cargo writes no line for a package, and the
+    // packages are taken in the order it ran them.
+    let mut announced = Vec::new();
+    if headings.is_empty() {
+        announced.extend(packages.iter().map(|package| (None, package)));
+    }
+    for heading in &headings {
+        let written = plain(heading);
+        let package = written.trim_start().trim_start_matches("Doc-tests ").trim();
+        let Some(package) = packages
+            .iter()
+            .find(|candidate| named(&candidate.package) == named(package))
+        else {
+            announced.clear();
+            break;
+        };
+        announced.push((Some((*heading).to_owned()), package));
+    }
+    let mut merged = Vec::new();
+    let mut next = 0;
+    for (heading, package) in announced {
+        let its = reports[next..]
+            .iter()
+            .take_while(|report| {
+                crate::rust_libtest_report::reported_tests(report)
+                    .iter()
+                    .all(|test| package.cases.iter().any(|case| case.name == *test))
+            })
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        next += its.len();
+        merged.push(Announced {
+            heading,
+            // rustdoc is not run for a package none of whose doctests were
+            // asked for; it would have reported that it ran none.
+            report: if its.is_empty() {
+                crate::rust_libtest_report::unasked_report(package.listed)
+            } else {
+                crate::rust_libtest_report::merged_report(&its, quiet)
+            },
+        });
+    }
+    if next == reports.len() && !merged.is_empty() {
+        merged
+    } else if reports.is_empty() {
+        Vec::new()
+    } else {
+        vec![Announced {
+            heading: None,
+            report: reports.concat(),
+        }]
+    }
+}
 
 /// Run the doctests through `cargo test --doc` with this program as rustdoc,
 /// then read back what the wrapper recorded for each package.
@@ -205,6 +302,21 @@ pub(crate) fn run_doctests(
     if exit != 0 {
         *overall_exit = exit;
     }
+    // rustdoc's report of each package's doctests, under Cargo's heading for
+    // it, as `cargo test` prints them. A failed doctest was one line naming
+    // it, with nothing of what it printed.
+    let reported = doctest_reports(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+        &packages,
+        crate::rust_test_runner::cargo_quiet(invocation)
+            || crate::rust_test_runner::libtest_quiet(invocation),
+    );
+    crate::rust_libtest_report::write_reports(diagnostics, &reported).map_err(io_error)?;
+    let reported = reported
+        .iter()
+        .map(|announced| announced.report.as_str())
+        .collect::<String>();
 
     let mut results = Vec::new();
     let mut index = 0_usize;
@@ -221,7 +333,7 @@ pub(crate) fn run_doctests(
                 &package.manifest_dir.join(path_in_package),
             )
             .unwrap_or_else(|_| path_in_package.to_owned());
-            if case.status == "failed" {
+            if case.status == "failed" && !reported.contains(&case.name) {
                 writeln!(diagnostics, "[supercov] Rust doctest failed: {}", case.name)
                     .map_err(io_error)?;
             }
@@ -622,6 +734,12 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
     // Merged pass: one rustdoc invocation with the user's own harness
     // arguments, so libtest selects exactly what it would have; each case
     // runs in a child of its own and is attributed by its index.
+    // `cargo test -- --ignored` failed outright on a package with a doctest:
+    // "the pass for doctest … ran 0 doctest(s) instead of that one alone".
+    let only_ignored = harness
+        .passthrough
+        .iter()
+        .any(|argument| argument == "--ignored");
     let selected_merged = merged_sorted
         .iter()
         .filter(|name| harness.selects(name))
@@ -667,7 +785,12 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
         }
         // libtest's selection and the wrapper's reading of it must agree, or
         // a doctest could run unattributed; when they differ, say so.
-        if reported != selected_merged && output.status.success() {
+        let agrees = if only_ignored {
+            reported.is_subset(&selected_merged)
+        } else {
+            reported == selected_merged
+        };
+        if !agrees && output.status.success() {
             let difference = selected_merged
                 .symmetric_difference(&reported)
                 .cloned()
@@ -750,12 +873,18 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
         }
     }
     for (name, output) in &outputs {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let lines = harness_lines(&text);
+        // Under `--ignored` libtest leaves out every doctest that is not
+        // ignored, which no listing tells apart: its pass ran none, and the
+        // doctest was not asked for.
+        if only_ignored && lines.is_empty() && output.status.success() {
+            continue;
+        }
         relay(output);
         if !output.status.success() {
             exit_code = output.status.code().unwrap_or(1);
         }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let lines = harness_lines(&text);
         // The pass must have run this doctest and nothing else; the filter
         // is a substring, so check rather than trust.
         let [(printed, status)] = lines.as_slice() else {
@@ -796,6 +925,7 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
         package,
         manifest_dir,
         cases,
+        listed: all_names.len(),
         exit_code,
     };
     fs::write(

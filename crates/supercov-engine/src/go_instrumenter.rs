@@ -779,9 +779,23 @@ impl<'a> Collector<'a> {
                             }
                         }
                         None => {
-                            // Before the switch's closing brace.
+                            // Before the switch's closing brace, and on its
+                            // line: three lines of its own moved every line
+                            // below the switch, so a failure further down
+                            // the file was reported three lines late. The
+                            // `;` ends whatever the last clause holds when
+                            // the switch is written on one line; a switch
+                            // with no clause has nothing to end.
                             let at = node.end_byte().saturating_sub(1);
-                            self.edit(at, 100, format!("\ndefault:\n{alias}.A({probe})\n"));
+                            let after_a_clause = cases.iter().any(|(_, clause)| clause.is_some());
+                            self.edit(
+                                at,
+                                100,
+                                format!(
+                                    "{}default: {alias}.A({probe}) ",
+                                    if after_a_clause { "; " } else { "" }
+                                ),
+                            );
                         }
                     }
                 }
@@ -862,13 +876,29 @@ pub struct GoEdit {
 }
 
 /// Apply edits to source, right to left so earlier offsets stay valid.
+///
+/// What is inserted is followed by a comment that tells Go where the text
+/// after it was written, `/*line :4:9*/`. Go reports a compile error, and
+/// `go vet` a finding, by line and column, and a probe earlier on the line
+/// moved the column: `./crypto.go:4:38: undefined` for `4:15`. With no file
+/// named, the comment keeps the name the file already has.
 pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
     let mut ordered = edits.to_vec();
     ordered.sort_by(|a, b| b.at.cmp(&a.at).then(b.rank.cmp(&a.rank)));
+    let lines = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+        .collect::<Vec<_>>();
     let mut out = source.to_owned();
+    let mut placed = None;
     for edit in ordered {
-        if edit.at > out.len() {
+        if edit.at > source.len() {
             continue;
+        }
+        if placed != Some(edit.at) {
+            placed = Some(edit.at);
+            let line = lines.partition_point(|start| *start <= edit.at);
+            let column = edit.at - lines[line - 1] + 1;
+            out.insert_str(edit.at, &format!("/*line :{line}:{column}*/"));
         }
         out.insert_str(edit.at, &edit.text);
     }
@@ -1082,6 +1112,52 @@ func classify(a int, b bool) string {
         parse(&out)
             .unwrap_or_else(|error| panic!("rewritten source does not parse: {error}\n{out}"));
         out
+    }
+
+    #[test]
+    fn what_follows_an_insertion_is_where_it_was_written() {
+        // Go reports a compile error by line and column, and a probe earlier
+        // on the line moved the column: `./crypto.go:4:38` for `4:15`.
+        const SOURCE: &str =
+            "package main\n\nfunc seal(key string) string {\n\treturn key + missing\n}\n";
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations = build_go_obligations("seal.go", SOURCE, &mut next, &mut decisions)
+            .expect("obligations");
+        let rewritten = rewrite(SOURCE, &obligations.edits);
+        // The statement on line 4 begins at column 2, after the tab.
+        assert!(
+            rewritten.contains("/*line :4:2*/return key + missing"),
+            "{rewritten}"
+        );
+        assert_eq!(
+            rewritten.lines().count(),
+            SOURCE.lines().count(),
+            "{rewritten}"
+        );
+    }
+
+    #[test]
+    fn a_switch_given_a_default_keeps_its_lines() {
+        // The `default` Supercov adds to a switch that has none took three
+        // lines, so every line below the switch was three further down:
+        // go-version's constraint.go grew from 307 lines to 310.
+        const SOURCE: &str = "package main\n\nfunc kind(key string) int {\n\tswitch {\n\tcase len(key) == 0:\n\t\treturn 0\n\tcase len(key) < 4:\n\t\treturn 1\n\t}\n\tswitch len(key) { case 4: return 2 }\n\tswitch key {\n\t}\n\treturn 3\n}\n";
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations = build_go_obligations("kind.go", SOURCE, &mut next, &mut decisions)
+            .expect("obligations");
+        let rewritten = rewrite(SOURCE, &obligations.edits);
+        assert_eq!(
+            rewritten.lines().count(),
+            SOURCE.lines().count(),
+            "{rewritten}"
+        );
+        assert_eq!(rewritten.matches("default: ").count(), 3, "{rewritten}");
+        // One that follows a clause ends it; one in an empty switch has
+        // nothing to end, and `;` alone is not a clause.
+        assert_eq!(rewritten.matches("; default: ").count(), 2, "{rewritten}");
+        parse(&rewritten.replace(RUNTIME_IMPORT, "example.com/kind/supercov")).expect("still Go");
     }
 
     #[test]

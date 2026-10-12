@@ -162,6 +162,15 @@ fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String
                     .push((relative, "tooling or vendored directory"));
                 continue;
             }
+            // The toolchain ignores a directory whose name begins with an
+            // underscore: `go build ./...` and `go test ./...` walk past it.
+            // chi keeps its examples in `_examples`, a tenth of its lines,
+            // and no command of the project's ever compiled them. Its files
+            // are named one by one so the scope can say where they went.
+            if name.starts_with('_') {
+                ignored_by_the_toolchain(root, &path, files)?;
+                continue;
+            }
             // A directory with a go.mod of its own is a different module. The
             // toolchain does not compile it as part of this one -- `go test
             // ./...` walks straight past it -- so measuring it would put
@@ -190,6 +199,11 @@ fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String
         if !name.ends_with(".go") {
             continue;
         }
+        // As for a directory: a file named `_draft.go` is not compiled.
+        if name.starts_with('_') || name.starts_with('.') {
+            files.excluded.push((relative, IGNORED_BY_THE_TOOLCHAIN));
+            continue;
+        }
         if is_test_file(&relative) {
             files.tests.push(relative);
         } else {
@@ -197,6 +211,49 @@ fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String
         }
     }
     Ok(())
+}
+
+const IGNORED_BY_THE_TOOLCHAIN: &str = "ignored by the Go toolchain";
+
+/// Every `.go` file under a directory the toolchain ignores.
+fn ignored_by_the_toolchain(
+    root: &Path,
+    directory: &Path,
+    files: &mut GoFiles,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("could not read {}: {error}", directory.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+        if file_type.is_dir() {
+            ignored_by_the_toolchain(root, &path, files)?;
+        } else if file_type.is_file()
+            && path.extension().is_some_and(|extension| extension == "go")
+            && let Ok(relative) = path.strip_prefix(root)
+        {
+            files.excluded.push((
+                relative.to_string_lossy().replace('\\', "/"),
+                IGNORED_BY_THE_TOOLCHAIN,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// An example program at the top of the module: gorilla/websocket keeps eight
+/// under `examples/`, a quarter of its lines, and nats.go eighty-five. Each is
+/// a `package main` no test runs. Only the directory's name is read, and only
+/// `examples`: cobra's `doc` and nats.go's `bench` are packages of the product
+/// with tests of their own.
+fn example_program(file: &str) -> bool {
+    file.split_once('/').is_some_and(|(first, _)| {
+        matches!(first.to_ascii_lowercase().as_str(), "examples" | "example")
+    })
 }
 
 pub fn discover_go_files(root: &Path) -> Result<GoFiles, String> {
@@ -238,9 +295,25 @@ pub fn prepare_go_project(
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<PreparedGoProject, String> {
     let mut files = discover_go_files(root)?;
-    if let Some(roots) = roots {
-        roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
-        roots.refuse_if_empty(files.sources.len(), "Go")?;
+    match roots {
+        Some(roots) => {
+            roots.narrow(&mut files.sources, &mut files.excluded, String::as_str);
+            roots.refuse_if_empty(files.sources.len(), "Go")?;
+        }
+        // A root someone named is what they say it is.
+        None => {
+            let GoFiles {
+                sources, excluded, ..
+            } = &mut files;
+            sources.retain(|file| {
+                let example = example_program(file);
+                if example {
+                    excluded.push((file.clone(), "example"));
+                }
+                !example
+            });
+            excluded.sort();
+        }
     }
     if files.sources.is_empty() && files.tests.is_empty() {
         return Err(
@@ -299,19 +372,41 @@ pub fn prepare_go_project(
             }
         }
     }
-    // Only when roots shaped what is measured: without them this frontend
-    // records no scope, and its default output stays exactly as it was.
-    if let Some(roots) = roots {
-        let kept = files.sources.clone();
-        manifest.scope = Some(
-            serde_json::to_value(
-                roots
-                    .scope(&kept, &files.excluded)
-                    .map_err(|error| error.to_string())?,
-            )
+    let scope = match roots {
+        Some(roots) => roots
+            .scope(&files.sources, &files.excluded)
             .map_err(|error| error.to_string())?,
-        );
-    }
+        None => {
+            let unread = |file: &String| unparseable.iter().any(|(path, _)| path == file);
+            crate::source_discovery::automatic_scope(
+                files
+                    .sources
+                    .iter()
+                    .filter(|file| !unread(file))
+                    .map(|file| (file.clone(), "Go application source".to_owned())),
+                files
+                    .sources
+                    .iter()
+                    .filter(|file| unread(file))
+                    .map(|file| (file.clone(), "could not be parsed".to_owned()))
+                    .chain(
+                        files
+                            .tests
+                            .iter()
+                            .map(|file| (file.clone(), "test file".to_owned())),
+                    )
+                    .chain(
+                        // A directory left out whole is not a file to list.
+                        files
+                            .excluded
+                            .iter()
+                            .filter(|(file, _)| file.ends_with(".go"))
+                            .map(|(file, reason)| (file.clone(), (*reason).to_owned())),
+                    ),
+            )
+        }
+    };
+    manifest.scope = Some(serde_json::to_value(scope).map_err(|error| error.to_string())?);
     Ok(PreparedGoProject {
         root: root.to_owned(),
         files,
@@ -439,14 +534,85 @@ mod tests {
         );
         assert_eq!(scope.roots, ["app.go"]);
 
-        // Unset, Go records no scope, exactly as before.
-        assert!(
-            prepare_go_project(&root, None)
-                .unwrap()
-                .manifest
-                .scope
-                .is_none()
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_run_lists_what_it_measures_and_what_it_left_out() {
+        // `runs <id> scope` answered that a Go run held no inventory. And two
+        // kinds of file were measured that no command of the project's runs:
+        // chi's `_examples`, which the toolchain walks past, and the
+        // `examples/` programs of gorilla/websocket, a quarter of its lines.
+        let root = fixture("automatic-scope");
+        write(&root, "go.mod", "module example.com/app\n");
+        let function = "\n\nfunc F(a int) int {\n\treturn a\n}\n";
+        write(&root, "app.go", &format!("package app{function}"));
+        write(&root, "app_test.go", "package app\n");
+        write(
+            &root,
+            "_examples/hello/main.go",
+            &format!("package main{function}"),
         );
+        write(&root, "_draft.go", &format!("package app{function}"));
+        write(
+            &root,
+            "examples/echo/main.go",
+            &format!("package main{function}"),
+        );
+        write(
+            &root,
+            "internal/examples/kept.go",
+            &format!("package examples{function}"),
+        );
+        write(&root, "doc/gen.go", &format!("package doc{function}"));
+        write(
+            &root,
+            "vendor/other/lib.go",
+            &format!("package lib{function}"),
+        );
+
+        let project = prepare_go_project(&root, None).unwrap();
+        assert_eq!(
+            project.files.sources,
+            ["app.go", "doc/gen.go", "internal/examples/kept.go"]
+        );
+        let scope: crate::source_discovery::SourceScope =
+            serde_json::from_value(project.manifest.scope.clone().expect("a scope")).unwrap();
+        assert_eq!(
+            scope.mode,
+            crate::source_discovery::SourceScopeMode::Automatic
+        );
+        let listed = scope
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.file.as_str(),
+                    entry.status == crate::source_discovery::SourceScopeStatus::Included,
+                    entry.reason.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            [
+                ("_draft.go", false, "ignored by the Go toolchain"),
+                (
+                    "_examples/hello/main.go",
+                    false,
+                    "ignored by the Go toolchain"
+                ),
+                ("app.go", true, "Go application source"),
+                ("app_test.go", false, "test file"),
+                ("doc/gen.go", true, "Go application source"),
+                ("examples/echo/main.go", false, "example"),
+                ("internal/examples/kept.go", true, "Go application source"),
+            ]
+        );
+
+        // A root someone named is what they say it is.
+        let named = prepare_go_project(&root, Some(&explicit_roots(&root, &["examples"]))).unwrap();
+        assert_eq!(named.files.sources, ["examples/echo/main.go"]);
         fs::remove_dir_all(root).ok();
     }
 

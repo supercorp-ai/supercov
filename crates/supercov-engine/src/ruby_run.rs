@@ -291,6 +291,7 @@ pub fn run_direct_ruby(
                         &evidence_directory,
                     )),
                     captured_output: None,
+                    console: None,
                 },
             },
         };

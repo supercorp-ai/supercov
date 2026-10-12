@@ -253,6 +253,7 @@ mod tests {
                 cwd: root.into(),
                 environment: None,
                 captured_output: None,
+                console: None,
             },
         }
     }

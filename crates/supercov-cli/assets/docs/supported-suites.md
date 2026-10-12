@@ -150,7 +150,7 @@ whatever was still buffered.
 | --- | --- | --- |
 | Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | Rust 1.95; run with `npx supercov -- cargo test` |
 | rustdoc doctests | Exact doctest identity; every doctest runs in a process of its own | Rust 1.95; part of `npx supercov -- cargo test` |
-| cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-nextest 0.9.138 or 0.9.140 |
+| cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-nextest 0.9.138 or newer (tested with 0.9.140 and 0.9.148) |
 
 Supercov preserves Cargo's test selection, scheduling, fail-fast behavior,
 environment and exit status. Doctests run with their own identities; nextest

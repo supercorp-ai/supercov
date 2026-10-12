@@ -7,12 +7,15 @@
 
 use std::{collections::BTreeMap, ffi::OsString};
 
+/// The first release that tells a target runner which test and attempt it
+/// was started for. An older one cannot be measured test by test.
 pub const MINIMUM_NEXTEST_ATTEMPT_VERSION: (u64, u64, u64) = (0, 9, 138);
-pub const MAXIMUM_NEXTEST_ATTEMPT_VERSION: (u64, u64, u64) = (0, 9, 140);
-pub const VERIFIED_NEXTEST_ATTEMPT_VERSIONS: &[(u64, u64, u64)] = &[
-    MINIMUM_NEXTEST_ATTEMPT_VERSION,
-    MAXIMUM_NEXTEST_ATTEMPT_VERSION,
-];
+/// The newest release the gates run under. A later one runs too: Supercov
+/// used to accept only the releases it had been checked with, so every new
+/// nextest was refused until a Supercov release named it (0.9.148 was, the
+/// week it came out). What a runner is told is checked for each attempt, and
+/// a release that told it less would stop there, saying what is missing.
+pub const NEWEST_CHECKED_NEXTEST_VERSION: (u64, u64, u64) = (0, 9, 148);
 
 const EXECUTION_IDENTITY_KEYS: &[&str] = &[
     "NEXTEST_RUN_ID",
@@ -116,21 +119,16 @@ fn parse_version(value: &str) -> Result<(u64, u64, u64), RustRunnerAttemptError>
     Ok(version)
 }
 
+/// Whether a release is newer than any the gates run under.
+pub fn newer_than_checked(value: &str) -> bool {
+    parse_version(value).is_ok_and(|version| version > NEWEST_CHECKED_NEXTEST_VERSION)
+}
+
 pub fn validate_nextest_version(value: &str) -> Result<(), RustRunnerAttemptError> {
     let version = parse_version(value)?;
     if version < MINIMUM_NEXTEST_ATTEMPT_VERSION {
         return Err(RustRunnerAttemptError(format!(
-            "nextest {value} predates the frozen 0.9.138 target-runner identity contract"
-        )));
-    }
-    if version > MAXIMUM_NEXTEST_ATTEMPT_VERSION {
-        return Err(RustRunnerAttemptError(format!(
-            "nextest {value} is newer than the verified 0.9.140 command and identity contract"
-        )));
-    }
-    if !VERIFIED_NEXTEST_ATTEMPT_VERSIONS.contains(&version) {
-        return Err(RustRunnerAttemptError(format!(
-            "nextest {value} is not one of the verified released target-runner contracts (0.9.138, 0.9.140)"
+            "nextest {value} is older than 0.9.138, the first release that tells a target runner which test and attempt it runs"
         )));
     }
     Ok(())
@@ -483,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn nextest_version_handshake_accepts_only_verified_releases() {
+    fn nextest_version_handshake_accepts_every_release_that_names_the_attempt() {
         assert_eq!(
             parse_nextest_version_output(
                 b"cargo-nextest 0.9.138 (fc97e97bb 2026-06-21)\nrelease: 0.9.138\ncommit-hash: fc97e97bbe0a3927482a694247da00c099f4269e\ncommit-date: 2026-06-21\nhost: aarch64-apple-darwin\n"
@@ -498,13 +496,13 @@ mod tests {
             .unwrap(),
             "0.9.140"
         );
-        assert!(
+        // A release between two the gates run under is not refused.
+        assert_eq!(
             parse_nextest_version_output(
                 b"cargo-nextest 0.9.139\nrelease: 0.9.139\nhost: aarch64-apple-darwin\n"
             )
-            .unwrap_err()
-            .to_string()
-            .contains("not one of the verified released")
+            .unwrap(),
+            "0.9.139"
         );
         assert!(
             parse_nextest_version_output(
@@ -512,16 +510,34 @@ mod tests {
             )
             .unwrap_err()
             .to_string()
-            .contains("predates")
+            .contains("older than 0.9.138")
         );
-        assert!(
+        // The release that was current when this was written, refused until
+        // Supercov named it: a project on that day's nextest could not be
+        // measured.
+        assert_eq!(
             parse_nextest_version_output(
-                b"cargo-nextest 0.9.141\nrelease: 0.9.141\nhost: aarch64-apple-darwin\n"
+                b"cargo-nextest 0.9.148 (cd1d6d546 2026-10-07)\nrelease: 0.9.148\ncommit-hash: cd1d6d5467322dbc0d39a80cb671d000ac302798\ncommit-date: 2026-10-07\nhost: aarch64-apple-darwin\n"
             )
-            .unwrap_err()
-            .to_string()
-            .contains("newer")
+            .unwrap(),
+            "0.9.148"
         );
+        // And one that does not exist yet runs, where it was refused.
+        for later in ["0.9.149", "0.10.0", "1.0.0"] {
+            assert_eq!(
+                parse_nextest_version_output(
+                    format!(
+                        "cargo-nextest {later}\nrelease: {later}\nhost: aarch64-apple-darwin\n"
+                    )
+                    .as_bytes()
+                )
+                .unwrap(),
+                later
+            );
+            assert!(newer_than_checked(later), "{later}");
+        }
+        assert!(!newer_than_checked("0.9.148"));
+        assert!(!newer_than_checked("0.9.141"));
         assert!(
             parse_nextest_version_output(
                 b"cargo 0.9.140\nrelease: 0.9.140\nhost: aarch64-apple-darwin\n"

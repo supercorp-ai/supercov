@@ -1249,7 +1249,7 @@ fn main() {
         fs::write(&input, format!("{}\n{runtime}", transformed.code)).unwrap();
         let compile = Command::new("rustc")
             .arg("--edition=2024")
-            .arg("--cap-lints=warn")
+            .arg("--cap-lints=allow")
             .arg(&input)
             .arg("-o")
             .arg(&binary)
@@ -1289,12 +1289,12 @@ fn main() {
         let input = directory.join("main.rs");
         let binary = directory.join("program");
         fs::write(&input, format!("{}\n{runtime}", transformed.code)).unwrap();
-        // --cap-lints=warn mirrors what the runner passes for the instrumented
+        // --cap-lints=allow mirrors what the runner passes for the instrumented
         // workspace: the host policy must not reject generated code, including
         // the `if ({{ frame ... }})` decision wrapping that trips unused_parens.
         let compile = Command::new("rustc")
             .arg("--edition=2024")
-            .arg("--cap-lints=warn")
+            .arg("--cap-lints=allow")
             .arg(&input)
             .arg("-o")
             .arg(&binary)

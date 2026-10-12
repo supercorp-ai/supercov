@@ -157,6 +157,13 @@ npx supercov -- sh -c "npm run build && npm test"
 A `pretest` script, or a Playwright `webServer` that builds, does the same. The
 build then compiles the instrumented copy, and what the tests run is measured.
 
+A build made in an earlier step does not reach the copy either. A CI job that
+ran `npm run build` and then `supercov -- node --test`, as a gate written for
+Supercov 3 would, built the project and tested a copy without `dist/`: the
+tests that need it fail, and the run still reports a coverage figure for the
+rest. The message at the end of such a run says the copy starts without build
+output and gives the command with the build in it.
+
 ## A test that reads your source fails under Supercov
 
 A test that opens your source files and asserts on their text sees the probes,

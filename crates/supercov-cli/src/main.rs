@@ -2247,6 +2247,7 @@ fn supervise() -> ExitCode {
         cwd,
         environment: None,
         captured_output: None,
+        console: None,
     };
     let mut stderr = std::io::stderr().lock();
     let supervisor = match std::env::current_exe()

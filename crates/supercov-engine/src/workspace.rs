@@ -1380,11 +1380,35 @@ fn naming_the_project(
     let Ok(text) = String::from_utf8(bytes) else {
         return Ok(None);
     };
+    Ok(project_named(&text, places))
+}
+
+/// What a Go or JVM command prints, passed on with the copy named as the
+/// project. Maven ends a failed run with "Please refer to
+/// <copy>/target/surefire-reports", Gradle with a `file://` address of its
+/// report in the copy, and Go names a file in a compile error from where it
+/// runs: `../../../../crypto.go:9:2` for `./crypto.go:9:2`.
+pub fn console_names(root: &Path, workspace: &Path) -> crate::process_supervision::ConsoleNames {
+    let up = workspace
+        .strip_prefix(root)
+        .ok()
+        .map(|inside| inside.components().count())
+        .filter(|levels| *levels > 0)
+        .map(|levels| "../".repeat(levels));
+    crate::process_supervision::ConsoleNames {
+        places: copy_and_project(root, workspace),
+        up_to_the_project: up,
+    }
+}
+
+/// `text` with each spelling of the copy's directory replaced by the
+/// project's, when it holds one.
+pub(crate) fn project_named(text: &str, places: &[(String, String)]) -> Option<String> {
     if !places.iter().any(|(copy, _)| text.contains(copy.as_str())) {
-        return Ok(None);
+        return None;
     }
     let mut out = String::with_capacity(text.len());
-    let mut rest = text.as_str();
+    let mut rest = text;
     // The next place the copy is named, the longest spelling where two start
     // together (`places` is sorted so).
     while let Some((at, copy, project)) = places
@@ -1410,7 +1434,7 @@ fn naming_the_project(
         }
     }
     out.push_str(rest);
-    Ok((out != text).then_some(out))
+    (out != text).then_some(out)
 }
 
 /// Copy files the wrapped command created or changed in the mirror back to

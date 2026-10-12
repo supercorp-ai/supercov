@@ -250,6 +250,14 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
         // name the copy's file, and coverage reports it by its path in the
         // project's layout.
         vitest: { prints: /[\\/]vitest[\\/]dist[\\/]/, names: true },
+        // A test's process makes each frame's path relative to where it
+        // runs (@tapjs/stack), and the process that reports reads the file
+        // under a frame by that path to print it (prismjs-terminal, for
+        // @tapjs/reporter): `../../../../src/crypto.js` over the right
+        // lines, or `src/crypto.js` over Supercov's.
+        // libtap, which tap 16 and older print with, reads the file itself,
+        // and their reporter reads it through cardinal.
+        tap: { prints: /[\\/](?:@tapjs[\\/](?:stack|reporter)|prismjs-terminal|libtap|cardinal)[\\/]/, names: false },
     }[runner];
     // Asked with no runner, the reads are in place and change nothing until
     // one is named: a process that may yet run a suite.
@@ -439,7 +447,8 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
     function supercovReadFileSync(file, ...rest) {
         if (!failureOutput.prints)
             return Reflect.apply(readSync, this, [file, ...rest]);
-        const local = rewrittenUnder(copies, file);
+        // A printer may name the file from where it runs.
+        const local = rewrittenUnder(copies, typeof file === "string" && !isAbsolute(file) ? resolve(file) : file);
         if (local === undefined) {
             const contents = Reflect.apply(readSync, this, [file, ...rest]);
             return failureOutput.composes && typeof contents === "string" && typeof file === "string" && file.endsWith(".map")
@@ -543,6 +552,9 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
 // of process) never loads it.
 if (isJestEntrypoint)
     process.__SUPERCOV_FAILURE_OUTPUT__("jest");
+// tap prints from the process its command starts, and from each test's own.
+else if (process.env.TAP_CHILD_ID || /\/node_modules\/(?:\.bin\/tap$|tap\/|@tapjs\/run\/)/.test(entrypoint))
+    process.__SUPERCOV_FAILURE_OUTPUT__("tap");
 else {
     const jest = /(?:^|[\\/])(?:jest|jest-cli|@jest[\\/]core|jest-runner)(?:[\\/]|$)/;
     const load = Module._load;

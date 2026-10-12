@@ -351,23 +351,55 @@ pub fn prepare_jvm_project(
             }
         }
     }
-    // Only when roots shaped what is measured: without them this frontend
-    // records no scope, and its default output stays exactly as it was.
-    if let Some(roots) = roots {
-        let kept = files
-            .sources
-            .iter()
-            .map(|(file, _)| file.clone())
-            .collect::<Vec<_>>();
-        manifest.scope = Some(
-            serde_json::to_value(
+    let scope =
+        match roots {
+            Some(roots) => {
+                let kept = files
+                    .sources
+                    .iter()
+                    .map(|(file, _)| file.clone())
+                    .collect::<Vec<_>>();
                 roots
                     .scope(&kept, &files.excluded)
-                    .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?,
-        );
-    }
+                    .map_err(|error| error.to_string())?
+            }
+            None => {
+                let unread = |file: &String| unparseable.iter().any(|(path, _)| path == file);
+                let named = |language: &JvmLanguage| match language {
+                    JvmLanguage::Java => "Java",
+                    JvmLanguage::Kotlin => "Kotlin",
+                };
+                crate::source_discovery::automatic_scope(
+                    files.sources.iter().filter(|(file, _)| !unread(file)).map(
+                        |(file, language)| {
+                            (
+                                file.clone(),
+                                format!("{} application source", named(language)),
+                            )
+                        },
+                    ),
+                    files
+                        .sources
+                        .iter()
+                        .filter(|(file, _)| unread(file))
+                        .map(|(file, _)| (file.clone(), "could not be parsed".to_owned()))
+                        .chain(
+                            files
+                                .tests
+                                .iter()
+                                .map(|(file, _)| (file.clone(), "test file".to_owned())),
+                        )
+                        .chain(
+                            files
+                                .excluded
+                                .iter()
+                                .filter(|(file, _)| language_of(file).is_some())
+                                .map(|(file, reason)| (file.clone(), (*reason).to_owned())),
+                        ),
+                )
+            }
+        };
+    manifest.scope = Some(serde_json::to_value(scope).map_err(|error| error.to_string())?);
     Ok(PreparedJvmProject {
         root: root.to_owned(),
         files,
@@ -479,12 +511,50 @@ mod tests {
             scope.mode,
             crate::source_discovery::SourceScopeMode::Explicit
         );
-        assert!(
+        // With no roots named the run lists what it measures all the same:
+        // `runs <id> scope` answered that it held no inventory.
+        write(
+            &root,
+            "src/test/java/app/GoodTest.java",
+            "class GoodTest {}",
+        );
+        write(&root, "Loose.java", "class Loose {}");
+        let scope: crate::source_discovery::SourceScope = serde_json::from_value(
             prepare_jvm_project(&root, None)
                 .unwrap()
                 .manifest
                 .scope
-                .is_none()
+                .expect("a scope"),
+        )
+        .unwrap();
+        assert_eq!(
+            scope.mode,
+            crate::source_discovery::SourceScopeMode::Automatic
+        );
+        assert_eq!(
+            scope
+                .entries
+                .iter()
+                .map(|entry| (
+                    entry.file.as_str(),
+                    entry.status == crate::source_discovery::SourceScopeStatus::Included,
+                    entry.reason.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("Loose.java", false, "outside a src source set"),
+                (
+                    "src/main/java/app/Good.java",
+                    true,
+                    "Java application source"
+                ),
+                (
+                    "src/main/java/shaded/Dep.java",
+                    true,
+                    "Java application source"
+                ),
+                ("src/test/java/app/GoodTest.java", false, "test file"),
+            ]
         );
         fs::remove_dir_all(root).ok();
     }

@@ -67,14 +67,20 @@ function supercov(args, env = environment()) {
   });
 }
 
-// The runner's nextest contract is verified against 0.9.138 and 0.9.140. This
-// leg used to skip when cargo-nextest was not on PATH, which is how a runner
-// that refused every nextest command passed this gate locally while CI failed
-// (1c8bf35). A verified nextest on PATH is used; otherwise the pinned build is
-// fetched once into the temp directory. The leg never skips.
-const NEXTEST_VERSION = '0.9.140';
-const VERIFIED_NEXTEST = /cargo-nextest 0\.9\.(?:138|140)\b/;
-async function nextestEnvironment() {
+// Any nextest from 0.9.138 runs; the runner's contract is checked here under
+// 0.9.140 and 0.9.148. This leg used to skip when cargo-nextest was not on PATH, which is
+// how a runner that refused every nextest command passed this gate locally
+// while CI failed (1c8bf35). It runs under each of the releases below: the one
+// on PATH when it is that release, otherwise the published build, fetched
+// once into the temp directory. A platform with no published build runs the
+// release it has on PATH. The leg never skips.
+//
+// 0.9.148 was the current release when it was added, and Supercov, which
+// then accepted only the releases named here, refused it: a project on that
+// day's nextest could not be measured at all.
+const NEXTEST_VERSIONS = ['0.9.140', '0.9.148'];
+async function nextestEnvironment(NEXTEST_VERSION) {
+  const VERIFIED_NEXTEST = new RegExp(`cargo-nextest ${NEXTEST_VERSION.replaceAll('.', '\\.')}\\b`);
   const windows = process.platform === 'win32';
   const probe = (env) => spawnSync('cargo', ['nextest', '--version'], { encoding: 'utf8', env, shell: windows });
   const onPath = probe(environment());
@@ -86,10 +92,8 @@ async function nextestEnvironment() {
     linux: process.arch === 'arm64' ? 'linux-arm' : 'linux',
     win32: process.arch === 'x64' ? 'windows-tar' : undefined,
   }[process.platform];
-  assert.ok(
-    archive,
-    `no verified cargo-nextest on PATH (${onPath.stdout.trim() || onPath.stderr.trim() || 'absent'}) and no pinned build for ${process.platform}/${process.arch}: install cargo-nextest ${NEXTEST_VERSION}`,
-  );
+  // No published build for this platform: only a release on PATH runs.
+  if (!archive) return undefined;
   const directory = resolve(realpathSync.native(tmpdir()), `supercov-cargo-nextest-${NEXTEST_VERSION}`);
   const executable = resolve(directory, windows ? 'cargo-nextest.exe' : 'cargo-nextest');
   if (!existsSync(executable)) {
@@ -207,18 +211,27 @@ try {
   const untaken = JSON.stringify(query(['runs', 'latest', 'line', `src/lib.rs:${neverLine}`]));
   assert.doesNotMatch(untaken, /classifies_|doubles_|greets_|passes_on_retry|\(line \d+\)/, `nothing reaches never_called: ${untaken}`);
 
-  // nextest: the same crate, one test retried once.
-  const nextest = await nextestEnvironment();
-  const retried = supercov(['--', 'cargo', 'nextest', 'run', '--retries', '1'], nextest.env);
-  assert.equal(retried.status, 0, `${retried.stdout}\n${retried.stderr}`);
-  // nextest colors its summary on CI; compare the plain text.
-  const plain = (retried.stdout + retried.stderr).replace(/\x1b\[[0-9;]*m/g, '');
-  assert.match(plain, /1 flaky/, `one test must have passed on its second attempt: ${plain}`);
-  // nextest runs the integration tests, not the doctest.
-  assert.match(retried.stderr, /\[supercov\] Rust coverage: 5 test\(s\)/, retried.stderr);
-  const retriedLine = JSON.stringify(query(['runs', 'latest', 'line', `src/lib.rs:${doubledLine}`]));
-  assert.match(retriedLine, /doubles_on_a_thread/, `attribution holds under nextest: ${retriedLine}`);
-  const nextestNote = `${nextest.version} retried one test once`;
+  // nextest: the same crate, one test retried once, under each release.
+  const notes = [];
+  for (const release of NEXTEST_VERSIONS) {
+    const nextest = await nextestEnvironment(release);
+    if (!nextest) continue;
+    const retried = supercov(['--', 'cargo', 'nextest', 'run', '--retries', '1'], nextest.env);
+    assert.equal(retried.status, 0, `${release}: ${retried.stdout}\n${retried.stderr}`);
+    // nextest colors its summary on CI; compare the plain text.
+    const plain = (retried.stdout + retried.stderr).replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(plain, /1 flaky/, `one test must have passed on its second attempt: ${plain}`);
+    // nextest shows its build, and what it builds is the rewritten source:
+    // every probe drew a warning of unnecessary parentheses.
+    assert.doesNotMatch(plain, /^warning: /mu, `${release}: the build must not report lints on rewritten code: ${plain}`);
+    // nextest runs the integration tests, not the doctest.
+    assert.match(retried.stderr, /\[supercov\] Rust coverage: 5 test\(s\)/, retried.stderr);
+    const retriedLine = JSON.stringify(query(['runs', 'latest', 'line', `src/lib.rs:${doubledLine}`]));
+    assert.match(retriedLine, /doubles_on_a_thread/, `attribution holds under nextest ${release}: ${retriedLine}`);
+    notes.push(nextest.version);
+  }
+  assert.ok(notes.length > 0, `no cargo-nextest of ${NEXTEST_VERSIONS.join(' or ')} on PATH and no published build for ${process.platform}/${process.arch}`);
+  const nextestNote = `${notes.join(' and ')} retried one test once`;
 
   console.log(
     `[rust-public-cargo] ${process.platform} ran the public cargo test path through the exact compiler chain; a spawned thread, a child process and a doctest kept their tests; ${nextestNote}`,

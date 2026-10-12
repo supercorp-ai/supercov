@@ -376,6 +376,7 @@ pub fn run_direct_python(
                         &evidence_directory,
                     )),
                     captured_output: None,
+                    console: None,
                 },
             },
         };

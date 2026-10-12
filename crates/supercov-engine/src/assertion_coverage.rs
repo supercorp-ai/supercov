@@ -59,6 +59,9 @@ const HELPER_CHARS: usize = 3000;
 const FIXTURE_CHARS: usize = 12000;
 const CONTEXT_LINES: usize = 0;
 const WINDOW_LINES: usize = 4;
+/// How far either side of a statement that is in no function its file is
+/// shown.
+const OUTSIDE_A_FUNCTION: usize = 25;
 const CODE_CHARS: usize = 10000;
 const BODY_LINES: usize = 150;
 
@@ -158,6 +161,16 @@ pub enum Language {
 }
 
 impl Language {
+    /// Whether a request shows, of the code the test ran, the function each
+    /// asked statement is in and nothing else, and leaves the test's helper
+    /// files out. Measured for these two on eight projects against the
+    /// outcome of applying each change (2026-10-13): 28 to 81% of the tokens,
+    /// and 451 wrong verdicts where the fuller request gave 457. The other
+    /// languages have not been measured and are asked as before.
+    fn asks_within_the_function(self) -> bool {
+        matches!(self, Language::JavaScript | Language::Python)
+    }
+
     /// The run manifest's language name, when it is one of these.
     pub fn from_manifest(name: &str) -> Option<Self> {
         match name {
@@ -243,7 +256,6 @@ pub struct Population {
     source_files: BTreeSet<String>,
     /// The project's Java and Kotlin files, for JVM tests and their imports.
     jvm_files: Vec<String>,
-    aliases: Vec<(String, String)>,
     /// Files read once: every request and every cache key reads the same text.
     files: std::sync::Mutex<BTreeMap<String, Option<std::sync::Arc<str>>>>,
     /// Whether a test file contains a text fragment, by (file, fragment).
@@ -486,7 +498,6 @@ pub fn population_from(
         ran,
         source_files,
         jvm_files,
-        aliases: tsconfig_aliases(root),
         files: Default::default(),
         quotes: Default::default(),
     })
@@ -761,6 +772,183 @@ fn prefix(text: &str, chars: usize) -> &str {
         Some((i, _)) => &text[..i],
         None => text,
     }
+}
+
+/// The lines of each function that lies in no other, with the statement that
+/// declares it (`export const seal = (key) => {`) and its decorators. A
+/// callback written inside a function belongs to it. First and last line,
+/// from one.
+fn outermost_functions(language: Language, file: &str, source: &str) -> Vec<(usize, usize)> {
+    let starts = line_starts(source);
+    let lines = |from: usize, to: usize| {
+        (
+            line_of(&starts, from),
+            line_of(&starts, to.saturating_sub(1).max(from)),
+        )
+    };
+    let mut spans = match language {
+        Language::JavaScript => {
+            let allocator = Allocator::default();
+            let source_type = SourceType::from_path(file).unwrap_or_else(|_| SourceType::tsx());
+            let parsed = Parser::new(&allocator, source, source_type).parse();
+            #[derive(Default)]
+            struct Functions {
+                // The statement, or the member of a class, a function is
+                // written in: what stands directly in the file, a block or a
+                // class body.
+                within: Option<(u32, u32)>,
+                found: Vec<(u32, u32)>,
+            }
+            impl Functions {
+                fn inside(&mut self, span: (u32, u32), walk: impl FnOnce(&mut Self)) {
+                    let outer = self.within.replace(span);
+                    walk(self);
+                    self.within = outer;
+                }
+                fn function(&mut self, own: oxc_span::Span) {
+                    self.found.push(self.within.unwrap_or((own.start, own.end)));
+                }
+            }
+            fn from_decorators(
+                span: oxc_span::Span,
+                decorators: &[oxc_ast::ast::Decorator<'_>],
+            ) -> (u32, u32) {
+                (
+                    decorators
+                        .first()
+                        .map_or(span.start, |first| first.span.start.min(span.start)),
+                    span.end,
+                )
+            }
+            impl<'a> Visit<'a> for Functions {
+                fn visit_program(&mut self, program: &oxc_ast::ast::Program<'a>) {
+                    for statement in &program.body {
+                        let span = statement.span();
+                        self.inside((span.start, span.end), |this| {
+                            this.visit_statement(statement)
+                        });
+                    }
+                }
+                fn visit_block_statement(&mut self, block: &oxc_ast::ast::BlockStatement<'a>) {
+                    for statement in &block.body {
+                        let span = statement.span();
+                        self.inside((span.start, span.end), |this| {
+                            this.visit_statement(statement)
+                        });
+                    }
+                }
+                fn visit_ts_module_block(&mut self, block: &oxc_ast::ast::TSModuleBlock<'a>) {
+                    for statement in &block.body {
+                        let span = statement.span();
+                        self.inside((span.start, span.end), |this| {
+                            this.visit_statement(statement)
+                        });
+                    }
+                }
+                fn visit_method_definition(&mut self, it: &oxc_ast::ast::MethodDefinition<'a>) {
+                    self.inside(from_decorators(it.span, &it.decorators), |this| {
+                        walk::walk_method_definition(this, it)
+                    });
+                }
+                fn visit_property_definition(&mut self, it: &oxc_ast::ast::PropertyDefinition<'a>) {
+                    self.inside(from_decorators(it.span, &it.decorators), |this| {
+                        walk::walk_property_definition(this, it)
+                    });
+                }
+                fn visit_accessor_property(&mut self, it: &oxc_ast::ast::AccessorProperty<'a>) {
+                    self.inside(from_decorators(it.span, &it.decorators), |this| {
+                        walk::walk_accessor_property(this, it)
+                    });
+                }
+                fn visit_static_block(&mut self, it: &oxc_ast::ast::StaticBlock<'a>) {
+                    self.inside((it.span.start, it.span.end), |this| {
+                        walk::walk_static_block(this, it)
+                    });
+                }
+                // Not walked into: what is inside a function is the function's.
+                fn visit_function(
+                    &mut self,
+                    it: &oxc_ast::ast::Function<'a>,
+                    _flags: oxc_syntax::scope::ScopeFlags,
+                ) {
+                    if it.body.is_some() {
+                        self.function(it.span);
+                    }
+                }
+                fn visit_arrow_function_expression(
+                    &mut self,
+                    it: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+                ) {
+                    self.function(it.span);
+                }
+            }
+            let mut functions = Functions::default();
+            functions.visit_program(&parsed.program);
+            functions
+                .found
+                .into_iter()
+                .map(|(from, to)| lines(from as usize, to as usize))
+                .collect::<Vec<_>>()
+        }
+        Language::Python => {
+            use ruff_python_ast::{
+                Stmt,
+                visitor::{Visitor, walk_stmt},
+            };
+            use ruff_text_size::Ranged;
+            struct Functions(Vec<(usize, usize)>);
+            impl<'a> Visitor<'a> for Functions {
+                fn visit_stmt(&mut self, stmt: &'a Stmt) {
+                    match stmt {
+                        Stmt::FunctionDef(function) => {
+                            let from = function
+                                .decorator_list
+                                .first()
+                                .map_or(function.start(), |first| {
+                                    first.start().min(function.start())
+                                });
+                            self.0.push((from.to_usize(), function.end().to_usize()));
+                        }
+                        _ => walk_stmt(self, stmt),
+                    }
+                }
+            }
+            let Ok(parsed) = ruff_python_parser::parse_module(source) else {
+                return Vec::new();
+            };
+            let mut functions = Functions(Vec::new());
+            for stmt in &parsed.syntax().body {
+                functions.visit_stmt(stmt);
+            }
+            functions
+                .0
+                .into_iter()
+                .map(|(from, to)| lines(from, to))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    spans.sort_unstable();
+    spans.dedup();
+    spans
+}
+
+/// How many lines a deleted statement is named by, when its question names
+/// all of them ("all 4 lines of it (lines 133 to 136)").
+fn whole_statement(statement: &Statement) -> Option<usize> {
+    let lines = statement.text.lines().count();
+    let word = statement
+        .text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    (statement.change == Change::Skip
+        && lines > 1
+        && !matches!(word, "break" | "continue" | "next"))
+    .then_some(lines)
 }
 
 fn line_starts(source: &str) -> Vec<usize> {
@@ -1245,19 +1433,21 @@ impl Population {
     }
 
     /// Test-side files the test imports (helpers, fixtures), cut to a budget
-    /// that grows with the number of questions.
+    /// that grows with the number of questions. None for JavaScript,
+    /// TypeScript and Python (see `asks_within_the_function`): on
+    /// supergateway they were a sixth of what was sent and changed 4 verdicts
+    /// in 101, two each way.
     pub fn helpers(&self, test: usize, questions: usize) -> BTreeMap<String, String> {
+        if self.language.asks_within_the_function() {
+            return BTreeMap::new();
+        }
         let cap = HELPER_CHARS.min(1500 + 400 * questions);
         let t = &self.tests[test];
         let text = self.read(&t.file).unwrap_or_default();
         let mut out = BTreeMap::new();
         let mut size = 0;
         let files = match self.language {
-            Language::JavaScript => import_specifiers(&text)
-                .iter()
-                .filter_map(|spec| self.resolve(&t.file, spec))
-                .collect::<Vec<_>>(),
-            Language::Python => self.python_helpers(&t.file, &text),
+            Language::JavaScript | Language::Python => Vec::new(),
             Language::Ruby => ruby::helpers(&self.root, &t.file, &text),
             Language::Go => go::helpers(&self.root, &t.file, &text),
             Language::Rust => rust_source::helpers(&self.root, &t.file, &text),
@@ -1321,82 +1511,19 @@ impl Population {
         out
     }
 
-    /// A Python test's helpers: the `conftest.py` files from its directory up
-    /// (where pytest fixtures live, closest first), then the project modules it
-    /// imports.
-    fn python_helpers(&self, from: &str, text: &str) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut dir = Path::new(from).parent();
-        while let Some(d) = dir {
-            let conftest = d.join("conftest.py").to_string_lossy().replace('\\', "/");
-            if self.root.join(&conftest).is_file() {
-                out.push(conftest);
-            }
-            dir = d.parent();
-        }
-        let here = Path::new(from).parent().unwrap_or(Path::new(""));
-        for module in python_imports(text) {
-            let dots = module.chars().take_while(|c| *c == '.').count();
-            let rest = module[dots..].replace('.', "/");
-            let bases = if dots > 0 {
-                let mut base = here.to_path_buf();
-                for _ in 1..dots {
-                    base.pop();
-                }
-                vec![base]
-            } else {
-                vec![PathBuf::new(), here.to_path_buf(), PathBuf::from("src")]
-            };
-            for base in bases {
-                let path = base.join(&rest);
-                let path = path.to_string_lossy().replace('\\', "/");
-                let found = [format!("{path}.py"), format!("{path}/__init__.py")]
-                    .into_iter()
-                    .find(|c| !c.starts_with('/') && self.root.join(c).is_file());
-                if let Some(found) = found {
-                    out.push(found);
-                    break;
-                }
-            }
-        }
-        out
-    }
-
-    fn resolve(&self, from: &str, spec: &str) -> Option<String> {
-        let base = if let Some((alias, target)) = self
-            .aliases
-            .iter()
-            .find(|(a, _)| spec.starts_with(a.as_str()))
-        {
-            PathBuf::from(format!("{target}{}", &spec[alias.len()..]))
-        } else if spec.starts_with('.') {
-            Path::new(from).parent().unwrap_or(Path::new("")).join(spec)
-        } else {
-            return None;
-        };
-        let s = normalize(&base);
-        let candidates = [
-            s.clone(),
-            format!("{s}.ts"),
-            format!("{s}.tsx"),
-            format!("{s}.js"),
-            format!("{s}.mjs"),
-            s.replace(".js", ".ts"),
-            format!("{s}/index.ts"),
-            format!("{s}/index.tsx"),
-            format!("{s}/index.js"),
-        ];
-        candidates.into_iter().find(|c| self.root.join(c).is_file())
-    }
-
     /// The source this test ran: every statement it executed marked ▶, four
     /// code lines around each asked statement, comment lines left out, within
     /// a budget that grows with the number of questions. Two lines around
     /// every executed statement and eight around each asked one, in a budget
     /// four times this, cost 28% more over 3,532 checked statements in 14
     /// projects and were no more accurate.
+    ///
+    /// In JavaScript, TypeScript and Python that is cut to the function each
+    /// asked statement is in (see `asks_within_the_function`): what the test
+    /// ran elsewhere in the file, and in other files, is left out.
     pub fn code_run(&self, test: usize, asked: &[usize]) -> BTreeMap<String, String> {
         let budget = CODE_CHARS.min(1000 + 400 * asked.len());
+        let within = self.language.asks_within_the_function();
         let ran = &self.ran[test];
         let mut want = BTreeMap::<String, BTreeSet<usize>>::new();
         for &a in asked {
@@ -1407,7 +1534,7 @@ impl Population {
         let mut files = want.keys().cloned().collect::<Vec<_>>();
         let mut others = ran
             .iter()
-            .filter(|(f, _)| !want.contains_key(*f))
+            .filter(|(f, _)| !within && !want.contains_key(*f))
             .collect::<Vec<_>>();
         others.sort_by_key(|(f, lines)| (std::cmp::Reverse(lines.len()), (*f).clone()));
         files.extend(others.into_iter().map(|(f, _)| f.clone()));
@@ -1441,6 +1568,54 @@ impl Population {
             for &l in want.get(&f).unwrap_or(&empty) {
                 show.extend(around(l, WINDOW_LINES));
             }
+            // How far the file was going to be shown, for the line that says
+            // how much of it is not.
+            let end = show
+                .iter()
+                .rev()
+                .copied()
+                .find(|&i| i != 0 && i <= text.len() && !self.language.comment(text[i - 1]))
+                .unwrap_or(0);
+            if within {
+                let functions = outermost_functions(self.language, &f, &source);
+                let around =
+                    |l: usize| (l.saturating_sub(OUTSIDE_A_FUNCTION), l + OUTSIDE_A_FUNCTION);
+                let function = |l: usize| {
+                    functions
+                        .iter()
+                        .copied()
+                        .find(|&(from, to)| from <= l && l <= to)
+                };
+                // The lines an assessed statement of this file begins on.
+                let begins = self
+                    .statements
+                    .iter()
+                    .filter(|s| s.file == f)
+                    .map(|s| s.line)
+                    .collect::<BTreeSet<_>>();
+                let mut kept = Vec::new();
+                for statement in asked.iter().map(|&a| &self.statements[a]) {
+                    if statement.file != f {
+                        continue;
+                    }
+                    kept.push(function(statement.line).unwrap_or(around(statement.line)));
+                    // A statement its question names by all its lines also
+                    // keeps what lies near each line it goes on to, as the
+                    // requests this was measured with did.
+                    for l in (statement.line + 1)
+                        ..statement.line + whole_statement(statement).unwrap_or(1)
+                    {
+                        kept.push(
+                            begins
+                                .contains(&l)
+                                .then(|| function(l))
+                                .flatten()
+                                .unwrap_or(around(l)),
+                        );
+                    }
+                }
+                show.retain(|i| kept.iter().any(|&(from, to)| from <= *i && *i <= to));
+            }
             let mut lines = Vec::new();
             let mut last = 0;
             for i in show {
@@ -1457,6 +1632,9 @@ impl Population {
                     text[i - 1]
                 ));
                 last = i;
+            }
+            if within && last != 0 && end > last {
+                lines.push(format!("        ... {} lines not shown", end - last));
             }
             let body = lines.join("\n");
             if !want.contains_key(&f) && total + body.len() > budget {
@@ -1594,7 +1772,7 @@ impl Population {
                     // Read as "`for x in items:` is deleted", only the header
                     // seemed to go: 22 of 100 such verdicts were wrong on six
                     // projects, 9 with all of it named.
-                    _ if s.text.lines().count() > 1 => {
+                    _ if whole_statement(s).is_some() => {
                         let lines = s.text.lines().count();
                         format!(
                             "the whole statement starting `{line}` is deleted, all {lines} lines of it (lines {} to {}): none of it runs",
@@ -1671,11 +1849,15 @@ impl Population {
                 );
             }
         }
-        json!({"model": model, "state": {
+        let mut state = json!({
             "instructions": INSTRUCTIONS, "runtime": runtime(&t.runner),
             "test": {"file": t.file, "name": t.name},
-            "test_code": self.test_code(test), "helpers": self.helpers(test, asked.len()),
-            "code_run": self.code_run(test, asked)}, "questions": questions})
+            "test_code": self.test_code(test),
+            "code_run": self.code_run(test, asked)});
+        if !self.language.asks_within_the_function() {
+            state["helpers"] = json!(self.helpers(test, asked.len()));
+        }
+        json!({"model": model, "state": state, "questions": questions})
     }
 
     /// What Jev sees for one statement asked of one test, line numbers aside:
@@ -2082,39 +2264,6 @@ fn python_condition(line: &str) -> String {
         .to_owned()
 }
 
-/// The modules a Python file imports: `from a.b import c` -> `a.b`,
-/// `import a, b as x` -> `a`, `b`, `from . import c` -> `.c`.
-fn python_imports(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in text.split('\n') {
-        let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix("from ") {
-            let Some((module, names)) = rest.split_once(" import ") else {
-                continue;
-            };
-            let module = module.trim();
-            if module.chars().all(|c| c == '.') {
-                for name in names.trim_matches(|c| c == '(' || c == ')').split(',') {
-                    let name = name.split(" as ").next().unwrap_or("").trim();
-                    if !name.is_empty() && name != "*" {
-                        out.push(format!("{module}{name}"));
-                    }
-                }
-            } else {
-                out.push(module.to_owned());
-            }
-        } else if let Some(rest) = t.strip_prefix("import ") {
-            for part in rest.split(',') {
-                let module = part.split(" as ").next().unwrap_or("").trim();
-                if !module.is_empty() {
-                    out.push(module.to_owned());
-                }
-            }
-        }
-    }
-    out
-}
-
 /// `if (c) {` -> `c`
 fn condition(line: &str) -> String {
     let mut t = line.trim();
@@ -2185,31 +2334,6 @@ fn strip_location(question: &str) -> String {
     }
 }
 
-fn import_specifiers(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in text.split('\n') {
-        let t = line.trim_start();
-        let quoted = |s: &str| -> Option<String> {
-            let s = s.trim_start();
-            let q = s.chars().next().filter(|c| *c == '\'' || *c == '"')?;
-            let rest = &s[1..];
-            rest.find(q).map(|end| rest[..end].to_owned())
-        };
-        if (t.starts_with("import ") || t.starts_with("export "))
-            && let Some(i) = t.find(" from ")
-        {
-            out.extend(quoted(&t[i + 6..]));
-        } else if let Some(i) = t.find("import(") {
-            out.extend(quoted(&t[i + 7..]));
-        } else if let Some(i) = t.find("require(") {
-            out.extend(quoted(&t[i + 8..]));
-        } else if let Some(r) = t.strip_prefix("} from ") {
-            out.extend(quoted(r));
-        }
-    }
-    out
-}
-
 /// The project-relative name of `path`, `..` and `.` resolved, with `/`
 /// between parts on every platform: a run names its files that way, and on
 /// Windows a joined path had `\\` and named a helper no run had.
@@ -2225,39 +2349,6 @@ fn normalize(path: &Path) -> String {
         }
     }
     out.join("/")
-}
-
-/// `compilerOptions.paths` of the project's tsconfig.json: `"~/*": ["./app/*"]`
-/// becomes (`~/`, `app/`).
-fn tsconfig_aliases(root: &Path) -> Vec<(String, String)> {
-    let Ok(text) = std::fs::read_to_string(root.join("tsconfig.json")) else {
-        return vec![];
-    };
-    let cleaned = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let Ok(config) = serde_json::from_str::<Value>(&cleaned) else {
-        return vec![];
-    };
-    let mut out = Vec::new();
-    if let Some(paths) = config["compilerOptions"]["paths"].as_object() {
-        for (alias, targets) in paths {
-            let Some(target) = targets
-                .as_array()
-                .and_then(|t| t.first())
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            let (Some(a), Some(t)) = (alias.strip_suffix('*'), target.strip_suffix('*')) else {
-                continue;
-            };
-            out.push((a.to_owned(), t.trim_start_matches("./").to_owned()));
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -2357,6 +2448,26 @@ mod tests {
             .map(String::from)
             .into()
         );
+    }
+
+    #[test]
+    fn a_statement_is_shown_with_the_function_it_is_in() {
+        // The outermost one, with the statement that declares it and what
+        // decorates it; a callback written inside it is part of it.
+        let typescript = "import { log } from './log'\n\nexport const seal = (key: string) => {\n  const parts = key.split('-').map((part) => {\n    return part.trim()\n  })\n  return parts\n}\n\nclass Vault {\n  size = 0\n  @logged()\n  open(door: string) {\n    return () => door\n  }\n}\n\nserver.on('close', function () {\n  log('closed')\n})\n\nif (flag) {\n  function inner() {\n    return 1\n  }\n}\nconst limit = 4\n";
+        assert_eq!(
+            outermost_functions(Language::JavaScript, "src/vault.ts", typescript),
+            [(3, 8), (12, 15), (18, 20), (23, 25)]
+        );
+        let python = "import os\n\nLIMIT = 4\n\n@cached\ndef seal(key):\n    def trim(part):\n        return part.strip()\n    return [trim(part) for part in key.split('-')]\n\nclass Vault:\n    size = 0\n\n    async def open(self, door):\n        return lambda: door\n\nif os.name == 'nt':\n    def separator():\n        return ';'\n";
+        assert_eq!(
+            outermost_functions(Language::Python, "vault.py", python),
+            [(5, 9), (14, 15), (18, 19)]
+        );
+        // The other languages are asked as they were.
+        assert!(outermost_functions(Language::Go, "vault.go", "package vault\n").is_empty());
+        assert!(Language::Python.asks_within_the_function());
+        assert!(!Language::Ruby.asks_within_the_function());
     }
 
     #[test]
@@ -2609,12 +2720,6 @@ mod tests {
         assert_eq!(python_title("tests.test_a.TestA.test_b"), "test_b");
         assert_eq!(python_condition("if y > 2:"), "y > 2");
         assert_eq!(python_condition("elif v is None:"), "v is None");
-        assert_eq!(
-            python_imports(
-                "from .helpers import make\nfrom . import fixtures, util as u\nimport tests.support, json as j\n"
-            ),
-            vec![".helpers", ".fixtures", ".util", "tests.support", "json"]
-        );
     }
 
     #[test]
