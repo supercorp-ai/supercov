@@ -143,8 +143,10 @@ pub fn instrument_test_file(
             file.edits.push(GoEdit {
                 at: body.start_byte() + 1,
                 rank: 100,
+                // On the brace's line, as every insertion into a test file
+                // is: lines of its own would move the lines below it.
                 text: format!(
-                    "\n\t{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths)\n\t{alias}.Destination(\"{evidence_path}\", {})\n",
+                    "{alias}.Arm(__supercovProbeCount, __supercovDecisionWidths); {alias}.Destination(\"{evidence_path}\", {});",
                     !wrapped
                 ),
             });
@@ -163,12 +165,10 @@ pub fn instrument_test_file(
                     Some(parameter)
                         if parameter_type(child, source).as_deref() == Some("*testing.F") =>
                     {
-                        format!(
-                            "\n\tdefer {HARNESS_UNATTRIBUTED_FUZZ}({parameter}, \"{name}\")()\n"
-                        )
+                        format!("defer {HARNESS_UNATTRIBUTED_FUZZ}({parameter}, \"{name}\")();")
                     }
                     _ => format!(
-                        "\n\tdefer func() {{ {alias}.Ran(\"{name}\", \"unknown\"); {alias}.Checkpoint() }}()\n"
+                        "defer func() {{ {alias}.Ran(\"{name}\", \"unknown\"); {alias}.Checkpoint() }}();"
                     ),
                 };
                 // Only a file that names the runtime needs its import, and
@@ -218,13 +218,13 @@ pub fn instrument_test_file(
             // tests exercised.
             let record = match parameter_name(child, source) {
                 Some(parameter) => {
-                    format!("\n\tdefer {HARNESS_UNATTRIBUTED}({parameter}, \"{name}\")()\n")
+                    format!("defer {HARNESS_UNATTRIBUTED}({parameter}, \"{name}\")();")
                 }
                 // `func TestX(*testing.T)` names nothing to read an outcome
                 // from, and is reported as having passed unless the run says
                 // otherwise -- the same rule the announced path uses.
                 None => format!(
-                    "\n\tdefer func() {{ {alias}.Ran(\"{name}\", \"passed\"); {alias}.Checkpoint() }}()\n"
+                    "defer func() {{ {alias}.Ran(\"{name}\", \"passed\"); {alias}.Checkpoint() }}();"
                 ),
             };
             needs_runtime |= record.contains(&format!("{alias}."));
@@ -238,14 +238,22 @@ pub fn instrument_test_file(
         // Through the generated helper rather than the runtime directly, so
         // the announcement can read the outcome off the test's own *testing.T
         // without the runtime ever importing `testing`.
-        // The trailing newline matters: a body written on one line puts its
-        // first statement immediately after the brace, and an announcement
-        // with nothing after it would run into that statement and not compile.
+        // On the line it follows, and ended with a semicolon. Lines of its own
+        // moved every line below them: a failure in the third test of a file
+        // read `crypto_test.go:26` for line 21. The semicolon matters: a body
+        // written on one line puts its first statement straight after the
+        // brace, and an announcement run into it would not compile. After
+        // `t.Parallel()` it needs one before it as well.
+        let after = if announce_at == body.start_byte() + 1 {
+            ""
+        } else {
+            "; "
+        };
         let announcement = match parameter_name(child, source) {
             Some(parameter) => {
-                format!("\n\tdefer {HARNESS_ENTER}({parameter}, \"{name}\")()\n")
+                format!("{after}defer {HARNESS_ENTER}({parameter}, \"{name}\")();")
             }
-            None => format!("\n\tdefer {alias}.EnterTest(\"{name}\")()\n"),
+            None => format!("{after}defer {alias}.EnterTest(\"{name}\")();"),
         };
         if announcement.contains(&format!("{alias}.")) {
             needs_runtime = true;
@@ -875,14 +883,39 @@ mod tests {
         );
         assert_eq!(file.tests, ["TestOne"]);
         // `instrumented` parses the result, so reaching here is most of the
-        // claim; this says the announcement is on a line of its own.
-        assert!(out.contains("__supercovTest(t, \"TestOne\")()\n"), "{out}");
+        // claim; this says the announcement ends before the statement begins.
+        assert!(
+            out.contains("{defer __supercovTest(t, \"TestOne\")(); if work() != 1"),
+            "{out}"
+        );
 
         // The same for a TestMain nobody spread over several lines.
         let (_, out) = instrumented(
             "package p\n\nimport \"testing\"\n\nfunc TestMain(m *testing.M) { os.Exit(m.Run()) }\n",
         );
-        assert!(out.contains("__supercovDecisionWidths)\n"), "{out}");
+        assert!(out.contains("__supercovDecisionWidths); "), "{out}");
+    }
+
+    #[test]
+    fn a_rewritten_test_file_has_the_lines_it_had() {
+        // Go reports a failure by its line. The announcement used to take two
+        // lines of its own in every test, the import one more, and TestMain's
+        // arming two: the third test of a file failed at `:26` for line 21.
+        let source = "package p\n\nimport \"testing\"\n\nfunc TestMain(m *testing.M) {\n\tos.Exit(m.Run())\n}\n\nfunc TestOne(t *testing.T) {\n\tdoWork()\n}\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tdoWork()\n}\n\nfunc FuzzIt(f *testing.F) {\n\tdoWork()\n}\n";
+        for serialised in [false, true] {
+            let file = instrument_test_file(source, "__supercov", "evidence", serialised).unwrap();
+            let out = crate::go_instrumenter::rewrite(source, &file.edits);
+            assert_eq!(out.lines().count(), source.lines().count(), "{out}");
+            // And each line still begins as it did.
+            for (written, rewritten) in source.lines().zip(out.lines()) {
+                let start = written.split(['(', '{']).next().unwrap_or(written);
+                assert!(
+                    rewritten.starts_with(start),
+                    "{written:?} became {rewritten:?}"
+                );
+            }
+            parse(&out).unwrap();
+        }
     }
 
     #[test]

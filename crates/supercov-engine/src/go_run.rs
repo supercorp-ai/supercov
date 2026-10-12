@@ -51,10 +51,12 @@ use crate::{
 
 /// Where the runtime package lands inside the workspace.
 ///
-/// A plain directory rather than something hidden: the Go tool ignores any
-/// directory whose name begins with `.` or `_`, so a runtime placed out of
-/// sight would also be out of the build.
-const RUNTIME_DIRECTORY: &str = "supercov_runtime";
+/// A directory whose name begins with `_`: the Go tool leaves those out of
+/// `./...` and builds them when a file imports one, which every rewritten
+/// file does. Under a plain name the package was listed with the project's
+/// own in every run, `?  example.com/shop/supercov_runtime  [no test files]`.
+/// Go 1.22 to 1.27 import it alike.
+const RUNTIME_DIRECTORY: &str = "_supercov_runtime";
 
 const RUNTIME_SOURCE: &str = include_str!("../runtime-assets/go/supercov/supercov.go");
 
@@ -174,6 +176,25 @@ fn read(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// A copy's file under the name Go is to report it by: the project's own.
+///
+/// Go puts a file's path, as the compiler read it, into every stack trace,
+/// so a panic under Supercov named the copy: `…/.supercov/workspaces/
+/// workspace/shop/crypto.go:24`. A line directive is how Go is told that a
+/// file stands for another, and from it on a line is the project's line: the
+/// rewriting adds none of its own.
+fn named_for_the_project(project: &Path, relative: &str, text: &str) -> String {
+    if text.starts_with(LINE_DIRECTIVE) {
+        return text.to_owned();
+    }
+    format!(
+        "{LINE_DIRECTIVE}{}:1\n{text}",
+        project.join(relative).display()
+    )
+}
+
+const LINE_DIRECTIVE: &str = "//line ";
+
 fn write(path: &Path, contents: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
@@ -194,6 +215,7 @@ fn evidence_name(directory: &str) -> String {
 /// Rewrite the workspace in place: instrumented sources, the runtime package
 /// they import, a probe array per package, and a harness per test package.
 fn instrument_workspace(
+    project_root: &Path,
     workspace: &Path,
     evidence_directory: &Path,
     serialised: bool,
@@ -258,7 +280,10 @@ fn instrument_workspace(
                 .entry(directory_of(relative))
                 .or_insert(name);
         }
-        write(&path, &instrumented)?;
+        write(
+            &path,
+            &named_for_the_project(project_root, relative, &instrumented),
+        )?;
     }
     for (directory, package) in &source_packages {
         write(
@@ -338,12 +363,15 @@ fn instrument_workspace(
                 declared_in.insert(test.clone(), relative.clone());
             }
             unattributed.extend(file.unattributed.iter().cloned());
-            if !file.edits.is_empty() {
-                write(
-                    &path,
+            // Written also when nothing in it changed, for its name.
+            write(
+                &path,
+                &named_for_the_project(
+                    project_root,
+                    relative,
                     &rewrite(&source, &file.edits).replace(RUNTIME_IMPORT, import_for(relative)),
-                )?;
-            }
+                ),
+            )?;
         }
         let Some(package) = harness_package else {
             continue;
@@ -551,8 +579,13 @@ pub fn run_direct_go(
             &root, &workspace, &ambient,
         )
         .map_err(|error| error.to_string())?;
-        let instrumented =
-            instrument_workspace(&workspace, &evidence_directory, serialised, roots.as_ref())?;
+        let instrumented = instrument_workspace(
+            &root,
+            &workspace,
+            &evidence_directory,
+            serialised,
+            roots.as_ref(),
+        )?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
         writeln!(
