@@ -78,7 +78,9 @@ try {
       '  fullyParallel: true,',
       '  workers: 2,',
       "  reporter: 'line',",
-      "  use: { baseURL: 'http://127.0.0.1:41738' },",
+      // The browser named, as the fixture matrix names one: what a page
+      // runs while it loads has to be its action's in each of them.
+      `  use: { baseURL: 'http://127.0.0.1:41738', browserName: ${JSON.stringify(process.env.SUPERCOV_BROWSER ?? 'chromium')} },`,
       '  webServer: {',
       "    command: 'npm run preview -- --host 127.0.0.1 --port 41738',",
       "    url: 'http://127.0.0.1:41738',",
