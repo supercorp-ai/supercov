@@ -892,29 +892,57 @@ const INSTRUMENTATION_FRAME = /[\\/]\.supercov[\\/](?:node_modules[\\/])?(?:play
 // added, at the assertion, and below the runtime's frames the function the
 // author wrote, at the wrapper. Vitest printed both, `:12:35` and `:12:1`.
 // They are one frame again: the author's function, where the assertion is.
+//
+// The runtime's frames are not always one run. `node:assert` called through
+// its module is wrapped a second time, so an assertion that fails there has
+// frames of the runtime above the added function too, and Node's own frame
+// for `AsyncLocalStorage.run` lies among those below it: Mocha printed the
+// added function, that frame and the author's function, three for one.
+const NODE_FRAME = /^\s*at .*\(?node:internal\//u;
 function cleanInstrumentationStack(error, lexical = false) {
   if (!error || typeof error !== "object" || typeof error.stack !== "string")
     return error;
   const lines = error.stack.split("\n");
   const hidden = lines.map((line, index) => index > 0 && INSTRUMENTATION_FRAME.test(line));
-  const first = hidden.indexOf(true);
-  if (first < 0)
+  if (!hidden.includes(true))
     return error;
-  const last = hidden.lastIndexOf(true);
-  let visible;
   const frame = /^(\s*at (?:async )?)(?:(.*?) \()?(.*?:\d+:\d+)\)?$/;
-  const added = lexical && first > 1 ? frame.exec(lines[first - 1]) : null;
-  const written = added && last + 1 < lines.length ? frame.exec(lines[last + 1]) : null;
   const file = (location) => location.replace(/:\d+:\d+$/, "");
-  // Both are frames of the author's file, or the error is another's. A name
-  // on the added one comes from a source map (Jest names a frame by what is
-  // called at its position), and it is the name the author's line would have.
-  if (added && written && file(added[3]) === file(written[3])) {
-    const merged = added[2] !== void 0 || written[2] === void 0 ? lines[first - 1] : `${written[1]}${written[2]} (${added[3]})`;
-    visible = [...lines.slice(0, first - 1), merged, ...lines.slice(last + 2)];
-  } else {
-    visible = lines.filter((line, index) => !hidden[index]);
+  // The function Supercov added is the frame above a run of the runtime's
+  // that ends at a frame of the same file: the author's.
+  let merged;
+  let at = -1;
+  for (let start = 2; lexical && !merged && start < lines.length; start += 1) {
+    if (!hidden[start] || hidden[start - 1])
+      continue;
+    let last = start;
+    for (let index = start; index < lines.length && (hidden[index] || NODE_FRAME.test(lines[index])); index += 1) {
+      if (hidden[index])
+        last = index;
+    }
+    const added = frame.exec(lines[start - 1]);
+    const written = last + 1 < lines.length ? frame.exec(lines[last + 1]) : null;
+    // Both are frames of the author's file, or the error is another's. A name
+    // on the added one comes from a source map (Jest names a frame by what is
+    // called at its position), and it is the name the author's line would
+    // have; the function Supercov added has none of its own.
+    if (added && written && file(added[3]) === file(written[3])) {
+      const named = added[2] !== void 0 && added[2] !== "<anonymous>";
+      at = start - 1;
+      merged = {
+        last: last + 1,
+        text: named || written[2] === void 0 ? lines[at] : `${written[1]}${written[2]} (${added[3]})`
+      };
+    }
+    start = last;
   }
+  const visible = lines.flatMap((line, index) => {
+    if (merged && index === at)
+      return [merged.text];
+    if (merged && index > at && index <= merged.last)
+      return [];
+    return hidden[index] ? [] : [line];
+  });
   try {
     error.stack = visible.join("\n");
   } catch (e) {

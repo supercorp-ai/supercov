@@ -3523,6 +3523,50 @@ fn nothing_is_still_being_deleted_when_the_command_has_ended() {
     }
 }
 
+#[test]
+fn a_report_the_command_writes_names_the_project_and_not_the_copy() {
+    // Under Vitest `coverage-final.json` keyed every file by its path in
+    // Supercov's copy, and `clover.xml` and Cobertura's `<source>` named the
+    // copy too: the command runs there, so anything that writes where it is
+    // writes that. A reporter that writes where it ran stands in for them.
+    let project = Project::empty("named");
+    project.write(
+        "package.json",
+        r#"{ "name": "named", "scripts": { "test": "node --test test/fee.test.js && node report.js" } }"#,
+    );
+    project.write(".gitignore", "node_modules\n.supercov\ncoverage\n");
+    project.write(
+        "src/fee.js",
+        "function fee(sum) {\n  return sum > 100 ? 0 : 5;\n}\nmodule.exports = { fee };\n",
+    );
+    project.write(
+        "test/fee.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('pays', () => equal(fee(1), 5));\n",
+    );
+    project.write(
+        "report.js",
+        "const fs = require('node:fs');\nconst path = require('node:path');\nconst file = path.resolve('src/fee.js');\nfs.mkdirSync('coverage', { recursive: true });\nfs.writeFileSync('coverage/coverage-final.json', JSON.stringify({ [file]: { path: file } }));\nfs.writeFileSync('coverage/cobertura.xml', `<source>${process.cwd()}</source>`);\n",
+    );
+    project.git(&["init", "-q"]);
+    let run = project.supercov(&["--", "npm", "test"]);
+    assert_eq!(run.code(), 0, "{}{}", run.stdout(), run.stderr());
+    // Windows spells the test's own directory `\\?\C:\…`; a tool spells it
+    // without the prefix.
+    let plain = |path: &std::path::Path| {
+        let text = path.display().to_string();
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+    };
+    let root = plain(&project.root);
+    let report: serde_json::Value =
+        serde_json::from_str(&project.read("coverage/coverage-final.json")).unwrap();
+    let file = plain(&project.root.join("src").join("fee.js"));
+    assert_eq!(report[&file]["path"], file, "{report}");
+    assert_eq!(
+        project.read("coverage/cobertura.xml"),
+        format!("<source>{root}</source>")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_comparison_says_which_files_the_difference_is_in() {

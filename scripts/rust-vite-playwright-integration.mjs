@@ -7,6 +7,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -15,6 +16,21 @@ const repository = resolve(import.meta.dirname, '..');
 const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`));
 const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-rust-vite-playwright-'));
 const project = resolve(temporary, 'project');
+
+// A port of this run's own. The fixture matrix runs this once for each
+// browser, one straight after another, and on one fixed port the preview
+// server of a run could find the port of the run before not yet free: Vite
+// then serves on the next port up without saying so, and Playwright waits on
+// the first until it gives up ("Timed out waiting 60000ms from
+// config.webServer"). `--strictPort` makes that an error instead.
+const port = await new Promise((settle, refuse) => {
+  const probe = createServer();
+  probe.once('error', refuse);
+  probe.listen(0, '127.0.0.1', () => {
+    const { port: free } = probe.address();
+    probe.close(() => settle(free));
+  });
+});
 
 function rust(command, request) {
   const result = spawnSync(binary, [command], {
@@ -78,10 +94,12 @@ try {
       '  fullyParallel: true,',
       '  workers: 2,',
       "  reporter: 'line',",
-      "  use: { baseURL: 'http://127.0.0.1:41738' },",
+      // The browser named, as the fixture matrix names one: what a page
+      // runs while it loads has to be its action's in each of them.
+      `  use: { baseURL: 'http://127.0.0.1:${port}', browserName: ${JSON.stringify(process.env.SUPERCOV_BROWSER ?? 'chromium')} },`,
       '  webServer: {',
-      "    command: 'npm run preview -- --host 127.0.0.1 --port 41738',",
-      "    url: 'http://127.0.0.1:41738',",
+      `    command: 'npm run preview -- --host 127.0.0.1 --port ${port} --strictPort',`,
+      `    url: 'http://127.0.0.1:${port}',`,
       '    reuseExistingServer: false,',
       '  },',
       '};',

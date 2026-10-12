@@ -288,9 +288,11 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
                 rewritten = new Set();
             }
         }
+        // ts-node names a file with forward slashes on Windows too.
+        const named = sep === "\\" ? file.split("/").join(sep) : file;
         for (const root of roots) {
-            if (file.startsWith(root)) {
-                const local = file.slice(root.length).split(sep).join("/");
+            if (named.startsWith(root)) {
+                const local = named.slice(root.length).split(sep).join("/");
                 return rewritten.has(local) ? local : undefined;
             }
         }
@@ -478,7 +480,61 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
     }
     path.relative = supercovRelative;
     syncBuiltinESMExports();
+    // ts-node compiles the text it is given, which is the rewritten file,
+    // and its source map ends there: TypeScript reads no map in its input.
+    // A frame under Mocha read `src/crypto.ts:37:10` for line 8, and a test
+    // file's `:15:172` for column 12. ts-node keeps what it compiled in
+    // memory and has source-map-support read it from there, so that is
+    // where the map is carried on to the lines the author wrote: a handler
+    // of Supercov's in the list the library keeps on the global object,
+    // asked before its default.
+    const shared = Symbol.for("source-map-support/sharedData");
+    function supercovRetrieveSourceMap(source) {
+        try {
+            const file = typeof source === "string" && source.startsWith("file://") ? fileURLToPath(source) : source;
+            if (rewrittenUnder(copies, file) === undefined)
+                return null;
+            let code;
+            for (const read of globalThis[shared]?.retrieveFileHandlers ?? []) {
+                code = read(file);
+                if (code)
+                    break;
+            }
+            const found = typeof code === "string" ? code.lastIndexOf("//# sourceMappingURL=data:application/json") : -1;
+            if (found < 0)
+                return null;
+            const text = Buffer.from(code.slice(code.indexOf(",", found) + 1).trim(), "base64").toString("utf8");
+            const through = composed(text);
+            return through === text ? null : { url: source, map: through };
+        }
+        catch {
+            return null;
+        }
+    }
+    failureOutput.adopt = () => {
+        const handlers = globalThis[shared]?.retrieveMapHandlers;
+        if (Array.isArray(handlers) && !handlers.includes(supercovRetrieveSourceMap))
+            handlers.unshift(supercovRetrieveSourceMap);
+    };
+    failureOutput.adopt();
 };
+// source-map-support is ts-node's, loaded when ts-node is: by a runner's own
+// `--require`, after this file, or by Node's, before it.
+{
+    const adopt = () => {
+        process.__SUPERCOV_FAILURE_OUTPUT__();
+        failureOutput.adopt?.();
+    };
+    if (globalThis[Symbol.for("source-map-support/sharedData")])
+        adopt();
+    const load = Module._load;
+    Module._load = function supercovSourceMapSupportLoad(request, ...rest) {
+        const loaded = Reflect.apply(load, this, [request, ...rest]);
+        if (typeof request === "string" && request.includes("source-map-support"))
+            adopt();
+        return loaded;
+    };
+}
 // Jest itself prints from here on. Any other process is Jest's from the
 // moment it loads Jest: a worker of its, or a tool that runs Jest in its own
 // process (`require("jest").run()`, as react-scripts and Vue's CLI do), where

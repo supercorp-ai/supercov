@@ -95,6 +95,12 @@ for (const browser of ["firefox", "webkit"]) {
     ["--prefix", "tests/fixtures/generic-playwright", "run", "test:coverage"],
     { SUPERCOV_BROWSER: browser },
   );
+  // What a page runs while it loads is its action's, in these too. Only
+  // Chromium's page is told its phase before it runs; here a hit is placed
+  // by its time, which read right in 16 runs of 16 in each browser.
+  runNode(["scripts/rust-vite-playwright-integration.mjs"], {
+    SUPERCOV_BROWSER: browser,
+  });
 }
 runNode(["scripts/rust-syntax-matrix.mjs"]);
 

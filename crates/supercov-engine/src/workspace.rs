@@ -1327,6 +1327,92 @@ fn is_build_output(root: &Path, directory: &Path) -> bool {
         .is_ok_and(|status| status.code() == Some(0))
 }
 
+/// A text file larger than this is copied as it is.
+const NAMED_FILE_LIMIT: u64 = 16 << 20;
+
+/// The spellings of the copy's directory a file can hold, each with the
+/// project's directory spelled the same way: as the path is, as JSON writes
+/// a Windows path (`C:\\project`), and as a URL writes one (`C:/project`).
+fn copy_and_project(root: &Path, workspace: &Path) -> Vec<(String, String)> {
+    let mut places = Vec::new();
+    let mut add = |copy: &Path, project: &Path| {
+        let (copy, project) = (copy.to_string_lossy(), project.to_string_lossy());
+        for (from, to) in [("\\", "\\"), ("\\", "\\\\"), ("\\", "/")] {
+            let pair = (copy.replace(from, to), project.replace(from, to));
+            if !pair.0.is_empty() && pair.0 != pair.1 && !places.contains(&pair) {
+                places.push(pair);
+            }
+        }
+    };
+    add(workspace, root);
+    if let (Ok(copy), Ok(project)) = (
+        canonicalize_simplified(workspace),
+        canonicalize_simplified(root),
+    ) {
+        add(&copy, &project);
+    }
+    // The longest first, so one spelling inside another is not cut short.
+    places.sort_by_key(|(copy, _)| std::cmp::Reverse(copy.len()));
+    places
+}
+
+/// The text of a file the command wrote, with the copy's directory replaced
+/// by the project's, when the file is text that names the copy.
+///
+/// The command ran in the copy, so anything that wrote where it was wrote
+/// the copy's path: a coverage report's `coverage-final.json` keyed every
+/// file by it, `clover.xml` and a Cobertura report's `<source>` named it, and
+/// a snapshot of a working directory holds it. Run without Supercov the same
+/// files name the project, and a file that flows back to the project is to
+/// be the file the command alone would have left there.
+fn naming_the_project(
+    file: &Path,
+    places: &[(String, String)],
+) -> Result<Option<String>, WorkspaceError> {
+    let metadata = fs::metadata(file).map_err(|error| io_error(file, error))?;
+    if !metadata.is_file() || metadata.len() > NAMED_FILE_LIMIT {
+        return Ok(None);
+    }
+    let bytes = fs::read(file).map_err(|error| io_error(file, error))?;
+    if bytes.contains(&0) {
+        return Ok(None);
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok(None);
+    };
+    if !places.iter().any(|(copy, _)| text.contains(copy.as_str())) {
+        return Ok(None);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    // The next place the copy is named, the longest spelling where two start
+    // together (`places` is sorted so).
+    while let Some((at, copy, project)) = places
+        .iter()
+        .filter_map(|(copy, project)| Some((rest.find(copy.as_str())?, copy, project)))
+        .min_by_key(|(at, _, _)| *at)
+    {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + copy.len()..];
+        // The directory itself, not a neighbour whose name begins with it
+        // (`app` beside `app-old`).
+        let continues = after
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_alphanumeric() || matches!(next, '-' | '_'));
+        if continues {
+            let first = rest[at..].chars().next().expect("a match is not empty");
+            out.push(first);
+            rest = &rest[at + first.len_utf8()..];
+        } else {
+            out.push_str(project);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    Ok((out != text).then_some(out))
+}
+
 /// Copy files the wrapped command created or changed in the mirror back to
 /// the real project, so `supercov -- <command>` leaves the working tree in
 /// the same state `<command>` alone would have: updated snapshots, generated
@@ -1353,6 +1439,7 @@ pub fn sync_command_outputs(
     // files of which a handful imported the runtime; the others (chunks with
     // probes, manifests naming workspace paths) were copied, and a later
     // `next start` in the project would have served an instrumented build.
+    let places = copy_and_project(root, workspace);
     let mut changed = Vec::new();
     let mut built = BTreeSet::new();
     let mut built_directories = BuiltDirectories::new(root);
@@ -1392,7 +1479,17 @@ pub fn sync_command_outputs(
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
         }
-        fs::copy(&from, &to).map_err(|error| io_error(&to, error))?;
+        match naming_the_project(&from, &places)? {
+            Some(text) => {
+                fs::write(&to, text).map_err(|error| io_error(&to, error))?;
+                if let Ok(metadata) = fs::metadata(&from) {
+                    let _ = fs::set_permissions(&to, metadata.permissions());
+                }
+            }
+            None => {
+                fs::copy(&from, &to).map_err(|error| io_error(&to, error))?;
+            }
+        }
         sync.synced += 1;
         sync.synced_paths.push(relative.clone());
     }
@@ -1775,6 +1872,64 @@ mod tests {
             "{\"version\":\"2\"}"
         );
         assert_eq!(sync.synced, 2);
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_flows_back_names_the_project_and_not_the_copy() {
+        // Vitest's coverage report, written by a command that ran in the copy:
+        // `coverage-final.json` keyed every file by the copy's path, where the
+        // same command without Supercov keys it by the project's.
+        let (root, workspace) = writeback_fixture("names");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        let (copy, project) = (workspace.display().to_string(), root.display().to_string());
+        fs::create_dir_all(workspace.join("coverage")).unwrap();
+        fs::write(
+            workspace.join("coverage/coverage-final.json"),
+            format!("{{\"{copy}/src/fee.js\": {{\"path\": \"{copy}/src/fee.js\"}}}}"),
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("coverage/cobertura.xml"),
+            format!("<sources><source>{copy}</source></sources>"),
+        )
+        .unwrap();
+        // A neighbour whose name only begins with the copy's is not the copy.
+        fs::write(
+            workspace.join("coverage/neighbour.txt"),
+            format!("{copy}-old/file and {copy}"),
+        )
+        .unwrap();
+        // Bytes that are not text are copied as they are.
+        let mut binary = copy.clone().into_bytes();
+        binary.push(0);
+        fs::write(workspace.join("coverage/cache.bin"), &binary).unwrap();
+        fs::write(workspace.join("coverage/plain.txt"), "nothing to name").unwrap();
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+        assert_eq!(sync.synced, 5);
+        assert_eq!(
+            fs::read_to_string(root.join("coverage/coverage-final.json")).unwrap(),
+            format!("{{\"{project}/src/fee.js\": {{\"path\": \"{project}/src/fee.js\"}}}}")
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("coverage/cobertura.xml")).unwrap(),
+            format!("<sources><source>{project}</source></sources>")
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("coverage/neighbour.txt")).unwrap(),
+            format!("{copy}-old/file and {project}")
+        );
+        assert_eq!(fs::read(root.join("coverage/cache.bin")).unwrap(), binary);
+        assert_eq!(
+            fs::read_to_string(root.join("coverage/plain.txt")).unwrap(),
+            "nothing to name"
+        );
+        // The copy keeps what the command wrote.
+        assert!(
+            fs::read_to_string(workspace.join("coverage/cobertura.xml"))
+                .unwrap()
+                .contains(&copy)
+        );
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 

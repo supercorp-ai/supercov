@@ -676,6 +676,42 @@ fn below_named_root<'a>(roots: &[PathBuf], path: &'a Path) -> Option<&'a Path> {
         .min_by_key(|local| local.components().count())
 }
 
+/// Code kept beside a project's packages without being part of one, by the
+/// directory at the top of the project it lies in: the documentation's
+/// build script, example programs, benchmarks, fuzz harnesses. A directory of such a name
+/// deeper down can be a package of the product and is left to be measured.
+///
+/// The frontends that walk a tree for every source file (Python, Ruby)
+/// counted these. On h11 `docs/`, `examples/`, `bench/` made six of eighteen
+/// measured files, none of which a test runs, and the package's own 99% of
+/// lines read 69%; click measured thirteen such files of thirty. Each of
+/// eight projects looked at had at least one of the three.
+pub fn beside_the_product(file: &str) -> Option<&'static str> {
+    let (first, _) = file.split_once('/')?;
+    match first.to_ascii_lowercase().as_str() {
+        "docs" | "doc" | "documentation" => Some("documentation"),
+        "examples" | "example" => Some("example"),
+        "bench" | "benches" | "benchmark" | "benchmarks" => Some("benchmark"),
+        "fuzz" | "fuzzing" => Some("fuzz harness"),
+        _ => None,
+    }
+}
+
+/// Take what lies beside the product out of `sources`, saying why. For a
+/// project that names no roots: a root someone named is what they say it is.
+pub fn leave_out_what_lies_beside(
+    sources: &mut Vec<String>,
+    excluded: &mut Vec<(String, &'static str)>,
+) {
+    sources.retain(|file| match beside_the_product(file) {
+        Some(reason) => {
+            excluded.push((file.clone(), reason));
+            false
+        }
+        None => true,
+    });
+}
+
 /// A benchmark: Vitest's `*.bench.ts` beside the code it measures, or a file
 /// under a `bench`/`benchmarks` directory. It runs the product; it is not the
 /// product. jshttp/cookie keeps four `src/*.bench.ts` files, which were
