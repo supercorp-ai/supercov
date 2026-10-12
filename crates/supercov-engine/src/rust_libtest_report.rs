@@ -10,6 +10,33 @@
 
 use std::fmt::Write as _;
 
+/// A report as Cargo and libtest write one between them: Cargo's line for
+/// the binary on standard error, and the binary's own report on standard
+/// output. `cargo test > results.txt` holds the reports and not Cargo's
+/// lines, and it does under Supercov.
+pub(crate) struct Announced {
+    pub heading: Option<String>,
+    pub report: String,
+}
+
+/// Write each report where `cargo test` writes it.
+pub(crate) fn write_reports(
+    diagnostics: &mut dyn std::io::Write,
+    reports: &[Announced],
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    for announced in reports {
+        if let Some(heading) = &announced.heading {
+            writeln!(diagnostics, "{heading}")?;
+            diagnostics.flush()?;
+        }
+        let mut output = std::io::stdout().lock();
+        output.write_all(announced.report.as_bytes())?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
 /// What one test's process wrote.
 pub(crate) struct CaseOutput<'a> {
     pub name: &'a str,
@@ -33,10 +60,14 @@ struct Counts {
 
 /// libtest's own line for the test: `test name ... ok`, with whatever it adds
 /// (`- should panic`, an ignore reason).
-fn result_line(stdout: &str) -> Option<&str> {
-    stdout
-        .lines()
-        .find(|line| line.starts_with("test ") && line.contains(" ... "))
+fn result_line<'a>(stdout: &'a str, name: &str) -> Option<&'a str> {
+    // The line for this test: a test that runs a suite of its own and passes
+    // its output on (as Supercov's do) prints such lines for other tests.
+    stdout.lines().find(|line| {
+        line.strip_prefix("test ")
+            .and_then(|rest| rest.strip_prefix(name))
+            .is_some_and(|rest| rest.starts_with(" ... ") || rest.starts_with(" - "))
+    })
 }
 
 /// What a failed test printed, under libtest's heading for it.
@@ -46,11 +77,47 @@ fn failure_detail(stdout: &str) -> Option<&str> {
     (start < end).then(|| &stdout[start..end])
 }
 
+/// Text without what a terminal reads as colour: on one, libtest writes
+/// `ok` as `ESC[32mokESC(BESC[m`.
+fn plain(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\u{1b}') {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('\u{1b}') {
+        out.push_str(&rest[..at]);
+        let sequence = &rest[at + 1..];
+        let length = match sequence.as_bytes().first() {
+            // A colour or a reset, ended by its letter.
+            Some(b'[') => sequence
+                .find(|next: char| next.is_ascii_alphabetic())
+                .map_or(sequence.len(), |end| end + 1),
+            // The character set a reset also names.
+            Some(b'(') => 2.min(sequence.len()),
+            _ => 0,
+        };
+        rest = &sequence[length..];
+    }
+    out.push_str(rest);
+    out.into()
+}
+
+/// The colour a word was written in: what stands before it and after it.
+fn colour_of(written: &str) -> (&str, &str) {
+    let word = plain(written);
+    match written.find(word.as_ref()) {
+        Some(at) if !word.is_empty() => (&written[..at], &written[at + word.len()..]),
+        _ => ("", ""),
+    }
+}
+
 fn counts(stdout: &str) -> Option<Counts> {
     let line = stdout
         .lines()
         .rev()
         .find(|line| line.starts_with("test result: "))?;
+    let line = plain(line);
     let (_, rest) = line.split_once(". ")?;
     let mut counts = Counts::default();
     for part in rest.split("; ") {
@@ -75,11 +142,11 @@ fn counts(stdout: &str) -> Option<Counts> {
 /// One report for the doctests of a package, of the reports rustdoc wrote for
 /// it: one for each doctest where each ran alone, one for several where it
 /// ran them together.
-pub(crate) fn merged_report(heading: &str, reports: &[&str]) -> String {
+pub(crate) fn merged_report(reports: &[&str], quiet: bool) -> String {
     // One report is rustdoc's own, with whatever it says after the result
     // (how long the doctests took to compile, when it compiles them as one).
-    if let [only] = reports {
-        return format!("{heading}\n{only}");
+    if let ([only], false) = (reports, quiet) {
+        return (*only).to_owned();
     }
     let lines = reports
         .iter()
@@ -91,7 +158,7 @@ pub(crate) fn merged_report(heading: &str, reports: &[&str]) -> String {
         })
         .collect::<Vec<_>>();
     let mut report = format!(
-        "{heading}\n\nrunning {} test{}\n",
+        "\nrunning {} test{}\n",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" }
     );
@@ -109,8 +176,25 @@ pub(crate) fn merged_report(heading: &str, reports: &[&str]) -> String {
             total.seconds += read.seconds;
         }
     }
-    for line in &lines {
-        let _ = writeln!(report, "{line}");
+    if quiet {
+        report.push_str(&terse_lines(lines.iter().map(|line| {
+            let (name, result) = line["test ".len()..]
+                .split_once(" ... ")
+                .unwrap_or((line, ""));
+            (
+                name.trim_end_matches(" - should panic"),
+                match result {
+                    "FAILED" => 'F',
+                    ignored if ignored.starts_with("ignored") => 'i',
+                    _ => '.',
+                },
+                ("", ""),
+            )
+        })));
+    } else {
+        for line in &lines {
+            let _ = writeln!(report, "{line}");
+        }
     }
     let mut failed = lines
         .iter()
@@ -166,6 +250,34 @@ pub(crate) fn unasked_report(tests: usize) -> String {
 /// a terse line.
 const TERSE_LINE: usize = 88;
 
+/// libtest's terse form of a run: a character for each test, and a failed
+/// test's name on a line of its own. What follows ends the last line.
+fn terse_lines<'a>(
+    results: impl ExactSizeIterator<Item = (&'a str, char, (&'a str, &'a str))>,
+) -> String {
+    let total = results.len();
+    let mut out = String::new();
+    let mut column = 0_usize;
+    let mut open = false;
+    for (reported, (name, result, (before, after))) in results.enumerate() {
+        if result == 'F' {
+            if open {
+                let _ = writeln!(out, " {reported}/{total}");
+            }
+            let _ = writeln!(out, "{name} --- {before}FAILED{after}");
+            open = false;
+        } else {
+            let _ = write!(out, "{before}{result}{after}");
+            column += 1;
+            open = column % TERSE_LINE != TERSE_LINE - 1;
+            if !open {
+                let _ = writeln!(out, " {}/{total}", reported + 1);
+            }
+        }
+    }
+    out
+}
+
 /// The report of one binary. `quiet` is libtest's terse form: a character for
 /// each test, and a failed test's name on a line of its own.
 pub(crate) fn libtest_report(cases: &[CaseOutput<'_>], quiet: bool) -> String {
@@ -178,10 +290,9 @@ pub(crate) fn libtest_report(cases: &[CaseOutput<'_>], quiet: bool) -> String {
     let mut filtered = None::<usize>;
     let mut details = Vec::new();
     let mut failed = Vec::new();
-    let mut column = 0_usize;
-    let mut open = false;
-    for (reported, case) in cases.iter().enumerate() {
-        let line = result_line(case.stdout);
+    let mut results = Vec::new();
+    for case in cases {
+        let line = result_line(case.stdout, case.name);
         let read = counts(case.stdout);
         let lost = case.exit != 0 && (line.is_none() || read.is_none());
         if let Some(read) = &read {
@@ -210,39 +321,36 @@ pub(crate) fn libtest_report(cases: &[CaseOutput<'_>], quiet: bool) -> String {
             });
         }
         let failed_here = case.exit != 0;
-        if !quiet {
-            match line {
-                Some(line) if !lost => {
-                    let _ = writeln!(report, "{line}");
-                }
-                _ => {
-                    let _ = writeln!(
-                        report,
-                        "test {} ... {}",
-                        case.name,
-                        if failed_here { "FAILED" } else { "ok" }
-                    );
-                }
+        if quiet {
+            results.push((
+                case.name,
+                if failed_here {
+                    'F'
+                } else if line.is_some_and(|line| plain(line).contains(" ... ignored")) {
+                    'i'
+                } else {
+                    '.'
+                },
+                line.and_then(|line| line.split_once(" ... "))
+                    .map_or(("", ""), |(_, result)| colour_of(result)),
+            ));
+            continue;
+        }
+        match line {
+            Some(line) if !lost => {
+                let _ = writeln!(report, "{line}");
             }
-        } else if failed_here {
-            if open {
-                let _ = writeln!(report, " {reported}/{}", cases.len());
-            }
-            let _ = writeln!(report, "{} --- FAILED", case.name);
-            open = false;
-        } else {
-            report.push(if line.is_some_and(|line| line.contains(" ... ignored")) {
-                'i'
-            } else {
-                '.'
-            });
-            column += 1;
-            open = column % TERSE_LINE != TERSE_LINE - 1;
-            if !open {
-                let _ = writeln!(report, " {}/{}", reported + 1, cases.len());
+            _ => {
+                let _ = writeln!(
+                    report,
+                    "test {} ... {}",
+                    case.name,
+                    if failed_here { "FAILED" } else { "ok" }
+                );
             }
         }
     }
+    report.push_str(&terse_lines(results.into_iter()));
     // A terse line is ended by what follows it.
     if !failed.is_empty() {
         report.push_str("\nfailures:\n\n");
@@ -261,10 +369,25 @@ pub(crate) fn libtest_report(cases: &[CaseOutput<'_>], quiet: bool) -> String {
     }
     // Each process filtered out every test but its own.
     let filtered = (filtered.unwrap_or(0) + 1).saturating_sub(cases.len());
+    // The word as a process wrote it: in its colour, on a terminal.
+    let word = if failed.is_empty() { "ok" } else { "FAILED" };
+    let word = cases
+        .iter()
+        .filter_map(|case| {
+            let line = case
+                .stdout
+                .lines()
+                .rev()
+                .find(|line| line.starts_with("test result: "))?;
+            let end = line.find(". ")?;
+            Some(&line["test result: ".len()..end])
+        })
+        .find(|written| plain(written) == word)
+        .unwrap_or(word);
     let _ = writeln!(
         report,
         "\ntest result: {}. {} passed; {} failed; {} ignored; {} measured; {} filtered out; finished in {:.2}s\n",
-        if failed.is_empty() { "ok" } else { "FAILED" },
+        word,
         total.passed,
         total.failed,
         total.ignored,
@@ -394,9 +517,8 @@ test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; 
         );
         assert_eq!(reported_tests(&failed), ["src/lib.rs - seal (line 7)"]);
         assert_eq!(
-            merged_report("   Doc-tests shop", &[passed, &failed]),
-            "   Doc-tests shop
-
+            merged_report(&[passed, &failed], false),
+            "
 running 2 tests
 test src/lib.rs - seal (line 3) ... ok
 test src/lib.rs - seal (line 7) ... FAILED
@@ -420,6 +542,54 @@ failures:
 test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
 
 "
+        );
+    }
+
+    #[test]
+    fn a_report_keeps_the_colours_its_processes_wrote() {
+        // On a terminal `cargo test` writes `ok` in green and `FAILED` in
+        // red, and the processes are asked for the same.
+        let green = "\nrunning 1 test\ntest a ... \u{1b}[32mok\u{1b}(B\u{1b}[m\n\ntest result: \u{1b}[32mok\u{1b}(B\u{1b}[m. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s\n\n";
+        let red = "\nrunning 1 test\ntest b ... \u{1b}[31mFAILED\u{1b}(B\u{1b}[m\n\nfailures:\n\n---- b stdout ----\nno\n\n\nfailures:\n    b\n\ntest result: \u{1b}[31mFAILED\u{1b}(B\u{1b}[m. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s\n\n";
+        let cases = [
+            CaseOutput {
+                name: "a",
+                exit: 0,
+                stdout: green,
+                stderr: "",
+            },
+            CaseOutput {
+                name: "b",
+                exit: 101,
+                stdout: red,
+                stderr: "",
+            },
+        ];
+        let report = libtest_report(&cases, false);
+        assert!(
+            report.contains("test a ... \u{1b}[32mok\u{1b}(B\u{1b}[m\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("test result: \u{1b}[31mFAILED\u{1b}(B\u{1b}[m. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out;"),
+            "{report}"
+        );
+        let terse = libtest_report(&cases, true);
+        assert!(
+            terse.contains(
+                "\u{1b}[32m.\u{1b}(B\u{1b}[m 1/2\nb --- \u{1b}[31mFAILED\u{1b}(B\u{1b}[m\n"
+            ),
+            "{terse}"
+        );
+    }
+
+    #[test]
+    fn quiet_doctests_are_one_terse_report() {
+        // `cargo test -q` printed a report for each doctest.
+        let passed = "\nrunning 1 test\ntest src/lib.rs - seal (line 3) ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.20s\n\n";
+        assert_eq!(
+            merged_report(&[passed, passed], true),
+            "\nrunning 2 tests\n..\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s\n\n"
         );
     }
 

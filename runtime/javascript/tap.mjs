@@ -19,9 +19,10 @@ import { runnerExecutionScope, writeRunnerEvidence } from "./runnerEvidence.mjs"
 async function subtestClasses() {
     const classes = [];
     let fromTap;
+    let tap;
     try {
         const fromProject = createRequire(join(process.cwd(), "package.json"));
-        const tap = realpathSync(dirname(fromProject.resolve("tap/package.json")));
+        tap = realpathSync(dirname(fromProject.resolve("tap/package.json")));
         fromTap = createRequire(join(tap, "package.json"));
     }
     catch {
@@ -54,12 +55,71 @@ async function subtestClasses() {
     // libtap is CommonJS, and its exports hide lib/: reach it from its main.
     try {
         const lib = dirname(fromTap.resolve("libtap"));
+        // tap sets libtap up before it loads it: which frames are tap's own,
+        // and how a frame is taken through a source map. Loaded from here
+        // first, libtap kept its defaults for the whole file, and a failure
+        // listed tap's frames under the test's.
+        try {
+            fromTap(join(tap, "settings.js"));
+        }
+        catch {
+            // A tap that has no settings of its own leaves libtap's.
+        }
+        try {
+            nameFromTheCopy(createRequire(join(lib, "test.js"))("stack-utils"));
+        }
+        catch {
+            // Frames stay as libtap writes them.
+        }
         classes.push(createRequire(import.meta.url)(join(lib, "test.js")));
     }
     catch {
         // Neither tap's own classes nor libtap's: tap 14 or older.
     }
     return classes;
+}
+
+// libtap takes the directory the test runs in off a frame, which under
+// Supercov is the copy, while a measured file's frame names the file its
+// author wrote: the whole of `/home/me/shop/src/crypto.js` for
+// `src/crypto.js`. A frame in the project is placed in the copy before
+// libtap reads it, as Mocha's are.
+function nameFromTheCopy(StackUtils) {
+    const real = (directory) => {
+        try {
+            return directory ? realpathSync(directory).replace(/\\/g, "/") : undefined;
+        }
+        catch {
+            return undefined;
+        }
+    };
+    const project = real(process.env.SUPERCOV_SOURCE_PROJECT_ROOT);
+    const copy = real(process.env.SUPERCOV_PROJECT_ROOT);
+    const { clean, at, parseLine } = StackUtils?.prototype ?? {};
+    if (!project || !copy || project === copy || typeof clean !== "function" || clean.supercovTap)
+        return;
+    const inTheProject = (text) => text.includes(`${project}/`) && !text.includes(`${copy}/`);
+    StackUtils.prototype.clean = function supercovTapClean(stack, ...rest) {
+        const lines = (Array.isArray(stack) ? stack : String(stack).split("\n")).map((line) => {
+            const text = String(line).replace(/\\/g, "/");
+            return inTheProject(text) ? text.split(`${project}/`).join(`${copy}/`) : line;
+        });
+        return Reflect.apply(clean, this, [lines, ...rest]);
+    };
+    StackUtils.prototype.clean.supercovTap = true;
+    const placed = (found) => {
+        if (typeof found?.file === "string" && found.file.startsWith(`${project}/`) && !found.file.startsWith(`${copy}/`))
+            found.file = found.file.slice(project.length + 1);
+        return found;
+    };
+    if (typeof at === "function")
+        StackUtils.prototype.at = function supercovTapAt(...given) {
+            return placed(Reflect.apply(at, this, given));
+        };
+    if (typeof parseLine === "function")
+        StackUtils.prototype.parseLine = function supercovTapParseLine(...given) {
+            return placed(Reflect.apply(parseLine, this, given));
+        };
 }
 
 export async function adaptTap(testFile) {

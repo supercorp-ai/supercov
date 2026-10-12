@@ -1627,6 +1627,7 @@ pub fn run_direct_jvm(
                     cwd: workspace.clone(),
                     environment: None,
                     captured_output: None,
+                    console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
             },
         };

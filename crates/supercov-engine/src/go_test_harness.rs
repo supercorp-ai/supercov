@@ -462,7 +462,22 @@ mod tests {
             instrument_test_file(source, "__supercov", "evidence.bin", false).expect("instrument");
         let out = rewrite(source, &file.edits);
         parse(&out).unwrap_or_else(|error| panic!("{error}\n{out}"));
-        (file, out)
+        (file, without_positions(&out))
+    }
+
+    /// The rewritten text without the comments that tell Go where what
+    /// follows an insertion was written (`/*line :9:10*/`), which is how the
+    /// tests here read it.
+    fn without_positions(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find("/*line :") {
+            out.push_str(&rest[..at]);
+            let end = rest[at..].find("*/").expect("a comment ends") + 2;
+            rest = &rest[at + end..];
+        }
+        out.push_str(rest);
+        out
     }
 
     #[test]

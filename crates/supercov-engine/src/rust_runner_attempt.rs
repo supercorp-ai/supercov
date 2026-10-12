@@ -8,9 +8,10 @@
 use std::{collections::BTreeMap, ffi::OsString};
 
 pub const MINIMUM_NEXTEST_ATTEMPT_VERSION: (u64, u64, u64) = (0, 9, 138);
-pub const MAXIMUM_NEXTEST_ATTEMPT_VERSION: (u64, u64, u64) = (0, 9, 140);
+pub const MAXIMUM_NEXTEST_ATTEMPT_VERSION: (u64, u64, u64) = (0, 9, 148);
 pub const VERIFIED_NEXTEST_ATTEMPT_VERSIONS: &[(u64, u64, u64)] = &[
     MINIMUM_NEXTEST_ATTEMPT_VERSION,
+    (0, 9, 140),
     MAXIMUM_NEXTEST_ATTEMPT_VERSION,
 ];
 
@@ -125,12 +126,12 @@ pub fn validate_nextest_version(value: &str) -> Result<(), RustRunnerAttemptErro
     }
     if version > MAXIMUM_NEXTEST_ATTEMPT_VERSION {
         return Err(RustRunnerAttemptError(format!(
-            "nextest {value} is newer than the verified 0.9.140 command and identity contract"
+            "nextest {value} is newer than the verified 0.9.148 command and identity contract"
         )));
     }
     if !VERIFIED_NEXTEST_ATTEMPT_VERSIONS.contains(&version) {
         return Err(RustRunnerAttemptError(format!(
-            "nextest {value} is not one of the verified released target-runner contracts (0.9.138, 0.9.140)"
+            "nextest {value} is not one of the verified released target-runner contracts (0.9.138, 0.9.140, 0.9.148)"
         )));
     }
     Ok(())
@@ -514,9 +515,26 @@ mod tests {
             .to_string()
             .contains("predates")
         );
+        // The release that was current when it was verified: refused until
+        // then, so a project on that day's nextest could not be measured.
+        assert_eq!(
+            parse_nextest_version_output(
+                b"cargo-nextest 0.9.148 (cd1d6d546 2026-10-07)\nrelease: 0.9.148\ncommit-hash: cd1d6d5467322dbc0d39a80cb671d000ac302798\ncommit-date: 2026-10-07\nhost: aarch64-apple-darwin\n"
+            )
+            .unwrap(),
+            "0.9.148"
+        );
         assert!(
             parse_nextest_version_output(
                 b"cargo-nextest 0.9.141\nrelease: 0.9.141\nhost: aarch64-apple-darwin\n"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not one of the verified released")
+        );
+        assert!(
+            parse_nextest_version_output(
+                b"cargo-nextest 0.9.149\nrelease: 0.9.149\nhost: aarch64-apple-darwin\n"
             )
             .unwrap_err()
             .to_string()

@@ -1,7 +1,7 @@
 // What a failing test prints is what it prints without Supercov: the same
 // file, line and column under every failure, and no frame of Supercov's.
 //
-//   node scripts/failure-output.mjs python ruby go rust node ava
+//   node scripts/failure-output.mjs python ruby go rust node ava tap
 //
 // Each language gets the same small project: a function that refuses a short
 // key, a test that meets the refusal, and a test whose comparison fails. Its
@@ -177,6 +177,23 @@ const languages = {
     assert.equal(profiled.status, 0, `${profiled.stdout}${profiled.stderr}`);
     assert.match(readFileSync(resolve(root, 'cover.out'), 'utf8'), /^mode: set\nexample\.com\/shop\/crypto\.go:8\./u);
     console.log('[failure-output] go test leaves its coverage profile in the project');
+    // A project that does not compile: Go names the file from where it runs
+    // and by line and column. It read `../../../../crypto.go:4:38` for
+    // `./crypto.go:4:15`, the copy's directory and a column moved by the probe
+    // before it. Packages build at once, so the lines are compared sorted.
+    const broken = project({
+      'go.mod': 'module example.com/shop\n\ngo 1.22\n',
+      'crypto.go': 'package shop\n\nfunc Seal(key string) string {\n\treturn key + undefinedThing\n}\n',
+      'crypto_test.go': 'package shop\n\nimport "testing"\n\nfunc TestSeal(t *testing.T) { _ = Seal("a") }\n',
+      'pkg/inner/inner.go': 'package inner\n\nfunc Up(s string) int {\n\treturn s\n}\n',
+      'pkg/inner/inner_test.go': 'package inner\n\nimport "testing"\n\nfunc TestUp(t *testing.T) { _ = Up("a") }\n',
+    });
+    const errors = (command, args) => printed(broken, command, args, (line) => line).sort();
+    const plain = errors('go', ['test', './...']);
+    for (const expected of [`.${sep}crypto.go:4:15: undefined: undefinedThing`, /^pkg[\\/]inner[\\/]inner\.go:4:9: cannot use s /u])
+      assert.ok(plain.some((line) => (typeof expected === 'string' ? line === expected : expected.test(line))), `go test: ${expected}\n${plain.join('\n')}`);
+    assert.deepEqual(errors(binary, ['--', 'go', 'test', './...']), plain, 'a Go project that does not compile');
+    console.log('[failure-output] a Go compile error reads as it does without Supercov');
   },
   rust() {
     const root = project({
@@ -197,8 +214,12 @@ const languages = {
       .replace(/\(\d+\) panicked/u, 'panicked')
       .replace(/-[0-9a-f]{16}(?:\.exe)?\)$/u, '-HASH)')
       .replace(/finished in [\d.]+s$/u, 'finished');
+    // Cargo colours its own lines where it is told to (`CARGO_TERM_COLOR`,
+    // as CI sets it), and so does Supercov's line for a binary: the colours
+    // are compared, and read through only to tell which lines are Cargo's.
+    const uncoloured = (line) => line.replace(/\u001b\[[0-9;]*m/gu, '');
     const lines = (command, args, outcome) => printed(root, command, args, tidy, outcome)
-      .filter((line) => !/^\s+(?:Compiling|Finished|Blocking|Locking)\b|^error: |^\s+`--/u.test(line))
+      .filter((line) => !/^\s+(?:Compiling|Finished|Blocking|Locking)\b|^error: |^\s+`--/u.test(uncoloured(line)))
       .sort();
     const plain = lines('cargo', ['test', '--no-fail-fast']);
     for (const expected of [
@@ -210,8 +231,17 @@ const languages = {
       'test tests::is_slow ... ignored, slow',
       'test result: FAILED. 1 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished',
       '   Doc-tests shop',
-    ]) assert.ok(plain.includes(expected), `cargo test: ${expected}\n${plain.join('\n')}`);
+    ]) assert.ok(plain.map(uncoloured).includes(expected), `cargo test: ${expected}\n${plain.join('\n')}`);
     assert.deepEqual(lines(binary, ['--', 'cargo', 'test', '--no-fail-fast']), plain, 'cargo test');
+    // What a binary reports is on standard output and Cargo's line for it on
+    // standard error, so `cargo test > results.txt` holds the reports alone.
+    // Supercov wrote both to standard error.
+    const reported = spawnSync(binary, ['--', 'cargo', 'test', '--no-fail-fast'], { cwd: root, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', CI: '1' } });
+    assert.match(reported.stdout, /^running 4 tests$/mu, reported.stdout);
+    assert.match(reported.stdout, /^test result: FAILED\. 1 passed; 2 failed; 1 ignored;/mu, reported.stdout);
+    assert.doesNotMatch(reported.stdout, /Running|Doc-tests/u, reported.stdout);
+    assert.match(uncoloured(reported.stderr), /^ {5}Running unittests src[\\/]lib\.rs /mu, reported.stderr);
+    assert.doesNotMatch(reported.stderr, /^running \d+ tests?$/mu, reported.stderr);
     // The tests marked `#[ignore]` alone: two binaries and the doctests each
     // report that they ran none of theirs. This failed outright, on "the pass
     // for doctest … ran 0 doctest(s) instead of that one alone".
@@ -220,7 +250,7 @@ const languages = {
       'running 1 test',
       'test tests::is_slow ... ok',
       'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished',
-    ]) assert.ok(ignored.includes(expected), `cargo test -- --ignored: ${expected}\n${ignored.join('\n')}`);
+    ]) assert.ok(ignored.map(uncoloured).includes(expected), `cargo test -- --ignored: ${expected}\n${ignored.join('\n')}`);
     assert.deepEqual(lines(binary, ['--', 'cargo', 'test', '--', '--ignored'], { passes: true }), ignored, 'cargo test -- --ignored');
     console.log('[failure-output] cargo test reads as it does without Supercov');
   },
@@ -251,6 +281,41 @@ languages.ava = () => {
     tidy: (line) => line.replace(/\(\d+(?:\.\d+)?m?s\)/u, ''),
     expects: [/^\s+at seal \(file:\/\/.*\/src\/crypto\.js:3:11\)$/u, /file:\/\/test\/crypto\.test\.js:10:5$/u],
   });
+};
+
+// tap is installed from the registry into the project, as the Mocha gate
+// installs Mocha: 21, which prints through @tapjs/stack and its own
+// reporter, and 16, which prints through libtap and stack-utils.
+//
+// Before this an application frame under tap 21 read
+// `../../../../src/crypto.js:3:11`. Under tap 16 it was the project's whole
+// path, with tap's own frames listed after it: Supercov loaded libtap before
+// tap had told it which frames are tap's.
+languages.tap = () => {
+  const windows = process.platform === 'win32';
+  for (const [version, files, args] of [
+    ['21', {
+      'package.json': '{ "name": "shop", "private": true, "type": "module" }\n',
+      'src/crypto.js': moduleSource,
+      'test/crypto.test.js': 'import t from "tap";\nimport { seal } from "../src/crypto.js";\n\nt.test("refuses a short key", async (t) => {\n  const sealed = seal("ab", "x");\n  t.equal(sealed.body, "X");\n});\n\nt.test("compares", async (t) => {\n  t.equal(seal("abcd", "y").body, "Z");\n});\n',
+    }, ['run', '--disable-coverage', '--reporter=base', 'test/crypto.test.js']],
+    ['16', {
+      'package.json': '{ "name": "shop", "private": true }\n',
+      'src/crypto.js': 'function seal(key, body) {\n  if (key.length < 4) {\n    throw new Error("key too short");\n  }\n  return { key, body: body.toUpperCase() };\n}\nmodule.exports = { seal };\n',
+      'test/crypto.test.js': 'const t = require("tap");\nconst { seal } = require("../src/crypto.js");\n\nt.test("refuses a short key", async (t) => {\n  const sealed = seal("ab", "x");\n  t.equal(sealed.body, "X");\n});\n\nt.test("compares", async (t) => {\n  t.equal(seal("abcd", "y").body, "Z");\n});\n',
+    }, ['--no-coverage', '--reporter=base', 'test/crypto.test.js']],
+  ]) {
+    const root = project({ ...files, '.gitignore': 'node_modules\n.supercov\n.tap\n.nyc_output\n' });
+    const install = spawnSync(windows ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--silent', `tap@${version}`], { cwd: root, encoding: 'utf8', shell: windows });
+    assert.equal(install.status, 0, `installing tap ${version}: ${install.stdout}\n${install.stderr}`);
+    const entry = JSON.parse(readFileSync(resolve(root, 'node_modules/tap/package.json'), 'utf8')).bin;
+    compare(`tap ${version}`, root, process.execPath, [resolve(root, 'node_modules/tap', typeof entry === 'string' ? entry : entry.tap), ...args], {
+      // How long the file and the run took; tap 16 writes zero-width
+      // spaces around a figure.
+      tidy: (line) => line.replace(/[\s\u200b]*[\d.]+m?s\u200b*$/u, ''),
+      expects: [/^\s*seal \(src[\\/]crypto\.js:3:11\)$/u, /^\s*(?:> )?3\s*\|?\s+throw new Error\("key too short"\);$/u],
+    });
+  }
 };
 
 const asked = process.argv.slice(2);

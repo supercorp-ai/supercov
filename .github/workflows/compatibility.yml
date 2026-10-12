@@ -232,7 +232,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rust-src
-      # One of the two nextest releases the runner contract is verified against.
+      # One of the nextest releases the runner contract is verified against;
+      # the gate fetches the newest one, 0.9.148, itself.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140

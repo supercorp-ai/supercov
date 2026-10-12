@@ -1296,12 +1296,17 @@ pub(crate) fn dynamic_library_environment(
     }
 }
 
+/// The compiler's flags for what Supercov builds: the project's own, with no
+/// lint reported. What is compiled is the rewritten source, and a lint on it
+/// is about Supercov's text: `cargo nextest run`, which shows its build,
+/// printed five warnings of unnecessary parentheses for a ten-line file, each
+/// quoting a line of probes. A project that denies warnings still builds.
 pub(crate) fn capped_rustflags() -> String {
     let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
     if !rustflags.is_empty() {
         rustflags.push(' ');
     }
-    rustflags.push_str("--cap-lints=warn");
+    rustflags.push_str("--cap-lints=allow");
     rustflags
 }
 
@@ -1314,7 +1319,12 @@ pub(crate) fn io_error(error: impl std::fmt::Display) -> RustTestRunnerError {
 /// Cargo's line for a test binary: `Running unittests src/lib.rs (target/…)`.
 /// The source is named from its package and the binary from the workspace, as
 /// Cargo names them.
-fn running_line(workspace: &Path, target: &Path, artifact: &TestArtifact) -> String {
+fn running_line(
+    workspace: &Path,
+    target: &Path,
+    artifact: &TestArtifact,
+    coloured: bool,
+) -> String {
     let source = workspace.join(&artifact.source);
     let source = source
         .strip_prefix(&artifact.package_directory)
@@ -1329,7 +1339,12 @@ fn running_line(workspace: &Path, target: &Path, artifact: &TestArtifact) -> Str
         |built| Path::new("target").join(built),
     );
     format!(
-        "     Running {}{} ({})",
+        "{} {}{} ({})",
+        if coloured {
+            "\u{1b}[1m\u{1b}[92m     Running\u{1b}[0m"
+        } else {
+            "     Running"
+        },
         if artifact.kind == "integration" {
             ""
         } else {
@@ -1340,15 +1355,71 @@ fn running_line(workspace: &Path, target: &Path, artifact: &TestArtifact) -> Str
     )
 }
 
+/// Whether Cargo colours its own lines: as `--color` or `CARGO_TERM_COLOR`
+/// says, and otherwise when they go to a terminal that has not asked for
+/// none.
+fn cargo_colours(invocation: &CargoTestInvocation) -> bool {
+    use std::io::IsTerminal;
+    let arguments = &invocation.arguments;
+    let asked = arguments
+        .iter()
+        .enumerate()
+        .find_map(|(index, argument)| {
+            argument
+                .strip_prefix("--color=")
+                .map(str::to_owned)
+                .or_else(|| (argument == "--color").then(|| arguments.get(index + 1).cloned())?)
+        })
+        .or_else(|| std::env::var("CARGO_TERM_COLOR").ok());
+    let set = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    match asked.as_deref() {
+        Some("always") => true,
+        Some("never") => false,
+        // As Cargo decides it when left to: forced, refused, and otherwise
+        // for a terminal that can show colours.
+        _ if set("CLICOLOR_FORCE").is_some_and(|value| value != "0") => true,
+        _ if set("NO_COLOR").is_some() || set("CLICOLOR").is_some_and(|value| value == "0") => {
+            false
+        }
+        _ => {
+            std::io::stderr().is_terminal()
+                && (cfg!(windows) || set("TERM").is_some_and(|term| term != "dumb"))
+        }
+    }
+}
+
+/// Whether libtest colours its results: as its own `--color` says, and
+/// otherwise when they go to a terminal that can show colours. A test's
+/// process writes to a pipe, so it is told.
+fn libtest_colours(invocation: &CargoTestInvocation) -> bool {
+    use std::io::IsTerminal;
+    let arguments = &invocation.runner_arguments;
+    let asked = arguments.iter().enumerate().find_map(|(index, argument)| {
+        argument
+            .strip_prefix("--color=")
+            .map(str::to_owned)
+            .or_else(|| (argument == "--color").then(|| arguments.get(index + 1).cloned())?)
+    });
+    match asked.as_deref() {
+        Some("always") => true,
+        Some("never") => false,
+        _ => {
+            std::io::stdout().is_terminal()
+                && (cfg!(windows)
+                    || std::env::var("TERM").is_ok_and(|term| !term.is_empty() && term != "dumb"))
+        }
+    }
+}
+
 /// `cargo test -q`.
-fn cargo_quiet(invocation: &CargoTestInvocation) -> bool {
+pub(crate) fn cargo_quiet(invocation: &CargoTestInvocation) -> bool {
     invocation.arguments[invocation.command_position() + 1..]
         .iter()
         .any(|argument| matches!(argument.as_str(), "-q" | "--quiet"))
 }
 
 /// libtest's own `-q` or `--format terse`: a character for each test.
-fn libtest_quiet(invocation: &CargoTestInvocation) -> bool {
+pub(crate) fn libtest_quiet(invocation: &CargoTestInvocation) -> bool {
     let runner = &invocation.runner_arguments;
     runner
         .iter()
@@ -1605,6 +1676,7 @@ pub fn run_prepared_rust_tests(
     let libtest_selection = rust_libtest_selection(&invocation)?;
     // An ignored test the user asked for with `--ignored` is listed, and must
     // then run: `--exact name` alone would report it ignored again.
+    let coloured_results = libtest_colours(&invocation);
     let ignored_mode = libtest_selection
         .list_arguments
         .iter()
@@ -1681,6 +1753,7 @@ pub fn run_prepared_rust_tests(
                             // 14.4s (baseline 8.0s streamed vs 1.0s captured).
                             .args(["--exact", &task.test])
                             .args(&ignored_mode)
+                            .args(coloured_results.then_some("--color=always"))
                             .current_dir(&task.artifact.package_directory)
                             .envs(instrumented_stack_environment())
                             .envs(dynamic_library_environment(
@@ -1727,15 +1800,22 @@ pub fn run_prepared_rust_tests(
     // its terse form; libtest's own `-q` is the terse form alone.
     let unannounced = cargo_quiet(&invocation);
     let terse = unannounced || libtest_quiet(&invocation);
-    let announced = |artifact: &TestArtifact| {
-        if unannounced {
-            String::new()
-        } else {
-            format!(
-                "{}\n",
-                running_line(&project.workspace_root, &project.target_directory, artifact)
-            )
-        }
+    let coloured = cargo_colours(&invocation);
+    let announced = |artifact: &TestArtifact, report: String| {
+        (
+            (artifact.kind == "integration", artifact.name.clone()),
+            crate::rust_libtest_report::Announced {
+                heading: (!unannounced).then(|| {
+                    running_line(
+                        &project.workspace_root,
+                        &project.target_directory,
+                        artifact,
+                        coloured,
+                    )
+                }),
+                report,
+            },
+        )
     };
     // In Cargo's order: unit tests, then each integration test by name.
     let mut reports = Vec::new();
@@ -1764,31 +1844,24 @@ pub fn run_prepared_rust_tests(
             )
             .collect::<Vec<_>>();
         let artifact = &binary[0].task.artifact;
-        reports.push((
-            (artifact.kind == "integration", artifact.name.clone()),
-            format!(
-                "{}{}",
-                announced(artifact),
-                crate::rust_libtest_report::libtest_report(&cases, terse)
-            ),
+        reports.push(announced(
+            artifact,
+            crate::rust_libtest_report::libtest_report(&cases, terse),
         ));
     }
     for (artifact, all) in unasked {
-        reports.push((
-            (artifact.kind == "integration", artifact.name.clone()),
-            format!(
-                "{}{}",
-                announced(artifact),
-                crate::rust_libtest_report::unasked_report(all)
-            ),
+        reports.push(announced(
+            artifact,
+            crate::rust_libtest_report::unasked_report(all),
         ));
     }
-    reports.sort();
-    for (_, report) in reports {
-        diagnostics
-            .write_all(report.as_bytes())
-            .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
-    }
+    reports.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let reports = reports
+        .into_iter()
+        .map(|(_, report)| report)
+        .collect::<Vec<_>>();
+    crate::rust_libtest_report::write_reports(diagnostics, &reports)
+        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
     for outcome in outcomes {
         let ProcessTask {
             artifact_index,

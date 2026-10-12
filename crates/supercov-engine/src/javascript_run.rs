@@ -780,6 +780,7 @@ pub fn run_direct_javascript(
                 cwd: workspace.clone(),
                 environment: Some(environment_with(overrides)),
                 captured_output: None,
+                console: None,
             },
         },
     };

@@ -876,13 +876,29 @@ pub struct GoEdit {
 }
 
 /// Apply edits to source, right to left so earlier offsets stay valid.
+///
+/// What is inserted is followed by a comment that tells Go where the text
+/// after it was written, `/*line :4:9*/`. Go reports a compile error, and
+/// `go vet` a finding, by line and column, and a probe earlier on the line
+/// moved the column: `./crypto.go:4:38: undefined` for `4:15`. With no file
+/// named, the comment keeps the name the file already has.
 pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
     let mut ordered = edits.to_vec();
     ordered.sort_by(|a, b| b.at.cmp(&a.at).then(b.rank.cmp(&a.rank)));
+    let lines = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+        .collect::<Vec<_>>();
     let mut out = source.to_owned();
+    let mut placed = None;
     for edit in ordered {
-        if edit.at > out.len() {
+        if edit.at > source.len() {
             continue;
+        }
+        if placed != Some(edit.at) {
+            placed = Some(edit.at);
+            let line = lines.partition_point(|start| *start <= edit.at);
+            let column = edit.at - lines[line - 1] + 1;
+            out.insert_str(edit.at, &format!("/*line :{line}:{column}*/"));
         }
         out.insert_str(edit.at, &edit.text);
     }
@@ -1096,6 +1112,29 @@ func classify(a int, b bool) string {
         parse(&out)
             .unwrap_or_else(|error| panic!("rewritten source does not parse: {error}\n{out}"));
         out
+    }
+
+    #[test]
+    fn what_follows_an_insertion_is_where_it_was_written() {
+        // Go reports a compile error by line and column, and a probe earlier
+        // on the line moved the column: `./crypto.go:4:38` for `4:15`.
+        const SOURCE: &str =
+            "package main\n\nfunc seal(key string) string {\n\treturn key + missing\n}\n";
+        let mut next = 0;
+        let mut decisions = 0;
+        let obligations = build_go_obligations("seal.go", SOURCE, &mut next, &mut decisions)
+            .expect("obligations");
+        let rewritten = rewrite(SOURCE, &obligations.edits);
+        // The statement on line 4 begins at column 2, after the tab.
+        assert!(
+            rewritten.contains("/*line :4:2*/return key + missing"),
+            "{rewritten}"
+        );
+        assert_eq!(
+            rewritten.lines().count(),
+            SOURCE.lines().count(),
+            "{rewritten}"
+        );
     }
 
     #[test]

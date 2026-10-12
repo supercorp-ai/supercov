@@ -147,7 +147,13 @@ struct ChildRecord {
 /// report is its package's while every doctest it names is one of that
 /// package's. When the two cannot be paired the reports are given as they
 /// came.
-fn doctest_reports(stdout: &str, stderr: &str, packages: &[PackageDoctests]) -> String {
+fn doctest_reports(
+    stdout: &str,
+    stderr: &str,
+    packages: &[PackageDoctests],
+    quiet: bool,
+) -> Vec<crate::rust_libtest_report::Announced> {
+    use crate::rust_libtest_report::Announced;
     let mut reports = Vec::<String>::new();
     for line in stdout.split_inclusive('\n') {
         if line.starts_with("running ") || reports.is_empty() {
@@ -160,21 +166,42 @@ fn doctest_reports(stdout: &str, stderr: &str, packages: &[PackageDoctests]) -> 
     }
     reports.retain(|report| !report.trim().is_empty());
     let named = |name: &str| name.replace('-', "_");
+    // Cargo may colour its word for the line.
+    let plain = |line: &str| {
+        let mut text = String::with_capacity(line.len());
+        let mut rest = line;
+        while let Some(at) = rest.find('\u{1b}') {
+            text.push_str(&rest[..at]);
+            rest = rest[at..].find('m').map_or("", |end| &rest[at + end + 1..]);
+        }
+        text.push_str(rest);
+        text
+    };
     let headings = stderr
         .lines()
-        .filter(|line| line.trim_start().starts_with("Doc-tests "))
+        .filter(|line| plain(line).trim_start().starts_with("Doc-tests "))
         .collect::<Vec<_>>();
-    let mut merged = String::new();
-    let mut next = 0;
+    // Under `cargo test -q` Cargo writes no line for a package, and the
+    // packages are taken in the order it ran them.
+    let mut announced = Vec::new();
+    if headings.is_empty() {
+        announced.extend(packages.iter().map(|package| (None, package)));
+    }
     for heading in &headings {
-        let package = heading.trim_start().trim_start_matches("Doc-tests ").trim();
+        let written = plain(heading);
+        let package = written.trim_start().trim_start_matches("Doc-tests ").trim();
         let Some(package) = packages
             .iter()
             .find(|candidate| named(&candidate.package) == named(package))
         else {
-            next = usize::MAX;
+            announced.clear();
             break;
         };
+        announced.push((Some((*heading).to_owned()), package));
+    }
+    let mut merged = Vec::new();
+    let mut next = 0;
+    for (heading, package) in announced {
         let its = reports[next..]
             .iter()
             .take_while(|report| {
@@ -185,21 +212,26 @@ fn doctest_reports(stdout: &str, stderr: &str, packages: &[PackageDoctests]) -> 
             .map(String::as_str)
             .collect::<Vec<_>>();
         next += its.len();
-        // rustdoc is not run for a package none of whose doctests were asked
-        // for; it would have reported that it ran none.
-        merged.push_str(&if its.is_empty() {
-            format!(
-                "{heading}\n{}",
+        merged.push(Announced {
+            heading,
+            // rustdoc is not run for a package none of whose doctests were
+            // asked for; it would have reported that it ran none.
+            report: if its.is_empty() {
                 crate::rust_libtest_report::unasked_report(package.listed)
-            )
-        } else {
-            crate::rust_libtest_report::merged_report(heading, &its)
+            } else {
+                crate::rust_libtest_report::merged_report(&its, quiet)
+            },
         });
     }
-    if next == reports.len() {
+    if next == reports.len() && !merged.is_empty() {
         merged
+    } else if reports.is_empty() {
+        Vec::new()
     } else {
-        reports.concat()
+        vec![Announced {
+            heading: None,
+            report: reports.concat(),
+        }]
     }
 }
 
@@ -277,10 +309,14 @@ pub(crate) fn run_doctests(
         &String::from_utf8_lossy(&output.stdout),
         &String::from_utf8_lossy(&output.stderr),
         &packages,
+        crate::rust_test_runner::cargo_quiet(invocation)
+            || crate::rust_test_runner::libtest_quiet(invocation),
     );
-    diagnostics
-        .write_all(reported.as_bytes())
-        .map_err(io_error)?;
+    crate::rust_libtest_report::write_reports(diagnostics, &reported).map_err(io_error)?;
+    let reported = reported
+        .iter()
+        .map(|announced| announced.report.as_str())
+        .collect::<String>();
 
     let mut results = Vec::new();
     let mut index = 0_usize;
