@@ -24,8 +24,14 @@ module Supercov
         super
       end
 
+      # The hooks here run around every example, so each failure listed
+      # `# ./.supercov/…/supercov_rspec.rb:13:in '…with_around_and_singleton_context_hooks'`
+      # under the spec's own line. RSpec leaves frames out by pattern, but
+      # never one under the working directory, which is where these lie; they
+      # are taken out of the exception before RSpec keeps it.
       def set_exception(exception)
         Supercov::RSpecAdapter.note_exception(self)
+        Supercov::RSpecAdapter.without_own_frames(exception)
         super
       end
 
@@ -45,6 +51,15 @@ module Supercov
       @runtime = runtime
       runtime.adapter_active = true
       ::RSpec::Core::Example.prepend(ExampleHooks)
+    end
+
+    def self.without_own_frames(exception)
+      @runtime.without_own_frames(exception)
+      return unless exception.respond_to?(:all_exceptions)
+
+      exception.all_exceptions.each { |failure| @runtime.without_own_frames(failure) }
+    rescue StandardError
+      nil
     end
 
     def self.identity(example)

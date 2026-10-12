@@ -34,6 +34,17 @@ module Supercov
         Supercov::TestUnitAdapter.enter(self, "teardown")
         super
       end
+
+      private
+
+      # The hooks above are on the way to every test, so an error's backtrace
+      # ended in three frames of this file, `…#run_test`, `…#run_setup` and
+      # `…#run`, printed under the test's own. test-unit leaves out its own
+      # frames by where they lie; these are taken out before it reads them.
+      def handle_exception(exception)
+        Supercov::TestUnitAdapter.without_own_frames(exception)
+        super
+      end
     end
 
     module ResultHooks
@@ -60,6 +71,10 @@ module Supercov
 
     @runtime = nil
     @state = {}
+
+    def self.without_own_frames(exception)
+      @runtime&.without_own_frames(exception)
+    end
 
     def self.install(runtime)
       return if @runtime
