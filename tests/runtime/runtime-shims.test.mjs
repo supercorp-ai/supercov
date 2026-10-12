@@ -736,6 +736,46 @@ test("a lexical wrapper's two frames are the author's one frame again", async ()
     "    at ok (node:assert:1:1)",
     "    at /workspace/tests/failing.test.js:12:7",
   ]);
+  // `node:assert` reached through its module is wrapped a second time, so
+  // the runtime's frames lie above the added function as well as below it.
+  // Mocha printed the added function, Node's `AsyncLocalStorage.run` and the
+  // author's function, where it prints `Context.<anonymous>` at the assertion.
+  const proxied = new Error("failed");
+  proxied.stack = [
+    "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:",
+    "",
+    "'Y' !== 'Z'",
+    "",
+    "    at file:///workspace/.supercov/node_modules/nodeAssertAdapter.mjs:40:16",
+    "    at withNodeAssertionPhase (file:///workspace/.supercov/node_modules/runtime.mjs:931:12)",
+    "    at Object.assertionApply [as apply] (file:///workspace/.supercov/node_modules/nodeAssertAdapter.mjs:38:12)",
+    "    at <anonymous> (/workspace/test/crypto.test.js:11:12)",
+    "    at withProbeV2Context (file:///workspace/.supercov/node_modules/runtime.mjs:300:12)",
+    "    at file:///workspace/.supercov/node_modules/runtime.mjs:868:52",
+    "    at AsyncLocalStorage.run (node:internal/async_local_storage/async_context_frame:65:14)",
+    "    at withCoverageCarrier (file:///workspace/.supercov/node_modules/runtime.mjs:868:29)",
+    "    at Module.withNodeAssertionPhase (file:///workspace/.supercov/node_modules/runtime.mjs:980:20)",
+    "    at Context.<anonymous> (/workspace/test/crypto.test.js:11:1)",
+    "    at process.processImmediate (node:internal/timers:574:21)",
+  ].join("\n");
+  assert.deepEqual(runtime.cleanInstrumentationStack(proxied, true).stack.split("\n").slice(4), [
+    "    at Context.<anonymous> (/workspace/test/crypto.test.js:11:12)",
+    "    at process.processImmediate (node:internal/timers:574:21)",
+  ]);
+  // What the assertion's argument threw has the author's code above the
+  // added function: that frame stays, and the two below it are still one.
+  const thrown = new Error("failed");
+  thrown.stack = [
+    "Error: key too short",
+    "    at seal (/workspace/src/crypto.js:3:11)",
+    "    at <anonymous> (/workspace/test/crypto.test.js:6:20)",
+    "    at withNodeAssertionPhase (file:///workspace/.supercov/node_modules/runtime.mjs:980:20)",
+    "    at Context.<anonymous> (/workspace/test/crypto.test.js:6:5)",
+  ].join("\n");
+  assert.deepEqual(runtime.cleanInstrumentationStack(thrown, true).stack.split("\n").slice(1), [
+    "    at seal (/workspace/src/crypto.js:3:11)",
+    "    at Context.<anonymous> (/workspace/test/crypto.test.js:6:20)",
+  ]);
   // A wrapper that calls the author's own function added none: both stay,
   // and only the runtime's own frames go.
   assert.deepEqual(cleaned("    at /workspace/tests/failing.test.js:12:7", false), [

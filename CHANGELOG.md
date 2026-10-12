@@ -11,6 +11,9 @@
 **Fixed**
 
 - A Playwright failure names the line you wrote also when the test file has not changed for three days. Playwright keeps the code it compiles and its source map as two files in the system's temporary directory, and uses the code without checking for the map; macOS removes files there that nothing has read for three days, and removed the maps first. Until the code went too, every frame and test location was the compiled code's: `app.spec.ts:50:1` for line 17, over a code frame of another test's lines. Supercov now has Playwright keep the copy's compiled files with the copy. A `PWTEST_CACHE_DIR` of your own is left alone.
+- A Mocha failure reads as it does without Supercov. An application frame printed the project's whole path (`at seal (/home/me/shop/src/crypto.js:3:11)` for `src/crypto.js:3:11`), a failed `node:assert` printed three frames for one line, and a stack that began in a timer ended in a frame of Node's hooks.
+- Under ts-node a frame names the line you wrote. ts-node compiles the text it is given and TypeScript reads no source map in it, so a frame read `src/crypto.ts:37:10` for line 8, and a test file's `:15:172` for column 12.
+- A report a command writes names your project and not Supercov's copy. Under Vitest `coverage-final.json` keyed every file by its path in the copy, and `clover.xml` and a Cobertura report's `<source>` named the copy's directory. Any text file that flows back to the project has the copy's directory replaced by the project's.
 - `assertions --limit 0` lists every row, as it does for `quality` and `security`. It was refused, and the same thing was spelled `--all`.
 
 ## 4.3.0

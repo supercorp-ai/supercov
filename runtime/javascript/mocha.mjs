@@ -64,6 +64,52 @@ export async function adaptMocha(entrypoint) {
         return Reflect.apply(run, this, args);
     };
     Runner.prototype.run.supercovMocha = true;
+    // Mocha takes its working directory off the front of each frame and
+    // prints the rest. Under Supercov that is the copy, while an application
+    // frame names the project's own file, so it printed whole:
+    // `at seal (/home/me/shop/src/crypto.js:3:11)` for `src/crypto.js:3:11`.
+    // And Supercov's hooks into asynchronous work put a frame of Node's under
+    // every stack that starts in a timer. A failure reads as it does without
+    // Supercov before Mocha or a reporter sees it.
+    const fail = Runner.prototype.fail;
+    if (typeof fail === "function") {
+        const place = asWritten();
+        Runner.prototype.fail = function supercovMochaFail(runnable, error, ...rest) {
+            place(error);
+            return Reflect.apply(fail, this, [runnable, error, ...rest]);
+        };
+    }
+}
+
+const HOOK_FRAME = /^\s*at process\.(?:callbackTrampoline|topLevelDomainCallback) \(node:(?:internal\/async_hooks|domain):\d+:\d+\)$/;
+
+function asWritten() {
+    const real = (directory) => {
+        try {
+            return directory ? realpathSync(directory) : undefined;
+        }
+        catch {
+            return undefined;
+        }
+    };
+    const project = real(process.env.SUPERCOV_SOURCE_PROJECT_ROOT);
+    const copy = real(process.env.SUPERCOV_PROJECT_ROOT);
+    return (error) => {
+        if (!error || typeof error.stack !== "string")
+            return;
+        const lines = error.stack.split("\n").filter((line) => !HOOK_FRAME.test(line));
+        const placed = project && copy && project !== copy
+            ? lines.map((line) => /^\s*at /.test(line) && line.includes(project + sep) && !line.includes(copy + sep)
+                ? line.replace(`(${project}${sep}`, `(${copy}${sep}`).replace(` at ${project}${sep}`, ` at ${copy}${sep}`)
+                : line)
+            : lines;
+        try {
+            error.stack = placed.join("\n");
+        }
+        catch {
+            // A stack that cannot be written is printed as it is.
+        }
+    };
 }
 
 function observe(runner, runtime, write) {
