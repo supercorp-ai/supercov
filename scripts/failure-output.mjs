@@ -23,7 +23,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
@@ -174,9 +174,10 @@ const languages = {
     // prints around the tests are not the same; where each panicked is.
     const panics = (lines) => lines.filter((line) => line.includes('panicked at')).map((line) => line.replace(/\(\d+\) /u, '')).sort();
     const plain = panics(printed(root, 'cargo', ['test', '--lib'], (line) => line));
+    // rustc names the file with the platform's separator.
     assert.deepEqual(plain, [
-      "thread 'tests::compares' panicked at src/lib.rs:24:9:",
-      "thread 'tests::refuses_a_short_key' panicked at src/lib.rs:7:9:",
+      `thread 'tests::compares' panicked at src${sep}lib.rs:24:9:`,
+      `thread 'tests::refuses_a_short_key' panicked at src${sep}lib.rs:7:9:`,
     ]);
     assert.deepEqual(panics(printed(root, binary, ['--', 'cargo', 'test', '--lib'], (line) => line)), plain, 'cargo test');
     console.log('[failure-output] cargo test panics where it does without Supercov');
