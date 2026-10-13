@@ -9,6 +9,7 @@
 **Fixed**
 
 - `runs patch` in a project kept below the top of its repository counts a new file not yet added to git as changed, and `--annotate github` names each file from the top, where a workflow looks for it. The file was left out and the marks were attached to no file.
+- `return undefined as T` is no longer read as a statement no test asserts. It was asked as a return made to return undefined, which no test can catch.
 
 ## 4.4.0
 
