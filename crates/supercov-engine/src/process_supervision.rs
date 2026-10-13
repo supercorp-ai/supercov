@@ -182,6 +182,86 @@ struct RelayTargets {
     /// writes both down this one pipe: two pipes read by two threads would
     /// pass its lines on in an order it did not write them in.
     both: Option<io::PipeReader>,
+    /// Streams that are a terminal, each read from a terminal of its own.
+    #[cfg(unix)]
+    terminals: Vec<Terminal>,
+}
+
+/// A terminal the command writes to in place of the user's, so that what it
+/// writes can be put right on the way and the command still sees a terminal:
+/// its colours, its width and its progress lines stay as they were.
+#[cfg(unix)]
+struct Terminal {
+    /// The end this process reads what the command wrote from.
+    ours: std::fs::File,
+    /// The user's terminal, where it is passed on to.
+    real: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Terminal {
+    /// A terminal of the size and settings of `real`, and the end of it the
+    /// command is given.
+    fn like(real: std::fs::File) -> Option<(Self, std::fs::File)> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: both structures are plain data the calls fill in, and the
+        // descriptors `openpty` returns are owned by nothing else.
+        unsafe {
+            let mut settings: libc::termios = std::mem::zeroed();
+            let mut size: libc::winsize = std::mem::zeroed();
+            if libc::tcgetattr(real.as_raw_fd(), &mut settings) != 0
+                || libc::ioctl(real.as_raw_fd(), libc::TIOCGWINSZ, &mut size) != 0
+            {
+                return None;
+            }
+            // What the command writes is passed on byte for byte; the
+            // user's terminal ends each line as it always did.
+            settings.c_oflag &= !libc::OPOST;
+            let (mut ours, mut theirs) = (-1, -1);
+            if libc::openpty(
+                &mut ours,
+                &mut theirs,
+                std::ptr::null_mut(),
+                &mut settings,
+                &mut size,
+            ) != 0
+            {
+                return None;
+            }
+            let ours = std::fs::File::from_raw_fd(ours);
+            let theirs = std::fs::File::from_raw_fd(theirs);
+            for end in [&ours, &theirs] {
+                // Neither end is for a process this one starts, other than
+                // as the stream `Command` makes of it.
+                libc::fcntl(end.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            Some((Self { ours, real }, theirs))
+        }
+    }
+
+    /// Gives the command's terminal the size the user's has now.
+    fn resize(&self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `size` is plain data the first call fills in.
+        unsafe {
+            let mut size: libc::winsize = std::mem::zeroed();
+            if libc::ioctl(self.real.as_raw_fd(), libc::TIOCGWINSZ, &mut size) == 0 {
+                libc::ioctl(self.ours.as_raw_fd(), libc::TIOCSWINSZ, &size);
+            }
+        }
+    }
+
+    /// Waits for the command to write, up to `wait`.
+    fn written(&self, wait: Duration) -> bool {
+        use std::os::fd::AsRawFd;
+        let mut poll = libc::pollfd {
+            fd: self.ours.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one descriptor this process owns.
+        unsafe { libc::poll(&mut poll, 1, wait.as_millis() as libc::c_int) > 0 }
+    }
 }
 
 /// Whether two handles are one file, pipe or device.
@@ -233,6 +313,33 @@ impl Relays {
         if !io::stderr().is_terminal() {
             targets.stderr = own_handle(&io::stderr());
         }
+        #[cfg(unix)]
+        {
+            let terminal = |is: bool, handle: Option<std::fs::File>| handle.filter(|_| is);
+            let stdout = terminal(io::stdout().is_terminal(), own_handle(&io::stdout()));
+            let stderr = terminal(io::stderr().is_terminal(), own_handle(&io::stderr()));
+            match (stdout, stderr) {
+                // One terminal for both, so the command's lines keep their order.
+                (Some(stdout), Some(stderr)) if one_place(&stdout, &stderr) => {
+                    if let Some((terminal, theirs)) = Terminal::like(stdout)
+                        && let Ok(second) = theirs.try_clone()
+                    {
+                        command.stdout(theirs).stderr(second);
+                        targets.terminals.push(terminal);
+                    }
+                }
+                (stdout, stderr) => {
+                    if let Some((terminal, theirs)) = stdout.and_then(Terminal::like) {
+                        command.stdout(theirs);
+                        targets.terminals.push(terminal);
+                    }
+                    if let Some((terminal, theirs)) = stderr.and_then(Terminal::like) {
+                        command.stderr(theirs);
+                        targets.terminals.push(terminal);
+                    }
+                }
+            }
+        }
         if let (Some(stdout), Some(stderr)) = (&targets.stdout, &targets.stderr)
             && one_place(stdout, stderr)
             && let Ok((reader, writer)) = io::pipe()
@@ -260,6 +367,10 @@ impl Relays {
         let Some(names) = names else {
             return Self(relays);
         };
+        #[cfg(unix)]
+        for terminal in targets.terminals {
+            relays.push(relay_terminal(terminal, names.clone()));
+        }
         if let Some(pipe) = targets.both {
             if let Some(to) = targets.stderr.or(targets.stdout) {
                 relays.push(relay(pipe, to, names.clone()));
@@ -324,6 +435,86 @@ fn relay(
                 if pass(&pending).is_err() {
                     let _ = ended.send(());
                     return;
+                }
+                pending.clear();
+            }
+        }
+        if !pending.is_empty() {
+            let _ = pass(&pending);
+        }
+        let _ = ended.send(());
+    });
+    wait
+}
+
+/// How long the end of a line is waited for once its beginning has come. A
+/// prompt or a progress line has no end and is passed on after this; a name
+/// is put right only in text that is passed on together, and a command
+/// writes a line at once.
+#[cfg(unix)]
+const TERMINAL_LINE_WAIT: Duration = Duration::from_millis(40);
+
+/// How often the command's terminal is given the size of the user's.
+#[cfg(unix)]
+const TERMINAL_SIZE_EVERY: Duration = Duration::from_millis(250);
+
+/// Passes on what a command writes to its terminal as it writes it: whole
+/// lines at once, and what is not yet a line after a moment.
+#[cfg(unix)]
+fn relay_terminal(mut terminal: Terminal, names: ConsoleNames) -> std::sync::mpsc::Receiver<()> {
+    let (ended, wait) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let Ok(mut to) = terminal.real.try_clone() else {
+            let _ = ended.send(());
+            return;
+        };
+        let mut pass = |bytes: &[u8]| -> io::Result<()> {
+            match std::str::from_utf8(bytes) {
+                Ok(text) => to.write_all(names.line(text).as_bytes())?,
+                Err(_) => to.write_all(bytes)?,
+            }
+            to.flush()
+        };
+        let mut pending: Vec<u8> = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        let mut sized = Instant::now();
+        loop {
+            let wait = if pending.is_empty() {
+                TERMINAL_SIZE_EVERY
+            } else {
+                TERMINAL_LINE_WAIT
+            };
+            if !terminal.written(wait) {
+                if !pending.is_empty() {
+                    if pass(&pending).is_err() {
+                        break;
+                    }
+                    pending.clear();
+                }
+                if sized.elapsed() >= TERMINAL_SIZE_EVERY {
+                    terminal.resize();
+                    sized = Instant::now();
+                }
+                continue;
+            }
+            // The last process holding the other end has gone: a read of
+            // nothing on macOS, an error on Linux.
+            let read = match terminal.ours.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            pending.extend_from_slice(&buffer[..read]);
+            if let Some(end) = pending.iter().rposition(|byte| *byte == b'\n') {
+                if pass(&pending[..=end]).is_err() {
+                    break;
+                }
+                pending.drain(..=end);
+            }
+            if pending.len() > RELAY_LINE_LIMIT {
+                if pass(&pending).is_err() {
+                    break;
                 }
                 pending.clear();
             }
@@ -1874,6 +2065,82 @@ mod tests {
         assert_eq!(
             String::from_utf8(kept.0.lock().unwrap().clone()).unwrap(),
             "# example.com/shop [example.com/shop.test]\n./crypto.go:4:15: undefined: undefinedThing\npkg/inner/inner.go:4:9: cannot use s\n\tat ../../../../../elsewhere.go:1 and a/../../../../b.go\n[ERROR] Please refer to /home/me/shop/target/surefire-reports for the individual test results.\nlast line, with no end"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_on_a_terminal_still_writes_to_one_and_names_the_project() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // The user's terminal: what is written to `users` shows at `screen`.
+        let (mut screen, mut users) = (-1, -1);
+        // SAFETY: the two descriptors are owned by nothing else.
+        let (mut screen, users) = unsafe {
+            assert_eq!(
+                libc::openpty(
+                    &mut screen,
+                    &mut users,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut::<libc::termios>(),
+                    std::ptr::null_mut::<libc::winsize>(),
+                ),
+                0
+            );
+            let size = libc::winsize {
+                ws_row: 40,
+                ws_col: 132,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            libc::ioctl(users, libc::TIOCSWINSZ, &size);
+            (
+                std::fs::File::from_raw_fd(screen),
+                std::fs::File::from_raw_fd(users),
+            )
+        };
+        let (terminal, theirs) = Terminal::like(users).expect("a terminal like the user's");
+        let names = ConsoleNames {
+            places: vec![(
+                "/home/me/shop/.supercov/workspaces/workspace/shop".into(),
+                "/home/me/shop".into(),
+            )],
+            up_to_the_project: None,
+        };
+        // A line whose name comes in two writes, the terminal's width as the
+        // command reads it, and a question that has no end of line.
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "test -t 1 && printf 'a terminal %s wide\\n' \"$(stty size <&2 | cut -d' ' -f2)\"; printf 'see /home/me/shop/.supercov/work'; printf 'spaces/workspace/shop/target/report\\n'; printf 'Install? '",
+            ])
+            .stdin(Stdio::null())
+            .stdout(theirs.try_clone().unwrap())
+            .stderr(theirs);
+        let mut child = command.spawn().unwrap();
+        drop(command);
+        let ended = relay_terminal(terminal, names);
+        assert!(child.wait().unwrap().success());
+        ended
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the relay ends when the command has gone");
+        // SAFETY: a flag on a descriptor this test owns.
+        unsafe {
+            let flags = libc::fcntl(screen.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(screen.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        let mut shown = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        while let Ok(read) = screen.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            shown.extend_from_slice(&buffer[..read]);
+        }
+        // The user's terminal ends each line itself, once.
+        assert_eq!(
+            String::from_utf8(shown).unwrap(),
+            "a terminal 132 wide\r\nsee /home/me/shop/target/report\r\nInstall? "
         );
     }
 
