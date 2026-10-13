@@ -1181,6 +1181,119 @@ pub fn watch_parent_process_group() -> io::Result<()> {
     ))
 }
 
+/// The terminal, lent to a command that reads the keyboard.
+///
+/// A command runs in a process group of its own, so that all of it can be
+/// ended, and the terminal belongs to Supercov's group: a read of the
+/// keyboard (a debugger at a breakpoint, a watch mode, a question) stops the
+/// command where it stands, as it stops a job a shell put in the background.
+/// When that happens the command's group is given the terminal and
+/// continued. Until then Ctrl-C reaches Supercov as it always has; after, it
+/// reaches the command, which is what someone at a debugger means by it.
+#[cfg(unix)]
+#[derive(Default)]
+struct Keyboard {
+    terminal: Option<fs::File>,
+    lent: bool,
+}
+
+#[cfg(unix)]
+impl Keyboard {
+    /// The signal the command stopped on, if it has stopped since last asked.
+    fn stopped(child: &Child) -> Option<i32> {
+        // SAFETY: `info` is plain data the call fills in. Asking for stops
+        // alone leaves the command's exit for `try_wait` to collect.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            if libc::waitid(
+                libc::P_PID,
+                child.id() as libc::id_t,
+                &mut info,
+                libc::WSTOPPED | libc::WNOHANG,
+            ) != 0
+                || info.si_code != libc::CLD_STOPPED
+            {
+                return None;
+            }
+            Some(info.si_status())
+        }
+    }
+
+    /// Makes `group` the one the terminal's keys and signals go to. False
+    /// when there is no terminal or it is not this process's to give.
+    fn give(&mut self, group: libc::pid_t, ours_to_give: bool) -> bool {
+        use std::os::fd::AsRawFd;
+        if self.terminal.is_none() {
+            self.terminal = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+                .ok();
+        }
+        let Some(terminal) = &self.terminal else {
+            return false;
+        };
+        // SAFETY: plain calls on a descriptor this process owns. Setting the
+        // group from one that is not the terminal's stops the caller unless
+        // the signal that would do it is held back for the moment.
+        unsafe {
+            if ours_to_give && libc::tcgetpgrp(terminal.as_raw_fd()) != libc::getpgrp() {
+                return false;
+            }
+            let mut held: libc::sigset_t = std::mem::zeroed();
+            let mut before: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut held);
+            libc::sigaddset(&mut held, libc::SIGTTOU);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &held, &mut before);
+            let given = libc::tcsetpgrp(terminal.as_raw_fd(), group) == 0;
+            libc::pthread_sigmask(libc::SIG_SETMASK, &before, std::ptr::null_mut());
+            given
+        }
+    }
+
+    /// The command stopped on `signal`. Returns whether it was continued.
+    fn command_stopped(&mut self, child: &mut Child, signal: i32) -> bool {
+        let group = child.id() as libc::pid_t;
+        match signal {
+            libc::SIGTTIN | libc::SIGTTOU if !self.lent => {
+                if !self.give(group, true) {
+                    // Supercov is itself in the background: the command
+                    // waits for the terminal as Supercov would.
+                    return false;
+                }
+                self.lent = true;
+            }
+            // Ctrl-Z, with the terminal lent: it stopped the command and
+            // not Supercov, and the shell is waiting on Supercov. Stop too,
+            // and lend the terminal again when the shell continues us.
+            libc::SIGTSTP if self.lent => {
+                self.take_back();
+                // SAFETY: stops this process until it is continued.
+                unsafe { libc::raise(libc::SIGSTOP) };
+                self.lent = self.give(group, true);
+            }
+            _ => return false,
+        }
+        signal_process_group(child, libc::SIGCONT);
+        true
+    }
+
+    fn take_back(&mut self) {
+        if std::mem::take(&mut self.lent) {
+            // SAFETY: reads this process's own group.
+            let ours = unsafe { libc::getpgrp() };
+            self.give(ours, false);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Keyboard {
+    fn drop(&mut self) {
+        self.take_back();
+    }
+}
+
 #[cfg(unix)]
 fn signal_process_group(child: &mut Child, signal: i32) {
     let pid = child.id() as i32;
@@ -1398,6 +1511,7 @@ impl ProcessSupervisor {
         let mut timed_out = false;
         let mut interrupted_signal = None;
         let mut escalated = false;
+        let mut keyboard = Keyboard::default();
 
         loop {
             let status = match child.try_wait() {
@@ -1410,12 +1524,28 @@ impl ProcessSupervisor {
             };
             if let Some(status) = status {
                 let (status, signal) = exit_parts(status);
+                // With the terminal lent, Ctrl-C went to the command alone.
+                // A command it ended is a run that was interrupted, as it
+                // is when Supercov is the one told.
+                if keyboard.lent
+                    && interrupted_signal.is_none()
+                    && !timed_out
+                    && (signal == Some(libc::SIGINT) || status == Some(128 + libc::SIGINT))
+                {
+                    interrupted_signal = Some(ForwardedSignal::Sigint);
+                }
+                keyboard.take_back();
                 return Ok(SupervisedResult {
                     status,
                     signal,
                     timed_out,
                     interrupted_signal,
                 });
+            }
+            if termination.is_none()
+                && let Some(signal) = Keyboard::stopped(child)
+            {
+                keyboard.command_stopped(child, signal);
             }
             let now = Instant::now();
             if termination.is_none()

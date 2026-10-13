@@ -485,3 +485,172 @@ pub fn through(base: &str) -> [(&str, &str); 3] {
         ("TYPESAFE_API_KEY", "sk-gateway"),
     ]
 }
+
+/// Supercov on a terminal of its own, started as a shell starts a command:
+/// what a test types reaches whichever process the terminal belongs to.
+#[cfg(unix)]
+pub struct OnTerminal {
+    child: std::process::Child,
+    ours: fs::File,
+    seen: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl OnTerminal {
+    pub fn start(project: &Project, args: &[&str]) -> Self {
+        use std::os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::process::CommandExt,
+        };
+        let (mut ours, mut theirs) = (-1, -1);
+        // SAFETY: the two descriptors are owned by nothing else.
+        let (ours, theirs) = unsafe {
+            assert_eq!(
+                libc::openpty(
+                    &mut ours,
+                    &mut theirs,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut::<libc::termios>(),
+                    std::ptr::null_mut::<libc::winsize>(),
+                ),
+                0
+            );
+            (fs::File::from_raw_fd(ours), fs::File::from_raw_fd(theirs))
+        };
+        let mut command = Command::new(env!("CARGO_BIN_EXE_supercov"));
+        command
+            .args(args)
+            .current_dir(&project.root)
+            .stdin(theirs.try_clone().unwrap())
+            .stdout(theirs.try_clone().unwrap())
+            .stderr(theirs);
+        for name in [
+            "SUPERCOV_TEST_KIND",
+            "SUPERCOV_SOURCE_ROOTS",
+            "SUPERCOV_PACKAGE_ROOT",
+            "SUPERCOV_LAUNCHER",
+        ] {
+            command.env_remove(name);
+        }
+        // SAFETY: both calls are safe between fork and exec. The terminal
+        // becomes the new session's, and its keys go to Supercov's group.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        drop(command);
+        // SAFETY: a flag on a descriptor this test owns.
+        unsafe {
+            let flags = libc::fcntl(ours.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(ours.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        Self {
+            child,
+            ours,
+            seen: Vec::new(),
+        }
+    }
+
+    fn read_some(&mut self) -> bool {
+        let mut buffer = [0_u8; 4096];
+        match self.ours.read(&mut buffer) {
+            Ok(0) => false,
+            Ok(read) => {
+                self.seen.extend_from_slice(&buffer[..read]);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(std::time::Duration::from_millis(10));
+                true
+            }
+            // Every process that held the other end has gone.
+            Err(_) => false,
+        }
+    }
+
+    pub fn seen(&self) -> String {
+        String::from_utf8_lossy(&self.seen).into_owned()
+    }
+
+    /// Waits until the terminal has shown `text`.
+    pub fn wait_for(&mut self, text: &str) {
+        let started = std::time::Instant::now();
+        while !self.seen().contains(text) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60) && self.read_some(),
+                "the terminal never showed {text:?}:\n{}",
+                self.seen()
+            );
+        }
+    }
+
+    pub fn press(&mut self, keys: &str) {
+        self.ours.write_all(keys.as_bytes()).unwrap();
+    }
+
+    /// Waits until Supercov itself is stopped, as a shell would see it.
+    pub fn wait_until_stopped(&mut self) {
+        let started = std::time::Instant::now();
+        loop {
+            // SAFETY: `info` is plain data the call fills in; asking for
+            // stops alone leaves the exit for `finish`.
+            let stopped = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    self.child.id() as libc::id_t,
+                    &mut info,
+                    libc::WSTOPPED | libc::WNOHANG,
+                ) == 0
+                    && info.si_code == libc::CLD_STOPPED
+            };
+            if stopped {
+                return;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "Supercov never stopped:\n{}",
+                self.seen()
+            );
+            self.read_some();
+        }
+    }
+
+    /// Continues Supercov, as `fg` does.
+    pub fn resume(&mut self) {
+        // SAFETY: a signal to the process this test started.
+        unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGCONT) };
+    }
+
+    /// The exit status and everything the terminal showed.
+    pub fn finish(mut self) -> (i32, String) {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                while self.read_some() && started.elapsed() < std::time::Duration::from_secs(90) {
+                    if self.seen.len() > 4 << 20 {
+                        break;
+                    }
+                    // The last of what was written, then the end of the terminal.
+                    let before = self.seen.len();
+                    thread::sleep(std::time::Duration::from_millis(30));
+                    if !self.read_some() || self.seen.len() == before {
+                        break;
+                    }
+                }
+                return (status.code().unwrap_or(-1), self.seen());
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(90),
+                "Supercov never ended:\n{}",
+                self.seen()
+            );
+            self.read_some();
+        }
+    }
+}

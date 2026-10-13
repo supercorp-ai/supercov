@@ -120,6 +120,13 @@ operation fails clearly instead of racing the first.
 After interruption or host restart, the next command recovers unpublished
 staging state. Completed runs remain immutable.
 
+Ctrl-C ends the test command and the run: nothing is recorded, and the exit
+status is 130. A test command that reads the keyboard (a debugger at a
+breakpoint, a watch mode, a question before an install) is given the terminal
+when it first reads, on macOS and Linux. From then on Ctrl-C and Ctrl-Z go to
+it, as they do without Supercov, and a command that Ctrl-C ended is still a
+run that was interrupted.
+
 ## Clean up local data
 
 Preview cleanup before removing anything:

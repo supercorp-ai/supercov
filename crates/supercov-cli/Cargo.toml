@@ -79,3 +79,7 @@ ureq = { version = "3.4", default-features = false, features = ["rustls", "json"
 
 [target.'cfg(windows)'.dependencies]
 ureq = { version = "3.4", default-features = false, features = ["native-tls", "json"] }
+
+# The tests that run Supercov on a terminal make one.
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

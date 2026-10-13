@@ -451,6 +451,86 @@ fn patch_reads_a_project_kept_below_the_top_of_its_repository() {
     );
 }
 
+/// A script that answers each line typed to it and ends on the second.
+#[cfg(unix)]
+const ASKS: &str = "\
+import { shipping } from './src/cart.js';
+let lines = 0;
+process.stdin.on('data', (typed) => {
+  lines += 1;
+  console.log(`line ${lines}: ${String(typed).trim()} (${shipping(60, false)})`);
+  if (lines === 2) process.exit(0);
+});
+console.log('asking');
+";
+
+#[cfg(unix)]
+#[test]
+fn a_command_on_a_terminal_reads_what_is_typed() {
+    // A debugger at a breakpoint, a watch mode, a question before an
+    // install: the command never got the keys, and stood stopped.
+    let project = Project::cart("keyboard");
+    project.write("ask.mjs", ASKS);
+    project.commit("asks");
+    let mut terminal = common::OnTerminal::start(&project, &["--", "node", "ask.mjs"]);
+    terminal.wait_for("asking");
+    terminal.press("first\n");
+    terminal.wait_for("line 1: first (0)");
+    terminal.press("second\n");
+    terminal.wait_for("line 2: second (0)");
+    let (code, seen) = terminal.finish();
+    assert_eq!(code, 0, "{seen}");
+    assert!(seen.contains("[coverage] evidence:"), "{seen}");
+    // The run is recorded as any other.
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(summary.contains("command: node ask.mjs"), "{summary}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
+    // With the terminal lent, Ctrl-C reaches the command and not Supercov.
+    // The run is still one that was interrupted: its status, and no record.
+    let project = Project::cart("keyboard-interrupt");
+    project.write("ask.mjs", ASKS);
+    project.commit("asks");
+    let mut terminal = common::OnTerminal::start(&project, &["--", "node", "ask.mjs"]);
+    terminal.wait_for("asking");
+    terminal.press("first\n");
+    terminal.wait_for("line 1: first (0)");
+    terminal.press("\u{3}");
+    let (code, seen) = terminal.finish();
+    assert_eq!(code, 130, "{seen}");
+    assert!(!seen.contains("[coverage] evidence:"), "{seen}");
+    let runs = project.supercov(&["runs", "--json"]).json();
+    assert_eq!(
+        runs["data"]["runs"].as_array().map(Vec::len),
+        Some(0),
+        "{runs}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_z_at_a_command_that_reads_the_keyboard_stops_supercov_too() {
+    // The shell waits on Supercov. Were the command alone stopped, the
+    // terminal would belong to nothing that reads it.
+    let project = Project::cart("keyboard-stop");
+    project.write("ask.mjs", ASKS);
+    project.commit("asks");
+    let mut terminal = common::OnTerminal::start(&project, &["--", "node", "ask.mjs"]);
+    terminal.wait_for("asking");
+    terminal.press("first\n");
+    terminal.wait_for("line 1: first (0)");
+    terminal.press("\u{1a}");
+    terminal.wait_until_stopped();
+    terminal.resume();
+    terminal.press("second\n");
+    terminal.wait_for("line 2: second (0)");
+    let (code, seen) = terminal.finish();
+    assert_eq!(code, 0, "{seen}");
+}
+
 #[test]
 fn reports_carry_the_same_view_in_every_format() {
     let project = Project::cart("reports");

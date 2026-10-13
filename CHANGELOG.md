@@ -10,6 +10,7 @@
 
 - `runs patch` in a project kept below the top of its repository counts a new file not yet added to git as changed, and `--annotate github` names each file from the top, where a workflow looks for it. The file was left out and the marks were attached to no file.
 - `return undefined as T` is no longer read as a statement no test asserts. It was asked as a return made to return undefined, which no test can catch.
+- A test command reads the keyboard on a terminal (macOS and Linux). A debugger at a breakpoint, a watch mode or `npx` asking to install never got what was typed: the command runs in a process group of its own, and its first read of the terminal stopped it. It is given the terminal when it first reads. Ctrl-C then reaches the command and still ends the run as interrupted; Ctrl-Z stops both.
 
 ## 4.4.0
 
