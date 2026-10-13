@@ -220,7 +220,10 @@ pub fn escape_message(value: &str) -> String {
 }
 
 /// Render GitHub Actions annotations for the uncovered ranges, capped.
-pub fn annotations(view: &PatchView, cap: usize) -> Vec<String> {
+///
+/// `prefix` is where the run stood below the top of the repository (`web/`, or
+/// nothing): a workflow finds a file by its name from the top.
+pub fn annotations(view: &PatchView, cap: usize, prefix: &str) -> Vec<String> {
     let mut out = Vec::new();
     for file in &view.files {
         for (start, end) in ranges(&file.uncovered) {
@@ -234,7 +237,7 @@ pub fn annotations(view: &PatchView, cap: usize) -> Vec<String> {
             };
             out.push(format!(
                 "::warning file={},line={},endLine={}::{}",
-                escape_property(&file.file),
+                escape_property(&format!("{prefix}{}", file.file)),
                 start,
                 end,
                 escape_message(&format!(
@@ -380,12 +383,12 @@ mod tests {
         let changed = ChangedLines::from([("a,b:c.ts".into(), BTreeSet::from([1, 2, 3, 4, 9]))]);
         let patch = build(&run, &changed);
         assert_eq!(ranges(&patch.files[0].uncovered), [(2, 4), (9, 9)]);
-        let rendered = annotations(&patch, 10);
+        let rendered = annotations(&patch, 10, "");
         assert_eq!(rendered.len(), 2);
         assert!(rendered[0].contains("file=a%2Cb%3Ac.ts"), "{}", rendered[0]);
         assert!(rendered[0].contains("line=2,endLine=4"), "{}", rendered[0]);
         assert!(!rendered[0].contains("\n"));
-        assert_eq!(annotations(&patch, 1).len(), 1, "the cap is honoured");
+        assert_eq!(annotations(&patch, 1, "").len(), 1, "the cap is honoured");
         assert_eq!(escape_message("a\nb%c"), "a%0Ab%25c");
     }
 }

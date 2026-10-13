@@ -630,6 +630,25 @@ fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Where `root` is below the top of its repository, with a trailing slash: `web/`.
+///
+/// Git speaks in repository-relative paths; the run speaks in paths relative to
+/// wherever Supercov ran. Translate rather than matching by basename, which
+/// would attribute one `index.ts` to another.
+fn repository_prefix(root: &Path) -> Result<Option<String>, String> {
+    let top = git_output(root, &["rev-parse", "--show-toplevel"])?
+        .trim()
+        .to_owned();
+    let top = fs::canonicalize(&top).unwrap_or_else(|_| PathBuf::from(&top));
+    let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
+    Ok(here
+        .strip_prefix(&top)
+        .ok()
+        .map(|rest| rest.to_string_lossy().replace('\\', "/"))
+        .filter(|rest| !rest.is_empty())
+        .map(|rest| format!("{rest}/")))
+}
+
 /// Changed lines between the merge base with `base` and the working tree.
 ///
 /// The merge base is the point the branch diverged, not the previous commit.
@@ -640,9 +659,6 @@ fn changed_lines_against(
     base: &str,
     measured: &supercov_engine::run_view::RunView,
 ) -> Result<supercov_engine::patch_view::ChangedLines, String> {
-    let top = git_output(root, &["rev-parse", "--show-toplevel"])?
-        .trim()
-        .to_owned();
     let merge_base = git_output(root, &["merge-base", base, "HEAD"])
         .map_err(|error| format!(
             "{error}\nCould not find where this branch left {base}. A shallow checkout has no merge base: fetch with enough history (actions/checkout uses fetch-depth: 0), and make sure {base} exists locally."
@@ -660,17 +676,7 @@ fn changed_lines_against(
             "--",
         ],
     )?;
-    // Git speaks in repository-relative paths; the run speaks in paths
-    // relative to wherever Supercov ran. Translate rather than matching by
-    // basename, which would attribute one `index.ts` to another.
-    let top = fs::canonicalize(&top).unwrap_or_else(|_| PathBuf::from(&top));
-    let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
-    let prefix = here
-        .strip_prefix(&top)
-        .ok()
-        .map(|rest| rest.to_string_lossy().replace('\\', "/"))
-        .filter(|rest| !rest.is_empty())
-        .map(|rest| format!("{rest}/"));
+    let prefix = repository_prefix(root)?;
     let relocate = |path: String| -> Option<String> {
         match prefix.as_ref() {
             Some(prefix) => path.strip_prefix(prefix).map(str::to_owned),
@@ -684,7 +690,14 @@ fn changed_lines_against(
     // An untracked file is entirely new, so every line the adapter measured in
     // it is a changed line. Reading the adapter's own set keeps this consistent
     // with the rest of the denominator.
-    for path in git_output(root, &["ls-files", "--others", "--exclude-standard"])?.lines() {
+    // `--full-name`: from a directory below the top, git lists these from where
+    // it stands, and the diff above from the top.
+    for path in git_output(
+        root,
+        &["ls-files", "--others", "--exclude-standard", "--full-name"],
+    )?
+    .lines()
+    {
         let Some(path) = relocate(path.trim().to_owned()) else {
             continue;
         };
@@ -815,7 +828,11 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
             print!("{}", render_patch(&patch, &base, floor, passed));
         }
         if annotate {
-            for annotation in supercov_engine::patch_view::annotations(&patch, max_annotations) {
+            // A workflow reads a file's name from the top of the repository.
+            let prefix = repository_prefix(&root)?.unwrap_or_default();
+            for annotation in
+                supercov_engine::patch_view::annotations(&patch, max_annotations, &prefix)
+            {
                 println!("{annotation}");
             }
         }

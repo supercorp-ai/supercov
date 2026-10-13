@@ -99,6 +99,26 @@ impl Project {
         project
     }
 
+    /// The cart project in a directory of a repository, committed: one
+    /// package of several. The repository comes first; it lasts as long as
+    /// the caller holds it.
+    pub fn cart_below(label: &str, directory: &str) -> (Self, Self) {
+        let repository = Self::empty(label);
+        let project = Self {
+            root: repository.root.join(directory),
+        };
+        project.write(
+            "package.json",
+            r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" } }"#,
+        );
+        project.write("src/cart.js", CART);
+        project.write("test/cart.test.js", CART_TESTS);
+        repository.write(".gitignore", ".supercov\n");
+        repository.git(&["init", "-q"]);
+        repository.commit("cart");
+        (repository, project)
+    }
+
     pub fn write(&self, file: &str, contents: &str) {
         let path = self.root.join(file);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
