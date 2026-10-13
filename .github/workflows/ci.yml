@@ -11,6 +11,12 @@ on:
 permissions:
   contents: read
 
+# A push to a pull request replaces the run of the commit before it. A run started by hand is left
+# to finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     runs-on: ubuntu-latest

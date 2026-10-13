@@ -14,6 +14,12 @@ permissions:
   contents: read
   pull-requests: write
 
+# A push to a pull request replaces the run of the commit before it. A run started by hand is left
+# to finish.
+concurrency:
+  group: coverage-comment-action-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   comment:
     strategy:
@@ -34,6 +40,8 @@ jobs:
           command: node --test
           working-directory: tests/action/fixture
           title: Coverage (${{ matrix.os }})
+          # One comment on the pull request is enough; the other runners write their summaries.
+          comment: ${{ matrix.os == 'ubuntu-latest' }}
       - name: The step reports what it measured
         shell: bash
         run: |
