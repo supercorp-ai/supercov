@@ -451,6 +451,25 @@ fn patch_reads_a_project_kept_below_the_top_of_its_repository() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn suites_started_together_from_one_command_are_one_run_with_their_kinds() {
+    // What to do where two suites run side by side: one command starts
+    // both, each says its own kind, and the run holds every test.
+    let project = Project::cart("together");
+    project.write(
+        "test/slow.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { describe } from \"../src/cart.js\";\n\ntest(\"describe lists names\", async () => {\n  await new Promise((done) => setTimeout(done, 200));\n  assert.equal(describe([{ name: \"a\" }]), \"a\");\n});\n",
+    );
+    project.commit("a slow suite");
+    let together = "SUPERCOV_TEST_KIND=unit node --test test/cart.test.js & unit=$!; SUPERCOV_TEST_KIND=integration node --test test/slow.test.js & integration=$!; wait $unit; first=$?; wait $integration && exit $first";
+    project.supercov(&["--", "sh", "-c", together]).succeeds();
+    let kinds = project.supercov(&["runs", "latest", "kinds"]).succeeds();
+    contains_all(&kinds, &["unit", "integration"]);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Total       4", "Passed      4"]);
+}
+
 #[test]
 fn reports_carry_the_same_view_in_every_format() {
     let project = Project::cart("reports");
@@ -2475,12 +2494,15 @@ fn a_lock_another_process_holds_is_named_and_one_left_behind_is_taken_over() {
     // This test process is alive, so its pid holds the lock.
     std::fs::write(&lock, owner(std::process::id())).unwrap();
     let held = project.supercov(&["--", "node", "--test"]);
-    assert_ne!(held.code(), 0);
-    assert!(
-        held.stderr()
-            .contains("coverage run run_other is already active in this project"),
-        "{}",
-        held.stderr()
+    // Not 1, which is what failing tests end with, and it says what to do.
+    assert_eq!(held.code(), 2, "{}", held.stderr());
+    contains_all(
+        &held.stderr(),
+        &[
+            "coverage run run_other is already active in this project",
+            "No test ran.",
+            "wait for that run to end, or start the suites from one command",
+        ],
     );
     // A lock still being written has no owner yet.
     std::fs::write(&lock, "{").unwrap();

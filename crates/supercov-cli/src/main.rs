@@ -1195,6 +1195,19 @@ fn process_exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
+/// The status of a run that never measured anything. A run refused because
+/// another is active is Supercov's not completing the request, which is 2:
+/// 1 from the second of two commands read as the tests failing.
+fn could_not_measure(error: &str) -> ExitCode {
+    if error.contains("is already active in this project")
+        || error.contains("is currently acquiring the project lock")
+    {
+        ExitCode::from(2)
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     let command_started = Instant::now();
     let command_ms = || command_started.elapsed().as_secs_f64() * 1000.0;
@@ -1310,7 +1323,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1376,7 +1389,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1415,7 +1428,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1456,7 +1469,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1497,7 +1510,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1542,7 +1555,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         }
         Err(error) => {
             eprintln!("[supercov] {error}");
-            ExitCode::from(1)
+            could_not_measure(&error.to_string())
         }
     }
 }

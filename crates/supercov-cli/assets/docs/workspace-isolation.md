@@ -115,7 +115,25 @@ partial output.
 ## Interrupted and overlapping commands
 
 One project can run one coverage or cleanup transaction at a time. A second
-operation fails clearly instead of racing the first.
+one ends with status 2 and says which run is active; no test of it has run.
+
+Each run rebuilds the project's one instrumented copy for its own command, so a
+second run at the same moment would replace the copy the first is running in.
+Suites that run side by side are measured by starting them from one command.
+They are then one run, each test keeps the kind its own process was given, and
+nothing has to be merged:
+
+```sh
+npx supercov -- sh -c '
+  SUPERCOV_TEST_KIND=integration npm run test:integration & integration=$!
+  SUPERCOV_TEST_KIND=e2e npm run test:e2e & e2e=$!
+  wait $integration; first=$?
+  wait $e2e && exit $first
+'
+```
+
+`wait` with no argument ends with 0 whatever the suites did, which would turn a
+failing suite green; waiting for each by its id keeps the status.
 
 After interruption or host restart, the next command recovers unpublished
 staging state. Completed runs remain immutable.

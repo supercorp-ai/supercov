@@ -6,6 +6,11 @@
 
 - A GitHub Action: `uses: supercorp-ai/supercov@v4` with `command: npm test` runs the tests and comments on the pull request which changed lines no test ran, with the run's line, branch and MC/DC coverage. One comment kept up to date, the lines marked in the diff, optional floors, the same report in the job summary. Every supported language; no account, token or server.
 
+**Changed**
+
+- `supercov report` of a large run takes seconds. It read the whole run again for every file with a gap: 10 min 25 s for a run of 2,000 tests over 300 files, now 19 s, and the report is the same byte for byte.
+- A second `supercov --` while one is active in the project ends with status 2, not 1, says that no test ran, and says what to do. Suites that run side by side are measured by starting them from one command, each with its own `SUPERCOV_TEST_KIND`; they are one run, with nothing to merge.
+
 **Fixed**
 
 - `runs patch` in a project kept below the top of its repository counts a new file not yet added to git as changed, and `--annotate github` names each file from the top, where a workflow looks for it. The file was left out and the marks were attached to no file.

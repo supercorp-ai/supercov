@@ -50,9 +50,12 @@ impl std::fmt::Display for LifecycleError {
                 )
             }
             Self::InvalidState(reason) => write!(formatter, "invalid run state: {reason}"),
+            // Read by someone whose second command just ended: say what
+            // can be done, since "already active" alone read as a failure of
+            // their tests.
             Self::ActiveRun { run_id, pid } => write!(
                 formatter,
-                "coverage run {run_id} is already active in this project (pid {pid})"
+                "coverage run {run_id} is already active in this project (pid {pid}). No test ran. A project measures one command at a time: wait for that run to end, or start the suites from one command so that they are one run (see `supercov docs workspace-isolation`)."
             ),
             Self::LockAcquiring => {
                 write!(
