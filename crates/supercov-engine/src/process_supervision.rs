@@ -218,12 +218,14 @@ impl Terminal {
             // user's terminal ends each line as it always did.
             settings.c_oflag &= !libc::OPOST;
             let (mut ours, mut theirs) = (-1, -1);
+            // Raw pointers: Linux declares the last two as read only, macOS
+            // does not.
             if libc::openpty(
                 &mut ours,
                 &mut theirs,
                 std::ptr::null_mut(),
-                &mut settings,
-                &mut size,
+                &raw mut settings,
+                &raw mut size,
             ) != 0
             {
                 return None;
