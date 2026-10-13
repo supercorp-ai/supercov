@@ -279,6 +279,62 @@ code nothing ran.
 adjacent misses into one range and capping the total (`--max-annotations`). It
 needs no token and posts no comment.
 
+## Comment on a pull request
+
+In GitHub Actions, one step runs the tests, says in a comment which changed
+lines no test ran, and marks them in the diff:
+
+```yaml
+on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: npm ci
+      - uses: supercorp-ai/supercov@v4
+        with:
+          command: npm test
+```
+
+`command` is the test command in any supported language: `pytest`,
+`cargo test`, `go test ./...`, `bundle exec rspec`, `mvn test`. The step takes
+the place of the one that ran the tests, and fails when they fail. It needs no
+account and no server: the comment is written with the workflow's own token,
+and everything else stays on the runner.
+
+The comment gives the coverage of the changed lines, the run's line, branch and
+MC/DC coverage, and each changed file with the lines no test ran, linked to the
+commit. A later push rewrites the same comment. The job summary holds the same
+report, which is what a pull request from a fork gets: its token cannot write a
+comment.
+
+| Input | Default | |
+| --- | --- | --- |
+| `command` | required | The test command. One command; put several in a script. |
+| `working-directory` | `.` | Where to run it. |
+| `min-changed-lines` | none | Fail below this percentage of changed lines covered. |
+| `min-lines`, `min-branches`, `min-mcdc` | none | Fail below this percentage for the whole run. |
+| `title` | `Coverage` | The comment's heading. Give each job its own when several comment on one pull request. |
+| `base` | the pull request's base | What the change is compared with. |
+| `comment`, `annotate` | `true` | Turn the comment or the marks in the diff off. |
+| `version` | the action's release | The Supercov release to run. |
+| `binary` | none | A `supercov` already on the runner, used instead of downloading one. |
+
+The default checkout fetches one commit; the step fetches the history between
+it and the base itself. It puts `supercov` on the `PATH` and sets the outputs
+`run-id`, `lines`, `branches` and `changed-lines`, so later steps can read the
+same run:
+
+```yaml
+      - run: supercov runs report --format html --output coverage/report
+```
+
 ## Export for other tools
 
 ```sh supercov-example

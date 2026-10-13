@@ -422,6 +422,36 @@ fn patch_judges_only_the_lines_a_change_touches() {
 }
 
 #[test]
+fn patch_reads_a_project_kept_below_the_top_of_its_repository() {
+    // Git names a file from the top (`web/src/cart.js`), the run from where
+    // it stood (`src/cart.js`), and a workflow marks a line by the first.
+    let (_repository, project) = Project::cart_below("patch-below", "web");
+    project.edit(
+        "src/cart.js",
+        "  return items.map((item) => item.name).join(\", \");",
+        "  const names = items.map((item) => item.name);\n  return names.join(\", \");",
+    );
+    project.write(
+        "src/tax.js",
+        "export function rate(country) {\n  return country === \"LT\" ? 0.21 : 0;\n}\n",
+    );
+    project.measure(&[]);
+    let patch = project
+        .supercov(&["runs", "patch", "--base", "HEAD", "--annotate", "github"])
+        .succeeds();
+    contains_all(
+        &patch,
+        &[
+            "0 of 4 changed executable line(s) covered",
+            "  src/cart.js: ",
+            "  src/tax.js: ",
+            "::warning file=web/src/cart.js,line=",
+            "::warning file=web/src/tax.js,line=",
+        ],
+    );
+}
+
+#[test]
 fn reports_carry_the_same_view_in_every_format() {
     let project = Project::cart("reports");
     project.measure(&[]);

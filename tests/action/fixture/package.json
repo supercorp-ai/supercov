@@ -1,0 +1,5 @@
+{
+  "name": "supercov-action-fixture",
+  "private": true,
+  "type": "module"
+}

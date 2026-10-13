@@ -585,12 +585,19 @@ fn statement_starts(file: &str, source: &str) -> BTreeMap<usize, Vec<(String, Op
 }
 
 /// `undefined` or `void 0`: returning undefined instead is the same code.
+/// What TypeScript wraps a value in to give it a type (`undefined as T`)
+/// leaves it the same value.
 fn is_undefined(expression: &Expression) -> bool {
     match expression {
         Expression::Identifier(identifier) => identifier.name == "undefined",
         Expression::UnaryExpression(unary) => {
             unary.operator == oxc_syntax::operator::UnaryOperator::Void
         }
+        Expression::TSAsExpression(cast) => is_undefined(&cast.expression),
+        Expression::TSSatisfiesExpression(cast) => is_undefined(&cast.expression),
+        Expression::TSTypeAssertion(cast) => is_undefined(&cast.expression),
+        Expression::TSNonNullExpression(cast) => is_undefined(&cast.expression),
+        Expression::ParenthesizedExpression(inner) => is_undefined(&inner.expression),
         _ => false,
     }
 }
@@ -2509,6 +2516,23 @@ mod tests {
             change_at(&starts, 8, "return void 0", js),
             Some(Change::Skip)
         );
+        // destr: `return undefined as T` was asked as "returns undefined", which no
+        // test can catch, and read as the one statement not asserted.
+        let typed = "function f<T>(a: number): T {\n  if (a === 1) return undefined as T\n  if (a === 2) return (undefined as unknown) as T\n  if (a === 3) return <T>undefined\n  return undefined!\n}\n";
+        let starts = statement_starts("x.ts", typed);
+        for (line, text) in [
+            (2, "return undefined as T"),
+            (3, "return (undefined as unknown) as T"),
+            (4, "return <T>undefined"),
+            (5, "return undefined!"),
+        ] {
+            assert_eq!(
+                change_at(&starts, line, text, js),
+                Some(Change::Skip),
+                "{text}"
+            );
+        }
+        let starts = statement_starts("x.ts", source);
         assert_eq!(
             change_at(&starts, 9, "let answered = false", js),
             Some(Change::Flip)

@@ -20,6 +20,12 @@ on:
 permissions:
   contents: read
 
+# A push to a pull request replaces the run of the commit before it. A run started by hand is left
+# to finish.
+concurrency:
+  group: compatibility-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   node:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',node,') }}
