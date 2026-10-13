@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- A GitHub Action: `uses: supercorp-ai/supercov@v4` with `command: npm test` runs the tests and comments on the pull request which changed lines no test ran, with the run's line, branch and MC/DC coverage. One comment kept up to date, the lines marked in the diff, optional floors, the same report in the job summary. Every supported language; no account, token or server.
+
+**Fixed**
+
+- `runs patch` in a project kept below the top of its repository counts a new file not yet added to git as changed, and `--annotate github` names each file from the top, where a workflow looks for it. The file was left out and the marks were attached to no file.
+
 ## 4.4.0
 
 **Added**

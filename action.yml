@@ -1,0 +1,58 @@
+name: Supercov coverage comment
+description: Run your tests and comment on the pull request which changed lines no test ran. Eight languages, no account, no token, no server.
+author: Supercorp
+branding:
+  icon: check-circle
+  color: green
+inputs:
+  command:
+    description: The test command to measure, such as `npm test`, `pytest` or `cargo test`. One command; put several in a script.
+    required: true
+  working-directory:
+    description: Where to run it, relative to the repository's root.
+    default: .
+  base:
+    description: The commit or branch the change is compared with. Defaults to the pull request's base; with none, only whole-run coverage is reported.
+    default: ''
+  comment:
+    description: Whether to write the comment on a pull request. The job summary is written either way.
+    default: 'true'
+  annotate:
+    description: Whether to mark changed lines no test ran in the pull request's diff.
+    default: 'true'
+  title:
+    description: The comment's heading. Give each job its own when several comment on one pull request.
+    default: Coverage
+  min-changed-lines:
+    description: Fail when less than this percentage of the changed lines is covered.
+    default: ''
+  min-lines:
+    description: Fail when line coverage of the whole run is below this percentage.
+    default: ''
+  min-branches:
+    description: Fail when branch coverage of the whole run is below this percentage.
+    default: ''
+  min-mcdc:
+    description: Fail when MC/DC of the whole run is below this percentage.
+    default: ''
+  version:
+    description: The Supercov release to run. Defaults to the one this action was published with.
+    default: ''
+  binary:
+    description: A `supercov` binary already on the runner, to use instead of downloading one.
+    default: ''
+  token:
+    description: The token the comment is written with. It needs `pull-requests: write`.
+    default: ${{ github.token }}
+outputs:
+  run-id:
+    description: The recorded run, for later `supercov runs <id>` queries in the same job.
+  lines:
+    description: Line coverage of the whole run, as a percentage.
+  branches:
+    description: Branch coverage of the whole run, as a percentage.
+  changed-lines:
+    description: Coverage of the changed lines, as a percentage. Empty when nothing executable changed.
+runs:
+  using: node24
+  main: action/main.mjs

@@ -344,6 +344,29 @@ npx supercov report
 
 Collections accept `--limit` and `--offset` and print a copyable next-page command. Machine-readable output is available with `--json` when an integration needs it.
 
+## Comment on pull requests
+
+In GitHub Actions, one step runs your tests and tells the pull request which
+changed lines no test ran:
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+
+steps:
+  - uses: actions/checkout@v6
+  - run: npm ci
+  - uses: supercorp-ai/supercov@v4
+    with:
+      command: npm test
+```
+
+It works with every supported language, keeps one comment up to date, marks the
+lines in the diff, and can fail the job below a floor (`min-changed-lines: 90`).
+No account, no upload token and no server: the report never leaves the runner.
+See [Comment on a pull request](docs/cli.md#comment-on-a-pull-request).
+
 ## Local, private, and zero-edit
 
 Everything Supercov writes lives under one hidden `.supercov/` directory: run evidence in `.supercov/runs/<run-id>/` and the isolated build cache in `.supercov/workspaces/`. It ignores itself in Git, so there is nothing to add to your `.gitignore`.

@@ -1,0 +1,44 @@
+name: Coverage comment action
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - action/**
+      - tests/action/**
+      - npm/native-targets.json
+      - .github/workflows/action.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      # One commit, as a workflow that has not thought about history has: the action fetches the rest.
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - id: coverage
+        uses: ./
+        with:
+          command: node --test
+          working-directory: tests/action/fixture
+          title: Coverage (${{ matrix.os }})
+      - name: The step reports what it measured
+        shell: bash
+        run: |
+          test -n "${{ steps.coverage.outputs.run-id }}"
+          test "${{ steps.coverage.outputs.lines }}" = "83.33"
+          test "${{ steps.coverage.outputs.branches }}" = "50.00"
+          supercov runs latest
+        working-directory: tests/action/fixture
