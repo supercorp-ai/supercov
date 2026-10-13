@@ -42,7 +42,7 @@ inputs:
     description: A `supercov` binary already on the runner, to use instead of downloading one.
     default: ''
   token:
-    description: The token the comment is written with. It needs `pull-requests: write`.
+    description: 'The token the comment is written with. It needs `pull-requests: write`.'
     default: ${{ github.token }}
 outputs:
   run-id:
