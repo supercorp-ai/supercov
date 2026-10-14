@@ -51,6 +51,18 @@ const summary = (root, id) => {
   return { tests: data.tests, lines: `${data.coverage.lines.covered}/${data.coverage.lines.total}`, stale: data.stale };
 };
 
+// A Ruby that Supercov measures: the one named, Homebrew's where the system's
+// is older, or the one on PATH. The same choice the Ruby gate makes.
+function ruby() {
+  const candidates = process.env.SUPERCOV_RUBY ? [process.env.SUPERCOV_RUBY] : ['/opt/homebrew/opt/ruby/bin/ruby', 'ruby'];
+  for (const candidate of candidates) {
+    const asked = spawnSync(candidate, ['-e', 'print RUBY_VERSION'], { encoding: 'utf8' });
+    const [major, minor] = (asked.stdout ?? '').split('.').map(Number);
+    if (asked.status === 0 && (major > 3 || (major === 3 && minor >= 3))) return candidate;
+  }
+  throw new Error('side-by-side needs Ruby 3.3 or newer on PATH (or SUPERCOV_RUBY)');
+}
+
 const PROJECTS = {
   node: {
     command: ['node', '--test'],
@@ -68,7 +80,9 @@ const PROJECTS = {
     },
   },
   ruby: {
-    command: ['ruby', '-Ilib', 'test/price_test.rb'],
+    get command() {
+      return [ruby(), '-Ilib', 'test/price_test.rb'];
+    },
     files: {
       'lib/price.rb': 'module Price\n  def self.half(price)\n    return 0 if price.negative?\n\n    price / 2\n  end\nend\n',
       'test/price_test.rb': "require 'minitest/autorun'\nrequire 'price'\n\nclass PriceTest < Minitest::Test\n  def test_half\n    sleep 0.5\n    assert_equal 5, Price.half(10)\n  end\nend\n",
