@@ -72,6 +72,14 @@ Compare, combine, and maintain:
   supercov runs clean [--keep N]       remove stored runs (all by default)
   supercov quality clean [--keep N]    remove saved assessments
 
+Settings, in the environment of the measured command:
+  SUPERCOV_SOURCE_ROOTS=src,app        measure only these directories or files
+  SUPERCOV_TEST_KIND=e2e               the test level of the command's tests
+  SUPERCOV_RUN_ID_FILE=<file>          write the recorded run's id to a file
+  SUPERCOV_SOURCE_TOOLS=<names>        run these linters on your files, not the copy
+  SUPERCOV_KEEP_WORKSPACE=1            keep the instrumented copy after the run
+  supercov docs cli                    what each does
+
 Guides:
   supercov docs                        list bundled guides
   supercov docs <topic>                print Markdown to stdout
