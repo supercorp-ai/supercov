@@ -66,8 +66,9 @@ pub struct DirectJavascriptRunResult {
     pub assertion_calls: usize,
     pub recovered_runs: Vec<String>,
     pub metadata: RunMetadata,
-    /// The runs of servers the suite drove, published beside this one.
-    pub server_runs: Vec<PathBuf>,
+    /// The runs of servers the suite drove, published beside this one, by
+    /// language.
+    pub server_runs: Vec<(String, PathBuf)>,
 }
 
 #[derive(Debug)]
@@ -557,13 +558,17 @@ pub fn run_direct_javascript(
         &request.command,
     )
     .map_err(|error| error.to_string())?;
-    // Browser tests may drive a Python server, whose source the probes
-    // measure in the copy the suite runs in. Without it, a project with no
-    // JavaScript source has nothing to measure.
-    let serves_python = project.playwright_config.is_some()
+    // Browser tests may drive a Python or Ruby server, whose source the
+    // probes measure in the copy the suite runs in. Without one, a project
+    // with no JavaScript source has nothing to measure.
+    let browser_suite = project.playwright_config.is_some();
+    let serves_python = browser_suite
         && crate::python_project::discover_python_files(&root)
             .is_ok_and(|files| !files.sources.is_empty());
-    if project.source_files.is_empty() && !serves_python {
+    let serves_ruby = browser_suite
+        && crate::ruby_project::discover_ruby_files(&root)
+            .is_ok_and(|files| !files.sources.is_empty());
+    if project.source_files.is_empty() && !serves_python && !serves_ruby {
         return Err(
             crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
                 .to_string()
@@ -660,23 +665,32 @@ pub fn run_direct_javascript(
         writeln!(diagnostics, "[supercov] {detail}").map_err(|error| error.to_string())?;
     }
 
-    let python_server = if serves_python {
-        crate::python_run::PythonServer::prepare(&root, &workspace, &run_id, &request.command)?
-    } else {
-        None
-    };
-    if project.source_files.is_empty() && python_server.is_none() {
+    let mut servers = Vec::new();
+    if serves_python
+        && let Some(server) =
+            crate::python_run::PythonServer::prepare(&root, &workspace, &run_id, &request.command)?
+    {
+        servers.push(Server::Python(server));
+    }
+    if serves_ruby
+        && let Some(server) =
+            crate::ruby_run::RubyServer::prepare(&root, &workspace, &run_id, &request.command)?
+    {
+        servers.push(Server::Ruby(server));
+    }
+    if project.source_files.is_empty() && servers.is_empty() {
         return Err(
             crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
                 .to_string()
                 .into(),
         );
     }
-    if let Some(server) = &python_server {
+    for server in &servers {
         writeln!(
             diagnostics,
-            "[supercov] measuring {} Python source file(s) in any Python server the tests start",
-            server.source_files()
+            "[supercov] measuring {} {language} source file(s) in any {language} server the tests start",
+            server.source_files(),
+            language = server.language(),
         )
         .map_err(|error| error.to_string())?;
     }
@@ -783,7 +797,7 @@ pub fn run_direct_javascript(
             original.display().to_string(),
         );
     }
-    if let Some(server) = &python_server {
+    for server in &servers {
         overrides.extend(server.environment());
     }
     // A tool that judges source as text, started without a package manager
@@ -1017,13 +1031,14 @@ pub fn run_direct_javascript(
 
     let publication_started = Instant::now();
     // Read before the evidence is archived and removed.
-    let served = python_server
-        .as_ref()
-        .map(|_| served_tests(&evidence_directory))
-        .unwrap_or_default();
+    let served = if servers.is_empty() {
+        Vec::new()
+    } else {
+        crate::served_tests::read(&evidence_directory)
+    };
     if project.source_files.is_empty() {
-        // Only the server's Python was measured: its run is the run.
-        let server = python_server.expect("a project without JavaScript source serves Python");
+        // Only the servers were measured: the first published is the run,
+        // any other beside it.
         let metadata = RunMetadata {
             id: run_id.clone(),
             started_at: started_at.clone(),
@@ -1049,19 +1064,58 @@ pub fn run_direct_javascript(
             merged_across: None,
             recorded_by: None,
         };
-        let published = server.publish(&root, &run_id, metadata, &served, diagnostics);
+        let mut published = None;
+        let mut server_runs = Vec::new();
+        let mut failure = None;
+        for server in servers {
+            let id = if published.is_none() {
+                run_id.clone()
+            } else {
+                companion_run_id(&run_id, server_runs.len() + 1)
+            };
+            let language = server.language();
+            match server.publish(
+                &root,
+                &run_id,
+                RunMetadata {
+                    id: id.clone(),
+                    ..metadata.clone()
+                },
+                &served,
+                diagnostics,
+            ) {
+                Ok(Some(run)) if published.is_none() => published = Some(run),
+                Ok(Some((directory, _))) => {
+                    finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
+                    server_runs.push((language.to_owned(), directory));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] the {language} server's run could not be published: {error}"
+                    );
+                    failure.get_or_insert(error);
+                }
+            }
+        }
         remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
             .map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(&root, &server_evidence_root)
             .map_err(|error| error.to_string())?;
-        let Some((run_directory, metadata)) = published? else {
+        if published.is_none()
+            && let Some(error) = failure
+        {
+            return Err(error.into());
+        }
+        let Some((run_directory, metadata)) = published else {
             let message = if execution.exit_code != 0 && served.is_empty() {
                 format!(
                     "the test command exited {} before any test reported an outcome; its own output above says why, and no run was published",
                     execution.exit_code
                 )
             } else {
-                "the project has no JavaScript source, and no test's request reached measured Python code: there was nothing to measure, and no run was published".to_owned()
+                "the project has no JavaScript source, and no test's request reached measured server code: there was nothing to measure, and no run was published".to_owned()
             };
             let _ = update_run_state(
                 &root,
@@ -1095,7 +1149,7 @@ pub fn run_direct_javascript(
             assertion_calls: frontend.assertion_calls,
             recovered_runs,
             metadata,
-            server_runs: Vec::new(),
+            server_runs,
         });
     }
     let archive_path = root
@@ -1169,11 +1223,12 @@ pub fn run_direct_javascript(
     } else {
         RunStateStatus::Failed
     };
-    // The server's run beside the browser run, under an id of its own that
+    // Each server's run beside the browser run, under an id of its own that
     // sorts after it: `runs latest` stays the browser run.
     let mut server_runs = Vec::new();
-    if let Some(server) = python_server {
-        let id = companion_run_id(&run_id);
+    for server in servers {
+        let id = companion_run_id(&run_id, server_runs.len() + 1);
+        let language = server.language();
         let server_metadata = RunMetadata {
             id: id.clone(),
             ..metadata.clone()
@@ -1181,14 +1236,14 @@ pub fn run_direct_javascript(
         match server.publish(&root, &run_id, server_metadata, &served, diagnostics) {
             Ok(Some((directory, _))) => {
                 finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
-                server_runs.push(directory);
+                server_runs.push((language.to_owned(), directory));
             }
             Ok(None) => {}
             // The browser run stands on its own.
             Err(error) => {
                 let _ = writeln!(
                     diagnostics,
-                    "[supercov] the Python server's run could not be published: {error}"
+                    "[supercov] the {language} server's run could not be published: {error}"
                 );
             }
         }
@@ -1209,97 +1264,65 @@ pub fn run_direct_javascript(
     })
 }
 
-/// The id of a run published beside `run_id` from the same command: the
-/// public id just below it when `run_id` is one, since runs that started
+/// The id of the `nth` run published beside `run_id` from the same command:
+/// a public id `nth` below it when `run_id` is one, since runs that started
 /// together are listed by id, highest first.
-fn companion_run_id(run_id: &str) -> String {
+fn companion_run_id(run_id: &str, nth: usize) -> String {
     match run_id
         .strip_prefix("run_")
         .filter(|hex| hex.len() == 16)
         .and_then(|hex| u64::from_str_radix(hex, 16).ok())
     {
-        Some(number) => format!("run_{:016x}", number.wrapping_sub(1)),
-        None => format!("{run_id}-python"),
+        Some(number) => format!("run_{:016x}", number.wrapping_sub(nth as u64)),
+        None => format!("{run_id}-server-{nth}"),
     }
 }
 
-/// Each browser test attempt the suite reported, for a Python server's run:
-/// read from the Playwright fixture's evidence lines.
-fn served_tests(evidence_directory: &Path) -> Vec<crate::python_evidence::ServedTest> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Scope {
-        worker_id: String,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Attempt {
-        test_id: String,
-        scope: Scope,
-        test: String,
-        test_file: String,
-        title: String,
-        retry: usize,
-        status: String,
-        expected_status: Option<String>,
-        provenance: crate::coverage_report::TestProvenance,
-        #[serde(default)]
-        phases: Vec<Phase>,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Phase {
-        started_at_ms: i64,
-        ended_at_ms: Option<i64>,
-    }
-    let mut served = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(evidence_directory) else {
-        return Vec::new();
-    };
-    let mut files = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name.starts_with("playwright-worker-") && name.ends_with(".mcdc.jsonl")
-                })
-        })
-        .collect::<Vec<_>>();
-    files.sort();
-    for file in files {
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        for attempt in text
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Attempt>(line).ok())
-        {
-            let worker = format!("playwright:{}", attempt.scope.worker_id);
-            let start = attempt.phases.iter().map(|phase| phase.started_at_ms).min();
-            let end = attempt
-                .phases
-                .iter()
-                .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
-                .max();
-            served
-                .entry((worker.clone(), attempt.test_id.clone(), attempt.retry))
-                .or_insert(crate::python_evidence::ServedTest {
-                    worker,
-                    test_id: attempt.test_id,
-                    retry: attempt.retry,
-                    name: attempt.test,
-                    title: attempt.title,
-                    file: attempt.test_file,
-                    status: attempt.status,
-                    expected_status: attempt.expected_status.unwrap_or_else(|| "passed".into()),
-                    provenance: attempt.provenance,
-                    window: start.zip(end),
-                });
+/// A server in another language a browser suite may start.
+enum Server {
+    Python(crate::python_run::PythonServer),
+    Ruby(crate::ruby_run::RubyServer),
+}
+
+impl Server {
+    fn language(&self) -> &'static str {
+        match self {
+            Self::Python(_) => "Python",
+            Self::Ruby(_) => "Ruby",
         }
     }
-    served.into_values().collect()
+
+    fn source_files(&self) -> usize {
+        match self {
+            Self::Python(server) => server.source_files(),
+            Self::Ruby(server) => server.source_files(),
+        }
+    }
+
+    fn environment(&self) -> BTreeMap<String, String> {
+        match self {
+            Self::Python(server) => server.environment(),
+            Self::Ruby(server) => server.environment(),
+        }
+    }
+
+    fn publish(
+        self,
+        root: &Path,
+        evidence_run_id: &str,
+        metadata: RunMetadata,
+        served: &[crate::served_tests::ServedTest],
+        diagnostics: &mut dyn std::io::Write,
+    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+        match self {
+            Self::Python(server) => {
+                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+            }
+            Self::Ruby(server) => {
+                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1315,13 +1338,14 @@ mod environment_tests {
             "run_ffffffffffffffff",
             "run_8000000000000000",
         ] {
-            let companion = companion_run_id(run);
+            let companion = companion_run_id(run, 1);
             assert_eq!(companion.len(), 20);
             assert!(companion.starts_with("run_"));
             assert!(companion.as_str() < run, "{companion} >= {run}");
-            assert_eq!(companion, companion_run_id(run));
+            assert_eq!(companion, companion_run_id(run, 1));
+            assert!(companion_run_id(run, 2) < companion);
         }
-        assert_eq!(companion_run_id("rust-1"), "rust-1-python");
+        assert_eq!(companion_run_id("rust-1", 1), "rust-1-server-1");
     }
 
     #[test]

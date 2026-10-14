@@ -152,6 +152,7 @@ try {
     'app/payments.py': 'def settle(event):\n    if event.get("type") == "charge.succeeded":\n        return "paid"\n    return "ignored"\n',
     'app/server.py': `import json
 import sys
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -174,6 +175,9 @@ class Handler(BaseHTTPRequestHandler):
             urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:${stripe}/charge", method="POST")).read()
             return self.reply("started")
         if self.path == "/state":
+            # Slow, so a poll of the test's runs on another thread when the
+            # webhook comes, and leaves while it runs.
+            time.sleep(0.2)
             return self.reply(state["order"])
         self.reply("ready")
 

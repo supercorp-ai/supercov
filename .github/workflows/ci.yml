@@ -52,6 +52,11 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
+      # The Ruby server gate measures a Puma app; Supercov measures Ruby 3.3
+      # and newer, and the runner's own Ruby is older.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
       - run: npm ci
       # Three of the scripts drive a real browser through Playwright.
       - run: npx playwright install --with-deps

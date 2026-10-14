@@ -5,13 +5,14 @@
 **Added**
 
 - Browser tests of a Python server measure the server. When a Playwright suite starts a Python program -- through `webServer`, a fixture or a test -- `npx supercov -- npx playwright test` measures it, and each request runs as the test that sent it: the standard library's HTTP server, Flask, Django and FastAPI, under their own servers, gunicorn or uvicorn. A request that names no test, such as a webhook, is credited by time as it is for a Node server. A project with no JavaScript source was refused ("No application source files were discovered"); one with a Node server too gets the server's Python run beside its browser run, and `merge` merges each.
+- Browser tests of a Ruby server measure it the same way: a Rack app -- Rails, Sinatra or any other -- under Puma, WEBrick or another server, each request run as the test that sent it, a webhook credited by time, and the server's Ruby run published as the run or beside the browser run.
 - `merge` reads what Ruby tests require (`require_relative`, a literal `require` found in the project, `autoload`, and what `.rspec` requires), so a changed Ruby helper leaves out only the runs whose tests load it. Every Ruby helper counted as loaded. A glob of support files or a change to `$LOAD_PATH` still counts every one.
 - A Python helper that only gained functions leaves every run in, as a JavaScript one does: a plain `def` that nothing written before names, with any import only it uses. A decorated function counts as a change, since a decorator runs when the module loads.
 
 **Fixed**
 
 - A virtual environment inside the project was copied into the run's copy without its interpreter, whose link points outside the project, so a server started as `.venv/bin/python` did not start. The copy uses the environment itself.
-- A Python process started from a measured Node process reported "SUPERCOV_CONTEXT was not a valid Supercov identity" as a limitation. It reads the Node process's test now.
+- A Python or Ruby process started from a measured Node process reported "SUPERCOV_CONTEXT was not a valid Supercov identity" as a limitation. It reads the Node process's test now.
 
 ## 4.8.1
 

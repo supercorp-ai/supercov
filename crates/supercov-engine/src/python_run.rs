@@ -710,7 +710,7 @@ impl PythonServer {
         root: &Path,
         evidence_run_id: &str,
         metadata: RunMetadata,
-        served: &[crate::python_evidence::ServedTest],
+        served: &[crate::served_tests::ServedTest],
         diagnostics: &mut dyn Write,
     ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
         let started = Instant::now();

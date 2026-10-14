@@ -36,6 +36,7 @@ module Supercov
   RUN_ID_ENV = "SUPERCOV_RUN_ID"
   WORKER_ENV = "SUPERCOV_RUBY_WORKER"
   CONTEXT_ENV = "SUPERCOV_CONTEXT"
+  SOURCE_ROOT_ENV = "SUPERCOV_RUBY_SOURCE_ROOT"
   DEBUG = !ENV["SUPERCOV_RUBY_DEBUG"].to_s.empty?
   # Escape hatch: a comma-separated list of path fragments to measure through
   # Ruby's Coverage module alone, without probe insertions.
@@ -370,6 +371,11 @@ module Supercov
       raise "unsupported Supercov Ruby plan version #{@plan['version'].inspect}" unless @plan["version"] == PLAN_VERSION
 
       @root = File.realpath(@plan["root"])
+      # A server a browser suite starts runs in Supercov's copy of the
+      # project, `root`, and may still load the project from where it is: a
+      # Gemfile `path:` gem or an absolute `require`.
+      source_root = ENV[SOURCE_ROOT_ENV].to_s
+      @source_root = source_root.empty? ? nil : File.realpath(source_root)
       @files = @plan["files"]
       @probes = {}
       @plan["probes"].each { |key, target| @probes[Integer(key)] = target }
@@ -692,10 +698,16 @@ module Supercov
       return nil unless absolute
 
       @saw_file = true
-      return nil unless absolute.start_with?(@root + "/")
+      root = [@root, @source_root].compact.find { |candidate| absolute.start_with?(candidate + "/") }
+      return nil unless root
+
+      relative = absolute[(root.length + 1)..]
+      # A file of the copy under the checkout is the copy's, not a path of
+      # the checkout's own.
+      return nil unless root == @root || @files.key?(relative)
 
       @matched_file = true
-      absolute[(@root.length + 1)..]
+      relative
     end
 
     # -- identity -----------------------------------------------------------
@@ -852,6 +864,23 @@ module Supercov
       error.set_backtrace(kept) if kept.size != frames.size
     rescue StandardError
       nil
+    end
+
+    # The identity of the phase this thread runs in, or nil for background.
+    def current_identity
+      @identities[current_context]
+    end
+
+    # The phase this thread entered itself, else the one the process was
+    # started in by a test (SUPERCOV_CONTEXT). Not another thread's: a
+    # server's request threads share the process-wide phase, and a request
+    # read as the test another thread was serving ran as no one's once that
+    # thread left it.
+    attr_accessor :inherited_identity
+
+    def own_identity
+      context = Thread.current[:__supercov_context]
+      context ? @identities[context] : @inherited_identity
     end
 
     def child_environment
@@ -1448,6 +1477,134 @@ module Supercov
     end
   end
 
+  # A server's requests, each run as the browser test that sent it: the
+  # Playwright runtime names the test in a header on the page's own requests
+  # and the request fixture's, and in a cookie on the app's host.
+  module Requests
+    SCOPE_HEADER = "HTTP_X_SUPERCOV_SCOPE"
+    SCOPE_COOKIES = %w[__supercov_scope __supercov_scope_site].freeze
+    # The worker a request that names no test is recorded under: numbered
+    # within its process, and given by the report to the test that was
+    # running when it came, if only one was.
+    REQUEST_WORKER = "supercov-request"
+
+    @requests = 0
+    @lock = Mutex.new
+
+    # Percent-decoding of a query string's or cookie's value. `uri` is not
+    # loaded for it: this runs before Bundler, and loading a default gem here
+    # clashes with the version an application's Gemfile pins.
+    def self.unescape(value)
+      value.tr("+", " ").gsub(/%([0-9A-Fa-f]{2})/) { Regexp.last_match(1).hex.chr }
+    end
+
+    # The test a Rack environment names, as a phase identity, or nil.
+    def self.identity(env)
+      encoded = env[SCOPE_HEADER]
+      if encoded.nil? || encoded.empty?
+        env["HTTP_COOKIE"].to_s.split(";").each do |part|
+          name, value = part.strip.split("=", 2)
+          if SCOPE_COOKIES.include?(name) && value && !value.empty?
+            encoded = unescape(value)
+            break
+          end
+        end
+      end
+      return nil if encoded.nil? || encoded.empty?
+
+      values = encoded.split("&").to_h { |pair| pair.split("=", 2).map { |part| unescape(part.to_s) } }
+      return nil unless values["v"] == "1" && !values["t"].to_s.empty? && !values["w"].to_s.empty?
+
+      { worker: "playwright:#{values["w"]}", test: values["t"], retry: Integer(values["a"] || "0", exception: false) || 0, phase: "call" }
+    rescue ArgumentError
+      nil
+    end
+
+    # The phase a parent process ran in, from SUPERCOV_CONTEXT: a Ruby
+    # parent's identity, or a JavaScript parent's carrier -- base64url JSON
+    # holding a Playwright test's scope, or none outside a test.
+    def self.inherited(value)
+      unless value.start_with?("ey")
+        identity = Marshal.load(value.unpack1("m0"))
+        raise TypeError, "identity is not a Hash" unless identity.is_a?(Hash)
+
+        return identity
+      end
+      # Read without `json`, for the reason `unescape` gives: the carrier's
+      # ids are plain strings and its retry a number.
+      carrier = value.tr("-_", "+/").unpack1("m").force_encoding(Encoding::UTF_8)
+      raise TypeError, "not a Supercov carrier" unless carrier.start_with?('{"version":1')
+
+      field = ->(name) { carrier[/"#{name}":"([^"\\]*)"/, 1] }
+      return nil unless carrier.include?('"scope":')
+
+      worker, test = field.call("workerId"), field.call("testId")
+      raise TypeError, "the carrier's scope names no test" unless worker && test
+
+      { "worker" => "playwright:#{worker}", "test" => test, "retry" => carrier[/"retry":(\d+)/, 1].to_i, "phase" => "call" }
+    end
+
+    # Run the block as the test the request names. A request that names no
+    # test runs as a numbered request of its own, unless this thread already
+    # runs as a test's or a request's: a framework's entry point under a
+    # server that was hooked too, or a server a test started.
+    def self.serve(runtime, env)
+      identity = identity(env)
+      current = runtime.own_identity
+      if identity.nil?
+        return yield unless current.nil?
+
+        number = @lock.synchronize { @requests += 1 }
+        identity = { worker: REQUEST_WORKER, test: number.to_s, retry: 0, phase: "call" }
+      elsif current && current["worker"] == identity[:worker] && current["test"] == identity[:test] && current["retry"] == identity[:retry]
+        return yield
+      end
+      runtime.switch(identity)
+      begin
+        yield
+      ensure
+        if current
+          runtime.switch(worker: current["worker"], test: current["test"], retry: current["retry"], phase: current["phase"])
+        else
+          runtime.switch(nil)
+        end
+      end
+    end
+
+    def self.hook(runtime, owner, method, &environment)
+      return if owner.instance_variable_get(:@__supercov_requests)
+
+      owner.instance_variable_set(:@__supercov_requests, true)
+      owner.prepend(Module.new do
+        define_method(method) do |*args, **kwargs, &block|
+          env = environment.call(*args)
+          next super(*args, **kwargs, &block) unless env
+
+          Supercov::Requests.serve(runtime, env) { super(*args, **kwargs, &block) }
+        end
+      end)
+    end
+
+    def self.install(runtime)
+      tracer = TracePoint.new(:end) do |tp|
+        case tp.self.name
+        when "Rails::Engine", "Sinatra::Base"
+          hook(runtime, tp.self, :call) { |env| env }
+        when "Puma::Server"
+          hook(runtime, tp.self, :handle_request) { |client, *| client.env if client.respond_to?(:env) }
+        when "WEBrick::HTTPServer"
+          # WEBrick requests are not Rack environments: read their headers.
+          hook(runtime, tp.self, :service) do |request, *|
+            { SCOPE_HEADER => request["x-supercov-scope"], "HTTP_COOKIE" => request["cookie"] }
+          end
+        end
+      rescue StandardError => error
+        runtime.limitation("ruby-request-adapter-failed", "request adapter failed to install: #{error.class}: #{error.message}")
+      end
+      tracer.enable
+    end
+  end
+
   # Child processes and threads inherit the current phase identity.
   module Propagation
     def self.install(runtime)
@@ -1532,10 +1689,11 @@ module Supercov
     inherited = ENV[CONTEXT_ENV]
     if inherited && !inherited.empty?
       begin
-        identity = Marshal.load(inherited.unpack1("m0"))
-        raise TypeError, "identity is not a Hash" unless identity.is_a?(Hash)
-
-        runtime.switch(worker: identity["worker"], test: identity["test"], retry: identity["retry"], phase: identity["phase"])
+        identity = Requests.inherited(inherited)
+        if identity
+          runtime.switch(worker: identity["worker"], test: identity["test"], retry: identity["retry"], phase: identity["phase"])
+          runtime.inherited_identity = runtime.current_identity
+        end
       rescue ArgumentError, TypeError, KeyError
         runtime.limitation("ruby-inherited-context-invalid", "SUPERCOV_CONTEXT was not a valid Supercov identity")
       end
@@ -1544,6 +1702,7 @@ module Supercov
     runtime.declare_uncountable_lines unless runtime.probes_supported?
     Attach.install(runtime)
     Propagation.install(runtime)
+    Requests.install(runtime)
     at_exit { runtime.close }
     runtime
   rescue StandardError => error

@@ -133,6 +133,7 @@ fn environment(
     for key in [
         "SUPERCOV_RUBY_PLAN",
         "SUPERCOV_RUBY_EVIDENCE_DIR",
+        "SUPERCOV_RUBY_SOURCE_ROOT",
         "SUPERCOV_RUN_ID",
         "SUPERCOV_PROJECT_ROOT",
         "SUPERCOV_CONTEXT",
@@ -423,6 +424,211 @@ pub fn run_direct_ruby(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+/// Ruby measured inside a browser suite's run: the server its tests drive,
+/// which Playwright's `webServer` or a fixture starts. Prepared whenever the
+/// project has Ruby source; a run whose suite starts no measured Ruby
+/// publishes nothing of it.
+pub struct RubyServer {
+    project: PreparedRubyProject,
+    integrity: crate::run_store::RunIntegrity,
+    source_inputs: crate::source_manifest::Inputs,
+    source_roots: Option<Vec<String>>,
+    directory: PathBuf,
+}
+
+impl RubyServer {
+    /// The plan and runtime for the project's Ruby source, or None when it
+    /// has none. `workspace` is where the suite runs: the probes find the
+    /// server's files there.
+    pub fn prepare(
+        root: &Path,
+        workspace: &Path,
+        run_id: &str,
+        command: &[String],
+    ) -> Result<Option<Self>, String> {
+        let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        // Roots named for the JavaScript source may hold no Ruby at all.
+        let Ok(roots) =
+            crate::source_discovery::ExplicitSourceRoots::from_environment(root, &ambient)
+        else {
+            return Ok(None);
+        };
+        let project = prepare_ruby_project(root, roots.as_ref())?;
+        if project.plan.files.is_empty() {
+            return Ok(None);
+        }
+        let source_roots = crate::source_discovery::configured_source_roots(&ambient);
+        let mut integrity_inputs = ruby_integrity_inputs(&project.files, command);
+        crate::source_discovery::fold_roots_into_configuration(
+            &mut integrity_inputs.execution_configuration,
+            source_roots.as_deref(),
+        );
+        let integrity = create_explicit_run_integrity(
+            root,
+            &integrity_inputs,
+            &FrontendIntegrityInputs::embedded_ruby(),
+        )
+        .map_err(|error| error.to_string())?;
+        let source_inputs = crate::source_capture::capture(
+            root,
+            "ruby",
+            ruby_integrity_inputs(&project.files, command).assertion_paths(),
+        )?;
+        let directory = root.join(".supercov/work").join(run_id).join("ruby");
+        write_runtime(&directory.join("runtime"))?;
+        fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
+        let mut plan = serde_json::to_value(&project.plan).map_err(|error| error.to_string())?;
+        plan["root"] = workspace.display().to_string().into();
+        let plan_path = directory.join("plan.rb");
+        fs::write(&plan_path, ruby_literal(&plan).into_bytes())
+            .map_err(|error| format!("{}: {error}", plan_path.display()))?;
+        Ok(Some(Self {
+            project,
+            integrity,
+            source_inputs,
+            source_roots,
+            directory,
+        }))
+    }
+
+    pub fn source_files(&self) -> usize {
+        self.project.plan.files.len()
+    }
+
+    /// What the suite's environment needs for a Ruby process it starts to be
+    /// measured; the run id and project root are the browser run's own.
+    pub fn environment(&self) -> std::collections::BTreeMap<String, String> {
+        let mut rubyopt = format!(
+            "-r{}",
+            self.directory.join("runtime/supercov_runtime.rb").display()
+        );
+        if let Some(existing) = std::env::var("RUBYOPT")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            rubyopt.push(' ');
+            rubyopt.push_str(&existing);
+        }
+        std::collections::BTreeMap::from([
+            ("RUBYOPT".into(), rubyopt),
+            (
+                "SUPERCOV_RUBY_PLAN".into(),
+                self.directory.join("plan.rb").display().to_string(),
+            ),
+            (
+                "SUPERCOV_RUBY_EVIDENCE_DIR".into(),
+                self.directory.join("evidence").display().to_string(),
+            ),
+            (
+                "SUPERCOV_RUBY_SOURCE_ROOT".into(),
+                self.project.root.display().to_string(),
+            ),
+        ])
+    }
+
+    /// Publish what the server ran as a Ruby run of its own, credited to the
+    /// browser tests that sent each request. None when no measured Ruby
+    /// process ran, or none answered a test's request.
+    pub fn publish(
+        self,
+        root: &Path,
+        evidence_run_id: &str,
+        metadata: RunMetadata,
+        served: &[crate::served_tests::ServedTest],
+        diagnostics: &mut dyn Write,
+    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+        let evidence_directory = self.directory.join("evidence");
+        let result = (|| {
+            if served.is_empty() {
+                return Ok(None);
+            }
+            let mut run = match crate::ruby_evidence::build_ruby_server_run(
+                &self.project.manifest,
+                &evidence_directory,
+                evidence_run_id,
+                &metadata.started_at,
+                metadata.test_exit_code.unwrap_or_default(),
+                &self.project.root,
+                served,
+            ) {
+                Err(
+                    crate::ruby_evidence::RubyEvidenceError::NoInterpreter
+                    | crate::ruby_evidence::RubyEvidenceError::NoTests,
+                ) => return Ok(None),
+                result => result.map_err(|error| error.to_string())?,
+            };
+            let answered = run.request.raw_results.iter().any(|raw| {
+                raw.role == "test" && raw.runtime.iter().any(|snapshot| !snapshot.hits.is_empty())
+            });
+            if !answered {
+                writeln!(
+                    diagnostics,
+                    "[supercov] a Ruby process ran, and no request a test sent reached measured Ruby code; no Ruby run was published"
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
+            validate_frontend_report_request(&run.declaration, &run.request)
+                .map_err(|error| error.to_string())?;
+            // The evidence was recorded under the browser run's id; a run
+            // published beside it has its own.
+            run.request.run_id = metadata.id.clone();
+            for scope in run
+                .request
+                .raw_results
+                .iter_mut()
+                .filter_map(|raw| raw.scope.as_mut())
+            {
+                scope.run_id = metadata.id.clone();
+            }
+            let archive_path = root
+                .join(".supercov/work")
+                .join(&metadata.id)
+                .join("ruby-evidence.raw.gz");
+            if let Some(parent) = archive_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            let entries = run.archive_entries().map_err(|error| error.to_string())?;
+            let entries = crate::source_capture::append(entries, &self.source_inputs)?;
+            let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
+            let tests = run.tests;
+            drop(run);
+            let metadata = RunMetadata {
+                integrity: self.integrity.clone(),
+                raw_evidence: RawEvidenceMetadata {
+                    schema_version: raw.schema_version,
+                    format: raw.format.into(),
+                    file: raw.file.into(),
+                    files: raw.files,
+                    uncompressed_bytes: raw.uncompressed_bytes,
+                    compressed_bytes: raw.compressed_bytes,
+                },
+                source_roots: self.source_roots.clone(),
+                ..metadata
+            };
+            let run_directory =
+                publish_run(root, &metadata, &archive_path).map_err(|error| error.to_string())?;
+            writeln!(
+                diagnostics,
+                "[supercov] Ruby server coverage: {tests} test(s) across {} source file(s)",
+                self.project.plan.files.len()
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(Some((run_directory, metadata)))
+        })();
+        let result = result.map_err(|error| {
+            note_kept_evidence(
+                root,
+                &evidence_directory,
+                &format!("{evidence_run_id}-ruby"),
+                error,
+            )
+        });
+        let _ = remove_stored_tree_deferred(root, &self.directory);
+        result
     }
 }
 

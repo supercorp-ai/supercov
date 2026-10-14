@@ -311,6 +311,21 @@ npx supercov -- ruby -Itest test/shapes_test.rb
 npx supercov -- bin/rails test
 ```
 
+### A Ruby server under browser tests
+
+A Playwright suite that starts a Ruby server, a Rails, Sinatra or other Rack
+app under Puma, WEBrick or another server, measures it the way it measures a
+[Python server](#a-python-server-under-browser-tests): each request runs as the
+test that sent it, a request that names no test is credited by time, a Ruby
+process a test starts belongs to that test, and the server's coverage is a Ruby
+run of its own, published as the run or beside the browser run. Gems installed
+into the project (`bundle config set path vendor/bundle`) are used from the
+copy the suite runs in.
+
+```sh
+npx supercov -- npx playwright test
+```
+
 ## Crediting a test with what it reached
 
 Most runners attribute exactly at no cost: Supercov runs each Rust test in its
