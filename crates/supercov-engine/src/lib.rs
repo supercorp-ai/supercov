@@ -46,6 +46,7 @@ pub mod ruby_evidence;
 pub mod ruby_instrumenter;
 pub mod ruby_project;
 pub mod ruby_run;
+pub mod run_currency;
 pub mod run_merge;
 pub mod run_query;
 pub mod run_store;
@@ -70,6 +71,7 @@ pub mod source_discovery;
 pub mod source_manifest;
 pub mod source_tools;
 pub mod source_units;
+pub mod test_loads;
 mod typescript_imports;
 pub mod workspace;
 

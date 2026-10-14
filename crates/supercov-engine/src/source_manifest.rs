@@ -638,35 +638,6 @@ pub fn test_files(run: &StoredRun) -> Option<BTreeSet<String>> {
     )
 }
 
-/// The files, of those a run was recorded with, whose change since makes
-/// what it recorded a record of other tests. `now` gives a file's digest as
-/// it is; `ran` the files the run's own tests are in; `tests` every file
-/// known to hold tests.
-///
-/// A file of another test changing takes nothing from this run: that test
-/// was not in it. A file that is not known to be a test's is one a test may
-/// load, a helper or a fixture, and counts against every run.
-///
-/// `helpers_count` is false where the user has accepted changes to files the
-/// tests load (`merge --allow-changed`): then only a file of the run's own
-/// tests counts, where the run says which those are.
-pub fn outdated_files(
-    recorded: &FileManifest,
-    now: impl Fn(&str) -> Option<String>,
-    ran: Option<&BTreeSet<String>>,
-    tests: &BTreeSet<String>,
-    helpers_count: bool,
-) -> Vec<String> {
-    changed_files(recorded, now)
-        .into_iter()
-        .filter(|file| match ran {
-            Some(ran) if !helpers_count => ran.contains(file),
-            Some(ran) => ran.contains(file) || !tests.contains(file),
-            None => true,
-        })
-        .collect()
-}
-
 /// The files, of those a run was recorded with, that are not as they were.
 pub fn changed_files(recorded: &FileManifest, now: impl Fn(&str) -> Option<String>) -> Vec<String> {
     recorded
@@ -802,6 +773,96 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     // as well, but replaying their histories missed no failing test there and
     // the same rule grew dry-inflector's selection from 73% to 90% of its
     // tests, so it is the JVM's alone.)
+    // Files tests load that nothing probes -- helpers, fixtures, support code
+    // beside the tests -- and that changed. No record says which test ran
+    // them, so a test is affected when its own file loads one: read from its
+    // imports where Supercov reads them, and otherwise by any change. Without
+    // this a helper every test called changing left every test unaffected.
+    let own_tests = executions
+        .tests
+        .iter()
+        .map(|record| record.test.file.clone())
+        .collect::<BTreeSet<_>>();
+    let known_tests = crate::run_store::discover_runs(&root)
+        .map(|inventory| {
+            inventory
+                .runs
+                .iter()
+                .filter_map(test_files)
+                .flatten()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default()
+        .union(&own_tests)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    // What is measured, where the run's coverage manifest says: everything
+    // else first-party is a helper. Where it does not, only files beside the
+    // tests are; a measured file's top level changing is judged by what each
+    // test ran, above.
+    let measured = read_archive_selected(&run.evidence_path, |path| path == "manifest.json")
+        .ok()
+        .and_then(|entries| entries.into_iter().next())
+        .and_then(|entry| serde_json::from_slice::<Value>(&entry.contents).ok())
+        .and_then(|manifest| {
+            Some(
+                manifest["scope"]["entries"]
+                    .as_array()?
+                    .iter()
+                    .filter(|entry| entry["status"] == "included")
+                    .filter_map(|entry| entry["file"].as_str().map(str::to_owned))
+                    .collect::<BTreeSet<_>>(),
+            )
+        });
+    let helper = |file: &str| match &measured {
+        Some(measured) => !measured.contains(file),
+        None => crate::run_currency::beside_the_tests(file),
+    };
+    let helpers = changes
+        .iter()
+        .filter(|(file, change)| {
+            !matches!(
+                change,
+                FileChange::Same | FileChange::CommentsOnly | FileChange::Added
+            ) && !known_tests.contains(**file)
+                && helper(file)
+                && !crate::run_currency::configuration_file(file)
+                && !crate::run_currency::dependency_file(file)
+        })
+        // A change that only adds functions reaches no test written before.
+        .filter(|(file, change)| match change {
+            FileChange::Code { before, .. } => fs::read_to_string(root.join(file))
+                .ok()
+                .and_then(|text| crate::source_units::only_added(before, file, &text))
+                .is_none(),
+            _ => true,
+        })
+        .map(|(file, change)| {
+            let what = match change {
+                FileChange::Code {
+                    before,
+                    after,
+                    diff,
+                    ..
+                } => {
+                    format!("{file} changed: {}", describe(before, after, diff))
+                }
+                FileChange::Removed => format!("{file} removed"),
+                _ => format!("{file} changed"),
+            };
+            (*file, what)
+        })
+        .collect::<Vec<_>>();
+    let checkout =
+        (!helpers.is_empty()).then(|| crate::run_currency::Checkout::new(&root, &known_tests));
+    let ran = (!helpers.is_empty()).then(|| crate::run_currency::Ran::of(run));
+    let configurations = manifest
+        .files
+        .keys()
+        .filter(|file| crate::run_currency::configuration_file(file))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut loads_of = BTreeMap::<String, Option<crate::test_loads::Loads>>::new();
     let named_by_tests = named_by_tests(&changes);
     let mut test_sources = BTreeMap::<&str, Option<String>>::new();
 
@@ -884,6 +945,31 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                             describe(before, after, diff)
                         ));
                     }
+                }
+            }
+        }
+        if let (Some(checkout), Some(ran)) = (&checkout, &ran) {
+            let loads = loads_of.entry(record.test.file.clone()).or_insert_with(|| {
+                checkout.loads(
+                    &BTreeSet::from([record.test.file.clone()]),
+                    ran.runners.as_ref(),
+                    &configurations,
+                )
+            });
+            for (file, what) in &helpers {
+                let loaded = match loads {
+                    Some(loads) if loads.open.is_none() => {
+                        loads.files.contains(*file) || !checkout.places(file)
+                    }
+                    _ => true,
+                };
+                if loaded {
+                    reasons.push(match loads {
+                        Some(loads) if loads.open.is_none() && loads.files.contains(*file) => {
+                            format!("{what} (this test's file loads it)")
+                        }
+                        _ => format!("{what} (a file tests may load)"),
+                    });
                 }
             }
         }

@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One declaration, positioned the way anchors are: one-based lines and
 /// one-based UTF-8 byte columns, end exclusive.
@@ -193,6 +193,225 @@ pub fn named<'u>(units: impl IntoIterator<Item = &'u Unit>) -> String {
         1..=4 => names.join(", "),
         n => format!("{}, and {} more", names[..3].join(", "), n - 3),
     }
+}
+
+/// The top-level functions a JavaScript or TypeScript file gained, where that
+/// is all that changed since `before` was read: nothing that existed then
+/// reads differently, no new code runs when the file loads, and no code that
+/// existed then names what was added (it would have meant something else
+/// before). Code written before these functions existed cannot have run them.
+///
+/// Decided by taking the additions out again -- the functions, and import
+/// names only they use -- and requiring every declaration of `before`, the
+/// file's own top level included, to digest exactly as it did. What cannot
+/// be taken out cleanly is not an addition; the answer is `None`, and the
+/// file counts as changed.
+pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>> {
+    use oxc_ast::ast::*;
+    use oxc_ast_visit::Visit;
+    use oxc_span::GetSpan;
+
+    let after = code(path, source)?;
+    let diff = before.diff(&after);
+    let added = diff
+        .added
+        .iter()
+        .filter(|index| !after.units[**index].inert)
+        .copied()
+        .collect::<Vec<_>>();
+    if !diff.removed.is_empty() || added.is_empty() || diff.changed.iter().any(|index| *index != 0)
+    {
+        return None;
+    }
+    let source_type =
+        crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    // Names a statement binds, where all it does is define functions.
+    fn functions(declaration: &Declaration<'_>) -> Option<Vec<String>> {
+        match declaration {
+            Declaration::FunctionDeclaration(function)
+                if !function.declare && function.body.is_some() =>
+            {
+                Some(vec![function.id.as_ref()?.name.to_string()])
+            }
+            Declaration::VariableDeclaration(variables) if !variables.declare => variables
+                .declarations
+                .iter()
+                .map(|declarator| {
+                    matches!(
+                        declarator.init,
+                        Some(
+                            Expression::ArrowFunctionExpression(_)
+                                | Expression::FunctionExpression(_)
+                        )
+                    )
+                    .then(|| {
+                        declarator
+                            .id
+                            .get_binding_identifier()
+                            .map(|id| id.name.to_string())
+                    })
+                    .flatten()
+                })
+                .collect(),
+            _ => None,
+        }
+    }
+    let top = added
+        .iter()
+        .filter(|index| after.units[**index].parent == Some(0))
+        .map(|index| after.units[*index].path.clone())
+        .collect::<BTreeSet<_>>();
+    let mut names = BTreeSet::new();
+    let mut cuts = Vec::new();
+    for statement in &parsed.program.body {
+        let bound = match statement {
+            Statement::FunctionDeclaration(_) | Statement::VariableDeclaration(_) => {
+                statement.as_declaration().and_then(functions)
+            }
+            Statement::ExportNamedDeclaration(export) if export.source.is_none() => {
+                match &export.declaration {
+                    Some(declaration) => functions(declaration),
+                    // `export { added }`, listing only what was added.
+                    None => export
+                        .specifiers
+                        .iter()
+                        .map(|specifier| {
+                            let local = specifier.local.name().to_string();
+                            top.contains(&local).then_some(local)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|listed| !listed.is_empty())
+                        .map(|_| Vec::new()),
+                }
+            }
+            _ => None,
+        };
+        let Some(bound) = bound else { continue };
+        if bound.iter().all(|name| top.contains(name)) {
+            names.extend(bound);
+            cuts.push((
+                statement.span().start as usize,
+                statement.span().end as usize,
+                String::new(),
+            ));
+        }
+    }
+    // Every added unit is one of those functions or inside one.
+    let inside = |index: usize| {
+        after.ancestors(index).any(|unit| {
+            after.units[unit].parent == Some(0) && names.contains(&after.units[unit].path)
+        })
+    };
+    if names.is_empty() || !added.iter().all(|index| inside(*index)) {
+        return None;
+    }
+    // What the rest of the file names, the additions taken out.
+    struct Names(BTreeSet<String>);
+    impl<'a> Visit<'a> for Names {
+        fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+            self.0.insert(it.name.to_string());
+        }
+        fn visit_jsx_identifier(&mut self, it: &JSXIdentifier<'a>) {
+            self.0.insert(it.name.to_string());
+        }
+    }
+    let mut remaining = Names(BTreeSet::new());
+    for statement in &parsed.program.body {
+        let span = statement.span();
+        if !cuts
+            .iter()
+            .any(|(start, _, _)| *start == span.start as usize)
+        {
+            remaining.visit_statement(statement);
+        }
+    }
+    if names.iter().any(|name| remaining.0.contains(name)) {
+        return None;
+    }
+    // Import names that only the additions use. A whole declaration goes
+    // only where it brings in types or a package; a first-party module newly
+    // imported runs its top level, which no earlier test did.
+    for statement in &parsed.program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        if specifiers.is_empty() {
+            continue;
+        }
+        let unused = specifiers
+            .iter()
+            .map(|specifier| !remaining.0.contains(specifier.local().name.as_str()))
+            .collect::<Vec<_>>();
+        if !unused.contains(&true) {
+            continue;
+        }
+        let span = (import.span.start as usize, import.span.end as usize);
+        if unused.iter().all(|unused| *unused) {
+            let module = import.source.value.as_str();
+            let package = !module.starts_with('.') && !module.starts_with('/');
+            if import.import_kind.is_type() || package {
+                cuts.push((span.0, span.1, String::new()));
+                continue;
+            }
+            return None;
+        }
+        // Some names stay: the declaration as it read with only those.
+        let named = specifiers
+            .iter()
+            .all(|specifier| matches!(specifier, ImportDeclarationSpecifier::ImportSpecifier(_)));
+        if !named || specifiers.len() < 2 {
+            return None;
+        }
+        let first = specifiers[0].span();
+        let last = specifiers[specifiers.len() - 1].span();
+        let separator = &source[first.end as usize..specifiers[1].span().start as usize];
+        let kept = specifiers
+            .iter()
+            .zip(&unused)
+            .filter(|(_, unused)| !**unused)
+            .map(|(specifier, _)| {
+                &source[specifier.span().start as usize..specifier.span().end as usize]
+            })
+            .collect::<Vec<_>>()
+            .join(separator);
+        cuts.push((
+            span.0,
+            span.1,
+            format!(
+                "{}{kept}{}",
+                &source[span.0..first.start as usize],
+                &source[last.end as usize..span.1]
+            ),
+        ));
+    }
+    cuts.sort_by_key(|(start, _, _)| *start);
+    let mut earlier = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in cuts {
+        if start < cursor {
+            return None;
+        }
+        earlier.push_str(&source[cursor..start]);
+        earlier.push_str(&replacement);
+        cursor = end;
+    }
+    earlier.push_str(&source[cursor..]);
+    let then = code(path, &earlier)?;
+    let digests = |code: &Code| {
+        code.units
+            .iter()
+            .map(|unit| (unit.path.clone(), unit.digest.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    (digests(&then) == digests(before)).then(|| names.into_iter().collect())
 }
 
 /// One declaration the parser found, in bytes.
@@ -2068,6 +2287,66 @@ mod tests {
         let f = unit(&x, "f");
         assert_eq!((f.line, f.column), (1, 15), "é is two bytes");
         assert_eq!((f.end_line, f.end_column), (1, 30), "end is exclusive");
+    }
+
+    #[test]
+    fn functions_added_to_a_helper_are_only_additions() {
+        let before = code(
+            "helpers.ts",
+            "import type { Page } from '@playwright/test';\nimport { a } from './a';\n\nexport async function open(page: Page) {\n  return a(page);\n}\n",
+        )
+        .unwrap();
+        let added = "import type { Page, Locator } from '@playwright/test';\nimport { a, b } from './a';\nimport { faker } from '@faker-js/faker';\n\nexport async function open(page: Page) {\n  return a(page);\n}\n\n/** The new one. */\nexport const pick = (locator: Locator) => b(locator, faker.word());\n\nfunction helper() {\n  return 1;\n}\nexport { helper };\n";
+        assert_eq!(
+            only_added(&before, "helpers.ts", added),
+            Some(vec!["helper".to_owned(), "pick".to_owned()])
+        );
+        // Anything else that moved is a change.
+        for changed in [
+            // a body the earlier tests ran
+            added.replace("return a(page);", "return a(page, 1);"),
+            // something that runs when the file loads
+            format!("{added}console.log('loaded');\n"),
+            // a first-party module newly loaded
+            added.replace(
+                "import { faker } from '@faker-js/faker';",
+                "import { faker } from './faker';",
+            ),
+            // existing code now names the added function
+            added.replace("return a(page);", "return pick(a(page));"),
+        ] {
+            assert_eq!(
+                only_added(&before, "helpers.ts", &changed),
+                None,
+                "{changed}"
+            );
+        }
+        // Nothing added is not an addition.
+        assert_eq!(
+            only_added(
+                &before,
+                "helpers.ts",
+                "import type { Page } from '@playwright/test';\nimport { a } from './a';\n\nexport async function open(page: Page) {\n  return a(page);\n}\n// a comment\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_added_function_that_shadows_a_global_is_a_change() {
+        let before = code(
+            "h.js",
+            "export function get(url) {\n  return fetch(url);\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            only_added(
+                &before,
+                "h.js",
+                "export function get(url) {\n  return fetch(url);\n}\nfunction fetch() {\n  return 1;\n}\n"
+            ),
+            None
+        );
     }
 
     #[test]

@@ -123,24 +123,23 @@ fn recorded_files(
     ))
 }
 
-/// Runs merged although their tests differ: the latest, whose record of the
-/// files and integrity the merge takes, and what differed between them.
+/// Runs merged although their tests or configuration differ: the latest,
+/// whose record of the files and integrity the merge takes, and what differed
+/// that does not reach the others.
 struct Grown<'a> {
     latest: usize,
     files: Option<&'a [u8]>,
     across: Vec<String>,
 }
 
-/// Which of the runs the others can be added to, where their tests differ:
-/// the newest, when every file each of the others was recorded with is in it
-/// unchanged. That is a suite that has only gained test files since, and what
-/// an earlier run recorded of the tests it had is still what they do.
-///
-/// A file of its own tests changed or removed since a run makes that run's
-/// record a record of other tests, and adding it would count them. So does a
-/// file that is not known to be a test's, which its tests may load, unless
-/// the user has said the change alters nothing they ran (`--allow-changed`).
-fn latest_of_grown_tests<'a>(
+/// Which of the runs the others can be added to, where their tests or test
+/// configuration differ: the newest, when nothing that changed between each
+/// of the others and it reaches what that run's tests did. That is a suite
+/// that has gained tests since, with helpers they need and settings of
+/// theirs, and what an earlier run recorded of its tests is still what they
+/// do. Each file that differs is judged by `run_currency::judge`.
+fn judged_against_latest<'a>(
+    root: &Path,
     inputs: &[&'a StoredRun],
     archives: &'a [Vec<EvidenceArchiveEntry>],
     known: &[StoredRun],
@@ -148,13 +147,11 @@ fn latest_of_grown_tests<'a>(
 ) -> Result<Option<Grown<'a>>, String> {
     let first = inputs[0];
     let fingerprint = |input: &StoredRun| input.metadata.integrity.fingerprint.clone();
-    let tests_differ = inputs
-        .iter()
-        .any(|input| fingerprint(input).tests != fingerprint(first).tests);
-    let configuration_differs = inputs
-        .iter()
-        .any(|input| fingerprint(input).configuration != fingerprint(first).configuration);
-    if !(tests_differ || allow_changed && configuration_differs) {
+    let differ = inputs.iter().any(|input| {
+        fingerprint(input).tests != fingerprint(first).tests
+            || fingerprint(input).configuration != fingerprint(first).configuration
+    });
+    if !differ {
         return Ok(None);
     }
     let latest = (0..inputs.len())
@@ -169,93 +166,78 @@ fn latest_of_grown_tests<'a>(
         .iter()
         .map(|archive| recorded_files(archive))
         .collect::<Vec<_>>();
-    let mut across = BTreeSet::new();
-    if configuration_differs {
-        across.insert("configuration".to_owned());
-    }
-    if !tests_differ {
-        // Only the configuration differs, and the user has accepted it: the
-        // files it names, where the runs recorded them.
-        if let Some((_, into)) = &files[latest] {
-            for (_, recorded) in files.iter().flatten() {
-                across.extend(crate::source_manifest::changed_files(
-                    &recorded.files,
-                    |file| into.files.get(file).map(|now| now.sha256.clone()),
-                ));
-            }
-        }
-        return Ok(Some(Grown {
-            latest,
-            files: files[latest].as_ref().map(|(bytes, _)| *bytes),
-            across: across.into_iter().collect(),
-        }));
-    }
-    let Some((bytes, into)) = &files[latest] else {
-        return Err(format!(
-            "Cannot merge incompatible run {}: differing domains: tests",
-            inputs[latest].id
-        ));
+    let unrecorded = |run: &StoredRun| {
+        format!(
+            "Cannot merge incompatible run {}: differing domains: tests or configuration, and it keeps no record of its files to compare",
+            run.id
+        )
     };
+    let Some((bytes, into)) = &files[latest] else {
+        return Err(unrecorded(inputs[latest]));
+    };
+    // Every file known to hold tests, from every run there is: a file of some
+    // other test changing takes nothing from this run.
+    let tests = known
+        .iter()
+        .filter_map(crate::source_manifest::test_files)
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    let checkout = crate::run_currency::Checkout::new(root, &tests);
+    let merged = |index: usize| inputs[index].metadata.merged == Some(true);
+    let reference = crate::run_currency::Ran::from_entries(&archives[latest], merged(latest));
+    // A file's text, where the checkout holds what the latest run recorded.
+    let text = |file: &str| {
+        let text = std::fs::read_to_string(root.join(file)).ok()?;
+        (crate::source_manifest::FileFingerprint::of(&text).sha256 == into.files.get(file)?.sha256)
+            .then_some(text)
+    };
+    let mut across = Vec::new();
     for (index, input) in inputs.iter().enumerate() {
         if index == latest {
             continue;
         }
         let Some((_, recorded)) = &files[index] else {
-            return Err(format!(
-                "Cannot merge incompatible run {}: differing domains: tests",
-                input.id
-            ));
+            return Err(unrecorded(input));
         };
-        let now = |file: &str| into.files.get(file).map(|now| now.sha256.clone());
-        across.extend(crate::source_manifest::changed_files(&recorded.files, now));
-        // Every file known to hold tests, from every run there is: a file
-        // of some other test changing takes nothing from this run.
-        let tests = known
-            .iter()
-            .filter_map(crate::source_manifest::test_files)
-            .flatten()
-            .collect::<BTreeSet<_>>();
-        let ran = crate::source_manifest::test_files(input);
-        let moved = crate::source_manifest::outdated_files(
+        let judgment = crate::run_currency::judge(
+            &checkout,
+            &input.metadata.command.join(" "),
             &recorded.files,
-            now,
-            ran.as_ref(),
-            &tests,
-            !allow_changed,
+            &into.files,
+            &text,
+            crate::source_manifest::test_files(input).as_ref(),
+            &crate::run_currency::Ran::from_entries(&archives[index], merged(index)),
+            reference.playwright.as_ref(),
+            allow_changed,
         );
-        if !moved.is_empty() {
-            let named = moved.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
-            let more = moved.len().saturating_sub(5);
-            // Its own tests changed: what it recorded is of other tests, and
-            // no option makes it theirs. A helper or fixture changed: the
-            // user can say the change alters nothing the earlier tests ran.
-            let own = ran
-                .as_ref()
-                .is_some_and(|ran| moved.iter().any(|file| ran.contains(file)));
+        if !judgment.outdated.is_empty() {
             return Err(format!(
-                "Cannot merge run {} with run {}: {} of the files it was recorded with {} changed or gone by then: {named}{}. {}",
+                "Cannot merge run {} with run {}: {}. {}",
                 input.id,
                 inputs[latest].id,
-                moved.len(),
-                if moved.len() == 1 { "was" } else { "were" },
-                if more > 0 {
-                    format!(" and {more} more")
-                } else {
-                    String::new()
-                },
-                if own {
+                listed(&judgment.outdated),
+                if judgment.own_tests {
                     "Its own tests changed; measure them again."
                 } else {
-                    "If they are files the tests load and the change alters nothing the earlier tests ran, pass --allow-changed."
+                    "Measure it again, or pass --allow-changed if the change alters nothing its tests ran."
                 },
             ));
         }
+        across.extend(judgment.across);
     }
     Ok(Some(Grown {
         latest,
         files: Some(bytes),
-        across: across.into_iter().collect(),
+        across: crate::run_currency::across(across),
     }))
+}
+
+/// A few of what moved, and how many more there are.
+pub fn listed(items: &[String]) -> String {
+    match items.len() {
+        0..=3 => items.join("; "),
+        n => format!("{}; and {} more", items[..3].join("; "), n - 3),
+    }
 }
 
 /// Merge two or more complete, compatible stored runs into one immutable run.
@@ -296,24 +278,16 @@ pub fn merge_coverage_runs(
     let first = inputs[0];
     for input in inputs.iter().skip(1) {
         let dimensions = incompatible_dimensions(first, input);
-        // Tests alone may differ; what that takes is looked at file by file.
-        // Configuration too, where the user has accepted it.
-        let accepted = |dimension: &&str| {
-            *dimension == "tests" || (allow_changed && *dimension == "configuration")
-        };
-        if !dimensions.iter().all(accepted) {
-            let only_test_side = dimensions
-                .iter()
-                .all(|dimension| *dimension == "tests" || *dimension == "configuration");
+        // Tests and their configuration may differ; what that takes is
+        // looked at file by file.
+        if dimensions
+            .iter()
+            .any(|dimension| *dimension != "tests" && *dimension != "configuration")
+        {
             return Err(format!(
-                "Cannot merge incompatible run {}: differing domains: {}{}",
+                "Cannot merge incompatible run {}: differing domains: {}",
                 input.id,
-                dimensions.join(", "),
-                if only_test_side {
-                    ". If the configuration change alters nothing the earlier tests ran, pass --allow-changed."
-                } else {
-                    ""
-                }
+                dimensions.join(", ")
             ));
         }
     }
@@ -325,7 +299,7 @@ pub fn merge_coverage_runs(
                 .map_err(|error| format!("Cannot merge coverage run {}: {error}", input.id))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let grown = latest_of_grown_tests(&inputs, &archives, &inventory.runs, allow_changed)?;
+    let grown = judged_against_latest(root, &inputs, &archives, &inventory.runs, allow_changed)?;
     let manifests = archives
         .iter()
         .map(|entries| {
@@ -501,7 +475,7 @@ pub fn merge_coverage_runs(
             merged_across: grown
                 .as_ref()
                 .map(|grown| grown.across.clone())
-                .filter(|across| allow_changed && !across.is_empty()),
+                .filter(|across| !across.is_empty()),
         };
         publish_run(root, &metadata, &archive_path)
             .map_err(|error| format!("Could not publish merged run: {error}"))?;

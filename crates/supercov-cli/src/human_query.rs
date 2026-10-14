@@ -842,12 +842,11 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 lines.push(format!("command: {}", data.command.join(" ")));
             }
             if !data.merged_across.is_empty() {
-                // The user accepted these; the reader of the number should
-                // know it is of tests run against them as they were then.
-                lines.push(format!(
-                    "merged across changes to: {}",
-                    data.merged_across.join(", ")
-                ));
+                // Files that differed between the merged runs, each with why
+                // it does not reach the earlier ones, or that the user
+                // accepted: the number is of tests run against them as they
+                // were then.
+                lines.push(format!("merged across: {}", data.merged_across.join("; ")));
             }
             if !data.valid {
                 // Calm but unmissable: the run itself is fine, the wrapped

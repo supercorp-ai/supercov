@@ -4508,7 +4508,7 @@ fn a_run_of_a_new_test_alone_is_added_to_the_runs_before_it() {
     contains_all(
         &refused.stderr(),
         &[
-            "1 of the files it was recorded with was changed or gone by then: test/names.test.js",
+            "test/names.test.js, a file of its own tests, has changed",
             "Its own tests changed; measure them again.",
         ],
     );
@@ -4525,7 +4525,7 @@ fn a_run_of_a_new_test_alone_is_added_to_the_runs_before_it() {
         &left,
         &[
             &format!("left out {first}"),
-            "test/names.test.js has changed since it ran",
+            "test/names.test.js, a file of its own tests, has changed. Measure it again to count it.",
             "merging 3 runs",
         ],
     );
@@ -4533,90 +4533,177 @@ fn a_run_of_a_new_test_alone_is_added_to_the_runs_before_it() {
 }
 
 #[test]
-fn new_tests_are_added_across_a_changed_helper_or_configuration_when_allowed() {
-    // A batch of new end-to-end specs usually changes the shared helpers and
-    // the runner's configuration too. Every spec loads them, so merge cannot
-    // tell the change alters nothing the baseline ran, and refused it; the
-    // only way on was the whole suite again. The user can say so.
+fn new_tests_are_added_across_the_helpers_and_settings_they_bring() {
+    // A batch of new end-to-end specs usually brings a helper or two and a
+    // setting of the runner's. Every spec loads the helpers, so merge refused
+    // to add a run of the new specs to the baseline, and an edit to one
+    // runner's settings made every other runner's run out of date too. Each
+    // file is judged by what the earlier tests did with it.
     let project = Project::cart("merge-across");
     project.write(
         "test/helpers.js",
         "export const item = (name) => ({ name });\n",
     );
-    project.write("runner.config.js", "export default { timeout: 1000 };\n");
     project.write(
         "test/helped.test.js",
         "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { describe } from \"../src/cart.js\";\nimport { item } from \"./helpers.js\";\n\ntest(\"helped\", () => {\n  assert.equal(describe([item(\"a\")]), \"a\");\n});\n",
     );
+    project.write("runner.config.js", "export default { timeout: 1000 };\n");
+    project.write(
+        "playwright.config.js",
+        "export default { timeout: 1000 };\n",
+    );
     project.commit("helpers");
     let baseline = project.measure(&[]);
 
-    // The batch: a helper gains a function, the configuration a setting, and
-    // one new spec uses both.
+    // The batch: the helper gains a function, the other runner's settings
+    // change, and one new test uses the new function.
     project.edit(
         "test/helpers.js",
         "\n",
-        "\nexport const items = (...names) => names.map(item);\n",
+        "\n\nexport const items = (...names) => names.map(item);\n",
     );
-    project.edit("runner.config.js", "timeout: 1000", "timeout: 2000");
+    project.edit("playwright.config.js", "timeout: 1000", "timeout: 2000");
     project.write(
         "test/batch.test.js",
         "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { describe } from \"../src/cart.js\";\nimport { items } from \"./helpers.js\";\n\ntest(\"batch\", () => {\n  assert.equal(describe(items(\"a\")), \"a\");\n});\n",
     );
     let batch = project.measure(&["test/batch.test.js"]);
-
-    let refused = project.supercov(&["merge", &baseline, &batch]);
-    assert_eq!(refused.code(), 2, "{}", refused.stdout());
-    assert!(
-        refused.stderr().contains("pass --allow-changed"),
-        "{}",
-        refused.stderr()
-    );
-    let left = project.supercov(&["merge"]);
-    assert!(
-        left.stdout().contains("or pass --allow-changed"),
-        "{}",
-        left.stdout()
-    );
-
-    project
-        .supercov(&["merge", "--allow-changed", &baseline, &batch])
-        .succeeds();
+    let summed = project.supercov(&["merge"]).succeeds();
+    contains_all(&summed, &["merging 2 runs", &baseline, &batch]);
     let merged = project.supercov(&["runs", "latest"]).succeeds();
     contains_all(
         &merged,
         &[
             "Passed      5",
-            "merged across changes to: ",
-            "configuration",
-            "test/helpers.js",
-            "--allow-changed",
+            "merged across: ",
+            "test/helpers.js (only added items)",
+            "playwright.config.js (playwright settings; `node --test` ran under node:test)",
         ],
     );
     let json = project.supercov(&["runs", "latest", "--json"]).json();
+    assert_eq!(json["data"]["stale"], false, "{json}");
     assert!(
         json["data"]["mergedAcross"]
             .as_array()
-            .is_some_and(|across| across.iter().any(|file| file == "test/helpers.js")),
+            .is_some_and(|across| across.iter().any(|item| item
+                .as_str()
+                .is_some_and(|item| item.starts_with("test/helpers.js")))),
         "{json}"
     );
-    // It is the checkout as it is now.
-    assert_eq!(json["data"]["stale"], false, "{json}");
 
-    // With no run named, the same two, which that merge already is.
-    let summed = project.supercov(&["merge", "--allow-changed"]).succeeds();
+    // A function the earlier tests ran changing is a change to what they did.
+    project.edit("test/helpers.js", "({ name })", "({ name: name.trim() })");
+    let again = project.measure(&["test/batch.test.js"]);
+    let refused = project.supercov(&["merge", &baseline, &again]);
+    assert_eq!(refused.code(), 2, "{}", refused.stdout());
+    contains_all(
+        &refused.stderr(),
+        &[
+            "test/helpers.js changed: ",
+            "item (line 1)",
+            "pass --allow-changed if the change alters nothing its tests ran",
+        ],
+    );
+    let left = project.supercov(&["merge"]);
+    contains_all(
+        &left.stdout(),
+        &[
+            &format!("left out {baseline}"),
+            "test/helpers.js changed: ",
+            "or pass --allow-changed",
+        ],
+    );
+    // The user can say it alters nothing they ran; the merged run says so.
+    project
+        .supercov(&["merge", "--allow-changed", &baseline, &again])
+        .succeeds();
+    contains_all(
+        &project.supercov(&["runs", "latest"]).succeeds(),
+        &["test/helpers.js (accepted)", "--allow-changed"],
+    );
+
+    // Settings no runner owns -- a build's, a tool's -- may set how any test
+    // runs.
+    project.edit("test/helpers.js", "({ name: name.trim() })", "({ name })");
+    project.edit("runner.config.js", "timeout: 1000", "timeout: 2000");
+    let settings = project.measure(&["test/batch.test.js"]);
+    let refused = project.supercov(&["merge", &baseline, &settings]);
+    assert_eq!(refused.code(), 2, "{}", refused.stdout());
     assert!(
-        summed.contains("these 2 runs are already merged"),
-        "{summed}"
+        refused.stderr().contains("runner.config.js has changed"),
+        "{}",
+        refused.stderr()
     );
 
     // The product code changing is never accepted: nothing is of this
     // source, and a merge of the runs named is of the source they ran.
     project.edit("src/cart.js", "return 0;", "return 1;");
-    assert_eq!(project.supercov(&["merge", "--allow-changed"]).code(), 2);
+    let source = project.supercov(&["merge", "--allow-changed"]);
+    assert_eq!(source.code(), 2);
+    assert!(
+        source
+            .stdout()
+            .contains("the source has changed (src/cart.js)"),
+        "{}",
+        source.stdout()
+    );
     project
         .supercov(&["merge", "--allow-changed", &baseline, &batch])
         .succeeds();
     let old = project.supercov(&["runs", "latest", "--json"]).json();
     assert_eq!(old["data"]["stale"], true, "{old}");
+}
+
+#[test]
+fn a_test_is_affected_by_a_helper_its_file_loads() {
+    // A helper sits beside the tests, where nothing is measured, so no test's
+    // record names it: a change to a helper every test called left every
+    // test unaffected.
+    let project = Project::cart("affected-helper");
+    project.write(
+        "test/helpers.js",
+        "export const item = (name) => ({ name });\n",
+    );
+    project.write(
+        "test/helped.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { describe } from \"../src/cart.js\";\nimport { item } from \"./helpers.js\";\n\ntest(\"helped\", () => {\n  assert.equal(describe([item(\"a\")]), \"a\");\n});\n",
+    );
+    project.commit("helpers");
+    project.measure(&[]);
+    let affected = |project: &Project| {
+        let data = project
+            .supercov(&["runs", "latest", "tests", "affected", "--json"])
+            .json()["data"]
+            .clone();
+        data["affected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|test| {
+                (
+                    test["name"].as_str().unwrap().to_owned(),
+                    test["reasons"].to_string(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    // Only added: no test written before can have run it.
+    project.edit(
+        "test/helpers.js",
+        "\n",
+        "\n\nexport const items = (...names) => names.map(item);\n",
+    );
+    assert_eq!(affected(&project), Vec::<(String, String)>::new());
+    // A function the helped test runs: that test, and no other.
+    project.edit("test/helpers.js", "({ name })", "({ name: name.trim() })");
+    let found = affected(&project);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].0.contains("helped"), "{found:?}");
+    assert!(
+        found[0].1.contains("test/helpers.js changed: ")
+            && found[0].1.contains("item (line 1)")
+            && found[0].1.contains("(this test's file loads it)"),
+        "{found:?}"
+    );
 }
