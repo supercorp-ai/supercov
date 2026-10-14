@@ -110,6 +110,99 @@ fn incompatible_dimensions(first: &StoredRun, candidate: &StoredRun) -> Vec<&'st
     dimensions
 }
 
+/// The files a run was recorded with, from its archive.
+fn recorded_files(
+    archive: &[EvidenceArchiveEntry],
+) -> Option<(&[u8], crate::source_manifest::InputManifest)> {
+    let entry = archive
+        .iter()
+        .find(|entry| entry.path == crate::source_capture::ARCHIVE_PATH)?;
+    Some((
+        entry.contents.as_slice(),
+        serde_json::from_slice(&entry.contents).ok()?,
+    ))
+}
+
+/// Which of the runs the others can be added to, where their tests differ:
+/// the newest, when every file each of the others was recorded with is in it
+/// unchanged. That is a suite that has only gained test files since, and what
+/// an earlier run recorded of the tests it had is still what they do.
+///
+/// A file of its own tests changed or removed since a run makes that run's
+/// record a record of other tests, and adding it would count them. So does a
+/// file that is not known to be a test's, which its tests may load.
+fn latest_of_grown_tests<'a>(
+    inputs: &[&'a StoredRun],
+    archives: &'a [Vec<EvidenceArchiveEntry>],
+    known: &[StoredRun],
+) -> Result<Option<(usize, &'a [u8])>, String> {
+    let first = inputs[0];
+    if inputs.iter().all(|input| {
+        input.metadata.integrity.fingerprint.tests == first.metadata.integrity.fingerprint.tests
+    }) {
+        return Ok(None);
+    }
+    let latest = (0..inputs.len())
+        .max_by(|left, right| {
+            inputs[*left]
+                .metadata
+                .started_at
+                .cmp(&inputs[*right].metadata.started_at)
+        })
+        .expect("at least two runs");
+    let files = archives
+        .iter()
+        .map(|archive| recorded_files(archive))
+        .collect::<Vec<_>>();
+    let Some((bytes, into)) = &files[latest] else {
+        return Err(format!(
+            "Cannot merge incompatible run {}: differing domains: tests",
+            inputs[latest].id
+        ));
+    };
+    for (index, input) in inputs.iter().enumerate() {
+        if index == latest {
+            continue;
+        }
+        let Some((_, recorded)) = &files[index] else {
+            return Err(format!(
+                "Cannot merge incompatible run {}: differing domains: tests",
+                input.id
+            ));
+        };
+        // Every file known to hold tests, from every run there is: a file
+        // of some other test changing takes nothing from this run.
+        let tests = known
+            .iter()
+            .filter_map(crate::source_manifest::test_files)
+            .flatten()
+            .collect::<BTreeSet<_>>();
+        let moved = crate::source_manifest::outdated_files(
+            &recorded.files,
+            |file| into.files.get(file).map(|now| now.sha256.clone()),
+            crate::source_manifest::test_files(input).as_ref(),
+            &tests,
+        );
+        if !moved.is_empty() {
+            let named = moved.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+            let more = moved.len().saturating_sub(5);
+            return Err(format!(
+                "Cannot merge run {} with run {}: {} of the files it was recorded with {} changed or gone by then: {named}{}. A run can be added to a later one that has only gained test files; measure the changed tests again.",
+                input.id,
+                inputs[latest].id,
+                moved.len(),
+                if moved.len() == 1 { "was" } else { "were" },
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                },
+            ));
+        }
+    }
+    Ok(Some((latest, bytes)))
+}
+
 /// Merge two or more complete, compatible stored runs into one immutable run.
 pub fn merge_coverage_runs(
     root: &Path,
@@ -147,7 +240,8 @@ pub fn merge_coverage_runs(
     let first = inputs[0];
     for input in inputs.iter().skip(1) {
         let dimensions = incompatible_dimensions(first, input);
-        if !dimensions.is_empty() {
+        // Tests alone may differ; what that takes is looked at file by file.
+        if dimensions.iter().any(|dimension| *dimension != "tests") {
             return Err(format!(
                 "Cannot merge incompatible run {}: differing domains: {}",
                 input.id,
@@ -163,6 +257,7 @@ pub fn merge_coverage_runs(
                 .map_err(|error| format!("Cannot merge coverage run {}: {error}", input.id))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let grown = latest_of_grown_tests(&inputs, &archives, &inventory.runs)?;
     let manifests = archives
         .iter()
         .map(|entries| {
@@ -172,10 +267,27 @@ pub fn merge_coverage_runs(
                 .map(|entry| entry.contents.as_slice())
         })
         .collect::<Vec<_>>();
-    let Some(manifest) = manifests[0] else {
+    let Some(mut manifest) = manifests[0] else {
         return Err("Cannot merge runs with different coverage denominators".into());
     };
-    if manifests
+    if let Some((latest, _)) = grown {
+        // A test file added since is one more entry in the scope's list of
+        // what is not source. What is measured has to be the same.
+        let measured = |manifest: Option<&[u8]>| {
+            let mut value = serde_json::from_slice::<Value>(manifest?).ok()?;
+            value.as_object_mut()?.remove("scope");
+            Some(value)
+        };
+        let first = measured(manifests[0]);
+        if first.is_none()
+            || manifests
+                .iter()
+                .any(|candidate| measured(*candidate) != first)
+        {
+            return Err("Cannot merge runs with different coverage denominators".into());
+        }
+        manifest = manifests[latest].expect("measured above");
+    } else if manifests
         .iter()
         .any(|candidate| *candidate != Some(manifest))
     {
@@ -260,9 +372,17 @@ pub fn merge_coverage_runs(
                     "coverage-model.json" | "frontend.json" | "manifest.json"
                 )
             }) {
+                // One record of the files for the whole merge: the latest
+                // run's, which holds every file the others were recorded with.
+                let contents = match grown {
+                    Some((_, files)) if entry.path == crate::source_capture::ARCHIVE_PATH => {
+                        files.to_vec()
+                    }
+                    _ => rewritten_contents(&entry.contents, merged_run_id)?,
+                };
                 entries.push(EvidenceArchiveEntry {
                     path: merged_path(&entry.path, shard),
-                    contents: rewritten_contents(&entry.contents, merged_run_id)?,
+                    contents,
                 });
             }
         }
@@ -287,7 +407,12 @@ pub fn merge_coverage_runs(
                     1
                 },
             ),
-            integrity: first.metadata.integrity.clone(),
+            // Of the latest run where the tests grew: it is the one the
+            // checkout is compared with.
+            integrity: inputs[grown.map_or(0, |(latest, _)| latest)]
+                .metadata
+                .integrity
+                .clone(),
             raw_evidence: RawEvidenceMetadata {
                 schema_version: raw.schema_version,
                 format: raw.format.into(),

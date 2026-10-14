@@ -452,13 +452,56 @@ const MERGE_USAGE: &str = "Usage: supercov merge [<run-id> <run-id> ...]\n\nWith
 /// first named decides its kind.
 fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
     let inventory = public_run_inventory(root).map_err(|error| error.to_string())?;
+    // A run of this source whose tests have changed since, with the first
+    // of its test files that is not as it was: said, so that a run left out
+    // is not a run silently missing from the total.
+    let mut outdated = Vec::new();
+    // Every file known to hold tests: one of another test changing takes
+    // nothing from a run that test was not in.
+    let tests = inventory
+        .runs
+        .iter()
+        .filter_map(supercov_engine::source_manifest::test_files)
+        .flatten()
+        .collect::<std::collections::BTreeSet<_>>();
     let mut current = inventory
         .runs
         .iter()
         .filter(|run| run.metadata.merged != Some(true))
         .filter(|run| {
             current_integrity_for_run(root, run).is_some_and(|current| {
-                !compare_run_integrity(Some(&run.metadata.integrity), &current).stale
+                let recorded = &run.metadata.integrity;
+                if !compare_run_integrity(Some(recorded), &current).stale {
+                    return true;
+                }
+                // The tests have changed since. The run is still of this
+                // source when every file it was recorded with is as it was:
+                // the suite has only gained test files, which is what
+                // measuring a new test alone and adding it up comes to.
+                if recorded.fingerprint.source != current.fingerprint.source
+                    || recorded.fingerprint.dependencies != current.fingerprint.dependencies
+                    || recorded.fingerprint.configuration != current.fingerprint.configuration
+                    || recorded.fingerprint.instrumenter != current.fingerprint.instrumenter
+                {
+                    return false;
+                }
+                let Ok(files) = supercov_engine::source_manifest::load_manifest(run) else {
+                    return false;
+                };
+                let changed = supercov_engine::source_manifest::outdated_files(
+                    &files.manifest.files,
+                    |file| {
+                        fs::read_to_string(root.join(file)).ok().map(|text| {
+                            supercov_engine::source_manifest::FileFingerprint::of(&text).sha256
+                        })
+                    },
+                    supercov_engine::source_manifest::test_files(run).as_ref(),
+                    &tests,
+                );
+                if let Some(file) = changed.first() {
+                    outdated.push((*run, file.clone()));
+                }
+                changed.is_empty()
             })
         })
         .collect::<Vec<_>>();
@@ -471,6 +514,22 @@ fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
     });
     let mut commands = std::collections::BTreeSet::new();
     current.retain(|run| commands.insert((&run.metadata.command, &run.metadata.source_roots)));
+    // Not one whose command has been measured again since.
+    outdated.retain(|(run, _)| {
+        !current
+            .iter()
+            .any(|kept| kept.metadata.command == run.metadata.command)
+    });
+    outdated.sort_by(|left, right| right.0.metadata.started_at.cmp(&left.0.metadata.started_at));
+    let mut said = std::collections::BTreeSet::new();
+    outdated.retain(|(run, _)| said.insert(run.metadata.command.clone()));
+    for (run, file) in outdated.iter().take(5) {
+        println!(
+            "[supercov] left out {} ({}): {file} has changed since it ran. Measure it again to count it.",
+            run.id,
+            run.metadata.command.join(" ")
+        );
+    }
     if current.is_empty() {
         return Err(format!(
             "no run was recorded on the source as it is now, so there is nothing to merge. Measure a suite first: {} -- <test command>",
@@ -480,10 +539,19 @@ fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
     // Runs of two languages in one project are two measurements.
     let mut sets = Vec::<Vec<&StoredRun>>::new();
     for run in current {
-        match sets.iter_mut().find(|set| {
-            set[0].metadata.integrity.fingerprint.combined
-                == run.metadata.integrity.fingerprint.combined
-        }) {
+        let measured = |run: &StoredRun| {
+            let fingerprint = &run.metadata.integrity.fingerprint;
+            (
+                fingerprint.source.clone(),
+                fingerprint.dependencies.clone(),
+                fingerprint.configuration.clone(),
+                fingerprint.instrumenter.clone(),
+            )
+        };
+        match sets
+            .iter_mut()
+            .find(|set| measured(set[0]) == measured(run))
+        {
             Some(set) => set.push(run),
             None => sets.push(vec![run]),
         }

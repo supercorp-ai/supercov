@@ -4371,3 +4371,75 @@ fn merge_with_no_run_named_adds_up_the_runs_on_the_source_as_it_is() {
     project.edit("src/cart.js", "return 0;", "return 1;");
     assert_eq!(project.supercov(&["merge"]).code(), 2);
 }
+
+#[test]
+fn a_run_of_a_new_test_alone_is_added_to_the_runs_before_it() {
+    // Raising a suite's coverage one test at a time: measure only what was
+    // added, and add it to what is known. `merge` refused it ("differing
+    // domains: tests"), so every new test meant the whole suite again.
+    let project = Project::cart("merge-grown");
+    let baseline = project.measure(&[]);
+    let before = project.supercov(&["runs", &baseline]).succeeds();
+    contains_all(&before, &["76.92% (10/13)", "Total       3"]);
+
+    let add = |name: &str| {
+        project.write(
+            &format!("test/{name}.test.js"),
+            &format!(
+                "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport {{ describe }} from \"../src/cart.js\";\n\ntest(\"{name}\", () => {{\n  assert.equal(describe([{{ name: \"a\" }}]), \"a\");\n}});\n"
+            ),
+        );
+        project
+            .supercov(&["--", "node", "--test", &format!("test/{name}.test.js")])
+            .succeeds();
+        project.latest()
+    };
+    let first = add("names");
+    project.supercov(&["merge", &baseline, &first]).succeeds();
+    let merged = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&merged, &["Total       4", "Passed      4"]);
+    assert!(
+        !merged.contains("76.92%"),
+        "the added test's lines count: {merged}"
+    );
+    // It is a run of the checkout as it is, so a floor can be asked of it.
+    project
+        .supercov(&["runs", "latest", "check", "--min-lines", "80"])
+        .succeeds();
+
+    // With no run named, the same sum, and the next test added to it.
+    let second = add("more-names");
+    let summed = project.supercov(&["merge"]).succeeds();
+    contains_all(&summed, &["merging 3 runs", &baseline, &first, &second]);
+    contains_all(
+        &project.supercov(&["runs", "latest"]).succeeds(),
+        &["Total       5", "Passed      5"],
+    );
+
+    // A test changed since a run makes that run's record one of other tests.
+    project.edit(
+        "test/names.test.js",
+        "test(\"names\"",
+        "test(\"names, again\"",
+    );
+    let third = add("yet-more");
+    let refused = project.supercov(&["merge", &first, &third]);
+    assert_eq!(refused.code(), 2, "{}", refused.stdout());
+    contains_all(
+        &refused.stderr(),
+        &[
+            "1 of the files it was recorded with was changed or gone by then: test/names.test.js",
+            "measure the changed tests again",
+        ],
+    );
+    let left = project.supercov(&["merge"]).succeeds();
+    contains_all(
+        &left,
+        &[
+            &format!("left out {first}"),
+            "test/names.test.js has changed since it ran",
+            "merging 3 runs",
+        ],
+    );
+    assert!(!left.contains(&format!("  {first}")), "{left}");
+}

@@ -12,6 +12,9 @@
 - Runs of one project can be started at the same moment. A second `supercov --` was refused with `already active`, because every run rebuilt the project's one copy. Each run now takes a copy of its own (`workspace`, then `workspace-2`), held by a lock of the operating system, which gives it back when the process ends however it ends. A run alone has the first copy, as before. A copy past the first is removed a day after its last run. `runs clean` is refused, with status 2, while a run is active.
 - `supercov merge` with no run named merges the runs recorded on the source as it is now: the newest of each command, leaving out merges. A script no longer has to find what each run was called.
 - Suites started from one command, each with its own `SUPERCOV_TEST_KIND`, are one run with every kind. This worked and was written down nowhere.
+- `merge` adds a run of a new test alone to the runs before it. It refused them ("differing domains: tests") although only a test file had been added, so raising a suite's coverage one test at a time meant measuring the whole suite each time. Runs may now differ in their tests when the later have only gained test files. A run is left out, and named, when a file of its own tests or a file tests load has changed since.
+- The LCOV export has LCOV 2's `MCDC`, `MCF` and `MCH` records, so a per-file MC/DC figure can be made from the export. Read back by lcov 2.6: its condition total is the run's MC/DC.
+- A JSON reply too large for one answer says how many of the entries asked for fit, and to follow `pagination.nextOffset`. It said only that it was too large.
 
 **Fixed**
 
