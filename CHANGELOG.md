@@ -1,14 +1,14 @@
 # Changelog
 
-## Unreleased
+## 4.9.0
 
 **Added**
 
 - Browser tests of a Python server measure the server. When a Playwright suite starts a Python program -- through `webServer`, a fixture or a test -- `npx supercov -- npx playwright test` measures it, and each request runs as the test that sent it: the standard library's HTTP server, Flask, Django and FastAPI, under their own servers, gunicorn or uvicorn, streamed responses included. A request that names no test, such as a webhook, is credited by time as it is for a Node server. A project with no JavaScript source was refused ("No application source files were discovered"); one with a Node server too gets the server's Python run beside its browser run, and `merge` merges each.
-- A browser run's summary names the runs of the servers its tests drove, and each server's run names the browser run (`companions` in JSON). The pull-request comment Action reports each server's run in a section of its own, and lists a changed file as not run at all only when no run measured it.
-- A server a Python or Ruby suite runs in its own process -- a pytest-django `live_server`, Django's `LiveServerTestCase`, Capybara's Puma under a Rails system test -- credits each request to the test that process was running, by time. Its requests counted as no test's, or all as the first test's that started the server's thread.
-- Browser tests of a Go server started with `go run` measure it: the copy's Go is rewritten with probes, and what the server ran is swept every 5 ms and credited, by time, to the browser test running then, if only one was.
 - Browser tests of a Ruby server measure it the same way: a Rack app -- Rails, Sinatra or any other -- under Puma, WEBrick or another server, each request run as the test that sent it, a webhook credited by time, and the server's Ruby run published as the run or beside the browser run.
+- Browser tests of a Go server started with `go run` measure it: the copy's Go is rewritten with probes, and what the server ran is swept every 5 ms and credited, by time, to the browser test running then, if only one was.
+- A server a Python or Ruby suite runs in its own process -- a pytest-django `live_server`, Django's `LiveServerTestCase`, Capybara's Puma under a Rails system test -- credits each request to the test that process was running, by time. Its requests counted as no test's, or all as the first test's that started the server's thread.
+- A browser run's summary names the runs of the servers its tests drove, and each server's run names the browser run (`companions` in JSON). The pull-request comment Action reports each server's run in a section of its own, and lists a changed file as not run at all only when no run measured it.
 - `merge` reads what Ruby tests require (`require_relative`, a literal `require` found in the project, `autoload`, and what `.rspec` requires), so a changed Ruby helper leaves out only the runs whose tests load it. Every Ruby helper counted as loaded. A glob of support files or a change to `$LOAD_PATH` still counts every one.
 - A Python helper that only gained functions leaves every run in, as a JavaScript one does: a plain `def` that nothing written before names, with any import only it uses. A decorated function counts as a change, since a decorator runs when the module loads.
 
