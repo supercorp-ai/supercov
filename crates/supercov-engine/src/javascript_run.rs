@@ -602,6 +602,29 @@ pub fn run_direct_javascript(
         .map(javascript_frontend_reuse_paths)
         .unwrap_or_default();
     let initialization_ms = elapsed_ms(initialization_started);
+    // A server's plan is prepared while the workspace is copied and the
+    // JavaScript instrumented: parsing a large Python tree took a third of a
+    // second of every run, server or not.
+    let prepare_servers = |workspace: PathBuf| {
+        let (root, run_id, command) = (root.clone(), run_id.clone(), request.command.clone());
+        move || -> Result<Vec<Server>, String> {
+            let mut servers = Vec::new();
+            if serves_python
+                && let Some(server) =
+                    crate::python_run::PythonServer::prepare(&root, &workspace, &run_id, &command)?
+            {
+                servers.push(Server::Python(server));
+            }
+            if serves_ruby
+                && let Some(server) =
+                    crate::ruby_run::RubyServer::prepare(&root, &workspace, &run_id, &command)?
+            {
+                servers.push(Server::Ruby(server));
+            }
+            Ok(servers)
+        }
+    };
+    let preparing_servers = std::thread::spawn(prepare_servers(prior_workspace.clone()));
 
     let workspace_started = Instant::now();
     let workspace_progress = crate::progress::ProgressLine::start("preparing isolated workspace");
@@ -665,18 +688,13 @@ pub fn run_direct_javascript(
         writeln!(diagnostics, "[supercov] {detail}").map_err(|error| error.to_string())?;
     }
 
-    let mut servers = Vec::new();
-    if serves_python
-        && let Some(server) =
-            crate::python_run::PythonServer::prepare(&root, &workspace, &run_id, &request.command)?
-    {
-        servers.push(Server::Python(server));
-    }
-    if serves_ruby
-        && let Some(server) =
-            crate::ruby_run::RubyServer::prepare(&root, &workspace, &run_id, &request.command)?
-    {
-        servers.push(Server::Ruby(server));
+    let mut servers = preparing_servers
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+    // Prepared for where the workspace was to be; one moved since is
+    // prepared again for where it is.
+    if workspace != prior_workspace && !servers.is_empty() {
+        servers = prepare_servers(workspace.clone())()?;
     }
     if project.source_files.is_empty() && servers.is_empty() {
         return Err(
