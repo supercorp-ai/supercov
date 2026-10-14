@@ -421,6 +421,25 @@ npx supercov -- go test -run TestParser ./internal/...
 npx supercov -- go test ./core/... ./app/...
 ```
 
+### A Go server under browser tests
+
+A Playwright suite that starts a Go server with `go run` measures it: the copy
+the suite runs in has its Go rewritten with probes, as for `go test`, and the
+server is built from that copy. Go has no per-request context Supercov can
+carry a test's name in to every probe, so the server sweeps what ran every
+5 ms, and each sweep is credited to the browser test that was running then,
+if only one was, and said to be. Work done while two tests ran at once, as
+with parallel workers, is the run's and no test's. The server's coverage is a
+Go run of its own, published as the run or beside the browser run, as for a
+[Python server](#a-python-server-under-browser-tests).
+
+A server binary built before the run is not the one Supercov instruments:
+start it with `go run`, or build it in the test command.
+
+```sh
+npx supercov -- npx playwright test
+```
+
 ## Java and Kotlin
 
 | Runner | Attribution | Current requirement |

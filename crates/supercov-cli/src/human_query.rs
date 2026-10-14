@@ -1736,10 +1736,11 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                                 test.totals.phases
                             )
                         } else if test.attribution == "by-time" {
-                            // A webhook a mock server sent: no request named
-                            // the test, and it was the only one running.
+                            // Server work no test could be read from -- a
+                            // webhook a mock sent, a Go server's window -- that
+                            // ran while this test, and only this test, was.
                             format!(
-                                "{} lines, {} hits, {} decisions, {} phases (with server work no request named, credited by time: it ran while only this test was running)",
+                                "{} lines, {} hits, {} decisions, {} phases (with server work credited by time: it ran while only this test was running)",
                                 test.totals.lines,
                                 test.totals.hits,
                                 test.totals.decisions,

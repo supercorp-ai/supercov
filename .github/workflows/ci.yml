@@ -57,6 +57,11 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      # The Go server gate builds its server with `go run`.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
       - run: npm ci
       # Three of the scripts drive a real browser through Playwright.
       - run: npx playwright install --with-deps

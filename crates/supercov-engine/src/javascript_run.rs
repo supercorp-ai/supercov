@@ -568,7 +568,10 @@ pub fn run_direct_javascript(
     let serves_ruby = browser_suite
         && crate::ruby_project::discover_ruby_files(&root)
             .is_ok_and(|files| !files.sources.is_empty());
-    if project.source_files.is_empty() && !serves_python && !serves_ruby {
+    let serves_go = browser_suite
+        && (root.join("go.mod").is_file()
+            || !crate::go_project::workspace_modules(&root).is_empty());
+    if project.source_files.is_empty() && !serves_python && !serves_ruby && !serves_go {
         return Err(
             crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
                 .to_string()
@@ -695,6 +698,13 @@ pub fn run_direct_javascript(
     // prepared again for where it is.
     if workspace != prior_workspace && !servers.is_empty() {
         servers = prepare_servers(workspace.clone())()?;
+    }
+    // Go is rewritten in the copy, so it waits for the copy.
+    if serves_go
+        && let Some(server) =
+            crate::go_run::GoServer::prepare(&root, &workspace, &run_id, &request.command)?
+    {
+        servers.push(Server::Go(server));
     }
     if project.source_files.is_empty() && servers.is_empty() {
         return Err(
@@ -1318,6 +1328,7 @@ fn companion_run_id(run_id: &str, nth: usize) -> String {
 enum Server {
     Python(crate::python_run::PythonServer),
     Ruby(crate::ruby_run::RubyServer),
+    Go(crate::go_run::GoServer),
 }
 
 impl Server {
@@ -1325,6 +1336,7 @@ impl Server {
         match self {
             Self::Python(_) => "Python",
             Self::Ruby(_) => "Ruby",
+            Self::Go(_) => "Go",
         }
     }
 
@@ -1332,6 +1344,7 @@ impl Server {
         match self {
             Self::Python(server) => server.source_files(),
             Self::Ruby(server) => server.source_files(),
+            Self::Go(server) => server.source_files(),
         }
     }
 
@@ -1339,6 +1352,7 @@ impl Server {
         match self {
             Self::Python(server) => server.environment(),
             Self::Ruby(server) => server.environment(),
+            Self::Go(server) => server.environment(),
         }
     }
 
@@ -1355,6 +1369,9 @@ impl Server {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
             Self::Ruby(server) => {
+                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+            }
+            Self::Go(server) => {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
         }
