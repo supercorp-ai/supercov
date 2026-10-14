@@ -288,6 +288,21 @@ try {
   assert.equal(bundle.runs[0].sourceMode, "exact");
   assert.match(bundle.runs[0].sources["src/access.js"].contents, /hostile/);
   assert(bundle.runs[0].fileDetails["src/access.js"].gapLines.length > 0);
+  // The report reads the run once for every file's detail. Each is what the
+  // command line gives for that file alone.
+  const detailed = Object.keys(bundle.runs[0].fileDetails);
+  assert(detailed.length > 0);
+  for (const file of detailed) {
+    const alone = JSON.parse(execFileSync(
+      binary,
+      ["runs", bundle.runs[0].id, "file", file, "--limit", "100000", "--json"],
+      { cwd: project, encoding: "utf8", stdio: "pipe" },
+    )).data;
+    const inReport = bundle.runs[0].fileDetails[file];
+    assert.deepEqual(inReport.counts, alone.counts, file);
+    assert.deepEqual(inReport.gapLines, alone.gapLines, file);
+    assert.equal(inReport.totalTests, alone.totalTests, file);
+  }
 
   // Syntax-checking the bundle proves it parses, not that it renders. A report
   // that throws on open still passes every text assertion above, so the last gate

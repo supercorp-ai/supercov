@@ -68,7 +68,7 @@ Check what the tests assert:
 Compare, combine, and maintain:
   supercov diff <older> <newer>        compare two runs
   supercov report [run-id]             open a portable interactive HTML report
-  supercov merge <id> <id> [...]       combine compatible runs
+  supercov merge [<id> <id> ...]       combine runs; with none, those on the current source
   supercov runs clean [--keep N]       remove stored runs (all by default)
   supercov quality clean [--keep N]    remove saved assessments
 
@@ -392,7 +392,7 @@ fn merge_command(run_ids: Vec<String>) -> ExitCode {
         .iter()
         .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
-        println!("Usage: supercov merge <run-id> <run-id> [...]");
+        println!("{MERGE_USAGE}");
         return ExitCode::SUCCESS;
     }
     let root = match std::env::current_dir() {
@@ -402,24 +402,197 @@ fn merge_command(run_ids: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (run_id, started_at) = match public_run_identity() {
-        Ok(identity) => identity,
-        Err(error) => {
-            eprintln!("[supercov] {error}");
-            return ExitCode::from(2);
+    // With no run named, the runs made on the source as it is now: what a
+    // script that ran its suites one by one, or side by side, has to add up
+    // without knowing what any of them was called.
+    let groups = if run_ids.is_empty() {
+        match runs_on_this_source(&root) {
+            Ok(groups) => groups,
+            Err(error) => {
+                eprintln!("[supercov] {error}");
+                return ExitCode::from(2);
+            }
         }
+    } else {
+        vec![run_ids]
     };
-    match supercov_engine::run_merge::merge_coverage_runs(&root, &run_ids, &run_id, &started_at) {
-        Ok(merged) => {
-            println!("[supercov] merged run {merged}");
-            println!("{} runs {merged}", launcher_command());
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("[supercov] {error}");
-            ExitCode::from(2)
+    for run_ids in groups {
+        let (run_id, started_at) = match public_run_identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                eprintln!("[supercov] {error}");
+                return ExitCode::from(2);
+            }
+        };
+        match supercov_engine::run_merge::merge_coverage_runs(&root, &run_ids, &run_id, &started_at)
+        {
+            Ok(merged) => {
+                println!("[supercov] merged run {merged}");
+                println!("{} runs {merged}", launcher_command());
+            }
+            Err(error) => {
+                eprintln!("[supercov] {error}");
+                return ExitCode::from(2);
+            }
         }
     }
+    ExitCode::SUCCESS
+}
+
+const MERGE_USAGE: &str = "Usage: supercov merge [<run-id> <run-id> ...]\n\nWith no run named, merges the runs recorded on the source as it is now: the newest of each\ncommand, leaving out runs that are themselves a merge.";
+
+/// The runs to merge when none is named, newest first, one list for each
+/// set that can be one run.
+///
+/// A run counts when the checkout has not moved on from it, which is the
+/// condition merging puts on its inputs anyway. Of a command run more than
+/// once only the newest is taken: a test that failed and then passed is
+/// reported failed by a merge of both, so a suite run again must replace its
+/// first attempt. Newest first, because where two runs hold one test the
+/// first named decides its kind.
+fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
+    let inventory = public_run_inventory(root).map_err(|error| error.to_string())?;
+    // A run of this source whose tests have changed since, with the first
+    // of its test files that is not as it was: said, so that a run left out
+    // is not a run silently missing from the total.
+    let mut outdated = Vec::new();
+    // Every file known to hold tests: one of another test changing takes
+    // nothing from a run that test was not in.
+    let tests = inventory
+        .runs
+        .iter()
+        .filter_map(supercov_engine::source_manifest::test_files)
+        .flatten()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut current = inventory
+        .runs
+        .iter()
+        .filter(|run| run.metadata.merged != Some(true))
+        .filter(|run| {
+            current_integrity_for_run(root, run).is_some_and(|current| {
+                let recorded = &run.metadata.integrity;
+                if !compare_run_integrity(Some(recorded), &current).stale {
+                    return true;
+                }
+                // The tests have changed since. The run is still of this
+                // source when every file it was recorded with is as it was:
+                // the suite has only gained test files, which is what
+                // measuring a new test alone and adding it up comes to.
+                if recorded.fingerprint.source != current.fingerprint.source
+                    || recorded.fingerprint.dependencies != current.fingerprint.dependencies
+                    || recorded.fingerprint.configuration != current.fingerprint.configuration
+                    || recorded.fingerprint.instrumenter != current.fingerprint.instrumenter
+                {
+                    return false;
+                }
+                let Ok(files) = supercov_engine::source_manifest::load_manifest(run) else {
+                    return false;
+                };
+                let changed = supercov_engine::source_manifest::outdated_files(
+                    &files.manifest.files,
+                    |file| {
+                        fs::read_to_string(root.join(file)).ok().map(|text| {
+                            supercov_engine::source_manifest::FileFingerprint::of(&text).sha256
+                        })
+                    },
+                    supercov_engine::source_manifest::test_files(run).as_ref(),
+                    &tests,
+                );
+                if let Some(file) = changed.first() {
+                    outdated.push((*run, file.clone()));
+                }
+                changed.is_empty()
+            })
+        })
+        .collect::<Vec<_>>();
+    current.sort_by(|left, right| {
+        right
+            .metadata
+            .started_at
+            .cmp(&left.metadata.started_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    let mut commands = std::collections::BTreeSet::new();
+    current.retain(|run| commands.insert((&run.metadata.command, &run.metadata.source_roots)));
+    // Not one whose command has been measured again since.
+    outdated.retain(|(run, _)| {
+        !current
+            .iter()
+            .any(|kept| kept.metadata.command == run.metadata.command)
+    });
+    outdated.sort_by(|left, right| right.0.metadata.started_at.cmp(&left.0.metadata.started_at));
+    let mut said = std::collections::BTreeSet::new();
+    outdated.retain(|(run, _)| said.insert(run.metadata.command.clone()));
+    for (run, file) in outdated.iter().take(5) {
+        println!(
+            "[supercov] left out {} ({}): {file} has changed since it ran. Measure it again to count it.",
+            run.id,
+            run.metadata.command.join(" ")
+        );
+    }
+    if current.is_empty() {
+        return Err(format!(
+            "no run was recorded on the source as it is now, so there is nothing to merge. Measure a suite first: {} -- <test command>",
+            launcher_command()
+        ));
+    }
+    // Runs of two languages in one project are two measurements.
+    let mut sets = Vec::<Vec<&StoredRun>>::new();
+    for run in current {
+        let measured = |run: &StoredRun| {
+            let fingerprint = &run.metadata.integrity.fingerprint;
+            (
+                fingerprint.source.clone(),
+                fingerprint.dependencies.clone(),
+                fingerprint.configuration.clone(),
+                fingerprint.instrumenter.clone(),
+            )
+        };
+        match sets
+            .iter_mut()
+            .find(|set| measured(set[0]) == measured(run))
+        {
+            Some(set) => set.push(run),
+            None => sets.push(vec![run]),
+        }
+    }
+    let mut groups = Vec::new();
+    for set in sets {
+        let ids = set.iter().map(|run| run.id.clone()).collect::<Vec<_>>();
+        if let [only] = set.as_slice() {
+            println!(
+                "[supercov] one run on the source as it is now, {} ({}): nothing to merge it with",
+                only.id,
+                only.metadata.command.join(" ")
+            );
+            continue;
+        }
+        // The same runs merged before are that merge.
+        let wanted = ids.iter().collect::<std::collections::BTreeSet<_>>();
+        if let Some(merged) = inventory.runs.iter().find(|run| {
+            run.metadata.merged == Some(true)
+                && run.metadata.parents.as_ref().is_some_and(|parents| {
+                    parents.iter().collect::<std::collections::BTreeSet<_>>() == wanted
+                })
+        }) {
+            println!(
+                "[supercov] these {} runs are already merged as {}",
+                ids.len(),
+                merged.id
+            );
+            println!("{} runs {}", launcher_command(), merged.id);
+            continue;
+        }
+        println!(
+            "[supercov] merging {} runs on the source as it is now:",
+            ids.len()
+        );
+        for run in &set {
+            println!("  {}  {}", run.id, run.metadata.command.join(" "));
+        }
+        groups.push(ids);
+    }
+    Ok(groups)
 }
 
 const PUBLIC_TIMESTAMP_FORMAT: &[time::format_description::BorrowedFormatItem<'static>] =
@@ -1195,6 +1368,17 @@ fn process_exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
+/// The status of a run that never measured anything. One that could not
+/// start because the project's storage was being cleaned is Supercov's not
+/// completing the request, which is 2: 1 reads as the tests failing.
+fn could_not_measure(error: &str) -> ExitCode {
+    if error.contains("storage is being cleaned") {
+        ExitCode::from(2)
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     let command_started = Instant::now();
     let command_ms = || command_started.elapsed().as_secs_f64() * 1000.0;
@@ -1310,7 +1494,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1376,7 +1560,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1415,7 +1599,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1456,7 +1640,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1497,7 +1681,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
-                ExitCode::from(1)
+                could_not_measure(&error)
             }
         };
     }
@@ -1542,7 +1726,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         }
         Err(error) => {
             eprintln!("[supercov] {error}");
-            ExitCode::from(1)
+            could_not_measure(&error.to_string())
         }
     }
 }
@@ -2050,8 +2234,13 @@ fn execute_public_query(
                             .filter_map(|entry| entry.kind.clone())
                             .collect::<Vec<_>>();
                         data.hints = full_suite_hints(root, &run.metadata.command, &observed_kinds);
-                        data.workspace = supercov_engine::workspace::cached_workspace_path(root)
-                            .ok()
+                        // The copy the run's command ran in, while it is there.
+                        data.workspace = run
+                            .metadata
+                            .copy
+                            .and_then(|copy| {
+                                supercov_engine::workspace::copy_path(root, copy).ok()
+                            })
                             .filter(|path| path.is_dir())
                             .map(|path| path.display().to_string());
                     }

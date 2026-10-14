@@ -14,7 +14,7 @@ use supercov_engine::{
     coverage_index::{CoverageIndex, CoverageViewId, IndexedFileGap},
     coverage_query::{
         CoverageFileDetailOptions, CoverageScopeQueryOptions, CoverageSummaryQueryOptions,
-        coverage_file_detail_query, coverage_scope_query, coverage_summary_query,
+        FileDetailSource, coverage_file_detail_from, coverage_scope_query, coverage_summary_query,
     },
     run_store::{StoredRun, compare_run_integrity, open_or_rebuild_query_index, select_run},
 };
@@ -404,12 +404,15 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
         .file_gaps(CoverageViewId::All, None, None)
         .map_err(|error| format!("could not read files for run {}: {error}", run.id))?;
     let mut file_details = BTreeMap::new();
+    // The run is read once for every file's detail, not once for each.
+    let read = FileDetailSource::read(&index, CoverageViewId::All)
+        .map_err(|error| format!("could not read run {}: {error:?}", run.id))?;
     for file in files
         .iter()
         .filter(|file| file.score > 0 || file.measurement_limitations > 0)
     {
-        let (detail, _) = coverage_file_detail_query(
-            &index,
+        let (detail, _) = coverage_file_detail_from(
+            &read,
             CoverageFileDetailOptions {
                 run: &run.id,
                 view: CoverageViewId::All,
@@ -429,10 +432,7 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
     }
 
     let mut file_totals: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    for hit in index
-        .hit_metadata(CoverageViewId::All)
-        .map_err(|error| format!("could not read file totals for run {}: {error}", run.id))?
-    {
+    for hit in read.points() {
         let kind = match hit.obligation.as_str() {
             "statement" => "statements",
             "function" => "functions",
@@ -440,52 +440,49 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
             _ => continue,
         };
         *file_totals
-            .entry(hit.file)
+            .entry(hit.file.clone())
             .or_default()
             .entry(kind.into())
             .or_default() += 1;
     }
 
-    let decisions = index
-        .decision_details(CoverageViewId::All)
-        .map_err(|error| format!("could not read decisions for run {}: {error}", run.id))?;
-    let tests = index
-        .test_details(CoverageViewId::All)
-        .map_err(|error| format!("could not read tests for run {}: {error}", run.id))?
-        .into_iter()
+    let decisions = read.decisions();
+    let tests = read
+        .tests()
+        .iter()
         .map(|test| {
             let total_lines = test.lines.len();
             let total_hits = test.hits.len();
             let total_decisions = test.decisions.len();
             Ok(ReportTest {
-                id: test.summary.id,
-                name: test.summary.name,
-                file: test.summary.file,
-                title: test.summary.title,
-                outcome: test.summary.outcome,
-                role: test.summary.role,
-                runner: test.summary.provenance.runner,
-                kind: test.summary.provenance.kind,
-                project: test.summary.provenance.project,
-                retries: test.retries,
-                attempts: serde_json::to_value(test.attempts).map_err(|error| error.to_string())?,
-                lines: serde_json::to_value(test.lines).map_err(|error| error.to_string())?,
+                id: test.summary.id.clone(),
+                name: test.summary.name.clone(),
+                file: test.summary.file.clone(),
+                title: test.summary.title.clone(),
+                outcome: test.summary.outcome.clone(),
+                role: test.summary.role.clone(),
+                runner: test.summary.provenance.runner.clone(),
+                kind: test.summary.provenance.kind.clone(),
+                project: test.summary.provenance.project.clone(),
+                retries: test.retries.clone(),
+                attempts: serde_json::to_value(&test.attempts)
+                    .map_err(|error| error.to_string())?,
+                lines: serde_json::to_value(&test.lines).map_err(|error| error.to_string())?,
                 total_lines,
                 total_hits,
                 total_decisions,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let lines = index
-        .lines(CoverageViewId::All)
-        .map_err(|error| format!("could not read lines for run {}: {error}", run.id))?
-        .into_iter()
+    let lines = read
+        .lines()
+        .iter()
         .map(|line| ReportLine {
-            file: line.file,
+            file: line.file.clone(),
             line: line.line,
             covered: line.covered,
-            confidence: line.confidence.level,
-            tests: line.tests,
+            confidence: line.confidence.level.clone(),
+            tests: line.tests.clone(),
         })
         .collect();
     let scope = match coverage_scope_query(

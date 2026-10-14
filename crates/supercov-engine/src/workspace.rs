@@ -239,9 +239,36 @@ pub fn planted_cargo_configuration(root: &Path, workspace: &Path) -> Option<Path
         .find(|path| fs::symlink_metadata(path).is_ok())
 }
 
-pub fn cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
+/// The directory, in the container, that holds a copy of the project:
+/// `workspace` for the first, the one a run alone takes, and `workspace-2`
+/// for the one a run takes while the first is in use.
+fn copy_directory_name(copy: usize) -> String {
+    if copy <= 1 {
+        "workspace".into()
+    } else {
+        format!("workspace-{copy}")
+    }
+}
+
+/// Everything in the container that belongs to one copy: the copy, and the
+/// view of the author's source kept beside it.
+pub(crate) fn copy_directories(container: &Path, copy: usize) -> [PathBuf; 2] {
+    let name = copy_directory_name(copy);
+    [
+        container.join(&name),
+        container.join(name.replacen("workspace", "source", 1)),
+    ]
+}
+
+/// Where the copy a run holds is.
+pub fn cached_workspace_path(root: &Path, lock: &ProjectLock) -> Result<PathBuf, WorkspaceError> {
+    copy_path(root, lock.copy())
+}
+
+/// Where one of the project's copies is, by its number.
+pub fn copy_path(root: &Path, copy: usize) -> Result<PathBuf, WorkspaceError> {
     Ok(workspace_container(root)
-        .join("workspace")
+        .join(copy_directory_name(copy))
         .join(project_name(root)?))
 }
 
@@ -278,14 +305,29 @@ fn ensure_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(&container).map_err(|source| io_error(&container, source))?;
+            let store = container.parent().expect("container parent");
+            fs::create_dir_all(store).map_err(|source| io_error(store, source))?;
             // One directory covers everything Supercov writes; make Git
             // ignore it without the user touching their own .gitignore.
             let store_ignore = root.join(".supercov/.gitignore");
             if fs::symlink_metadata(&store_ignore).is_err() {
                 let _ = fs::write(&store_ignore, b"*\n");
             }
-            created = true;
+            // Made complete and then named, in one step. A run starting at
+            // the same moment took a container that existed and did not yet
+            // hold its marker for someone else's directory, kept its copy in
+            // another, and then could not find it.
+            let made = store.join(format!(".workspaces-{}", unique()));
+            fs::create_dir(&made).map_err(|source| io_error(&made, source))?;
+            fs::write(made.join(WORKSPACE_MARKER), WORKSPACE_MARKER_CONTENTS)
+                .map_err(|source| io_error(&made, source))?;
+            match fs::rename(&made, &container) {
+                Ok(()) => created = true,
+                // Another run named its own first.
+                Err(_) => {
+                    let _ = fs::remove_dir_all(&made);
+                }
+            }
         }
         Err(source) => return Err(io_error(&container, source)),
     }
@@ -908,8 +950,12 @@ fn transaction_prefix(root: &Path, kind: &str) -> Result<String, WorkspaceError>
     ))
 }
 
-fn transaction_path(root: &Path, kind: &str) -> Result<PathBuf, WorkspaceError> {
-    let workspace = cached_workspace_path(root)?;
+fn transaction_path(
+    root: &Path,
+    lock: &ProjectLock,
+    kind: &str,
+) -> Result<PathBuf, WorkspaceError> {
+    let workspace = cached_workspace_path(root, lock)?;
     Ok(workspace.parent().expect("workspace parent").join(format!(
         "{}{}",
         transaction_prefix(root, kind)?,
@@ -930,7 +976,7 @@ pub fn recover_cached_workspace(
     lock: &ProjectLock,
 ) -> Result<CacheRecoveryResult, WorkspaceError> {
     require_lock(root, lock)?;
-    let workspace = cached_workspace_path(root)?;
+    let workspace = cached_workspace_path(root, lock)?;
     let parent = workspace.parent().expect("workspace parent");
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
@@ -1026,9 +1072,9 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
     require_lock(root, lock)?;
     ensure_container(root)?;
     recover_cached_workspace(root, lock)?;
-    let workspace = cached_workspace_path(root)?;
-    let staging = transaction_path(root, "staging")?;
-    let previous = transaction_path(root, "previous")?;
+    let workspace = cached_workspace_path(root, lock)?;
+    let staging = transaction_path(root, lock, "staging")?;
+    let previous = transaction_path(root, lock, "previous")?;
     let result = (|| {
         let canonical_root =
             canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
@@ -1889,7 +1935,7 @@ pub fn prune_cached_workspace_sources(
     lock: &ProjectLock,
 ) -> Result<Vec<String>, WorkspaceError> {
     require_lock(root, lock)?;
-    let workspace = cached_workspace_path(root)?;
+    let workspace = cached_workspace_path(root, lock)?;
     if fs::symlink_metadata(&workspace).is_err() {
         return Ok(Vec::new());
     }
@@ -2547,7 +2593,7 @@ mod tests {
     }
 
     fn transaction_debris(root: &Path) -> Vec<String> {
-        let workspace = cached_workspace_path(root).unwrap();
+        let workspace = copy_path(root, 1).unwrap();
         let prefix = format!(".{}.", project_name(root).unwrap().to_string_lossy());
         fs::read_dir(workspace.parent().unwrap())
             .unwrap()
@@ -3029,7 +3075,7 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         ensure_container(&root).unwrap();
-        let workspace = cached_workspace_path(&root).unwrap();
+        let workspace = cached_workspace_path(&root, &lock).unwrap();
         let parent = workspace.parent().unwrap();
         fs::create_dir_all(parent).unwrap();
         let previous = parent.join(format!(

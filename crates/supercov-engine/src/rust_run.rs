@@ -244,7 +244,7 @@ pub fn run_direct_rust(
 
         let workspace_started = Instant::now();
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
-        let workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
+        let workspace = cached_workspace_path(&root, &lock).map_err(|error| error.to_string())?;
         if let Some(planted) = crate::workspace::planted_cargo_configuration(&root, &workspace) {
             return Err(format!(
                 "{} would change how Supercov builds the project but not how `cargo test` does; remove it",
@@ -426,6 +426,7 @@ pub fn run_direct_rust(
             merged: None,
             parents: None,
             source_roots: source_roots.clone(),
+            copy: Some(lock.copy()),
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
@@ -450,7 +451,7 @@ pub fn run_direct_rust(
     if result.is_err() {
         let _ =
             remove_stored_tree_deferred(&root, &root.join(".supercov/work").join(&request.run_id));
-        if let Ok(workspace) = cached_workspace_path(&root) {
+        if let Ok(workspace) = cached_workspace_path(&root, &lock) {
             let _ = remove_stored_tree_deferred(
                 &root,
                 &workspace
