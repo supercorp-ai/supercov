@@ -182,6 +182,12 @@ pub struct ServerRecord {
     pub statement_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ExecutionScope>,
+    /// Made while the server handled a request that named no test -- a
+    /// webhook a mock server sends -- numbered per request in its process.
+    /// Only such work is credited by time: start-up and a test process's own
+    /// module loading are not a request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,11 +302,78 @@ pub const ATTRIBUTION_RUN_WIDE: &str = "run-wide";
 /// prove what it ran and its silence proves nothing.
 pub const ATTRIBUTION_PARTIAL: &str = "partial";
 
+/// Exact, and credited besides with server work that no request named: work
+/// an app server did while this test, and no other, was running -- a webhook
+/// a mock server sends, a job the test set off. Credited by the time it ran.
+///
+/// What the test is recorded as reaching is still all its own work, so its
+/// silence still means it did not run the code; the credited work may in
+/// rare cases be another test's, finished late, which adds to this test's
+/// reach and never hides any of it.
+pub const ATTRIBUTION_BY_TIME: &str = "by-time";
+
+/// Server work for a request that named no test -- a webhook a mock server
+/// sends -- done while one test, and only one, was running is that test's,
+/// credited by the time it ran. Where tests ran at once, or none was
+/// running (start-up, between tests), it stays no test's, and is returned.
+///
+/// A test's time is from its first phase to the end of its last: what it did
+/// is known to fall inside, and work after it is left alone rather than
+/// guessed at.
+fn credit_by_time(
+    raw_results: &mut [RawTestResult],
+    records: Vec<ServerRecord>,
+) -> Vec<ServerRecord> {
+    let windows = raw_results
+        .iter()
+        .enumerate()
+        .filter(|(_, raw)| raw.role != "background")
+        .filter_map(|(index, raw)| {
+            let start = raw.phases.iter().map(|phase| phase.started_at_ms).min()?;
+            let end = raw
+                .phases
+                .iter()
+                .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
+                .max()?;
+            Some((index, start, end))
+        })
+        .collect::<Vec<_>>();
+    let mut unattributed = Vec::new();
+    // A request's work appears once per request; what stays no test's is
+    // counted once.
+    let mut kept = std::collections::HashSet::new();
+    for record in records {
+        let owner = record.request.and(record.timestamp_ms).and_then(|at| {
+            let mut running = windows
+                .iter()
+                .filter(|(_, start, end)| *start <= at && at <= *end);
+            let only = running.next()?;
+            running.next().is_none().then_some(only.0)
+        });
+        match owner {
+            Some(index) => {
+                let raw = &mut raw_results[index];
+                raw.attribution = least_exact(&raw.attribution, ATTRIBUTION_BY_TIME);
+                raw.server.push(record);
+            }
+            None => {
+                let mut record = record;
+                record.request = None;
+                if kept.insert(serde_json::to_vec(&record).unwrap_or_default()) {
+                    unattributed.push(record);
+                }
+            }
+        }
+    }
+    unattributed
+}
+
 /// Of two attributions for one test, the one that claims less.
 fn least_exact(left: &str, right: &str) -> String {
     let rank = |attribution: &str| match attribution {
-        ATTRIBUTION_RUN_WIDE => 2,
-        ATTRIBUTION_PARTIAL => 1,
+        ATTRIBUTION_RUN_WIDE => 3,
+        ATTRIBUTION_PARTIAL => 2,
+        ATTRIBUTION_BY_TIME => 1,
         _ => 0,
     };
     if rank(right) > rank(left) {
@@ -328,7 +401,7 @@ pub fn coverage_is_its_own(attribution: &str) -> bool {
 /// an absence as proof is how a change to code a test exercised comes back as
 /// "this test is unaffected".
 pub fn coverage_is_complete(attribution: &str) -> bool {
-    attribution == ATTRIBUTION_EXACT || attribution.is_empty()
+    attribution == ATTRIBUTION_EXACT || attribution == ATTRIBUTION_BY_TIME || attribution.is_empty()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2829,7 +2902,7 @@ pub fn analyze_coverage_archive(
     let background = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
         entry.path.starts_with("server/background/") && entry.path.ends_with(".jsonl")
     }));
-    let background_records = background.records;
+    let background_records = credit_by_time(&mut raw_results, background.records);
     if !background_records.is_empty() {
         raw_results.push(RawTestResult {
             test_id: Some(format!("background:{}", request.run_id)),
@@ -3213,6 +3286,71 @@ mod tests {
             browser: vec![],
             server: vec![],
         }
+    }
+
+    #[test]
+    fn server_work_no_request_named_is_credited_to_the_only_test_running() {
+        let phase = |start: i64, end: i64| CoveragePhase {
+            id: format!("phase-{start}"),
+            kind: "action".into(),
+            operation: "get".into(),
+            source: None,
+            caused_by_phase_id: None,
+            started_at_ms: start,
+            ended_at_ms: Some(end),
+            status: None,
+            error: None,
+        };
+        let at = |timestamp: i64| ServerRecord {
+            record_type: "hit".into(),
+            meta: None,
+            vector: None,
+            id: Some(format!("hit-{timestamp}")),
+            timestamp_ms: Some(timestamp),
+            phase_id: None,
+            statement_id: None,
+            scope: None,
+            request: Some(timestamp as u64),
+        };
+        // Module loading in a test process: no request, never credited.
+        let mut loading = at(170);
+        loading.request = None;
+        let mut first = raw("checkout", 0, "passed", &[]);
+        first.phases = vec![phase(100, 150), phase(160, 200)];
+        let mut second = raw("refund", 0, "passed", &[]);
+        second.phases = vec![phase(300, 400)];
+        // A third that overlaps the second: they ran at once.
+        let mut beside = raw("report", 0, "passed", &[]);
+        beside.phases = vec![phase(350, 450)];
+        let mut results = vec![first, second, beside];
+        let left = credit_by_time(
+            &mut results,
+            vec![at(50), at(155), loading, at(320), at(360), at(500)],
+        );
+        // During the first test, between two of its phases: its own.
+        assert_eq!(results[0].server.len(), 1);
+        assert_eq!(results[0].attribution, ATTRIBUTION_BY_TIME);
+        // While the second ran alone: its own.
+        assert_eq!(results[1].server.len(), 1);
+        assert_eq!(results[1].attribution, ATTRIBUTION_BY_TIME);
+        // Before any test, while two ran at once, and after all: no test's.
+        assert_eq!(results[2].server.len(), 0);
+        assert_eq!(results[2].attribution, ATTRIBUTION_EXACT);
+        let left = left
+            .iter()
+            .filter_map(|record| record.timestamp_ms)
+            .collect::<Vec<_>>();
+        assert_eq!(left, [50, 170, 360, 500]);
+        // Still complete: the credit adds to the test's reach, never hides it.
+        assert!(coverage_is_complete(ATTRIBUTION_BY_TIME));
+        assert_eq!(
+            least_exact(ATTRIBUTION_BY_TIME, ATTRIBUTION_PARTIAL),
+            ATTRIBUTION_PARTIAL
+        );
+        assert_eq!(
+            least_exact(ATTRIBUTION_EXACT, ATTRIBUTION_BY_TIME),
+            ATTRIBUTION_BY_TIME
+        );
     }
 
     #[test]

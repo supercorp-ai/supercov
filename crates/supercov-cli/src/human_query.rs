@@ -489,6 +489,14 @@ fn attribution_line(counts: &supercov_engine::coverage_query::TestAttributionCou
     if counts.exact > 0 {
         parts.push(format!("{} exact", count(counts.exact)));
     }
+    if counts.by_time > 0 {
+        // A webhook a mock server sent, a job the test set off: no request
+        // named the test, and it was the only one running.
+        parts.push(format!(
+            "{} with server work credited by time",
+            count(counts.by_time)
+        ));
+    }
     if counts.partial > 0 {
         // Ruby records a line for the first test that reaches it, so a later
         // test running the same line is credited with none of it.
@@ -1708,6 +1716,16 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                                 test.totals.decisions,
                                 test.totals.phases
                             )
+                        } else if test.attribution == "by-time" {
+                            // A webhook a mock server sent: no request named
+                            // the test, and it was the only one running.
+                            format!(
+                                "{} lines, {} hits, {} decisions, {} phases (with server work no request named, credited by time: it ran while only this test was running)",
+                                test.totals.lines,
+                                test.totals.hits,
+                                test.totals.decisions,
+                                test.totals.phases
+                            )
                         } else {
                             format!(
                                 "{} lines, {} hits, {} decisions, {} phases",
@@ -2234,6 +2252,7 @@ mod tests {
 
         let counts = |exact, partial, run_wide| TestAttributionCounts {
             exact,
+            by_time: 0,
             partial,
             run_wide,
         };
@@ -2256,6 +2275,16 @@ mod tests {
             !lower_bound.contains("--exact-attribution"),
             "nothing here is bought by running in order: {lower_bound}"
         );
+
+        // Server work a test set off and no request named, credited to the
+        // only test running at the time, is said to be.
+        let by_time = attribution_line(&TestAttributionCounts {
+            exact: 1,
+            by_time: 1,
+            partial: 0,
+            run_wide: 0,
+        });
+        assert_eq!(by_time, "1 exact, 1 with server work credited by time");
 
         // A mixed run names each part rather than rounding to the worst.
         let mixed = attribution_line(&counts(5, 0, 2));
