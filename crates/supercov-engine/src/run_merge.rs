@@ -533,6 +533,7 @@ pub fn merge_coverage_runs(
             source_roots: None,
             copy: None,
             recorded_by: None,
+            companions: None,
             merged_across: grown
                 .as_ref()
                 .map(|grown| grown.across.clone())

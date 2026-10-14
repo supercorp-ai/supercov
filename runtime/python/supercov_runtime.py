@@ -390,6 +390,8 @@ class Runtime:
         self.under_root = False
         self.context = contextvars.ContextVar("supercov_python_context", default=0)
         self.identities: dict[int, dict] = {}
+        # The phase a test started this process in, through SUPERCOV_CONTEXT.
+        self.inherited_identity = None
         self.next_context = 1
         self.asserted: set[int] = set()
         # (context, file, line) of every site probe already handled.
@@ -1269,6 +1271,7 @@ class Runtime:
                 identity = _inherited_identity(inherited)
                 if identity is not None:
                     self.switch(identity)
+                    self.inherited_identity = self.current_identity()
             except (ValueError, KeyError, TypeError):
                 self.limitation("python-inherited-context-invalid", "SUPERCOV_CONTEXT was not a valid Supercov identity")
         atexit.register(self.close)
@@ -1435,8 +1438,57 @@ def _scope_header(scope):
     return header
 
 
+class _RequestBody:
+    """A WSGI response body that runs as the request it answers: entered at
+    its first chunk, left when it ends or is closed. The server's own code
+    between chunks is not the project's and records nothing.
+
+    `close` is forwarded, as WSGI requires of a wrapper; nothing else of the
+    body is, so a server's `wsgi.file_wrapper` fast path falls back to
+    iterating, which is what lets each chunk be measured as the request's.
+    """
+
+    def __init__(self, runtime, body, identity):
+        self._runtime, self._body, self._identity = runtime, body, identity
+        self._chunks = None
+        self._leave = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        runtime = self._runtime
+        if self._leave is None:
+            self._leave = runtime.context.get()
+            runtime.switch(self._identity)
+        try:
+            if self._chunks is None:
+                self._chunks = iter(self._body)
+            return next(self._chunks)
+        except StopIteration:
+            self._exit()
+            raise
+
+    def _exit(self):
+        if self._leave is not None:
+            leave, self._leave = self._leave, None
+            self._runtime.switch(self._runtime.identities.get(leave))
+
+    def close(self):
+        close = getattr(self._body, "close", None)
+        try:
+            if close is not None:
+                if self._leave is None:
+                    self._leave = self._runtime.context.get()
+                    self._runtime.switch(self._identity)
+                close()
+        finally:
+            self._exit()
+
+
 REQUEST_WORKER = "supercov-request"
 _requests = itertools.count(1)
+_in_request = contextvars.ContextVar("supercov_in_request", default=False)
 
 
 def _enter_request(runtime, identity):
@@ -1446,24 +1498,32 @@ def _enter_request(runtime, identity):
     library's server).
 
     A request that names no test -- a webhook from a mock Supercov does not
-    measure -- runs as a numbered request of its own, which the report gives
-    to the test that was running when it came, if only one was."""
+    measure, a browser's request to a live server a pytest suite runs in a
+    thread -- runs as a numbered request of its own, which the report gives
+    to the test that was running when it came, if only one was. Not as the
+    phase its thread was started in: a live server started in the first
+    test's setup made every request that setup's. A process a test started
+    stays that test's."""
     if identity is None:
-        current = runtime.current_identity()
-        if current is not None:
-            # Already a request of this server's, or a test's own process.
+        if _in_request.get() or runtime.inherited_identity is not None:
             return None
         identity = {"worker": REQUEST_WORKER, "test": str(next(_requests)), "retry": 0, "phase": "call"}
     elif runtime.current_identity() == identity:
         return None
     leave = runtime.context.get()
     runtime.switch(identity)
-    return leave
+    return leave, _in_request.set(True)
 
 
-def _leave_request(runtime, leave):
-    if leave is not None:
+def _leave_request(runtime, entered):
+    if entered is not None:
+        leave, token = entered
         runtime.switch(runtime.identities.get(leave))
+        try:
+            _in_request.reset(token)
+        except (ValueError, RuntimeError):
+            # Left from another context than it was entered in.
+            _in_request.set(False)
 
 
 def _install_propagation(runtime: Runtime) -> None:
@@ -1609,7 +1669,13 @@ def _install_propagation(runtime: Runtime) -> None:
         def entry(application, environ, start_response):
             leave = _enter_request(runtime, _request_identity(_environ_header(environ)))
             try:
-                return original(application, environ, start_response)
+                body = original(application, environ, start_response)
+                active = runtime.current_identity()
+                # A streamed body runs as the server iterates it, after this
+                # returns: each chunk runs as the request did.
+                if active is None or isinstance(body, (list, tuple, bytes)):
+                    return body
+                return _RequestBody(runtime, body, active)
             finally:
                 _leave_request(runtime, leave)
 

@@ -2473,6 +2473,7 @@ fn execute_public_query(
                     {
                         data.command.clone_from(&run.metadata.command);
                         data.merged_across = run.metadata.merged_across.clone().unwrap_or_default();
+                        data.companions = run.metadata.companions.clone().unwrap_or_default();
                         data.assertion_coverage = Some(match assertions_command::saved(run) {
                             Some(result) => serde_json::json!({"available": true, "summary": result["summary"], "basis": result["basis"], "model": result["model"]}),
                             None => serde_json::json!({"available": false, "assess": format!("{} runs {} assertions assess", crate::launcher_command(), run.id)}),

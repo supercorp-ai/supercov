@@ -856,6 +856,25 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 // were then.
                 lines.push(format!("merged across: {}", data.merged_across.join("; ")));
             }
+            // A server's coverage is a run of its own: said where the
+            // browser run is read, which is where it would be looked for.
+            for companion in &data.companions {
+                lines.push(match companion.role.as_str() {
+                    "server" => format!(
+                        "{} server: run {} -- {} runs {}",
+                        companion.language,
+                        companion.id,
+                        crate::launcher_command(),
+                        companion.id
+                    ),
+                    _ => format!(
+                        "tests from: the browser run {} -- {} runs {}",
+                        companion.id,
+                        crate::launcher_command(),
+                        companion.id
+                    ),
+                });
+            }
             if !data.valid {
                 // Calm but unmissable: the run itself is fine, the wrapped
                 // command failed, so the numbers below cannot gate anything.
@@ -1717,10 +1736,11 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                                 test.totals.phases
                             )
                         } else if test.attribution == "by-time" {
-                            // A webhook a mock server sent: no request named
-                            // the test, and it was the only one running.
+                            // Server work no test could be read from -- a
+                            // webhook a mock sent, a Go server's window -- that
+                            // ran while this test, and only this test, was.
                             format!(
-                                "{} lines, {} hits, {} decisions, {} phases (with server work no request named, credited by time: it ran while only this test was running)",
+                                "{} lines, {} hits, {} decisions, {} phases (with server work credited by time: it ran while only this test was running)",
                                 test.totals.lines,
                                 test.totals.hits,
                                 test.totals.decisions,

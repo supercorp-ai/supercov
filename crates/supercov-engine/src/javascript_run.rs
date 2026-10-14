@@ -568,7 +568,10 @@ pub fn run_direct_javascript(
     let serves_ruby = browser_suite
         && crate::ruby_project::discover_ruby_files(&root)
             .is_ok_and(|files| !files.sources.is_empty());
-    if project.source_files.is_empty() && !serves_python && !serves_ruby {
+    let serves_go = browser_suite
+        && (root.join("go.mod").is_file()
+            || !crate::go_project::workspace_modules(&root).is_empty());
+    if project.source_files.is_empty() && !serves_python && !serves_ruby && !serves_go {
         return Err(
             crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
                 .to_string()
@@ -602,6 +605,29 @@ pub fn run_direct_javascript(
         .map(javascript_frontend_reuse_paths)
         .unwrap_or_default();
     let initialization_ms = elapsed_ms(initialization_started);
+    // A server's plan is prepared while the workspace is copied and the
+    // JavaScript instrumented: parsing a large Python tree took a third of a
+    // second of every run, server or not.
+    let prepare_servers = |workspace: PathBuf| {
+        let (root, run_id, command) = (root.clone(), run_id.clone(), request.command.clone());
+        move || -> Result<Vec<Server>, String> {
+            let mut servers = Vec::new();
+            if serves_python
+                && let Some(server) =
+                    crate::python_run::PythonServer::prepare(&root, &workspace, &run_id, &command)?
+            {
+                servers.push(Server::Python(server));
+            }
+            if serves_ruby
+                && let Some(server) =
+                    crate::ruby_run::RubyServer::prepare(&root, &workspace, &run_id, &command)?
+            {
+                servers.push(Server::Ruby(server));
+            }
+            Ok(servers)
+        }
+    };
+    let preparing_servers = std::thread::spawn(prepare_servers(prior_workspace.clone()));
 
     let workspace_started = Instant::now();
     let workspace_progress = crate::progress::ProgressLine::start("preparing isolated workspace");
@@ -665,18 +691,20 @@ pub fn run_direct_javascript(
         writeln!(diagnostics, "[supercov] {detail}").map_err(|error| error.to_string())?;
     }
 
-    let mut servers = Vec::new();
-    if serves_python
-        && let Some(server) =
-            crate::python_run::PythonServer::prepare(&root, &workspace, &run_id, &request.command)?
-    {
-        servers.push(Server::Python(server));
+    let mut servers = preparing_servers
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+    // Prepared for where the workspace was to be; one moved since is
+    // prepared again for where it is.
+    if workspace != prior_workspace && !servers.is_empty() {
+        servers = prepare_servers(workspace.clone())()?;
     }
-    if serves_ruby
+    // Go is rewritten in the copy, so it waits for the copy.
+    if serves_go
         && let Some(server) =
-            crate::ruby_run::RubyServer::prepare(&root, &workspace, &run_id, &request.command)?
+            crate::go_run::GoServer::prepare(&root, &workspace, &run_id, &request.command)?
     {
-        servers.push(Server::Ruby(server));
+        servers.push(Server::Go(server));
     }
     if project.source_files.is_empty() && servers.is_empty() {
         return Err(
@@ -1063,6 +1091,7 @@ pub fn run_direct_javascript(
             copy: Some(cleanup.lock().copy()),
             merged_across: None,
             recorded_by: None,
+            companions: None,
         };
         let mut published = None;
         let mut server_runs = Vec::new();
@@ -1215,28 +1244,34 @@ pub fn run_direct_javascript(
         copy: Some(cleanup.lock().copy()),
         merged_across: None,
         recorded_by: None,
-    };
-    let run_directory =
-        publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
-    let terminal_status = if execution.exit_code == 0 {
-        RunStateStatus::Complete
-    } else {
-        RunStateStatus::Failed
+        companions: None,
     };
     // Each server's run beside the browser run, under an id of its own that
-    // sorts after it: `runs latest` stays the browser run.
+    // sorts after it: `runs latest` stays the browser run. Published first,
+    // so the browser run names the ones that were.
     let mut server_runs = Vec::new();
+    let mut companions = Vec::new();
     for server in servers {
         let id = companion_run_id(&run_id, server_runs.len() + 1);
         let language = server.language();
         let server_metadata = RunMetadata {
             id: id.clone(),
+            companions: Some(vec![crate::run_store::CompanionRun {
+                id: run_id.clone(),
+                language: "JavaScript".into(),
+                role: "browser".into(),
+            }]),
             ..metadata.clone()
         };
         match server.publish(&root, &run_id, server_metadata, &served, diagnostics) {
             Ok(Some((directory, _))) => {
                 finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
                 server_runs.push((language.to_owned(), directory));
+                companions.push(crate::run_store::CompanionRun {
+                    id,
+                    language: language.into(),
+                    role: "server".into(),
+                });
             }
             Ok(None) => {}
             // The browser run stands on its own.
@@ -1248,6 +1283,17 @@ pub fn run_direct_javascript(
             }
         }
     }
+    let metadata = RunMetadata {
+        companions: (!companions.is_empty()).then_some(companions),
+        ..metadata
+    };
+    let run_directory =
+        publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
+    let terminal_status = if execution.exit_code == 0 {
+        RunStateStatus::Complete
+    } else {
+        RunStateStatus::Failed
+    };
     update_run_state(&root, &run_id, terminal_status, &started_at, None)
         .map_err(|error| error.to_string())?;
     finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
@@ -1282,6 +1328,7 @@ fn companion_run_id(run_id: &str, nth: usize) -> String {
 enum Server {
     Python(crate::python_run::PythonServer),
     Ruby(crate::ruby_run::RubyServer),
+    Go(crate::go_run::GoServer),
 }
 
 impl Server {
@@ -1289,6 +1336,7 @@ impl Server {
         match self {
             Self::Python(_) => "Python",
             Self::Ruby(_) => "Ruby",
+            Self::Go(_) => "Go",
         }
     }
 
@@ -1296,6 +1344,7 @@ impl Server {
         match self {
             Self::Python(server) => server.source_files(),
             Self::Ruby(server) => server.source_files(),
+            Self::Go(server) => server.source_files(),
         }
     }
 
@@ -1303,6 +1352,7 @@ impl Server {
         match self {
             Self::Python(server) => server.environment(),
             Self::Ruby(server) => server.environment(),
+            Self::Go(server) => server.environment(),
         }
     }
 
@@ -1319,6 +1369,9 @@ impl Server {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
             Self::Ruby(server) => {
+                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+            }
+            Self::Go(server) => {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
         }

@@ -245,10 +245,18 @@ that test.
 
 The server's coverage is a Python run of its own. In a project with no
 JavaScript source that run is the run. In one with a Node server or front end
-too, the browser run is published as usual, the server's run beside it, and
-the command prints the server run's id; `runs latest` is the browser run. Each
-run's figures stand alone, and `supercov merge` merges each language's runs
-separately.
+too, the browser run is published as usual and the server's run beside it.
+`runs latest` is the browser run, and its summary names the server's run
+(`companions` in JSON); the server's run names the browser run it took its
+tests from. The pull-request comment Action reports each server's run in a
+section of its own. Each run's figures stand alone, and `supercov merge`
+merges each language's runs separately.
+
+A server the suite runs in its own process works without Playwright: a
+pytest-django `live_server`, Django's `LiveServerTestCase`, or a Flask app in
+a thread that a Selenium or pytest-playwright suite drives. Its requests name
+no test, and each is credited to the test that was running in that process
+when it came, and said to be.
 
 The server runs in Supercov's copy of the project. A virtual environment
 inside the project is used as it is, and a package installed editable from the
@@ -322,8 +330,13 @@ run of its own, published as the run or beside the browser run. Gems installed
 into the project (`bundle config set path vendor/bundle`) are used from the
 copy the suite runs in.
 
+A Rails system test runs its app in Capybara's Puma, in the test process: each
+request is credited to the test that was running when it came, and said to
+be.
+
 ```sh
 npx supercov -- npx playwright test
+npx supercov -- bin/rails test:system
 ```
 
 ## Crediting a test with what it reached
@@ -406,6 +419,25 @@ its own.
 npx supercov -- go test ./...
 npx supercov -- go test -run TestParser ./internal/...
 npx supercov -- go test ./core/... ./app/...
+```
+
+### A Go server under browser tests
+
+A Playwright suite that starts a Go server with `go run` measures it: the copy
+the suite runs in has its Go rewritten with probes, as for `go test`, and the
+server is built from that copy. Go has no per-request context Supercov can
+carry a test's name in to every probe, so the server sweeps what ran every
+5 ms, and each sweep is credited to the browser test that was running then,
+if only one was, and said to be. Work done while two tests ran at once, as
+with parallel workers, is the run's and no test's. The server's coverage is a
+Go run of its own, published as the run or beside the browser run, as for a
+[Python server](#a-python-server-under-browser-tests).
+
+A server binary built before the run is not the one Supercov instruments:
+start it with `go run`, or build it in the test command.
+
+```sh
+npx supercov -- npx playwright test
 ```
 
 ## Java and Kotlin

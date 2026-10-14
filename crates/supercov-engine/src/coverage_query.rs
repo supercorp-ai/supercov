@@ -310,6 +310,10 @@ pub struct CoverageSummaryData {
     /// runs it was merged from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_across: Vec<String>,
+    /// The runs the same command published beside this one: its servers'
+    /// runs, or the browser run a server's run took its tests from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companions: Vec<crate::run_store::CompanionRun>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2849,6 +2853,7 @@ pub fn coverage_summary_query(
         run: options.run.into(),
         command: Vec::new(),
         merged_across: Vec::new(),
+        companions: Vec::new(),
         hints: Vec::new(),
         workspace: None,
         filters,

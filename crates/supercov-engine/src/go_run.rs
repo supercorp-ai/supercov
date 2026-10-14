@@ -166,7 +166,9 @@ fn package_name(source: &str) -> Option<String> {
                 .strip_prefix("package")
                 .and_then(|rest| rest.strip_prefix(|c: char| c.is_ascii_whitespace()))
                 .and_then(|rest| rest.split_whitespace().next())
-                .map(str::to_owned);
+                // The instrumented text ends the clause with `;`, as the
+                // rewriter writes an import on the same line.
+                .map(|name| name.trim_end_matches(';').to_owned());
         }
     }
     None
@@ -242,15 +244,42 @@ fn evidence_name(directory: &str) -> String {
 
 /// Rewrite the workspace in place: instrumented sources, the runtime package
 /// they import, a probe array per package, and a harness per test package.
-fn instrument_workspace(
+/// A workspace's sources rewritten with probes: the project, each module's
+/// runtime import, the probe count every package reserves, and the package
+/// of each source directory.
+struct InstrumentedSources {
+    project: PreparedGoProject,
+    runtimes: Vec<(String, String)>,
+    probe_count: usize,
+    source_packages: BTreeMap<String, String>,
+}
+
+impl InstrumentedSources {
+    /// The runtime a file imports: its module's.
+    fn import_for(&self, relative: &str) -> &str {
+        runtime_for(&self.runtimes, relative)
+    }
+}
+
+/// The runtime a file imports, of the modules' runtimes longest first.
+fn runtime_for<'a>(runtimes: &'a [(String, String)], relative: &str) -> &'a str {
+    runtimes
+        .iter()
+        .find(|(directory, _)| {
+            directory == "."
+                || relative == directory
+                || relative.starts_with(&format!("{directory}/"))
+        })
+        .map(|(_, import)| import.as_str())
+        .unwrap_or_default()
+}
+
+fn instrument_sources(
     project_root: &Path,
     workspace: &Path,
-    evidence_directory: &Path,
-    serialised: bool,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
-) -> Result<InstrumentedWorkspace, String> {
-    let mut project = prepare_go_project(workspace, roots)?;
-    let mut unparseable_tests: Vec<(String, String)> = Vec::new();
+) -> Result<InstrumentedSources, String> {
+    let project = prepare_go_project(workspace, roots)?;
 
     // A go.work repository has several modules and no module at its root, so
     // each gets a runtime of its own: an import is resolved against the module
@@ -278,30 +307,26 @@ fn instrument_workspace(
     }
     // Longest first, so a nested module wins over the root it sits under.
     runtimes.sort_by_key(|(directory, _)| std::cmp::Reverse(directory.len()));
-    let import_for = |relative: &str| -> &str {
-        runtimes
-            .iter()
-            .find(|(directory, _)| {
-                directory == "."
-                    || relative == directory
-                    || relative.starts_with(&format!("{directory}/"))
-            })
-            .map(|(_, import)| import.as_str())
-            .unwrap_or_default()
+    let mut sources = InstrumentedSources {
+        project,
+        runtimes,
+        probe_count: 0,
+        source_packages: BTreeMap::new(),
     };
 
     // Probe ids are handed out across the whole module, so every package
     // reserves the same total: a probe from one package is the same index in
     // the binary that links it as a dependency.
-    let probe_count = project
+    sources.probe_count = sources
+        .project
         .probes
         .keys()
         .max()
         .map_or(0, |highest| *highest as usize + 1);
 
     let mut source_packages: BTreeMap<String, String> = BTreeMap::new();
-    for (relative, instrumented) in &project.instrumented {
-        let instrumented = instrumented.replace(RUNTIME_IMPORT, import_for(relative));
+    for (relative, instrumented) in &sources.project.instrumented {
+        let instrumented = instrumented.replace(RUNTIME_IMPORT, sources.import_for(relative));
         let path = workspace.join(relative);
         if let Some(name) = package_name(&instrumented) {
             source_packages
@@ -319,11 +344,30 @@ fn instrument_workspace(
             &probe_array_file(
                 package,
                 RUNTIME_ALIAS,
-                import_for(&format!("{directory}/x.go")),
-                probe_count,
+                sources.import_for(&format!("{directory}/x.go")),
+                sources.probe_count,
             ),
         )?;
     }
+    sources.source_packages = source_packages;
+    Ok(sources)
+}
+
+fn instrument_workspace(
+    project_root: &Path,
+    workspace: &Path,
+    evidence_directory: &Path,
+    serialised: bool,
+    roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+) -> Result<InstrumentedWorkspace, String> {
+    let InstrumentedSources {
+        mut project,
+        runtimes,
+        probe_count,
+        source_packages,
+    } = instrument_sources(project_root, workspace, roots)?;
+    let import_for = |relative: &str| runtime_for(&runtimes, relative);
+    let mut unparseable_tests: Vec<(String, String)> = Vec::new();
 
     let mut by_directory: BTreeMap<String, Vec<&String>> = BTreeMap::new();
     for relative in &project.files.tests {
@@ -854,6 +898,7 @@ pub fn run_direct_go(
             copy: Some(lock.copy()),
             merged_across: None,
             recorded_by: None,
+            companions: None,
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
@@ -896,6 +941,344 @@ pub fn run_direct_go(
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
     }
+}
+
+/// The file a server's main package gains: it arms the runtime and starts
+/// the clock its windows are harvested on.
+const SERVER_FILE: &str = "supercov_server.go";
+
+/// Go measured inside a browser suite's run: a server its tests drive, built
+/// from the copy the suite runs in by `go run` or `go build` in the command.
+/// Its sources there are rewritten with probes, and each main package arms
+/// the runtime in server mode: windows of what ran, harvested on a clock and
+/// given to the browser test running throughout each, by time. A binary
+/// built before the run is not this one and is not measured.
+pub struct GoServer {
+    project: PreparedGoProject,
+    integrity: crate::run_store::RunIntegrity,
+    source_inputs: crate::source_manifest::Inputs,
+    source_roots: Option<Vec<String>>,
+    directory: PathBuf,
+}
+
+/// One harvest of a server's probes, as the runtime appended it.
+#[derive(Deserialize)]
+struct ServerWindow {
+    start: i64,
+    end: i64,
+    /// Pairs: probe id, mask.
+    probes: Vec<u64>,
+    /// Pairs: decision, packed vector.
+    vectors: Vec<u64>,
+}
+
+impl GoServer {
+    /// Instrument the copy's Go sources for a server, or None when the
+    /// project has no Go module or no main package.
+    pub fn prepare(
+        root: &Path,
+        workspace: &Path,
+        run_id: &str,
+        command: &[String],
+    ) -> Result<Option<Self>, String> {
+        if !workspace.join("go.mod").is_file()
+            && crate::go_project::workspace_modules(workspace).is_empty()
+        {
+            return Ok(None);
+        }
+        let files = crate::go_project::discover_go_files(root)?;
+        if files.sources.is_empty() {
+            return Ok(None);
+        }
+        let ambient = std::env::vars().collect::<BTreeMap<_, _>>();
+        // Roots named for the JavaScript source may hold no Go at all.
+        let Ok(roots) = crate::source_discovery::ExplicitSourceRoots::from_environment_in(
+            root, workspace, &ambient,
+        ) else {
+            return Ok(None);
+        };
+        let source_roots = crate::source_discovery::configured_source_roots(&ambient);
+        let mut integrity_inputs = go_integrity_inputs(&files, command);
+        crate::source_discovery::fold_roots_into_configuration(
+            &mut integrity_inputs.execution_configuration,
+            source_roots.as_deref(),
+        );
+        let source_inputs =
+            crate::source_capture::capture(root, "go", integrity_inputs.assertion_paths())?;
+        let integrity = create_explicit_run_integrity(
+            root,
+            &integrity_inputs,
+            &FrontendIntegrityInputs::embedded_go(),
+        )
+        .map_err(|error| error.to_string())?;
+        let sources = instrument_sources(root, workspace, roots.as_ref())?;
+        let widths = sources
+            .project
+            .decision_widths
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut mains = 0;
+        for (directory, package) in &sources.source_packages {
+            if package != "main" {
+                continue;
+            }
+            mains += 1;
+            write(
+                &workspace.join(directory).join(SERVER_FILE),
+                &format!(
+                    "// Code generated by Supercov. DO NOT EDIT.\n\npackage main\n\nimport {RUNTIME_ALIAS} \"{}\"\n\nfunc init() {{\n\t{RUNTIME_ALIAS}.Serve({}, []uint8{{{widths}}})\n}}\n",
+                    sources.import_for(&format!("{directory}/x.go")),
+                    sources.probe_count,
+                ),
+            )?;
+        }
+        if mains == 0 || sources.project.instrumented.is_empty() {
+            return Ok(None);
+        }
+        let directory = root.join(".supercov/work").join(run_id).join("go");
+        fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
+        Ok(Some(Self {
+            project: sources.project,
+            integrity,
+            source_inputs,
+            source_roots,
+            directory,
+        }))
+    }
+
+    pub fn source_files(&self) -> usize {
+        self.project.instrumented.len()
+    }
+
+    /// What the suite's environment needs for a server it builds to write
+    /// its windows.
+    pub fn environment(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([(
+            "SUPERCOV_GO_SERVER_EVIDENCE_DIR".into(),
+            self.directory.join("evidence").display().to_string(),
+        )])
+    }
+
+    /// Publish what the server ran as a Go run of its own: each window
+    /// credited, by time, to the one browser test whose span it falls in;
+    /// what no single test's does is no test's. None when no instrumented
+    /// server ran, or no window fell in a test.
+    pub fn publish(
+        self,
+        root: &Path,
+        _evidence_run_id: &str,
+        metadata: RunMetadata,
+        served: &[crate::served_tests::ServedTest],
+        diagnostics: &mut dyn Write,
+    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+        let evidence_directory = self.directory.join("evidence");
+        let result = (|| {
+            let mut windows = Vec::new();
+            let mut files = fs::read_dir(&evidence_directory)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.extension()
+                                .is_some_and(|extension| extension == "windows")
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            files.sort();
+            for file in &files {
+                let text = fs::read_to_string(file)
+                    .map_err(|error| format!("{}: {error}", file.display()))?;
+                // A line cut short by the server being killed is the one
+                // window it was writing.
+                windows.extend(
+                    text.lines()
+                        .filter_map(|line| serde_json::from_str::<ServerWindow>(line).ok()),
+                );
+            }
+            if served.is_empty() || windows.is_empty() {
+                return Ok(None);
+            }
+            let probe_count = self
+                .project
+                .probes
+                .keys()
+                .max()
+                .map_or(0, |highest| *highest as usize + 1);
+            let widths = self.project.decision_widths.clone();
+            let mut global = vec![0_u32; probe_count];
+            let mut decision_vectors = vec![Vec::<u64>::new(); widths.len()];
+            let mut by_test = BTreeMap::<usize, crate::owned_evidence::OwnedTestEvidence>::new();
+            for window in &windows {
+                // The one test whose span the window overlaps.
+                let mut running = served.iter().enumerate().filter(|(_, test)| {
+                    test.window
+                        .is_some_and(|(start, end)| start <= window.end && window.start <= end)
+                });
+                let owner = match (running.next(), running.next()) {
+                    (Some((index, _)), None) => Some(index),
+                    _ => None,
+                };
+                for pair in window.probes.chunks_exact(2) {
+                    let (index, mask) = (pair[0] as usize, pair[1] as u32);
+                    if let Some(total) = global.get_mut(index) {
+                        *total |= mask;
+                    }
+                    if let Some(owner) = owner {
+                        *by_test
+                            .entry(owner)
+                            .or_default()
+                            .probes
+                            .entry(index as u32)
+                            .or_default() |= mask;
+                    }
+                }
+                for pair in window.vectors.chunks_exact(2) {
+                    let (decision, key) = (pair[0] as u32, pair[1]);
+                    if let Some(seen) = decision_vectors.get_mut(decision as usize)
+                        && !seen.contains(&key)
+                    {
+                        seen.push(key);
+                    }
+                    if let Some(owner) = owner {
+                        let test = by_test.entry(owner).or_default();
+                        let vector = crate::owned_evidence::PackedVector { decision, key };
+                        if !test.vectors.contains(&vector) {
+                            test.vectors.push(vector);
+                        }
+                    }
+                }
+            }
+            let credited = by_test.keys().copied().collect::<BTreeSet<_>>();
+            let package = |test: &crate::served_tests::ServedTest| test.worker.clone();
+            let mut tests = Vec::new();
+            let mut outcomes = Vec::new();
+            for (index, test) in served.iter().enumerate() {
+                let status = match test.status.as_str() {
+                    "passed" => "passed",
+                    "skipped" => "skipped",
+                    _ => "failed",
+                };
+                let mut evidence = by_test.remove(&index).unwrap_or_default();
+                evidence.name = test.name.clone();
+                evidence.status = status.into();
+                evidence.runner = test.provenance.runner.clone();
+                tests.push(evidence);
+                outcomes.push(OwnedTestOutcome {
+                    name: test.name.clone(),
+                    runner: test.provenance.runner.clone(),
+                    package: package(test),
+                    file: Some(test.file.clone()),
+                    status: status.into(),
+                    attributed: true,
+                });
+            }
+            let evidence = crate::owned_evidence::OwnedEvidence {
+                global,
+                tests,
+                widths,
+                decision_vectors,
+            };
+            let mut declaration = go_declaration();
+            for runner in &mut declaration.runners {
+                runner.runner = "playwright".into();
+                runner.execution_model =
+                    supercov_contracts::ExecutionModel::ParallelContextPropagated;
+            }
+            let mut run = build_frontend_run(OwnedRunInputs {
+                declaration,
+                environment: "go",
+                manifest: &self.project.manifest,
+                probes: &self.project.probes,
+                evidence: &evidence,
+                outcomes: &outcomes,
+                run_id: &metadata.id,
+                generated_at: &metadata.started_at,
+                test_exit_code: metadata.test_exit_code.unwrap_or_default(),
+                coverage_model: go_coverage_model(),
+            })
+            .map_err(|error| error.to_string())?;
+            for (raw, (index, test)) in run
+                .request
+                .raw_results
+                .iter_mut()
+                .zip(served.iter().enumerate())
+            {
+                raw.title = Some(test.title.clone());
+                raw.expected_status = Some(test.expected_status.clone());
+                raw.status = Some(test.status.clone());
+                raw.provenance = crate::coverage_report::TestProvenance {
+                    source: raw.provenance.source.clone(),
+                    ..test.provenance.clone()
+                };
+                if credited.contains(&index) {
+                    raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
+                }
+            }
+            validate_frontend_report_request(&run.declaration, &run.request)
+                .map_err(|error| error.to_string())?;
+            let archive_path = root
+                .join(".supercov/work")
+                .join(&metadata.id)
+                .join("go-evidence.raw.gz");
+            if let Some(parent) = archive_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            let raw = write_archive(
+                crate::source_capture::append(
+                    run.archive_entries().map_err(|error| error.to_string())?,
+                    &self.source_inputs,
+                )?,
+                &archive_path,
+            )
+            .map_err(|error| error.to_string())?;
+            let metadata = RunMetadata {
+                integrity: self.integrity.clone(),
+                raw_evidence: RawEvidenceMetadata {
+                    schema_version: raw.schema_version,
+                    format: raw.format.into(),
+                    file: raw.file.into(),
+                    files: raw.files,
+                    uncompressed_bytes: raw.uncompressed_bytes,
+                    compressed_bytes: raw.compressed_bytes,
+                },
+                source_roots: self.source_roots.clone(),
+                ..metadata
+            };
+            let run_directory =
+                publish_run(root, &metadata, &archive_path).map_err(|error| error.to_string())?;
+            writeln!(
+                diagnostics,
+                "[supercov] Go server coverage: {} test(s) across {} source file(s), credited by time",
+                served.len(),
+                self.project.instrumented.len()
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(Some((run_directory, metadata)))
+        })();
+        let result = result.map_err(|error| {
+            note_kept_evidence(
+                root,
+                &evidence_directory,
+                &format!("{}-go", metadata_id(&self.directory)),
+                error,
+            )
+        });
+        let _ = remove_stored_tree_deferred(root, &self.directory);
+        result
+    }
+}
+
+/// The run a work directory is of: `.supercov/work/<run>/go`.
+fn metadata_id(directory: &Path) -> String {
+    directory
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

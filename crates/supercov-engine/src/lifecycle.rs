@@ -1522,6 +1522,7 @@ mod tests {
             copy: None,
             merged_across: None,
             recorded_by: None,
+            companions: None,
         }
     }
 

@@ -34,6 +34,58 @@ pub struct ServedTest {
     pub window: Option<(i64, i64)>,
 }
 
+/// One phase starting: in which process (its transport), where in its
+/// records, and of which attempt (worker, test, retry).
+pub type PhaseStart = (String, usize, Attempt);
+
+/// A test attempt: worker, test, retry.
+pub type Attempt = (String, String, usize);
+
+/// The suite's own test attempts, in the order each process ran them: what
+/// a request to a server the suite runs in its own process -- a live server
+/// a browser or the test itself calls -- is judged by. A process writes its
+/// records in order, so the attempt whose phase began last before the
+/// request did is the one running when it came: exactly, where the attempts
+/// were run one after another, and no one's where they interleave.
+pub struct InProcess {
+    /// By transport: where each phase began and whose, and whether the
+    /// process ran attempts at once.
+    by_transport: BTreeMap<String, (Vec<(usize, Attempt)>, bool)>,
+}
+
+impl InProcess {
+    pub fn new(phases: &[PhaseStart]) -> Self {
+        let mut by_transport = BTreeMap::<String, (Vec<_>, bool)>::new();
+        for (transport, seq, attempt) in phases {
+            by_transport
+                .entry(transport.clone())
+                .or_default()
+                .0
+                .push((*seq, attempt.clone()));
+        }
+        for (starts, interleaved) in by_transport.values_mut() {
+            starts.sort();
+            let mut left = BTreeSet::new();
+            for pair in starts.windows(2) {
+                if pair[0].1 != pair[1].1 {
+                    left.insert(pair[0].1.clone());
+                    *interleaved |= left.contains(&pair[1].1);
+                }
+            }
+        }
+        Self { by_transport }
+    }
+
+    pub fn owner(&self, transport: &str, seq: usize) -> Option<&Attempt> {
+        let (starts, interleaved) = self.by_transport.get(transport)?;
+        if *interleaved {
+            return None;
+        }
+        let before = starts.partition_point(|(start, _)| *start < seq);
+        before.checked_sub(1).map(|index| &starts[index].1)
+    }
+}
+
 /// The attempt a request that named no test belongs to: the one running when
 /// it came, if only one was, among the attempts its process answered a
 /// request of where it answered any -- with a server per worker, the
@@ -134,4 +186,42 @@ pub fn read(evidence_directory: &Path) -> Vec<ServedTest> {
         }
     }
     served.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A request to a server the suite runs itself is the test's whose phase
+    // began last before it in that process: by record, which a millisecond
+    // clock cannot tell apart when a test ends, the next starts and the
+    // request comes all in one millisecond.
+    #[test]
+    fn a_request_in_process_is_the_test_running_before_it() {
+        let attempt = |test: &str| ("main".to_owned(), test.to_owned(), 0);
+        let phases = [
+            ("a".to_owned(), 1, attempt("one")),
+            ("a".to_owned(), 2, attempt("one")),
+            ("a".to_owned(), 5, attempt("one")),
+            ("a".to_owned(), 6, attempt("two")),
+            ("a".to_owned(), 7, attempt("two")),
+        ];
+        let order = InProcess::new(&phases);
+        assert_eq!(order.owner("a", 0), None, "before any test");
+        assert_eq!(order.owner("a", 3), Some(&attempt("one")));
+        assert_eq!(
+            order.owner("a", 6),
+            Some(&attempt("one")),
+            "as the next test begins"
+        );
+        assert_eq!(order.owner("a", 8), Some(&attempt("two")));
+        assert_eq!(order.owner("b", 3), None, "another process ran no test");
+        // Tests that ran at once in one process are no one's.
+        let interleaved = InProcess::new(&[
+            ("a".to_owned(), 1, attempt("one")),
+            ("a".to_owned(), 2, attempt("two")),
+            ("a".to_owned(), 3, attempt("one")),
+        ]);
+        assert_eq!(interleaved.owner("a", 4), None);
+    }
 }

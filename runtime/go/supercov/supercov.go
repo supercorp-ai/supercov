@@ -13,6 +13,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -732,4 +734,86 @@ func writeLocked(path string) error {
 		}
 	}
 	return out.Flush()
+}
+
+// ServerEvidenceEnv names the directory a server a browser suite starts
+// writes its windows to. Unset, Serve only arms the runtime.
+const ServerEvidenceEnv = "SUPERCOV_GO_SERVER_EVIDENCE_DIR"
+
+// How often a server's probes are swept into a window of their own.
+const serverWindow = 5 * time.Millisecond
+
+// Serve measures a program that is not a test binary: a server a browser
+// suite starts. It has no test boundaries to harvest at, and its requests
+// arrive from tests it cannot see, so it harvests on a clock instead: every
+// window that reached anything becomes one line, with when it began and
+// ended, and the engine gives each window to the browser test that was
+// running throughout it, if only one was. A window that spans two tests,
+// or falls while two run at once, is no test's.
+//
+// Each window is appended as it closes, so a server stopped by a signal --
+// which runs no deferred function -- loses at most the window it was in.
+//
+// Called from a generated init in the program's main package. A probe in a
+// dependency's init may run before it; decision probes ignore an unarmed
+// runtime, and point probes store into the array Reserve already made.
+func Serve(count int, conditions []uint8) {
+	Arm(count, conditions)
+	directory := os.Getenv(ServerEvidenceEnv)
+	if directory == "" {
+		return
+	}
+	name := filepath.Join(directory, "server-"+strconv.Itoa(os.Getpid())+"-"+strconv.FormatInt(time.Now().UnixNano(), 36)+".windows")
+	file, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		os.Stderr.WriteString("supercov: could not record the server's coverage: " + err.Error() + "\n")
+		return
+	}
+	go func() {
+		start := time.Now().UnixMilli()
+		ticker := time.NewTicker(serverWindow)
+		defer ticker.Stop()
+		var line []byte
+		for range ticker.C {
+			mu.Lock()
+			records = append(records[:0], testRecord{name: "window"})
+			current = 0
+			harvest()
+			window := records[0]
+			records = records[:0]
+			current = -1
+			mu.Unlock()
+			end := time.Now().UnixMilli()
+			if len(window.probes) > 0 || len(window.vectors) > 0 {
+				line = append(line[:0], "{\"start\":"...)
+				line = strconv.AppendInt(line, start, 10)
+				line = append(line, ",\"end\":"...)
+				line = strconv.AppendInt(line, end, 10)
+				line = append(line, ",\"probes\":["...)
+				for index, hit := range window.probes {
+					if index > 0 {
+						line = append(line, ',')
+					}
+					line = strconv.AppendUint(line, uint64(hit.index), 10)
+					line = append(line, ',')
+					line = strconv.AppendUint(line, uint64(hit.value), 10)
+				}
+				line = append(line, "],\"vectors\":["...)
+				for index, hit := range window.vectors {
+					if index > 0 {
+						line = append(line, ',')
+					}
+					line = strconv.AppendUint(line, uint64(hit.decision), 10)
+					line = append(line, ',')
+					line = strconv.AppendUint(line, hit.key, 10)
+				}
+				line = append(line, "]}\n"...)
+				if _, err := file.Write(line); err != nil {
+					os.Stderr.WriteString("supercov: could not record the server's coverage: " + err.Error() + "\n")
+					return
+				}
+			}
+			start = end
+		}
+	}()
 }

@@ -759,8 +759,8 @@ module Supercov
     # belongs to no single test: it goes to the run's background and the run
     # says so. Probe hits stay exact per thread.
     def sample_stdlib(thread, context)
-      overlapping = @active_threads.any? { |other, ctx| other != thread && ctx != 0 && other.alive? }
-      if overlapping
+      others = @active_threads.filter_map { |other, ctx| ctx if other != thread && ctx != 0 && other.alive? }
+      if !others.empty? && !one_attempt?([context, *others])
         limitation(
           "ruby-concurrent-test-phases",
           "tests ran concurrently in threads; line, branch and method observations made while phases overlapped are attributed to the run, not to a test (probe observations stay exact)",
@@ -769,6 +769,17 @@ module Supercov
       else
         collect_stdlib(context)
       end
+    end
+
+    # Whether phases are of one test attempt at most, counting a request that
+    # named no test as no attempt's: a suite's own test and the requests it
+    # makes to a server the suite runs in a thread, which the report gives to
+    # that test by time. Their lines are that test's either way.
+    def one_attempt?(contexts)
+      contexts.filter_map do |ctx|
+        identity = @identities[ctx]
+        [identity["worker"], identity["test"], identity["retry"]] if identity && identity["worker"] != Requests::REQUEST_WORKER
+      end.uniq.size <= 1
     end
 
     # The first assertion of a call phase. The stdlib delta the phase has

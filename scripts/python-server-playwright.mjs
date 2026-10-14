@@ -212,6 +212,24 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
     assert.match(page(webhook, paidRun), /Attribution {6}1 exact, 1 with server work credited by time/u);
   }
 
+  // A server the suite runs in its own process, as a live server fixture
+  // does: started in a thread before the tests, called by them, its
+  // requests naming no test. Each is the test's that was running.
+  const live = resolve(base, 'live');
+  write(live, {
+    'app/__init__.py': '',
+    'app/grades.py': grades,
+    'tests/__init__.py': '',
+    'tests/test_live.py': "import threading\nimport unittest\nimport urllib.request\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n\nfrom app.grades import grade\n\n\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        body = grade(int(self.path.rsplit(\"=\", 1)[1])).encode()\n        self.send_response(200)\n        self.send_header(\"content-length\", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def log_message(self, *args):\n        pass\n\n\nserver = None\n\n\ndef setUpModule():\n    global server\n    server = ThreadingHTTPServer((\"127.0.0.1\", 0), Handler)\n    threading.Thread(target=server.serve_forever, daemon=True).start()\n\n\ndef tearDownModule():\n    server.shutdown()\n\n\ndef get(score):\n    return urllib.request.urlopen(f\"http://127.0.0.1:{server.server_address[1]}/?score={score}\").read().decode()\n\n\nclass Live(unittest.TestCase):\n    def test_a_high_score(self):\n        self.assertEqual(get(95), \"A\")\n\n    def test_a_low_score(self):\n        self.assertEqual(get(10), \"fail\")\n",
+  });
+  const liveRun = run(live, binary, ['--', python, '-m', 'unittest', 'discover', '-s', 'tests', '-t', '.']);
+  assert.equal(liveRun.status, 0, liveRun.stdout + liveRun.stderr);
+  const [liveId] = runs(live);
+  const low = page(live, liveId, 'test', 'tests.test_live.Live.test_a_low_score');
+  assert.deepEqual(low.match(/app\/grades\.py:\d+/gu), ['app/grades.py:1', 'app/grades.py:2', 'app/grades.py:4', 'app/grades.py:6'], low);
+  assert.match(low, /credited by time/u, low);
+  assert.deepEqual(page(live, liveId, 'test', 'tests.test_live.Live.test_a_high_score').match(/app\/grades\.py:\d+/gu), ['app/grades.py:1', 'app/grades.py:2', 'app/grades.py:3']);
+
   // A Node server beside it: the browser run is the run, and the server's
   // is published beside it. Merging two runs of each merges each.
   const mixed = resolve(base, 'mixed');
@@ -234,8 +252,11 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
     assert.ok(server, both.stderr);
     const [latest] = runs(mixed);
     assert.notEqual(latest, server, 'the browser run is the latest run');
-    assert.match(page(mixed, latest), /Lines/u);
-    assert.match(page(mixed, server), /Lines/u);
+    // Each names the other where it is read, and in JSON.
+    assert.match(page(mixed, latest), new RegExp(`Python server: run ${server}`, 'u'));
+    assert.match(page(mixed, server), new RegExp(`tests from: the browser run ${latest}`, 'u'));
+    const linked = JSON.parse(run(mixed, binary, ['runs', latest, '--json']).stdout).data.companions;
+    assert.deepEqual(linked, [{ id: server, language: 'Python', role: 'server' }]);
   }
   // The front's request reached the Python server through the Node server,
   // which carried the test along.
@@ -253,13 +274,15 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
       'pyproject.toml': '[project]\nname = "gradebook"\nversion = "0.0.0"\n\n[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n\n[tool.setuptools.packages.find]\nwhere = ["src"]\n',
       'src/gradebook/__init__.py': grades,
       'app/__init__.py': '',
-      'app/flask_app.py': 'from flask import Flask, request\n\nfrom gradebook import grade\n\napp = Flask(__name__)\n\n\n@app.get("/ready")\ndef ready():\n    return "ready"\n\n\n@app.get("/grade")\ndef graded():\n    return grade(int(request.args["score"]))\n',
+      'app/flask_app.py': 'from flask import Flask, request\n\nfrom gradebook import grade\n\napp = Flask(__name__)\n\n\n@app.get("/ready")\ndef ready():\n    return "ready"\n\n\n@app.get("/grade")\ndef graded():\n    return grade(int(request.args["score"]))\n\n\n@app.get("/stream")\ndef streamed():\n    score = int(request.args["score"])\n\n    def chunks():\n        yield grade(score)\n\n    return app.response_class(chunks())\n',
       'app/fastapi_app.py': 'from fastapi import FastAPI\nfrom fastapi.responses import PlainTextResponse\n\nfrom gradebook import grade\n\napp = FastAPI()\n\n\n@app.get("/ready", response_class=PlainTextResponse)\nasync def ready():\n    return "ready"\n\n\n@app.get("/grade", response_class=PlainTextResponse)\nasync def graded(score: int):\n    return grade(score)\n',
       'app/django_app.py': 'import sys\n\nfrom django.conf import settings\nfrom django.http import HttpResponse\nfrom django.urls import path\n\nfrom gradebook import grade\n\nsettings.configure(DEBUG=True, ROOT_URLCONF=__name__, ALLOWED_HOSTS=["*"], SECRET_KEY="fixture")\n\n\ndef ready(request):\n    return HttpResponse("ready")\n\n\ndef graded(request):\n    return HttpResponse(grade(int(request.GET["score"])))\n\n\nurlpatterns = [path("ready", ready), path("grade", graded)]\n\nif __name__ == "__main__":\n    from django.core.management import execute_from_command_line\n\n    execute_from_command_line([sys.argv[0], "runserver", "--noreload", sys.argv[1]])\n',
       'app/django_wsgi.py': 'from django.core.wsgi import get_wsgi_application\n\nimport app.django_app  # noqa: F401\n\napplication = get_wsgi_application()\n',
       'app/django_asgi.py': 'from django.core.asgi import get_asgi_application\n\nimport app.django_app  # noqa: F401\n\napplication = get_asgi_application()\n',
-      'playwright.config.js': `const at = '127.0.0.1:${port + 3}';\nconst servers = {\n  flask: \`.venv/bin/python -m flask --app app.flask_app run --port ${port + 3}\`,\n  fastapi: \`.venv/bin/python -m uvicorn app.fastapi_app:app --port ${port + 3}\`,\n  django: \`.venv/bin/python -m app.django_app \${at}\`,\n  'django-gunicorn': \`.venv/bin/gunicorn -w 2 --threads 2 -b \${at} app.django_wsgi:application\`,\n  'django-uvicorn': \`.venv/bin/python -m uvicorn app.django_asgi:application --port ${port + 3}\`,\n};\nexport default {\n  testDir: 'tests',\n  workers: 1,\n  reporter: 'line',\n  use: { baseURL: \`http://\${at}\` },\n  webServer: { command: servers[process.env.SERVER], url: \`http://\${at}/ready\`, reuseExistingServer: false },\n};\n`,
+      'playwright.config.js': `const at = '127.0.0.1:${port + 3}';\nconst servers = {\n  flask: \`.venv/bin/python -m flask --app app.flask_app run --port ${port + 3}\`,\n  fastapi: \`.venv/bin/python -m uvicorn app.fastapi_app:app --port ${port + 3}\`,\n  django: \`.venv/bin/python -m app.django_app \${at}\`,\n  'flask-gunicorn': \`.venv/bin/gunicorn -w 1 -b \${at} app.flask_app:app\`,\n  'django-gunicorn': \`.venv/bin/gunicorn -w 2 --threads 2 -b \${at} app.django_wsgi:application\`,\n  'django-uvicorn': \`.venv/bin/python -m uvicorn app.django_asgi:application --port ${port + 3}\`,\n};\nexport default {\n  testDir: process.env.TESTS ?? 'tests',\n  workers: 1,\n  reporter: 'line',\n  use: { baseURL: \`http://\${at}\` },\n  webServer: { command: servers[process.env.SERVER], url: \`http://\${at}/ready\`, reuseExistingServer: false },\n};\n`,
       'tests/grades.spec.js': "import { expect, test } from '@playwright/test';\n\ntest('a high score is an A', async ({ request }) => {\n  expect(await (await request.get('/grade?score=95')).text()).toBe('A');\n});\n\ntest('a low score fails', async ({ request }) => {\n  expect(await (await request.get('/grade?score=10')).text()).toBe('fail');\n});\n",
+      // A body the server reads after the view has returned.
+      'streams/stream.spec.js': "import { expect, test } from '@playwright/test';\n\ntest('a streamed grade passes', async ({ request }) => {\n  expect(await (await request.get('/stream?score=70')).text()).toBe('pass');\n});\n",
     });
     const packages = ['flask', 'fastapi', 'uvicorn', 'django', 'gunicorn'];
     // uv where it is installed; pip, upgraded first, where it is not.
@@ -287,6 +310,12 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
       const high = page(frameworks, latest, 'test', 'a high score is an A').match(/src\/gradebook\/__init__\.py:\d+/gu) ?? [];
       assert.deepEqual(high, ['src/gradebook/__init__.py:1', 'src/gradebook/__init__.py:2', 'src/gradebook/__init__.py:3'], `${name}: the request is not its test's`);
     }
+    // gunicorn reads a streamed body after the view returns: it is still the
+    // request's.
+    measure(frameworks, [], { SERVER: 'flask-gunicorn', TESTS: 'streams' });
+    const [streamRun] = runs(frameworks);
+    const streamed = page(frameworks, streamRun, 'test', 'a streamed grade passes');
+    assert.match(streamed, /src\/gradebook\/__init__\.py:5/u, `the streamed body is not its test's:\n${streamed}`);
   }
   console.log('[python-server-playwright] a Python server under browser tests is measured, each request credited to its test');
 } finally {
