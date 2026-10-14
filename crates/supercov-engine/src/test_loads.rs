@@ -41,9 +41,10 @@ const EXTENSIONS: [&str; 9] = [
 
 /// A file Supercov can read imports from.
 pub fn reads_imports(file: &str) -> bool {
-    EXTENSIONS[..8]
-        .iter()
-        .any(|extension| file.ends_with(extension))
+    file.ends_with(".py")
+        || EXTENSIONS[..8]
+            .iter()
+            .any(|extension| file.ends_with(extension))
 }
 
 /// Imports of the files of one checkout, read once each.
@@ -55,6 +56,7 @@ pub struct Imports {
     /// package.json `imports`, the `#name` specifiers.
     subpaths: BTreeMap<String, Vec<String>>,
     parsed: RefCell<BTreeMap<String, Option<Vec<Specifier>>>>,
+    python: RefCell<BTreeMap<String, Option<Vec<PythonImport>>>>,
 }
 
 impl Imports {
@@ -90,6 +92,7 @@ impl Imports {
             aliases: aliases(root),
             subpaths,
             parsed: RefCell::new(BTreeMap::new()),
+            python: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -102,6 +105,10 @@ impl Imports {
             .collect::<VecDeque<_>>();
         while let Some(file) = queue.pop_front() {
             if !loads.files.insert(file.clone()) || !reads_imports(&file) {
+                continue;
+            }
+            if file.ends_with(".py") {
+                self.python_loads(&file, &mut loads, &mut queue);
                 continue;
             }
             let Some(specifiers) = self.specifiers(&file) else {
@@ -155,6 +162,117 @@ impl Imports {
             }
         }
         named
+    }
+
+    /// What a Python file loads: the modules it imports, the packages they
+    /// sit in (whose `__init__.py` runs first), pytest's `conftest.py` in its
+    /// directory and every directory above, and the plugins they name. A
+    /// module found nowhere in the project is the standard library's or an
+    /// installed package's; a computed import, or a change to `sys.path`,
+    /// leaves the answer open.
+    fn python_loads(&self, file: &str, loads: &mut Loads, queue: &mut VecDeque<String>) {
+        for directory in Path::new(file).ancestors().skip(1) {
+            if let Some(conftest) = normal(&directory.join("conftest.py"))
+                && self.root.join(&conftest).is_file()
+            {
+                queue.push_back(conftest);
+            }
+        }
+        let known = self.python.borrow().get(file).cloned();
+        let imports = known.unwrap_or_else(|| {
+            let parsed = fs::read_to_string(self.root.join(file))
+                .ok()
+                .and_then(|source| python_imports(&source));
+            self.python
+                .borrow_mut()
+                .insert(file.to_owned(), parsed.clone());
+            parsed
+        });
+        let Some(imports) = imports else {
+            loads
+                .open
+                .get_or_insert_with(|| format!("{file} could not be read"));
+            return;
+        };
+        for import in imports {
+            match import {
+                PythonImport::Computed(why) => {
+                    loads.open.get_or_insert_with(|| format!("{file} {why}"));
+                }
+                PythonImport::Module {
+                    module,
+                    level,
+                    names,
+                } => {
+                    queue.extend(self.python_resolve(file, &module, level, &names));
+                }
+            }
+        }
+    }
+
+    /// The project files an import runs, or none for a module outside it.
+    fn python_resolve(
+        &self,
+        file: &str,
+        module: &str,
+        level: u32,
+        names: &[String],
+    ) -> Vec<String> {
+        let exists = |path: &Path| normal(path).filter(|path| self.root.join(path).is_file());
+        let parts = module
+            .split('.')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        let directory = Path::new(file).parent().unwrap_or(Path::new(""));
+        let bases = if level > 0 {
+            let mut base = directory.to_owned();
+            for _ in 1..level {
+                base = base.parent().unwrap_or(Path::new("")).to_owned();
+            }
+            vec![base]
+        } else {
+            // Where a test's imports are found: beside it and above (pytest
+            // puts a test's root directory on the path), and a src layout.
+            let mut bases = directory
+                .ancestors()
+                .map(Path::to_owned)
+                .collect::<Vec<_>>();
+            bases.push(PathBuf::from("src"));
+            bases
+        };
+        for base in bases {
+            let mut found = Vec::new();
+            let mut package = base.clone();
+            let mut resolved = parts.is_empty();
+            for (index, part) in parts.iter().enumerate() {
+                package = package.join(part);
+                if let Some(init) = exists(&package.join("__init__.py")) {
+                    found.push(init);
+                    resolved = index + 1 == parts.len();
+                } else if index + 1 == parts.len()
+                    && let Some(module) = exists(&package.with_extension("py"))
+                {
+                    found.push(module);
+                    resolved = true;
+                } else {
+                    break;
+                }
+            }
+            if !resolved {
+                continue;
+            }
+            // `from package import name` may name a submodule.
+            for name in names {
+                let submodule = package.join(name);
+                if let Some(file) = exists(&submodule.with_extension("py"))
+                    .or_else(|| exists(&submodule.join("__init__.py")))
+                {
+                    found.push(file);
+                }
+            }
+            return found;
+        }
+        Vec::new()
     }
 
     fn specifiers(&self, file: &str) -> Option<Vec<Specifier>> {
@@ -520,6 +638,134 @@ fn parse(file: &str, source: &str) -> Option<Vec<Specifier>> {
     Some(collector.found)
 }
 
+#[derive(Debug, Clone)]
+enum PythonImport {
+    Module {
+        module: String,
+        /// Leading dots of a relative import.
+        level: u32,
+        names: Vec<String>,
+    },
+    /// Why what it loads cannot be read.
+    Computed(&'static str),
+}
+
+/// Every import in a Python file, at any depth, with `importlib` calls that
+/// name a module literally and pytest's `pytest_plugins`.
+fn python_imports(source: &str) -> Option<Vec<PythonImport>> {
+    use ruff_python_ast::{
+        Expr, Stmt,
+        visitor::{Visitor, walk_expr, walk_stmt},
+    };
+    let parsed = ruff_python_parser::parse_module(source).ok()?;
+    struct Collector(Vec<PythonImport>);
+    fn module(name: &str) -> PythonImport {
+        PythonImport::Module {
+            module: name.to_owned(),
+            level: 0,
+            names: Vec::new(),
+        }
+    }
+    fn strings(expression: &Expr) -> Option<Vec<String>> {
+        match expression {
+            Expr::StringLiteral(text) => Some(vec![text.value.to_str().to_owned()]),
+            Expr::List(list) => list
+                .elts
+                .iter()
+                .map(|item| strings(item).map(|mut s| s.remove(0)))
+                .collect(),
+            Expr::Tuple(tuple) => tuple
+                .elts
+                .iter()
+                .map(|item| strings(item).map(|mut s| s.remove(0)))
+                .collect(),
+            _ => None,
+        }
+    }
+    fn is_sys_path(expression: &Expr) -> bool {
+        matches!(expression, Expr::Attribute(attribute)
+            if attribute.attr.as_str() == "path"
+                && matches!(&*attribute.value, Expr::Name(name) if name.id.as_str() == "sys"))
+    }
+    impl<'a> Visitor<'a> for Collector {
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            match stmt {
+                Stmt::Import(import) => {
+                    for alias in &import.names {
+                        self.0.push(module(alias.name.as_str()));
+                    }
+                }
+                Stmt::ImportFrom(import) => self.0.push(PythonImport::Module {
+                    module: import
+                        .module
+                        .as_ref()
+                        .map(|m| m.to_string())
+                        .unwrap_or_default(),
+                    level: import.level,
+                    names: import
+                        .names
+                        .iter()
+                        .map(|alias| alias.name.to_string())
+                        .collect(),
+                }),
+                Stmt::Assign(assign) => {
+                    for target in &assign.targets {
+                        if matches!(target, Expr::Name(name) if name.id.as_str() == "pytest_plugins")
+                        {
+                            match strings(&assign.value) {
+                                Some(plugins) => self.0.extend(plugins.iter().map(|p| module(p))),
+                                None => self.0.push(PythonImport::Computed(
+                                    "names its pytest plugins by computation",
+                                )),
+                            }
+                        }
+                        if is_sys_path(target) {
+                            self.0.push(PythonImport::Computed("changes sys.path"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            walk_stmt(self, stmt);
+        }
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if let Expr::Call(call) = expr {
+                let first = call.arguments.args.first();
+                match &*call.func {
+                    Expr::Attribute(attribute)
+                        if is_sys_path(&attribute.value)
+                            && matches!(
+                                attribute.attr.as_str(),
+                                "insert" | "append" | "extend"
+                            ) =>
+                    {
+                        self.0.push(PythonImport::Computed("changes sys.path"));
+                    }
+                    Expr::Attribute(attribute) if attribute.attr.as_str() == "import_module" => {
+                        self.0.push(match first.and_then(strings) {
+                            Some(mut names) => module(&names.remove(0)),
+                            None => PythonImport::Computed("imports a module named by computation"),
+                        });
+                    }
+                    Expr::Name(name)
+                        if matches!(name.id.as_str(), "__import__" | "import_module") =>
+                    {
+                        self.0.push(match first.and_then(strings) {
+                            Some(mut names) => module(&names.remove(0)),
+                            None => PythonImport::Computed("imports a module named by computation"),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            walk_expr(self, expr);
+        }
+    }
+    let mut collector = Collector(Vec::new());
+    collector.visit_body(&parsed.syntax().body);
+    Some(collector.0)
+}
+
 /// The test runner a configuration file belongs to, by its name. A change to
 /// one runner's configuration changes nothing another runner does.
 pub fn configuration_runner(file: &str) -> Option<&'static str> {
@@ -641,6 +887,57 @@ mod tests {
         let closed = imports.loads(["d.test.js"]);
         assert_eq!(closed.open, None);
         assert!(closed.files.contains("e.js"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_python_test_loads_its_conftest_and_what_it_imports() {
+        let root = project(&[
+            (
+                "tests/conftest.py",
+                "import pytest\nfrom tests.support import factory\n",
+            ),
+            ("tests/__init__.py", ""),
+            ("tests/support/__init__.py", ""),
+            ("tests/support/factory.py", "import json\n"),
+            (
+                "tests/unit/test_a.py",
+                "from .helpers import make\nfrom shop import cart\n",
+            ),
+            ("tests/unit/__init__.py", ""),
+            ("tests/unit/helpers.py", "def make():\n    return 1\n"),
+            (
+                "tests/e2e/test_b.py",
+                "import requests\nfrom tests.e2e import pages\n",
+            ),
+            ("tests/e2e/__init__.py", ""),
+            ("tests/e2e/pages.py", ""),
+            ("src/shop/__init__.py", ""),
+            ("src/shop/cart.py", ""),
+            (
+                "tests/odd/test_c.py",
+                "import sys\nsys.path.insert(0, 'x')\n",
+            ),
+        ]);
+        let imports = Imports::new(&root);
+        let unit = imports.loads(["tests/unit/test_a.py"]);
+        assert_eq!(unit.open, None, "{unit:?}");
+        for file in [
+            "tests/conftest.py",
+            "tests/support/factory.py",
+            "tests/unit/helpers.py",
+            "src/shop/cart.py",
+        ] {
+            assert!(unit.files.contains(file), "{file}: {unit:?}");
+        }
+        assert!(!unit.files.contains("tests/e2e/pages.py"));
+        let e2e = imports.loads(["tests/e2e/test_b.py"]);
+        assert!(
+            e2e.files.contains("tests/e2e/pages.py")
+                && !e2e.files.contains("tests/unit/helpers.py"),
+            "{e2e:?}"
+        );
+        assert!(imports.loads(["tests/odd/test_c.py"]).open.is_some());
         fs::remove_dir_all(root).unwrap();
     }
 

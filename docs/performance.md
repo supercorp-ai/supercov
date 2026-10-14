@@ -120,6 +120,20 @@ Each completed run stores compressed evidence and metadata under
 `.supercov/runs/<run-id>/`. Query views are derived from that evidence rather
 than stored as a full report for every filter.
 
+Most of a large run is its query index, `query-index.v1.bin`: on a suite of
+about 400 tests with per-test evidence, 160 MB of a 216 MB run, beside 58 MB of
+evidence. The index is a cache. Supercov builds it again from the evidence the
+first time the run is queried without it, so a CI job that keeps runs as an
+artifact can leave it out:
+
+```sh supercov-example
+tar czf supercov-runs.tgz --exclude 'query-index.v1.bin' .supercov/runs
+```
+
+A merged run holds a copy of each run's evidence and an index of its own, so
+merging adds about as much again. To hand a run to a reviewer, the HTML report
+(`npx supercov report`) is usually the smaller artifact.
+
 The isolated workspace may be larger because it can contain an instrumented
 build cache. Supercov does not delete history in the background.
 

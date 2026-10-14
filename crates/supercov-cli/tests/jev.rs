@@ -466,7 +466,7 @@ fn a_merged_run_is_assessed_like_the_runs_it_was_made_from() {
     assert!(by_test.contains("src/cart.js"), "{by_test}");
 
     // Merging computes nothing a query has not asked for: what each test ran
-    // stays with the runs that recorded it, and the refusal names them.
+    // stays with the runs that recorded it, and a merge is answered from them.
     for derived in ["source-manifest.cache.json", "test-executions.json"] {
         assert!(
             !project
@@ -478,15 +478,24 @@ fn a_merged_run_is_assessed_like_the_runs_it_was_made_from() {
             "{derived} was written by the merge"
         );
     }
-    let affected = project.supercov(&["runs", &merged, "tests", "affected"]);
-    assert_ne!(affected.code(), 0);
-    assert!(
-        affected.stderr().contains(&format!(
-            "A merged run keeps no record of what each test ran; ask the runs it was merged from: {unit}, {integration}"
-        )),
-        "{}",
-        affected.stderr()
+    project.edit("src/cart.js", "join(\", \")", "join(\"; \")");
+    let affected = project
+        .supercov(&["runs", &merged, "tests", "affected", "--json"])
+        .json()["data"]
+        .clone();
+    assert_eq!(
+        affected["mergedFrom"],
+        serde_json::json!([unit, integration]),
+        "{affected}"
     );
+    let names = affected["affected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| test["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["describe names the items"], "{affected}");
+    assert_eq!(affected["summary"]["tests"], 4, "{affected}");
 }
 
 #[test]

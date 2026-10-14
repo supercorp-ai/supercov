@@ -33,6 +33,10 @@ pub struct Ran {
     pub runners: Option<BTreeSet<String>>,
     /// The Playwright configuration as it resolved, where it ran Playwright.
     pub playwright: Option<Value>,
+    /// The files it measured, from its coverage manifest's scope. A file of
+    /// the source outside them -- a simulator, a script -- is judged as a
+    /// helper is.
+    pub measured: Option<BTreeSet<String>>,
 }
 
 impl Ran {
@@ -58,6 +62,14 @@ impl Ran {
             };
             if name == PLAYWRIGHT_CONFIGURATION {
                 ran.playwright = Some(value);
+            } else if name == "manifest.json" {
+                ran.measured = value["scope"]["entries"].as_array().map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|entry| entry["status"] == "included")
+                        .filter_map(|entry| entry["file"].as_str().map(str::to_owned))
+                        .collect()
+                });
             } else if let Some(runners) = value["runners"].as_array() {
                 ran.runners.get_or_insert_with(BTreeSet::new).extend(
                     runners
@@ -78,7 +90,7 @@ impl Ran {
         } else {
             path
         };
-        [PLAYWRIGHT_CONFIGURATION, "frontend.json"]
+        [PLAYWRIGHT_CONFIGURATION, "frontend.json", "manifest.json"]
             .into_iter()
             .find(|wanted| *wanted == name)
     }
@@ -93,6 +105,9 @@ pub struct Judgment {
     /// Whether one of those is a file of the run's own tests: no option makes
     /// a changed test's record its own.
     pub own_tests: bool,
+    /// Whether one of those is one no option accepts: a file of its own
+    /// tests, or one it measured.
+    pub settled: bool,
     /// Files that differ and do not reach the run, with why; and those the
     /// user accepted.
     pub across: Vec<String>,
@@ -332,6 +347,7 @@ pub fn judge(
         let gone = !now.contains_key(&file);
         if own.is_some_and(|own| own.contains(&file)) {
             judgment.own_tests = true;
+            judgment.settled = true;
             judgment.outdated.push(format!(
                 "{file}, a file of its own tests, {}",
                 if gone { "is gone" } else { "has changed" }
@@ -377,7 +393,23 @@ pub fn judge(
             }
             continue;
         }
-        // A file tests may load: a helper, a fixture, a support module.
+        // What the run measured has moved on: its numbers are of other code.
+        // Where the run does not say what it measured, any file not beside
+        // the tests may be.
+        let measured = match &ran.measured {
+            Some(measured) => measured.contains(&file),
+            None => !beside_the_tests(&file),
+        };
+        if measured {
+            judgment.settled = true;
+            judgment.outdated.push(format!(
+                "{file}, which it measured, {}",
+                if gone { "is gone" } else { "has changed" }
+            ));
+            continue;
+        }
+        // A file tests may load: a helper, a fixture, a support module, or
+        // source outside what is measured.
         let placed = checkout.places(&file);
         if let Some(loads) = &loads
             && loads.open.is_none()

@@ -647,17 +647,100 @@ pub fn changed_files(recorded: &FileManifest, now: impl Fn(&str) -> Option<Strin
         .collect()
 }
 
+/// `tests affected` of a merged run: each run it was merged from answers for
+/// its own tests, and a test in several of them is one test, affected where
+/// any of them says so -- as a test failed in either run is failed in the
+/// merge.
+fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String> {
+    let parents = run
+        .metadata
+        .parents
+        .as_deref()
+        .filter(|parents| !parents.is_empty())
+        .ok_or("This merged run does not say which runs it was merged from")?;
+    let inventory = crate::run_store::discover_runs(root).map_err(|error| error.to_string())?;
+    // Where a test is answered: affected outranks undetermined, which
+    // outranks unaffected.
+    const BUCKETS: [&str; 3] = ["affected", "undetermined", "unaffected"];
+    let mut tests = BTreeMap::<(String, String), (usize, Value)>::new();
+    let mut changed = BTreeMap::<String, Value>::new();
+    let mut meaning = Value::Null;
+    for parent in parents {
+        let Some(stored) = inventory.runs.iter().find(|stored| stored.id == *parent) else {
+            return Err(format!(
+                "Run {} was merged from {parent}, which is no longer stored, and a merge is answered from the runs it was merged from. Ask the others, or measure the suite again",
+                run.id
+            ));
+        };
+        let report = affected_tests(root, stored)?;
+        for (rank, bucket) in BUCKETS.iter().enumerate() {
+            for test in report[*bucket].as_array().into_iter().flatten() {
+                let key = (
+                    test["file"].as_str().unwrap_or_default().to_owned(),
+                    test["name"].as_str().unwrap_or_default().to_owned(),
+                );
+                match tests.get_mut(&key) {
+                    Some((held, _)) if *held < rank => {}
+                    Some((held, entry)) if *held == rank => {
+                        let mut reasons = entry["reasons"].as_array().cloned().unwrap_or_default();
+                        for reason in test["reasons"].as_array().into_iter().flatten() {
+                            if !reasons.contains(reason) {
+                                reasons.push(reason.clone());
+                            }
+                        }
+                        entry["reasons"] = Value::Array(reasons);
+                    }
+                    _ => {
+                        tests.insert(key, (rank, test.clone()));
+                    }
+                }
+            }
+        }
+        for file in report["changedFiles"].as_array().into_iter().flatten() {
+            if let Some(name) = file["file"].as_str() {
+                changed
+                    .entry(name.to_owned())
+                    .or_insert_with(|| file.clone());
+            }
+        }
+        if meaning.is_null() {
+            meaning = report["meaning"].clone();
+        }
+    }
+    let mut buckets = BUCKETS.map(|_| Vec::new());
+    for (rank, test) in tests.into_values() {
+        buckets[rank].push(test);
+    }
+    // Most likely to fail first, as within one run.
+    for bucket in &mut buckets[..2] {
+        bucket.sort_by_key(|entry| std::cmp::Reverse(entry["nameMatch"].as_u64().unwrap_or(0)));
+    }
+    let [affected, undetermined, unaffected] = buckets;
+    let total = affected.len() + undetermined.len() + unaffected.len();
+    Ok(json!({
+        "run": run.id,
+        "mergedFrom": parents,
+        "summary": {
+            "tests": total,
+            "affected": affected.len(),
+            "undetermined": undetermined.len(),
+            "unaffected": unaffected.len(),
+            "changedFiles": changed.len(),
+        },
+        "affected": affected,
+        "undetermined": undetermined,
+        "unaffected": unaffected,
+        "changedFiles": changed.into_values().collect::<Vec<_>>(),
+        "meaning": meaning,
+    }))
+}
+
 pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     // What each test ran is recorded when a run is published, beside the
-    // code it ran, and a merge records nothing: its parts hold the records.
+    // code it ran, and a merge records nothing: its parts hold the records,
+    // and a merge is answered from them when asked.
     if run.metadata.merged == Some(true) {
-        return Err(match run.metadata.parents.as_deref() {
-            Some(parents) if !parents.is_empty() => format!(
-                "A merged run keeps no record of what each test ran; ask the runs it was merged from: {}",
-                parents.join(", ")
-            ),
-            _ => "A merged run keeps no record of what each test ran; ask the runs it was merged from".into(),
-        });
+        return affected_tests_of_merge(root, run);
     }
     let stored = load_manifest(run)?;
     let executions: Executions = fs::read(run.directory.join(EXECUTIONS_FILE))
