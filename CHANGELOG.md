@@ -5,23 +5,23 @@
 **Added**
 
 - A GitHub Action: `uses: supercorp-ai/supercov@v4` with `command: npm test` runs the tests and comments on the pull request which changed lines no test ran, with the run's line, branch and MC/DC coverage. One comment kept up to date, the lines marked in the diff, optional floors, the same report in the job summary. Every supported language; no account, token or server.
+- Runs of one project can be started at the same moment. A second `supercov --` was refused with `already active`, because every run rebuilt the project's one copy. Each run takes a copy of its own (`workspace`, then `workspace-2`), held by a lock of the operating system. A run alone has the first copy, as before; a copy past the first is removed a day after its last run. `runs clean` is refused, with status 2, while a run is active.
+- `supercov merge` with no run named merges the runs recorded on the source as it is now: the newest of each command, leaving out merges. A script no longer has to find what each run was called.
+- `merge` adds a run of a new test alone to the runs before it. It refused them (`differing domains: tests`) when only a test file had been added. A run is left out, and named, when a file of its own tests or a file tests load has changed since.
+- The LCOV export has LCOV 2's `MCDC`, `MCF` and `MCH` records. Read back by lcov 2.6, its condition total is the run's MC/DC.
 
 **Changed**
 
-- `supercov report` of a large run takes seconds. It read the whole run again for every file with a gap: 10 min 25 s for a run of 2,000 tests over 300 files, now 19 s, and the report is the same byte for byte.
-- Runs of one project can be started at the same moment. A second `supercov --` was refused with `already active`, because every run rebuilt the project's one copy. Each run now takes a copy of its own (`workspace`, then `workspace-2`), held by a lock of the operating system, which gives it back when the process ends however it ends. A run alone has the first copy, as before. A copy past the first is removed a day after its last run. `runs clean` is refused, with status 2, while a run is active.
-- `supercov merge` with no run named merges the runs recorded on the source as it is now: the newest of each command, leaving out merges. A script no longer has to find what each run was called.
-- Suites started from one command, each with its own `SUPERCOV_TEST_KIND`, are one run with every kind. This worked and was written down nowhere.
-- `merge` adds a run of a new test alone to the runs before it. It refused them ("differing domains: tests") although only a test file had been added, so raising a suite's coverage one test at a time meant measuring the whole suite each time. Runs may now differ in their tests when the later have only gained test files. A run is left out, and named, when a file of its own tests or a file tests load has changed since.
-- The LCOV export has LCOV 2's `MCDC`, `MCF` and `MCH` records, so a per-file MC/DC figure can be made from the export. Read back by lcov 2.6: its condition total is the run's MC/DC.
-- A JSON reply too large for one answer says how many of the entries asked for fit, and to follow `pagination.nextOffset`. It said only that it was too large.
+- `supercov report` of a large run takes seconds: 10 min 25 s for a run of 2,000 tests over 300 files, now 19 s, and the same report byte for byte.
+- A JSON reply too large for one answer says how many of the entries asked for fit, and to follow `pagination.nextOffset`.
+- Suites started from one command, each with its own `SUPERCOV_TEST_KIND`, are one run with every kind. This worked and is now documented.
 
 **Fixed**
 
-- `runs patch` in a project kept below the top of its repository counts a new file not yet added to git as changed, and `--annotate github` names each file from the top, where a workflow looks for it. The file was left out and the marks were attached to no file.
-- `return undefined as T` is no longer read as a statement no test asserts. It was asked as a return made to return undefined, which no test can catch.
-- A test command reads the keyboard on a terminal (macOS and Linux). A debugger at a breakpoint, a watch mode or `npx` asking to install never got what was typed: the command runs in a process group of its own, and its first read of the terminal stopped it. It is given the terminal when it first reads. Ctrl-C then reaches the command and still ends the run as interrupted; Ctrl-Z stops both.
-- What Go, Maven and Gradle print names the project on a terminal too (macOS and Linux). 4.4.0 put the names right only where the output was a file or a pipe: at a terminal a Go compile error still read `../../../../price.go:4:28`, and Maven and Gradle ended a failed run with a report in Supercov's copy. The command now writes to a terminal of its own, so its colours, width and progress lines are as they were.
+- A test command reads the keyboard on a terminal (macOS and Linux). A debugger at a breakpoint, a watch mode or `npx` asking to install never got what was typed: the command's first read of the terminal stopped it. Ctrl-C then reaches the command and still ends the run as interrupted; Ctrl-Z stops both.
+- What Go, Maven and Gradle print names the project on a terminal too (macOS and Linux). A Go compile error read `../../../../price.go:4:28`, and Maven and Gradle named a report in Supercov's copy.
+- `runs patch` in a project kept below the top of its repository counts a new file not yet added to git, and `--annotate github` names each file from the top, where a workflow looks for it.
+- `return undefined as T` is no longer read as a statement no test asserts.
 
 ## 4.4.0
 
