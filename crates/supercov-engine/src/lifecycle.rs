@@ -884,6 +884,12 @@ pub(crate) fn publish_run_with_fault(
     archived: Archived,
     fault: Option<RunPublicationFault>,
 ) -> Result<PathBuf, LifecycleError> {
+    // Every run says which release recorded it.
+    let mut metadata = metadata.clone();
+    metadata
+        .recorded_by
+        .get_or_insert_with(|| env!("CARGO_PKG_VERSION").to_owned());
+    let metadata = &metadata;
     checked_id(&metadata.id)?;
     let destination = root.join(".supercov/runs").join(&metadata.id);
     reject_linked_ancestors(root, &destination, false)?;
@@ -1515,6 +1521,7 @@ mod tests {
             source_roots: None,
             copy: None,
             merged_across: None,
+            recorded_by: None,
         }
     }
 

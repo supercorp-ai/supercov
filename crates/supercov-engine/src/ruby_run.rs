@@ -387,6 +387,7 @@ pub fn run_direct_ruby(
             source_roots: source_roots.clone(),
             copy: None,
             merged_across: None,
+            recorded_by: None,
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;

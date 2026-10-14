@@ -236,9 +236,21 @@ class CoveragePhaseController {
     // Parameter properties are stateful despite the base ESLint rule treating
     // this as an empty constructor.
     // eslint-disable-next-line no-useless-constructor
-    constructor(scope, configuredHeaders = {}) {
+    constructor(scope, configuredHeaders = {}, baseURL) {
         this.scope = scope;
         this.configuredHeaders = configuredHeaders;
+        // Where the app under test is served: the project's base URL, and the
+        // local hosts a web server listens on. A cookie is kept per host, for
+        // every port of it.
+        const hosts = ["http://localhost/", "http://127.0.0.1/"];
+        try {
+            if (baseURL)
+                hosts.unshift(new URL("/", baseURL).href);
+        }
+        catch {
+            // A base URL Playwright itself would refuse.
+        }
+        this.appHosts = [...new Set(hosts)];
     }
     allPages() {
         return [...this.pages];
@@ -451,12 +463,29 @@ class CoveragePhaseController {
             coverageGlobal.__SUPERCOV_ATTEMPT__ = { attemptId, scopeValue };
             coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
             try {
-                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
+                // Sent to a frame of another site too, where the page is a
+                // secure context; the cookie the context was given is the
+                // same, and a Lax copy written here would replace it.
+                const reach = globalThis.isSecureContext ? "SameSite=None; Secure" : "SameSite=Lax";
+                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; ${reach}`;
                 if (!coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__) {
                     const originalFetch = globalThis.fetch?.bind(globalThis);
                     if (originalFetch) {
                         coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__ = true;
                         globalThis.fetch = ((input, init) => {
+                            // Only the page's own origin hears the scope. A
+                            // header on a request to another origin makes the
+                            // browser ask that origin first, and one that
+                            // allows only the headers it uses refuses: the
+                            // page's fetch failed under measurement alone.
+                            try {
+                                const target = new URL(input instanceof Request ? input.url : String(input), location.href);
+                                if (target.origin !== location.origin)
+                                    return originalFetch(input, init);
+                            }
+                            catch {
+                                return originalFetch(input, init);
+                            }
                             const headers = new Headers(init?.headers ??
                                 (input instanceof Request ? input.headers : undefined));
                             headers.set(scopeHeader, coverageGlobal.__SUPERCOV_ATTEMPT__?.scopeValue ?? scopeValue);
@@ -513,6 +542,16 @@ class CoveragePhaseController {
             if (!originalFetch)
                 return answer;
             globalThis.fetch = ((input, init) => {
+                // As in a page: another origin would be asked first, and may
+                // refuse a header it does not expect.
+                try {
+                    const target = new URL(input instanceof Request ? input.url : String(input), globalThis.location.href);
+                    if (target.origin !== globalThis.location.origin)
+                        return originalFetch(input, init);
+                }
+                catch {
+                    return originalFetch(input, init);
+                }
                 const headers = new Headers(init?.headers ??
                     (input instanceof Request ? input.headers : undefined));
                 headers.set(scopeHeader, scopeValue);
@@ -705,13 +744,10 @@ class CoveragePhaseController {
         const options = scoped[0] && typeof scoped[0] === "object"
             ? scoped[0]
             : {};
-        scoped[0] = {
-            ...options,
-            extraHTTPHeaders: {
-                ...(options.extraHTTPHeaders ?? {}),
-                ...(activeCoverageHeaders() ?? {}),
-            },
-        };
+        // The scope reaches the app in cookies once the context is
+        // registered (`updateContextHeaders`); headers on the context would
+        // go to every origin the page fetches from.
+        scoped[0] = { ...options };
         return scoped;
     }
     /**
@@ -744,8 +780,9 @@ class CoveragePhaseController {
             coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(attemptId, id);
             try {
                 localStorage.setItem(storageKey, id);
-                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
-                document.cookie = `${phaseCookie}=${encodeURIComponent(id)}; Path=/; SameSite=Lax`;
+                const reach = globalThis.isSecureContext ? "SameSite=None; Secure" : "SameSite=Lax";
+                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; ${reach}`;
+                document.cookie = `${phaseCookie}=${encodeURIComponent(id)}; Path=/; ${reach}`;
             }
             catch {
                 // Sandboxed/cross-origin frames may not expose localStorage.
@@ -779,14 +816,42 @@ class CoveragePhaseController {
                 this.unresponsiveWorkers.add(worker);
         })));
     }
+    /**
+     * Tell the app which test and phase its requests belong to, in cookies on
+     * the app's hosts. Headers set on the context went with every request the
+     * browser made, to any origin, and a header on a request to another
+     * origin makes the browser ask that origin first: one that allows only the
+     * headers it uses refused, and the page's request failed under
+     * measurement alone. A cookie never does. The page sends it to its own
+     * site from the first navigation on, and, on a secure origin, to frames
+     * of the app's other hosts as well.
+     */
     async updateContextHeaders(context, phaseId) {
-        await context
-            .setExtraHTTPHeaders({
-            ...(this.contextConfiguredHeaders.get(context) ?? this.configuredHeaders),
-            [COVERAGE_SCOPE_HEADER]: encodeCoverageScope(this.scope),
-            ...(phaseId ? { [COVERAGE_PHASE_HEADER]: phaseId } : {}),
-        })
-            .catch(() => undefined);
+        const values = [
+            [COVERAGE_SCOPE_COOKIE, encodeURIComponent(encodeCoverageScope(this.scope))],
+            ...(phaseId ? [[COVERAGE_PHASE_COOKIE, encodeURIComponent(phaseId)]] : []),
+        ];
+        await Promise.all([
+            // The context's own headers are the owner's, unchanged.
+            context
+                .setExtraHTTPHeaders(this.contextConfiguredHeaders.get(context) ?? this.configuredHeaders)
+                .catch(() => undefined),
+            ...this.appHosts.map((url) => {
+                // A frame of another site gets a cookie only if it may cross
+                // sites, which needs a secure origin: https, or a local host.
+                // Chromium keeps such a cookie only when it is given by domain;
+                // given by an http URL it is dropped without a word.
+                const host = new URL(url);
+                const secure = host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname);
+                const where = secure
+                    ? { domain: host.hostname, path: "/", sameSite: "None", secure: true }
+                    : { url, sameSite: "Lax" };
+                // One host refused leaves the others theirs.
+                return context
+                    .addCookies(values.map(([name, value]) => ({ name, value, ...where })))
+                    .catch(() => undefined);
+            }),
+        ]);
     }
     async activatePage(page, phaseId) {
         const cdp = this.cdpSessions.get(page);
@@ -1352,7 +1417,7 @@ const instrumentedFixtures = {
         async ({}, use, testInfo) => {
             const scope = executionScope(testInfo);
             const configuredHeaders = Object.fromEntries(Object.entries(testInfo.project.use.extraHTTPHeaders ?? {}).map(([name, value]) => [name, String(value)]));
-            const controller = new CoveragePhaseController(scope, configuredHeaders);
+            const controller = new CoveragePhaseController(scope, configuredHeaders, testInfo.project.use.baseURL);
             controllers.set(scope.attemptId, controller);
             activeController = controller;
             directRuntime()?.activateCoverageScope(scope);
