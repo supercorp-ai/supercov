@@ -142,6 +142,72 @@ try {
   assert.deepEqual(affected.trim().split('\n').sort(), ['grades.spec.js a high score is an A', 'grades.spec.js a low score fails', 'grades.spec.js a script the test runs', 'grades.spec.js the page asks for the top grade'], affected);
   write(plain, { 'app/grades.py': grades });
 
+  // A webhook a mock Supercov does not measure sends: the request names no
+  // test, and its work is the test's that was running when it came.
+  const webhook = resolve(base, 'webhook');
+  const stripe = port + 4;
+  write(webhook, {
+    'package.json': '{ "name": "python-webhook", "private": true, "type": "module" }\n',
+    'app/__init__.py': '',
+    'app/payments.py': 'def settle(event):\n    if event.get("type") == "charge.succeeded":\n        return "paid"\n    return "ignored"\n',
+    'app/server.py': `import json
+import sys
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from app.payments import settle
+
+state = {"order": "none"}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def reply(self, body):
+        data = body.encode()
+        self.send_response(200)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/checkout":
+            state["order"] = "pending"
+            urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:${stripe}/charge", method="POST")).read()
+            return self.reply("started")
+        if self.path == "/state":
+            return self.reply(state["order"])
+        self.reply("ready")
+
+    def do_POST(self):
+        event = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        state["order"] = settle(event)
+        self.reply("ok")
+
+    def log_message(self, *args):
+        pass
+
+
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+`,
+    // Answers the charge, then calls the app's webhook by itself.
+    'mocks/stripe.mjs': `import { createServer } from 'node:http';\n\ncreateServer((request, response) => {\n  if (request.url === '/charge') {\n    response.end('{}');\n    setTimeout(() => fetch('http://127.0.0.1:${port + 5}/webhook', { method: 'POST', body: JSON.stringify({ type: 'charge.succeeded' }) }), 100);\n    return;\n  }\n  response.end('ready');\n}).listen(${stripe}, '127.0.0.1');\n`,
+    'playwright.config.js': config([
+      { command: `${python} -m app.server ${port + 5}`, url: `http://127.0.0.1:${port + 5}/ready`, reuseExistingServer: false },
+      // Started without Supercov, as an external mock binary would be.
+      { command: 'env -u NODE_OPTIONS node mocks/stripe.mjs', url: `http://127.0.0.1:${stripe}/`, reuseExistingServer: false },
+    ], `http://127.0.0.1:${port + 5}`),
+    'tests/checkout.spec.js': "import { expect, test } from '@playwright/test';\n\ntest('a checkout is paid when the webhook arrives', async ({ request }) => {\n  await request.get('/checkout');\n  await expect.poll(async () => (await request.get('/state')).text()).toBe('paid');\n});\n\ntest('the state can be read', async ({ request }) => {\n  expect(await (await request.get('/state')).text()).toBeTruthy();\n});\n",
+  });
+  if (process.platform !== 'win32') {
+    measure(webhook, []);
+    const [paidRun] = runs(webhook);
+    const paid = page(webhook, paidRun, 'test', 'a checkout is paid when the webhook arrives');
+    assert.match(paid, /app\/payments\.py:3/u, `the webhook is not the checkout test's:\n${paid}`);
+    assert.match(paid, /credited by time/u, paid);
+    const read = page(webhook, paidRun, 'test', 'the state can be read');
+    assert.doesNotMatch(read, /payments\.py|credited by time/u, read);
+    assert.match(page(webhook, paidRun), /Attribution {6}1 exact, 1 with server work credited by time/u);
+  }
+
   // A Node server beside it: the browser run is the run, and the server's
   // is published beside it. Merging two runs of each merges each.
   const mixed = resolve(base, 'mixed');

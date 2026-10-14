@@ -1209,32 +1209,18 @@ pub fn run_direct_javascript(
     })
 }
 
-/// The id of a run published beside `run_id` from the same command: a
-/// public id when `run_id` is one, and one that sorts after it, since runs
-/// that started together are listed by id.
+/// The id of a run published beside `run_id` from the same command: the
+/// public id just below it when `run_id` is one, since runs that started
+/// together are listed by id, highest first.
 fn companion_run_id(run_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let public = run_id.len() == 20
-        && run_id.starts_with("run_")
-        && run_id[4..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-    if !public {
-        return format!("{run_id}-python");
+    match run_id
+        .strip_prefix("run_")
+        .filter(|hex| hex.len() == 16)
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+    {
+        Some(number) => format!("run_{:016x}", number.wrapping_sub(1)),
+        None => format!("{run_id}-python"),
     }
-    let mut fallback = None;
-    for attempt in 0_u32..256 {
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(format!("{run_id}\0python\0{attempt}").as_bytes())
-        );
-        let id = format!("run_{}", &digest[..16]);
-        if id.as_str() < run_id {
-            return id;
-        }
-        fallback.get_or_insert(id);
-    }
-    fallback.expect("an id was made")
 }
 
 /// Each browser test attempt the suite reported, for a Python server's run:
@@ -1257,6 +1243,14 @@ fn served_tests(evidence_directory: &Path) -> Vec<crate::python_evidence::Served
         status: String,
         expected_status: Option<String>,
         provenance: crate::coverage_report::TestProvenance,
+        #[serde(default)]
+        phases: Vec<Phase>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Phase {
+        started_at_ms: i64,
+        ended_at_ms: Option<i64>,
     }
     let mut served = BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(evidence_directory) else {
@@ -1283,6 +1277,12 @@ fn served_tests(evidence_directory: &Path) -> Vec<crate::python_evidence::Served
             .filter_map(|line| serde_json::from_str::<Attempt>(line).ok())
         {
             let worker = format!("playwright:{}", attempt.scope.worker_id);
+            let start = attempt.phases.iter().map(|phase| phase.started_at_ms).min();
+            let end = attempt
+                .phases
+                .iter()
+                .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
+                .max();
             served
                 .entry((worker.clone(), attempt.test_id.clone(), attempt.retry))
                 .or_insert(crate::python_evidence::ServedTest {
@@ -1295,6 +1295,7 @@ fn served_tests(evidence_directory: &Path) -> Vec<crate::python_evidence::Served
                     status: attempt.status,
                     expected_status: attempt.expected_status.unwrap_or_else(|| "passed".into()),
                     provenance: attempt.provenance,
+                    window: start.zip(end),
                 });
         }
     }
@@ -1304,6 +1305,24 @@ fn served_tests(evidence_directory: &Path) -> Vec<crate::python_evidence::Served
 #[cfg(test)]
 mod environment_tests {
     use super::*;
+
+    // A server's run published beside a browser run sorts after it, so
+    // `runs latest` stays the browser run; and is the same each time.
+    #[test]
+    fn a_companion_run_id_is_public_and_sorts_after_its_run() {
+        for run in [
+            "run_0123456789abcdef",
+            "run_ffffffffffffffff",
+            "run_8000000000000000",
+        ] {
+            let companion = companion_run_id(run);
+            assert_eq!(companion.len(), 20);
+            assert!(companion.starts_with("run_"));
+            assert!(companion.as_str() < run, "{companion} >= {run}");
+            assert_eq!(companion, companion_run_id(run));
+        }
+        assert_eq!(companion_run_id("rust-1"), "rust-1-python");
+    }
 
     #[test]
     fn nested_npm_drops_only_pnpm_derived_environment_aliases() {

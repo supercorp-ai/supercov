@@ -1435,12 +1435,26 @@ def _scope_header(scope):
     return header
 
 
+REQUEST_WORKER = "supercov-request"
+_requests = itertools.count(1)
+
+
 def _enter_request(runtime, identity):
     """Run what follows as the test `identity` names; returns what to hand
-    `_leave_request`, or None when there is nothing to leave -- no test was
-    named, or the request already runs as that test (a framework's entry
-    point under the standard library's server)."""
-    if identity is None or runtime.current_identity() == identity:
+    `_leave_request`, or None when there is nothing to leave: the request
+    already runs as that test (a framework's entry point under the standard
+    library's server).
+
+    A request that names no test -- a webhook from a mock Supercov does not
+    measure -- runs as a numbered request of its own, which the report gives
+    to the test that was running when it came, if only one was."""
+    if identity is None:
+        current = runtime.current_identity()
+        if current is not None:
+            # Already a request of this server's, or a test's own process.
+            return None
+        identity = {"worker": REQUEST_WORKER, "test": str(next(_requests)), "retry": 0, "phase": "call"}
+    elif runtime.current_identity() == identity:
         return None
     leave = runtime.context.get()
     runtime.switch(identity)
