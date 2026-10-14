@@ -461,7 +461,16 @@ function attemptKey(scope) {
 function serverRecordKey(record) {
   var _a8;
   const suffix = record.type === "decision" ? `${record.meta.id}:${vectorKey(record.vector)}` : record.id;
-  return `${(_a8 = record.phaseId) != null ? _a8 : "unscoped"}:${record.type}:${suffix}`;
+  // Each request that names no test keeps its own first hits: the report
+  // credits them to the test running when it came, and a later request's
+  // work belongs to whichever test was running then.
+  const request = record.request ? `request-${record.request}:` : "";
+  return `${request}${(_a8 = record.phaseId) != null ? _a8 : "unscoped"}:${record.type}:${suffix}`;
+}
+// Numbers the requests a server handles that name no test.
+function nextUnscopedRequest() {
+  state.unscopedRequests = (state.unscopedRequests || 0) + 1;
+  return state.unscopedRequests;
 }
 function beginBufferedServerEvidence(scope) {
   if (isBrowser)
@@ -794,7 +803,11 @@ function appendServer(record) {
   try {
     const directory = scope ? serverEvidenceDirectory(scope) : void 0;
     const path = scope ? serverEvidencePath(scope) : void 0;
-    const serialized = __spreadValues(__spreadValues({}, record), scope ? { scope } : {});
+    // Work done while handling a request that named no test -- a webhook a
+    // mock server sends -- says so, with the request's number.
+    const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
+    const unscopedRequest = !scope && stored && stored.request ? { request: stored.request } : {};
+    const serialized = __spreadValues(__spreadValues(__spreadValues({}, record), scope ? { scope } : {}), unscopedRequest);
     if (scope && state.bufferedAttempts.has(attemptKey(scope))) {
       const key = attemptKey(scope);
       const buffered = (_c = state.serverBuffers.get(key)) != null ? _c : {
@@ -1387,9 +1400,24 @@ function installNodeRequestPropagation() {
       // the server process were created by a shared before hook.
       const incoming = requestCoverageContext(args[0]);
       if (incoming) context = incoming.scope ? incoming : context != null ? context : currentRequestContext();
+      // A request that names no test, to a server no test owns, is numbered:
+      // the report credits its work to the test running when it came.
+      if (incoming && serverPhaseStorage && !(context && (context.scope || context.phaseId)))
+        context = { request: nextUnscopedRequest() };
+      // Node emits a request's body and its response's events outside the
+      // handler's context, so a handler that reads the body -- `req.on('end')`
+      // -- ran as no test's. The request and response carry it with them.
+      if (incoming && context) {
+        for (const emitter of args.slice(0, 2)) {
+          if (emitter && typeof emitter === "object" && typeof emitter.emit === "function")
+            emitterCoverageContexts.set(emitter, context);
+        }
+      }
     }
     const invoke = () => Reflect.apply(original, this, [event, ...args]);
     try {
+      if (context && context.request && !context.scope)
+        return serverPhaseStorage.run(context, () => withProbeV2Context(context, invoke));
       return context ? withCoverageCarrier({ version: 1, ...context }, invoke) : invoke();
     } finally {
       if (event === "close") emitterCoverageContexts.delete(this);
@@ -1410,6 +1438,8 @@ function withRequestPhase(handler, event) {
     // owner. Shared servers have no captured test scope and stay unattributed.
     const inheritedContext = requestContext && requestContext.scope ? {} : registeredContext.scope ? registeredContext : requestContext === void 0 ? currentRequestContext() : {};
     const context = __spreadValues(__spreadValues({}, ((_a8 = requestContext == null ? void 0 : requestContext.scope) != null ? _a8 : inheritedContext.scope) ? { scope: (_b = requestContext == null ? void 0 : requestContext.scope) != null ? _b : inheritedContext.scope } : {}), ((_c = requestContext == null ? void 0 : requestContext.phaseId) != null ? _c : inheritedContext.phaseId) ? { phaseId: (_d = requestContext == null ? void 0 : requestContext.phaseId) != null ? _d : inheritedContext.phaseId } : {});
+    if (requestContext !== void 0 && !context.scope)
+      context.request = nextUnscopedRequest();
     const invoke = () => {
       if (event === "connection" && context.scope && args[0] &&
           typeof args[0] === "object" && typeof args[0].emit === "function")

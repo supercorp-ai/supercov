@@ -182,6 +182,12 @@ pub struct ServerRecord {
     pub statement_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ExecutionScope>,
+    /// Made while the server handled a request that named no test -- a
+    /// webhook a mock server sends -- numbered per request in its process.
+    /// Only such work is credited by time: start-up and a test process's own
+    /// module loading are not a request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,9 +312,9 @@ pub const ATTRIBUTION_PARTIAL: &str = "partial";
 /// reach and never hides any of it.
 pub const ATTRIBUTION_BY_TIME: &str = "by-time";
 
-/// Server work no request named -- a webhook a mock server sends, a job a
-/// test set off -- done while one test, and only one, was running is that
-/// test's, credited by the time it ran. Where tests ran at once, or none was
+/// Server work for a request that named no test -- a webhook a mock server
+/// sends -- done while one test, and only one, was running is that test's,
+/// credited by the time it ran. Where tests ran at once, or none was
 /// running (start-up, between tests), it stays no test's, and is returned.
 ///
 /// A test's time is from its first phase to the end of its last: what it did
@@ -333,8 +339,11 @@ fn credit_by_time(
         })
         .collect::<Vec<_>>();
     let mut unattributed = Vec::new();
+    // A request's work appears once per request; what stays no test's is
+    // counted once.
+    let mut kept = std::collections::HashSet::new();
     for record in records {
-        let owner = record.timestamp_ms.and_then(|at| {
+        let owner = record.request.and(record.timestamp_ms).and_then(|at| {
             let mut running = windows
                 .iter()
                 .filter(|(_, start, end)| *start <= at && at <= *end);
@@ -347,7 +356,13 @@ fn credit_by_time(
                 raw.attribution = least_exact(&raw.attribution, ATTRIBUTION_BY_TIME);
                 raw.server.push(record);
             }
-            None => unattributed.push(record),
+            None => {
+                let mut record = record;
+                record.request = None;
+                if kept.insert(serde_json::to_vec(&record).unwrap_or_default()) {
+                    unattributed.push(record);
+                }
+            }
         }
     }
     unattributed
@@ -3295,7 +3310,11 @@ mod tests {
             phase_id: None,
             statement_id: None,
             scope: None,
+            request: Some(timestamp as u64),
         };
+        // Module loading in a test process: no request, never credited.
+        let mut loading = at(170);
+        loading.request = None;
         let mut first = raw("checkout", 0, "passed", &[]);
         first.phases = vec![phase(100, 150), phase(160, 200)];
         let mut second = raw("refund", 0, "passed", &[]);
@@ -3306,7 +3325,7 @@ mod tests {
         let mut results = vec![first, second, beside];
         let left = credit_by_time(
             &mut results,
-            vec![at(50), at(155), at(320), at(360), at(500)],
+            vec![at(50), at(155), loading, at(320), at(360), at(500)],
         );
         // During the first test, between two of its phases: its own.
         assert_eq!(results[0].server.len(), 1);
@@ -3321,7 +3340,7 @@ mod tests {
             .iter()
             .filter_map(|record| record.timestamp_ms)
             .collect::<Vec<_>>();
-        assert_eq!(left, [50, 360, 500]);
+        assert_eq!(left, [50, 170, 360, 500]);
         // Still complete: the credit adds to the test's reach, never hides it.
         assert!(coverage_is_complete(ATTRIBUTION_BY_TIME));
         assert_eq!(

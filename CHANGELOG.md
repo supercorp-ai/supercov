@@ -4,7 +4,11 @@
 
 **Added**
 
-- Server work that no request named is credited to the test that was running: a webhook a mock Stripe server sends to the app, a job a test set off. It counted as no test's, and the tests whose only coverage it was were flagged as recording none. A test is credited only when it was the only one running when the server did the work, and the run's `Attribution` line and the test's own page say it was credited by time.
+- A request to your app server that names no test, such as a webhook from a mock Stripe server Supercov does not measure, is credited to the test that was running when the server handled it. It counted as no test's, and the tests whose only coverage it was were flagged as recording none. A test is credited only when it was the only one running then, and the run's `Attribution` line and the test's own page say it was credited by time.
+
+**Fixed**
+
+- A Node server handler that reads the request body (`req.on('end', ...)`) ran as no test's: Node emits a body's events outside the handler's context. The request and its response now carry the test's scope into them.
 
 **Changed**
 
