@@ -626,6 +626,37 @@ fn usage(message: String) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// Whether every configuration file that changed since the run belongs to a
+/// test runner its tests did not run under: the Playwright configuration
+/// changing changes nothing a Vitest run did.
+fn other_runners_only(root: &Path, run: &StoredRun) -> bool {
+    let Ok(files) = supercov_engine::source_manifest::load_manifest(run) else {
+        return false;
+    };
+    let Some(runners) = supercov_engine::run_currency::Ran::of(run).runners else {
+        return false;
+    };
+    let changed = files
+        .manifest
+        .files
+        .iter()
+        .filter(|(file, _)| supercov_engine::run_currency::configuration_file(file))
+        .filter(|(file, was)| {
+            std::fs::read_to_string(root.join(file))
+                .ok()
+                .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256)
+                != Some(was.sha256.clone())
+        })
+        .map(|(file, _)| file.as_str())
+        .collect::<Vec<_>>();
+    // Nothing recorded changed, yet the configuration did: a file was added.
+    !changed.is_empty()
+        && changed.iter().all(|file| {
+            supercov_engine::test_loads::configuration_runner(file)
+                .is_some_and(|runner| !runners.contains(runner))
+        })
+}
+
 /// The checkout against the run, and what that means for the answer: a
 /// run-wide difference makes every test affected; a source set that changed
 /// without any captured file changing means a file was added.
@@ -638,6 +669,9 @@ fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
         .reasons
         .iter()
         .filter(|r| RUN_WIDE.contains(&r.as_str()))
+        .filter(|r| {
+            r.as_str() != "test/build configuration changed" || !other_runners_only(root, run)
+        })
         .cloned()
         .collect::<Vec<_>>();
     if !run_wide.is_empty() {

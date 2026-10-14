@@ -303,6 +303,10 @@ pub struct CoverageSummaryData {
     pub run: String,
     #[serde(default)]
     pub command: Vec<String>,
+    /// For a merge made with `--allow-changed`: what differed between the
+    /// runs it was merged from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_across: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2841,6 +2845,7 @@ pub fn coverage_summary_query(
         assertion_coverage: None,
         run: options.run.into(),
         command: Vec::new(),
+        merged_across: Vec::new(),
         hints: Vec::new(),
         workspace: None,
         filters,

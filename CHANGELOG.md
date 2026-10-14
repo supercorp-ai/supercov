@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `merge` adds a run of new tests to the runs before it when the tests brought helpers or runner settings with them. It judges each file that differs by what the earlier run's tests did with it: a helper their files do not import, or one that only gained functions, leaves the run in; so does another runner's configuration, and a Playwright change to timeouts, retries, workers, reporters or which tests to run. A run left out is named with the files and functions that changed. The merged run lists what it crossed (`merged across:`).
+- `merge --allow-changed` accepts the changes Supercov counts, when you know they alter nothing the earlier tests ran. Product code, dependencies and a run's own test files are never accepted.
+
+**Fixed**
+
+- `tests affected` reported no test affected when a helper the tests call changed, since helpers sit outside what is measured. A test is now affected by a helper its file imports, and every test by one Supercov cannot place.
+- A Playwright configuration change made every unit test affected and every Vitest run out of date for `merge`, and a Vitest one did the same to Playwright runs. A runner's settings now count only for runs that used it.
+- `merge` with no run named left out a run whose source had changed without saying so. It now names it and the changed files.
+
 ## 4.5.0
 
 **Added**

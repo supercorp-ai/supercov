@@ -593,7 +593,7 @@ fn dependency_files(root: &Path) -> Result<Vec<PathBuf>, IntegrityError> {
     Ok(files)
 }
 
-fn configuration_file(path: &Path) -> bool {
+pub(crate) fn configuration_file(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())

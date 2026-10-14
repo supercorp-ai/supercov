@@ -511,8 +511,12 @@ pass in the run is listed regardless.
 per line, for a runner's filter. A Vitest, Playwright or node:test test inside
 `describe` blocks is printed as the blocks and the test joined by spaces
 (`small charges`), which is what `vitest -t`, `--grep` and
-`--test-name-pattern` match. A dependency, lockfile, configuration or
-toolchain change affects every test and is reported as such. A source file
+`--test-name-pattern` match. A helper beside the tests that changed affects
+the tests whose files import it (a helper that only gained functions affects
+none), and every test where Supercov cannot read the imports. A dependency,
+lockfile, configuration or toolchain change affects every test and is reported
+as such; a test runner's settings affect only the runs that used that runner.
+A source file
 added since the run is outside every test's record; the working-tree check
 says so, and the suite should run in full.
 
@@ -595,9 +599,10 @@ A test that is in two of the runs is one test in the merge. If it failed in
 either, it is failed, which is why a command run again replaces its earlier
 run and is not merged with it.
 
-The runs may differ in their tests when the later ones have only gained test
-files. Measuring a new test alone and adding it to the runs before it is
-then the whole suite's figure, without the whole suite's time:
+The runs may differ in their tests, the helpers beside them, and the test
+runners' settings, as long as nothing that changed reaches what an earlier
+run's tests did. Measuring a new test alone and adding it to the runs before it
+is then the whole suite's figure, without the whole suite's time:
 
 ```sh supercov-example
 npx supercov -- npm test               # the suite, once
@@ -605,9 +610,42 @@ npx supercov -- <the new test alone>   # a test added since
 npx supercov merge
 ```
 
-A run is left out, and named, when a file of its own tests has changed since
-it ran, or a file tests load that is not itself a test's: what it recorded is
-then of other tests. Measure those again to count them.
+Each file that differs from what an earlier run was recorded with is judged by
+what that run's tests did with it:
+
+- Another run's test file: it was not in this run. A file of the run's own
+  tests: what it recorded is of other tests, and the run is left out.
+- A helper, fixture or support file: left out of a run only when that run's
+  test files import it, directly or through other files. For JavaScript and
+  TypeScript tests Supercov reads the imports; a computed import path, or tests
+  in another language, count every helper as loaded. A helper that only gained
+  functions, which code written before cannot have called, leaves every run
+  in.
+- A test runner's settings: `playwright.config.*`, `vitest.config.*`,
+  `jest.config.*` and `ava.config.*` belong to their runner, and a run that
+  did not use that runner keeps. Of Playwright's settings, only those that
+  decide what a test does count: `use`, `testDir`, `webServer`,
+  `globalSetup`, `globalTeardown`, and a project's `dependencies` and
+  `teardown`. Timeouts, retries, workers, reporters, which files and names to
+  run, and projects added since schedule tests and change nothing an earlier
+  test reached. This needs the newer run to have measured Playwright.
+- Any other configuration, such as `tsconfig.json`, `vite.config.*` or a
+  Babel file, may set how any test runs, and leaves the run out.
+
+A run left out is named with the files and the functions that changed. The
+merged run lists what differed and why it does not reach the earlier runs:
+`merged across:` in `runs <id>`, and `mergedAcross` in JSON.
+
+When you know a change Supercov counts does not alter what the earlier tests
+ran, say so:
+
+```sh supercov-example
+npx supercov merge --allow-changed
+```
+
+The product code, the dependencies, and what is measured must still be the
+same, and a run whose own test files changed is still left out. What was
+accepted is listed in `merged across:` as accepted.
 
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` is

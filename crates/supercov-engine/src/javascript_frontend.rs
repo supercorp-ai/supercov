@@ -1364,6 +1364,27 @@ fn write_playwright_config(
            throw new Error('Supercov refuses a Playwright output/cwd outside the isolated project: ' + absolute);\n\
          }};\n\
          const normalizeWebServer = server => server ? ({{ ...server, cwd: runtimePath(server.cwd ?? originalDirectory) }}) : server;\n\
+         // How the configuration resolved, for a later merge: a run of new
+         // tests with settings of their own is added to this one only where
+         // nothing that decides what a test does changed. Paths inside the
+         // copy are written relative to it; every run has a copy of its own.
+         if (process.env.SUPERCOV_EVIDENCE_DIR && process.env.TEST_WORKER_INDEX === undefined) {{\n\
+           try {{\n\
+             const {{ mkdirSync, renameSync, writeFileSync }} = await import('node:fs');\n\
+             const seen = new WeakSet();\n\
+             let text = JSON.stringify(resolved, (key, value) => {{\n\
+               if (typeof value === 'function' || value instanceof RegExp) return String(value);\n\
+               if (value && typeof value === 'object') {{ if (seen.has(value)) return undefined; seen.add(value); }}\n\
+               return value;\n\
+             }});\n\
+             for (const root of [runtimeProjectRoot, sourceProjectRoot].filter(Boolean)) text = text.split(JSON.stringify(root).slice(1, -1)).join('.');\n\
+             const directory = resolve(process.cwd(), process.env.SUPERCOV_EVIDENCE_DIR);\n\
+             mkdirSync(directory, {{ recursive: true }});\n\
+             const file = resolve(directory, 'playwright-configuration.json');\n\
+             writeFileSync(`${{file}}.${{process.pid}}`, text);\n\
+             renameSync(`${{file}}.${{process.pid}}`, file);\n\
+           }} catch {{}}\n\
+         }}\n\
          const normalized = {{ ...resolved,\n\
            testDir: runtimePath(resolved.testDir),\n\
            outputDir: runtimePath(resolved.outputDir),\n\
