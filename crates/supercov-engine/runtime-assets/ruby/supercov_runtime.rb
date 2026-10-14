@@ -871,6 +871,18 @@ module Supercov
       @identities[current_context]
     end
 
+    # The phase this thread entered itself, else the one the process was
+    # started in by a test (SUPERCOV_CONTEXT). Not another thread's: a
+    # server's request threads share the process-wide phase, and a request
+    # read as the test another thread was serving ran as no one's once that
+    # thread left it.
+    attr_accessor :inherited_identity
+
+    def own_identity
+      context = Thread.current[:__supercov_context]
+      context ? @identities[context] : @inherited_identity
+    end
+
     def child_environment
       identity = @identities[current_context]
       return {} if identity.nil?
@@ -1538,7 +1550,7 @@ module Supercov
     # server that was hooked too, or a server a test started.
     def self.serve(runtime, env)
       identity = identity(env)
-      current = runtime.current_identity
+      current = runtime.own_identity
       if identity.nil?
         return yield unless current.nil?
 
@@ -1678,7 +1690,10 @@ module Supercov
     if inherited && !inherited.empty?
       begin
         identity = Requests.inherited(inherited)
-        runtime.switch(worker: identity["worker"], test: identity["test"], retry: identity["retry"], phase: identity["phase"]) if identity
+        if identity
+          runtime.switch(worker: identity["worker"], test: identity["test"], retry: identity["retry"], phase: identity["phase"])
+          runtime.inherited_identity = runtime.current_identity
+        end
       rescue ArgumentError, TypeError, KeyError
         runtime.limitation("ruby-inherited-context-invalid", "SUPERCOV_CONTEXT was not a valid Supercov identity")
       end

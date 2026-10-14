@@ -58,7 +58,12 @@ class Web < Sinatra::Base
     Net::HTTP.post(URI("http://127.0.0.1:${stripe}/charge"), "")
     "started"
   end
-  get("/state") { settings.order }
+  # Slow, so that a poll of the test's is running on another thread when
+  # the webhook comes, and leaves while it runs: the webhook is no poll's.
+  get("/state") do
+    sleep 0.2
+    settings.order
+  end
   post("/webhook") do
     settings.order = Payments.settle(request.body.read)
     "ok"
