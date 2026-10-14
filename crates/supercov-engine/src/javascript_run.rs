@@ -66,6 +66,8 @@ pub struct DirectJavascriptRunResult {
     pub assertion_calls: usize,
     pub recovered_runs: Vec<String>,
     pub metadata: RunMetadata,
+    /// The runs of servers the suite drove, published beside this one.
+    pub server_runs: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -549,8 +551,25 @@ pub fn run_direct_javascript(
     }
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let source_roots = crate::source_discovery::configured_source_roots(&environment);
-    let project = discover_coverage_project(&root, &environment, &request.command)
-        .map_err(|error| error.to_string())?;
+    let project = crate::project_discovery::discover_coverage_project_of_any_size(
+        &root,
+        &environment,
+        &request.command,
+    )
+    .map_err(|error| error.to_string())?;
+    // Browser tests may drive a Python server, whose source the probes
+    // measure in the copy the suite runs in. Without it, a project with no
+    // JavaScript source has nothing to measure.
+    let serves_python = project.playwright_config.is_some()
+        && crate::python_project::discover_python_files(&root)
+            .is_ok_and(|files| !files.sources.is_empty());
+    if project.source_files.is_empty() && !serves_python {
+        return Err(
+            crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
+                .to_string()
+                .into(),
+        );
+    }
     let integrity = javascript_integrity_for_project(&root, &project)?;
     let source_inputs = crate::source_capture::capture(
         &root,
@@ -639,6 +658,27 @@ pub fn run_direct_javascript(
     let adapter_setup_ms = elapsed_ms(adapter_started);
     if let Some(detail) = crate::javascript_frontend::setup_timing_detail() {
         writeln!(diagnostics, "[supercov] {detail}").map_err(|error| error.to_string())?;
+    }
+
+    let python_server = if serves_python {
+        crate::python_run::PythonServer::prepare(&root, &workspace, &run_id, &request.command)?
+    } else {
+        None
+    };
+    if project.source_files.is_empty() && python_server.is_none() {
+        return Err(
+            crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
+                .to_string()
+                .into(),
+        );
+    }
+    if let Some(server) = &python_server {
+        writeln!(
+            diagnostics,
+            "[supercov] measuring {} Python source file(s) in any Python server the tests start",
+            server.source_files()
+        )
+        .map_err(|error| error.to_string())?;
     }
 
     let evidence_relative = format!(".supercov/evidence/{run_id}");
@@ -742,6 +782,9 @@ pub fn run_direct_javascript(
             "SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG".into(),
             original.display().to_string(),
         );
+    }
+    if let Some(server) = &python_server {
+        overrides.extend(server.environment());
     }
     // A tool that judges source as text, started without a package manager
     // or installed outside the project, is found through PATH.
@@ -973,6 +1016,88 @@ pub fn run_direct_javascript(
     .map_err(|error| error.to_string())?;
 
     let publication_started = Instant::now();
+    // Read before the evidence is archived and removed.
+    let served = python_server
+        .as_ref()
+        .map(|_| served_tests(&evidence_directory))
+        .unwrap_or_default();
+    if project.source_files.is_empty() {
+        // Only the server's Python was measured: its run is the run.
+        let server = python_server.expect("a project without JavaScript source serves Python");
+        let metadata = RunMetadata {
+            id: run_id.clone(),
+            started_at: started_at.clone(),
+            duration_ms: rounded_millisecond(elapsed_ms(total_started)),
+            command: request.command.clone(),
+            test_exit_code: Some(execution.exit_code),
+            integrity: integrity.clone(),
+            raw_evidence: RawEvidenceMetadata::default(),
+            isolated_build: Some(true),
+            instrumented_build_cache: None,
+            timings: Some(RunTimings {
+                initialization_ms: rounded_millisecond(initialization_ms),
+                workspace_preparation_ms: rounded_millisecond(workspace_preparation_ms),
+                adapter_setup_ms: rounded_millisecond(adapter_setup_ms),
+                instrumented_build_ms: 0.0,
+                test_command_ms: rounded_millisecond(test_command_ms),
+                evidence_publication_ms: 0.0,
+            }),
+            merged: None,
+            parents: None,
+            source_roots: source_roots.clone(),
+            copy: Some(cleanup.lock().copy()),
+            merged_across: None,
+            recorded_by: None,
+        };
+        let published = server.publish(&root, &run_id, metadata, &served, diagnostics);
+        remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
+            .map_err(|error| error.to_string())?;
+        remove_stored_tree_deferred(&root, &server_evidence_root)
+            .map_err(|error| error.to_string())?;
+        let Some((run_directory, metadata)) = published? else {
+            let message = if execution.exit_code != 0 && served.is_empty() {
+                format!(
+                    "the test command exited {} before any test reported an outcome; its own output above says why, and no run was published",
+                    execution.exit_code
+                )
+            } else {
+                "the project has no JavaScript source, and no test's request reached measured Python code: there was nothing to measure, and no run was published".to_owned()
+            };
+            let _ = update_run_state(
+                &root,
+                &run_id,
+                RunStateStatus::Failed,
+                &started_at,
+                Some(message.clone()),
+            );
+            cleanup.mark_terminal();
+            return Err(message.into());
+        };
+        update_run_state(
+            &root,
+            &run_id,
+            if execution.exit_code == 0 {
+                RunStateStatus::Complete
+            } else {
+                RunStateStatus::Failed
+            },
+            &started_at,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
+        cleanup.mark_terminal();
+        return Ok(DirectJavascriptRunResult {
+            run_id,
+            run_directory,
+            workspace,
+            exit_code: execution.exit_code,
+            assertion_calls: frontend.assertion_calls,
+            recovered_runs,
+            metadata,
+            server_runs: Vec::new(),
+        });
+    }
     let archive_path = root
         .join(".supercov/work")
         .join(&run_id)
@@ -1044,6 +1169,30 @@ pub fn run_direct_javascript(
     } else {
         RunStateStatus::Failed
     };
+    // The server's run beside the browser run, under an id of its own that
+    // sorts after it: `runs latest` stays the browser run.
+    let mut server_runs = Vec::new();
+    if let Some(server) = python_server {
+        let id = companion_run_id(&run_id);
+        let server_metadata = RunMetadata {
+            id: id.clone(),
+            ..metadata.clone()
+        };
+        match server.publish(&root, &run_id, server_metadata, &served, diagnostics) {
+            Ok(Some((directory, _))) => {
+                finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
+                server_runs.push(directory);
+            }
+            Ok(None) => {}
+            // The browser run stands on its own.
+            Err(error) => {
+                let _ = writeln!(
+                    diagnostics,
+                    "[supercov] the Python server's run could not be published: {error}"
+                );
+            }
+        }
+    }
     update_run_state(&root, &run_id, terminal_status, &started_at, None)
         .map_err(|error| error.to_string())?;
     finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
@@ -1056,12 +1205,124 @@ pub fn run_direct_javascript(
         assertion_calls: frontend.assertion_calls,
         recovered_runs,
         metadata,
+        server_runs,
     })
+}
+
+/// The id of a run published beside `run_id` from the same command: the
+/// public id just below it when `run_id` is one, since runs that started
+/// together are listed by id, highest first.
+fn companion_run_id(run_id: &str) -> String {
+    match run_id
+        .strip_prefix("run_")
+        .filter(|hex| hex.len() == 16)
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+    {
+        Some(number) => format!("run_{:016x}", number.wrapping_sub(1)),
+        None => format!("{run_id}-python"),
+    }
+}
+
+/// Each browser test attempt the suite reported, for a Python server's run:
+/// read from the Playwright fixture's evidence lines.
+fn served_tests(evidence_directory: &Path) -> Vec<crate::python_evidence::ServedTest> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Scope {
+        worker_id: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Attempt {
+        test_id: String,
+        scope: Scope,
+        test: String,
+        test_file: String,
+        title: String,
+        retry: usize,
+        status: String,
+        expected_status: Option<String>,
+        provenance: crate::coverage_report::TestProvenance,
+        #[serde(default)]
+        phases: Vec<Phase>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Phase {
+        started_at_ms: i64,
+        ended_at_ms: Option<i64>,
+    }
+    let mut served = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(evidence_directory) else {
+        return Vec::new();
+    };
+    let mut files = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("playwright-worker-") && name.ends_with(".mcdc.jsonl")
+                })
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for attempt in text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Attempt>(line).ok())
+        {
+            let worker = format!("playwright:{}", attempt.scope.worker_id);
+            let start = attempt.phases.iter().map(|phase| phase.started_at_ms).min();
+            let end = attempt
+                .phases
+                .iter()
+                .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
+                .max();
+            served
+                .entry((worker.clone(), attempt.test_id.clone(), attempt.retry))
+                .or_insert(crate::python_evidence::ServedTest {
+                    worker,
+                    test_id: attempt.test_id,
+                    retry: attempt.retry,
+                    name: attempt.test,
+                    title: attempt.title,
+                    file: attempt.test_file,
+                    status: attempt.status,
+                    expected_status: attempt.expected_status.unwrap_or_else(|| "passed".into()),
+                    provenance: attempt.provenance,
+                    window: start.zip(end),
+                });
+        }
+    }
+    served.into_values().collect()
 }
 
 #[cfg(test)]
 mod environment_tests {
     use super::*;
+
+    // A server's run published beside a browser run sorts after it, so
+    // `runs latest` stays the browser run; and is the same each time.
+    #[test]
+    fn a_companion_run_id_is_public_and_sorts_after_its_run() {
+        for run in [
+            "run_0123456789abcdef",
+            "run_ffffffffffffffff",
+            "run_8000000000000000",
+        ] {
+            let companion = companion_run_id(run);
+            assert_eq!(companion.len(), 20);
+            assert!(companion.starts_with("run_"));
+            assert!(companion.as_str() < run, "{companion} >= {run}");
+            assert_eq!(companion, companion_run_id(run));
+        }
+        assert_eq!(companion_run_id("rust-1"), "rust-1-python");
+    }
 
     #[test]
     fn nested_npm_drops_only_pnpm_derived_environment_aliases() {

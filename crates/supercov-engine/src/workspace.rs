@@ -577,6 +577,14 @@ fn copy_tree<Operations: WorkspaceOperations>(
             continue;
         }
         let to = destination.join(&name);
+        // A Python virtual environment is never instrumented, and copied it
+        // loses its interpreter: `bin/python` links outside the project, and
+        // such links are left out, so a server started as `.venv/bin/python`
+        // did not start at all. The copy uses the environment itself.
+        if metadata.file_type().is_dir() && from.join("pyvenv.cfg").is_file() {
+            create_link(&from, &to, true).map_err(|error| io_error(&to, error))?;
+            continue;
+        }
         if metadata.file_type().is_dir() {
             // Nested node_modules are never instrumented, so they are not
             // mirrored file by file: on a real monorepo (many packages and

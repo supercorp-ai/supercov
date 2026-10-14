@@ -224,6 +224,37 @@ npx supercov -- uv run pytest
 npx supercov -- python -m unittest
 ```
 
+### A Python server under browser tests
+
+A Playwright suite that starts a Python server, through `webServer`, a fixture
+or a test, measures the server when you run it under Supercov:
+
+```sh
+npx supercov -- npx playwright test
+```
+
+Each request runs as the test that sent it. Supercov's Playwright runtime names
+the test in a header on the page's own requests and the request fixture's, and
+in a cookie on the app's host; the server reads it in the standard library's
+HTTP server, in any WSGI server running Flask or Django (gunicorn, waitress,
+their own development servers) and in any ASGI server running Starlette,
+FastAPI or Django (uvicorn, hypercorn). A request that names no test, such as
+a webhook from a mock, is credited by time as it is for a Node server; see the
+[coverage model](coverage-model.md). A Python process a test starts belongs to
+that test.
+
+The server's coverage is a Python run of its own. In a project with no
+JavaScript source that run is the run. In one with a Node server or front end
+too, the browser run is published as usual, the server's run beside it, and
+the command prints the server run's id; `runs latest` is the browser run. Each
+run's figures stand alone, and `supercov merge` merges each language's runs
+separately.
+
+The server runs in Supercov's copy of the project. A virtual environment
+inside the project is used as it is, and a package installed editable from the
+checkout is measured too. `SUPERCOV_SOURCE_ROOTS` applies to both languages:
+when you set it, list the Python directories as well.
+
 ## Ruby
 
 | Runner | Attribution | Current requirement |

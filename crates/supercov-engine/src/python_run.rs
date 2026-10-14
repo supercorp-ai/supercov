@@ -161,6 +161,7 @@ fn environment(
     for key in [
         "SUPERCOV_PYTHON_PLAN",
         "SUPERCOV_PYTHON_EVIDENCE_DIR",
+        "SUPERCOV_PYTHON_SOURCE_ROOT",
         "SUPERCOV_RUN_ID",
         "SUPERCOV_PROJECT_ROOT",
         "SUPERCOV_CONTEXT",
@@ -271,6 +272,53 @@ fn assertion_starts(source: &str) -> Result<Vec<usize>, String> {
         collector.visit_stmt(stmt);
     }
     Ok(collector.0)
+}
+
+struct Archive {
+    raw: crate::evidence_archive::EvidenceArchiveMetadata,
+    analysed: Option<crate::coverage_report::CoverageReport>,
+    serialized_ms: f64,
+    archive_ms: f64,
+}
+
+/// Archive a run, analysed as the archive will analyse -- the request it
+/// archives, with the run's integrity record, which the archive does not
+/// hold -- while it is written: neither waits on the other.
+fn archive_python_run(
+    run: &PythonFrontendRun,
+    source_inputs: &crate::source_manifest::Inputs,
+    archive_path: &Path,
+    publication_started: Instant,
+    joined_ms: f64,
+) -> Result<Archive, String> {
+    let (archived, analysed) = std::thread::scope(|scope| {
+        let analysis = scope.spawn(|| {
+            crate::coverage_report::analyze_frontend_request(
+                &run.declaration,
+                &run.request,
+                crate::coverage_report::TransportStats::none(),
+            )
+        });
+        let archived = (|| {
+            let entries = run.archive_entries().map_err(|error| error.to_string())?;
+            let serialized_ms = elapsed_ms(publication_started) - joined_ms;
+            let entries = crate::source_capture::append(entries, source_inputs)?;
+            let raw = write_archive(entries, archive_path).map_err(|error| error.to_string())?;
+            let archive_ms = elapsed_ms(publication_started) - joined_ms - serialized_ms;
+            Ok::<_, String>((raw, serialized_ms, archive_ms))
+        })();
+        let analysed = analysis
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (archived, analysed)
+    });
+    let (raw, serialized_ms, archive_ms) = archived?;
+    Ok(Archive {
+        raw,
+        analysed: analysed.ok(),
+        serialized_ms,
+        archive_ms,
+    })
 }
 
 pub fn run_direct_python(
@@ -434,34 +482,20 @@ pub fn run_direct_python(
             .map_err(|error| error.to_string())?;
         let joined_ms = elapsed_ms(publication_started);
         let archive_path = work_directory.join("evidence.raw.gz");
-        // Analysed as the archive will analyse -- the request it archives,
-        // with the run's integrity record, which the archive does not hold
-        // -- while it is written: neither waits on the other.
         run.request.integrity = serde_json::to_value(&integrity).ok();
-        let (archived, analysed) = std::thread::scope(|scope| {
-            let analysis = scope.spawn(|| {
-                crate::coverage_report::analyze_frontend_request(
-                    &run.declaration,
-                    &run.request,
-                    crate::coverage_report::TransportStats::none(),
-                )
-            });
-            let archived = (|| {
-                let entries = run.archive_entries().map_err(|error| error.to_string())?;
-                let serialized_ms = elapsed_ms(publication_started) - joined_ms;
-                let entries = crate::source_capture::append(entries, &source_inputs)?;
-                let raw =
-                    write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
-                let archive_ms = elapsed_ms(publication_started) - joined_ms - serialized_ms;
-                Ok::<_, String>((raw, serialized_ms, archive_ms))
-            })();
-            let analysed = analysis
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-            (archived, analysed)
-        });
+        let Archive {
+            raw,
+            analysed,
+            serialized_ms,
+            archive_ms,
+        } = archive_python_run(
+            &run,
+            &source_inputs,
+            &archive_path,
+            publication_started,
+            joined_ms,
+        )?;
         let analysis_ms = elapsed_ms(publication_started) - joined_ms;
-        let (raw, serialized_ms, archive_ms) = archived?;
         // The joined evidence is in the archive now, and publication reads it
         // from there. Held to the end for three counts, it was the largest
         // thing alive while publication analysed the archive: 1.4 GB on a
@@ -521,7 +555,7 @@ pub fn run_direct_python(
             &metadata,
             &archive_path,
             Archived {
-                report: analysed.ok(),
+                report: analysed,
                 inputs: Some(source_inputs.manifest()),
             },
         )
@@ -559,6 +593,231 @@ pub fn run_direct_python(
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
     }
+}
+
+/// Python measured inside a browser suite's run: the server its tests drive,
+/// which Playwright's `webServer` or a fixture starts. Prepared whenever the
+/// project has Python source, since only the server's launch says which
+/// program it is; a run whose suite starts no measured Python publishes
+/// nothing of it.
+pub struct PythonServer {
+    project: PreparedPythonProject,
+    integrity: crate::run_store::RunIntegrity,
+    source_inputs: crate::source_manifest::Inputs,
+    source_roots: Option<Vec<String>>,
+    directory: PathBuf,
+}
+
+impl PythonServer {
+    /// The plan and runtime for the project's Python source, or None when it
+    /// has none. `workspace` is where the suite runs: the probes find the
+    /// server's files there.
+    pub fn prepare(
+        root: &Path,
+        workspace: &Path,
+        run_id: &str,
+        command: &[String],
+    ) -> Result<Option<Self>, String> {
+        let ambient = std::env::vars().collect::<BTreeMap<_, _>>();
+        // Roots named for the JavaScript source may hold no Python at all.
+        let Ok(roots) =
+            crate::source_discovery::ExplicitSourceRoots::from_environment(root, &ambient)
+        else {
+            return Ok(None);
+        };
+        let project = prepare_python_project(root, roots.as_ref())?;
+        if project.plan.files.is_empty() {
+            return Ok(None);
+        }
+        let source_roots = crate::source_discovery::configured_source_roots(&ambient);
+        let mut integrity_inputs = python_integrity_inputs(&project.files, command);
+        crate::source_discovery::fold_roots_into_configuration(
+            &mut integrity_inputs.execution_configuration,
+            source_roots.as_deref(),
+        );
+        let integrity = create_explicit_run_integrity(
+            root,
+            &integrity_inputs,
+            &FrontendIntegrityInputs::embedded_python(),
+        )
+        .map_err(|error| error.to_string())?;
+        let source_inputs = crate::source_capture::capture(
+            root,
+            "python",
+            python_integrity_inputs(&project.files, command).assertion_paths(),
+        )?;
+        let directory = root.join(".supercov/work").join(run_id).join("python");
+        write_runtime(&directory.join("runtime"))?;
+        fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
+        let plan = crate::python_instrumenter::PythonProbePlan {
+            root: workspace.display().to_string(),
+            ..project.plan.clone()
+        };
+        let plan_path = directory.join("plan.json");
+        fs::write(
+            &plan_path,
+            serde_json::to_vec(&plan).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("{}: {error}", plan_path.display()))?;
+        Ok(Some(Self {
+            project,
+            integrity,
+            source_inputs,
+            source_roots,
+            directory,
+        }))
+    }
+
+    pub fn source_files(&self) -> usize {
+        self.project.plan.files.len()
+    }
+
+    /// What the suite's environment needs for a Python process it starts to
+    /// be measured; the run id and project root are the browser run's own.
+    pub fn environment(&self) -> BTreeMap<String, String> {
+        let python_path = prepend_path_list(
+            std::env::var_os("PYTHONPATH"),
+            &self.directory.join("runtime"),
+        );
+        BTreeMap::from([
+            (
+                "PYTHONPATH".into(),
+                python_path.to_string_lossy().into_owned(),
+            ),
+            (
+                "SUPERCOV_PYTHON_PLAN".into(),
+                self.directory.join("plan.json").display().to_string(),
+            ),
+            (
+                "SUPERCOV_PYTHON_EVIDENCE_DIR".into(),
+                self.directory.join("evidence").display().to_string(),
+            ),
+            (
+                "SUPERCOV_PYTHON_SOURCE_ROOT".into(),
+                self.project.root.display().to_string(),
+            ),
+        ])
+    }
+
+    /// Publish what the server ran as a Python run of its own, credited to
+    /// the browser tests that sent each request. None when no measured
+    /// Python process ran, or when none answered a test's request: Python a
+    /// suite only ran in passing (a build tool, a seed script) is not a
+    /// server's coverage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish(
+        self,
+        root: &Path,
+        evidence_run_id: &str,
+        metadata: RunMetadata,
+        served: &[crate::python_evidence::ServedTest],
+        diagnostics: &mut dyn Write,
+    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+        let started = Instant::now();
+        let evidence_directory = self.directory.join("evidence");
+        let result = (|| {
+            // No browser test reported: the suite was not Playwright's, or
+            // never got to its tests.
+            if served.is_empty() {
+                return Ok(None);
+            }
+            let mut run = match crate::python_evidence::build_python_server_run(
+                &self.project.manifest,
+                &evidence_directory,
+                evidence_run_id,
+                &metadata.started_at,
+                metadata.test_exit_code.unwrap_or_default(),
+                Path::new(&self.project.plan.root),
+                served,
+            ) {
+                Err(
+                    crate::python_evidence::PythonEvidenceError::NoInterpreter
+                    | crate::python_evidence::PythonEvidenceError::NoTests,
+                ) => return Ok(None),
+                result => result.map_err(|error| error.to_string())?,
+            };
+            let answered = run.request.raw_results.iter().any(|raw| {
+                raw.role == "test" && raw.runtime.iter().any(|snapshot| !snapshot.hits.is_empty())
+            });
+            if !answered {
+                writeln!(
+                    diagnostics,
+                    "[supercov] a Python process ran, and no request a test sent reached measured Python code; no Python run was published"
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
+            validate_frontend_report_request(&run.declaration, &run.request)
+                .map_err(|error| error.to_string())?;
+            // The evidence was recorded under the browser run's id; a run
+            // published beside it has its own.
+            run.request.run_id = metadata.id.clone();
+            for scope in run
+                .request
+                .raw_results
+                .iter_mut()
+                .filter_map(|raw| raw.scope.as_mut())
+            {
+                scope.run_id = metadata.id.clone();
+            }
+            run.request.integrity = serde_json::to_value(&self.integrity).ok();
+            let archive_path = root
+                .join(".supercov/work")
+                .join(&metadata.id)
+                .join("python-evidence.raw.gz");
+            if let Some(parent) = archive_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            let Archive { raw, analysed, .. } =
+                archive_python_run(&run, &self.source_inputs, &archive_path, started, 0.0)?;
+            let tests = run.tests;
+            drop(run);
+            let metadata = RunMetadata {
+                integrity: self.integrity.clone(),
+                raw_evidence: RawEvidenceMetadata {
+                    schema_version: raw.schema_version,
+                    format: raw.format.into(),
+                    file: raw.file.into(),
+                    files: raw.files,
+                    uncompressed_bytes: raw.uncompressed_bytes,
+                    compressed_bytes: raw.compressed_bytes,
+                },
+                source_roots: self.source_roots.clone(),
+                ..metadata
+            };
+            let run_directory = publish_archived_run(
+                root,
+                &metadata,
+                &archive_path,
+                Archived {
+                    report: analysed,
+                    inputs: Some(self.source_inputs.manifest()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            writeln!(
+                diagnostics,
+                "[supercov] Python server coverage: {tests} test(s) across {} source file(s)",
+                self.project.plan.files.len()
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(Some((run_directory, metadata)))
+        })();
+        let result = result.map_err(|error| {
+            note_kept_evidence(
+                root,
+                &evidence_directory,
+                &metadata_id_hint(evidence_run_id),
+                error,
+            )
+        });
+        let _ = remove_stored_tree_deferred(root, &self.directory);
+        result
+    }
+}
+
+fn metadata_id_hint(run_id: &str) -> String {
+    format!("{run_id}-python")
 }
 
 #[cfg(test)]

@@ -110,13 +110,13 @@ By test kind
 directory has any, so a directory's `All` never stands above its kinds
 unexplained.
 
-A request to your app server that names no test -- a webhook from a mock
-Stripe server Supercov does not measure -- is credited to the test running when
-the server handled it, if that test was the only one running then. Where a
-server serves one worker's tests, as a server started per worker does, only
-that worker's tests count, so the request is credited while other workers run
-theirs. A mock that runs under Supercov passes the test's identity on in its
-own requests, and its webhook is credited exactly. The run's `Attribution`
+A request to your app server, Node or Python, that names no test -- a webhook
+from a mock Stripe server Supercov does not measure -- is credited to the test
+running when the server handled it, if that test was the only one running then.
+Where a server serves one worker's tests, as a server started per worker does,
+only that worker's tests count, so the request is credited while other workers
+run theirs. A mock that runs under Supercov passes the test's identity on in
+its own requests, and its webhook is credited exactly. The run's `Attribution`
 line counts tests credited by time as `with server work credited by time`, and
 each one's `runs <id> test` page says so. Work done while tests ran at once on
 the same server, or while none ran, stays no test's.

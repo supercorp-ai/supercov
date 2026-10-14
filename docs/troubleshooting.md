@@ -42,6 +42,11 @@ npx supercov runs latest scope
 Do not broaden the roots to dependencies or generated output merely to remove a
 warning. The goal is an honest boundary around code the repository owns.
 
+Browser tests of a Python server need a Playwright configuration in the
+project, and Python source under the roots: Supercov then measures the server
+the suite starts. See
+[Supported suites](supported-suites.md#a-python-server-under-browser-tests).
+
 A file `scope` lists as `test or fixture source` or `conventional tool script`
 was recognised by its path. If it is your code, name its directory, or the file
 itself, as a root: a named root is source whatever it is called.

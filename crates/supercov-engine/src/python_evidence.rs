@@ -61,6 +61,10 @@ fn default_runner() -> String {
     PYTEST_RUNNER.into()
 }
 
+fn python_runner(runner: &str) -> bool {
+    matches!(runner, PYTEST_RUNNER | UNITTEST_RUNNER)
+}
+
 /// Every field the runtime writes is named so `deny_unknown_fields` keeps
 /// the record shape frozen, even where Rust does not read the value yet.
 #[derive(Debug, Deserialize)]
@@ -340,7 +344,16 @@ struct Evidence {
     limitations: BTreeMap<(String, Option<String>, Option<String>), RuntimeLimitation>,
     /// The layout's ids, which slot hits are positions in.
     slot_ids: Vec<String>,
+    /// Each request a server answered that named no test: its identity, when
+    /// it came, its process's transport, and that process's worker.
+    requests: Vec<(Identity, i64, String, String)>,
+    /// By transport, the browser test attempts a process answered a request
+    /// of.
+    served_by: BTreeMap<String, BTreeSet<(String, String, usize)>>,
 }
+
+/// The worker the runtime names a request that names no test as.
+const REQUEST_WORKER: &str = "supercov-request";
 
 fn read_evidence_directory(
     directory: &Path,
@@ -1142,11 +1155,11 @@ fn apply_transport(
             Record::Worker { worker } => process_worker = Some(worker),
             Record::Phase {
                 ctx,
+                at,
                 worker,
                 test,
                 retry,
                 phase,
-                ..
             } => {
                 if ctx == 0 {
                     return Err(invalid("phase context 0 is reserved for background"));
@@ -1157,18 +1170,41 @@ fn apply_transport(
                 if test.trim().is_empty() || worker.trim().is_empty() {
                     return Err(invalid("phase identity must name a worker and test"));
                 }
-                if phase == "call" {
-                    before_assertion.insert(ctx, Observations::default());
+                // A request is numbered within its process, which its
+                // transport names.
+                let worker = if worker == REQUEST_WORKER {
+                    format!("{REQUEST_WORKER}:{name}")
+                } else {
+                    worker
+                };
+                let identity = Identity {
+                    worker,
+                    test,
+                    retry,
+                    phase,
+                };
+                if identity.worker.starts_with(REQUEST_WORKER) {
+                    evidence.requests.push((
+                        identity.clone(),
+                        at,
+                        name.to_owned(),
+                        process_worker.clone().unwrap_or_else(|| "main".into()),
+                    ));
+                } else {
+                    if identity.phase == "call" {
+                        before_assertion.insert(ctx, Observations::default());
+                    }
+                    evidence
+                        .served_by
+                        .entry(name.to_owned())
+                        .or_default()
+                        .insert((
+                            identity.worker.clone(),
+                            identity.test.clone(),
+                            identity.retry,
+                        ));
                 }
-                contexts.insert(
-                    ctx,
-                    Identity {
-                        worker,
-                        test,
-                        retry,
-                        phase,
-                    },
-                );
+                contexts.insert(ctx, identity);
             }
             Record::Outcome {
                 worker,
@@ -1674,7 +1710,171 @@ pub fn build_python_frontend_run(
     test_exit_code: i32,
     root: &Path,
 ) -> Result<PythonFrontendRun, PythonEvidenceError> {
-    let evidence = read_evidence_directory(evidence_directory, run_id)?;
+    let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
+    // A server a test suite starts outside any test numbers the requests no
+    // test named; with no browser tests to give them to, they are what they
+    // were before, the process's background.
+    credit_requests_by_time(&mut evidence, &[]);
+    build_from_evidence(
+        evidence,
+        manifest,
+        run_id,
+        generated_at,
+        test_exit_code,
+        root,
+    )
+}
+
+/// A browser test whose requests a measured Python server answered: what
+/// the browser runner reported for it, which no Python runner saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedTest {
+    /// As the server's runtime names the worker: `playwright:<worker id>`.
+    pub worker: String,
+    pub test_id: String,
+    pub retry: usize,
+    /// The test's name, title and file as the browser run gives them.
+    pub name: String,
+    pub title: String,
+    pub file: String,
+    pub status: String,
+    pub expected_status: String,
+    pub provenance: TestProvenance,
+    /// When the attempt ran, in milliseconds since the epoch, first and
+    /// last moment: what a request that named no test is judged by.
+    pub window: Option<(i64, i64)>,
+}
+
+/// The Python run of a server a browser suite drove: the server's evidence,
+/// with each browser test's outcome as its runner reported it, under the
+/// names that runner gave them.
+pub fn build_python_server_run(
+    manifest: &CoverageManifest,
+    evidence_directory: &Path,
+    run_id: &str,
+    generated_at: &str,
+    test_exit_code: i32,
+    root: &Path,
+    served: &[ServedTest],
+) -> Result<PythonFrontendRun, PythonEvidenceError> {
+    let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
+    let mut by_attempt = BTreeMap::new();
+    for test in served {
+        let key = (test.worker.clone(), test.test_id.clone(), test.retry);
+        let outcome = match test.status.as_str() {
+            "passed" => "passed",
+            "skipped" => "skipped",
+            _ => "failed",
+        };
+        evidence.outcomes.entry(key.clone()).or_default().push((
+            "call".into(),
+            outcome.into(),
+            test.expected_status == "failed",
+        ));
+        evidence
+            .runners
+            .insert(key.clone(), test.provenance.runner.clone());
+        by_attempt.insert(key, test);
+    }
+    let by_time = credit_requests_by_time(&mut evidence, served);
+    let mut run = build_from_evidence(
+        evidence,
+        manifest,
+        run_id,
+        generated_at,
+        test_exit_code,
+        root,
+    )?;
+    for raw in &mut run.request.raw_results {
+        let Some(test) = raw.scope.as_ref().and_then(|scope| {
+            by_attempt.get(&(
+                scope.worker_id.clone(),
+                raw.test.clone(),
+                raw.retry.unwrap_or(0),
+            ))
+        }) else {
+            continue;
+        };
+        raw.test = test.name.clone();
+        raw.title = Some(test.title.clone());
+        raw.test_file = Some(test.file.clone());
+        raw.status = Some(test.status.clone());
+        raw.expected_status = Some(test.expected_status.clone());
+        raw.provenance = test.provenance.clone();
+        if by_time.contains(&(test.worker.clone(), test.test_id.clone(), test.retry)) {
+            raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
+        }
+    }
+    run.tests = run
+        .request
+        .raw_results
+        .iter()
+        .filter(|raw| raw.role == "test")
+        .map(|raw| raw.test.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    Ok(run)
+}
+
+/// Give each request that named no test to the browser test attempt that
+/// was running when it came, if only one was: among the attempts its
+/// process answered a request of, where it answered any -- with a server
+/// per worker, the worker's test, whatever other workers ran meanwhile --
+/// and among every attempt otherwise. What no single attempt owns is the
+/// process's background. Returns the attempts credited so.
+fn credit_requests_by_time(
+    evidence: &mut Evidence,
+    served: &[ServedTest],
+) -> BTreeSet<(String, String, usize)> {
+    let mut credited = BTreeSet::new();
+    for (identity, at, transport, process_worker) in std::mem::take(&mut evidence.requests) {
+        let Some(observations) = evidence.per_identity.remove(&identity) else {
+            continue;
+        };
+        let answered = evidence.served_by.get(&transport);
+        let mut running = served.iter().filter(|test| {
+            answered.is_none_or(|attempts| {
+                attempts.contains(&(test.worker.clone(), test.test_id.clone(), test.retry))
+            }) && test
+                .window
+                .is_some_and(|(start, end)| start <= at && at <= end)
+        });
+        let owner = match (running.next(), running.next()) {
+            (Some(only), None) => Some(only),
+            _ => None,
+        };
+        let into = match owner {
+            Some(test) => {
+                credited.insert((test.worker.clone(), test.test_id.clone(), test.retry));
+                evidence
+                    .per_identity
+                    .entry(Identity {
+                        worker: test.worker.clone(),
+                        test: test.test_id.clone(),
+                        retry: test.retry,
+                        phase: "call".into(),
+                    })
+                    .or_default()
+            }
+            None => evidence.background.entry(process_worker).or_default(),
+        };
+        into.hits.extend(observations.hits);
+        into.slot_hits.extend(observations.slot_hits);
+        for (id, vectors) in observations.vectors {
+            into.vectors.entry(id).or_default().extend(vectors);
+        }
+    }
+    credited
+}
+
+fn build_from_evidence(
+    evidence: Evidence,
+    manifest: &CoverageManifest,
+    run_id: &str,
+    generated_at: &str,
+    test_exit_code: i32,
+    root: &Path,
+) -> Result<PythonFrontendRun, PythonEvidenceError> {
     if evidence.interpreters == 0 {
         return Err(PythonEvidenceError::NoInterpreter);
     }
@@ -1691,6 +1891,7 @@ pub fn build_python_frontend_run(
         test_files,
         limitations,
         slot_ids,
+        ..
     } = evidence;
     let mut manifest = manifest.clone();
     let index = ManifestIndex::new(&manifest);
@@ -2109,13 +2310,32 @@ pub fn build_python_frontend_run(
                         retry: AttributionPrecision::Exact,
                         phase: AttributionPrecision::Exact,
                         action: AttributionPrecision::Unavailable,
-                        assertion: AttributionPrecision::Exact,
+                        // A server sees a browser test's requests, never
+                        // its assertions, which run in the browser runner.
+                        assertion: if python_runner(runner) {
+                            AttributionPrecision::Exact
+                        } else {
+                            AttributionPrecision::Unavailable
+                        },
                     },
-                    limitations: vec![FrontendLimitation {
-                        id: format!("python-{runner}-action-linkage"),
-                        scopes: vec![FrontendLimitationScope::Action],
-                        reason: format!("{runner} exposes no general action lifecycle"),
-                    }],
+                    limitations: if python_runner(runner) {
+                        vec![FrontendLimitation {
+                            id: format!("python-{runner}-action-linkage"),
+                            scopes: vec![FrontendLimitationScope::Action],
+                            reason: format!("{runner} exposes no general action lifecycle"),
+                        }]
+                    } else {
+                        vec![FrontendLimitation {
+                            id: format!("python-server-{runner}-linkage"),
+                            scopes: vec![
+                                FrontendLimitationScope::Action,
+                                FrontendLimitationScope::Assertion,
+                            ],
+                            reason: format!(
+                                "the server sees each {runner} test's requests, not its actions or assertions"
+                            ),
+                        }]
+                    },
                 })
                 .collect(),
             structural_limitations,
@@ -2144,6 +2364,101 @@ mod tests {
         frontend_protocol::validate_frontend_report_request,
         python_instrumenter::build_python_obligations,
     };
+
+    // A request that named no test is the test's that was running when it
+    // came, if only one was: among those its process answered a request of,
+    // where it answered any, and among every test otherwise.
+    #[test]
+    fn a_request_naming_no_test_is_the_only_running_tests() {
+        let identity = |worker: &str, test: &str| Identity {
+            worker: worker.into(),
+            test: test.into(),
+            retry: 0,
+            phase: "call".into(),
+        };
+        let observed = |hit: &str| Observations {
+            hits: BTreeSet::from([hit.to_owned()]),
+            ..Observations::default()
+        };
+        let served = |worker: &str, test: &str, window: (i64, i64)| ServedTest {
+            worker: worker.into(),
+            test_id: test.into(),
+            retry: 0,
+            name: test.into(),
+            title: test.into(),
+            file: "tests/a.spec.js".into(),
+            status: "passed".into(),
+            expected_status: "passed".into(),
+            provenance: TestProvenance::default(),
+            window: Some(window),
+        };
+        // Two workers' tests at once; one server per worker, and one server
+        // only a mock calls.
+        let tests = [
+            served("playwright:w0", "one", (100, 200)),
+            served("playwright:w1", "two", (100, 200)),
+            served("playwright:w1", "three", (300, 400)),
+        ];
+        let first = identity("supercov-request:a.mmap", "1");
+        let late = identity("supercov-request:a.mmap", "2");
+        let mocked = identity("supercov-request:b.mmap", "1");
+        let alone = identity("supercov-request:b.mmap", "2");
+        let mut evidence = Evidence {
+            per_identity: BTreeMap::from([
+                (first.clone(), observed("first")),
+                (late.clone(), observed("late")),
+                (mocked.clone(), observed("mocked")),
+                (alone.clone(), observed("alone")),
+            ]),
+            requests: vec![
+                (first, 150, "a.mmap".into(), "main".into()),
+                (late, 250, "a.mmap".into(), "main".into()),
+                (mocked, 150, "b.mmap".into(), "main".into()),
+                (alone, 350, "b.mmap".into(), "main".into()),
+            ],
+            served_by: BTreeMap::from([(
+                "a.mmap".to_owned(),
+                BTreeSet::from([("playwright:w0".to_owned(), "one".to_owned(), 0)]),
+            )]),
+            ..Evidence::default()
+        };
+        let credited = credit_requests_by_time(&mut evidence, &tests);
+        assert_eq!(
+            credited,
+            BTreeSet::from([
+                ("playwright:w0".to_owned(), "one".to_owned(), 0),
+                ("playwright:w1".to_owned(), "three".to_owned(), 0),
+            ])
+        );
+        let hits = |worker: &str, test: &str| {
+            evidence
+                .per_identity
+                .get(&identity(worker, test))
+                .map(|observations| observations.hits.clone())
+                .unwrap_or_default()
+        };
+        // The worker's own test, though another ran meanwhile.
+        assert_eq!(
+            hits("playwright:w0", "one"),
+            BTreeSet::from(["first".to_owned()])
+        );
+        assert_eq!(
+            hits("playwright:w1", "three"),
+            BTreeSet::from(["alone".to_owned()])
+        );
+        // Between its tests, and while two ran with no process to choose by,
+        // no test's: the background, and no request identity remains.
+        assert_eq!(
+            evidence.background["main"].hits,
+            BTreeSet::from(["late".to_owned(), "mocked".to_owned()])
+        );
+        assert!(
+            evidence
+                .per_identity
+                .keys()
+                .all(|identity| !identity.worker.starts_with(REQUEST_WORKER))
+        );
+    }
 
     fn temporary(name: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
