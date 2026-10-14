@@ -600,8 +600,8 @@ files. Measuring a new test alone and adding it to the runs before it is
 then the whole suite's figure, without the whole suite's time:
 
 ```sh supercov-example
-npx supercov -- npm test                       # the suite, once
-npx supercov -- npx vitest run test/new.test.ts   # a test added since, alone
+npx supercov -- npm test               # the suite, once
+npx supercov -- <the new test alone>   # a test added since
 npx supercov merge
 ```
 
