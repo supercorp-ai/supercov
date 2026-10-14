@@ -856,6 +856,25 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 // were then.
                 lines.push(format!("merged across: {}", data.merged_across.join("; ")));
             }
+            // A server's coverage is a run of its own: said where the
+            // browser run is read, which is where it would be looked for.
+            for companion in &data.companions {
+                lines.push(match companion.role.as_str() {
+                    "server" => format!(
+                        "{} server: run {} -- {} runs {}",
+                        companion.language,
+                        companion.id,
+                        crate::launcher_command(),
+                        companion.id
+                    ),
+                    _ => format!(
+                        "tests from: the browser run {} -- {} runs {}",
+                        companion.id,
+                        crate::launcher_command(),
+                        companion.id
+                    ),
+                });
+            }
             if !data.valid {
                 // Calm but unmissable: the run itself is fine, the wrapped
                 // command failed, so the numbers below cannot gate anything.

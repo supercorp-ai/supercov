@@ -245,10 +245,12 @@ that test.
 
 The server's coverage is a Python run of its own. In a project with no
 JavaScript source that run is the run. In one with a Node server or front end
-too, the browser run is published as usual, the server's run beside it, and
-the command prints the server run's id; `runs latest` is the browser run. Each
-run's figures stand alone, and `supercov merge` merges each language's runs
-separately.
+too, the browser run is published as usual and the server's run beside it.
+`runs latest` is the browser run, and its summary names the server's run
+(`companions` in JSON); the server's run names the browser run it took its
+tests from. The pull-request comment Action reports each server's run in a
+section of its own. Each run's figures stand alone, and `supercov merge`
+merges each language's runs separately.
 
 The server runs in Supercov's copy of the project. A virtual environment
 inside the project is used as it is, and a package installed editable from the

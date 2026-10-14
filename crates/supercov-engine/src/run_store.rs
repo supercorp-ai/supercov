@@ -152,6 +152,23 @@ pub struct RunMetadata {
     /// the version is what says so. Absent in runs recorded before 4.7.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded_by: Option<String>,
+    /// The runs one command published beside this one: the runs of servers
+    /// a browser suite drove, or the browser run a server's run took its
+    /// tests from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companions: Option<Vec<CompanionRun>>,
+}
+
+/// A run published from the same command as another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompanionRun {
+    pub id: String,
+    /// `JavaScript`, `Python`, `Ruby`.
+    pub language: String,
+    /// `server`: a server the run's tests drove. `browser`: the browser run
+    /// whose tests this server's run took.
+    pub role: String,
 }
 
 #[cfg(test)]
@@ -419,6 +436,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
         copy: None,
         merged_across: None,
         recorded_by: None,
+        companions: None,
     };
     fs::write(
         directory.join("run.json"),
@@ -1056,6 +1074,7 @@ mod tests {
             copy: None,
             merged_across: None,
             recorded_by: None,
+            companions: None,
         };
         fs::write(
             directory.join("run.json"),

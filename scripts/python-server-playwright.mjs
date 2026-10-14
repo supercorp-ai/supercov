@@ -234,8 +234,11 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
     assert.ok(server, both.stderr);
     const [latest] = runs(mixed);
     assert.notEqual(latest, server, 'the browser run is the latest run');
-    assert.match(page(mixed, latest), /Lines/u);
-    assert.match(page(mixed, server), /Lines/u);
+    // Each names the other where it is read, and in JSON.
+    assert.match(page(mixed, latest), new RegExp(`Python server: run ${server}`, 'u'));
+    assert.match(page(mixed, server), new RegExp(`tests from: the browser run ${latest}`, 'u'));
+    const linked = JSON.parse(run(mixed, binary, ['runs', latest, '--json']).stdout).data.companions;
+    assert.deepEqual(linked, [{ id: server, language: 'Python', role: 'server' }]);
   }
   // The front's request reached the Python server through the Node server,
   // which carried the test along.

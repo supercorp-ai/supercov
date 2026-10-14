@@ -64,6 +64,29 @@ test('a failing command is said, with no coverage beside it', () => {
   assert.doesNotMatch(body, /\| Lines \|/);
 });
 
+test('a server the tests drove has its own section, and a file it measured is not missing', () => {
+  const coverage = (covered, total) => ({ lines: { covered, total }, branches: { covered: 1, total: 2 }, coveredConditions: 0, conditions: 0 });
+  const body = comment({
+    title: 'Coverage',
+    command: 'npx playwright test',
+    version: '4.9.0',
+    summary: { coverage: coverage(7, 7), tests: 5 },
+    patch: { eligible: 2, covered: 2, files: [{ file: 'src/front.js', uncovered: [] }], missingFromRun: ['app/views.py', 'docs/notes.py'] },
+    servers: [
+      {
+        language: 'Python',
+        summary: { coverage: coverage(28, 30), tests: 5 },
+        patch: { eligible: 4, covered: 3, files: [{ file: 'app/views.py', uncovered: [12] }], missingFromRun: ['src/front.js', 'docs/notes.py'] },
+      },
+    ],
+  });
+  assert.match(body, /#### Python server\n\n\*\*Changed lines: 75\.00% \(3 of 4\)\*\* covered by a test\./);
+  assert.match(body, /\| `app\/views\.py` \| 12 \|/);
+  // Missing only where no run measured it.
+  assert.match(body, /not run by the test command at all: `docs\/notes\.py`\n/);
+  assert.doesNotMatch(body, /at all: .*views\.py/);
+});
+
 test('an annotation escapes what would end the command', () => {
   assert.equal(
     annotation('src/a,b:c.js', 4, 6),

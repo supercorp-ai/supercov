@@ -226,11 +226,26 @@ async function main() {
     const links = repository && sha
       ? (file, start, end) => `${server}/${repository}/blob/${sha}/${inRepository(file).split('/').map(encodeURIComponent).join('/')}#L${start}${end === start ? '' : `-L${end}`}`
       : undefined;
-    body = comment({ title, command, version, summary, patch, patchError, floors, links });
+    // The runs of servers the tests drove, each its own section.
+    const servers = [];
+    for (const companion of (summary.companions ?? []).filter((each) => each.role === 'server')) {
+      const server = { language: companion.language, summary: query(binary, cwd, ['runs', companion.id]).data };
+      if (base && patch) {
+        try {
+          const result = query(binary, cwd, ['runs', companion.id, 'patch', '--base', base]);
+          if (result.data?.patch) server.patch = result.data.patch;
+          else server.patchError = (result.data?.reasons ?? ['the run could not be mapped onto the change']).join('; ');
+        } catch (error) {
+          server.patchError = error.message.split('\n')[0];
+        }
+      }
+      servers.push(server);
+    }
+    body = comment({ title, command, version, summary, patch, patchError, servers, floors, links });
 
     if (patch && input(environment, 'annotate', 'true') === 'true') {
       let left = 30;
-      for (const file of patch.files) {
+      for (const file of [patch, ...servers.map((server) => server.patch)].filter(Boolean).flatMap((each) => each.files)) {
         for (const [start, end] of ranges(file.uncovered)) {
           if (left === 0) break;
           left -= 1;

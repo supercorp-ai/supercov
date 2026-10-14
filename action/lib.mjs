@@ -65,46 +65,62 @@ const inline = (text) => `\`${String(text).replaceAll('`', '')}\``;
 ///
 /// `links` turns a file and a range into an address, or is absent where there is no commit to
 /// point at.
-export function comment({ title, command, version, failed, summary, patch, patchError, floors = [], links, limit = 20 }) {
+export function comment({ title, command, version, failed, summary, patch, patchError, servers = [], floors = [], links, limit = 20 }) {
   const lines = [marker(title), `### ${title}`, ''];
   if (failed !== undefined) {
     lines.push(`The test command ${inline(command)} failed (exit ${failed}), so there is no coverage to report for this commit.`);
   } else {
-    const coverage = summary.coverage;
-    if (patch) {
-      lines.push(
-        patch.eligible === 0
-          ? '**Changed lines:** nothing executable changed.'
-          : `**Changed lines: ${count(patch.covered, patch.eligible)}** covered by a test.`,
-        '',
-      );
-    } else if (patchError) {
-      lines.push(`Changed lines could not be read: ${patchError}`, '');
+    measured(lines, { summary, patch, patchError, links, limit });
+    // A file is not run at all only where no run measured it: the browser
+    // run does not measure the server its tests drove, which has a run of
+    // its own.
+    const missing = [patch, ...servers.map((server) => server.patch)]
+      .filter(Boolean)
+      .map((each) => new Set(each.missingFromRun ?? []))
+      .reduce((all, each) => (all ? new Set([...all].filter((file) => each.has(file))) : each), undefined);
+    if (missing?.size) {
+      lines.push('', `Changed, and not run by the test command at all: ${[...missing].map(inline).join(', ')}`);
     }
-    lines.push('| Lines | Branches | MC/DC | Tests |', '| --- | --- | --- | --- |');
-    lines.push(
-      `| ${count(coverage.lines.covered, coverage.lines.total)} | ${count(coverage.branches.covered, coverage.branches.total)} | ${count(coverage.coveredConditions, coverage.conditions)} | ${summary.tests} |`,
-    );
-    const uncovered = (patch?.files ?? []).filter((file) => file.uncovered.length > 0);
-    if (uncovered.length > 0) {
-      lines.push('', '| Changed file | Lines no test ran |', '| --- | --- |');
-      for (const file of uncovered.slice(0, limit)) {
-        const cells = ranges(file.uncovered).map(([start, end]) => {
-          const label = start === end ? `${start}` : `${start}-${end}`;
-          const address = links?.(file.file, start, end);
-          return address ? `[${label}](${address})` : label;
-        });
-        lines.push(`| ${inline(file.file)} | ${cells.join(', ')} |`);
-      }
-      if (uncovered.length > limit) lines.push('', `${uncovered.length - limit} more files have changed lines no test ran.`);
-    }
-    if (patch?.missingFromRun?.length) {
-      lines.push('', `Changed, and not run by the test command at all: ${patch.missingFromRun.map(inline).join(', ')}`);
+    for (const server of servers) {
+      lines.push('', `#### ${server.language} server`, '');
+      measured(lines, { ...server, links, limit });
     }
     for (const floor of floors) lines.push('', `**Below the floor:** ${floor}`);
   }
   lines.push('', `<sub>Measured by <a href="https://supercov.com">Supercov</a> ${version} running ${inline(command)}.</sub>`);
   return `${lines.join('\n')}\n`;
+}
+
+/// One run's changed lines, totals and the changed files with lines no test ran.
+function measured(lines, { summary, patch, patchError, links, limit }) {
+  const coverage = summary.coverage;
+  if (patch) {
+    lines.push(
+      patch.eligible === 0
+        ? '**Changed lines:** nothing executable changed.'
+        : `**Changed lines: ${count(patch.covered, patch.eligible)}** covered by a test.`,
+      '',
+    );
+  } else if (patchError) {
+    lines.push(`Changed lines could not be read: ${patchError}`, '');
+  }
+  lines.push('| Lines | Branches | MC/DC | Tests |', '| --- | --- | --- | --- |');
+  lines.push(
+    `| ${count(coverage.lines.covered, coverage.lines.total)} | ${count(coverage.branches.covered, coverage.branches.total)} | ${count(coverage.coveredConditions, coverage.conditions)} | ${summary.tests} |`,
+  );
+  const uncovered = (patch?.files ?? []).filter((file) => file.uncovered.length > 0);
+  if (uncovered.length > 0) {
+    lines.push('', '| Changed file | Lines no test ran |', '| --- | --- |');
+    for (const file of uncovered.slice(0, limit)) {
+      const cells = ranges(file.uncovered).map(([start, end]) => {
+        const label = start === end ? `${start}` : `${start}-${end}`;
+        const address = links?.(file.file, start, end);
+        return address ? `[${label}](${address})` : label;
+      });
+      lines.push(`| ${inline(file.file)} | ${cells.join(', ')} |`);
+    }
+    if (uncovered.length > limit) lines.push('', `${uncovered.length - limit} more files have changed lines no test ran.`);
+  }
 }
 
 /// A workflow command that marks lines in the pull request's diff.

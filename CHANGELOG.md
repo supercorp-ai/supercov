@@ -5,6 +5,7 @@
 **Added**
 
 - Browser tests of a Python server measure the server. When a Playwright suite starts a Python program -- through `webServer`, a fixture or a test -- `npx supercov -- npx playwright test` measures it, and each request runs as the test that sent it: the standard library's HTTP server, Flask, Django and FastAPI, under their own servers, gunicorn or uvicorn. A request that names no test, such as a webhook, is credited by time as it is for a Node server. A project with no JavaScript source was refused ("No application source files were discovered"); one with a Node server too gets the server's Python run beside its browser run, and `merge` merges each.
+- A browser run's summary names the runs of the servers its tests drove, and each server's run names the browser run (`companions` in JSON). The pull-request comment Action reports each server's run in a section of its own, and lists a changed file as not run at all only when no run measured it.
 - Browser tests of a Ruby server measure it the same way: a Rack app -- Rails, Sinatra or any other -- under Puma, WEBrick or another server, each request run as the test that sent it, a webhook credited by time, and the server's Ruby run published as the run or beside the browser run.
 
 **Fixed**

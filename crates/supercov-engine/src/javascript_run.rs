@@ -1063,6 +1063,7 @@ pub fn run_direct_javascript(
             copy: Some(cleanup.lock().copy()),
             merged_across: None,
             recorded_by: None,
+            companions: None,
         };
         let mut published = None;
         let mut server_runs = Vec::new();
@@ -1215,28 +1216,34 @@ pub fn run_direct_javascript(
         copy: Some(cleanup.lock().copy()),
         merged_across: None,
         recorded_by: None,
-    };
-    let run_directory =
-        publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
-    let terminal_status = if execution.exit_code == 0 {
-        RunStateStatus::Complete
-    } else {
-        RunStateStatus::Failed
+        companions: None,
     };
     // Each server's run beside the browser run, under an id of its own that
-    // sorts after it: `runs latest` stays the browser run.
+    // sorts after it: `runs latest` stays the browser run. Published first,
+    // so the browser run names the ones that were.
     let mut server_runs = Vec::new();
+    let mut companions = Vec::new();
     for server in servers {
         let id = companion_run_id(&run_id, server_runs.len() + 1);
         let language = server.language();
         let server_metadata = RunMetadata {
             id: id.clone(),
+            companions: Some(vec![crate::run_store::CompanionRun {
+                id: run_id.clone(),
+                language: "JavaScript".into(),
+                role: "browser".into(),
+            }]),
             ..metadata.clone()
         };
         match server.publish(&root, &run_id, server_metadata, &served, diagnostics) {
             Ok(Some((directory, _))) => {
                 finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
                 server_runs.push((language.to_owned(), directory));
+                companions.push(crate::run_store::CompanionRun {
+                    id,
+                    language: language.into(),
+                    role: "server".into(),
+                });
             }
             Ok(None) => {}
             // The browser run stands on its own.
@@ -1248,6 +1255,17 @@ pub fn run_direct_javascript(
             }
         }
     }
+    let metadata = RunMetadata {
+        companions: (!companions.is_empty()).then_some(companions),
+        ..metadata
+    };
+    let run_directory =
+        publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
+    let terminal_status = if execution.exit_code == 0 {
+        RunStateStatus::Complete
+    } else {
+        RunStateStatus::Failed
+    };
     update_run_state(&root, &run_id, terminal_status, &started_at, None)
         .map_err(|error| error.to_string())?;
     finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;

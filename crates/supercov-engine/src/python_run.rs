@@ -548,6 +548,7 @@ pub fn run_direct_python(
             copy: None,
             merged_across: None,
             recorded_by: None,
+            companions: None,
         };
         drop(run);
         let run_directory = publish_archived_run(
