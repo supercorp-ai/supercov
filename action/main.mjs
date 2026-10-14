@@ -1,6 +1,7 @@
 // Runs a test command under Supercov and says on the pull request what the change left untested.
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { annotation, comment, input, marker, nativeTarget, percentage, ranges, unpack, verify } from './lib.mjs';
@@ -151,11 +152,21 @@ async function main() {
   }
   if (environment.GITHUB_PATH) appendFileSync(environment.GITHUB_PATH, `${dirname(binary)}\n`);
 
+  // The run this step recorded, by the id it writes: another step of the job
+  // may be recording a run in the same checkout at the same time.
+  const idFile = join(environment.RUNNER_TEMP || tmpdir(), `supercov-run-id-${process.pid}`);
   console.log(`::group::supercov -- ${command}`);
-  const run = spawnSync(`"${binary}" -- ${command}`, { cwd, shell: true, stdio: 'inherit' });
+  const run = spawnSync(`"${binary}" -- ${command}`, {
+    cwd,
+    shell: true,
+    stdio: 'inherit',
+    env: { ...environment, SUPERCOV_RUN_ID_FILE: idFile },
+  });
   console.log('::endgroup::');
   if (run.error) throw run.error;
   const exit = run.status ?? 1;
+  // A Supercov older than 4.7.0 writes no id; its newest run is this one.
+  const recorded = existsSync(idFile) ? readFileSync(idFile, 'utf8').trim() || 'latest' : 'latest';
 
   const outputs = {};
   const floors = [];
@@ -163,7 +174,7 @@ async function main() {
   if (exit !== 0) {
     body = comment({ title, command, version, failed: exit });
   } else {
-    const summary = query(binary, cwd, ['runs', 'latest']).data;
+    const summary = query(binary, cwd, ['runs', recorded]).data;
     outputs['run-id'] = summary.run;
     outputs.lines = percentage(summary.coverage.lines.covered, summary.coverage.lines.total).replace('%', '');
     outputs.branches = percentage(summary.coverage.branches.covered, summary.coverage.branches.total).replace('%', '');
@@ -173,7 +184,7 @@ async function main() {
       return floor ? [`--min-${metric}`, floor] : [];
     });
     if (minimums.length > 0) {
-      const check = query(binary, cwd, ['runs', 'latest', 'check', ...minimums]);
+      const check = query(binary, cwd, ['runs', recorded, 'check', ...minimums]);
       const outcome = check.data?.outcome ?? {};
       for (const violation of outcome.violations ?? []) {
         floors.push(`${violation.metric === 'mcdc' ? 'MC/DC' : violation.metric} ${percentage(violation.covered, violation.eligible)}, below ${violation.floorPpm / 10000}%`);
@@ -190,7 +201,7 @@ async function main() {
         const floor = input(environment, 'min-changed-lines');
         let result = {};
         try {
-          result = query(binary, cwd, ['runs', 'latest', 'patch', '--base', base, ...(floor ? ['--min-lines', floor] : [])]);
+          result = query(binary, cwd, ['runs', recorded, 'patch', '--base', base, ...(floor ? ['--min-lines', floor] : [])]);
         } catch (error) {
           result = { data: { reasons: [error.message.split('\n')[0]] } };
         }

@@ -9,15 +9,21 @@
 // timeout, one new spec -- and merge with no run named. Then a header every
 // request sends, which must leave the first run out; and a change to a helper
 // function the first spec calls, which `tests affected` must report.
+//
+// Then two Python suites run by different commands, each naming the run it
+// recorded in SUPERCOV_RUN_ID_FILE: they merge, the merge is not out of date,
+// a helper only one suite imports changes nothing for the other, and
+// `tests affected` answers for the merged run from the runs in it.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 // Inside the repository, so the suite finds its Playwright.
-const root = resolve(repository, 'target', `merge-across-${process.pid}-${Date.now()}`);
+let root = resolve(repository, 'target', `merge-across-${process.pid}-${Date.now()}`);
+const roots = [root];
 const port = 41000 + Math.floor(Math.random() * 8000);
 
 const files = {
@@ -87,6 +93,58 @@ try {
   const reasons = JSON.stringify(affected.affected);
   assert.match(reasons, /tests\/e2e\/helpers\.js changed: .*gradeOf.*\(this test's file loads it\)/u, reasons);
   console.log(`[merge-across] new specs merge across an added helper and a longer timeout; a header and a changed helper are counted`);
+
+  root = resolve(repository, 'target', `merge-across-python-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  const python = process.platform === 'win32' ? 'python' : 'python3';
+  for (const [file, text] of Object.entries({
+    'shop/__init__.py': 'def half(value):\n    if value < 0:\n        return 0\n    return value / 2\n',
+    'tests/__init__.py': '',
+    'tests/unit/__init__.py': '',
+    'tests/unit/helpers.py': 'def make():\n    return 10\n',
+    'tests/unit/test_half.py': 'import unittest\nfrom shop import half\nfrom .helpers import make\n\n\nclass Half(unittest.TestCase):\n    def test_half(self):\n        self.assertEqual(half(make()), 5)\n',
+    'tests/integration/__init__.py': '',
+    'tests/integration/test_negative.py': 'import unittest\nfrom shop import half\n\n\nclass Negative(unittest.TestCase):\n    def test_negative(self):\n        self.assertEqual(half(-1), 0)\n',
+  })) write(file, text);
+  const idFile = resolve(root, '.run-id');
+  const suite = (directory) => {
+    const result = spawnSync(binary, ['--', python, '-m', 'unittest', 'discover', '-s', `tests/${directory}`, '-t', '.'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, NO_COLOR: '1', CI: '1', SUPERCOV_RUN_ID_FILE: idFile },
+    });
+    assert.equal(result.status, 0, `${directory} failed under Supercov:\n${result.stdout}${result.stderr}`);
+    assert.ok(existsSync(idFile), 'the run named itself');
+    return readFileSync(idFile, 'utf8').trim();
+  };
+  const unit = suite('unit');
+  const integration = suite('integration');
+  assert.notEqual(unit, integration);
+  const both = supercov('merge');
+  assert.equal(both.status, 0, both.printed);
+  assert.match(both.printed, /merged run/u, both.printed);
+  const pair = JSON.parse(supercov('runs', 'latest', '--json').stdout).data;
+  assert.equal(pair.tests, 2, JSON.stringify(pair));
+  assert.equal(pair.stale, false, 'a merge of suites run by different commands is of this checkout');
+
+  edit('tests/unit/helpers.py', 'return 10', 'return 12');
+  const untouched = JSON.parse(supercov('runs', integration, 'tests', 'affected', '--json').stdout).data;
+  assert.equal(untouched.summary.affected, 0, JSON.stringify(untouched));
+  const touched = JSON.parse(supercov('runs', unit, 'tests', 'affected', '--json').stdout).data;
+  assert.match(JSON.stringify(touched.affected), /tests\/unit\/helpers\.py changed: .*\(this test's file loads it\)/u, JSON.stringify(touched));
+  const fromMerge = JSON.parse(supercov('runs', pair.run, 'tests', 'affected', '--json').stdout).data;
+  assert.deepEqual(fromMerge.mergedFrom.toSorted(), [unit, integration].toSorted(), JSON.stringify(fromMerge));
+  assert.equal(fromMerge.summary.affected, 1, JSON.stringify(fromMerge));
+
+  edit('tests/unit/helpers.py', 'return 12', 'return 10');
+  edit('tests/unit/test_half.py', '\n\n\nclass', '\n\n\n# measured again\nclass');
+  const again = suite('unit');
+  const regrouped = supercov('merge');
+  assert.equal(regrouped.status, 0, regrouped.printed);
+  assert.ok(regrouped.printed.includes(again) && regrouped.printed.includes(integration), regrouped.printed);
+  console.log('[merge-across] Python suites run by different commands merge, name their runs, and keep to their own helpers');
 } finally {
-  if (root.startsWith(resolve(repository, 'target', 'merge-across-'))) rmSync(root, { recursive: true, force: true });
+  for (const made of roots) {
+    if (made.startsWith(resolve(repository, 'target', 'merge-across-'))) rmSync(made, { recursive: true, force: true });
+  }
 }

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `SUPERCOV_RUN_ID_FILE` names a file the recorded run's id is written to, for a script that queries the run it just made. `latest` is another run when two commands record runs side by side. The GitHub Action uses it.
+- `tests affected` answers for a merged run from the runs it was merged from. It refused, naming them.
+- `merge` and `tests affected` read the imports of Python tests, with pytest's `conftest.py` files and `pytest_plugins`: a changed helper counts only for the runs and tests whose files import it.
+
+**Fixed**
+
+- `merge` refused Python, Ruby, Go, Rust and JVM suites run by different commands ("differing domains: integrity fingerprint"), and a merged run of those languages read as out of date. A run's fingerprint there holds its command; a merge is now checked with the command of the run it was merged into.
+- A change to source left out of what is measured, such as a simulator outside `SUPERCOV_SOURCE_ROOTS`, made every run out of date for `merge`. It is now judged as a helper is.
+
 ## 4.6.0
 
 **Added**

@@ -104,7 +104,13 @@ fn incompatible_dimensions(first: &StoredRun, candidate: &StoredRun) -> Vec<&'st
     if candidate.fingerprint.configuration != first.fingerprint.configuration {
         dimensions.push("configuration");
     }
-    if dimensions.is_empty() && candidate.fingerprint.combined != first.fingerprint.combined {
+    // With every domain alike, what is left is how each was run: the test
+    // command, for the languages whose fingerprint holds it. Commands that
+    // differ are what shards are.
+    if dimensions.is_empty()
+        && candidate.fingerprint.combined != first.fingerprint.combined
+        && candidate.fingerprint.execution == first.fingerprint.execution
+    {
         dimensions.push("integrity fingerprint");
     }
     dimensions
@@ -150,6 +156,7 @@ fn judged_against_latest<'a>(
     let differ = inputs.iter().any(|input| {
         fingerprint(input).tests != fingerprint(first).tests
             || fingerprint(input).configuration != fingerprint(first).configuration
+            || fingerprint(input).source != fingerprint(first).source
     });
     if !differ {
         return Ok(None);
@@ -166,10 +173,16 @@ fn judged_against_latest<'a>(
         .iter()
         .map(|archive| recorded_files(archive))
         .collect::<Vec<_>>();
+    // Without a record of the files, the domains are all there is to say.
     let unrecorded = |run: &StoredRun| {
+        let other = inputs
+            .iter()
+            .find(|other| other.id != run.id)
+            .expect("at least two runs");
         format!(
-            "Cannot merge incompatible run {}: differing domains: tests or configuration, and it keeps no record of its files to compare",
-            run.id
+            "Cannot merge incompatible run {}: differing domains: {}",
+            run.id,
+            incompatible_dimensions(other, run).join(", ")
         )
     };
     let Some((bytes, into)) = &files[latest] else {
@@ -218,6 +231,8 @@ fn judged_against_latest<'a>(
                 listed(&judgment.outdated),
                 if judgment.own_tests {
                     "Its own tests changed; measure them again."
+                } else if judgment.settled {
+                    "Measure it again."
                 } else {
                     "Measure it again, or pass --allow-changed if the change alters nothing its tests ran."
                 },
@@ -280,9 +295,12 @@ pub fn merge_coverage_runs(
         let dimensions = incompatible_dimensions(first, input);
         // Tests and their configuration may differ; what that takes is
         // looked at file by file.
+        // So may the source, where what changed is outside what is measured.
         if dimensions
             .iter()
-            .any(|dimension| *dimension != "tests" && *dimension != "configuration")
+            .any(|dimension| !matches!(*dimension, "tests" | "configuration" | "source"))
+            || input.metadata.integrity.fingerprint.source_files
+                != first.metadata.integrity.fingerprint.source_files
         {
             return Err(format!(
                 "Cannot merge incompatible run {}: differing domains: {}",

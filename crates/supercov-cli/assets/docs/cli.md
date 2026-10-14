@@ -121,6 +121,18 @@ npx supercov -- cargo nextest run
 Use the complete command you rely on before merging or deploying. A coverage run
 preserves the wrapped command's exit status, so it can remain a CI gate.
 
+A script that queries the run it just recorded can have Supercov write the
+run's id to a file. `latest` is the newest run, which is another one when two
+commands record runs side by side:
+
+```sh supercov-example
+SUPERCOV_RUN_ID_FILE=unit.id npx supercov -- <test command>
+npx supercov runs <run-id> check --min-lines 80   # the id in unit.id
+```
+
+The file is removed when the run starts and written when it is recorded, so a
+run that is not recorded leaves no id behind.
+
 ## List and select runs
 
 ```sh supercov
@@ -511,9 +523,10 @@ pass in the run is listed regardless.
 per line, for a runner's filter. A Vitest, Playwright or node:test test inside
 `describe` blocks is printed as the blocks and the test joined by spaces
 (`small charges`), which is what `vitest -t`, `--grep` and
-`--test-name-pattern` match. A helper beside the tests that changed affects
-the tests whose files import it (a helper that only gained functions affects
-none), and every test where Supercov cannot read the imports. A dependency,
+`--test-name-pattern` match. A helper beside the tests, or source outside what is
+measured, that changed affects the tests whose files import it (a JavaScript or
+TypeScript helper that only gained functions affects none), and every test
+where Supercov cannot read the imports. A dependency,
 lockfile, configuration or toolchain change affects every test and is reported
 as such; a test runner's settings affect only the runs that used that runner.
 A source file
@@ -615,12 +628,15 @@ what that run's tests did with it:
 
 - Another run's test file: it was not in this run. A file of the run's own
   tests: what it recorded is of other tests, and the run is left out.
-- A helper, fixture or support file: left out of a run only when that run's
-  test files import it, directly or through other files. For JavaScript and
-  TypeScript tests Supercov reads the imports; a computed import path, or tests
-  in another language, count every helper as loaded. A helper that only gained
-  functions, which code written before cannot have called, leaves every run
-  in.
+- A file the run measured: left out, always.
+- A helper, fixture or support file, or source outside what is measured (a
+  simulator kept out of `SUPERCOV_SOURCE_ROOTS`): left out of a run only when
+  that run's test files import it, directly or through other files. Supercov
+  reads the imports of JavaScript, TypeScript and Python tests, with pytest's
+  `conftest.py` files and `pytest_plugins`; a computed import, a change to
+  `sys.path`, or tests in another language count every helper as loaded. A
+  JavaScript or TypeScript helper that only gained functions, which code
+  written before cannot have called, leaves every run in.
 - A test runner's settings: `playwright.config.*`, `vitest.config.*`,
   `jest.config.*` and `ava.config.*` belong to their runner, and a run that
   did not use that runner keeps. Of Playwright's settings, only those that
@@ -648,9 +664,9 @@ same, and a run whose own test files changed is still left out. What was
 accepted is listed in `merged across:` as accepted.
 
 `assertions assess` assesses a merged run across every suite merged into it,
-reusing the answers saved when its parts were assessed. `tests affected` is
-asked of the runs that were merged, which hold the record of what each test
-ran.
+reusing the answers saved when its parts were assessed. `tests affected` of a
+merged run is answered from the runs it was merged from, which hold the record
+of what each test ran; a test in several of them is affected where any says so.
 
 ## Clean local data
 
@@ -698,6 +714,7 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_SOURCE_ROOTS` | Comma-separated directories or files that hold your own code, in any language; everything else is left out |
 | `SUPERCOV_TEST_KIND` | Label the wrapped command as a test level such as `unit` or `e2e` |
 | `SUPERCOV_SOURCE_TOOLS` | Comma-separated names of tools the test command runs that read source as text, such as a linter or a spell checker, besides Biome, oxlint, dprint, cspell and knip. Each is run on your source as you wrote it instead of on the instrumented copy |
+| `SUPERCOV_RUN_ID_FILE` | A file to write the recorded run's id to, for a script to query that run rather than `latest` |
 | `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran |
 
 Examples:

@@ -451,6 +451,30 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// What a recorded run says when it is done: where its evidence is, and,
+/// for a script that has to name it, its id in the file
+/// `SUPERCOV_RUN_ID_FILE` names. Guessing the newest run is wrong when two
+/// commands record runs side by side.
+fn published(run_directory: &Path) {
+    println!(
+        "[coverage] evidence: {}",
+        run_directory.join("evidence.raw.gz").display()
+    );
+    if let (Some(file), Some(id)) = (
+        std::env::var_os(RUN_ID_FILE).filter(|file| !file.is_empty()),
+        run_directory.file_name().and_then(|id| id.to_str()),
+    ) && let Err(error) = fs::write(&file, format!("{id}\n"))
+    {
+        eprintln!(
+            "[supercov] could not write the run id to {}: {error}",
+            Path::new(&file).display()
+        );
+    }
+}
+
+/// Names the file a run writes its id to.
+const RUN_ID_FILE: &str = "SUPERCOV_RUN_ID_FILE";
+
 const MERGE_USAGE: &str = "Usage: supercov merge [--allow-changed] [<run-id> <run-id> ...]\n\nWith no run named, merges the runs recorded on the source as it is now: the newest of each\ncommand, leaving out runs that are themselves a merge.\n\n--allow-changed  also merge runs recorded before files the tests load (helpers, fixtures)\n                 or the test configuration changed. The product code and what is measured\n                 must still be the same; the merged run names what differed.";
 
 /// The runs to merge when none is named, newest first, one list for each
@@ -550,7 +574,12 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
                     ));
                     return false;
                 }
-                if recorded.fingerprint.source != current.fingerprint.source {
+                // A measured file added or removed: what is measured differs.
+                // A change to a file is judged below, file by file.
+                if recorded.fingerprint.source != current.fingerprint.source
+                    && (files.is_none()
+                        || recorded.fingerprint.source_files != current.fingerprint.source_files)
+                {
                     outdated.push((*run, moved("source"), true));
                     return false;
                 }
@@ -615,7 +644,7 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
                         outdated.push((
                             *run,
                             supercov_engine::run_merge::listed(&judgment.outdated),
-                            judgment.own_tests,
+                            judgment.settled,
                         ));
                         false
                     }
@@ -660,16 +689,18 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
             launcher_command()
         ));
     }
-    // Runs of two languages in one project are two measurements. Their
-    // configuration may differ: what that takes was judged above.
+    // Runs of two languages in one project, or of two packages, are two
+    // measurements. Their source, tests and configuration may differ in
+    // files they do not measure: what that takes was judged above.
     let mut sets = Vec::<Vec<&StoredRun>>::new();
     for run in current {
         let measured = |run: &StoredRun| {
             let fingerprint = &run.metadata.integrity.fingerprint;
             (
-                fingerprint.source.clone(),
                 fingerprint.dependencies.clone(),
                 fingerprint.instrumenter.clone(),
+                fingerprint.source_files,
+                run.metadata.source_roots.clone(),
             )
         };
         match sets
@@ -1524,6 +1555,13 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // A run that is not recorded must not leave the last one's id for a
+    // script to read as its own.
+    if let Some(file) = std::env::var_os(RUN_ID_FILE).filter(|file| !file.is_empty())
+        && Path::new(&file).is_file()
+    {
+        let _ = fs::remove_file(&file);
+    }
     spawn_trash_sweeper(&root);
     let detection = supercov_engine::frontend_detection::detect_frontends(&root, &command);
     let unsupported =
@@ -1596,10 +1634,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
-                println!(
-                    "[coverage] evidence: {}",
-                    result.run_directory.join("evidence.raw.gz").display()
-                );
+                published(&result.run_directory);
                 eprintln!(
                     "[supercov] Rust coverage: {} test(s) across {} artifact(s)",
                     result.tests, result.artifacts
@@ -1635,10 +1670,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
-                println!(
-                    "[coverage] evidence: {}",
-                    result.run_directory.join("evidence.raw.gz").display()
-                );
+                published(&result.run_directory);
                 eprintln!(
                     "[supercov] Go coverage: {} test(s) across {} source file(s) in {} package(s)",
                     result.tests, result.source_files, result.packages
@@ -1701,10 +1733,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
-                println!(
-                    "[coverage] evidence: {}",
-                    result.run_directory.join("evidence.raw.gz").display()
-                );
+                published(&result.run_directory);
                 eprintln!(
                     "[supercov] JVM coverage: {} test(s) across {} source file(s) in {} module(s)",
                     result.tests, result.source_files, result.modules
@@ -1739,10 +1768,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
-                println!(
-                    "[coverage] evidence: {}",
-                    result.run_directory.join("evidence.raw.gz").display()
-                );
+                published(&result.run_directory);
                 eprintln!(
                     "[supercov] Python coverage: {} test(s) across {} source file(s), {} interpreter process(es) on Python {}",
                     result.tests,
@@ -1780,10 +1806,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         finish_trash_sweep(&root);
         return match result {
             Ok(result) => {
-                println!(
-                    "[coverage] evidence: {}",
-                    result.run_directory.join("evidence.raw.gz").display()
-                );
+                published(&result.run_directory);
                 eprintln!(
                     "[supercov] Ruby coverage: {} test(s) across {} source file(s), {} interpreter process(es) on Ruby {}",
                     result.tests,
@@ -1824,10 +1847,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     finish_trash_sweep(&root);
     match result {
         Ok(result) => {
-            println!(
-                "[coverage] evidence: {}",
-                result.run_directory.join("evidence.raw.gz").display()
-            );
+            published(&result.run_directory);
             if let Some(timings) = &result.metadata.timings {
                 eprintln!(
                     "[supercov] timings {}",
@@ -2031,8 +2051,8 @@ fn current_integrity_for_run(
     root: &Path,
     run: &StoredRun,
 ) -> Option<supercov_engine::run_store::RunIntegrity> {
-    let command = &run.metadata.command;
-    let roots = run.metadata.source_roots.as_deref();
+    let (command, roots) = integrity_command(root, run);
+    let (command, roots) = (&command, roots.as_deref());
     match frontend_of(&run.metadata.integrity.instrumenter_version) {
         Frontend::Rust => {
             supercov_engine::rust_run::current_rust_integrity(root, command, roots).ok()
@@ -2047,6 +2067,48 @@ fn current_integrity_for_run(
         Frontend::Jvm => supercov_engine::jvm_run::current_jvm_integrity(root, command, roots).ok(),
         Frontend::JavaScript => current_javascript_integrity(root, command, roots),
     }
+}
+
+/// The command a run's fingerprint was made with. A merged run carries the
+/// fingerprint of the run it was merged into, and where a language's
+/// fingerprint holds the test command, checking it against `supercov merge`
+/// made every merged run of it read as out of date.
+fn integrity_command(root: &Path, run: &StoredRun) -> (Vec<String>, Option<Vec<String>>) {
+    let own = || {
+        (
+            run.metadata.command.clone(),
+            run.metadata.source_roots.clone(),
+        )
+    };
+    if run.metadata.merged != Some(true) {
+        return own();
+    }
+    let Ok(inventory) = public_run_inventory(root) else {
+        return own();
+    };
+    let combined = &run.metadata.integrity.fingerprint.combined;
+    let mut current = run;
+    // A merge of merges: follow the fingerprint down to a run of a command.
+    for _ in 0..16 {
+        let Some(parent) = current
+            .metadata
+            .parents
+            .iter()
+            .flatten()
+            .filter_map(|id| inventory.runs.iter().find(|stored| stored.id == *id))
+            .find(|parent| parent.metadata.integrity.fingerprint.combined == *combined)
+        else {
+            break;
+        };
+        if parent.metadata.merged != Some(true) {
+            return (
+                parent.metadata.command.clone(),
+                parent.metadata.source_roots.clone(),
+            );
+        }
+        current = parent;
+    }
+    own()
 }
 
 fn selected_package_script(command: &[String]) -> Option<&str> {

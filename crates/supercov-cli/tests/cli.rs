@@ -4644,7 +4644,7 @@ fn new_tests_are_added_across_the_helpers_and_settings_they_bring() {
     assert!(
         source
             .stdout()
-            .contains("the source has changed (src/cart.js)"),
+            .contains("src/cart.js, which it measured, has changed"),
         "{}",
         source.stdout()
     );
@@ -4653,6 +4653,40 @@ fn new_tests_are_added_across_the_helpers_and_settings_they_bring() {
         .succeeds();
     let old = project.supercov(&["runs", "latest", "--json"]).json();
     assert_eq!(old["data"]["stale"], true, "{old}");
+}
+
+#[test]
+fn source_left_out_of_what_is_measured_is_judged_like_a_helper() {
+    // A project keeps simulators outside SUPERCOV_SOURCE_ROOTS on purpose.
+    // A change to one made every run out of date for merge, the suites
+    // that never load it included.
+    let project = Project::cart("merge-unmeasured");
+    project.write(
+        "simulators/echo.js",
+        "export const echo = (value) => value;\n",
+    );
+    project.write(
+        "test/echo.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { echo } from \"../simulators/echo.js\";\nimport { describe } from \"../src/cart.js\";\n\ntest(\"echo\", () => {\n  assert.equal(echo(describe([{ name: \"a\" }])), \"a\");\n});\n",
+    );
+    project.commit("simulators");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "src")];
+    let measure = |file: &str| {
+        project
+            .supercov_with(&["--", "node", "--test", file], &roots)
+            .succeeds();
+        project.latest()
+    };
+    let cart = measure("test/cart.test.js");
+    measure("test/echo.test.js");
+    project.edit("simulators/echo.js", "=> value", "=> String(value)");
+    let echo = measure("test/echo.test.js");
+    let summed = project.supercov_with(&["merge"], &roots).succeeds();
+    contains_all(&summed, &["merging 2 runs", &cart, &echo]);
+    contains_all(
+        &project.supercov(&["runs", "latest"]).succeeds(),
+        &["simulators/echo.js (`node --test test/cart.test.js` does not load it)"],
+    );
 }
 
 #[test]

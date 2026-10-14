@@ -239,12 +239,16 @@ try {
   assert.ok(handler, beside.files.map((file) => file.path).join('\n'));
   assert.equal(handler.coverage.in_run, true, JSON.stringify(handler.coverage));
 
-  // A merge computes nothing nobody asked for, and says where the record of
-  // what each test ran is kept.
-  const affected = supercov(['runs', mergedRun, 'tests', 'affected']);
-  assert.notEqual(affected.status, 0, affected.output);
-  assert.match(affected.output, new RegExp(`ask the runs it was merged from: ${unitRun}, ${e2eRun}`), affected.output);
-  assert.equal(supercov(['runs', unitRun, 'tests', 'affected']).status, 0);
+  // A merge computes nothing nobody asked for: what each test ran stays with
+  // the runs that recorded it, and a merge is answered from them when asked.
+  const affected = supercov(['runs', mergedRun, 'tests', 'affected', '--json']);
+  assert.equal(affected.status, 0, affected.output);
+  const answer = JSON.parse(affected.stdout).data;
+  assert.deepEqual(answer.mergedFrom, [unitRun, e2eRun], affected.output);
+  const fromParts = [unitRun, e2eRun]
+    .map((run) => JSON.parse(supercov(['runs', run, 'tests', 'affected', '--json']).stdout).data.summary.tests)
+    .reduce((sum, tests) => sum + tests, 0);
+  assert.equal(answer.summary.tests, fromParts, affected.output);
 } finally {
   no.stop();
   yes.stop();
