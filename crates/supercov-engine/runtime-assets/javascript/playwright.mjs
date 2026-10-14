@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.mjs";
+import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -458,16 +458,16 @@ class CoveragePhaseController {
         // own attempt, so the newest wins; the fetch patch is installed once
         // and reads the attempt at call time, so a stale copy can never pin an
         // old scope onto a request the way nested wrappers would.
-        await context.addInitScript(({ attemptId, scopeHeader, scopeValue, scopeCookie }) => {
+        await context.addInitScript(({ attemptId, scopeHeader, scopeValue, scopeCookie, scopeSiteCookie }) => {
             const coverageGlobal = globalThis;
             coverageGlobal.__SUPERCOV_ATTEMPT__ = { attemptId, scopeValue };
             coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
             try {
-                // Sent to a frame of another site too, where the page is a
-                // secure context; the cookie the context was given is the
-                // same, and a Lax copy written here would replace it.
-                const reach = globalThis.isSecureContext ? "SameSite=None; Secure" : "SameSite=Lax";
-                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; ${reach}`;
+                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
+                // And for this document's frames on another of the app's
+                // hosts, where crossing sites is allowed.
+                if (globalThis.isSecureContext)
+                    document.cookie = `${scopeSiteCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=None; Secure`;
                 if (!coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__) {
                     const originalFetch = globalThis.fetch?.bind(globalThis);
                     if (originalFetch) {
@@ -505,6 +505,7 @@ class CoveragePhaseController {
             scopeHeader: COVERAGE_SCOPE_HEADER,
             scopeValue: encodeCoverageScope(this.scope),
             scopeCookie: COVERAGE_SCOPE_COOKIE,
+            scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
         }).catch(() => undefined);
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
@@ -770,7 +771,7 @@ class CoveragePhaseController {
     }
     async activateFrames(phaseId) {
         await timed("activate.frameEvaluate", () => Promise.all([...this.pages].flatMap((page) => page.frames()).map((frame) => frame
-            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie }) => {
+            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
             // A document that loaded under an earlier test's attempt (a page
@@ -780,9 +781,12 @@ class CoveragePhaseController {
             coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(attemptId, id);
             try {
                 localStorage.setItem(storageKey, id);
-                const reach = globalThis.isSecureContext ? "SameSite=None; Secure" : "SameSite=Lax";
-                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; ${reach}`;
-                document.cookie = `${phaseCookie}=${encodeURIComponent(id)}; Path=/; ${reach}`;
+                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
+                document.cookie = `${phaseCookie}=${encodeURIComponent(id)}; Path=/; SameSite=Lax`;
+                if (globalThis.isSecureContext) {
+                    document.cookie = `${scopeSiteCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=None; Secure`;
+                    document.cookie = `${phaseSiteCookie}=${encodeURIComponent(id)}; Path=/; SameSite=None; Secure`;
+                }
             }
             catch {
                 // Sandboxed/cross-origin frames may not expose localStorage.
@@ -794,6 +798,8 @@ class CoveragePhaseController {
             scopeCookie: COVERAGE_SCOPE_COOKIE,
             scopeValue: encodeCoverageScope(this.scope),
             phaseCookie: COVERAGE_PHASE_COOKIE,
+            scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
+            phaseSiteCookie: COVERAGE_PHASE_SITE_COOKIE,
         })
             .catch(() => undefined))));
     }
@@ -827,9 +833,11 @@ class CoveragePhaseController {
      * of the app's other hosts as well.
      */
     async updateContextHeaders(context, phaseId) {
-        const values = [
-            [COVERAGE_SCOPE_COOKIE, encodeURIComponent(encodeCoverageScope(this.scope))],
-            ...(phaseId ? [[COVERAGE_PHASE_COOKIE, encodeURIComponent(phaseId)]] : []),
+        const scope = encodeURIComponent(encodeCoverageScope(this.scope));
+        const phase = phaseId ? encodeURIComponent(phaseId) : undefined;
+        const pairs = (scopeName, phaseName) => [
+            [scopeName, scope],
+            ...(phase ? [[phaseName, phase]] : []),
         ];
         await Promise.all([
             // The context's own headers are the owner's, unchanged.
@@ -837,19 +845,18 @@ class CoveragePhaseController {
                 .setExtraHTTPHeaders(this.contextConfiguredHeaders.get(context) ?? this.configuredHeaders)
                 .catch(() => undefined),
             ...this.appHosts.map((url) => {
-                // A frame of another site gets a cookie only if it may cross
-                // sites, which needs a secure origin: https, or a local host.
-                // Chromium keeps such a cookie only when it is given by domain;
-                // given by an http URL it is dropped without a word.
                 const host = new URL(url);
-                const secure = host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname);
-                const where = secure
-                    ? { domain: host.hostname, path: "/", sameSite: "None", secure: true }
-                    : { url, sameSite: "Lax" };
+                // For the app's own site: requests, navigations and sockets.
+                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
+                // For its frames on another of its hosts: a cookie that
+                // crosses sites must be Secure, which needs https or a local
+                // host. Chromium keeps such a cookie only when it is given by
+                // domain; given by an http URL it is dropped without a word.
+                if (host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname)) {
+                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
+                }
                 // One host refused leaves the others theirs.
-                return context
-                    .addCookies(values.map(([name, value]) => ({ name, value, ...where })))
-                    .catch(() => undefined);
+                return context.addCookies(cookies).catch(() => undefined);
             }),
         ]);
     }
