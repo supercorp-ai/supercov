@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- Browser tests of a Python server measure the server. When a Playwright suite starts a Python program -- through `webServer`, a fixture or a test -- `npx supercov -- npx playwright test` measures it, and each request runs as the test that sent it: the standard library's HTTP server, Flask, Django and FastAPI, under their own servers, gunicorn or uvicorn. A request that names no test, such as a webhook, is credited by time as it is for a Node server. A project with no JavaScript source was refused ("No application source files were discovered"); one with a Node server too gets the server's Python run beside its browser run, and `merge` merges each.
+
+**Fixed**
+
+- A virtual environment inside the project was copied into the run's copy without its interpreter, whose link points outside the project, so a server started as `.venv/bin/python` did not start. The copy uses the environment itself.
+- A Python process started from a measured Node process reported "SUPERCOV_CONTEXT was not a valid Supercov identity" as a limitation. It reads the Node process's test now.
+
 ## 4.8.1
 
 **Added**
