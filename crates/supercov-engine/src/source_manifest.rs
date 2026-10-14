@@ -624,6 +624,42 @@ pub fn executions(
 /// establish. What this cannot see is a file the run never captured -- a file
 /// added since -- and the run's dependencies and configuration, which the
 /// working-tree check answers for.
+/// The files a run's tests are written in, where the run recorded what each
+/// of its tests ran.
+pub fn test_files(run: &StoredRun) -> Option<BTreeSet<String>> {
+    let executions: Executions =
+        serde_json::from_slice(&fs::read(run.directory.join(EXECUTIONS_FILE)).ok()?).ok()?;
+    Some(
+        executions
+            .tests
+            .into_iter()
+            .map(|record| record.test.file)
+            .collect(),
+    )
+}
+
+/// The files, of those a run was recorded with, whose change since makes
+/// what it recorded a record of other tests. `now` gives a file's digest as
+/// it is; `ran` the files the run's own tests are in; `tests` every file
+/// known to hold tests.
+///
+/// A file of another test changing takes nothing from this run: that test
+/// was not in it. A file that is not known to be a test's is one a test may
+/// load, a helper or a fixture, and counts against every run.
+pub fn outdated_files(
+    recorded: &FileManifest,
+    now: impl Fn(&str) -> Option<String>,
+    ran: Option<&BTreeSet<String>>,
+    tests: &BTreeSet<String>,
+) -> Vec<String> {
+    recorded
+        .iter()
+        .filter(|(file, was)| now(file).as_deref() != Some(was.sha256.as_str()))
+        .filter(|(file, _)| !ran.is_some_and(|ran| !ran.contains(*file) && tests.contains(*file)))
+        .map(|(file, _)| file.clone())
+        .collect()
+}
+
 pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     // What each test ran is recorded when a run is published, beside the
     // code it ran, and a merge records nothing: its parts hold the records.

@@ -10,11 +10,12 @@
 //! execution frequency a consumer would display as fact. And MC/DC conditions
 //! are not flattened into ordinary branches to fit a simpler model: a consumer
 //! would then report condition obligations as branch coverage, which is a
-//! different measurement. The richer evidence stays in the JSON view.
+//! different measurement. LCOV has records of its own for them, which are
+//! written; Cobertura has none, and the evidence stays in the JSON view.
 
 use std::fmt::Write as _;
 
-use crate::run_view::{Metric, RunView};
+use crate::run_view::{ConditionRecord, Metric, RunView};
 
 /// Escape text for XML character data and attribute values.
 fn xml(value: &str) -> String {
@@ -69,11 +70,61 @@ pub fn export(view: &RunView, format: &str, timestamp: u64) -> Result<String, St
     }
 }
 
-/// An LCOV tracefile.
+/// A file's conditions as LCOV 2's `MCDC` records, and how many of them it
+/// counts found and hit.
 ///
-/// Line, function and branch records only. Modern LCOV does have an `MCDC`
-/// record, but faithful mapping from Supercov's condition evidence and support
-/// in downstream readers both need verifying before claiming it.
+/// LCOV asks of each condition whether it was shown to turn the outcome when
+/// it went from false to true, and from true to false, and counts each as
+/// one. Supercov counts a condition covered when a pair of evaluations shows
+/// it turning the outcome, which is both at once: a covered condition is two
+/// hit, one not covered is none, and hit over found is Supercov's own MC/DC.
+///
+/// A record names its condition by line, the size of its group and its place
+/// in the group, so two decisions of one size on one line would be one
+/// group to a reader. Where a line holds such decisions, all its conditions
+/// are written as one group; otherwise a decision is a group.
+fn mcdc_records(conditions: &[ConditionRecord], out: &mut String) -> (usize, usize) {
+    let (mut found, mut hit) = (0, 0);
+    for line in conditions.chunk_by(|left, right| left.line == right.line) {
+        let decisions = line
+            .chunk_by(|left, right| left.column == right.column)
+            .collect::<Vec<_>>();
+        let mut sizes = decisions.iter().map(|each| each.len()).collect::<Vec<_>>();
+        sizes.sort_unstable();
+        let apart = sizes.windows(2).all(|pair| pair[0] != pair[1]);
+        let mut groups = if apart { decisions } else { vec![line] };
+        groups.sort_by_key(|group| group.len());
+        for group in groups {
+            for (index, condition) in group.iter().enumerate() {
+                let named = condition
+                    .source
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let named = if named.is_empty() {
+                    format!("condition {index}")
+                } else {
+                    named
+                };
+                let shown = u8::from(condition.covered);
+                found += 2;
+                hit += 2 * usize::from(shown);
+                for sense in ['t', 'f'] {
+                    let _ = writeln!(
+                        out,
+                        "MCDC:{},{},{sense},{shown},{index},{named}",
+                        condition.line,
+                        group.len()
+                    );
+                }
+            }
+        }
+    }
+    (found, hit)
+}
+
+/// An LCOV tracefile: line, function and branch records, and LCOV 2's
+/// `MCDC` records, which a reader of an older format passes over.
 pub fn lcov(view: &RunView) -> String {
     let mut out = String::new();
     for file in &view.files {
@@ -109,6 +160,11 @@ pub fn lcov(view: &RunView) -> String {
             .unwrap_or((0, 0));
         let _ = writeln!(out, "BRF:{branches}");
         let _ = writeln!(out, "BRH:{covered_branches}");
+        let (conditions, shown) = mcdc_records(&file.conditions, &mut out);
+        if conditions > 0 {
+            let _ = writeln!(out, "MCF:{conditions}");
+            let _ = writeln!(out, "MCH:{shown}");
+        }
         for (line, covered) in file.line_hits() {
             let _ = writeln!(out, "DA:{line},{}", u8::from(covered));
         }
@@ -260,6 +316,26 @@ mod tests {
                         taken: false,
                     },
                 ],
+                // Line 2 holds `a && b` with `a` shown and `b` not; line 3 two
+                // decisions of two conditions each, which a reader would take
+                // for one group.
+                conditions: [
+                    (2, 4, 0, true, "a"),
+                    (2, 4, 1, false, "b ==\n  1"),
+                    (3, 2, 0, true, "c"),
+                    (3, 2, 1, true, "d"),
+                    (3, 20, 0, false, "e"),
+                    (3, 20, 1, true, "f(1, 2)"),
+                ]
+                .into_iter()
+                .map(|(line, column, index, covered, source)| ConditionRecord {
+                    line,
+                    column,
+                    index,
+                    covered,
+                    source: source.into(),
+                })
+                .collect(),
             }],
             source_neighbourhoods: BTreeSet::new(),
         }
@@ -293,6 +369,40 @@ mod tests {
     }
 
     #[test]
+    fn lcov_names_each_condition_and_counts_as_supercov_counts() {
+        let text = lcov(&fixture());
+        // A decision is a group: its line, its size, then each condition
+        // shown turning the outcome both ways or neither.
+        assert!(
+            text.contains(
+                "MCDC:2,2,t,1,0,a\nMCDC:2,2,f,1,0,a\nMCDC:2,2,t,0,1,b == 1\nMCDC:2,2,f,0,1,b == 1\n"
+            ),
+            "{text}"
+        );
+        // Two decisions of one size on a line are one group of four, so that
+        // no two conditions answer to one name.
+        assert!(
+            text.contains(
+                "MCDC:3,4,t,1,0,c\nMCDC:3,4,f,1,0,c\nMCDC:3,4,t,1,1,d\nMCDC:3,4,f,1,1,d\nMCDC:3,4,t,0,2,e\nMCDC:3,4,f,0,2,e\nMCDC:3,4,t,1,3,f(1, 2)\nMCDC:3,4,f,1,3,f(1, 2)\n"
+            ),
+            "{text}"
+        );
+        // Four of six conditions shown is eight of twelve, the same share.
+        assert!(text.contains("MCF:12\nMCH:8\n"), "{text}");
+        // Every record is one LCOV 2 reads: its own pattern for the line.
+        for record in text.lines().filter(|line| line.starts_with("MCDC:")) {
+            let fields = record["MCDC:".len()..].splitn(6, ',').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 6, "{record}");
+            assert!(fields[0].parse::<usize>().is_ok_and(|line| line > 0));
+            assert!(fields[1].parse::<usize>().is_ok());
+            assert!(matches!(fields[2], "t" | "f"));
+            assert!(fields[3].parse::<usize>().is_ok());
+            assert!(fields[4].parse::<usize>().unwrap() < fields[1].parse::<usize>().unwrap());
+            assert!(!fields[5].is_empty() && !fields[5].contains('\n'));
+        }
+    }
+
+    #[test]
     fn lcov_records_keep_the_order_readers_parse_them_in() {
         // geninfo defines the sequence, and readers rely on it: a tracefile
         // whose counters precede the records they summarise is accepted by
@@ -308,10 +418,13 @@ mod tests {
             "BRDA" => 6,
             "BRF" => 7,
             "BRH" => 8,
-            "DA" => 9,
-            "LF" => 10,
-            "LH" => 11,
-            _ => 12,
+            "MCDC" => 9,
+            "MCF" => 10,
+            "MCH" => 11,
+            "DA" => 12,
+            "LF" => 13,
+            "LH" => 14,
+            _ => 15,
         };
         for record in text
             .split("end_of_record\n")

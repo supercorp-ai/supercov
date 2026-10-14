@@ -173,6 +173,17 @@ pub struct BranchRecord {
     pub taken: bool,
 }
 
+/// One condition of a decision: where the decision is, which of its
+/// conditions this is, and whether its independent effect was shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionRecord {
+    pub line: usize,
+    pub column: usize,
+    pub index: usize,
+    pub covered: bool,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileView {
@@ -189,6 +200,11 @@ pub struct FileView {
     pub missing_conditions: Vec<Location>,
     pub functions: Vec<FunctionRecord>,
     pub branches: Vec<BranchRecord>,
+    /// Every condition of every decision, for an export that names them.
+    /// The JSON view gives `missing_conditions`, and a decision's own query
+    /// the rest.
+    #[serde(skip)]
+    pub conditions: Vec<ConditionRecord>,
 }
 
 impl FileView {
@@ -315,6 +331,7 @@ pub fn build(
                 missing_conditions: Vec::new(),
                 functions: Vec::new(),
                 branches: Vec::new(),
+                conditions: Vec::new(),
             })
             .measured_lines
             .extend(line.measured.then_some(line.line));
@@ -337,6 +354,7 @@ pub fn build(
                 missing_conditions: Vec::new(),
                 functions: Vec::new(),
                 branches: Vec::new(),
+                conditions: Vec::new(),
             });
         for alternative in branch.alternatives.iter().filter(|a| !a.covered) {
             entry.missing_branches.push(Location {
@@ -386,11 +404,21 @@ pub fn build(
                 missing_conditions: Vec::new(),
                 functions: Vec::new(),
                 branches: Vec::new(),
+                conditions: Vec::new(),
             });
         for _ in decision.conditions.iter().filter(|c| !c.covered) {
             entry.missing_conditions.push(Location {
                 line: decision.meta.line,
                 column: decision.meta.column,
+            });
+        }
+        for condition in &decision.conditions {
+            entry.conditions.push(ConditionRecord {
+                line: decision.meta.line,
+                column: decision.meta.column,
+                index: condition.index,
+                covered: condition.covered,
+                source: condition.source.clone(),
             });
         }
     }
@@ -408,6 +436,8 @@ pub fn build(
             .sort_by(|a, b| (a.line, &a.name).cmp(&(b.line, &b.name)));
         file.branches
             .sort_by_key(|record| (record.line, record.block, record.index));
+        file.conditions
+            .sort_by_key(|record| (record.line, record.column, record.index));
         built.push(file);
     }
     let source_neighbourhoods = built
@@ -739,6 +769,7 @@ mod tests {
                 missing_conditions: Vec::new(),
                 functions: Vec::new(),
                 branches: Vec::new(),
+                conditions: Vec::new(),
             },
             FileView {
                 file: "src/b.ts".into(),
@@ -754,6 +785,7 @@ mod tests {
                 missing_conditions: Vec::new(),
                 functions: Vec::new(),
                 branches: Vec::new(),
+                conditions: Vec::new(),
             },
         ];
         let outcome = check(

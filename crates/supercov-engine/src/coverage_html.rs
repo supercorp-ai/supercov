@@ -337,6 +337,7 @@ mod tests {
                 missing_conditions: Vec::new(),
                 functions: Vec::new(),
                 branches: Vec::new(),
+                conditions: Vec::new(),
             }],
             source_neighbourhoods: BTreeSet::new(),
         }

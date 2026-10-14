@@ -356,7 +356,13 @@ one to fill a field.
 
 MC/DC conditions are not exported as ordinary branches. A consumer would then
 show condition obligations as branch coverage, which is a different
-measurement; that evidence stays in the JSON view and the HTML report. A report
+measurement. The LCOV export writes them as LCOV 2's own records, `MCDC:` for
+each condition with `MCF:` and `MCH:` for a file, so `lcov --mcdc-coverage` and
+`genhtml --mcdc-coverage` show a per-file MC/DC figure from the export alone.
+LCOV counts a condition twice, once for each way it can turn the outcome, and
+Supercov's covered condition is both: hit over found is the run's MC/DC. A
+reader of the older format passes the records over. Cobertura has no such
+record; there the evidence stays in the JSON view and the HTML report. A report
 from a failed or stale run is still written, with a warning on stderr — only
 `check` refuses to pass on one.
 
@@ -588,6 +594,20 @@ called. Asked again with nothing new, it names the merge already made.
 A test that is in two of the runs is one test in the merge. If it failed in
 either, it is failed, which is why a command run again replaces its earlier
 run and is not merged with it.
+
+The runs may differ in their tests when the later ones have only gained test
+files. Measuring a new test alone and adding it to the runs before it is
+then the whole suite's figure, without the whole suite's time:
+
+```sh supercov-example
+npx supercov -- npm test                       # the suite, once
+npx supercov -- npx vitest run test/new.test.ts   # a test added since, alone
+npx supercov merge
+```
+
+A run is left out, and named, when a file of its own tests has changed since
+it ran, or a file tests load that is not itself a test's: what it recorded is
+then of other tests. Measure those again to count them.
 
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` is
