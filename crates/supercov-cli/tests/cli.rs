@@ -3551,7 +3551,6 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
 #[cfg(unix)]
 #[test]
 fn a_tool_that_judges_source_reads_it_as_it_was_written() {
-    use std::os::unix::fs::PermissionsExt;
     let project = Project::empty("judged");
     let script = |tool: &str| {
         format!(
@@ -3572,13 +3571,7 @@ fn a_tool_that_judges_source_reads_it_as_it_was_written() {
     // files itself, fails on a line nobody wrote, and leaves a report.
     let linter = "#!/bin/sh\nif grep -rl supercov \"$1\"; then exit 3; fi\ngrep -c '' \"$1\"/fee.js > lint-report.txt\n";
     for tool in ["oxlint", "housestyle"] {
-        let path = format!("node_modules/.bin/{tool}");
-        project.write(&path, linter);
-        std::fs::set_permissions(
-            project.root.join(&path),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        project.write_script(&format!("node_modules/.bin/{tool}"), linter);
     }
     project.git(&["init", "-q"]);
 
@@ -4018,7 +4011,6 @@ fn a_directory_says_what_ran_while_no_test_was_running() {
 #[cfg(unix)]
 #[test]
 fn a_tools_change_to_source_reaches_the_project_and_the_file_stays_measured() {
-    use std::os::unix::fs::PermissionsExt;
     let project = Project::empty("fixed");
     project.write(
         "package.json",
@@ -4035,21 +4027,14 @@ fn a_tools_change_to_source_reaches_the_project_and_the_file_stays_measured() {
     );
     // A formatter that runs on Node and writes through `fs`, and a native
     // linter that fixes what it reads, which has to be the formatted text.
-    project.write(
+    project.write_script(
         "node_modules/.bin/prettier",
         "#!/usr/bin/env node\nconst fs = require('node:fs');\nconst file = process.argv[3];\nfs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('rate=5', 'rate = 5'));\n",
     );
-    project.write(
+    project.write_script(
         "node_modules/.bin/oxlint",
         "#!/bin/sh\nif grep -rl supercov \"$2\"; then exit 3; fi\ngrep -q 'var rate = 5' \"$2\"/fee.js || exit 4\nsed 's/var rate/const rate/' \"$2\"/fee.js > fixed.tmp && mv fixed.tmp \"$2\"/fee.js\n",
     );
-    for tool in ["prettier", "oxlint"] {
-        std::fs::set_permissions(
-            project.root.join(format!("node_modules/.bin/{tool}")),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-    }
     project.git(&["init", "-q"]);
 
     // Prettier with `--write` and ESLint with `--fix` wrote the source they
@@ -4097,7 +4082,6 @@ fn a_tools_change_to_source_reaches_the_project_and_the_file_stays_measured() {
 #[cfg(unix)]
 #[test]
 fn a_workspace_packages_own_tool_reads_source_as_it_was_written() {
-    use std::os::unix::fs::PermissionsExt;
     let project = Project::empty("judged-package");
     project.write(
         "package.json",
@@ -4118,15 +4102,10 @@ fn a_workspace_packages_own_tool_reads_source_as_it_was_written() {
     );
     // pnpm, and npm without hoisting, give a package its tools in a `.bin`
     // of its own, which is first on PATH when its scripts run.
-    project.write(
+    project.write_script(
         "packages/app/node_modules/.bin/oxlint",
         "#!/bin/sh\nif grep -rl supercov \"$1\"; then exit 3; fi\ngrep -c '' \"$1\"/fee.js > lint-report.txt\n",
     );
-    std::fs::set_permissions(
-        project.root.join("packages/app/node_modules/.bin/oxlint"),
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
     project.git(&["init", "-q"]);
 
     project.supercov(&["--", "npm", "test"]).succeeds();

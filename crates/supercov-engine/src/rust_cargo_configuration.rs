@@ -1183,25 +1183,42 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Write an executable script by way of another process. A file this
+    /// process has open for writing is inherited by a child another test
+    /// thread forks, and held until that child execs; running the script
+    /// meanwhile fails with "Text file busy". Written by `cp`, the script
+    /// never has a descriptor here.
+    #[cfg(unix)]
+    fn write_script(path: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let draft = path.with_extension("draft");
+        fs::write(&draft, text).unwrap();
+        let copied = std::process::Command::new("cp")
+            .arg(&draft)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp {} failed", draft.display());
+        fs::remove_file(&draft).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn included_build_rustc_drives_host_and_cfg_runner_selection() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = fixture();
         let rustc = which::which("rustc").unwrap();
         let proxy = root.join("compiler-proxy");
         let log = root.join("compiler.log");
-        fs::write(
+        write_script(
             &proxy,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexec \"{}\" \"$@\"\n",
                 log.display(),
                 rustc.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&proxy, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         fs::write(
             root.join(".cargo/compiler.toml"),
             concat!(

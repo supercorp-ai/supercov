@@ -125,6 +125,27 @@ impl Project {
         fs::write(path, contents).unwrap();
     }
 
+    /// Write an executable script by way of another process. A file this
+    /// process has open for writing is inherited by a child another test
+    /// thread forks, and held until that child execs; running the script
+    /// meanwhile fails with "Text file busy". Written by `cp`, the script
+    /// never has a descriptor here.
+    #[cfg(unix)]
+    pub fn write_script(&self, file: &str, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let draft = format!("{file}.draft");
+        self.write(&draft, contents);
+        let copied = std::process::Command::new("cp")
+            .arg(self.root.join(&draft))
+            .arg(self.root.join(file))
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp {draft} failed");
+        fs::remove_file(self.root.join(&draft)).unwrap();
+        fs::set_permissions(self.root.join(file), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     pub fn read(&self, file: &str) -> String {
         fs::read_to_string(self.root.join(file)).unwrap()
     }
