@@ -853,7 +853,7 @@ fn every_subcommand_explains_itself_and_names_a_mistake() {
         ),
         (
             vec!["merge", "--help"],
-            "Usage: supercov merge <run-id> <run-id>",
+            "With no run named, merges the runs recorded on the source as it is now",
         ),
         (
             vec!["runs", "clean", "--help"],
@@ -898,7 +898,10 @@ fn every_subcommand_explains_itself_and_names_a_mistake() {
             "unknown format pdf",
         ),
         (vec!["runs", "report", "--bogus"], "unknown option --bogus"),
-        (vec!["merge"], "Usage: supercov merge"),
+        (
+            vec!["merge", "run_0000000000000001"],
+            "Usage: supercov merge",
+        ),
         (
             vec!["merge", "run_0000000000000001", "run_0000000000000002"],
             "run_0000000000000001: no such local run",
@@ -2484,49 +2487,37 @@ fn report_data(html: &str) -> serde_json::Value {
 }
 
 #[test]
-fn a_lock_another_process_holds_is_named_and_one_left_behind_is_taken_over() {
+fn a_lock_an_older_release_holds_is_left_alone_and_one_left_behind_is_taken_over() {
     let project = Project::cart("locks");
     let lock = project.root.join(".supercov/locks/active.json");
     std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
     let owner = |pid: u32| {
         format!(r#"{{"runId":"run_other","pid":{pid},"startedAt":"2026-10-02T00:00:00Z"}}"#)
     };
-    // This test process is alive, so its pid holds the lock.
+    // A run of a release that locked nothing wrote this file and is alive
+    // while its process is; this test's process stands in for it. The run
+    // started beside it takes a copy of its own.
     std::fs::write(&lock, owner(std::process::id())).unwrap();
-    let held = project.supercov(&["--", "node", "--test"]);
-    // Not 1, which is what failing tests end with, and it says what to do.
-    assert_eq!(held.code(), 2, "{}", held.stderr());
-    contains_all(
-        &held.stderr(),
-        &[
-            "coverage run run_other is already active in this project",
-            "No test ran.",
-            "wait for that run to end, or start the suites from one command",
-        ],
-    );
-    // A lock still being written has no owner yet.
-    std::fs::write(&lock, "{").unwrap();
-    let acquiring = project.supercov(&["--", "node", "--test"]);
-    assert_ne!(acquiring.code(), 0);
+    let beside = project.supercov(&["--", "node", "--test"]);
+    assert_eq!(beside.code(), 0, "{}", beside.stderr());
     assert!(
-        acquiring
-            .stderr()
-            .contains("a coverage run is currently acquiring the project lock"),
+        beside.stderr().contains("workspace-2"),
         "{}",
-        acquiring.stderr()
+        beside.stderr()
     );
-    // One whose owner is gone, or that never got one and is old, is taken over.
-    std::fs::write(&lock, owner(u32::MAX - 1)).unwrap();
-    project.supercov(&["--", "node", "--test"]).succeeds();
-    std::fs::write(&lock, "{").unwrap();
+    // One whose owner has gone, or that was never finished, holds nothing.
+    for left in [owner(u32::MAX - 1), "{".to_owned()] {
+        std::fs::write(&lock, left).unwrap();
+        let alone = project.supercov(&["--", "node", "--test"]);
+        assert_eq!(alone.code(), 0, "{}", alone.stderr());
+        assert!(
+            !alone.stderr().contains("workspace-2"),
+            "{}",
+            alone.stderr()
+        );
+    }
+
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-    std::fs::File::options()
-        .write(true)
-        .open(&lock)
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
-    project.supercov(&["--", "node", "--test"]).succeeds();
 
     // The trash sweeper keeps the same rules for its own lock. The runs above
     // each started one in the background; it is let finish first.
@@ -4226,4 +4217,157 @@ fn a_run_in_which_no_test_ran_is_marked_in_the_listing() {
     let listed = project.supercov(&["runs", "--json"]).json();
     assert_eq!(listed["data"]["runs"][0]["tests"], 0);
     assert_eq!(listed["data"]["runs"][1]["tests"], 3);
+}
+
+/// A suite of one test that takes a moment, so that runs started together
+/// are running together.
+fn slow_suite(project: &Project, name: &str, function: &str, call: &str) {
+    project.write(
+        &format!("test/{name}.test.js"),
+        &format!(
+            "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport {{ {function} }} from \"../src/cart.js\";\n\ntest(\"{name}\", async () => {{\n  await new Promise((done) => setTimeout(done, 600));\n  assert.ok({call} !== undefined);\n}});\n"
+        ),
+    );
+}
+
+#[test]
+fn runs_started_at_once_each_have_a_copy_and_all_are_recorded() {
+    // Suites that share nothing run side by side without Supercov. Under it
+    // the second was refused, because every run rebuilt the one copy.
+    let project = Project::cart("side-by-side");
+    slow_suite(&project, "unit", "total", "total([], null)");
+    slow_suite(&project, "integration", "shipping", "shipping(10, true)");
+    slow_suite(&project, "e2e", "describe", "describe([])");
+    project.commit("three suites");
+    let ran = std::thread::scope(|scope| {
+        ["unit", "integration", "e2e"]
+            .map(|kind| {
+                let project = &project;
+                scope.spawn(move || {
+                    let file = format!("test/{kind}.test.js");
+                    project.supercov_with(
+                        &["--", "node", "--test", &file],
+                        &[("SUPERCOV_TEST_KIND", kind)],
+                    )
+                })
+            })
+            .map(|thread| thread.join().unwrap())
+    });
+    let mut copies = Vec::new();
+    for run in &ran {
+        assert_eq!(run.code(), 0, "{}", run.stderr());
+        let stderr = run.stderr();
+        let copy = stderr
+            .lines()
+            .find_map(|line| line.split("instrumenting isolated workspace ").nth(1))
+            .unwrap_or_else(|| panic!("{stderr}"))
+            .to_owned();
+        // What a test prints names the project, whichever copy it ran in.
+        assert!(
+            !run.stdout().contains(".supercov/workspaces"),
+            "{}",
+            run.stdout()
+        );
+        copies.push(copy);
+    }
+    copies.sort();
+    copies.dedup();
+    assert_eq!(
+        copies.len(),
+        3,
+        "each run has a copy of its own: {copies:?}"
+    );
+
+    let runs = project.supercov(&["runs", "--json"]).json();
+    let runs = runs["data"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 3, "{runs:?}");
+    for run in runs {
+        let id = run["id"].as_str().unwrap();
+        let summary = project.supercov(&["runs", id]).succeeds();
+        contains_all(&summary, &["Total       1", "Passed      1"]);
+    }
+
+    // Cleaning wants the store to itself, and says who has it.
+    let cleaned = std::thread::scope(|scope| {
+        let running =
+            scope.spawn(|| project.supercov(&["--", "node", "--test", "test/unit.test.js"]));
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        let cleaned = project.supercov(&["runs", "clean"]);
+        assert_eq!(running.join().unwrap().code(), 0);
+        cleaned
+    });
+    assert_eq!(cleaned.code(), 2, "{}", cleaned.stderr());
+    contains_all(
+        &cleaned.stderr(),
+        &[
+            "is active in this project",
+            "can be cleaned when no run is active",
+        ],
+    );
+    // And then removes every copy.
+    project.supercov(&["runs", "clean"]).succeeds();
+    assert!(!project.root.join(".supercov/workspaces").exists());
+}
+
+#[test]
+fn merge_with_no_run_named_adds_up_the_runs_on_the_source_as_it_is() {
+    // A script that measured three suites had to find what each run was
+    // called, and took the newest directory's name, which is a guess.
+    let project = Project::cart("merge-current");
+    slow_suite(&project, "unit", "total", "total([], null)");
+    slow_suite(&project, "integration", "shipping", "shipping(10, true)");
+    project.commit("two suites");
+    let nothing = project.supercov(&["merge"]);
+    assert_eq!(nothing.code(), 2, "{}", nothing.stdout());
+    assert!(
+        nothing
+            .stderr()
+            .contains("no run was recorded on the source as it is now"),
+        "{}",
+        nothing.stderr()
+    );
+
+    let measure = |kind: &str| {
+        let file = format!("test/{kind}.test.js");
+        project
+            .supercov_with(
+                &["--", "node", "--test", &file],
+                &[("SUPERCOV_TEST_KIND", kind)],
+            )
+            .succeeds();
+        project.latest()
+    };
+    let unit = measure("unit");
+    let one = project.supercov(&["merge"]).succeeds();
+    assert!(one.contains("nothing to merge it with"), "{one}");
+    let integration = measure("integration");
+    // The same command again: its first run is not what the suite did last.
+    let again = measure("unit");
+
+    let merged = project.supercov(&["merge"]).succeeds();
+    contains_all(
+        &merged,
+        &["merging 2 runs", &again, &integration, "merged run run_"],
+    );
+    assert!(!merged.contains(&unit), "{merged}");
+    let kinds = project.supercov(&["runs", "latest", "kinds"]).succeeds();
+    contains_all(&kinds, &["unit", "integration"]);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Total       2", "Passed      2"]);
+
+    // Asked again, it is the merge already made, and no third run of it.
+    let recorded = |project: &Project| {
+        project.supercov(&["runs", "--json"]).json()["data"]["runs"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let before = recorded(&project);
+    let same = project.supercov(&["merge"]).succeeds();
+    assert!(same.contains("already merged as"), "{same}");
+    assert_eq!(recorded(&project), before);
+
+    // Once the source has moved on, none of them is of this source.
+    project.edit("src/cart.js", "return 0;", "return 1;");
+    assert_eq!(project.supercov(&["merge"]).code(), 2);
 }

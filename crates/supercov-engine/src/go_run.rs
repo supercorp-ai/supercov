@@ -851,6 +851,7 @@ pub fn run_direct_go(
             merged: None,
             parents: None,
             source_roots: source_roots.clone(),
+            copy: Some(lock.copy()),
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;

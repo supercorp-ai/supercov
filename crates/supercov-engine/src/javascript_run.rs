@@ -570,7 +570,8 @@ pub fn run_direct_javascript(
         crate::source_manifest::digest(&project.root.to_string_lossy()),
         crate::source_manifest::digest(&(&project.source_files, &source_roots))
     );
-    let prior_workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
+    let prior_workspace =
+        cached_workspace_path(&root, cleanup.lock()).map_err(|error| error.to_string())?;
     let reusable_frontend = read_javascript_frontend_cache(&prior_workspace, &frontend_cache_key);
     let cached_paths = reusable_frontend
         .as_ref()
@@ -1032,6 +1033,7 @@ pub fn run_direct_javascript(
         merged: None,
         parents: None,
         source_roots: source_roots.clone(),
+        copy: Some(cleanup.lock().copy()),
     };
     let run_directory =
         publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;

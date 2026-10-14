@@ -9,7 +9,9 @@
 **Changed**
 
 - `supercov report` of a large run takes seconds. It read the whole run again for every file with a gap: 10 min 25 s for a run of 2,000 tests over 300 files, now 19 s, and the report is the same byte for byte.
-- A second `supercov --` while one is active in the project ends with status 2, not 1, says that no test ran, and says what to do. Suites that run side by side are measured by starting them from one command, each with its own `SUPERCOV_TEST_KIND`; they are one run, with nothing to merge.
+- Runs of one project can be started at the same moment. A second `supercov --` was refused with `already active`, because every run rebuilt the project's one copy. Each run now takes a copy of its own (`workspace`, then `workspace-2`), held by a lock of the operating system, which gives it back when the process ends however it ends. A run alone has the first copy, as before. A copy past the first is removed a day after its last run. `runs clean` is refused, with status 2, while a run is active.
+- `supercov merge` with no run named merges the runs recorded on the source as it is now: the newest of each command, leaving out merges. A script no longer has to find what each run was called.
+- Suites started from one command, each with its own `SUPERCOV_TEST_KIND`, are one run with every kind. This worked and was written down nowhere.
 
 **Fixed**
 

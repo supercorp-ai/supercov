@@ -137,6 +137,11 @@ pub struct RunMetadata {
     /// stale the moment it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_roots: Option<Vec<String>>,
+    /// Which copy of the project the command ran in, where it ran in one: 1
+    /// for a run alone, 2 for one started while that copy was in use. It is
+    /// where what the command wrote is to be found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<usize>,
 }
 
 #[cfg(test)]
@@ -401,6 +406,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
         merged: None,
         parents: None,
         source_roots: None,
+        copy: None,
     };
     fs::write(
         directory.join("run.json"),
@@ -1035,6 +1041,7 @@ mod tests {
             merged: None,
             parents: None,
             source_roots: None,
+            copy: None,
         };
         fs::write(
             directory.join("run.json"),
