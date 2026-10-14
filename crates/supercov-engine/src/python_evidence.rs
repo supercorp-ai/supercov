@@ -352,8 +352,7 @@ struct Evidence {
     served_by: BTreeMap<String, BTreeSet<(String, String, usize)>>,
 }
 
-/// The worker the runtime names a request that names no test as.
-const REQUEST_WORKER: &str = "supercov-request";
+use crate::served_tests::REQUEST_WORKER;
 
 fn read_evidence_directory(
     directory: &Path,
@@ -1725,25 +1724,7 @@ pub fn build_python_frontend_run(
     )
 }
 
-/// A browser test whose requests a measured Python server answered: what
-/// the browser runner reported for it, which no Python runner saw.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServedTest {
-    /// As the server's runtime names the worker: `playwright:<worker id>`.
-    pub worker: String,
-    pub test_id: String,
-    pub retry: usize,
-    /// The test's name, title and file as the browser run gives them.
-    pub name: String,
-    pub title: String,
-    pub file: String,
-    pub status: String,
-    pub expected_status: String,
-    pub provenance: TestProvenance,
-    /// When the attempt ran, in milliseconds since the epoch, first and
-    /// last moment: what a request that named no test is judged by.
-    pub window: Option<(i64, i64)>,
-}
+pub use crate::served_tests::ServedTest;
 
 /// The Python run of a server a browser suite drove: the server's evidence,
 /// with each browser test's outcome as its runner reported it, under the
@@ -1831,18 +1812,7 @@ fn credit_requests_by_time(
         let Some(observations) = evidence.per_identity.remove(&identity) else {
             continue;
         };
-        let answered = evidence.served_by.get(&transport);
-        let mut running = served.iter().filter(|test| {
-            answered.is_none_or(|attempts| {
-                attempts.contains(&(test.worker.clone(), test.test_id.clone(), test.retry))
-            }) && test
-                .window
-                .is_some_and(|(start, end)| start <= at && at <= end)
-        });
-        let owner = match (running.next(), running.next()) {
-            (Some(only), None) => Some(only),
-            _ => None,
-        };
+        let owner = crate::served_tests::owner(served, evidence.served_by.get(&transport), at);
         let into = match owner {
             Some(test) => {
                 credited.insert((test.worker.clone(), test.test_id.clone(), test.retry));

@@ -1866,10 +1866,10 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     match result {
         Ok(result) => {
             published(&result.run_directory);
-            for server in &result.server_runs {
+            for (language, server) in &result.server_runs {
                 if let Some(id) = server.file_name().and_then(|id| id.to_str()) {
                     eprintln!(
-                        "[supercov] the Python server's coverage is run {id}: `supercov runs {id}`"
+                        "[supercov] the {language} server's coverage is run {id}: `supercov runs {id}`"
                     );
                 }
             }

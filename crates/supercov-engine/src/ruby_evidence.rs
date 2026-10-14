@@ -51,6 +51,15 @@ fn default_runner() -> String {
     RSPEC_RUNNER.into()
 }
 
+fn ruby_runner(runner: &str) -> bool {
+    matches!(
+        runner,
+        RSPEC_RUNNER | MINITEST_RUNNER | TEST_UNIT_RUNNER | CUCUMBER_RUNNER
+    )
+}
+
+use crate::served_tests::{REQUEST_WORKER, ServedTest};
+
 /// Every field the runtime writes is named so `deny_unknown_fields` keeps
 /// the record shape frozen, even where Rust does not read the value yet.
 #[derive(Debug, Deserialize)]
@@ -303,6 +312,12 @@ struct Evidence {
     limitations: Vec<RuntimeLimitation>,
     /// Some process credited a line to the first test that ran it only.
     first_sighting: bool,
+    /// Each request a server answered that named no test: its identity, when
+    /// it came, its process's transport, and that process's worker.
+    requests: Vec<(Identity, i64, String, String)>,
+    /// By transport, the browser test attempts a process answered a request
+    /// of.
+    served_by: BTreeMap<String, BTreeSet<(String, String, usize)>>,
 }
 
 fn read_evidence_directory(directory: &Path, run_id: &str) -> Result<Evidence, RubyEvidenceError> {
@@ -519,11 +534,11 @@ fn read_evidence_file(
             }
             Record::Phase {
                 ctx,
+                at,
                 worker,
                 test,
                 retry,
                 phase,
-                ..
             } => {
                 if ctx == 0 {
                     return Err(invalid("phase context 0 is reserved for background"));
@@ -534,18 +549,41 @@ fn read_evidence_file(
                 if test.trim().is_empty() || worker.trim().is_empty() {
                     return Err(invalid("phase identity must name a worker and test"));
                 }
-                if phase == "call" {
-                    before_assertion.insert(ctx, Observations::default());
+                // A request is numbered within its process, which its
+                // transport names.
+                let worker = if worker == REQUEST_WORKER {
+                    format!("{REQUEST_WORKER}:{name}")
+                } else {
+                    worker
+                };
+                let identity = Identity {
+                    worker,
+                    test,
+                    retry,
+                    phase,
+                };
+                if identity.worker.starts_with(REQUEST_WORKER) {
+                    evidence.requests.push((
+                        identity.clone(),
+                        at,
+                        name.to_owned(),
+                        process_worker.clone().unwrap_or_else(|| "main".into()),
+                    ));
+                } else {
+                    if identity.phase == "call" {
+                        before_assertion.insert(ctx, Observations::default());
+                    }
+                    evidence
+                        .served_by
+                        .entry(name.to_owned())
+                        .or_default()
+                        .insert((
+                            identity.worker.clone(),
+                            identity.test.clone(),
+                            identity.retry,
+                        ));
                 }
-                contexts.insert(
-                    ctx,
-                    Identity {
-                        worker,
-                        test,
-                        retry,
-                        phase,
-                    },
-                );
+                contexts.insert(ctx, identity);
             }
             Record::Outcome {
                 worker,
@@ -1017,7 +1055,140 @@ pub fn build_ruby_frontend_run(
     test_exit_code: i32,
     root: &Path,
 ) -> Result<RubyFrontendRun, RubyEvidenceError> {
-    let evidence = read_evidence_directory(evidence_directory, run_id)?;
+    let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
+    // A server a test suite starts outside any test numbers the requests no
+    // test named; with no browser tests to give them to, they are the
+    // process's background.
+    credit_requests_by_time(&mut evidence, &[]);
+    build_from_evidence(
+        evidence,
+        manifest,
+        run_id,
+        generated_at,
+        test_exit_code,
+        root,
+    )
+}
+
+/// The Ruby run of a server a browser suite drove: the server's evidence,
+/// with each browser test's outcome as its runner reported it, under the
+/// names that runner gave them.
+pub fn build_ruby_server_run(
+    manifest: &CoverageManifest,
+    evidence_directory: &Path,
+    run_id: &str,
+    generated_at: &str,
+    test_exit_code: i32,
+    root: &Path,
+    served: &[ServedTest],
+) -> Result<RubyFrontendRun, RubyEvidenceError> {
+    let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
+    let mut by_attempt = BTreeMap::new();
+    for test in served {
+        let key = (test.worker.clone(), test.test_id.clone(), test.retry);
+        let outcome = match test.status.as_str() {
+            "passed" => "passed",
+            "skipped" => "skipped",
+            _ => "failed",
+        };
+        evidence.outcomes.entry(key.clone()).or_default().push((
+            "call".into(),
+            outcome.into(),
+            test.expected_status == "failed",
+        ));
+        evidence
+            .runners
+            .insert(key.clone(), test.provenance.runner.clone());
+        by_attempt.insert(key, test);
+    }
+    let by_time = credit_requests_by_time(&mut evidence, served);
+    let mut run = build_from_evidence(
+        evidence,
+        manifest,
+        run_id,
+        generated_at,
+        test_exit_code,
+        root,
+    )?;
+    for raw in &mut run.request.raw_results {
+        let Some(test) = raw.scope.as_ref().and_then(|scope| {
+            by_attempt.get(&(
+                scope.worker_id.clone(),
+                raw.test.clone(),
+                raw.retry.unwrap_or(0),
+            ))
+        }) else {
+            continue;
+        };
+        raw.test = test.name.clone();
+        raw.title = Some(test.title.clone());
+        raw.test_file = Some(test.file.clone());
+        raw.status = Some(test.status.clone());
+        raw.expected_status = Some(test.expected_status.clone());
+        raw.provenance = test.provenance.clone();
+        // Partial, where one-shot lines made it so, already claims less.
+        if by_time.contains(&(test.worker.clone(), test.test_id.clone(), test.retry))
+            && raw.attribution == crate::coverage_report::ATTRIBUTION_EXACT
+        {
+            raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
+        }
+    }
+    run.tests = run
+        .request
+        .raw_results
+        .iter()
+        .filter(|raw| raw.role == "test")
+        .map(|raw| raw.test.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    Ok(run)
+}
+
+/// Give each request that named no test to the browser test attempt that
+/// was running when it came (see `served_tests::owner`); what no single
+/// attempt owns is the process's background. Returns the attempts credited
+/// so.
+fn credit_requests_by_time(
+    evidence: &mut Evidence,
+    served: &[ServedTest],
+) -> BTreeSet<(String, String, usize)> {
+    let mut credited = BTreeSet::new();
+    for (identity, at, transport, process_worker) in std::mem::take(&mut evidence.requests) {
+        let Some(observations) = evidence.per_identity.remove(&identity) else {
+            continue;
+        };
+        let into = match crate::served_tests::owner(served, evidence.served_by.get(&transport), at)
+        {
+            Some(test) => {
+                credited.insert((test.worker.clone(), test.test_id.clone(), test.retry));
+                evidence
+                    .per_identity
+                    .entry(Identity {
+                        worker: test.worker.clone(),
+                        test: test.test_id.clone(),
+                        retry: test.retry,
+                        phase: "call".into(),
+                    })
+                    .or_default()
+            }
+            None => evidence.background.entry(process_worker).or_default(),
+        };
+        into.hits.extend(observations.hits);
+        for (id, vectors) in observations.vectors {
+            into.vectors.entry(id).or_default().extend(vectors);
+        }
+    }
+    credited
+}
+
+fn build_from_evidence(
+    evidence: Evidence,
+    manifest: &CoverageManifest,
+    run_id: &str,
+    generated_at: &str,
+    test_exit_code: i32,
+    root: &Path,
+) -> Result<RubyFrontendRun, RubyEvidenceError> {
     if evidence.interpreters == 0 {
         return Err(RubyEvidenceError::NoInterpreter);
     }
@@ -1034,6 +1205,7 @@ pub fn build_ruby_frontend_run(
         test_files,
         limitations,
         first_sighting,
+        ..
     } = evidence;
     let attribution = if first_sighting {
         crate::coverage_report::ATTRIBUTION_PARTIAL
@@ -1417,15 +1589,32 @@ pub fn build_ruby_frontend_run(
                         retry: AttributionPrecision::Exact,
                         phase: AttributionPrecision::Exact,
                         action: AttributionPrecision::Unavailable,
-                        assertion: AttributionPrecision::Exact,
+                        // A server sees a browser test's requests, never
+                        // its assertions, which run in the browser runner.
+                        assertion: if ruby_runner(runner) {
+                            AttributionPrecision::Exact
+                        } else {
+                            AttributionPrecision::Unavailable
+                        },
                     },
-                    limitations: vec![
+                    limitations: vec![if ruby_runner(runner) {
                         FrontendLimitation {
                             id: format!("ruby-{runner}-action-linkage"),
                             scopes: vec![FrontendLimitationScope::Action],
                             reason: format!("{runner} exposes no general action lifecycle"),
-                        },
-                    ]
+                        }
+                    } else {
+                        FrontendLimitation {
+                            id: format!("ruby-server-{runner}-linkage"),
+                            scopes: vec![
+                                FrontendLimitationScope::Action,
+                                FrontendLimitationScope::Assertion,
+                            ],
+                            reason: format!(
+                                "the server sees each {runner} test's requests, not its actions or assertions"
+                            ),
+                        }
+                    }]
                     .into_iter()
                     // Declared because the declaration is what a reader checks
                     // a number against. Where lines come from Ruby's one-shot
