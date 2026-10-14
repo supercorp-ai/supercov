@@ -280,9 +280,10 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
             return [copy];
         }
     })();
-    // The copy lies in the project at .supercov/workspaces/workspace/<name>.
+    // The copy lies in the project at .supercov/workspaces/workspace/<name>,
+    // or at workspace-2 where it is one of several runs at once.
     const projects = copies
-        .filter((copy) => /[\\/]\.supercov[\\/]workspaces[\\/]workspace[\\/][^\\/]+[\\/]$/.test(copy))
+        .filter((copy) => /[\\/]\.supercov[\\/]workspaces[\\/]workspace(?:-\d+)?[\\/][^\\/]+[\\/]$/.test(copy))
         .map((copy) => resolve(copy, "../../../..") + sep);
     // The path inside the copy of a rewritten file that lies under one of `roots`.
     const rewrittenUnder = (roots, file) => {

@@ -114,14 +114,29 @@ partial output.
 
 ## Interrupted and overlapping commands
 
-One project can run one coverage or cleanup transaction at a time. A second
-one ends with status 2 and says which run is active; no test of it has run.
+Runs of one project can be started at the same moment. Each takes a copy of
+the project to itself: a run alone always has the first,
+`.supercov/workspaces/workspace/<name>`, and one started while that is in use
+has `workspace-2`, the next `workspace-3`. None waits and none is refused:
 
-Each run rebuilds the project's one instrumented copy for its own command, so a
-second run at the same moment would replace the copy the first is running in.
-Suites that run side by side are measured by starting them from one command.
-They are then one run, each test keeps the kind its own process was given, and
-nothing has to be merged:
+```sh
+npx supercov -- npm run test:unit &
+npx supercov -- npm run test:integration &
+npx supercov -- npm run test:e2e &
+wait
+npx supercov merge
+```
+
+`merge` with no run named adds up the runs recorded on the source as it is
+now, so a script does not have to know what each was called.
+
+A copy past the first is kept for a day after its last run, so that runs that
+overlap again start from what they left, and is removed after that. Rust runs
+build into one directory, as two `cargo test` do, and Cargo makes the second
+wait while the first compiles.
+
+Suites can also be started from one command. They are then one run with
+nothing to merge, and each test keeps the kind its own process was given:
 
 ```sh
 npx supercov -- sh -c '
@@ -134,6 +149,10 @@ npx supercov -- sh -c '
 
 `wait` with no argument ends with 0 whatever the suites did, which would turn a
 failing suite green; waiting for each by its id keeps the status.
+
+`runs clean` wants the store to itself. While a run is active it ends with
+status 2 and names the run; a run started while it works is told so, and no
+test of it runs.
 
 After interruption or host restart, the next command recovers unpublished
 staging state. Completed runs remain immutable.

@@ -246,7 +246,14 @@ pub fn source_view_path(workspace: &Path) -> Option<PathBuf> {
     let name = workspace.file_name()?;
     let kind = workspace.parent()?;
     let container = kind.parent()?;
-    (kind.file_name()? == "workspace").then(|| container.join("source").join(name))
+    // `workspace` has its view in `source`, and `workspace-2` in `source-2`.
+    let kind = kind.file_name()?.to_str()?;
+    let number = kind.strip_prefix("workspace")?;
+    (number.is_empty()
+        || number
+            .strip_prefix('-')
+            .is_some_and(|number| number.parse::<usize>().is_ok()))
+    .then(|| container.join(format!("source{number}")).join(name))
 }
 
 /// A view is kept under the project's `.supercov`, which the project's

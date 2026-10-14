@@ -29,7 +29,7 @@ pub enum LifecycleError {
     UnsafePath(PathBuf),
     InvalidState(String),
     ActiveRun { run_id: String, pid: u32 },
-    LockAcquiring,
+    Cleaning,
     LockUnavailable,
     PublicationExists(String),
     Metadata(serde_json::Error),
@@ -50,17 +50,15 @@ impl std::fmt::Display for LifecycleError {
                 )
             }
             Self::InvalidState(reason) => write!(formatter, "invalid run state: {reason}"),
-            // Read by someone whose second command just ended: say what
-            // can be done, since "already active" alone read as a failure of
-            // their tests.
+            // Only cleaning asks to be alone; a run takes a copy of its own.
             Self::ActiveRun { run_id, pid } => write!(
                 formatter,
-                "coverage run {run_id} is already active in this project (pid {pid}). No test ran. A project measures one command at a time: wait for that run to end, or start the suites from one command so that they are one run (see `supercov docs workspace-isolation`)."
+                "coverage run {run_id} is active in this project (pid {pid}). Its storage can be cleaned when no run is active."
             ),
-            Self::LockAcquiring => {
+            Self::Cleaning => {
                 write!(
                     formatter,
-                    "a coverage run is currently acquiring the project lock"
+                    "this project's Supercov storage is being cleaned. No test ran: start the run again when the cleaning has finished."
                 )
             }
             Self::LockUnavailable => {
@@ -552,20 +550,121 @@ struct LockOwner {
     started_at: String,
 }
 
+/// The most copies of a project kept apart at once. A run past it has
+/// nothing to take, which says more about what started it than about the
+/// number.
+const MOST_COPIES: usize = 64;
+
+/// How long a copy other than the first is kept after its last run. The
+/// first is the one a run alone always takes; the others exist because runs
+/// overlapped, and hold a copy of the source and whatever was built in it.
+const IDLE_COPY_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// A run's hold on a project: its share of the store, and a copy of the
+/// project that is its alone for as long as it runs.
+///
+/// Each is a lock the operating system keeps. It gives one to one process
+/// and takes it back when that process ends, however it ends, so no run has
+/// to decide whether a lock it finds was left by one that died: twenty runs
+/// started together each try the first copy, and nineteen go on to the next.
+/// Beside each copy's lock is a file naming who holds it, for messages and
+/// for the releases that wrote that file and locked nothing.
 pub struct ProjectLock {
     root: PathBuf,
-    path: PathBuf,
     owner: LockOwner,
+    copy: usize,
+    /// Dropped to release: the store, then the copy.
+    held: Vec<Held>,
     released: bool,
 }
 
+/// The file name of a copy's lock, without its extension: `active` for the
+/// first, as it was when there was one, and `active-2` for the second.
+fn copy_lock_name(copy: usize) -> String {
+    if copy == 1 {
+        "active".into()
+    } else {
+        format!("active-{copy}")
+    }
+}
+
+fn read_owner(path: &Path) -> Option<LockOwner> {
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+/// A lock that is given back when this goes, by saying so.
+///
+/// Closing the file would give it back too, once every copy of the file is
+/// closed, and a process started at that moment holds a copy until it has
+/// loaded its program. A run that released its copy and one that asked for
+/// it in the same instant found it still held.
+struct Held(File);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+/// A file's lock, taken if no other process holds it. `None` is held.
+///
+/// Where the file system keeps no locks, `alive` decides: the owner written
+/// beside the lock, if its process is still there.
+fn take_lock(
+    path: &Path,
+    shared: bool,
+    alive: impl Fn() -> bool,
+) -> Result<Option<Held>, LifecycleError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    let taken = if shared {
+        file.try_lock_shared()
+    } else {
+        file.try_lock()
+    };
+    match taken {
+        Ok(()) => Ok(Some(Held(file))),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(_)) => Ok((!alive()).then_some(Held(file))),
+    }
+}
+
+/// The owner of a copy whose process is still there and is not this one.
+fn live_owner(locks: &Path, copy: usize) -> Option<LockOwner> {
+    read_owner(&locks.join(format!("{}.json", copy_lock_name(copy))))
+        .filter(|owner| owner.pid != std::process::id() && process_exists(owner.pid))
+}
+
 impl ProjectLock {
+    /// A run's hold: a share of the store, and the first copy nobody has.
     pub fn acquire(root: &Path, run_id: &str, started_at: &str) -> Result<Self, LifecycleError> {
+        Self::take(root, run_id, started_at, false)
+    }
+
+    /// The whole store, for cleaning. Refused while any run is active.
+    pub fn acquire_alone(
+        root: &Path,
+        run_id: &str,
+        started_at: &str,
+    ) -> Result<Self, LifecycleError> {
+        Self::take(root, run_id, started_at, true)
+    }
+
+    fn take(
+        root: &Path,
+        run_id: &str,
+        started_at: &str,
+        alone: bool,
+    ) -> Result<Self, LifecycleError> {
         checked_id(run_id)?;
-        let path = root.join(".supercov/locks/active.json");
-        let parent = path.parent().expect("lock parent");
-        reject_linked_ancestors(root, parent, true)?;
-        fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+        let locks = root.join(".supercov/locks");
+        reject_linked_ancestors(root, &locks, true)?;
+        fs::create_dir_all(&locks).map_err(|source| io_error(&locks, source))?;
         // Direct frontends do not create an isolated workspace. Initialize
         // the store's ignore file here as well, without replacing user rules
         // or following a pre-existing symlink.
@@ -586,49 +685,68 @@ impl ProjectLock {
             pid: std::process::id(),
             started_at: started_at.into(),
         };
-        let mut payload = serde_json::to_vec_pretty(&owner).map_err(LifecycleError::Metadata)?;
-        payload.push(b'\n');
-        for _ in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    file.write_all(&payload)
-                        .and_then(|_| file.sync_all())
-                        .map_err(|source| io_error(&path, source))?;
-                    sync_directory(parent)?;
-                    return Ok(Self {
-                        root: root.to_owned(),
-                        path,
-                        owner,
-                        released: false,
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let existing = fs::read(&path)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<LockOwner>(&bytes).ok());
-                    if let Some(existing) = existing {
-                        if process_exists(existing.pid) {
-                            return Err(LifecycleError::ActiveRun {
-                                run_id: existing.run_id,
-                                pid: existing.pid,
-                            });
-                        }
-                    } else {
-                        let age = fs::metadata(&path)
-                            .and_then(|metadata| metadata.modified())
-                            .ok()
-                            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                            .unwrap_or_default();
-                        if age < INCOMPLETE_LOCK_GRACE {
-                            return Err(LifecycleError::LockAcquiring);
-                        }
+        let active = || (1..=MOST_COPIES).find_map(|copy| live_owner(&locks, copy));
+        let store = take_lock(&locks.join("store.lock"), !alone, || {
+            alone && active().is_some()
+        })?;
+        let Some(store) = store else {
+            // Whoever holds a share of the store wrote its name beside its
+            // copy; this process may be one of them.
+            let holder = || {
+                (1..=MOST_COPIES).find_map(|copy| {
+                    read_owner(&locks.join(format!("{}.json", copy_lock_name(copy))))
+                        .filter(|owner| process_exists(owner.pid))
+                })
+            };
+            return Err(if alone {
+                holder().map_or(LifecycleError::LockUnavailable, |owner| {
+                    LifecycleError::ActiveRun {
+                        run_id: owner.run_id,
+                        pid: owner.pid,
                     }
-                    fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
-                }
-                Err(source) => return Err(io_error(&path, source)),
+                })
+            } else {
+                LifecycleError::Cleaning
+            });
+        };
+        // A run of a release that locked nothing shares no store lock, and
+        // is known by the file it wrote.
+        if alone && let Some(owner) = active() {
+            return Err(LifecycleError::ActiveRun {
+                run_id: owner.run_id,
+                pid: owner.pid,
+            });
+        }
+        for copy in 1..=MOST_COPIES {
+            let name = copy_lock_name(copy);
+            let Some(lock) = take_lock(&locks.join(format!("{name}.lock")), false, || {
+                live_owner(&locks, copy).is_some()
+            })?
+            else {
+                continue;
+            };
+            if live_owner(&locks, copy).is_some() {
+                continue;
             }
+            let path = locks.join(format!("{name}.json"));
+            let mut payload =
+                serde_json::to_vec_pretty(&owner).map_err(LifecycleError::Metadata)?;
+            payload.push(b'\n');
+            fs::write(&path, payload).map_err(|source| io_error(&path, source))?;
+            return Ok(Self {
+                root: root.to_owned(),
+                owner,
+                copy,
+                held: vec![store, lock],
+                released: false,
+            });
         }
         Err(LifecycleError::LockUnavailable)
+    }
+
+    /// Which copy of the project this run has: 1 when it runs alone.
+    pub fn copy(&self) -> usize {
+        self.copy
     }
 
     pub fn release(&mut self) -> Result<(), LifecycleError> {
@@ -636,13 +754,19 @@ impl ProjectLock {
             return Ok(());
         }
         self.released = true;
-        let owned = fs::read(&self.path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<LockOwner>(&bytes).ok())
-            .is_some_and(|owner| owner == self.owner);
-        if owned {
-            fs::remove_file(&self.path).map_err(|source| io_error(&self.path, source))?;
+        let path = self
+            .root
+            .join(".supercov/locks")
+            .join(format!("{}.json", copy_lock_name(self.copy)));
+        if read_owner(&path).is_some_and(|owner| owner == self.owner) {
+            fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
         }
+        // The copy was last used now, which is what keeps it a day.
+        let _ = self
+            .held
+            .last()
+            .map(|lock| lock.0.set_modified(SystemTime::now()));
+        self.held.clear();
         Ok(())
     }
 
@@ -1041,10 +1165,22 @@ fn copy_evidence(source: &Path, destination: &Path, files: &mut usize) -> std::i
     Ok(())
 }
 
+/// Clears what runs that died left behind, and copies nobody has used for a
+/// day.
+///
+/// Every run asks for this as it starts, and none needs it: its own run is
+/// new. So one of the runs started together does it, and the others, finding
+/// it being done, go on.
 pub fn recover_abandoned_runs(
     root: &Path,
     updated_at: &str,
 ) -> Result<Vec<String>, LifecycleError> {
+    let locks = root.join(".supercov/locks");
+    fs::create_dir_all(&locks).map_err(|source| io_error(&locks, source))?;
+    let Some(_recovering) = take_lock(&locks.join("recover.lock"), false, || false)? else {
+        return Ok(Vec::new());
+    };
+    remove_idle_copies(root, &locks)?;
     let mut recovered = Vec::new();
     for id in child_directories(&root.join(".supercov/work"))? {
         let Some(state) = read_state(root, &id)? else {
@@ -1087,6 +1223,36 @@ pub fn recover_abandoned_runs(
     }
     recovered.sort();
     Ok(recovered)
+}
+
+/// Removes each copy past the first that no run holds and none has used for
+/// a day. Its lock is taken first, so a copy in use is never the one removed.
+fn remove_idle_copies(root: &Path, locks: &Path) -> Result<(), LifecycleError> {
+    let container = crate::workspace::workspace_container(root);
+    for copy in 2..=MOST_COPIES {
+        let lock_path = locks.join(format!("{}.lock", copy_lock_name(copy)));
+        let Ok(metadata) = fs::metadata(&lock_path) else {
+            continue;
+        };
+        let idle = metadata
+            .modified()
+            .ok()
+            .and_then(|used| SystemTime::now().duration_since(used).ok())
+            .is_some_and(|idle| idle >= IDLE_COPY_KEPT);
+        if !idle {
+            continue;
+        }
+        let Some(_held) = take_lock(&lock_path, false, || live_owner(locks, copy).is_some())?
+        else {
+            continue;
+        };
+        for directory in crate::workspace::copy_directories(&container, copy) {
+            if fs::symlink_metadata(&directory).is_ok() {
+                remove_stored_tree_deferred(root, &directory)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1226,7 +1392,7 @@ fn cleanup_storage(
         "retention"
     };
     let lock_id = format!("{operation}-{}-{}", std::process::id(), unique_name());
-    let mut lock = ProjectLock::acquire(root, &lock_id, updated_at)?;
+    let mut lock = ProjectLock::acquire_alone(root, &lock_id, updated_at)?;
     recover_abandoned_runs(root, updated_at)?;
     let result = cleanup_storage_locked(root, options, remove_build_cache);
     lock.release()?;
@@ -1347,6 +1513,7 @@ mod tests {
             merged: None,
             parents: None,
             source_roots: None,
+            copy: None,
         }
     }
 
@@ -1754,6 +1921,174 @@ mod tests {
         let mut lock = ProjectLock::acquire(&root, "second", "start").unwrap();
         assert_eq!(fs::read_to_string(&ignore).unwrap(), "custom\n");
         lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn owner_file(root: &Path, copy: usize) -> PathBuf {
+        root.join(".supercov/locks")
+            .join(format!("{}.json", copy_lock_name(copy)))
+    }
+
+    #[test]
+    fn runs_at_once_each_hold_a_copy_and_the_lowest_free_is_taken_next() {
+        let root = project();
+        let mut first = ProjectLock::acquire(&root, "first", "start").unwrap();
+        let mut second = ProjectLock::acquire(&root, "second", "start").unwrap();
+        let third = ProjectLock::acquire(&root, "third", "start").unwrap();
+        assert_eq!((first.copy(), second.copy(), third.copy()), (1, 2, 3));
+        assert_eq!(read_owner(&owner_file(&root, 2)).unwrap().run_id, "second");
+
+        // A copy given back is the next one taken, and names nobody.
+        second.release().unwrap();
+        assert!(!owner_file(&root, 2).exists());
+        let again = ProjectLock::acquire(&root, "fourth", "start").unwrap();
+        assert_eq!(again.copy(), 2);
+
+        // Dropped without a release, as a run that panicked is.
+        drop(third);
+        first.release().unwrap();
+        assert_eq!(
+            ProjectLock::acquire(&root, "fifth", "start")
+                .unwrap()
+                .copy(),
+            1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn many_runs_starting_in_the_same_instant_never_share_a_copy() {
+        let root = project();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(24));
+        let holds = (0..24)
+            .map(|each| {
+                let root = root.clone();
+                let start = std::sync::Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    let lock =
+                        ProjectLock::acquire(&root, &format!("run-{each}"), "start").unwrap();
+                    // Recovery is asked for by every one of them, and done by one.
+                    recover_abandoned_runs(&root, "start").unwrap();
+                    lock
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        let mut copies = holds.iter().map(ProjectLock::copy).collect::<Vec<_>>();
+        copies.sort_unstable();
+        assert_eq!(copies, (1..=24).collect::<Vec<_>>());
+        drop(holds);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_run_starts_while_the_store_is_cleaned_and_none_is_cleaned_under() {
+        let root = project();
+        let mut cleaning = ProjectLock::acquire_alone(&root, "clean", "start").unwrap();
+        assert!(matches!(
+            ProjectLock::acquire(&root, "run", "start"),
+            Err(LifecycleError::Cleaning)
+        ));
+        cleaning.release().unwrap();
+        let _first = ProjectLock::acquire(&root, "first", "start").unwrap();
+        let _second = ProjectLock::acquire(&root, "second", "start").unwrap();
+        match ProjectLock::acquire_alone(&root, "clean", "start") {
+            Err(LifecycleError::ActiveRun { run_id, pid }) => {
+                assert_eq!((run_id.as_str(), pid), ("first", std::process::id()));
+            }
+            other => panic!("cleaning under two runs: {:?}", other.map(|_| ())),
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_of_a_release_that_locked_nothing_keeps_its_copy() {
+        // 4.4.0 wrote `active.json` and held no lock. Its run is alive for as
+        // long as its process is; the process that started this test stands
+        // in for it.
+        let root = project();
+        let locks = root.join(".supercov/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let theirs = std::os::unix::process::parent_id();
+        fs::write(
+            owner_file(&root, 1),
+            format!(r#"{{"runId":"run_theirs","pid":{theirs},"startedAt":"then"}}"#),
+        )
+        .unwrap();
+        let mut beside = ProjectLock::acquire(&root, "beside", "start").unwrap();
+        assert_eq!(beside.copy(), 2);
+        assert!(matches!(
+            ProjectLock::acquire_alone(&root, "clean", "start"),
+            Err(LifecycleError::ActiveRun { ref run_id, pid }) if run_id == "run_theirs" && pid == theirs
+        ));
+        beside.release().unwrap();
+
+        // One whose process has gone left the file behind, and holds nothing.
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        fs::write(
+            owner_file(&root, 1),
+            format!(r#"{{"runId":"run_gone","pid":{dead},"startedAt":"then"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            ProjectLock::acquire(&root, "after", "start")
+                .unwrap()
+                .copy(),
+            1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_copy_past_the_first_goes_a_day_after_its_last_run() {
+        let root = project();
+        let container = root.join(".supercov/workspaces");
+        for copy in [
+            "workspace",
+            "workspace-2",
+            "workspace-3",
+            "workspace-4",
+            "source-2",
+        ] {
+            fs::create_dir_all(container.join(copy).join("project")).unwrap();
+        }
+        fs::write(
+            container.join(".supercov-workspace-store"),
+            b"Supercov instrumented workspace. Safe to delete.\n",
+        )
+        .unwrap();
+        let locks = root.join(".supercov/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let long_ago = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+        // The second and the fourth were last used three days ago, the third
+        // an hour ago, and the fourth is in use now.
+        for (copy, used) in [
+            (2, long_ago),
+            (3, SystemTime::now() - Duration::from_secs(3600)),
+            (4, long_ago),
+        ] {
+            let lock = File::create(locks.join(format!("{}.lock", copy_lock_name(copy)))).unwrap();
+            lock.set_modified(used).unwrap();
+        }
+        let held = take_lock(&locks.join("active-4.lock"), false, || false)
+            .unwrap()
+            .unwrap();
+        held.0.set_modified(long_ago).unwrap();
+
+        recover_abandoned_runs(&root, "now").unwrap();
+        let left = |copy: &str| container.join(copy).exists();
+        assert!(left("workspace"), "the first is never idle");
+        assert!(!left("workspace-2") && !left("source-2"));
+        assert!(left("workspace-3"));
+        assert!(left("workspace-4"), "a copy in use is not removed");
+        drop(held);
+        sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

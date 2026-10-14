@@ -572,11 +572,22 @@ assessment, each commit cost under a cent.
 
 ```sh supercov
 npx supercov merge <shard-a> <shard-b> <shard-c>
+npx supercov merge
 ```
 
 Merge creates a new run. The inputs must describe the same source,
 configuration, toolchain, schema, and coverage denominator. Supercov rejects an
 incompatible merge rather than publishing a misleading aggregate.
+
+With no run named, `merge` takes the runs recorded on the source as it is now:
+the newest of each command, leaving out runs that are themselves a merge. It
+prints the runs it took. This is what a script uses after measuring its
+suites, one after another or side by side, without knowing what each run was
+called. Asked again with nothing new, it names the merge already made.
+
+A test that is in two of the runs is one test in the merge. If it failed in
+either, it is failed, which is why a command run again replaces its earlier
+run and is not merged with it.
 
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` is
