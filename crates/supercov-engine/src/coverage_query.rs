@@ -3117,6 +3117,11 @@ pub struct TestWithoutEvidence {
     pub runner: String,
     pub outcome: String,
     pub assertions: usize,
+    /// Whether the test's file imports any measured source, where Supercov
+    /// reads its imports and the test runs outside a browser: one that
+    /// imports none can only have checked test code, mocks or fixtures.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imports_measured: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -3176,6 +3181,7 @@ pub fn tests_without_evidence_query(
                 runner: test.summary.provenance.runner,
                 outcome: test.summary.outcome,
                 assertions,
+                imports_measured: None,
             })
         })
         .collect::<Vec<_>>();

@@ -2057,6 +2057,38 @@ fn frontend_of(instrumenter_version: &str) -> Frontend {
     Frontend::JavaScript
 }
 
+/// Says, of each test that asserted and recorded no coverage, whether its
+/// file imports any measured source. One that imports none can only have
+/// checked test code, mocks or fixtures, which Supercov does not measure, and
+/// is told apart from one whose evidence may have been lost. Left unsaid for
+/// a browser runner's tests, which reach the app over HTTP, and where the
+/// imports cannot be read.
+fn mark_tests_that_import_no_measured_source(
+    root: &Path,
+    run: &StoredRun,
+    tests: &mut [supercov_engine::coverage_query::TestWithoutEvidence],
+) {
+    let Some(measured) = supercov_engine::run_currency::Ran::of(run).measured else {
+        return;
+    };
+    let imports = supercov_engine::test_loads::Imports::new(root);
+    for test in tests {
+        let Some(file) = test.file.as_deref() else {
+            continue;
+        };
+        if test.runner == "playwright"
+            || test.kind == "e2e"
+            || !supercov_engine::test_loads::reads_imports(file)
+        {
+            continue;
+        }
+        let loads = imports.loads([file]);
+        if loads.open.is_none() {
+            test.imports_measured = Some(loads.files.iter().any(|file| measured.contains(file)));
+        }
+    }
+}
+
 fn current_integrity_for_run(
     root: &Path,
     run: &StoredRun,
@@ -2414,6 +2446,12 @@ fn execute_public_query(
                             }
                         }
                         _ => {}
+                    }
+                    if let supercov_engine::indexed_query::IndexedQueryData::TestsWithoutEvidence(
+                        data,
+                    ) = &mut output.data
+                    {
+                        mark_tests_that_import_no_measured_source(root, run, &mut data.tests);
                     }
                     if let supercov_engine::indexed_query::IndexedQueryData::Summary(data) =
                         &mut output.data

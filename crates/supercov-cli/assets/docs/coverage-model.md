@@ -96,16 +96,7 @@ Both are useful:
 
 Code that runs while no test is running counts in the run's total and in no
 test's: a server starting before the first test, modules loading, work between
-tests.
-
-A request to your app server that names no test -- a webhook from a mock
-Stripe server Supercov does not measure -- is credited to the test running when
-the server handled it, if that test was the only one running then. A mock that
-runs under Supercov passes the test's identity on in its own requests, and its
-webhook is credited exactly. The run's
-`Attribution` line counts those tests as `with server work credited by time`,
-and each one's `runs <id> test` page says so. Work done while tests ran at
-once, or while none ran, stays no test's. When a run has any, the summary's `By test kind` table ends with a
+tests. When a run has any, the summary's `By test kind` table ends with a
 `no test` row for what only that covered, which is why a run with one kind of
 test can show a total above that kind's own:
 
@@ -119,9 +110,22 @@ By test kind
 directory has any, so a directory's `All` never stands above its kinds
 unexplained.
 
+A request to your app server that names no test -- a webhook from a mock
+Stripe server Supercov does not measure -- is credited to the test running when
+the server handled it, if that test was the only one running then. Where a
+server serves one worker's tests, as a server started per worker does, only
+that worker's tests count, so the request is credited while other workers run
+theirs. A mock that runs under Supercov passes the test's identity on in its
+own requests, and its webhook is credited exactly. The run's `Attribution`
+line counts tests credited by time as `with server work credited by time`, and
+each one's `runs <id> test` page says so. Work done while tests ran at once on
+the same server, or while none ran, stays no test's.
+
 A test that made assertions and has no covered line to its name is counted in
 a warning on the summary. `npx supercov runs latest tests without-evidence`
-lists every such test, with its file, kind and outcome.
+lists every such test, with its file, kind and outcome. Where its file imports
+no measured source, it says so: such a test can only have checked test code,
+mocks or fixtures.
 
 See [Supported suites](supported-suites.md) for the attribution available from
 each runner.

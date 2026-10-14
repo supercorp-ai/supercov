@@ -150,7 +150,7 @@ fn diagnostic_lines(diagnostic: &CoverageDiagnostic, list: Option<&str>) -> Vec<
                 lines.push(format!("    All of them: {list}"));
             }
             lines.extend([
-                "  Possible causes: the code under test is outside the measured source (see `scope`), uninstrumented data, shared setup, lost async context, or missing probe transport. Missing evidence does not prove the code did not execute.".into(),
+                "  Possible causes: the test checks only test code, mocks or fixtures, which are not measured; the code under test is outside the measured source (see `scope`); shared setup; lost async context; or missing probe transport. Missing evidence does not prove the code did not execute.".into(),
                 "  Inspect the test's coverage and assertion details to distinguish missing execution from missing attribution.".into(),
             ]);
             return lines;
@@ -1832,7 +1832,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     })
                     .map_or_else(String::new, |file| format!("{file} > "));
                 lines.push(format!(
-                    "  {place}{} [{}] — {}/{}, {}, {} assertion{}",
+                    "  {place}{} [{}] — {}/{}, {}, {} assertion{}{}",
                     test.name,
                     test.id,
                     test.kind,
@@ -1840,6 +1840,11 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     test.outcome,
                     count(test.assertions),
                     if test.assertions == 1 { "" } else { "s" },
+                    if test.imports_measured == Some(false) {
+                        "; its file imports no measured source"
+                    } else {
+                        ""
+                    },
                 ));
             }
             lines.push(page_label(page));
@@ -1853,7 +1858,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             }
             lines.extend([
                 String::new(),
-                "Each ran and checked something, and no line of the measured source is linked to it: the code it checks is outside the measured source (see `scope`), ran in shared setup, or its evidence did not arrive. Missing evidence does not prove the code did not execute.".into(),
+                "Each ran and checked something, and no line of the measured source is linked to it: it checks only test code, mocks or fixtures (certain where its file imports no measured source), the code it checks is outside the measured source (see `scope`), ran in shared setup, or its evidence did not arrive. Missing evidence does not prove the code did not execute.".into(),
                 format!(
                     "One test in detail: {}",
                     coverage_command(&data.run, request, "test <id>")
@@ -2219,7 +2224,7 @@ mod tests {
             vec![
                 "  1 test made assertions, but Supercov received no source-coverage evidence:",
                 "    Example: safety.spec.ts > checks the VM",
-                "  Possible causes: the code under test is outside the measured source (see `scope`), uninstrumented data, shared setup, lost async context, or missing probe transport. Missing evidence does not prove the code did not execute.",
+                "  Possible causes: the test checks only test code, mocks or fixtures, which are not measured; the code under test is outside the measured source (see `scope`); shared setup; lost async context; or missing probe transport. Missing evidence does not prove the code did not execute.",
                 "  Inspect the test's coverage and assertion details to distinguish missing execution from missing attribution.",
             ]
         );
