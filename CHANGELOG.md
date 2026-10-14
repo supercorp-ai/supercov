@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- `supercov --help` lists the settings a measured command reads from its environment (`SUPERCOV_SOURCE_ROOTS`, `SUPERCOV_TEST_KIND`, `SUPERCOV_RUN_ID_FILE`, `SUPERCOV_SOURCE_TOOLS`, `SUPERCOV_KEEP_WORKSPACE`). They were described only in the CLI guide.
+
 ## 4.7.0
 
 **Added**

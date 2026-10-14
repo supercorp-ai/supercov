@@ -798,6 +798,28 @@ fn help_and_bundled_guides_need_no_project() {
     assert_ne!(missing.code(), 0);
     let version = project.supercov(&["--version"]).succeeds();
     assert!(version.contains(env!("CARGO_PKG_VERSION")), "{version}");
+
+    // Every setting the CLI guide's table lists is named where people and
+    // agents look first.
+    let help = project.supercov(&["--help"]).succeeds();
+    let cli = project.supercov(&["docs", "cli"]).succeeds();
+    let table = cli
+        .split("## Environment variables")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("the CLI guide lists its environment variables");
+    let settings = table
+        .lines()
+        .filter_map(|line| line.strip_prefix("| `"))
+        .filter_map(|line| line.split('`').next())
+        .collect::<Vec<_>>();
+    assert!(settings.len() >= 5, "{table}");
+    for setting in settings {
+        assert!(
+            help.contains(setting),
+            "{setting} is not in --help:\n{help}"
+        );
+    }
 }
 
 #[test]
