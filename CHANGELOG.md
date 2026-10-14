@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- A request that names no test is credited by time with parallel workers too, where each worker's tests have an app server of their own: only the tests a server served count for it. It was credited only when one test was running anywhere.
+
+**Changed**
+
+- `tests without-evidence` says of a test whose file imports no measured source that it does (`importsMeasured` in JSON): its assertions can only have checked test code, mocks or fixtures. The summary's warning names that cause first.
+
+**Fixed**
+
+- A runner's configuration named in the command (`playwright test --config e2e/playwright.config.ts`, `vitest -c ...`, `jest --config ...`) was ignored when the project had one at its root, so the run loaded the root configuration and ran other tests than the command did.
+
 ## 4.8.0
 
 **Added**

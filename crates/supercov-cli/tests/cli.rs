@@ -3921,7 +3921,7 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
             "Tests that made assertions and recorded no coverage: 2",
             "test/static.test.js > names are strings [",
             "test/static.test.js > two is two [",
-            "passed, 1 assertion",
+            "passed, 1 assertion; its file imports no measured source",
             "showing 1-2 of 2",
         ],
     );
@@ -3942,6 +3942,8 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     assert_eq!(page["data"]["tests"][0]["name"], "names are strings");
     assert_eq!(page["data"]["tests"][0]["file"], "test/static.test.js");
     assert_eq!(page["data"]["tests"][0]["assertions"], 1);
+    // It checks only test code: its file imports nothing measured.
+    assert_eq!(page["data"]["tests"][0]["importsMeasured"], false);
     // `tests affected` is still the other query under `tests`.
     let other = project.supercov(&["runs", "latest", "tests", "nonsense"]);
     assert_eq!(other.code(), 2);

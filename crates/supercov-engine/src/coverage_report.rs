@@ -322,7 +322,7 @@ pub const ATTRIBUTION_BY_TIME: &str = "by-time";
 /// guessed at.
 fn credit_by_time(
     raw_results: &mut [RawTestResult],
-    records: Vec<ServerRecord>,
+    processes: Vec<Vec<ServerRecord>>,
 ) -> Vec<ServerRecord> {
     let windows = raw_results
         .iter()
@@ -335,21 +335,47 @@ fn credit_by_time(
                 .iter()
                 .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
                 .max()?;
-            Some((index, start, end))
+            let attempt = raw.scope.as_ref().map(|scope| scope.attempt_id.clone());
+            Some((index, start, end, attempt))
         })
         .collect::<Vec<_>>();
+    let mut work = Vec::new();
+    for records in processes {
+        // The attempts this process served a request naming, and among those
+        // alone, where it served any: with a server per worker, the worker's
+        // test, whatever the other workers ran meanwhile. A process that
+        // served none -- one only an unmeasured mock calls -- is judged
+        // against every test running.
+        let served = records
+            .iter()
+            .filter(|record| record.record_type == "served")
+            .filter_map(|record| record.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let candidates = windows
+            .iter()
+            .filter(|(_, _, _, attempt)| {
+                served.is_empty() || attempt.as_ref().is_some_and(|id| served.contains(id))
+            })
+            .collect::<Vec<_>>();
+        for record in records
+            .into_iter()
+            .filter(|record| record.record_type != "served")
+        {
+            let owner = record.request.and(record.timestamp_ms).and_then(|at| {
+                let mut running = candidates
+                    .iter()
+                    .filter(|(_, start, end, _)| *start <= at && at <= *end);
+                let only = running.next()?;
+                running.next().is_none().then_some(only.0)
+            });
+            work.push((owner, record));
+        }
+    }
     let mut unattributed = Vec::new();
     // A request's work appears once per request; what stays no test's is
     // counted once.
     let mut kept = std::collections::HashSet::new();
-    for record in records {
-        let owner = record.request.and(record.timestamp_ms).and_then(|at| {
-            let mut running = windows
-                .iter()
-                .filter(|(_, start, end)| *start <= at && at <= *end);
-            let only = running.next()?;
-            running.next().is_none().then_some(only.0)
-        });
+    for (owner, record) in work {
         match owner {
             Some(index) => {
                 let raw = &mut raw_results[index];
@@ -2899,11 +2925,37 @@ pub fn analyze_coverage_archive(
         }
     }
 
-    let background = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
+    // Background evidence by the process that wrote it: `<writer>-<n>.jsonl`.
+    let mut writers = BTreeMap::<&str, Vec<&EvidenceArchiveEntry>>::new();
+    for entry in entries.iter().filter(|entry| {
         entry.path.starts_with("server/background/") && entry.path.ends_with(".jsonl")
-    }));
-    let background_records = credit_by_time(&mut raw_results, background.records);
-    if !background_records.is_empty() {
+    }) {
+        let name = &entry.path["server/background/".len()..entry.path.len() - ".jsonl".len()];
+        let writer = name
+            .rsplit_once('-')
+            .filter(|(_, sequence)| sequence.chars().all(|c| c.is_ascii_digit()))
+            .map_or(name, |(writer, _)| writer);
+        writers.entry(writer).or_default().push(entry);
+    }
+    let mut background = TolerantJsonLines::<ServerRecord> {
+        records: Vec::new(),
+        corrupt_records: 0,
+        corrupt_files: 0,
+    };
+    let mut processes = Vec::new();
+    for files in writers.into_values() {
+        let parsed = parse_server_json_lines::<ServerRecord>(files.into_iter());
+        background.corrupt_records += parsed.corrupt_records;
+        background.corrupt_files += parsed.corrupt_files;
+        processes.push(parsed.records);
+    }
+    // The run declares its background runner whenever a process wrote
+    // background evidence, so the runner stays though everything in it was
+    // credited to a test or was only a note of what a server served.
+    let had_background = !processes.is_empty();
+    let background_records = credit_by_time(&mut raw_results, processes);
+    background.records.clone_from(&background_records);
+    if had_background {
         raw_results.push(RawTestResult {
             test_id: Some(format!("background:{}", request.run_id)),
             scope: None,
@@ -3325,7 +3377,7 @@ mod tests {
         let mut results = vec![first, second, beside];
         let left = credit_by_time(
             &mut results,
-            vec![at(50), at(155), loading, at(320), at(360), at(500)],
+            vec![vec![at(50), at(155), loading, at(320), at(360), at(500)]],
         );
         // During the first test, between two of its phases: its own.
         assert_eq!(results[0].server.len(), 1);
@@ -3350,6 +3402,64 @@ mod tests {
         assert_eq!(
             least_exact(ATTRIBUTION_EXACT, ATTRIBUTION_BY_TIME),
             ATTRIBUTION_BY_TIME
+        );
+    }
+
+    #[test]
+    fn with_a_server_per_worker_its_requests_are_credited_among_its_own_tests() {
+        let scoped = |id: &str, start: i64, end: i64| {
+            let mut result = raw(id, 0, "passed", &[]);
+            result.scope = Some(ExecutionScope {
+                version: 1,
+                run_id: "run".into(),
+                worker_id: format!("worker-{id}"),
+                test_id: id.into(),
+                test_key: id.into(),
+                retry: 0,
+                attempt_id: format!("attempt-{id}"),
+            });
+            result.phases = vec![CoveragePhase {
+                id: format!("phase-{id}"),
+                kind: "action".into(),
+                operation: "get".into(),
+                source: None,
+                caused_by_phase_id: None,
+                started_at_ms: start,
+                ended_at_ms: Some(end),
+                status: None,
+                error: None,
+            }];
+            result
+        };
+        let record = |kind: &str, id: &str, at: i64, request: Option<u64>| ServerRecord {
+            record_type: kind.into(),
+            meta: None,
+            vector: None,
+            id: Some(id.into()),
+            timestamp_ms: Some(at),
+            phase_id: None,
+            statement_id: None,
+            scope: None,
+            request,
+        };
+        // Two workers' tests overlap from 150 to 200; each has its own server.
+        let mut results = vec![scoped("first", 100, 200), scoped("second", 150, 300)];
+        let first_server = vec![
+            record("served", "attempt-first", 101, None),
+            // During the overlap: the first worker's server, so its test.
+            record("hit", "webhook", 170, Some(1)),
+            // While only the second worker's test runs: not this server's.
+            record("hit", "late", 250, Some(2)),
+        ];
+        let second_server = vec![record("served", "attempt-second", 151, None)];
+        let left = credit_by_time(&mut results, vec![first_server, second_server]);
+        assert_eq!(results[0].server.len(), 1, "{:?}", results[0].server);
+        assert_eq!(results[0].server[0].id.as_deref(), Some("webhook"));
+        assert!(results[1].server.is_empty());
+        assert_eq!(
+            left.iter().filter_map(|r| r.id.clone()).collect::<Vec<_>>(),
+            ["late"],
+            "served markers are not coverage"
         );
     }
 

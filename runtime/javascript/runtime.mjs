@@ -467,6 +467,25 @@ function serverRecordKey(record) {
   const request = record.request ? `request-${record.request}:` : "";
   return `${request}${(_a8 = record.phaseId) != null ? _a8 : "unscoped"}:${record.type}:${suffix}`;
 }
+// Notes, once per test attempt, that this process served a request naming
+// it. A request here that names no test is credited by time only among the
+// attempts this process served: with a server per worker, the worker's test,
+// whatever the other workers run meanwhile.
+function noteServedAttempt(scope) {
+  if (!state.servedAttempts)
+    state.servedAttempts = /* @__PURE__ */ new Set();
+  const key = attemptKey(scope);
+  if (state.servedAttempts.has(key))
+    return;
+  state.servedAttempts.add(key);
+  const fs = getFs();
+  if (!fs)
+    return;
+  try {
+    appendDurableBackgroundRecord(fs, scope.runId, { type: "served", id: scope.attemptId, timestampMs: Date.now() });
+  } catch (e) {
+  }
+}
 // Numbers the requests a server handles that name no test.
 function nextUnscopedRequest() {
   state.unscopedRequests = (state.unscopedRequests || 0) + 1;
@@ -1400,6 +1419,8 @@ function installNodeRequestPropagation() {
       // the server process were created by a shared before hook.
       const incoming = requestCoverageContext(args[0]);
       if (incoming) context = incoming.scope ? incoming : context != null ? context : currentRequestContext();
+      if (incoming && incoming.scope)
+        noteServedAttempt(incoming.scope);
       // A request that names no test, to a server no test owns, is numbered:
       // the report credits its work to the test running when it came.
       if (incoming && serverPhaseStorage && !(context && (context.scope || context.phaseId)))

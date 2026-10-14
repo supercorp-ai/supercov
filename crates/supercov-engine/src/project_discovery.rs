@@ -604,6 +604,44 @@ fn command_tokens(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// The configuration file a runner is given in the command: `--config
+/// <file>`, `--config=<file>` or `-c <file>` after the runner's name, before
+/// the next command of a chain. Case is kept: it is a path.
+fn configured_by_command(root: &Path, command: &str, tool: &str) -> Option<PathBuf> {
+    let tokens = command
+        .split_whitespace()
+        .map(|token| token.trim_matches(|character: char| matches!(character, '\'' | '"')))
+        .collect::<Vec<_>>();
+    let mut in_tool = false;
+    for (index, token) in tokens.iter().enumerate() {
+        if matches!(*token, "&&" | "||" | ";" | "|") {
+            in_tool = false;
+            continue;
+        }
+        let file = token.rsplit(['/', '\\']).next().unwrap_or(token);
+        let file = file.trim_end_matches(".cmd").trim_end_matches(".exe");
+        if file == tool {
+            in_tool = true;
+            continue;
+        }
+        if !in_tool {
+            continue;
+        }
+        let value = match token.strip_prefix("--config=") {
+            Some(value) => Some(value),
+            None if matches!(*token, "--config" | "-c") => tokens.get(index + 1).copied(),
+            None => None,
+        };
+        if let Some(value) = value
+            .map(|value| root.join(value))
+            .filter(|path| path.is_file())
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
 fn has_tool(tokens: &[String], tool: &str) -> bool {
     tokens.iter().any(|token| {
         let file = token.rsplit('/').next().unwrap_or(token);
@@ -690,12 +728,19 @@ pub fn discover_coverage_project(
     if source_files.is_empty() {
         return Err(ProjectDiscoveryError::NoSourceFiles);
     }
+    // The configuration the command names comes before any found by name: a
+    // root `playwright.config.ts` beside `--config e2e/playwright.config.ts`
+    // made the run load the root one, and run other tests than the command.
+    let expanded = expanded_command(root, command);
     let playwright_config = configured_path(root, environment, "SUPERCOV_PLAYWRIGHT_CONFIG")
+        .or_else(|| configured_by_command(root, &expanded, "playwright"))
         .or_else(|| first_config(root, PLAYWRIGHT_CONFIGS))
         .or_else(|| nested_playwright_configs(root).into_iter().next());
     let vitest_config = configured_path(root, environment, "SUPERCOV_VITEST_CONFIG")
+        .or_else(|| configured_by_command(root, &expanded, "vitest"))
         .or_else(|| first_config(root, VITEST_CONFIGS));
     let jest_config = configured_path(root, environment, "SUPERCOV_JEST_CONFIG")
+        .or_else(|| configured_by_command(root, &expanded, "jest"))
         .or_else(|| first_config(root, JEST_CONFIGS));
     let discovered_playwright = discover_playwright_adapter(root);
     let playwright_module = environment
@@ -712,7 +757,7 @@ pub fn discover_coverage_project(
                 "test".into()
             }
         });
-    let expanded_test_command = expanded_command(root, command);
+    let expanded_test_command = expanded;
     let tokens = command_tokens(&expanded_test_command);
     let uses_jest =
         jest_config.is_some() || has_tool(&tokens, "jest") || manifest.get("jest").is_some();
@@ -803,6 +848,57 @@ mod tests {
 
     fn command(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
+    }
+
+    #[test]
+    fn the_configuration_the_command_names_comes_first() {
+        // A root configuration beside the one the command names: the run
+        // loaded the root one and ran other tests than the command.
+        let root = project(
+            "named-config",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"test:e2e":"playwright test --config e2e/Playwright.config.ts","test:unit":"vitest run -c config/vitest.unit.ts"}}"#,
+                ),
+                ("src/main.ts", "export const ready = true"),
+                ("playwright.config.ts", "export default {}"),
+                ("e2e/Playwright.config.ts", "export default {}"),
+                ("vitest.config.ts", "export default {}"),
+                ("config/vitest.unit.ts", "export default {}"),
+            ],
+        );
+        let discover = |args: &[&str]| {
+            discover_coverage_project(&root, &BTreeMap::new(), &command(args)).unwrap()
+        };
+        assert_eq!(
+            discover(&["npm", "run", "test:e2e"]).playwright_config,
+            Some(root.join("e2e/Playwright.config.ts"))
+        );
+        assert_eq!(
+            discover(&[
+                "npx",
+                "playwright",
+                "test",
+                "--config=e2e/Playwright.config.ts"
+            ])
+            .playwright_config,
+            Some(root.join("e2e/Playwright.config.ts"))
+        );
+        assert_eq!(
+            discover(&["npm", "run", "test:unit"]).vitest_config,
+            Some(root.join("config/vitest.unit.ts"))
+        );
+        // Named for another tool, or not at all: found by name as before.
+        assert_eq!(
+            discover(&["npx", "playwright", "test"]).playwright_config,
+            Some(root.join("playwright.config.ts"))
+        );
+        assert_eq!(
+            discover(&["npx", "vitest", "run", "--config", "missing.ts"]).vitest_config,
+            Some(root.join("vitest.config.ts"))
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
