@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `merge` reads what Ruby tests require (`require_relative`, a literal `require` found in the project, `autoload`, and what `.rspec` requires), so a changed Ruby helper leaves out only the runs whose tests load it. Every Ruby helper counted as loaded. A glob of support files or a change to `$LOAD_PATH` still counts every one.
+- A Python helper that only gained functions leaves every run in, as a JavaScript one does: a plain `def` that nothing written before names, with any import only it uses. A decorated function counts as a change, since a decorator runs when the module loads.
+
 ## 4.8.1
 
 **Added**

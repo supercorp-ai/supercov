@@ -142,6 +142,18 @@ try {
   const regrouped = supercov('merge');
   assert.equal(regrouped.status, 0, regrouped.printed);
   assert.ok(regrouped.printed.includes(again) && regrouped.printed.includes(integration), regrouped.printed);
+
+  // A helper that only gained a function: what the run's tests ran is as it
+  // was, and the run stays in. A decorated one is a change.
+  edit('tests/unit/helpers.py', 'return 10\n', 'return 10\n\n\ndef make_more():\n    return 20\n');
+  const gained = supercov('merge');
+  assert.equal(gained.status, 0, gained.printed);
+  // Both runs still count: they are the merge made before.
+  assert.match(gained.printed, /these 2 runs are already merged/u, gained.printed);
+  assert.doesNotMatch(gained.printed, /left out/u, gained.printed);
+  edit('tests/unit/helpers.py', 'def make_more', '@staticmethod\ndef make_more');
+  const decorated = supercov('merge');
+  assert.match(decorated.printed, new RegExp(`left out ${again}.*tests/unit/helpers\\.py`, 'u'), decorated.printed);
   console.log('[merge-across] Python suites run by different commands merge, name their runs, and keep to their own helpers');
 } finally {
   for (const made of roots) {

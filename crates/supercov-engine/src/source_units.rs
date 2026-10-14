@@ -211,6 +211,9 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
     use oxc_ast_visit::Visit;
     use oxc_span::GetSpan;
 
+    if path.ends_with(".py") {
+        return only_added_python(before, path, source);
+    }
     let after = code(path, source)?;
     let diff = before.diff(&after);
     let added = diff
@@ -389,6 +392,191 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
                 "{}{kept}{}",
                 &source[span.0..first.start as usize],
                 &source[last.end as usize..span.1]
+            ),
+        ));
+    }
+    cuts.sort_by_key(|(start, _, _)| *start);
+    let mut earlier = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in cuts {
+        if start < cursor {
+            return None;
+        }
+        earlier.push_str(&source[cursor..start]);
+        earlier.push_str(&replacement);
+        cursor = end;
+    }
+    earlier.push_str(&source[cursor..]);
+    let then = code(path, &earlier)?;
+    let digests = |code: &Code| {
+        code.units
+            .iter()
+            .map(|unit| (unit.path.clone(), unit.digest.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    (digests(&then) == digests(before)).then(|| names.into_iter().collect())
+}
+
+/// `only_added` for a Python file: the top-level functions it gained, where
+/// that is all that changed. Only a plain `def` counts: a decorator runs
+/// when the module loads -- `@app.route` registers a route, a pytest fixture
+/// may shadow one a plugin gives every test -- and so does a class body. A
+/// new `import` that only the additions use goes with them where it names a
+/// package; a relative import brings in a module of the project's, whose top
+/// level no earlier test ran.
+fn only_added_python(before: &Code, path: &str, source: &str) -> Option<Vec<String>> {
+    use ruff_python_ast::{
+        Expr, ExprContext, Stmt,
+        visitor::{Visitor, walk_expr},
+    };
+    use ruff_text_size::Ranged;
+
+    let after = code(path, source)?;
+    let diff = before.diff(&after);
+    let added = diff
+        .added
+        .iter()
+        .filter(|index| !after.units[**index].inert)
+        .copied()
+        .collect::<Vec<_>>();
+    if !diff.removed.is_empty() || added.is_empty() || diff.changed.iter().any(|index| *index != 0)
+    {
+        return None;
+    }
+    let parsed = ruff_python_parser::parse_module(source).ok()?;
+    let body = &parsed.syntax().body;
+    let top = added
+        .iter()
+        .filter(|index| after.units[**index].parent == Some(0))
+        .map(|index| after.units[*index].path.clone())
+        .collect::<BTreeSet<_>>();
+    let mut names = BTreeSet::new();
+    let mut cuts = Vec::new();
+    for statement in body {
+        if let Stmt::FunctionDef(function) = statement
+            && function.decorator_list.is_empty()
+            && top.contains(function.name.as_str())
+        {
+            names.insert(function.name.to_string());
+            cuts.push((
+                statement.range().start().to_usize(),
+                statement.range().end().to_usize(),
+                String::new(),
+            ));
+        }
+    }
+    let inside = |index: usize| {
+        after.ancestors(index).any(|unit| {
+            after.units[unit].parent == Some(0) && names.contains(&after.units[unit].path)
+        })
+    };
+    if names.is_empty() || !added.iter().all(|index| inside(*index)) {
+        return None;
+    }
+    // What the rest of the file names, the additions taken out.
+    struct Names(BTreeSet<String>);
+    impl<'a> Visitor<'a> for Names {
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if let Expr::Name(name) = expr
+                && name.ctx == ExprContext::Load
+            {
+                self.0.insert(name.id.to_string());
+            }
+            walk_expr(self, expr);
+        }
+    }
+    let mut remaining = Names(BTreeSet::new());
+    let mut used = Names(BTreeSet::new());
+    let cut = |statement: &Stmt, cuts: &[(usize, usize, String)]| {
+        cuts.iter()
+            .any(|(start, _, _)| *start == statement.range().start().to_usize())
+    };
+    for statement in body {
+        if cut(statement, &cuts) {
+            used.visit_stmt(statement);
+        } else {
+            remaining.visit_stmt(statement);
+        }
+    }
+    // `__all__` lists names as strings.
+    let exported = body
+        .iter()
+        .filter(|statement| !cut(statement, &cuts))
+        .any(|statement| {
+            let text =
+                &source[statement.range().start().to_usize()..statement.range().end().to_usize()];
+            text.starts_with("__all__")
+                && names.iter().any(|name| {
+                    text.contains(&format!("\"{name}\"")) || text.contains(&format!("'{name}'"))
+                })
+        });
+    if exported || names.iter().any(|name| remaining.0.contains(name)) {
+        return None;
+    }
+    // Import names only the additions use; one nothing uses was there
+    // before or is a change.
+    for statement in body {
+        let (aliases, relative) = match statement {
+            Stmt::Import(import) => (&import.names, false),
+            Stmt::ImportFrom(import) => (&import.names, import.level > 0),
+            _ => continue,
+        };
+        let bound = |alias: &ruff_python_ast::Alias| {
+            alias.asname.as_ref().map_or_else(
+                || {
+                    alias
+                        .name
+                        .as_str()
+                        .split('.')
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned()
+                },
+                |name| name.to_string(),
+            )
+        };
+        if aliases.iter().any(|alias| alias.name.as_str() == "*") {
+            continue;
+        }
+        let unused = aliases
+            .iter()
+            .map(|alias| {
+                let name = bound(alias);
+                !remaining.0.contains(&name) && used.0.contains(&name)
+            })
+            .collect::<Vec<_>>();
+        if !unused.contains(&true) {
+            continue;
+        }
+        let range = statement.range();
+        let span = (range.start().to_usize(), range.end().to_usize());
+        if unused.iter().all(|unused| *unused) {
+            if relative {
+                return None;
+            }
+            cuts.push((span.0, span.1, String::new()));
+            continue;
+        }
+        // Some names stay: the statement as it read with only those.
+        let first = aliases[0].range();
+        let last = aliases[aliases.len() - 1].range();
+        let separator = &source[first.end().to_usize()..aliases[1].range().start().to_usize()];
+        let kept = aliases
+            .iter()
+            .zip(&unused)
+            .filter(|(_, unused)| !**unused)
+            .map(|(alias, _)| {
+                &source[alias.range().start().to_usize()..alias.range().end().to_usize()]
+            })
+            .collect::<Vec<_>>()
+            .join(separator);
+        cuts.push((
+            span.0,
+            span.1,
+            format!(
+                "{}{kept}{}",
+                &source[span.0..first.start().to_usize()],
+                &source[last.end().to_usize()..span.1]
             ),
         ));
     }
@@ -2330,6 +2518,48 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn functions_added_to_a_python_helper_are_only_additions() {
+        let before = code(
+            "tests/helpers.py",
+            "import json\nfrom app.models import Order, User\n\n\ndef make_order(**fields):\n    return Order(**json.loads(json.dumps(fields)))\n",
+        )
+        .unwrap();
+        let added = "import json\nimport random\nfrom app.models import Order, User, Refund\n\n\ndef make_order(**fields):\n    return Order(**json.loads(json.dumps(fields)))\n\n\ndef make_refund(order):\n    \"\"\"The new one.\"\"\"\n    return Refund(order, random.random())\n\n\nasync def later():\n    return 1\n";
+        assert_eq!(
+            only_added(&before, "tests/helpers.py", added),
+            Some(vec!["later".to_owned(), "make_refund".to_owned()])
+        );
+        for changed in [
+            // a body the earlier tests ran
+            added.replace("json.dumps(fields)", "json.dumps(fields, sort_keys=True)"),
+            // something that runs when the module loads
+            format!("{added}print('loaded')\n"),
+            // a decorator runs at load: a fixture may shadow a plugin's
+            added.replace(
+                "def make_refund(order):",
+                "@pytest.fixture\ndef make_refund(order):",
+            ),
+            // a module of the project's newly loaded
+            added.replace("import random\n", "from . import randomness as random\n"),
+            // existing code now names the added function
+            added.replace("return Order(", "return later() or Order("),
+            // exported by name
+            format!("{added}__all__ = [\"make_refund\"]\n"),
+            // a class body runs at load
+            added.replace(
+                "async def later():\n    return 1\n",
+                "class Later:\n    pass\n",
+            ),
+        ] {
+            assert_eq!(
+                only_added(&before, "tests/helpers.py", &changed),
+                None,
+                "{changed}"
+            );
+        }
     }
 
     #[test]
