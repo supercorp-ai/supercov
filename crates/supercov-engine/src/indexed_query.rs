@@ -88,6 +88,12 @@ pub enum IndexedQueryError {
     MissingReport,
     Query(QueryError),
     ResponseTooLarge(ResponseTooLarge),
+    /// A page that was too large, and how many of its entries would fit.
+    PageTooLarge {
+        size: ResponseTooLarge,
+        asked: usize,
+        fits: usize,
+    },
 }
 
 impl From<QueryError> for IndexedQueryError {
@@ -118,7 +124,7 @@ impl std::fmt::Display for IndexedQueryError {
                 "coverage minimization requires reconstructed per-test evidence"
             ),
             Self::Query(error) => write!(formatter, "{error:?}"),
-            Self::ResponseTooLarge(error) => write!(
+            Self::ResponseTooLarge(error) | Self::PageTooLarge { size: error, .. } => write!(
                 formatter,
                 "response is {} bytes and exceeds the {}-byte limit",
                 error.actual_bytes, error.max_bytes
@@ -206,6 +212,21 @@ impl IndexedQueryError {
                     "actualBytes": error.actual_bytes,
                     "maxBytes": error.max_bytes,
                     "hint": "Use --offset/--limit or a narrower coverage query."
+                })),
+            ),
+            // A script that wanted every entry asked for a limit it had to
+            // guess, and was told only that the guess was too large.
+            Self::PageTooLarge { size, asked, fits } => (
+                ErrorCode::ResponseTooLarge,
+                format!(
+                    "JSON response is {} bytes; the maximum is {} bytes. About {fits} of the {asked} entries asked for fit in one reply: use --limit {fits} and follow pagination.nextOffset with --offset until hasMore is false",
+                    size.actual_bytes, size.max_bytes
+                ),
+                Some(json!({
+                    "actualBytes": size.actual_bytes,
+                    "maxBytes": size.max_bytes,
+                    "suggestedLimit": fits,
+                    "hint": format!("Use --limit {fits} and --offset, following pagination.nextOffset, or a narrower coverage query.")
                 })),
             ),
             Self::Query(error) => match error {
@@ -349,13 +370,24 @@ pub struct IndexedQueryOutput {
     pub pagination: Option<supercov_contracts::AgentPagination>,
 }
 
+/// How many of the entries of a page that was too large fit in a reply:
+/// nine tenths of what the sizes say, since entries differ.
+fn entries_that_fit(returned: usize, size: &ResponseTooLarge) -> usize {
+    (returned * size.max_bytes * 9 / (size.actual_bytes * 10)).max(1)
+}
+
 impl IndexedQueryOutput {
     pub fn agent_json(&self) -> Result<String, IndexedQueryError> {
-        Ok(agent_json::success(
-            self.command,
-            &self.data,
-            self.pagination.as_ref(),
-        )?)
+        agent_json::success(self.command, &self.data, self.pagination.as_ref()).map_err(|size| {
+            match &self.pagination {
+                Some(page) if page.returned > 1 => IndexedQueryError::PageTooLarge {
+                    asked: page.returned,
+                    fits: entries_that_fit(page.returned, &size),
+                    size,
+                },
+                _ => IndexedQueryError::ResponseTooLarge(size),
+            }
+        })
     }
 }
 
@@ -733,6 +765,44 @@ pub fn query_indexed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_too_large_says_how_many_entries_fit() {
+        // `runs <id> files --limit 5000 --json` on a project of 300 files:
+        // the reply said it was too large and not what limit would not be.
+        let size = ResponseTooLarge {
+            actual_bytes: 170_131,
+            max_bytes: 65_536,
+        };
+        let fits = entries_that_fit(300, &size);
+        assert_eq!(fits, 104);
+        // One entry larger than a reply is still asked for one at a time.
+        assert_eq!(
+            entries_that_fit(
+                2,
+                &ResponseTooLarge {
+                    actual_bytes: 9_000_000,
+                    max_bytes: 65_536
+                }
+            ),
+            1
+        );
+        let error = IndexedQueryError::PageTooLarge {
+            size,
+            asked: 300,
+            fits,
+        }
+        .agent_error();
+        assert_eq!(error.code, agent_json::ErrorCode::ResponseTooLarge);
+        assert_eq!(error.details.as_ref().unwrap()["suggestedLimit"], 104);
+        assert!(
+            error
+                .message
+                .contains("About 104 of the 300 entries asked for fit in one reply: use --limit 104 and follow pagination.nextOffset"),
+            "{}",
+            error.message
+        );
+    }
 
     #[test]
     fn maps_typed_selection_failures_to_the_frozen_agent_contract() {
