@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- A streamed response from a Flask or Django app under gunicorn or another WSGI server is read after the view returns, and ran as no test's. Its body runs as the request it answers.
 - A virtual environment inside the project was copied into the run's copy without its interpreter, whose link points outside the project, so a server started as `.venv/bin/python` did not start. The copy uses the environment itself.
 - A Python or Ruby process started from a measured Node process reported "SUPERCOV_CONTEXT was not a valid Supercov identity" as a limitation. It reads the Node process's test now.
 

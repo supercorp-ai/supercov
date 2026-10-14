@@ -1435,6 +1435,54 @@ def _scope_header(scope):
     return header
 
 
+class _RequestBody:
+    """A WSGI response body that runs as the request it answers: entered at
+    its first chunk, left when it ends or is closed. The server's own code
+    between chunks is not the project's and records nothing.
+
+    `close` is forwarded, as WSGI requires of a wrapper; nothing else of the
+    body is, so a server's `wsgi.file_wrapper` fast path falls back to
+    iterating, which is what lets each chunk be measured as the request's.
+    """
+
+    def __init__(self, runtime, body, identity):
+        self._runtime, self._body, self._identity = runtime, body, identity
+        self._chunks = None
+        self._leave = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        runtime = self._runtime
+        if self._leave is None:
+            self._leave = runtime.context.get()
+            runtime.switch(self._identity)
+        try:
+            if self._chunks is None:
+                self._chunks = iter(self._body)
+            return next(self._chunks)
+        except StopIteration:
+            self._exit()
+            raise
+
+    def _exit(self):
+        if self._leave is not None:
+            leave, self._leave = self._leave, None
+            self._runtime.switch(self._runtime.identities.get(leave))
+
+    def close(self):
+        close = getattr(self._body, "close", None)
+        try:
+            if close is not None:
+                if self._leave is None:
+                    self._leave = self._runtime.context.get()
+                    self._runtime.switch(self._identity)
+                close()
+        finally:
+            self._exit()
+
+
 REQUEST_WORKER = "supercov-request"
 _requests = itertools.count(1)
 
@@ -1609,7 +1657,13 @@ def _install_propagation(runtime: Runtime) -> None:
         def entry(application, environ, start_response):
             leave = _enter_request(runtime, _request_identity(_environ_header(environ)))
             try:
-                return original(application, environ, start_response)
+                body = original(application, environ, start_response)
+                active = runtime.current_identity()
+                # A streamed body runs as the server iterates it, after this
+                # returns: each chunk runs as the request did.
+                if active is None or isinstance(body, (list, tuple, bytes)):
+                    return body
+                return _RequestBody(runtime, body, active)
             finally:
                 _leave_request(runtime, leave)
 
