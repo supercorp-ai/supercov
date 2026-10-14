@@ -142,6 +142,11 @@ pub struct RunMetadata {
     /// where what the command wrote is to be found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy: Option<usize>,
+    /// For a merge made with `--allow-changed`: what differed between the
+    /// runs merged, files the tests load and `configuration`. The merge is
+    /// of tests that ran against those as they were then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_across: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -407,6 +412,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
         parents: None,
         source_roots: None,
         copy: None,
+        merged_across: None,
     };
     fs::write(
         directory.join("run.json"),
@@ -1042,6 +1048,7 @@ mod tests {
             parents: None,
             source_roots: None,
             copy: None,
+            merged_across: None,
         };
         fs::write(
             directory.join("run.json"),

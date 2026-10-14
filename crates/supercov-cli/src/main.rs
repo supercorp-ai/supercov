@@ -387,14 +387,21 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn merge_command(run_ids: Vec<String>) -> ExitCode {
-    if run_ids
+fn merge_command(arguments: Vec<String>) -> ExitCode {
+    if arguments
         .iter()
         .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
         println!("{MERGE_USAGE}");
         return ExitCode::SUCCESS;
     }
+    let allow_changed = arguments
+        .iter()
+        .any(|argument| argument == "--allow-changed");
+    let run_ids = arguments
+        .into_iter()
+        .filter(|argument| argument != "--allow-changed")
+        .collect::<Vec<_>>();
     let root = match std::env::current_dir() {
         Ok(root) => root,
         Err(error) => {
@@ -406,7 +413,7 @@ fn merge_command(run_ids: Vec<String>) -> ExitCode {
     // script that ran its suites one by one, or side by side, has to add up
     // without knowing what any of them was called.
     let groups = if run_ids.is_empty() {
-        match runs_on_this_source(&root) {
+        match runs_on_this_source(&root, allow_changed) {
             Ok(groups) => groups,
             Err(error) => {
                 eprintln!("[supercov] {error}");
@@ -424,8 +431,13 @@ fn merge_command(run_ids: Vec<String>) -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-        match supercov_engine::run_merge::merge_coverage_runs(&root, &run_ids, &run_id, &started_at)
-        {
+        match supercov_engine::run_merge::merge_coverage_runs(
+            &root,
+            &run_ids,
+            &run_id,
+            &started_at,
+            allow_changed,
+        ) {
             Ok(merged) => {
                 println!("[supercov] merged run {merged}");
                 println!("{} runs {merged}", launcher_command());
@@ -439,7 +451,7 @@ fn merge_command(run_ids: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-const MERGE_USAGE: &str = "Usage: supercov merge [<run-id> <run-id> ...]\n\nWith no run named, merges the runs recorded on the source as it is now: the newest of each\ncommand, leaving out runs that are themselves a merge.";
+const MERGE_USAGE: &str = "Usage: supercov merge [--allow-changed] [<run-id> <run-id> ...]\n\nWith no run named, merges the runs recorded on the source as it is now: the newest of each\ncommand, leaving out runs that are themselves a merge.\n\n--allow-changed  also merge runs recorded before files the tests load (helpers, fixtures)\n                 or the test configuration changed. The product code and what is measured\n                 must still be the same; the merged run names what differed.";
 
 /// The runs to merge when none is named, newest first, one list for each
 /// set that can be one run.
@@ -450,7 +462,7 @@ const MERGE_USAGE: &str = "Usage: supercov merge [<run-id> <run-id> ...]\n\nWith
 /// reported failed by a merge of both, so a suite run again must replace its
 /// first attempt. Newest first, because where two runs hold one test the
 /// first named decides its kind.
-fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
+fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<String>>, String> {
     let inventory = public_run_inventory(root).map_err(|error| error.to_string())?;
     // A run of this source whose tests have changed since, with the first
     // of its test files that is not as it was: said, so that a run left out
@@ -480,9 +492,14 @@ fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
                 // measuring a new test alone and adding it up comes to.
                 if recorded.fingerprint.source != current.fingerprint.source
                     || recorded.fingerprint.dependencies != current.fingerprint.dependencies
-                    || recorded.fingerprint.configuration != current.fingerprint.configuration
                     || recorded.fingerprint.instrumenter != current.fingerprint.instrumenter
                 {
+                    return false;
+                }
+                if !allow_changed
+                    && recorded.fingerprint.configuration != current.fingerprint.configuration
+                {
+                    outdated.push((*run, "the test configuration".to_owned()));
                     return false;
                 }
                 let Ok(files) = supercov_engine::source_manifest::load_manifest(run) else {
@@ -497,6 +514,7 @@ fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
                     },
                     supercov_engine::source_manifest::test_files(run).as_ref(),
                     &tests,
+                    !allow_changed,
                 );
                 if let Some(file) = changed.first() {
                     outdated.push((*run, file.clone()));
@@ -525,9 +543,14 @@ fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
     outdated.retain(|(run, _)| said.insert(run.metadata.command.clone()));
     for (run, file) in outdated.iter().take(5) {
         println!(
-            "[supercov] left out {} ({}): {file} has changed since it ran. Measure it again to count it.",
+            "[supercov] left out {} ({}): {file} has changed since it ran. Measure it again to count it{}.",
             run.id,
-            run.metadata.command.join(" ")
+            run.metadata.command.join(" "),
+            if allow_changed {
+                ""
+            } else {
+                ", or pass --allow-changed if the change alters nothing its tests ran"
+            }
         );
     }
     if current.is_empty() {
@@ -536,7 +559,8 @@ fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
             launcher_command()
         ));
     }
-    // Runs of two languages in one project are two measurements.
+    // Runs of two languages in one project are two measurements. A change
+    // of configuration the user has accepted does not part them.
     let mut sets = Vec::<Vec<&StoredRun>>::new();
     for run in current {
         let measured = |run: &StoredRun| {
@@ -544,7 +568,7 @@ fn runs_on_this_source(root: &Path) -> Result<Vec<Vec<String>>, String> {
             (
                 fingerprint.source.clone(),
                 fingerprint.dependencies.clone(),
-                fingerprint.configuration.clone(),
+                (!allow_changed).then(|| fingerprint.configuration.clone()),
                 fingerprint.instrumenter.clone(),
             )
         };
@@ -2223,6 +2247,7 @@ fn execute_public_query(
                         &mut output.data
                     {
                         data.command.clone_from(&run.metadata.command);
+                        data.merged_across = run.metadata.merged_across.clone().unwrap_or_default();
                         data.assertion_coverage = Some(match assertions_command::saved(run) {
                             Some(result) => serde_json::json!({"available": true, "summary": result["summary"], "basis": result["basis"], "model": result["model"]}),
                             None => serde_json::json!({"available": false, "assess": format!("{} runs {} assertions assess", crate::launcher_command(), run.id)}),

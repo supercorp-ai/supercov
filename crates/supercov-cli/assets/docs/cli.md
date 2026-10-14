@@ -609,6 +609,20 @@ A run is left out, and named, when a file of its own tests has changed since
 it ran, or a file tests load that is not itself a test's: what it recorded is
 then of other tests. Measure those again to count them.
 
+New tests often come with a change to the shared helpers or to the test
+runner's configuration, which every test loads. Supercov cannot tell whether
+that change alters what the earlier tests ran. When you know it does not, say
+so:
+
+```sh supercov-example
+npx supercov merge --allow-changed
+```
+
+The product code, the dependencies, and what is measured must still be the
+same, and a run whose own test files changed is still left out. The merged run
+shows `merged across changes to:` with the configuration and the files that
+differed, and `mergedAcross` in JSON.
+
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` is
 asked of the runs that were merged, which hold the record of what each test

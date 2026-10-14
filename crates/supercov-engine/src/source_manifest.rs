@@ -646,16 +646,32 @@ pub fn test_files(run: &StoredRun) -> Option<BTreeSet<String>> {
 /// A file of another test changing takes nothing from this run: that test
 /// was not in it. A file that is not known to be a test's is one a test may
 /// load, a helper or a fixture, and counts against every run.
+///
+/// `helpers_count` is false where the user has accepted changes to files the
+/// tests load (`merge --allow-changed`): then only a file of the run's own
+/// tests counts, where the run says which those are.
 pub fn outdated_files(
     recorded: &FileManifest,
     now: impl Fn(&str) -> Option<String>,
     ran: Option<&BTreeSet<String>>,
     tests: &BTreeSet<String>,
+    helpers_count: bool,
 ) -> Vec<String> {
+    changed_files(recorded, now)
+        .into_iter()
+        .filter(|file| match ran {
+            Some(ran) if !helpers_count => ran.contains(file),
+            Some(ran) => ran.contains(file) || !tests.contains(file),
+            None => true,
+        })
+        .collect()
+}
+
+/// The files, of those a run was recorded with, that are not as they were.
+pub fn changed_files(recorded: &FileManifest, now: impl Fn(&str) -> Option<String>) -> Vec<String> {
     recorded
         .iter()
         .filter(|(file, was)| now(file).as_deref() != Some(was.sha256.as_str()))
-        .filter(|(file, _)| !ran.is_some_and(|ran| !ran.contains(*file) && tests.contains(*file)))
         .map(|(file, _)| file.clone())
         .collect()
 }

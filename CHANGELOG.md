@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `supercov merge --allow-changed` adds a run of new tests to the runs before it when the shared helpers or the test runner's configuration changed with them. Without it, `merge` refuses, because every test loads those files, and says to pass the option if the change alters nothing the earlier tests ran. The product code, dependencies and what is measured must still match, and a run whose own test files changed is still refused. The merged run shows `merged across changes to:` with what differed.
+
 ## 4.5.0
 
 **Added**

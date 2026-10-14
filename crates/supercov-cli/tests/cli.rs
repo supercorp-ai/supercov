@@ -4509,8 +4509,16 @@ fn a_run_of_a_new_test_alone_is_added_to_the_runs_before_it() {
         &refused.stderr(),
         &[
             "1 of the files it was recorded with was changed or gone by then: test/names.test.js",
-            "measure the changed tests again",
+            "Its own tests changed; measure them again.",
         ],
+    );
+    // Accepting changes does not make a changed test's record its own.
+    let still = project.supercov(&["merge", "--allow-changed", &first, &third]);
+    assert_eq!(still.code(), 2, "{}", still.stdout());
+    assert!(
+        still.stderr().contains("Its own tests changed"),
+        "{}",
+        still.stderr()
     );
     let left = project.supercov(&["merge"]).succeeds();
     contains_all(
@@ -4522,4 +4530,93 @@ fn a_run_of_a_new_test_alone_is_added_to_the_runs_before_it() {
         ],
     );
     assert!(!left.contains(&format!("  {first}")), "{left}");
+}
+
+#[test]
+fn new_tests_are_added_across_a_changed_helper_or_configuration_when_allowed() {
+    // A batch of new end-to-end specs usually changes the shared helpers and
+    // the runner's configuration too. Every spec loads them, so merge cannot
+    // tell the change alters nothing the baseline ran, and refused it; the
+    // only way on was the whole suite again. The user can say so.
+    let project = Project::cart("merge-across");
+    project.write(
+        "test/helpers.js",
+        "export const item = (name) => ({ name });\n",
+    );
+    project.write("runner.config.js", "export default { timeout: 1000 };\n");
+    project.write(
+        "test/helped.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { describe } from \"../src/cart.js\";\nimport { item } from \"./helpers.js\";\n\ntest(\"helped\", () => {\n  assert.equal(describe([item(\"a\")]), \"a\");\n});\n",
+    );
+    project.commit("helpers");
+    let baseline = project.measure(&[]);
+
+    // The batch: a helper gains a function, the configuration a setting, and
+    // one new spec uses both.
+    project.edit(
+        "test/helpers.js",
+        "\n",
+        "\nexport const items = (...names) => names.map(item);\n",
+    );
+    project.edit("runner.config.js", "timeout: 1000", "timeout: 2000");
+    project.write(
+        "test/batch.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { describe } from \"../src/cart.js\";\nimport { items } from \"./helpers.js\";\n\ntest(\"batch\", () => {\n  assert.equal(describe(items(\"a\")), \"a\");\n});\n",
+    );
+    let batch = project.measure(&["test/batch.test.js"]);
+
+    let refused = project.supercov(&["merge", &baseline, &batch]);
+    assert_eq!(refused.code(), 2, "{}", refused.stdout());
+    assert!(
+        refused.stderr().contains("pass --allow-changed"),
+        "{}",
+        refused.stderr()
+    );
+    let left = project.supercov(&["merge"]);
+    assert!(
+        left.stdout().contains("or pass --allow-changed"),
+        "{}",
+        left.stdout()
+    );
+
+    project
+        .supercov(&["merge", "--allow-changed", &baseline, &batch])
+        .succeeds();
+    let merged = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &merged,
+        &[
+            "Passed      5",
+            "merged across changes to: ",
+            "configuration",
+            "test/helpers.js",
+            "--allow-changed",
+        ],
+    );
+    let json = project.supercov(&["runs", "latest", "--json"]).json();
+    assert!(
+        json["data"]["mergedAcross"]
+            .as_array()
+            .is_some_and(|across| across.iter().any(|file| file == "test/helpers.js")),
+        "{json}"
+    );
+    // It is the checkout as it is now.
+    assert_eq!(json["data"]["stale"], false, "{json}");
+
+    // With no run named, the same two, which that merge already is.
+    let summed = project.supercov(&["merge", "--allow-changed"]).succeeds();
+    assert!(
+        summed.contains("these 2 runs are already merged"),
+        "{summed}"
+    );
+
+    // The product code changing is never accepted: nothing is of this
+    // source, and a merge of the runs named is of the source they ran.
+    project.edit("src/cart.js", "return 0;", "return 1;");
+    assert_eq!(project.supercov(&["merge", "--allow-changed"]).code(), 2);
+    project
+        .supercov(&["merge", "--allow-changed", &baseline, &batch])
+        .succeeds();
+    let old = project.supercov(&["runs", "latest", "--json"]).json();
+    assert_eq!(old["data"]["stale"], true, "{old}");
 }

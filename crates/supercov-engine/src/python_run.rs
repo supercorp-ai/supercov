@@ -512,6 +512,7 @@ pub fn run_direct_python(
             parents: None,
             source_roots: source_roots.clone(),
             copy: None,
+            merged_across: None,
         };
         drop(run);
         let run_directory = publish_archived_run(

@@ -1514,6 +1514,7 @@ mod tests {
             parents: None,
             source_roots: None,
             copy: None,
+            merged_across: None,
         }
     }
 

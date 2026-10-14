@@ -16,7 +16,7 @@ supercov runs <run-id> decision <id|path:line> [selectors]
 supercov runs <run-id> test <id|name> [selectors]
 supercov runs <run-id> minimize [selectors]
 supercov diff <older-run> <newer-run> [--json]
-supercov merge <run-id> <run-id> [...]
+supercov merge [--allow-changed] [<run-id> <run-id> ...]
 supercov runs clean [--keep N] [--dry-run]
 ```
 
