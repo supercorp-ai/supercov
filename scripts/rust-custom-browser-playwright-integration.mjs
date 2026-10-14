@@ -163,7 +163,7 @@ try {
       "          response.end(`<iframe id=inner src=\"http://localhost:${address.port}/inner\"></iframe>`);",
       '          return;',
       '        }',
-      "        const scope = request.headers['x-supercov-scope'] ? 'scoped' : 'background';",
+      "        const scope = request.headers['x-supercov-scope'] || /__supercov_scope(_site)?=/.test(request.headers.cookie ?? '') ? 'scoped' : 'background';",
       "        response.end(`<p id=scope>${scope}</p><a id=again href=\"/inner-again\">again</a>`);",
       '      });',
       "      await new Promise((resolveListen) => server.listen(0, '0.0.0.0', resolveListen));",

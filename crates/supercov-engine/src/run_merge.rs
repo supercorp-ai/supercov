@@ -247,6 +247,20 @@ fn judged_against_latest<'a>(
     }))
 }
 
+/// Why a run of another Supercov release cannot be merged with this one's.
+pub fn recorded_by_another_release(run: &StoredRun) -> String {
+    match run.metadata.recorded_by.as_deref() {
+        Some(version) if version != env!("CARGO_PKG_VERSION") => format!(
+            "it was recorded by Supercov {version}, which instruments differently from Supercov {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+        _ => format!(
+            "it was recorded by an earlier Supercov, which instruments differently from Supercov {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+    }
+}
+
 /// A few of what moved, and how many more there are.
 pub fn listed(items: &[String]) -> String {
     match items.len() {
@@ -293,6 +307,22 @@ pub fn merge_coverage_runs(
     let first = inputs[0];
     for input in inputs.iter().skip(1) {
         let dimensions = incompatible_dimensions(first, input);
+        // Another release instruments differently, and nothing else is worth
+        // saying about the difference: the run has to be measured again.
+        if dimensions
+            .iter()
+            .any(|dimension| matches!(*dimension, "instrumenter" | "coverage schema"))
+        {
+            let older = [first, *input]
+                .into_iter()
+                .find(|run| run.metadata.recorded_by.as_deref() != Some(env!("CARGO_PKG_VERSION")))
+                .unwrap_or(input);
+            return Err(format!(
+                "Cannot merge run {}: {}. Measure it again to merge it.",
+                older.id,
+                recorded_by_another_release(older)
+            ));
+        }
         // Tests and their configuration may differ; what that takes is
         // looked at file by file.
         // So may the source, where what changed is outside what is measured.
@@ -490,6 +520,7 @@ pub fn merge_coverage_runs(
             parents: Some(run_ids.to_vec()),
             source_roots: None,
             copy: None,
+            recorded_by: None,
             merged_across: grown
                 .as_ref()
                 .map(|grown| grown.across.clone())

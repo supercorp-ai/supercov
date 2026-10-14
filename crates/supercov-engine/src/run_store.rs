@@ -147,6 +147,11 @@ pub struct RunMetadata {
     /// of tests that ran against those as they were then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_across: Option<Vec<String>>,
+    /// The Supercov release that recorded the run. A run of another release
+    /// was instrumented differently and cannot be merged with this one's;
+    /// the version is what says so. Absent in runs recorded before 4.7.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_by: Option<String>,
 }
 
 #[cfg(test)]
@@ -413,6 +418,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
         source_roots: None,
         copy: None,
         merged_across: None,
+        recorded_by: None,
     };
     fs::write(
         directory.join("run.json"),
@@ -1049,6 +1055,7 @@ mod tests {
             source_roots: None,
             copy: None,
             merged_across: None,
+            recorded_by: None,
         };
         fs::write(
             directory.join("run.json"),

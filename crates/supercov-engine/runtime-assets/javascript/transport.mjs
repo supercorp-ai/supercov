@@ -2,6 +2,11 @@ export const COVERAGE_SCOPE_HEADER = "x-supercov-scope";
 export const COVERAGE_PHASE_HEADER = "x-supercov-phase";
 export const COVERAGE_SCOPE_COOKIE = "__supercov_scope";
 export const COVERAGE_PHASE_COOKIE = "__supercov_phase";
+// The same, for frames of the app on another of its hosts: a cookie that
+// crosses sites must be Secure, and a Secure cookie is not sent over ws://,
+// so the two cannot be one.
+export const COVERAGE_SCOPE_SITE_COOKIE = "__supercov_scope_site";
+export const COVERAGE_PHASE_SITE_COOKIE = "__supercov_phase_site";
 export const COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 export const DEFAULT_SERVER_EVIDENCE_ROOT = "/tmp/supercov-server-evidence";
 // Buffer as it was when Supercov loaded. Tests replace globals -- axios's set

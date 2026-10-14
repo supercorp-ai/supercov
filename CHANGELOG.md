@@ -12,6 +12,8 @@
 
 - `merge` refused Python, Ruby, Go, Rust and JVM suites run by different commands ("differing domains: integrity fingerprint"), and a merged run of those languages read as out of date. A run's fingerprint there holds its command; a merge is now checked with the command of the run it was merged into.
 - A change to source left out of what is measured, such as a simulator outside `SUPERCOV_SOURCE_ROOTS`, made every run out of date for `merge`. It is now judged as a helper is.
+- A page measured under Playwright could not fetch from another origin that allows only the headers it uses: Supercov added its coverage headers to every request, so the browser asked that origin first and was refused. Requests to other origins are now left as the page made them. The app hears which test a request belongs to from cookies on its hosts (the base URL's, `localhost` and `127.0.0.1`), which reach its frames on another of those hosts too, and from the headers on the page's requests to its own origin.
+- `merge` of a run recorded by another Supercov release answered only "differing domains: instrumenter, …". It now says the run was recorded by an earlier release, which instruments differently, and to measure it again. Runs record the release that made them (`recordedBy`).
 
 ## 4.6.0
 

@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.mjs";
+import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -236,9 +236,21 @@ class CoveragePhaseController {
     // Parameter properties are stateful despite the base ESLint rule treating
     // this as an empty constructor.
     // eslint-disable-next-line no-useless-constructor
-    constructor(scope, configuredHeaders = {}) {
+    constructor(scope, configuredHeaders = {}, baseURL) {
         this.scope = scope;
         this.configuredHeaders = configuredHeaders;
+        // Where the app under test is served: the project's base URL, and the
+        // local hosts a web server listens on. A cookie is kept per host, for
+        // every port of it.
+        const hosts = ["http://localhost/", "http://127.0.0.1/"];
+        try {
+            if (baseURL)
+                hosts.unshift(new URL("/", baseURL).href);
+        }
+        catch {
+            // A base URL Playwright itself would refuse.
+        }
+        this.appHosts = [...new Set(hosts)];
     }
     allPages() {
         return [...this.pages];
@@ -446,17 +458,34 @@ class CoveragePhaseController {
         // own attempt, so the newest wins; the fetch patch is installed once
         // and reads the attempt at call time, so a stale copy can never pin an
         // old scope onto a request the way nested wrappers would.
-        await context.addInitScript(({ attemptId, scopeHeader, scopeValue, scopeCookie }) => {
+        await context.addInitScript(({ attemptId, scopeHeader, scopeValue, scopeCookie, scopeSiteCookie }) => {
             const coverageGlobal = globalThis;
             coverageGlobal.__SUPERCOV_ATTEMPT__ = { attemptId, scopeValue };
             coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
             try {
                 document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
+                // And for this document's frames on another of the app's
+                // hosts, where crossing sites is allowed.
+                if (globalThis.isSecureContext)
+                    document.cookie = `${scopeSiteCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=None; Secure`;
                 if (!coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__) {
                     const originalFetch = globalThis.fetch?.bind(globalThis);
                     if (originalFetch) {
                         coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__ = true;
                         globalThis.fetch = ((input, init) => {
+                            // Only the page's own origin hears the scope. A
+                            // header on a request to another origin makes the
+                            // browser ask that origin first, and one that
+                            // allows only the headers it uses refuses: the
+                            // page's fetch failed under measurement alone.
+                            try {
+                                const target = new URL(input instanceof Request ? input.url : String(input), location.href);
+                                if (target.origin !== location.origin)
+                                    return originalFetch(input, init);
+                            }
+                            catch {
+                                return originalFetch(input, init);
+                            }
                             const headers = new Headers(init?.headers ??
                                 (input instanceof Request ? input.headers : undefined));
                             headers.set(scopeHeader, coverageGlobal.__SUPERCOV_ATTEMPT__?.scopeValue ?? scopeValue);
@@ -476,6 +505,7 @@ class CoveragePhaseController {
             scopeHeader: COVERAGE_SCOPE_HEADER,
             scopeValue: encodeCoverageScope(this.scope),
             scopeCookie: COVERAGE_SCOPE_COOKIE,
+            scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
         }).catch(() => undefined);
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
@@ -513,6 +543,16 @@ class CoveragePhaseController {
             if (!originalFetch)
                 return answer;
             globalThis.fetch = ((input, init) => {
+                // As in a page: another origin would be asked first, and may
+                // refuse a header it does not expect.
+                try {
+                    const target = new URL(input instanceof Request ? input.url : String(input), globalThis.location.href);
+                    if (target.origin !== globalThis.location.origin)
+                        return originalFetch(input, init);
+                }
+                catch {
+                    return originalFetch(input, init);
+                }
                 const headers = new Headers(init?.headers ??
                     (input instanceof Request ? input.headers : undefined));
                 headers.set(scopeHeader, scopeValue);
@@ -705,13 +745,10 @@ class CoveragePhaseController {
         const options = scoped[0] && typeof scoped[0] === "object"
             ? scoped[0]
             : {};
-        scoped[0] = {
-            ...options,
-            extraHTTPHeaders: {
-                ...(options.extraHTTPHeaders ?? {}),
-                ...(activeCoverageHeaders() ?? {}),
-            },
-        };
+        // The scope reaches the app in cookies once the context is
+        // registered (`updateContextHeaders`); headers on the context would
+        // go to every origin the page fetches from.
+        scoped[0] = { ...options };
         return scoped;
     }
     /**
@@ -734,7 +771,7 @@ class CoveragePhaseController {
     }
     async activateFrames(phaseId) {
         await timed("activate.frameEvaluate", () => Promise.all([...this.pages].flatMap((page) => page.frames()).map((frame) => frame
-            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie }) => {
+            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
             // A document that loaded under an earlier test's attempt (a page
@@ -746,6 +783,10 @@ class CoveragePhaseController {
                 localStorage.setItem(storageKey, id);
                 document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
                 document.cookie = `${phaseCookie}=${encodeURIComponent(id)}; Path=/; SameSite=Lax`;
+                if (globalThis.isSecureContext) {
+                    document.cookie = `${scopeSiteCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=None; Secure`;
+                    document.cookie = `${phaseSiteCookie}=${encodeURIComponent(id)}; Path=/; SameSite=None; Secure`;
+                }
             }
             catch {
                 // Sandboxed/cross-origin frames may not expose localStorage.
@@ -757,6 +798,8 @@ class CoveragePhaseController {
             scopeCookie: COVERAGE_SCOPE_COOKIE,
             scopeValue: encodeCoverageScope(this.scope),
             phaseCookie: COVERAGE_PHASE_COOKIE,
+            scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
+            phaseSiteCookie: COVERAGE_PHASE_SITE_COOKIE,
         })
             .catch(() => undefined))));
     }
@@ -779,14 +822,43 @@ class CoveragePhaseController {
                 this.unresponsiveWorkers.add(worker);
         })));
     }
+    /**
+     * Tell the app which test and phase its requests belong to, in cookies on
+     * the app's hosts. Headers set on the context went with every request the
+     * browser made, to any origin, and a header on a request to another
+     * origin makes the browser ask that origin first: one that allows only the
+     * headers it uses refused, and the page's request failed under
+     * measurement alone. A cookie never does. The page sends it to its own
+     * site from the first navigation on, and, on a secure origin, to frames
+     * of the app's other hosts as well.
+     */
     async updateContextHeaders(context, phaseId) {
-        await context
-            .setExtraHTTPHeaders({
-            ...(this.contextConfiguredHeaders.get(context) ?? this.configuredHeaders),
-            [COVERAGE_SCOPE_HEADER]: encodeCoverageScope(this.scope),
-            ...(phaseId ? { [COVERAGE_PHASE_HEADER]: phaseId } : {}),
-        })
-            .catch(() => undefined);
+        const scope = encodeURIComponent(encodeCoverageScope(this.scope));
+        const phase = phaseId ? encodeURIComponent(phaseId) : undefined;
+        const pairs = (scopeName, phaseName) => [
+            [scopeName, scope],
+            ...(phase ? [[phaseName, phase]] : []),
+        ];
+        await Promise.all([
+            // The context's own headers are the owner's, unchanged.
+            context
+                .setExtraHTTPHeaders(this.contextConfiguredHeaders.get(context) ?? this.configuredHeaders)
+                .catch(() => undefined),
+            ...this.appHosts.map((url) => {
+                const host = new URL(url);
+                // For the app's own site: requests, navigations and sockets.
+                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
+                // For its frames on another of its hosts: a cookie that
+                // crosses sites must be Secure, which needs https or a local
+                // host. Chromium keeps such a cookie only when it is given by
+                // domain; given by an http URL it is dropped without a word.
+                if (host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname)) {
+                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
+                }
+                // One host refused leaves the others theirs.
+                return context.addCookies(cookies).catch(() => undefined);
+            }),
+        ]);
     }
     async activatePage(page, phaseId) {
         const cdp = this.cdpSessions.get(page);
@@ -1352,7 +1424,7 @@ const instrumentedFixtures = {
         async ({}, use, testInfo) => {
             const scope = executionScope(testInfo);
             const configuredHeaders = Object.fromEntries(Object.entries(testInfo.project.use.extraHTTPHeaders ?? {}).map(([name, value]) => [name, String(value)]));
-            const controller = new CoveragePhaseController(scope, configuredHeaders);
+            const controller = new CoveragePhaseController(scope, configuredHeaders, testInfo.project.use.baseURL);
             controllers.set(scope.attemptId, controller);
             activeController = controller;
             directRuntime()?.activateCoverageScope(scope);

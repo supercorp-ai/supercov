@@ -4453,6 +4453,54 @@ fn merge_with_no_run_named_adds_up_the_runs_on_the_source_as_it_is() {
 }
 
 #[test]
+fn a_run_of_another_release_is_named_for_what_it_is() {
+    // Merging a run recorded before an upgrade answered "differing domains:
+    // instrumenter, tests, configuration", which names nothing to do.
+    let project = Project::cart("merge-release");
+    let older = project.measure(&["test/cart.test.js"]);
+    project.write(
+        "test/more.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { describe } from \"../src/cart.js\";\n\ntest(\"more\", () => {\n  assert.equal(describe([{ name: \"a\" }]), \"a\");\n});\n",
+    );
+    let newer = project.measure(&["test/more.test.js"]);
+    let recorded = serde_json::from_str::<serde_json::Value>(
+        &project.read(&format!(".supercov/runs/{newer}/run.json")),
+    )
+    .unwrap();
+    assert_eq!(
+        recorded["recordedBy"],
+        env!("CARGO_PKG_VERSION"),
+        "{recorded}"
+    );
+    // What a run of 4.5.0 looks like to this release.
+    let path = format!(".supercov/runs/{older}/run.json");
+    let mut metadata = serde_json::from_str::<serde_json::Value>(&project.read(&path)).unwrap();
+    metadata["integrity"]["fingerprint"]["instrumenter"] = serde_json::json!("0".repeat(64));
+    metadata["recordedBy"] = serde_json::json!("4.5.0");
+    project.write(&path, &serde_json::to_string_pretty(&metadata).unwrap());
+
+    let refused = project.supercov(&["merge", &older, &newer]);
+    assert_eq!(refused.code(), 2, "{}", refused.stdout());
+    contains_all(
+        &refused.stderr(),
+        &[
+            &format!(
+                "Cannot merge run {older}: it was recorded by Supercov 4.5.0, which instruments differently"
+            ),
+            "Measure it again to merge it.",
+        ],
+    );
+    let left = project.supercov(&["merge"]);
+    assert!(
+        left.stdout().contains(&format!(
+            "left out {older} (node --test test/cart.test.js): it was recorded by Supercov 4.5.0"
+        )),
+        "{}",
+        left.stdout()
+    );
+}
+
+#[test]
 fn a_run_of_a_new_test_alone_is_added_to_the_runs_before_it() {
     // Raising a suite's coverage one test at a time: measure only what was
     // added, and add it to what is known. `merge` refused it ("differing

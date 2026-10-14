@@ -34,6 +34,8 @@ var COVERAGE_SCOPE_HEADER = "x-supercov-scope";
 var COVERAGE_PHASE_HEADER = "x-supercov-phase";
 var COVERAGE_SCOPE_COOKIE = "__supercov_scope";
 var COVERAGE_PHASE_COOKIE = "__supercov_phase";
+var COVERAGE_SCOPE_SITE_COOKIE = "__supercov_scope_site";
+var COVERAGE_PHASE_SITE_COOKIE = "__supercov_phase_site";
 var COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 var DEFAULT_SERVER_EVIDENCE_ROOT = "/tmp/supercov-server-evidence";
 function configuredServerEvidenceRoot() {
@@ -1345,8 +1347,10 @@ function requestCoverageContext(value) {
       }
     }
   }
-  const encodedScope = (_a8 = headers.get(COVERAGE_SCOPE_HEADER)) != null ? _a8 : cookies.get(COVERAGE_SCOPE_COOKIE);
-  const rawPhaseId = (_b = headers.get(COVERAGE_PHASE_HEADER)) != null ? _b : cookies.get(COVERAGE_PHASE_COOKIE);
+  // A frame of the app on another of its hosts carries only the cookies
+  // made to cross sites.
+  const encodedScope = (_a8 = headers.get(COVERAGE_SCOPE_HEADER)) != null ? _a8 : cookies.has(COVERAGE_SCOPE_COOKIE) ? cookies.get(COVERAGE_SCOPE_COOKIE) : cookies.get(COVERAGE_SCOPE_SITE_COOKIE);
+  const rawPhaseId = (_b = headers.get(COVERAGE_PHASE_HEADER)) != null ? _b : cookies.has(COVERAGE_PHASE_COOKIE) ? cookies.get(COVERAGE_PHASE_COOKIE) : cookies.get(COVERAGE_PHASE_SITE_COOKIE);
   const scope = decodeCoverageScope(typeof encodedScope === "string" ? encodedScope : void 0);
   // The phase cookie outlives a test in a shared browser context just like
   // the stored phase does (see currentPhaseId); a request carrying a scope

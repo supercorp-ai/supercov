@@ -531,6 +531,16 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
         .filter(|run| {
             current_integrity_for_run(root, run).is_some_and(|current| {
                 let recorded = &run.metadata.integrity;
+                // A run of another release reads as current -- its checkout
+                // has not moved -- but cannot be merged with this release's.
+                if recorded.fingerprint.instrumenter != current.fingerprint.instrumenter {
+                    outdated.push((
+                        *run,
+                        supercov_engine::run_merge::recorded_by_another_release(run),
+                        true,
+                    ));
+                    return false;
+                }
                 if !compare_run_integrity(Some(recorded), &current).stale {
                     return true;
                 }
@@ -566,14 +576,6 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
                         format!("the {domain} has changed ({})", named.join(", "))
                     }
                 };
-                if recorded.fingerprint.instrumenter != current.fingerprint.instrumenter {
-                    outdated.push((
-                        *run,
-                        "it was measured by another version of Supercov".to_owned(),
-                        true,
-                    ));
-                    return false;
-                }
                 // A measured file added or removed: what is measured differs.
                 // A change to a file is judged below, file by file.
                 if recorded.fingerprint.source != current.fingerprint.source
