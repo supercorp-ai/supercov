@@ -1898,6 +1898,119 @@ fn obligation_source(obligation: &CoverageFileObligation) -> Option<String> {
     }
 }
 
+/// What a file's detail is read from: the run's lines, points, decisions,
+/// limitations and tests, read once and kept by file.
+///
+/// Reading them is most of what a file's detail costs, and none of it
+/// depends on the file. The HTML report asks for every file with a gap, and
+/// read the whole run again for each: six minutes for a merged run of 2,094
+/// tests that is exported in five seconds.
+pub struct FileDetailSource {
+    view: CoverageViewId,
+    tests: Vec<crate::coverage_index::IndexedTestDetail>,
+    test_summaries: Vec<IndexedTestSummary>,
+    tests_by_id: HashMap<String, IndexedTestSummary>,
+    /// The tests with a line in each file.
+    tests_by_file: HashMap<String, Vec<String>>,
+    lines: Vec<crate::coverage_index::IndexedLine>,
+    lines_by_file: BTreeMap<String, Vec<usize>>,
+    points: Vec<crate::coverage_index::IndexedHitMetadata>,
+    points_by_file: HashMap<String, Vec<usize>>,
+    decisions: Vec<crate::coverage_report::DecisionResult>,
+    decisions_by_file: HashMap<String, Vec<usize>>,
+    limitations: BTreeMap<String, Vec<crate::coverage_index::IndexedLimitation>>,
+}
+
+impl FileDetailSource {
+    pub fn read(index: &CoverageIndex<'_>, view: CoverageViewId) -> Result<Self, QueryError> {
+        let tests = index.test_details(view)?;
+        let mut tests_by_file = HashMap::<String, Vec<String>>::new();
+        for test in &tests {
+            let mut files = test
+                .lines
+                .iter()
+                .map(|line| line.file.as_str())
+                .collect::<Vec<_>>();
+            files.sort_unstable();
+            files.dedup();
+            for file in files {
+                tests_by_file
+                    .entry(file.to_owned())
+                    .or_default()
+                    .push(test.summary.id.clone());
+            }
+        }
+        let test_summaries = tests
+            .iter()
+            .map(|test| test.summary.clone())
+            .collect::<Vec<_>>();
+        let tests_by_id = test_summaries
+            .iter()
+            .map(|test| (test.id.clone(), test.clone()))
+            .collect();
+        let lines = index.lines(view)?;
+        let mut lines_by_file = BTreeMap::<String, Vec<usize>>::new();
+        for (at, line) in lines.iter().enumerate() {
+            lines_by_file.entry(line.file.clone()).or_default().push(at);
+        }
+        let points = index.hit_metadata(view)?;
+        let mut points_by_file = HashMap::<String, Vec<usize>>::new();
+        for (at, point) in points.iter().enumerate() {
+            points_by_file
+                .entry(point.file.clone())
+                .or_default()
+                .push(at);
+        }
+        let decisions = index.decision_details(view)?;
+        let mut decisions_by_file = HashMap::<String, Vec<usize>>::new();
+        for (at, decision) in decisions.iter().enumerate() {
+            decisions_by_file
+                .entry(decision.meta.file.clone())
+                .or_default()
+                .push(at);
+        }
+        let mut limitations = BTreeMap::<String, Vec<_>>::new();
+        for limitation in index.limitations(view)? {
+            limitations
+                .entry(limitation.file.clone())
+                .or_default()
+                .push(limitation);
+        }
+        Ok(Self {
+            view,
+            tests,
+            test_summaries,
+            tests_by_id,
+            tests_by_file,
+            lines,
+            lines_by_file,
+            points,
+            points_by_file,
+            decisions,
+            decisions_by_file,
+            limitations,
+        })
+    }
+
+    /// Every test, line, point and decision of the run, in the index's
+    /// order, for a reader that wants them all as well as a file's detail.
+    pub fn tests(&self) -> &[crate::coverage_index::IndexedTestDetail] {
+        &self.tests
+    }
+
+    pub fn lines(&self) -> &[crate::coverage_index::IndexedLine] {
+        &self.lines
+    }
+
+    pub fn points(&self) -> &[crate::coverage_index::IndexedHitMetadata] {
+        &self.points
+    }
+
+    pub fn decisions(&self) -> &[crate::coverage_report::DecisionResult] {
+        &self.decisions
+    }
+}
+
 pub fn coverage_file_detail_query(
     index: &CoverageIndex<'_>,
     options: CoverageFileDetailOptions<'_>,
@@ -1905,26 +2018,26 @@ pub fn coverage_file_detail_query(
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
-    let test_details = index.test_details(options.view)?;
-    let test_summaries = test_details
-        .iter()
-        .map(|test| test.summary.clone())
-        .collect::<Vec<_>>();
-    let selected = selected_test_ids(&test_summaries, options.kind, options.runner)?;
-    let tests_by_id = test_summaries
-        .into_iter()
-        .map(|test| (test.id.clone(), test))
-        .collect::<HashMap<_, _>>();
-    let lines = index.lines(options.view)?;
-    let limitation_records = index.limitations(options.view)?;
-    let files = lines
-        .iter()
-        .map(|line| line.file.as_str())
-        .chain(
-            limitation_records
-                .iter()
-                .map(|limitation| limitation.file.as_str()),
-        )
+    coverage_file_detail_from(&FileDetailSource::read(index, options.view)?, options)
+}
+
+/// One file's detail from a run already read. `options.view` is the view the
+/// run was read in.
+pub fn coverage_file_detail_from(
+    read: &FileDetailSource,
+    options: CoverageFileDetailOptions<'_>,
+) -> Result<(CoverageFileDetailData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    debug_assert!(read.view == options.view);
+    let selected = selected_test_ids(&read.test_summaries, options.kind, options.runner)?;
+    let tests_by_id = &read.tests_by_id;
+    let files = read
+        .lines_by_file
+        .keys()
+        .chain(read.limitations.keys())
+        .map(String::as_str)
         .collect::<BTreeSet<_>>();
     let file = if files.contains(options.selector) {
         options.selector.to_owned()
@@ -1944,35 +2057,41 @@ pub fn coverage_file_detail_query(
         }
         matches[0].to_owned()
     };
+    let lines = read
+        .lines_by_file
+        .get(&file)
+        .into_iter()
+        .flatten()
+        .map(|at| &read.lines[*at])
+        .collect::<Vec<_>>();
+    let metadata = read
+        .points_by_file
+        .get(&file)
+        .into_iter()
+        .flatten()
+        .map(|at| &read.points[*at])
+        .collect::<Vec<_>>();
     let selected_includes = |tests: &[String]| {
         selected.as_ref().map_or(!tests.is_empty(), |selected| {
             tests.iter().any(|test| selected.contains(test))
         })
     };
-    let total_lines = lines
-        .iter()
-        .filter(|line| line.measured && line.file == file)
-        .count();
+    let total_lines = lines.iter().filter(|line| line.measured).count();
     let uncovered_lines = lines
         .iter()
-        .filter(|line| line.measured && line.file == file && !selected_includes(&line.tests))
+        .filter(|line| line.measured && !selected_includes(&line.tests))
         .map(|line| {
             CoverageFileObligation::Line(CoverageLineObligation {
                 kind: "line".into(),
                 id: format!("line:{}:{}", line.file, line.line),
                 line: line.line,
-                other_coverage: other_coverage(&line.tests, selected.as_ref(), &tests_by_id),
+                other_coverage: other_coverage(&line.tests, selected.as_ref(), tests_by_id),
             })
         })
         .collect::<Vec<_>>();
-    let metadata = index.hit_metadata(options.view)?;
     let statements = metadata
         .iter()
-        .filter(|point| {
-            point.file == file
-                && point.obligation == "statement"
-                && !selected_includes(&point.tests)
-        })
+        .filter(|point| point.obligation == "statement" && !selected_includes(&point.tests))
         .map(|point| {
             CoverageFileObligation::Point(CoveragePointObligation {
                 kind: "statement".into(),
@@ -1980,15 +2099,13 @@ pub fn coverage_file_detail_query(
                 line: point.line,
                 column: point.column,
                 source: point.label.clone().unwrap_or_else(|| point.source.clone()),
-                other_coverage: other_coverage(&point.tests, selected.as_ref(), &tests_by_id),
+                other_coverage: other_coverage(&point.tests, selected.as_ref(), tests_by_id),
             })
         })
         .collect::<Vec<_>>();
     let functions = metadata
         .iter()
-        .filter(|point| {
-            point.file == file && point.obligation == "function" && !selected_includes(&point.tests)
-        })
+        .filter(|point| point.obligation == "function" && !selected_includes(&point.tests))
         .map(|point| {
             CoverageFileObligation::Point(CoveragePointObligation {
                 kind: "function".into(),
@@ -1996,17 +2113,13 @@ pub fn coverage_file_detail_query(
                 line: point.line,
                 column: point.column,
                 source: point.label.clone().unwrap_or_else(|| point.source.clone()),
-                other_coverage: other_coverage(&point.tests, selected.as_ref(), &tests_by_id),
+                other_coverage: other_coverage(&point.tests, selected.as_ref(), tests_by_id),
             })
         })
         .collect::<Vec<_>>();
     let branches = metadata
         .iter()
-        .filter(|branch| {
-            branch.file == file
-                && branch.obligation == "branch"
-                && !selected_includes(&branch.tests)
-        })
+        .filter(|branch| branch.obligation == "branch" && !selected_includes(&branch.tests))
         .map(|branch| {
             CoverageFileObligation::Branch(CoverageBranchObligation {
                 kind: "branch".into(),
@@ -2015,7 +2128,7 @@ pub fn coverage_file_detail_query(
                 column: branch.column,
                 source: branch.source.clone(),
                 missing: branch.alternative.clone().unwrap_or_default(),
-                other_coverage: other_coverage(&branch.tests, selected.as_ref(), &tests_by_id),
+                other_coverage: other_coverage(&branch.tests, selected.as_ref(), tests_by_id),
             })
         })
         .collect::<Vec<_>>();
@@ -2024,14 +2137,16 @@ pub fn coverage_file_detail_query(
     // what tells one that never ran from one that ran part of the way.
     let observed_lines = metadata
         .iter()
-        .filter(|point| point.file == file && selected_includes(&point.tests))
+        .filter(|point| selected_includes(&point.tests))
         .map(|point| point.line)
         .collect::<BTreeSet<_>>();
-    let original_decisions = index.decision_details(options.view)?;
     let mut mcdc = Vec::new();
-    for original in original_decisions
-        .iter()
-        .filter(|decision| decision.meta.file == file)
+    for original in read
+        .decisions_by_file
+        .get(&file)
+        .into_iter()
+        .flatten()
+        .map(|at| &read.decisions[*at])
     {
         let filtered = selected_decision(original.clone(), selected.as_ref());
         for condition in filtered
@@ -2059,7 +2174,7 @@ pub fn coverage_file_detail_query(
                     .iter()
                     .map(|observation| vector_text(&observation.vector))
                     .collect(),
-                other_coverage: other_coverage(&original_tests, selected.as_ref(), &tests_by_id),
+                other_coverage: other_coverage(&original_tests, selected.as_ref(), tests_by_id),
             }));
         }
     }
@@ -2077,9 +2192,12 @@ pub fn coverage_file_detail_query(
             .cmp(&right.line())
             .then_with(|| left.kind().cmp(right.kind()))
     });
-    let mut limitations = limitation_records
+    let mut limitations = read
+        .limitations
+        .get(&file)
         .into_iter()
-        .filter(|limitation| limitation.file == file)
+        .flatten()
+        .cloned()
         .map(|limitation| CoverageFileLimitation {
             id: limitation.id,
             kind: limitation.kind,
@@ -2098,13 +2216,15 @@ pub fn coverage_file_detail_query(
             .then_with(|| left.column.cmp(&right.column))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let total_tests = test_details
-        .iter()
+    let total_tests = read
+        .tests_by_file
+        .get(&file)
+        .into_iter()
+        .flatten()
         .filter(|test| {
             selected
                 .as_ref()
-                .is_none_or(|selected| selected.contains(&test.summary.id))
-                && test.lines.iter().any(|line| line.file == file)
+                .is_none_or(|selected| selected.contains(*test))
         })
         .count();
     let total_obligations = obligations.len();
