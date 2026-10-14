@@ -717,6 +717,20 @@ pub fn discover_coverage_project(
     environment: &BTreeMap<String, String>,
     command: &[String],
 ) -> Result<CoverageProject, ProjectDiscoveryError> {
+    let project = discover_coverage_project_of_any_size(root, environment, command)?;
+    if project.source_files.is_empty() {
+        return Err(ProjectDiscoveryError::NoSourceFiles);
+    }
+    Ok(project)
+}
+
+/// `discover_coverage_project` for a suite whose application may hold no
+/// JavaScript at all: browser tests of a Python server.
+pub fn discover_coverage_project_of_any_size(
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+    command: &[String],
+) -> Result<CoverageProject, ProjectDiscoveryError> {
     let manifest = package_json(root);
     let configured_roots = crate::source_discovery::configured_source_roots(environment);
     let DiscoveredSourceScope {
@@ -725,9 +739,6 @@ pub fn discover_coverage_project(
         scope,
         limitations,
     } = discover_source_scope(root, configured_roots.as_deref())?;
-    if source_files.is_empty() {
-        return Err(ProjectDiscoveryError::NoSourceFiles);
-    }
     // The configuration the command names comes before any found by name: a
     // root `playwright.config.ts` beside `--config e2e/playwright.config.ts`
     // made the run load the root one, and run other tests than the command.

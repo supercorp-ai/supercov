@@ -61,6 +61,10 @@ fn default_runner() -> String {
     PYTEST_RUNNER.into()
 }
 
+fn python_runner(runner: &str) -> bool {
+    matches!(runner, PYTEST_RUNNER | UNITTEST_RUNNER)
+}
+
 /// Every field the runtime writes is named so `deny_unknown_fields` keeps
 /// the record shape frozen, even where Rust does not read the value yet.
 #[derive(Debug, Deserialize)]
@@ -1675,6 +1679,108 @@ pub fn build_python_frontend_run(
     root: &Path,
 ) -> Result<PythonFrontendRun, PythonEvidenceError> {
     let evidence = read_evidence_directory(evidence_directory, run_id)?;
+    build_from_evidence(
+        evidence,
+        manifest,
+        run_id,
+        generated_at,
+        test_exit_code,
+        root,
+    )
+}
+
+/// A browser test whose requests a measured Python server answered: what
+/// the browser runner reported for it, which no Python runner saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedTest {
+    /// As the server's runtime names the worker: `playwright:<worker id>`.
+    pub worker: String,
+    pub test_id: String,
+    pub retry: usize,
+    /// The test's name, title and file as the browser run gives them.
+    pub name: String,
+    pub title: String,
+    pub file: String,
+    pub status: String,
+    pub expected_status: String,
+    pub provenance: TestProvenance,
+}
+
+/// The Python run of a server a browser suite drove: the server's evidence,
+/// with each browser test's outcome as its runner reported it, under the
+/// names that runner gave them.
+pub fn build_python_server_run(
+    manifest: &CoverageManifest,
+    evidence_directory: &Path,
+    run_id: &str,
+    generated_at: &str,
+    test_exit_code: i32,
+    root: &Path,
+    served: &[ServedTest],
+) -> Result<PythonFrontendRun, PythonEvidenceError> {
+    let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
+    let mut by_attempt = BTreeMap::new();
+    for test in served {
+        let key = (test.worker.clone(), test.test_id.clone(), test.retry);
+        let outcome = match test.status.as_str() {
+            "passed" => "passed",
+            "skipped" => "skipped",
+            _ => "failed",
+        };
+        evidence.outcomes.entry(key.clone()).or_default().push((
+            "call".into(),
+            outcome.into(),
+            test.expected_status == "failed",
+        ));
+        evidence
+            .runners
+            .insert(key.clone(), test.provenance.runner.clone());
+        by_attempt.insert(key, test);
+    }
+    let mut run = build_from_evidence(
+        evidence,
+        manifest,
+        run_id,
+        generated_at,
+        test_exit_code,
+        root,
+    )?;
+    for raw in &mut run.request.raw_results {
+        let Some(test) = raw.scope.as_ref().and_then(|scope| {
+            by_attempt.get(&(
+                scope.worker_id.clone(),
+                raw.test.clone(),
+                raw.retry.unwrap_or(0),
+            ))
+        }) else {
+            continue;
+        };
+        raw.test = test.name.clone();
+        raw.title = Some(test.title.clone());
+        raw.test_file = Some(test.file.clone());
+        raw.status = Some(test.status.clone());
+        raw.expected_status = Some(test.expected_status.clone());
+        raw.provenance = test.provenance.clone();
+    }
+    run.tests = run
+        .request
+        .raw_results
+        .iter()
+        .filter(|raw| raw.role == "test")
+        .map(|raw| raw.test.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    Ok(run)
+}
+
+fn build_from_evidence(
+    evidence: Evidence,
+    manifest: &CoverageManifest,
+    run_id: &str,
+    generated_at: &str,
+    test_exit_code: i32,
+    root: &Path,
+) -> Result<PythonFrontendRun, PythonEvidenceError> {
     if evidence.interpreters == 0 {
         return Err(PythonEvidenceError::NoInterpreter);
     }
@@ -2109,13 +2215,32 @@ pub fn build_python_frontend_run(
                         retry: AttributionPrecision::Exact,
                         phase: AttributionPrecision::Exact,
                         action: AttributionPrecision::Unavailable,
-                        assertion: AttributionPrecision::Exact,
+                        // A server sees a browser test's requests, never
+                        // its assertions, which run in the browser runner.
+                        assertion: if python_runner(runner) {
+                            AttributionPrecision::Exact
+                        } else {
+                            AttributionPrecision::Unavailable
+                        },
                     },
-                    limitations: vec![FrontendLimitation {
-                        id: format!("python-{runner}-action-linkage"),
-                        scopes: vec![FrontendLimitationScope::Action],
-                        reason: format!("{runner} exposes no general action lifecycle"),
-                    }],
+                    limitations: if python_runner(runner) {
+                        vec![FrontendLimitation {
+                            id: format!("python-{runner}-action-linkage"),
+                            scopes: vec![FrontendLimitationScope::Action],
+                            reason: format!("{runner} exposes no general action lifecycle"),
+                        }]
+                    } else {
+                        vec![FrontendLimitation {
+                            id: format!("python-server-{runner}-linkage"),
+                            scopes: vec![
+                                FrontendLimitationScope::Action,
+                                FrontendLimitationScope::Assertion,
+                            ],
+                            reason: format!(
+                                "the server sees each {runner} test's requests, not its actions or assertions"
+                            ),
+                        }]
+                    },
                 })
                 .collect(),
             structural_limitations,

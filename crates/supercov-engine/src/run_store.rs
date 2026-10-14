@@ -97,7 +97,7 @@ pub struct InstrumentedBuildCache {
     pub reused: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RawEvidenceMetadata {
     pub schema_version: u32,

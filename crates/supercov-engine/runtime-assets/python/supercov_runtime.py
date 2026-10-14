@@ -41,6 +41,7 @@ CONTEXT_ENV = "SUPERCOV_CONTEXT"
 PLAN_ENV = "SUPERCOV_PYTHON_PLAN"
 EVIDENCE_DIR_ENV = "SUPERCOV_PYTHON_EVIDENCE_DIR"
 RUN_ID_ENV = "SUPERCOV_RUN_ID"
+SOURCE_ROOT_ENV = "SUPERCOV_PYTHON_SOURCE_ROOT"
 WORKER_ENV = "SUPERCOV_PYTHON_WORKER"
 TIMING = bool(os.environ.get("SUPERCOV_PYTHON_TIMING"))
 # Debug only: leave out one piece of the runtime to measure what it costs --
@@ -374,6 +375,11 @@ class Runtime:
 
         root, index = supercov_probes.load_plan(plan_path, PLAN_VERSION)
         self.root = os.path.realpath(root)
+        # A server a browser suite starts runs in Supercov's copy of the
+        # project, `root`, and may still import the project from where it
+        # is: an editable install puts the checkout on `sys.path`.
+        source_root = os.environ.get(SOURCE_ROOT_ENV)
+        self.roots = (self.root,) + ((os.path.realpath(source_root),) if source_root else ())
         self.evidence_dir = evidence_dir
         self.run_id = run_id
         self.worker = worker
@@ -825,12 +831,15 @@ class Runtime:
                     real = self._realpath(candidate)
                 except OSError:
                     continue
-                if real == self.root or real.startswith(self.root + os.sep):
-                    self.under_root = True
-                    relative = real[len(self.root) + 1 :].replace(os.sep, "/")
-                    if relative in self.probe_files or relative in self.probe_sites:
-                        break
-                    relative = None
+                for root in self.roots:
+                    if real == root or real.startswith(root + os.sep):
+                        self.under_root = True
+                        relative = real[len(root) + 1 :].replace(os.sep, "/")
+                        if relative in self.probe_files or relative in self.probe_sites:
+                            break
+                        relative = None
+                if relative is not None:
+                    break
         self.path_cache[filename] = relative
         return relative
 
@@ -1257,7 +1266,9 @@ class Runtime:
         inherited = os.environ.get(CONTEXT_ENV)
         if inherited:
             try:
-                self.switch(_json_load(inherited))
+                identity = _inherited_identity(inherited)
+                if identity is not None:
+                    self.switch(identity)
             except (ValueError, KeyError, TypeError):
                 self.limitation("python-inherited-context-invalid", "SUPERCOV_CONTEXT was not a valid Supercov identity")
         atexit.register(self.close)
@@ -1343,6 +1354,102 @@ class Runtime:
 
 
 # -- causal context propagation ----------------------------------------------
+
+
+SCOPE_HEADER = "x-supercov-scope"
+SCOPE_COOKIES = ("__supercov_scope", "__supercov_scope_site")
+
+
+def _request_identity(header):
+    """The browser test a request names, as a phase identity, or None.
+
+    `header(name)` reads one request header by its lower-case name. The
+    Playwright runtime sends the test's scope as a header on the page's own
+    requests and as a cookie on the app's hosts; it is the same query string
+    either way (`v=1&r=...&w=...&t=...&k=...&a=...&i=...`).
+    """
+    from urllib.parse import parse_qs, unquote
+
+    encoded = header(SCOPE_HEADER)
+    if not encoded:
+        for part in (header("cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name in SCOPE_COOKIES and value:
+                encoded = unquote(value)
+                break
+    if not encoded:
+        return None
+    values = {key: items[0] for key, items in parse_qs(encoded).items() if items}
+    if values.get("v") != "1" or not values.get("t") or not values.get("w"):
+        return None
+    try:
+        retry = int(values.get("a", "0"))
+    except ValueError:
+        return None
+    return {
+        "worker": "playwright:" + values["w"],
+        "test": values["t"],
+        "retry": retry,
+        "phase": "call",
+    }
+
+
+def _inherited_identity(value):
+    """The phase a parent process ran in, from `SUPERCOV_CONTEXT`: a Python
+    parent's identity as JSON, or a JavaScript parent's carrier -- base64url
+    JSON holding a Playwright test's scope, or no scope outside a test, when
+    the child is no test's. Raises ValueError for anything else."""
+    if value.startswith("{"):
+        return _json_load(value)
+    import base64
+
+    carrier = _json_load(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode("utf-8"))
+    if not isinstance(carrier, dict) or carrier.get("version") != 1:
+        raise ValueError("not a Supercov carrier")
+    scope = carrier.get("scope")
+    if not scope:
+        return None
+    return {
+        "worker": "playwright:" + scope["workerId"],
+        "test": scope["testId"],
+        "retry": int(scope["retry"]),
+        "phase": "call",
+    }
+
+
+def _environ_header(environ):
+    """`header` for a WSGI environ."""
+    return lambda name: environ.get("HTTP_" + name.upper().replace("-", "_"))
+
+
+def _scope_header(scope):
+    """`header` for an ASGI connection scope."""
+
+    def header(name):
+        wanted = name.encode("latin-1")
+        for key, value in scope.get("headers") or ():
+            if key.lower() == wanted:
+                return value.decode("latin-1")
+        return None
+
+    return header
+
+
+def _enter_request(runtime, identity):
+    """Run what follows as the test `identity` names; returns what to hand
+    `_leave_request`, or None when there is nothing to leave -- no test was
+    named, or the request already runs as that test (a framework's entry
+    point under the standard library's server)."""
+    if identity is None or runtime.current_identity() == identity:
+        return None
+    leave = runtime.context.get()
+    runtime.switch(identity)
+    return leave
+
+
+def _leave_request(runtime, leave):
+    if leave is not None:
+        runtime.switch(runtime.identities.get(leave))
 
 
 def _install_propagation(runtime: Runtime) -> None:
@@ -1447,9 +1554,94 @@ def _install_propagation(runtime: Runtime) -> None:
         process_type.start = process_start_with_context
         process_type._supercov_patched = True
 
+    def install_http_server(module):
+        """A request to a server built on the standard library's
+        `BaseHTTPRequestHandler` runs as the browser test that sent it."""
+        handler = module.BaseHTTPRequestHandler
+        if getattr(handler, "_supercov_patched", False):
+            return
+        original_parse = handler.parse_request
+        original_handle = handler.handle
+
+        def parse_request(request_handler):
+            # A connection kept alive carries the next request: the one
+            # before it is left first, whichever test this one names.
+            _leave_request(runtime, request_handler.__dict__.pop("_supercov_leave", None))
+            parsed = original_parse(request_handler)
+            if parsed:
+                headers = request_handler.headers
+                request_handler._supercov_leave = _enter_request(
+                    runtime, _request_identity(lambda name: headers.get(name))
+                )
+            return parsed
+
+        def handle(request_handler):
+            try:
+                return original_handle(request_handler)
+            finally:
+                _leave_request(runtime, request_handler.__dict__.pop("_supercov_leave", None))
+
+        handler.parse_request = parse_request
+        handler.handle = handle
+        handler._supercov_patched = True
+
+    def wsgi_entry(owner, attribute="__call__"):
+        """Wrap a WSGI application's entry point, `(environ, start_response)`:
+        the request runs as the test it names, under any server."""
+        original = owner.__dict__.get(attribute)
+        if original is None or getattr(original, "_supercov_patched", False):
+            return
+
+        def entry(application, environ, start_response):
+            leave = _enter_request(runtime, _request_identity(_environ_header(environ)))
+            try:
+                return original(application, environ, start_response)
+            finally:
+                _leave_request(runtime, leave)
+
+        entry._supercov_patched = True
+        setattr(owner, attribute, entry)
+
+    def asgi_entry(owner):
+        """Wrap an ASGI application's `__call__(scope, receive, send)`."""
+        original = owner.__dict__.get("__call__")
+        if original is None or getattr(original, "_supercov_patched", False):
+            return
+
+        async def entry(application, scope, receive, send):
+            identity = None
+            if scope.get("type") in ("http", "websocket"):
+                identity = _request_identity(_scope_header(scope))
+            leave = _enter_request(runtime, identity)
+            try:
+                return await original(application, scope, receive, send)
+            finally:
+                _leave_request(runtime, leave)
+
+        entry._supercov_patched = True
+        owner.__call__ = entry
+
+    def install_flask(module):
+        wsgi_entry(module.Flask, "wsgi_app")
+
+    def install_django_wsgi(module):
+        wsgi_entry(module.WSGIHandler)
+
+    def install_django_asgi(module):
+        asgi_entry(module.ASGIHandler)
+
+    def install_starlette(module):
+        asgi_entry(module.Starlette)
+
     # Patched when a program first imports it: most interpreters a suite
     # launches never start a thread, and importing threading here cost each
     # of them a millisecond.
+    # A server's requests, each run as the browser test that sent it.
+    runtime.probing.after_import("http.server", install_http_server)
+    runtime.probing.after_import("flask.app", install_flask)
+    runtime.probing.after_import("django.core.handlers.wsgi", install_django_wsgi)
+    runtime.probing.after_import("django.core.handlers.asgi", install_django_asgi)
+    runtime.probing.after_import("starlette.applications", install_starlette)
     runtime.probing.after_import("threading", install_threading)
     runtime.probing.after_import("concurrent.futures.thread", install_executor)
     runtime.probing.after_import("subprocess", install_subprocess)

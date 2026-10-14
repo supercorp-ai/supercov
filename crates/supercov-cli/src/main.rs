@@ -670,17 +670,25 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
             .cmp(&left.metadata.started_at)
             .then_with(|| right.id.cmp(&left.id))
     });
+    // One command can make two runs: a browser suite's, and the Python
+    // server's its tests drove.
+    let measurement = |run: &StoredRun| {
+        (
+            run.metadata.command.clone(),
+            frontend_of(&run.metadata.integrity.instrumenter_version),
+        )
+    };
     let mut commands = std::collections::BTreeSet::new();
-    current.retain(|run| commands.insert((&run.metadata.command, &run.metadata.source_roots)));
+    current.retain(|run| commands.insert((measurement(run), &run.metadata.source_roots)));
     // Not one whose command has been measured again since.
     outdated.retain(|(run, _, _)| {
         !current
             .iter()
-            .any(|kept| kept.metadata.command == run.metadata.command)
+            .any(|kept| measurement(kept) == measurement(run))
     });
     outdated.sort_by(|left, right| right.0.metadata.started_at.cmp(&left.0.metadata.started_at));
     let mut said = std::collections::BTreeSet::new();
-    outdated.retain(|(run, _, _)| said.insert(run.metadata.command.clone()));
+    outdated.retain(|(run, _, _)| said.insert(measurement(run)));
     for (run, why, settled) in outdated.iter().take(5) {
         println!(
             "[supercov] left out {} ({}): {why}. Measure it again to count it{}.",
@@ -1858,6 +1866,13 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     match result {
         Ok(result) => {
             published(&result.run_directory);
+            for server in &result.server_runs {
+                if let Some(id) = server.file_name().and_then(|id| id.to_str()) {
+                    eprintln!(
+                        "[supercov] the Python server's coverage is run {id}: `supercov runs {id}`"
+                    );
+                }
+            }
             if let Some(timings) = &result.metadata.timings {
                 eprintln!(
                     "[supercov] timings {}",
@@ -2023,7 +2038,7 @@ fn current_javascript_integrity(
 }
 
 /// Which frontend measured a run, from the contract version it recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Frontend {
     Rust,
     Ruby,
