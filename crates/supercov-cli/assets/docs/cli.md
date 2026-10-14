@@ -632,11 +632,14 @@ what that run's tests did with it:
 - A helper, fixture or support file, or source outside what is measured (a
   simulator kept out of `SUPERCOV_SOURCE_ROOTS`): left out of a run only when
   that run's test files import it, directly or through other files. Supercov
-  reads the imports of JavaScript, TypeScript and Python tests, with pytest's
-  `conftest.py` files and `pytest_plugins`; a computed import, a change to
-  `sys.path`, or tests in another language count every helper as loaded. A
-  JavaScript or TypeScript helper that only gained functions, which code
-  written before cannot have called, leaves every run in.
+  reads the imports of JavaScript, TypeScript, Python and Ruby tests, with
+  pytest's `conftest.py` files and `pytest_plugins`, and what `.rspec`
+  requires; a computed import, a glob of support files, a change to
+  `sys.path` or `$LOAD_PATH`, or tests in another language count every helper
+  as loaded. A JavaScript, TypeScript or Python helper that only gained
+  functions, which code written before cannot have called, leaves every run
+  in. In Python that is a plain `def`: a decorator runs when the module
+  loads.
 - A test runner's settings: `playwright.config.*`, `vitest.config.*`,
   `jest.config.*` and `ava.config.*` belong to their runner, and a run that
   did not use that runner keeps. Of Playwright's settings, only those that

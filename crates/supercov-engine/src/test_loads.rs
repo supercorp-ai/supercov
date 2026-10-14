@@ -42,6 +42,7 @@ const EXTENSIONS: [&str; 9] = [
 /// A file Supercov can read imports from.
 pub fn reads_imports(file: &str) -> bool {
     file.ends_with(".py")
+        || file.ends_with(".rb")
         || EXTENSIONS[..8]
             .iter()
             .any(|extension| file.ends_with(extension))
@@ -57,6 +58,7 @@ pub struct Imports {
     subpaths: BTreeMap<String, Vec<String>>,
     parsed: RefCell<BTreeMap<String, Option<Vec<Specifier>>>>,
     python: RefCell<BTreeMap<String, Option<Vec<PythonImport>>>>,
+    ruby: RefCell<BTreeMap<String, Option<Vec<RubyRequire>>>>,
 }
 
 impl Imports {
@@ -93,6 +95,7 @@ impl Imports {
             subpaths,
             parsed: RefCell::new(BTreeMap::new()),
             python: RefCell::new(BTreeMap::new()),
+            ruby: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -109,6 +112,10 @@ impl Imports {
             }
             if file.ends_with(".py") {
                 self.python_loads(&file, &mut loads, &mut queue);
+                continue;
+            }
+            if file.ends_with(".rb") {
+                self.ruby_loads(&file, &mut loads, &mut queue);
                 continue;
             }
             let Some(specifiers) = self.specifiers(&file) else {
@@ -205,6 +212,81 @@ impl Imports {
                     names,
                 } => {
                     queue.extend(self.python_resolve(file, &module, level, &names));
+                }
+            }
+        }
+    }
+
+    /// What a Ruby file loads: what it requires by a literal path, relative
+    /// to it or on the load path a runner sets up (`lib`, `spec`, `test`),
+    /// and, for a spec, what `.rspec` requires before every one. A feature
+    /// found nowhere in the project is a gem's or the standard library's; a
+    /// computed path, a glob of support files, or a change to `$LOAD_PATH`
+    /// leaves the answer open.
+    fn ruby_loads(&self, file: &str, loads: &mut Loads, queue: &mut VecDeque<String>) {
+        let exists = |path: &Path| normal(path).filter(|path| self.root.join(path).is_file());
+        let feature = |name: &str| {
+            let name = name.strip_suffix(".rb").unwrap_or(name);
+            ["lib", "spec", "test", ""]
+                .iter()
+                .find_map(|base| exists(&Path::new(base).join(format!("{name}.rb"))))
+        };
+        if file.ends_with("_spec.rb")
+            && let Ok(options) = fs::read_to_string(self.root.join(".rspec"))
+        {
+            let words = options.split_whitespace().collect::<Vec<_>>();
+            for pair in words.windows(2) {
+                if matches!(pair[0], "--require" | "-r")
+                    && let Some(required) = feature(pair[1])
+                {
+                    queue.push_back(required);
+                }
+            }
+            for word in &words {
+                if let Some(name) = word.strip_prefix("--require=")
+                    && let Some(required) = feature(name)
+                {
+                    queue.push_back(required);
+                }
+            }
+        }
+        let known = self.ruby.borrow().get(file).cloned();
+        let requires = known.unwrap_or_else(|| {
+            let parsed = fs::read_to_string(self.root.join(file))
+                .ok()
+                .and_then(|source| ruby_requires(&source));
+            self.ruby
+                .borrow_mut()
+                .insert(file.to_owned(), parsed.clone());
+            parsed
+        });
+        let Some(requires) = requires else {
+            loads
+                .open
+                .get_or_insert_with(|| format!("{file} could not be read"));
+            return;
+        };
+        let directory = Path::new(file).parent().unwrap_or(Path::new(""));
+        for required in requires {
+            match required {
+                RubyRequire::Relative(path) => {
+                    let path = path.strip_suffix(".rb").unwrap_or(&path).to_owned();
+                    match exists(&directory.join(format!("{path}.rb"))) {
+                        Some(next) => queue.push_back(next),
+                        None => {
+                            loads.open.get_or_insert_with(|| {
+                                format!("{file} requires '{path}', which Supercov cannot find")
+                            });
+                        }
+                    }
+                }
+                RubyRequire::Feature(name) => {
+                    if let Some(next) = feature(&name) {
+                        queue.push_back(next);
+                    }
+                }
+                RubyRequire::Computed(why) => {
+                    loads.open.get_or_insert_with(|| format!("{file} {why}"));
                 }
             }
         }
@@ -768,6 +850,65 @@ fn python_imports(source: &str) -> Option<Vec<PythonImport>> {
 
 /// The test runner a configuration file belongs to, by its name. A change to
 /// one runner's configuration changes nothing another runner does.
+#[derive(Debug, Clone)]
+enum RubyRequire {
+    /// `require_relative "x"`.
+    Relative(String),
+    /// `require "x"`, `load "x.rb"`, `autoload :X, "x"`: on the load path.
+    Feature(String),
+    Computed(&'static str),
+}
+
+/// What a Ruby file requires, or None when it does not parse.
+fn ruby_requires(source: &str) -> Option<Vec<RubyRequire>> {
+    use ruby_prism::{CallNode, GlobalVariableReadNode, Visit};
+    let parsed = ruby_prism::parse(source.as_bytes());
+    if parsed.errors().next().is_some() {
+        return None;
+    }
+    struct Requires(Vec<RubyRequire>);
+    impl<'pr> Visit<'pr> for Requires {
+        fn visit_call_node(&mut self, node: &CallNode<'pr>) {
+            let name = node.name();
+            let name = name.as_slice();
+            if node.receiver().is_none()
+                && matches!(
+                    name,
+                    b"require" | b"require_relative" | b"load" | b"autoload"
+                )
+            {
+                let arguments = node
+                    .arguments()
+                    .map(|arguments| arguments.arguments().iter().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                // `autoload :Name, "path"` names its path second.
+                let path = if name == b"autoload" {
+                    arguments.get(1)
+                } else {
+                    arguments.first()
+                };
+                let literal = path
+                    .and_then(|path| path.as_string_node())
+                    .and_then(|path| String::from_utf8(path.unescaped().to_vec()).ok());
+                self.0.push(match (literal, name) {
+                    (Some(path), b"require_relative") => RubyRequire::Relative(path),
+                    (Some(path), _) => RubyRequire::Feature(path),
+                    (None, _) => RubyRequire::Computed("requires a computed path"),
+                });
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+        fn visit_global_variable_read_node(&mut self, node: &GlobalVariableReadNode<'pr>) {
+            if matches!(node.name().as_slice(), b"$LOAD_PATH" | b"$:") {
+                self.0.push(RubyRequire::Computed("changes $LOAD_PATH"));
+            }
+        }
+    }
+    let mut requires = Requires(Vec::new());
+    requires.visit(&parsed.node());
+    Some(requires.0)
+}
+
 pub fn configuration_runner(file: &str) -> Option<&'static str> {
     let name = file.rsplit('/').next()?.to_ascii_lowercase();
     if !name.contains(".config.") && !name.contains(".workspace.") {
@@ -938,6 +1079,49 @@ mod tests {
             "{e2e:?}"
         );
         assert!(imports.loads(["tests/odd/test_c.py"]).open.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_ruby_spec_loads_what_it_requires_and_what_rspec_requires() {
+        let root = project(&[
+            (".rspec", "--require spec_helper\n--format documentation\n"),
+            (
+                "spec/spec_helper.rb",
+                "require \"json\"\nrequire_relative \"support/factories\"\n",
+            ),
+            ("spec/support/factories.rb", "module Factories; end\n"),
+            ("spec/support/unused.rb", "module Unused; end\n"),
+            (
+                "spec/orders_spec.rb",
+                "require \"orders\"\nRSpec.describe(Orders) { }\n",
+            ),
+            (
+                "lib/orders.rb",
+                "autoload :Refunds, \"orders/refunds\"\nmodule Orders; end\n",
+            ),
+            ("lib/orders/refunds.rb", "module Refunds; end\n"),
+            (
+                "spec/glob_spec.rb",
+                "Dir[File.join(__dir__, \"support/*.rb\")].each { |f| require f }\n",
+            ),
+            ("spec/path_spec.rb", "$LOAD_PATH.unshift(\"vendor\")\n"),
+        ]);
+        let imports = Imports::new(&root);
+        let loads = imports.loads(["spec/orders_spec.rb"]);
+        assert_eq!(loads.open, None);
+        assert_eq!(
+            loads.files.into_iter().collect::<Vec<_>>(),
+            [
+                "lib/orders.rb",
+                "lib/orders/refunds.rb",
+                "spec/orders_spec.rb",
+                "spec/spec_helper.rb",
+                "spec/support/factories.rb",
+            ]
+        );
+        assert!(imports.loads(["spec/glob_spec.rb"]).open.is_some());
+        assert!(imports.loads(["spec/path_spec.rb"]).open.is_some());
         fs::remove_dir_all(root).unwrap();
     }
 
