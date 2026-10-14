@@ -96,7 +96,14 @@ Both are useful:
 
 Code that runs while no test is running counts in the run's total and in no
 test's: a server starting before the first test, modules loading, work between
-tests. When a run has any, the summary's `By test kind` table ends with a
+tests.
+
+A request to your app server that names no test -- a webhook a mock Stripe
+server sends, a job a test set off -- is credited to the test running when the
+server did the work, if that test was the only one running then. The run's
+`Attribution` line counts those tests as `with server work credited by time`,
+and each one's `runs <id> test` page says so. Work done while tests ran at
+once, or while none ran, stays no test's. When a run has any, the summary's `By test kind` table ends with a
 `no test` row for what only that covered, which is why a run with one kind of
 test can show a total above that kind's own:
 

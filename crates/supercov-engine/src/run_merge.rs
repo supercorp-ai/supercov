@@ -254,9 +254,21 @@ pub fn recorded_by_another_release(run: &StoredRun) -> String {
             "it was recorded by Supercov {version}, which instruments differently from Supercov {}",
             env!("CARGO_PKG_VERSION")
         ),
-        _ => format!(
-            "it was recorded by an earlier Supercov, which instruments differently from Supercov {}",
+        // Runs say which release recorded them from 4.7.0 on, so one that
+        // does not is older; its date is what else it can say.
+        None => format!(
+            "it was recorded{} by a Supercov older than 4.7.0, which instruments differently from Supercov {}",
+            run.metadata
+                .started_at
+                .get(..10)
+                .map(|day| format!(" on {day}"))
+                .unwrap_or_default(),
             env!("CARGO_PKG_VERSION")
+        ),
+        // The same release number instrumenting differently: a build of
+        // Supercov's own source between releases.
+        Some(version) => format!(
+            "it was recorded by another build of Supercov {version}, which instruments differently from this one"
         ),
     }
 }

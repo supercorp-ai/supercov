@@ -4520,6 +4520,20 @@ fn a_run_of_another_release_is_named_for_what_it_is() {
         "{}",
         left.stdout()
     );
+
+    // A run from before runs said which release made them: older than the
+    // first that did, on the day it ran.
+    metadata.as_object_mut().unwrap().remove("recordedBy");
+    let day = metadata["startedAt"].as_str().unwrap()[..10].to_owned();
+    project.write(&path, &serde_json::to_string_pretty(&metadata).unwrap());
+    let refused = project.supercov(&["merge", &older, &newer]);
+    assert!(
+        refused.stderr().contains(&format!(
+            "it was recorded on {day} by a Supercov older than 4.7.0"
+        )),
+        "{}",
+        refused.stderr()
+    );
 }
 
 #[test]

@@ -274,6 +274,9 @@ pub struct CoverageRunnersData {
 pub struct TestAttributionCounts {
     /// Credited with exactly what they reached.
     pub exact: usize,
+    /// Credited with exactly what they reached, and with server work no
+    /// request named that ran while each was the only test running.
+    pub by_time: usize,
     /// Credited with some of what they reached, and no way to say how much.
     pub partial: usize,
     /// Credited with none of it; what they reached is in the run's totals.
@@ -282,7 +285,7 @@ pub struct TestAttributionCounts {
 
 impl TestAttributionCounts {
     pub fn total(&self) -> usize {
-        self.exact + self.partial + self.run_wide
+        self.exact + self.by_time + self.partial + self.run_wide
     }
 }
 
@@ -2874,6 +2877,7 @@ pub fn coverage_summary_query(
                 match test.attribution.as_str() {
                     crate::coverage_report::ATTRIBUTION_RUN_WIDE => counts.run_wide += 1,
                     crate::coverage_report::ATTRIBUTION_PARTIAL => counts.partial += 1,
+                    crate::coverage_report::ATTRIBUTION_BY_TIME => counts.by_time += 1,
                     _ => counts.exact += 1,
                 }
             }

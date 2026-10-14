@@ -1579,6 +1579,7 @@ fn test_summary_record(
         crate::coverage_report::ATTRIBUTION_EXACT => 0,
         crate::coverage_report::ATTRIBUTION_RUN_WIDE => 1,
         crate::coverage_report::ATTRIBUTION_PARTIAL => 2,
+        crate::coverage_report::ATTRIBUTION_BY_TIME => 3,
         _ => return Err(CoverageIndexError::InvalidRecord("test attribution")),
     };
     record[2] = match test.outcome.as_str() {
@@ -3341,6 +3342,7 @@ impl<'a> CoverageIndex<'a> {
                     0 => crate::coverage_report::ATTRIBUTION_EXACT,
                     1 => crate::coverage_report::ATTRIBUTION_RUN_WIDE,
                     2 => crate::coverage_report::ATTRIBUTION_PARTIAL,
+                    3 => crate::coverage_report::ATTRIBUTION_BY_TIME,
                     _ => return Err(CoverageIndexError::InvalidRecord("test attribution")),
                 }
                 .into(),

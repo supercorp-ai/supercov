@@ -2,9 +2,15 @@
 
 ## Unreleased
 
+**Added**
+
+- Server work that no request named is credited to the test that was running: a webhook a mock Stripe server sends to the app, a job a test set off. It counted as no test's, and the tests whose only coverage it was were flagged as recording none. A test is credited only when it was the only one running when the server did the work, and the run's `Attribution` line and the test's own page say it was credited by time.
+
 **Changed**
 
+- `merge` names a run recorded before 4.7.0 as recorded by a Supercov older than 4.7.0, on the day it ran, instead of "an earlier Supercov". Runs record their release from 4.7.0 on.
 - `supercov --help` lists the settings a measured command reads from its environment (`SUPERCOV_SOURCE_ROOTS`, `SUPERCOV_TEST_KIND`, `SUPERCOV_RUN_ID_FILE`, `SUPERCOV_SOURCE_TOOLS`, `SUPERCOV_KEEP_WORKSPACE`). They were described only in the CLI guide.
+
 
 ## 4.7.0
 
