@@ -212,6 +212,24 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
     assert.match(page(webhook, paidRun), /Attribution {6}1 exact, 1 with server work credited by time/u);
   }
 
+  // A server the suite runs in its own process, as a live server fixture
+  // does: started in a thread before the tests, called by them, its
+  // requests naming no test. Each is the test's that was running.
+  const live = resolve(base, 'live');
+  write(live, {
+    'app/__init__.py': '',
+    'app/grades.py': grades,
+    'tests/__init__.py': '',
+    'tests/test_live.py': "import threading\nimport unittest\nimport urllib.request\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n\nfrom app.grades import grade\n\n\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        body = grade(int(self.path.rsplit(\"=\", 1)[1])).encode()\n        self.send_response(200)\n        self.send_header(\"content-length\", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def log_message(self, *args):\n        pass\n\n\nserver = None\n\n\ndef setUpModule():\n    global server\n    server = ThreadingHTTPServer((\"127.0.0.1\", 0), Handler)\n    threading.Thread(target=server.serve_forever, daemon=True).start()\n\n\ndef tearDownModule():\n    server.shutdown()\n\n\ndef get(score):\n    return urllib.request.urlopen(f\"http://127.0.0.1:{server.server_address[1]}/?score={score}\").read().decode()\n\n\nclass Live(unittest.TestCase):\n    def test_a_high_score(self):\n        self.assertEqual(get(95), \"A\")\n\n    def test_a_low_score(self):\n        self.assertEqual(get(10), \"fail\")\n",
+  });
+  const liveRun = run(live, binary, ['--', python, '-m', 'unittest', 'discover', '-s', 'tests', '-t', '.']);
+  assert.equal(liveRun.status, 0, liveRun.stdout + liveRun.stderr);
+  const [liveId] = runs(live);
+  const low = page(live, liveId, 'test', 'tests.test_live.Live.test_a_low_score');
+  assert.deepEqual(low.match(/app\/grades\.py:\d+/gu), ['app/grades.py:1', 'app/grades.py:2', 'app/grades.py:4', 'app/grades.py:6'], low);
+  assert.match(low, /credited by time/u, low);
+  assert.deepEqual(page(live, liveId, 'test', 'tests.test_live.Live.test_a_high_score').match(/app\/grades\.py:\d+/gu), ['app/grades.py:1', 'app/grades.py:2', 'app/grades.py:3']);
+
   // A Node server beside it: the browser run is the run, and the server's
   // is published beside it. Merging two runs of each merges each.
   const mixed = resolve(base, 'mixed');

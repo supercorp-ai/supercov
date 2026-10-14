@@ -390,6 +390,8 @@ class Runtime:
         self.under_root = False
         self.context = contextvars.ContextVar("supercov_python_context", default=0)
         self.identities: dict[int, dict] = {}
+        # The phase a test started this process in, through SUPERCOV_CONTEXT.
+        self.inherited_identity = None
         self.next_context = 1
         self.asserted: set[int] = set()
         # (context, file, line) of every site probe already handled.
@@ -1269,6 +1271,7 @@ class Runtime:
                 identity = _inherited_identity(inherited)
                 if identity is not None:
                     self.switch(identity)
+                    self.inherited_identity = self.current_identity()
             except (ValueError, KeyError, TypeError):
                 self.limitation("python-inherited-context-invalid", "SUPERCOV_CONTEXT was not a valid Supercov identity")
         atexit.register(self.close)
@@ -1485,6 +1488,7 @@ class _RequestBody:
 
 REQUEST_WORKER = "supercov-request"
 _requests = itertools.count(1)
+_in_request = contextvars.ContextVar("supercov_in_request", default=False)
 
 
 def _enter_request(runtime, identity):
@@ -1494,24 +1498,32 @@ def _enter_request(runtime, identity):
     library's server).
 
     A request that names no test -- a webhook from a mock Supercov does not
-    measure -- runs as a numbered request of its own, which the report gives
-    to the test that was running when it came, if only one was."""
+    measure, a browser's request to a live server a pytest suite runs in a
+    thread -- runs as a numbered request of its own, which the report gives
+    to the test that was running when it came, if only one was. Not as the
+    phase its thread was started in: a live server started in the first
+    test's setup made every request that setup's. A process a test started
+    stays that test's."""
     if identity is None:
-        current = runtime.current_identity()
-        if current is not None:
-            # Already a request of this server's, or a test's own process.
+        if _in_request.get() or runtime.inherited_identity is not None:
             return None
         identity = {"worker": REQUEST_WORKER, "test": str(next(_requests)), "retry": 0, "phase": "call"}
     elif runtime.current_identity() == identity:
         return None
     leave = runtime.context.get()
     runtime.switch(identity)
-    return leave
+    return leave, _in_request.set(True)
 
 
-def _leave_request(runtime, leave):
-    if leave is not None:
+def _leave_request(runtime, entered):
+    if entered is not None:
+        leave, token = entered
         runtime.switch(runtime.identities.get(leave))
+        try:
+            _in_request.reset(token)
+        except (ValueError, RuntimeError):
+            # Left from another context than it was entered in.
+            _in_request.set(False)
 
 
 def _install_propagation(runtime: Runtime) -> None:

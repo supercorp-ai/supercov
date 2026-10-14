@@ -252,6 +252,12 @@ tests from. The pull-request comment Action reports each server's run in a
 section of its own. Each run's figures stand alone, and `supercov merge`
 merges each language's runs separately.
 
+A server the suite runs in its own process works without Playwright: a
+pytest-django `live_server`, Django's `LiveServerTestCase`, or a Flask app in
+a thread that a Selenium or pytest-playwright suite drives. Its requests name
+no test, and each is credited to the test that was running in that process
+when it came, and said to be.
+
 The server runs in Supercov's copy of the project. A virtual environment
 inside the project is used as it is, and a package installed editable from the
 checkout is measured too. `SUPERCOV_SOURCE_ROOTS` applies to both languages:
@@ -324,8 +330,13 @@ run of its own, published as the run or beside the browser run. Gems installed
 into the project (`bundle config set path vendor/bundle`) are used from the
 copy the suite runs in.
 
+A Rails system test runs its app in Capybara's Puma, in the test process: each
+request is credited to the test that was running when it came, and said to
+be.
+
 ```sh
 npx supercov -- npx playwright test
+npx supercov -- bin/rails test:system
 ```
 
 ## Crediting a test with what it reached

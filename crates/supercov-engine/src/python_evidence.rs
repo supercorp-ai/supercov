@@ -345,11 +345,15 @@ struct Evidence {
     /// The layout's ids, which slot hits are positions in.
     slot_ids: Vec<String>,
     /// Each request a server answered that named no test: its identity, when
-    /// it came, its process's transport, and that process's worker.
-    requests: Vec<(Identity, i64, String, String)>,
+    /// it came, where in its process's records, that process's transport, and
+    /// its worker.
+    requests: Vec<(Identity, i64, usize, String, String)>,
     /// By transport, the browser test attempts a process answered a request
     /// of.
     served_by: BTreeMap<String, BTreeSet<(String, String, usize)>>,
+    /// When each of the suite's own test phases started, and in which
+    /// process.
+    phase_starts: Vec<crate::served_tests::PhaseStart>,
 }
 
 use crate::served_tests::REQUEST_WORKER;
@@ -1186,6 +1190,7 @@ fn apply_transport(
                     evidence.requests.push((
                         identity.clone(),
                         at,
+                        line_number,
                         name.to_owned(),
                         process_worker.clone().unwrap_or_else(|| "main".into()),
                     ));
@@ -1193,15 +1198,19 @@ fn apply_transport(
                     if identity.phase == "call" {
                         before_assertion.insert(ctx, Observations::default());
                     }
+                    let attempt = (
+                        identity.worker.clone(),
+                        identity.test.clone(),
+                        identity.retry,
+                    );
+                    evidence
+                        .phase_starts
+                        .push((name.to_owned(), line_number, attempt.clone()));
                     evidence
                         .served_by
                         .entry(name.to_owned())
                         .or_default()
-                        .insert((
-                            identity.worker.clone(),
-                            identity.test.clone(),
-                            identity.retry,
-                        ));
+                        .insert(attempt);
                 }
                 contexts.insert(ctx, identity);
             }
@@ -1710,18 +1719,23 @@ pub fn build_python_frontend_run(
     root: &Path,
 ) -> Result<PythonFrontendRun, PythonEvidenceError> {
     let mut evidence = read_evidence_directory(evidence_directory, run_id)?;
-    // A server a test suite starts outside any test numbers the requests no
-    // test named; with no browser tests to give them to, they are what they
-    // were before, the process's background.
-    credit_requests_by_time(&mut evidence, &[]);
-    build_from_evidence(
+    // A server the suite runs in its own process -- a live server a browser
+    // or the test itself calls -- numbers the requests no test named: each
+    // is the suite's test running then in that process, if only one was.
+    let order = crate::served_tests::InProcess::new(&evidence.phase_starts);
+    let by_time = credit_requests_by_time(&mut evidence, |_, transport, _, seq| {
+        order.owner(transport, seq).cloned()
+    });
+    let mut run = build_from_evidence(
         evidence,
         manifest,
         run_id,
         generated_at,
         test_exit_code,
         root,
-    )
+    )?;
+    mark_by_time(&mut run, &by_time);
+    Ok(run)
 }
 
 pub use crate::served_tests::ServedTest;
@@ -1757,7 +1771,10 @@ pub fn build_python_server_run(
             .insert(key.clone(), test.provenance.runner.clone());
         by_attempt.insert(key, test);
     }
-    let by_time = credit_requests_by_time(&mut evidence, served);
+    let by_time = credit_requests_by_time(&mut evidence, |evidence, transport, at, _| {
+        crate::served_tests::owner(served, evidence.served_by.get(transport), at)
+            .map(|test| (test.worker.clone(), test.test_id.clone(), test.retry))
+    });
     let mut run = build_from_evidence(
         evidence,
         manifest,
@@ -1797,31 +1814,48 @@ pub fn build_python_server_run(
     Ok(run)
 }
 
-/// Give each request that named no test to the browser test attempt that
-/// was running when it came, if only one was: among the attempts its
-/// process answered a request of, where it answered any -- with a server
-/// per worker, the worker's test, whatever other workers ran meanwhile --
-/// and among every attempt otherwise. What no single attempt owns is the
-/// process's background. Returns the attempts credited so.
+/// Say of each attempt credited with a request by time that it was.
+fn mark_by_time(run: &mut PythonFrontendRun, by_time: &BTreeSet<(String, String, usize)>) {
+    for raw in &mut run.request.raw_results {
+        let Some(scope) = &raw.scope else { continue };
+        let key = (
+            scope.worker_id.clone(),
+            scope.test_id.clone(),
+            raw.retry.unwrap_or(0),
+        );
+        if by_time.contains(&key) && raw.attribution == crate::coverage_report::ATTRIBUTION_EXACT {
+            raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
+        }
+    }
+}
+
+/// Give each request that named no test to the test attempt `owner` names
+/// for it -- from its transport, when it came and where in its process's
+/// records -- or, where none, to its process's background. Returns the
+/// attempts credited so.
 fn credit_requests_by_time(
     evidence: &mut Evidence,
-    served: &[ServedTest],
+    owner: impl Fn(&Evidence, &str, i64, usize) -> Option<(String, String, usize)>,
 ) -> BTreeSet<(String, String, usize)> {
+    let requests = std::mem::take(&mut evidence.requests);
+    let owners = requests
+        .iter()
+        .map(|(_, at, seq, transport, _)| owner(evidence, transport, *at, *seq))
+        .collect::<Vec<_>>();
     let mut credited = BTreeSet::new();
-    for (identity, at, transport, process_worker) in std::mem::take(&mut evidence.requests) {
+    for ((identity, _, _, _, process_worker), owner) in requests.into_iter().zip(owners) {
         let Some(observations) = evidence.per_identity.remove(&identity) else {
             continue;
         };
-        let owner = crate::served_tests::owner(served, evidence.served_by.get(&transport), at);
         let into = match owner {
-            Some(test) => {
-                credited.insert((test.worker.clone(), test.test_id.clone(), test.retry));
+            Some((worker, test, retry)) => {
+                credited.insert((worker.clone(), test.clone(), retry));
                 evidence
                     .per_identity
                     .entry(Identity {
-                        worker: test.worker.clone(),
-                        test: test.test_id.clone(),
-                        retry: test.retry,
+                        worker,
+                        test,
+                        retry,
                         phase: "call".into(),
                     })
                     .or_default()
@@ -2381,10 +2415,10 @@ mod tests {
                 (alone.clone(), observed("alone")),
             ]),
             requests: vec![
-                (first, 150, "a.mmap".into(), "main".into()),
-                (late, 250, "a.mmap".into(), "main".into()),
-                (mocked, 150, "b.mmap".into(), "main".into()),
-                (alone, 350, "b.mmap".into(), "main".into()),
+                (first, 150, 1, "a.mmap".into(), "main".into()),
+                (late, 250, 2, "a.mmap".into(), "main".into()),
+                (mocked, 150, 1, "b.mmap".into(), "main".into()),
+                (alone, 350, 2, "b.mmap".into(), "main".into()),
             ],
             served_by: BTreeMap::from([(
                 "a.mmap".to_owned(),
@@ -2392,7 +2426,10 @@ mod tests {
             )]),
             ..Evidence::default()
         };
-        let credited = credit_requests_by_time(&mut evidence, &tests);
+        let credited = credit_requests_by_time(&mut evidence, |evidence, transport, at, _| {
+            crate::served_tests::owner(&tests, evidence.served_by.get(transport), at)
+                .map(|test| (test.worker.clone(), test.test_id.clone(), test.retry))
+        });
         assert_eq!(
             credited,
             BTreeSet::from([
