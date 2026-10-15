@@ -4,6 +4,22 @@ import { appendFileSync, mkdirSync, statSync } from "node:fs";
 import Module, { syncBuiltinESMExports } from "node:module";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+
+// In a container Supercov's `docker` launcher mounts the run's directory
+// into, its user (root) owns what it creates there; a directory made with
+// the usual mask would keep the run, outside, from removing what goes in it.
+function makeDirectory(directory) {
+    if (process.env.SUPERCOV_CONTAINER !== "1")
+        return mkdirSync(directory, { recursive: true });
+    const previous = process.umask(0);
+    try {
+        return mkdirSync(directory, { recursive: true, mode: 0o777 });
+    }
+    finally {
+        process.umask(previous);
+    }
+}
+
 const HOST_PATH_KEYS = ["hostPath", "source", "src", "localPath"];
 const GUEST_PATH_KEYS = [
     "guestPath",
@@ -83,7 +99,7 @@ function record(value) {
             ppid: process.ppid,
             ...value,
         })}\n`;
-        mkdirSync(dirname(path), { recursive: true });
+        makeDirectory(dirname(path));
         appendFileSync(path, line);
         executionLog = { token: executionLog.token, path, size: executionLog.size + Buffer.byteLength(line) };
     }

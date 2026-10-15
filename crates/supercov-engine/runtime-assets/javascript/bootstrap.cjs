@@ -19,21 +19,28 @@ else {
         // <workspace>/.supercov/node_modules/bootstrap.cjs
         const root = path.resolve(__dirname, "..", "..");
         const settings = JSON.parse(fs.readFileSync(path.join(__dirname, "run.json"), "utf8"));
-        const moved = (value) => typeof value === "string" && settings.root !== root
-            ? value.split(settings.root).join(root)
+        // An image built from the workspace holds a copy of it, but its
+        // evidence belongs where the run reads it: when the run's own
+        // directory is mounted here at its path (Supercov's `docker` launcher
+        // mounts it), the host's paths are kept, and a copy that goes away
+        // with its container is not written to.
+        const hostVisible = settings.root !== root && fs.existsSync(path.join(settings.root, ".supercov"));
+        const here = hostVisible ? settings.root : root;
+        const moved = (value) => typeof value === "string" && settings.root !== here
+            ? value.split(settings.root).join(here)
             : value;
         // Settings carried over from the host name the host's paths, which do
         // not exist here; replace them all rather than keep a mixture.
-        const foreign = process.env.SUPERCOV_PROJECT_ROOT !== root;
+        const foreign = process.env.SUPERCOV_PROJECT_ROOT !== here;
         for (const [name, value] of Object.entries(settings.environment)) {
             if (foreign || process.env[name] === undefined)
                 process.env[name] = moved(value);
         }
-        process.env.SUPERCOV_PROJECT_ROOT = root;
+        process.env.SUPERCOV_PROJECT_ROOT = here;
         process.env.SUPERCOV_EXECUTION_LOG_SHARD ??= `bootstrap-${process.pid}-${Date.now()}`;
         require("./runtime.mjs");
         // Counted in the run's summary: coverage from here belongs to no test.
-        require("./launchSupervisor.mjs").recordExecution({ event: "guest-process", guestRoot: root });
+        require("./launchSupervisor.mjs").recordExecution({ event: "guest-process", guestRoot: here });
     }
     catch {
         // Without its settings or its runtime nothing can be recorded here,

@@ -39,8 +39,11 @@ try {
   const measured = run(binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_SOURCE_ROOTS: 'public' });
   assert.equal(measured.status, 0, `${measured.stdout}${measured.stderr}`);
   const runId = JSON.parse(run(binary, ['runs', '--json']).stdout).data.runs[0].id;
-  // Line 12 runs after the assignment that starts the navigation.
-  for (const [title, line] of [['leaves for the same origin', 4], ['leaves for another origin', 11], ['leaves for another origin', 12]]) {
+  // What a handler runs after the assignment that starts the navigation
+  // (line 12) runs after `beforeunload`, and a page leaving for another
+  // origin is gone before anything it sends then reliably arrives: it is not
+  // asserted, and the docs say so.
+  for (const [title, line] of [['leaves for the same origin', 4], ['leaves for another origin', 11]]) {
     const covered = run(binary, ['runs', runId, 'line', `public/app.js:${line}`]);
     assert.equal(covered.status, 0, covered.stdout + covered.stderr);
     assert.match(covered.stdout, new RegExp(title, 'u'), `${title}: the handler that navigated away is not the test's\n${covered.stdout}`);

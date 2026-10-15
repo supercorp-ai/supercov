@@ -866,6 +866,56 @@ pub fn run_direct_javascript(
     {
         overrides.insert("PATH".into(), path.to_owned());
     }
+    // A server compose builds from the copy runs in a container nothing of
+    // the run reaches. The `docker` launcher gives each service built from
+    // the copy the run's settings and Supercov's directory, mounted at its
+    // path (docker_servers.rs): a Go or Java server's windows and a Node
+    // server's evidence are written where the run reads them. The run stops
+    // what it started before reading.
+    let docker_state = root.join(".supercov/work").join(&run_id).join("docker");
+    let mut docker_environment = overrides
+        .keys()
+        .filter(|name| name.starts_with("SUPERCOV_"))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    docker_environment.extend(
+        servers
+            .iter()
+            .flat_map(|server| server.environment().into_keys()),
+    );
+    let docker_environment = docker_environment.into_iter().collect::<Vec<_>>();
+    let docker_servers = !project.source_files.is_empty() || !servers.is_empty();
+    if cfg!(unix) && docker_servers {
+        let launchers = workspace.join(".supercov/node_modules/.docker");
+        let path = overrides
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os("PATH"));
+        if let Some(path) = path
+            && crate::docker_servers::write_launchers(&launchers, &path).is_some()
+            && let Ok(joined) =
+                std::env::join_paths(std::iter::once(launchers).chain(std::env::split_paths(&path)))
+            && let Some(joined) = joined.to_str()
+        {
+            overrides.insert("PATH".into(), joined.to_owned());
+            overrides.insert(
+                crate::docker_servers::STATE_VARIABLE.into(),
+                docker_state.display().to_string(),
+            );
+            overrides.insert(
+                crate::docker_servers::MOUNT_VARIABLE.into(),
+                root.join(".supercov").display().to_string(),
+            );
+            overrides.insert(
+                crate::docker_servers::COPY_VARIABLE.into(),
+                workspace.display().to_string(),
+            );
+            overrides.insert(
+                crate::docker_servers::ENVIRONMENT_VARIABLE.into(),
+                docker_environment.join(","),
+            );
+        }
+    }
     // What bootstrap.cjs installs in a process that runs the workspace without
     // these settings: one started in a container or VM the workspace is
     // mounted into. It moves `root` to where it sees the workspace from.
@@ -974,6 +1024,8 @@ pub fn run_direct_javascript(
             return Err(message.into());
         }
     };
+    // A server compose left running writes its last window when stopped.
+    crate::docker_servers::stop_started(&docker_state);
     let test_command_ms = execution
         .phases
         .iter()

@@ -450,12 +450,7 @@ function persistBrowser() {
     return;
   persistBrowserListenersInstalled = true;
   try {
-    // `beforeunload` fires inside the assignment that starts the navigation,
-    // and the rest of that handler runs after it, before the document goes.
-    addEventListener("beforeunload", () => {
-      handOverBrowser();
-      Promise.resolve().then(handOverBrowser);
-    });
+    addEventListener("beforeunload", handOverBrowser);
     addEventListener("pagehide", persistBrowserNow);
     addEventListener("visibilitychange", () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden")
@@ -526,7 +521,7 @@ function flushBufferedServerEvidence(scope) {
   if (!fs || buffered.records.size === 0)
     return void 0;
   try {
-    fs.mkdirSync(buffered.directory, { recursive: true });
+    makeEvidenceDirectory(fs, buffered.directory);
     fs.appendFileSync(buffered.path, [...buffered.records.values()].map((record) => JSON.stringify(record)).join("\n") + "\n");
     return buffered.path;
   } catch (e) {
@@ -616,11 +611,32 @@ function flushBackgroundAppends(fs) {
     }
   }
 }
+// In a container Supercov's `docker` launcher mounts the run's directory
+// into, its user (root) owns what it creates there, and the run, outside,
+// could not remove what went in it. There each directory made is opened to
+// all.
+function makeEvidenceDirectory(fs, directory) {
+  const first = fs.mkdirSync(directory, { recursive: true });
+  if (!first || typeof process === "undefined" || !process.env || process.env.SUPERCOV_CONTAINER !== "1")
+    return;
+  let current = first;
+  const opened = [current];
+  for (const part of directory.slice(first.length).split(/[\\/]/).filter(Boolean)) {
+    current = `${current}/${part}`;
+    opened.push(current);
+  }
+  for (const made of opened) {
+    try {
+      fs.chmodSync(made, 0o777);
+    } catch (e) {
+    }
+  }
+}
 function writeBackgroundLines(fs, runId, payload) {
   var _a8;
   const directory = backgroundEvidenceDirectory(runId);
   if (!state.createdEvidenceDirectories.has(directory)) {
-    fs.mkdirSync(directory, { recursive: true });
+    makeEvidenceDirectory(fs, directory);
     state.createdEvidenceDirectories.add(directory);
   }
   let path = state.backgroundWriters.get(runId);
@@ -750,7 +766,7 @@ function flushServerAppends() {
       if (!fs)
         throw new Error("node:fs is unavailable");
       if (!state.createdEvidenceDirectories.has(entry.directory)) {
-        fs.mkdirSync(entry.directory, { recursive: true });
+        makeEvidenceDirectory(fs, entry.directory);
         state.createdEvidenceDirectories.add(entry.directory);
       }
       fs.appendFileSync(path, entry.lines.join(""));

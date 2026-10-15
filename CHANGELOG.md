@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- Browser tests of a server `docker compose` builds measure it: Node, Python, Ruby, Go, Java and Kotlin. The image is built from Supercov's copy, and Supercov's `docker` gives each service built from it the run's settings and the project's `.supercov`, mounted at its path, so each test is credited its own work as for a server started directly. Those services are built first, so an image left from an earlier run is never used, and the containers are stopped, not removed, when the command ends. A Python or Ruby image that moves the code (`COPY backend/ /srv/`) is matched to the copy by its files' paths.
+- A project whose Playwright is installed beside its config alone (`e2e/node_modules`) can be measured from its root, where its server is built. Every worker failed ("Cannot find package '@playwright/test'").
+
+**Fixed**
+
+- TypeScript in a project that builds images stopped at its first probe wherever Supercov's runtime was not installed ("reading 'mcdcBegin'"): a TypeScript server built in a container, or pages an image's build prerenders. Since 4.0 its files carried no copy of the runtime, as JavaScript files do; in such projects they carry one again.
+
 ## 4.10.1
 
 **Added**

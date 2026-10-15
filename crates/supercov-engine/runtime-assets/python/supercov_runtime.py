@@ -42,6 +42,8 @@ PLAN_ENV = "SUPERCOV_PYTHON_PLAN"
 EVIDENCE_DIR_ENV = "SUPERCOV_PYTHON_EVIDENCE_DIR"
 RUN_ID_ENV = "SUPERCOV_RUN_ID"
 SOURCE_ROOT_ENV = "SUPERCOV_PYTHON_SOURCE_ROOT"
+# Set by Supercov's `docker` launcher in a service built from the copy.
+CONTAINER_ENV = "SUPERCOV_CONTAINER"
 WORKER_ENV = "SUPERCOV_PYTHON_WORKER"
 TIMING = bool(os.environ.get("SUPERCOV_PYTHON_TIMING"))
 # Debug only: leave out one piece of the runtime to measure what it costs --
@@ -418,6 +420,16 @@ class Runtime:
         self.index = index
         self.probe_files = index.files
         self.probe_sites = index.sites
+        # In an image built from the copy, the copy's files are at a path of
+        # the image's own (`/app`). Each planned file by its name, to find that
+        # path from the first file imported from it.
+        self.container_candidates: dict[str, list[str]] | None = None
+        if os.environ.get(CONTAINER_ENV) == "1":
+            self.container_candidates = {}
+            for relative in list(index.files) + list(index.sites):
+                self.container_candidates.setdefault(relative.rsplit("/", 1)[-1], []).append(relative)
+        self.container_tried: set[tuple[str, str]] = set()
+        self.container_map: tuple[str, str] | None = None
         self.probe_ids = index.ids
         self.probe_decisions = index.decisions
         self.loaded_decisions: dict[int, _Decision] = {}
@@ -457,7 +469,9 @@ class Runtime:
             self.evidence_dir,
             f"{safe_worker}.{pid}.{self.output_token}.mmap",
         )
-        descriptor = os.open(self.output_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        # Readable outside a container, whose user (root) owns it there.
+        mode = 0o644 if os.environ.get(CONTAINER_ENV) == "1" else 0o600
+        descriptor = os.open(self.output_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, mode)
         try:
             os.ftruncate(descriptor, TRANSPORT_INITIAL_CAPACITY)
             output = _open_transport(descriptor, TRANSPORT_INITIAL_CAPACITY)
@@ -842,8 +856,63 @@ class Runtime:
                         relative = None
                 if relative is not None:
                     break
+            if relative is None and self.container_map is not None:
+                try:
+                    relative = self._mapped_relative(self._realpath(filename if os.path.isabs(filename) else os.path.join(os.getcwd(), filename)))
+                except OSError:
+                    relative = None
+            elif relative is None and self.container_candidates:
+                relative = self._container_relative(filename)
         self.path_cache[filename] = relative
         return relative
+
+    def _container_relative(self, filename: str) -> str | None:
+        """A file of the copy in an image built from it.
+
+        A Dockerfile copies the copy's files to a path of its own, and may
+        move them (`COPY backend/app/ ./app/`): an image file and a planned
+        file that end alike, a directory and the name at least, give the
+        image's prefix for the copy's. The pair is taken only if at least
+        three of the planned files under that prefix (all, when fewer) are at
+        their places in the image too: one generic name, a dependency's
+        `utils.py`, is never taken for the project's.
+        """
+        try:
+            real = self._realpath(filename if os.path.isabs(filename) else os.path.join(os.getcwd(), filename))
+        except OSError:
+            return None
+        parts = real.split(os.sep)
+        planned_files = list(self.probe_files)
+        for relative in self.container_candidates.get(parts[-1], []):
+            planned = relative.split("/")
+            shared = 0
+            while shared < min(len(parts), len(planned)) and parts[-1 - shared] == planned[-1 - shared]:
+                shared += 1
+            if shared < 2:
+                continue
+            image_prefix = os.sep.join(parts[:-shared])
+            copy_prefix = "/".join(planned[:-shared])
+            if (image_prefix, copy_prefix) in self.container_tried:
+                continue
+            self.container_tried.add((image_prefix, copy_prefix))
+            under = [name for name in planned_files if not copy_prefix or name.startswith(copy_prefix + "/")][:64]
+            need = min(3, len(under))
+            if need and sum(
+                os.path.isfile(os.path.join(image_prefix, *name[len(copy_prefix) :].lstrip("/").split("/")))
+                for name in under
+            ) >= need:
+                self.container_map = (image_prefix, copy_prefix)
+                self.container_candidates = None
+                return relative
+        return None
+
+    def _mapped_relative(self, real: str) -> str | None:
+        image_prefix, copy_prefix = self.container_map
+        if not real.startswith(image_prefix + os.sep):
+            return None
+        rest = real[len(image_prefix) + 1 :].replace(os.sep, "/")
+        relative = f"{copy_prefix}/{rest}" if copy_prefix else rest
+        return relative if relative in self.probe_files or relative in self.probe_sites else None
 
     def _realpath(self, path: str) -> str:
         """`os.path.realpath`, resolving each directory once.
@@ -901,13 +970,20 @@ class Runtime:
                 import _posixshmem
             except ImportError:
                 _posixshmem = False
-        if _posixshmem:
+        # A container's shared memory is not the run's: there a slot is a
+        # file in the mounted evidence directory, readable outside it.
+        in_container = os.environ.get(CONTAINER_ENV) == "1"
+        if _posixshmem and not in_container:
             try:
                 return self._create_shared_slot(stem)
             except OSError:
                 pass
         path = stem + SLOT_SUFFIX
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o644 if in_container else 0o600,
+        )
         try:
             os.ftruncate(descriptor, self.slot_bytes)
             slot = _Hits(descriptor, self.slot_bytes, access=mmap.ACCESS_WRITE)

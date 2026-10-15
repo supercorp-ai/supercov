@@ -43,6 +43,11 @@ import sys
 import zlib
 from types import CodeType
 
+# In a container Supercov's `docker` launcher mounts the run's directory into,
+# whatever this writes beside the plan is the container's root's, which the
+# run outside could not remove: there the caches are not written.
+_IN_CONTAINER = os.environ.get("SUPERCOV_CONTAINER") == "1"
+
 
 def _sha256(data: bytes):
     """SHA-256 from CPython's own C implementation, loaded when first used.
@@ -474,6 +479,8 @@ def load_plan(path: str, version: int) -> tuple[str, PlanIndex]:
     if plan.get("version") != version:
         raise RuntimeError(f"unsupported Supercov Python plan version {plan.get('version')!r}")
     index = index_plan(plan)
+    if _IN_CONTAINER:
+        return plan["root"], index
     temporary = None
     try:
         descriptor, temporary = tempfile.mkstemp(dir=os.path.dirname(cache), suffix=".partial")
@@ -669,6 +676,8 @@ class Probing:
                 self._register(constant)
 
     def _store(self, path: str, payload) -> None:
+        if _IN_CONTAINER:
+            return
         import tempfile
 
         try:

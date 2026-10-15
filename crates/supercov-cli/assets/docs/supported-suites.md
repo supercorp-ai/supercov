@@ -452,6 +452,33 @@ is not the one Supercov instruments.
 npx supercov -- npx playwright test
 ```
 
+### A server Docker Compose builds
+
+A Playwright suite whose server `docker compose up` builds (`build:` in the
+compose file) measures it in any of these languages: Node, Python, Ruby, Go,
+Java or Kotlin. The image is built from Supercov's copy, so it holds the
+copy's code. Supercov's `docker` on the suite's PATH gives each service
+built from the copy the run's settings, and mounts the project's `.supercov`
+into it at the same path, so the server writes its coverage where the run
+reads it. Each request or window is credited to its test as for a server
+started directly. Supercov builds those services before starting them, so
+an image left over from an earlier run is never used. When the command ends
+it stops the containers it started; it never removes them.
+
+- Services that pull an image (`image:` with no `build:`) run code nobody
+  instrumented, and are left as they are.
+- A Python or Ruby image may keep the code at a path of its own
+  (`COPY backend/ /srv/`): the runtime matches the image's files to the
+  copy's by their paths' common ending, and only when several of them match.
+- A Go image needs Supercov's runtime package, `_supercov_runtime/` at the
+  module root: copy the whole module (`COPY . .`), not chosen directories.
+- `docker run` and a `docker build` the command makes itself are not
+  covered; neither is Windows.
+
+```sh
+npx supercov -- npx playwright test
+```
+
 ## Java and Kotlin
 
 | Runner | Attribution | Current requirement |
