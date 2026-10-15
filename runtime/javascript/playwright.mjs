@@ -719,6 +719,16 @@ class CoveragePhaseController {
             ArrayBuffer.isView(result))
             return result;
         const candidate = result;
+        // A native dialog is Playwright's own object, returned as it is. Its
+        // `type()` was taken for a locator's action: it returned a promise
+        // where Playwright returns a string, and started a phase whose
+        // activation waits on the page, which runs nothing while the dialog
+        // is open, so the dialog could never be answered and the page never
+        // closed. Nothing a dialog's methods do is the application's work.
+        if (typeof candidate["accept"] === "function" &&
+            typeof candidate["dismiss"] === "function" &&
+            typeof candidate["defaultValue"] === "function")
+            return result;
         if (typeof candidate["contexts"] === "function" &&
             typeof candidate["newContext"] === "function")
             trackBrowser(result);

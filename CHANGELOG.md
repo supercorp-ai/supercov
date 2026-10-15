@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Playwright test could not answer a native dialog (`window.prompt`, `confirm`, `alert`) it waited for: `dialog.type()` returned a promise instead of a string, and `accept()` or `dismiss()` never finished, so the page could not be closed. A dialog is now Playwright's own object, as without Supercov.
+
 ## 4.11.0
 
 **Added**
