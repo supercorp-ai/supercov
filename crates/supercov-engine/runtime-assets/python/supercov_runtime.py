@@ -970,13 +970,20 @@ class Runtime:
                 import _posixshmem
             except ImportError:
                 _posixshmem = False
-        if _posixshmem:
+        # A container's shared memory is not the run's: there a slot is a
+        # file in the mounted evidence directory, readable outside it.
+        in_container = os.environ.get(CONTAINER_ENV) == "1"
+        if _posixshmem and not in_container:
             try:
                 return self._create_shared_slot(stem)
             except OSError:
                 pass
         path = stem + SLOT_SUFFIX
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o644 if in_container else 0o600,
+        )
         try:
             os.ftruncate(descriptor, self.slot_bytes)
             slot = _Hits(descriptor, self.slot_bytes, access=mmap.ACCESS_WRITE)
