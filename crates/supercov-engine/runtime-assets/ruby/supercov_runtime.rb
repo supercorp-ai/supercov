@@ -389,6 +389,7 @@ module Supercov
       @closed = false
       @mutex = Mutex.new
       @seen_lock = Mutex.new
+      @transport_lock = Mutex.new
       @transport = nil
       @transport_pid = nil
       @context = 0
@@ -736,7 +737,7 @@ module Supercov
           thread[:__supercov_context] = nil
           @active_threads.delete(thread)
         else
-          @context = @next_context
+          context = @next_context
           @next_context += 1
           stored = {
             "worker" => identity[:worker] || @worker,
@@ -744,10 +745,16 @@ module Supercov
             "retry" => identity[:retry].to_i,
             "phase" => identity[:phase],
           }
-          @identities[@context] = stored
-          record({ "t" => "phase", "ctx" => @context, "at" => now_ms }.merge(stored))
-          thread[:__supercov_context] = @context
-          @active_threads[thread] = @context
+          @identities[context] = stored
+          # Declared before any thread can read it: a thread with no phase of
+          # its own reads the process-wide one without this lock, and one that
+          # read it first recorded under a context the evidence had not
+          # declared yet (Campfire's system tests, a Puma request beside an
+          # Action Cable thread), and the run could not be published.
+          record({ "t" => "phase", "ctx" => context, "at" => now_ms }.merge(stored))
+          @context = context
+          thread[:__supercov_context] = context
+          @active_threads[thread] = context
           hook_assertions if identity[:phase] == "call"
         end
         @context
@@ -1372,17 +1379,23 @@ module Supercov
       pid = Process.pid
       return if @transport && @transport_pid == pid
 
+      # Two threads recording their first records at once each opened an
+      # evidence file, and the phases one declared went to the file the
+      # other then replaced: the run could not be published.
+      @transport_lock.synchronize { open_transport(pid) unless @transport && @transport_pid == pid }
+    end
+
+    def open_transport(pid)
       # A forked child inherits the parent's Ruby objects; it must own its
       # own evidence file and re-declare the phase it is running inside.
       forked = !@transport_pid.nil?
       @transport&.close if forked
       worker = forked ? "#{@worker}-#{pid}" : @worker
       @worker = worker
-      @transport = Transport.new(@evidence_dir, worker, pid)
-      @transport_pid = pid
+      transport = Transport.new(@evidence_dir, worker, pid)
       # A forked child's evidence file names its ids afresh.
       @id_numbers = {} if forked
-      @transport.write(
+      transport.write(
         "t" => "process",
         "v" => EVIDENCE_VERSION,
         "run" => @run_id,
@@ -1394,7 +1407,11 @@ module Supercov
         "lines" => @probes_supported ? "exact" : "first",
       )
       identity = @identities[@context]
-      @transport.write({ "t" => "phase", "ctx" => @context, "at" => now_ms }.merge(identity)) if forked && @context != 0 && identity
+      transport.write({ "t" => "phase", "ctx" => @context, "at" => now_ms }.merge(identity)) if forked && @context != 0 && identity
+      # Seen by threads that do not take the lock only once it holds its
+      # header.
+      @transport = transport
+      @transport_pid = pid
     end
 
     def close
