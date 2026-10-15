@@ -30,21 +30,36 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 
 public final class Server {
+  private static final java.util.concurrent.CountDownLatch BOTH = new java.util.concurrent.CountDownLatch(2);
+
   public static void main(String[] args) throws Exception {
     HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", Integer.parseInt(args[0])), 0);
     server.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(4));
     server.createContext("/ready", exchange -> reply(exchange, "ready"));
     server.createContext("/grade", exchange -> {
       String query = exchange.getRequestURI().getQuery();
-      if (query.contains("slow")) {
-        try {
-          Thread.sleep(300);
-        } catch (InterruptedException interrupted) {
-          Thread.currentThread().interrupt();
+      // Two slow requests meet before either grades, and each holds its
+      // reply after: each grade runs while both tests are running, however
+      // late the second worker starts.
+      boolean slow = query.contains("slow");
+      try {
+        if (slow) {
+          BOTH.countDown();
+          BOTH.await(20, java.util.concurrent.TimeUnit.SECONDS);
         }
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
       }
       int score = Integer.parseInt(query.replaceAll(".*score=([0-9]+).*", "$1"));
-      reply(exchange, Grades.grade(score));
+      String grade = Grades.grade(score);
+      try {
+        if (slow) {
+          Thread.sleep(300);
+        }
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+      }
+      reply(exchange, grade);
     });
     server.start();
   }
