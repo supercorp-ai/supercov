@@ -58,6 +58,10 @@ pub struct IndexedQueryRequest {
     /// How many directory levels a rollup keeps.
     #[serde(default)]
     pub depth: Option<usize>,
+    /// `diff --gained`: what the newer run covers that the older did not,
+    /// and nothing it does not.
+    #[serde(default)]
+    pub gained_only: bool,
 }
 
 fn default_limit() -> usize {
@@ -446,6 +450,7 @@ pub fn query_indexed(
                 runner: request.runner.as_deref(),
                 offset: request.offset,
                 limit: request.limit,
+                gained_only: request.gained_only,
             },
         )?;
         return Ok(IndexedQueryOutput {

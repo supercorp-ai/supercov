@@ -26,6 +26,7 @@ use supercov_engine::{
 use time::{OffsetDateTime, macros::format_description};
 
 mod assertions_command;
+mod gaps_export;
 mod html_report;
 mod human_query;
 mod public_query;
@@ -2521,6 +2522,12 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
     }
     if command == "runs" && arguments.get(1).is_some_and(|a| a == "assertions") {
         return assertions_command::command(&arguments);
+    }
+    if command == "runs"
+        && arguments.get(1).is_some_and(|a| a == "gaps")
+        && arguments.iter().any(|a| a == "--format")
+    {
+        return gaps_export::command(&arguments);
     }
     if command == "runs" && arguments.get(1).is_some_and(|a| a == "source") {
         return source_query::command(&arguments);
