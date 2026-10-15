@@ -392,6 +392,42 @@ class CoveragePhaseController {
         }
     }
     /**
+     * Start the pages an earlier test left open (a page a serial describe
+     * opens in `beforeAll`, a worker-scoped one) with no evidence, and return
+     * what they held. Their documents kept every hit since they loaded, and
+     * each later test was credited with what the tests before it ran. What
+     * they held is the earlier tests' (already recorded) and work between
+     * tests, such as a `beforeAll` signing in: no test's. A document that
+     * already has one of this test's phases is left alone: a reset that
+     * arrives late must not drop what this test ran.
+     */
+    async takeCarriedEvidence() {
+        await Promise.all([...this.pendingRegistrations]);
+        const prefix = `${this.scope.attemptId}:`;
+        const take = (target) => bounded(target
+            .evaluate((prefix) => {
+            const coverageGlobal = globalThis;
+            if (String(coverageGlobal.__SUPERCOV_PHASE_ID__ ?? "").startsWith(prefix))
+                return undefined;
+            const getSnapshot = coverageGlobal.__SUPERCOV_COVERAGE_SNAPSHOT__;
+            const reset = coverageGlobal.__SUPERCOV_RESET__;
+            if (!getSnapshot || !reset)
+                return undefined;
+            const snapshot = JSON.stringify(getSnapshot());
+            reset();
+            return snapshot;
+        }, prefix)
+            .then((text) => (typeof text === "string" ? JSON.parse(text) : undefined))
+            .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
+        const taken = await Promise.all(this.allPages().flatMap((page) => [
+            ...page.frames().map(take),
+            ...page.workers().map(take),
+        ]));
+        const snapshots = taken.filter((snapshot) => snapshot && snapshot !== WORKER_TIMED_OUT &&
+            (snapshot.hits?.length || snapshot.events?.length || snapshot.decisions?.length));
+        return snapshots.length > 0 ? mergeSnapshots(snapshots) : undefined;
+    }
+    /**
      * A page is registered once, and whoever asks while that is under way
      * waits for it. Playwright announces a page to the context's listener
      * before the fixture that hands it to the test has it, so the listener
@@ -1458,6 +1494,25 @@ function mergeCollectedPhases(controllerPhases, fallbackPhases) {
     });
     return [...controllerPhases, ...remaining];
 }
+/**
+ * Pool runners may cycle-restore a VM immediately after Playwright exits,
+ * which can discard or overwrite the normal artifact copy. Each record is
+ * written to one uniquely named, one-shot evidence file in the runner's shared
+ * directory as well. No test streams into this path.
+ */
+function appendEvidenceLine(serialized) {
+    const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"] ??
+        (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")
+            ? undefined
+            : GENERATED_EVIDENCE_DIRECTORY);
+    if (!evidenceDirectory)
+        return;
+    const resolvedDirectory = resolve(process.cwd(), evidenceDirectory);
+    const append = process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1"
+        ? appendJsonLineDurableSync
+        : appendJsonLineSync;
+    append(resolve(resolvedDirectory, `playwright-worker-${evidenceWriterIdentity()}-${process.pid}.mcdc.jsonl`), serialized);
+}
 const instrumentedFixtures = {
     page: async ({ page }, use, testInfo) => {
         const scope = executionScope(testInfo);
@@ -1507,6 +1562,17 @@ const instrumentedFixtures = {
             activeController = controller;
             directRuntime()?.activateCoverageScope(scope);
             await controller.adoptTrackedContexts().catch(() => undefined);
+            const carried = await controller.takeCarriedEvidence().catch(() => undefined);
+            if (carried) {
+                appendEvidenceLine(`${JSON.stringify({
+                    testId: `__supercov_background__:playwright:${scope.attemptId}`,
+                    test: "Playwright work between tests",
+                    status: "unknown",
+                    provenance: { runner: "background", kind: "background", source: "explicit" },
+                    role: "background",
+                    browser: [carried],
+                })}\n`);
+            }
             const serverOutput = serverEvidencePath(scope);
             mkdirSync(serverEvidenceDirectory(scope), { recursive: true });
             rmSync(serverOutput, { force: true });
@@ -1543,22 +1609,7 @@ const instrumentedFixtures = {
                         browser,
                         server,
                     };
-                    const serialized = `${JSON.stringify(payload)}\n`;
-                    // Pool runners may cycle-restore a VM immediately after Playwright
-                    // exits, which can discard or overwrite the normal artifact copy.
-                    // Write one uniquely named, one-shot evidence file to the runner's
-                    // shared directory as well. No test streams into this path.
-                    const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"] ??
-                        (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")
-                            ? undefined
-                            : GENERATED_EVIDENCE_DIRECTORY);
-                    if (evidenceDirectory) {
-                        const resolvedDirectory = resolve(process.cwd(), evidenceDirectory);
-                        const append = process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1"
-                            ? appendJsonLineDurableSync
-                            : appendJsonLineSync;
-                        append(resolve(resolvedDirectory, `playwright-worker-${evidenceWriterIdentity()}-${process.pid}.mcdc.jsonl`), serialized);
-                    }
+                    appendEvidenceLine(`${JSON.stringify(payload)}\n`);
                 }
                 finally {
                     await timed("controller.dispose", () => controller.dispose());
