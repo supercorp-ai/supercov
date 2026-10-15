@@ -25,9 +25,6 @@ var __spreadProps = (a, b) => __spreadValues(a, b);
 // `globalThis.Buffer = undefined` to check it copes -- and the runtime runs
 // inside those tests; it must not fail where the application does not.
 var capturedBuffer = typeof Buffer === "undefined" ? void 0 : Buffer;
-// Likewise the timer: a test that installs fake timers would otherwise hold
-// the browser's evidence back until it advanced its clock.
-var capturedSetTimeout = setTimeout;
 
 // dist/transport.js
 var COVERAGE_SCOPE_HEADER = "x-supercov-scope";
@@ -419,7 +416,6 @@ function pushWorkerEvidence() {
   }
   runtimeGlobal.__SUPERCOV_WORKER_EVIDENCE__ = () => Array.from(received, ([token, pushed]) => ({ token, url: pushed.url, current: pushed.current, snapshot: pushed.snapshot }));
 })();
-var persistBrowserScheduled = false;
 var persistBrowserListenersInstalled = false;
 function persistBrowserNow() {
   if (!isBrowser)
@@ -429,31 +425,39 @@ function persistBrowserNow() {
   } catch (e) {
   }
 }
+// The Playwright collector's binding takes the evidence of a document that
+// is about to leave. localStorage gives it to the next document only on the
+// same origin: a click that sent the page to another one (an admin's
+// masquerade link, a sign-in redirect) lost every hit it made. Called from
+// `pagehide` the binding never reached the collector; from `beforeunload`
+// it does.
+function handOverBrowser() {
+  try {
+    if (typeof runtimeGlobal.__supercovLeaving === "function")
+      runtimeGlobal.__supercovLeaving(JSON.stringify(coverageSnapshot()));
+  } catch (e) {
+  }
+}
 function persistBrowser() {
   if (!isBrowser)
     return;
-  // Persistence exists so evidence survives navigation, not to mirror every
-  // event: serializing the whole snapshot per event is quadratic in a
-  // render burst. Coalesce to one write per macrotask and flush when the
-  // page is actually leaving.
-  if (!persistBrowserListenersInstalled) {
-    persistBrowserListenersInstalled = true;
-    try {
-      addEventListener("pagehide", persistBrowserNow);
-      addEventListener("visibilitychange", () => {
-        if (typeof document !== "undefined" && document.visibilityState === "hidden")
-          persistBrowserNow();
-      });
-    } catch (e) {
-    }
-  }
-  if (persistBrowserScheduled)
+  // Persistence exists so evidence survives navigation, so it is written
+  // when the page leaves. Written after every macrotask that recorded
+  // anything, the whole snapshot was serialized again and again: a large
+  // instrumented frontend doubled a Playwright suite's time. A page the
+  // test closes is read by the collector before it closes.
+  if (persistBrowserListenersInstalled)
     return;
-  persistBrowserScheduled = true;
-  capturedSetTimeout(() => {
-    persistBrowserScheduled = false;
-    persistBrowserNow();
-  }, 0);
+  persistBrowserListenersInstalled = true;
+  try {
+    addEventListener("beforeunload", handOverBrowser);
+    addEventListener("pagehide", persistBrowserNow);
+    addEventListener("visibilitychange", () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden")
+        persistBrowserNow();
+    });
+  } catch (e) {
+  }
 }
 function attemptKey(scope) {
   return `${scope.runId}\0${scope.workerId}\0${scope.attemptId}`;

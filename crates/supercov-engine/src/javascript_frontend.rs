@@ -1132,6 +1132,32 @@ fn keep_directives_first(source: &str, output: &mut crate::js_instrumenter::Cand
     output.code = reorder(lines).join("\n");
 }
 
+/// The runtime's body as each file that needs its own copy carries it:
+/// without its comments and spacing. A browser loads every directly served
+/// file, so a page of 47 files fetched 47 copies, 3.9 MB, at each test's fresh
+/// context. The source as written when it cannot be parsed.
+fn compact_runtime(runtime_source: &str) -> String {
+    let Some(export_start) = runtime_source.rfind("\nexport {") else {
+        return runtime_source.to_owned();
+    };
+    let body = &runtime_source[..export_start];
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, body, oxc_span::SourceType::mjs()).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return runtime_source.to_owned();
+    }
+    let options = oxc_codegen::CodegenOptions {
+        minify: true,
+        comments: oxc_codegen::CommentOptions::disabled(),
+        ..oxc_codegen::CodegenOptions::default()
+    };
+    let compact = oxc_codegen::Codegen::new()
+        .with_options(options)
+        .build(&parsed.program)
+        .code;
+    format!("{compact}{}", &runtime_source[export_start..])
+}
+
 fn bootstrap_runtime(
     output: &mut crate::js_instrumenter::CandidateOutput,
     runtime_source: &str,
@@ -1567,8 +1593,9 @@ pub fn prepare_javascript_frontend(
     }
 
     let runtime_path = runtime_directory.join("runtime.mjs");
-    let standalone_runtime =
-        fs::read_to_string(&runtime_path).map_err(|source| io_error(&runtime_path, source))?;
+    let standalone_runtime = compact_runtime(
+        &fs::read_to_string(&runtime_path).map_err(|source| io_error(&runtime_path, source))?,
+    );
     // debug's karma bundles its sources with browserify and runs them in
     // Chrome, where nothing had installed the runtime: every file failed on
     // its first line ("reading 'mcdcBegin'"). The browser's evidence has no
@@ -1812,6 +1839,32 @@ mod tests {
         let before = untouched.code.clone();
         keep_directives_first("x();\n//= not a directive\n", &mut untouched);
         assert_eq!(untouched.code, before);
+    }
+
+    // Each directly served file carries a copy, so it carries no comments.
+    #[test]
+    fn the_copy_of_the_runtime_a_file_carries_is_compact() {
+        let source = include_str!("../runtime-assets/javascript/runtime.mjs");
+        let compact = compact_runtime(source);
+        assert!(
+            compact.len() * 3 < source.len() * 2,
+            "{} of {}",
+            compact.len(),
+            source.len()
+        );
+        let export_start = compact.rfind("\nexport {").unwrap();
+        assert_eq!(
+            &compact[export_start..],
+            &source[source.rfind("\nexport {").unwrap()..]
+        );
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed = oxc_parser::Parser::new(
+            &allocator,
+            &compact[..export_start],
+            oxc_span::SourceType::cjs(),
+        )
+        .parse();
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     }
     #[test]
     fn ancestor_description_names_each_component_and_its_state() {
