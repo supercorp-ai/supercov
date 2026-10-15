@@ -37,19 +37,64 @@ fn rewrite_scope_run_ids(value: &mut Value, merged_run_id: &str) {
     }
 }
 
-fn rewritten_contents(contents: &[u8], merged_run_id: &str) -> Result<Vec<u8>, String> {
+/// The test a record is of: a test's own record names it, and a server's
+/// names it in its scope.
+fn record_test(value: &Value) -> Option<&str> {
+    value["testId"]
+        .as_str()
+        .or_else(|| value["scope"]["testId"].as_str())
+}
+
+/// The tests a run's archive holds a record of.
+fn measured_tests(archive: &[EvidenceArchiveEntry]) -> BTreeMap<String, String> {
+    let mut tests = BTreeMap::new();
+    for entry in archive {
+        let Ok(text) = std::str::from_utf8(&entry.contents) else {
+            continue;
+        };
+        for line in text.lines() {
+            if !line.contains("\"testId\"") {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(line)
+                && let (Some(id), Some(name)) = (value["testId"].as_str(), value["test"].as_str())
+            {
+                tests.insert(id.to_owned(), name.to_owned());
+            }
+        }
+    }
+    tests
+}
+
+/// An entry's records for the merge, without those of the tests measured
+/// again in another run. None when nothing of the entry is left.
+fn rewritten_contents(
+    contents: &[u8],
+    merged_run_id: &str,
+    superseded: Option<&BTreeSet<String>>,
+) -> Result<Option<Vec<u8>>, String> {
     let contents = std::str::from_utf8(contents)
         .map_err(|_| "coverage evidence contains non-UTF-8 data".to_owned())?;
     let mut rewritten = Vec::with_capacity(contents.len());
-    for (index, line) in contents.split('\n').enumerate() {
-        if index > 0 {
-            rewritten.push(b'\n');
-        }
+    let mut left_out = false;
+    let mut kept = false;
+    for line in contents.split('\n') {
         if line.is_empty() {
             continue;
         }
         match serde_json::from_str::<Value>(line) {
+            Ok(value)
+                if superseded.is_some_and(|tests| {
+                    record_test(&value).is_some_and(|test| tests.contains(test))
+                }) =>
+            {
+                left_out = true;
+            }
             Ok(mut value) => {
+                if kept {
+                    rewritten.push(b'\n');
+                }
+                kept = true;
                 rewrite_scope_run_ids(&mut value, merged_run_id);
                 rewritten.extend(
                     serde_json::to_vec(&value)
@@ -58,13 +103,15 @@ fn rewritten_contents(contents: &[u8], merged_run_id: &str) -> Result<Vec<u8>, S
             }
             Err(error) => {
                 return Err(format!(
-                    "cannot merge malformed recognized JSON evidence at line {}: {error}",
-                    index + 1
+                    "cannot merge malformed recognized JSON evidence: {error}"
                 ));
             }
         }
     }
-    Ok(rewritten)
+    if contents.ends_with('\n') && kept {
+        rewritten.push(b'\n');
+    }
+    Ok((kept || !left_out).then_some(rewritten))
 }
 
 fn merged_path(path: &str, shard: usize) -> String {
@@ -132,10 +179,14 @@ fn recorded_files(
 /// Runs merged although their tests or configuration differ: the latest,
 /// whose record of the files and integrity the merge takes, and what differed
 /// that does not reach the others.
-struct Grown<'a> {
+struct Grown {
     latest: usize,
-    files: Option<&'a [u8]>,
+    files: Option<Vec<u8>>,
     across: Vec<String>,
+    /// Of each run, the tests whose record a changed support file made out
+    /// of date and that another of the runs measured again: their old
+    /// records are left out.
+    superseded: BTreeMap<usize, BTreeSet<String>>,
 }
 
 /// Which of the runs the others can be added to, where their tests or test
@@ -144,20 +195,24 @@ struct Grown<'a> {
 /// that has gained tests since, with helpers they need and settings of
 /// theirs, and what an earlier run recorded of its tests is still what they
 /// do. Each file that differs is judged by `run_currency::judge`.
-fn judged_against_latest<'a>(
+fn judged_against_latest(
     root: &Path,
-    inputs: &[&'a StoredRun],
-    archives: &'a [Vec<EvidenceArchiveEntry>],
+    inputs: &[&StoredRun],
+    archives: &[Vec<EvidenceArchiveEntry>],
     known: &[StoredRun],
     allow_changed: bool,
-) -> Result<Option<Grown<'a>>, String> {
+) -> Result<Option<Grown>, String> {
     let first = inputs[0];
     let fingerprint = |input: &StoredRun| input.metadata.integrity.fingerprint.clone();
+    // Files no fingerprint covers -- a mock's data, read by a server the
+    // tests reached -- are in each run's record of its files.
+    let recorded =
+        |index: usize| recorded_files(&archives[index]).map(|(_, manifest)| manifest.files);
     let differ = inputs.iter().any(|input| {
         fingerprint(input).tests != fingerprint(first).tests
             || fingerprint(input).configuration != fingerprint(first).configuration
             || fingerprint(input).source != fingerprint(first).source
-    });
+    }) || (1..inputs.len()).any(|index| recorded(index) != recorded(0));
     if !differ {
         return Ok(None);
     }
@@ -185,9 +240,27 @@ fn judged_against_latest<'a>(
             incompatible_dimensions(other, run).join(", ")
         )
     };
-    let Some((bytes, into)) = &files[latest] else {
+    let Some((_, into)) = &files[latest] else {
         return Err(unrecorded(inputs[latest]));
     };
+    // A file only an earlier run recorded -- a mock no test of the latest
+    // reached -- is not gone: it is judged by what the checkout holds now,
+    // and the merge's record keeps it.
+    let mut into = into.clone();
+    for (_, recorded) in files.iter().flatten() {
+        for file in recorded.files.keys() {
+            if into.files.contains_key(file) {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(root.join(file)) {
+                into.files.insert(
+                    file.clone(),
+                    crate::source_manifest::FileFingerprint::of(&text),
+                );
+            }
+        }
+    }
+    let into = &into;
     // Every file known to hold tests, from every run there is: a file of some
     // other test changing takes nothing from this run.
     let tests = known
@@ -205,6 +278,7 @@ fn judged_against_latest<'a>(
             .then_some(text)
     };
     let mut across = Vec::new();
+    let mut superseded = BTreeMap::new();
     for (index, input) in inputs.iter().enumerate() {
         if index == latest {
             continue;
@@ -223,6 +297,50 @@ fn judged_against_latest<'a>(
             reference.playwright.as_ref(),
             allow_changed,
         );
+        // Tests a changed support file reached: kept out of this run's part
+        // when another run measured them again, else the run cannot be
+        // merged until they are.
+        if !judgment.reached.is_empty() {
+            let reached = judgment
+                .reached
+                .values()
+                .flatten()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let own = measured_tests(&archives[index]);
+            let again = archives
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .flat_map(|(_, archive)| measured_tests(archive).into_keys())
+                .collect::<BTreeSet<_>>();
+            let files = judgment.reached.keys().cloned().collect::<Vec<_>>();
+            let missing = reached
+                .iter()
+                .filter(|test| !again.contains(*test))
+                .map(|test| own.get(test).cloned().unwrap_or_else(|| test.clone()))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Cannot merge run {} with run {}: {} changed, and {} of its tests reached {} through a server that served them and were not measured again: {}. Measure them again (`supercov runs {} tests affected --names`), then merge.",
+                    input.id,
+                    inputs[latest].id,
+                    listed(&files),
+                    missing.len(),
+                    if files.len() == 1 { "it" } else { "them" },
+                    listed(&missing),
+                    input.id,
+                ));
+            }
+            for file in &files {
+                across.push(format!(
+                    "{file} (the {} test(s) of `{}` that reached it were measured again)",
+                    judgment.reached[file].len(),
+                    input.metadata.command.join(" ")
+                ));
+            }
+            superseded.insert(index, reached);
+        }
         if !judgment.outdated.is_empty() {
             return Err(format!(
                 "Cannot merge run {} with run {}: {}. {}",
@@ -242,8 +360,9 @@ fn judged_against_latest<'a>(
     }
     Ok(Some(Grown {
         latest,
-        files: Some(bytes),
+        files: Some(serde_json::to_vec(into).map_err(|error| error.to_string())?),
         across: crate::run_currency::across(across),
+        superseded,
     }))
 }
 
@@ -476,11 +595,19 @@ pub fn merge_coverage_runs(
             }) {
                 // One record of the files for the whole merge: the latest
                 // run's, which holds every file the others were recorded with.
-                let contents = match grown.as_ref().and_then(|grown| grown.files) {
+                let superseded = grown
+                    .as_ref()
+                    .and_then(|grown| grown.superseded.get(&shard));
+                let contents = match grown.as_ref().and_then(|grown| grown.files.as_ref()) {
                     Some(files) if entry.path == crate::source_capture::ARCHIVE_PATH => {
-                        files.to_vec()
+                        files.clone()
                     }
-                    _ => rewritten_contents(&entry.contents, merged_run_id)?,
+                    _ => match rewritten_contents(&entry.contents, merged_run_id, superseded)? {
+                        Some(contents) => contents,
+                        // Every record of the entry was of a test measured
+                        // again elsewhere.
+                        None => continue,
+                    },
                 };
                 entries.push(EvidenceArchiveEntry {
                     path: merged_path(&entry.path, shard),
@@ -706,12 +833,33 @@ mod tests {
         let rewritten = rewritten_contents(
             b"{\"scope\":{\"runId\":\"old\",\"testId\":\"test\"},\"nested\":[{\"scope\":{\"runId\":\"old\"}}]}\n",
             "merged",
+            None,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(
             std::str::from_utf8(&rewritten).unwrap(),
             "{\"scope\":{\"runId\":\"merged\",\"testId\":\"test\"},\"nested\":[{\"scope\":{\"runId\":\"merged\"}}]}\n"
         );
-        assert!(rewritten_contents(b"plain\n", "merged").is_err());
+        assert!(rewritten_contents(b"plain\n", "merged", None).is_err());
+    }
+
+    #[test]
+    fn a_test_measured_again_elsewhere_leaves_its_records_out() {
+        let superseded = BTreeSet::from(["paid".to_owned()]);
+        let records = b"{\"testId\":\"paid\",\"test\":\"pays\"}\n{\"testId\":\"mail\",\"test\":\"mails\"}\n{\"scope\":{\"testId\":\"paid\"},\"type\":\"hit\"}\n";
+        let kept = rewritten_contents(records, "merged", Some(&superseded))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&kept).unwrap(),
+            "{\"testId\":\"mail\",\"test\":\"mails\"}\n"
+        );
+        // An entry of the superseded test alone is left out whole.
+        let only = b"{\"testId\":\"paid\",\"test\":\"pays\"}\n";
+        assert_eq!(
+            rewritten_contents(only, "merged", Some(&superseded)).unwrap(),
+            None
+        );
     }
 }

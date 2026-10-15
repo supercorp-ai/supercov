@@ -1040,6 +1040,26 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                 )
             });
             for (file, what) in &helpers {
+                // A file a process that served the run's tests loaded -- a
+                // mock server's -- reached those tests and no others.
+                let served_by = ran.support.as_ref().and_then(|support| {
+                    let tests = support.files.get(*file)?;
+                    Some(tests.iter().any(|test| {
+                        support
+                            .names
+                            .get(test)
+                            .is_some_and(|name| *name == record.test.name)
+                    }))
+                });
+                let imported = matches!(loads, Some(loads) if loads.open.is_none() && loads.files.contains(*file));
+                if let Some(served) = served_by
+                    && !imported
+                {
+                    if served {
+                        reasons.push(format!("{what} (a server that served this test loaded it)"));
+                    }
+                    continue;
+                }
                 let loaded = match loads {
                     Some(loads) if loads.open.is_none() => {
                         loads.files.contains(*file) || !checkout.places(file)

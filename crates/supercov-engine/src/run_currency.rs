@@ -37,6 +37,9 @@ pub struct Ran {
     /// the source outside them -- a simulator, a script -- is judged as a
     /// helper is.
     pub measured: Option<BTreeSet<String>>,
+    /// Which of its tests reached which files through the processes that
+    /// served them (support_reach.rs), where it recorded that.
+    pub support: Option<crate::support_reach::SupportReach>,
 }
 
 impl Ran {
@@ -60,7 +63,15 @@ impl Ran {
             let Ok(value) = serde_json::from_slice::<Value>(&entry.contents) else {
                 continue;
             };
-            if name == PLAYWRIGHT_CONFIGURATION {
+            if name == crate::support_reach::ARCHIVE_PATH {
+                if let Ok(reach) =
+                    serde_json::from_value::<crate::support_reach::SupportReach>(value)
+                {
+                    ran.support
+                        .get_or_insert_with(Default::default)
+                        .extend(reach);
+                }
+            } else if name == PLAYWRIGHT_CONFIGURATION {
                 ran.playwright = Some(value);
             } else if name == "manifest.json" {
                 ran.measured = value["scope"]["entries"].as_array().map(|entries| {
@@ -90,9 +101,14 @@ impl Ran {
         } else {
             path
         };
-        [PLAYWRIGHT_CONFIGURATION, "frontend.json", "manifest.json"]
-            .into_iter()
-            .find(|wanted| *wanted == name)
+        [
+            PLAYWRIGHT_CONFIGURATION,
+            "frontend.json",
+            "manifest.json",
+            crate::support_reach::ARCHIVE_PATH,
+        ]
+        .into_iter()
+        .find(|wanted| *wanted == name)
     }
 }
 
@@ -111,6 +127,10 @@ pub struct Judgment {
     /// Files that differ and do not reach the run, with why; and those the
     /// user accepted.
     pub across: Vec<String>,
+    /// Files that changed and that only some of its tests reached, through
+    /// a process that served them: those tests are a record of something
+    /// else, and the rest still of what they ran (support_reach.rs).
+    pub reached: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// One checkout's files, read once for every run judged against it.
@@ -406,6 +426,26 @@ pub fn judge(
                 "{file}, which it measured, {}",
                 if gone { "is gone" } else { "has changed" }
             ));
+            continue;
+        }
+        // A file a process that served the run's tests loaded or read -- a
+        // mock server's -- reached those tests and no others. A file no such
+        // process loaded is judged by what the tests import, as before.
+        if let Some(tests) = ran
+            .support
+            .as_ref()
+            .and_then(|support| support.files.get(&file))
+            && !loads
+                .as_ref()
+                .is_some_and(|loads| loads.files.contains(&file))
+        {
+            if tests.is_empty() {
+                judgment.across.push(format!(
+                    "{file} (no test of `{label}` was served by what loaded it)"
+                ));
+            } else {
+                judgment.reached.insert(file, tests.clone());
+            }
             continue;
         }
         // A file tests may load: a helper, a fixture, a support module, or

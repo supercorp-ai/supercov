@@ -847,8 +847,64 @@ function skipCoverageThresholds(tool) {
 // instead, where such a file is read as an ES module and the hook never
 // sees it; the loader is told so it can hand those files back.
 const typescriptHandler = Module._extensions[".ts"];
+// The tests a process serves reach the project files it loaded and read: a
+// mock server a suite starts, the app server. Where SUPERCOV_SUPPORT_DIR is
+// set this process notes them in a file of its own, which the loader adds
+// its modules to and the runtime the tests the process served; a change to
+// one of those files then affects those tests alone (`tests affected`,
+// `merge`).
+const supportDirectory = process.env.SUPERCOV_SUPPORT_DIR;
+let supportFile;
+if (supportDirectory) {
+    supportFile = path.join(supportDirectory, `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.jsonl`);
+    // This process's own, not a parent's it inherited.
+    process.env.__SUPERCOV_SUPPORT_FILE = supportFile;
+    try {
+        fs.mkdirSync(supportDirectory, { recursive: true });
+    }
+    catch {
+        // Then nothing is noted, and every test counts as before.
+    }
+    const projectRoot = process.env.SUPERCOV_PROJECT_ROOT;
+    const read = new Set();
+    const noteRead = (target) => {
+        try {
+            const file = typeof target === "string"
+                ? resolve(target)
+                : target instanceof URL && target.protocol === "file:"
+                    ? fileURLToPath(target)
+                    : undefined;
+            // The copy lives under `.supercov/`: what is the project's is
+            // decided by the project root.
+            const inside = file && projectRoot && file.startsWith(projectRoot + sep) ? file.slice(projectRoot.length + 1) : undefined;
+            if (!inside || inside.startsWith(`.supercov${sep}`) || inside.split(sep).includes("node_modules") || read.has(file))
+                return;
+            read.add(file);
+            fs.appendFileSync(supportFile, `${JSON.stringify({ read: file })}\n`);
+        }
+        catch {
+            // A read not noted counts for every test, as before.
+        }
+    };
+    for (const name of ["readFileSync", "readFile"]) {
+        const original = fs[name];
+        fs[name] = function supercovNotedRead(target, ...rest) {
+            noteRead(target);
+            return original.call(this, target, ...rest);
+        };
+    }
+    const readPromised = fs.promises.readFile;
+    fs.promises.readFile = function supercovNotedRead(target, ...rest) {
+        noteRead(target);
+        return readPromised.call(this, target, ...rest);
+    };
+    syncBuiltinESMExports();
+}
 register(new URL("./resolve-loader.mjs", import.meta.url), {
-    data: { typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS" },
+    data: {
+        typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS",
+        supportFile,
+    },
 });
 if (process.env.SUPERCOV_DEBUG === "1") {
     console.error("[supercov] preload", { entrypoint });

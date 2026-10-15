@@ -560,6 +560,16 @@ A source file
 added since the run is outside every test's record; the working-tree check
 says so, and the suite should run in full.
 
+A server the suite starts is recorded too: a mock server `webServer` starts,
+or the application's own. Each Node process of a Playwright run notes the
+project files it loads and reads, and the tests it serves, by the test a
+request names or, for one that names none (a webhook), the test running
+then. A change to a file such a process loaded or read, a mock's code, a
+helper it imports or the data it reads, affects the tests it served and no
+others. A mock keeps its state between tests, so a mock's files count whole,
+not route by route; a file the application's server loaded, a preload of its
+own, affects every test it served.
+
 ### Which affected tests check the change
 
 When the run has an [assertion assessment](assertions.md), `tests affected`
@@ -681,6 +691,19 @@ what that run's tests did with it:
 A run left out is named with the files and the functions that changed. The
 merged run lists what differed and why it does not reach the earlier runs:
 `merged across:` in `runs <id>`, and `mergedAcross` in JSON.
+
+A changed file that a server the run's tests reached loaded or read (see
+[Find the tests a change affects](#find-the-tests-a-change-affects)) takes
+only those tests from the run: measure them again, and the merge keeps the
+rest of the run and leaves their old records out:
+
+```sh supercov-example
+npx supercov runs <the suite's run> tests affected --names   # after changing a mock
+npx supercov -- npx playwright test <those tests>
+npx supercov merge
+```
+
+Until they are measured again, the merge refuses and names them.
 
 When you know a change Supercov counts does not alter what the earlier tests
 ran, say so:

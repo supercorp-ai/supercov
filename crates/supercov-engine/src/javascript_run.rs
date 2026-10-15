@@ -859,6 +859,16 @@ pub fn run_direct_javascript(
     {
         overrides.insert("UV_NO_SYNC".into(), "1".into());
     }
+    // What each process a browser suite starts loads, reads and serves, so a
+    // change to a mock server's files affects only the tests it served
+    // (support_reach.rs).
+    let support_directory = workspace.join(".supercov/support").join(&run_id);
+    if project.playwright_config.is_some() {
+        overrides.insert(
+            crate::support_reach::DIRECTORY_VARIABLE.into(),
+            support_directory.display().to_string(),
+        );
+    }
     // A tool that judges source as text, started without a package manager
     // or installed outside the project, is found through PATH.
     if let Some(path) = crate::source_tools::path_with_launchers(&workspace)
@@ -1142,11 +1152,12 @@ pub fn run_direct_javascript(
 
     let publication_started = Instant::now();
     // Read before the evidence is archived and removed.
-    let served = if servers.is_empty() {
+    let served = if servers.is_empty() && !support_directory.is_dir() {
         Vec::new()
     } else {
         crate::served_tests::read(&evidence_directory)
     };
+    let support = crate::support_reach::read(&support_directory, &workspace, &served);
     if project.source_files.is_empty() {
         // Only the servers were measured: the first published is the run,
         // any other beside it.
@@ -1287,9 +1298,30 @@ pub fn run_direct_javascript(
         },
     ])
     .map_err(|error| error.to_string())?;
-    let entries =
+    let mut entries =
         javascript_archive_entries(entries, &frontend.manifest, &run_id, execution.exit_code)?;
-    let entries = crate::source_capture::append(entries, &source_inputs)?;
+    if let Some(support) = &support {
+        entries.push(EvidenceArchiveEntry {
+            path: crate::support_reach::ARCHIVE_PATH.into(),
+            contents: serde_json::to_vec(support).map_err(|error| error.to_string())?,
+        });
+    }
+    // The files the run's servers loaded and read are recorded with the
+    // rest, so a change to one -- a mock's `requests.json` as much as its
+    // code -- is seen, and judged by the tests that reached it.
+    let mut recorded_inputs = source_inputs.clone();
+    if let Some(support) = &support
+        && let Ok(reached) = crate::source_capture::capture(
+            &root,
+            "javascript",
+            support.files.keys().map(PathBuf::from),
+        )
+    {
+        for (file, text) in reached.files {
+            recorded_inputs.files.entry(file).or_insert(text);
+        }
+    }
+    let entries = crate::source_capture::append(entries, &recorded_inputs)?;
     let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
     remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
         .map_err(|error| error.to_string())?;

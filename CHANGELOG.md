@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- A change to a mock server affects only the tests it served. Each Node process of a Playwright run notes the project files it loads and reads and the tests it serves, so `tests affected` names those tests, and `merge` takes the suite's run with only them measured again, leaving their old records out. A mock change meant measuring the whole suite again; one to a mock's data file went unseen.
+- `supercov runs <run-id> gaps --format jsonl` writes every uncovered obligation, one JSON object per line, with its file, line and source: every MC/DC condition of a run in one pass, without paging.
+- `supercov diff <older> <newer> --gained` lists only what the newer run covers that the older did not: a test measured alone, against the suite's run, shows what it newly covered.
+- The CLI guide shows how to merge runs measured on two machines: each measures part of the suite, and one job merges their runs.
+
 ## 4.11.1
 
 **Fixed**

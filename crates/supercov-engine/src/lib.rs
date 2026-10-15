@@ -74,6 +74,7 @@ pub mod source_discovery;
 pub mod source_manifest;
 pub mod source_tools;
 pub mod source_units;
+pub mod support_reach;
 pub mod test_kind;
 pub mod test_loads;
 mod typescript_imports;
