@@ -486,7 +486,7 @@ compare it with the suite's run, keeping only what it gained:
 
 ```sh supercov-example
 npx supercov -- <the new test alone>
-npx supercov diff <the suite's run> latest --gained
+npx supercov diff <suite-run> latest --gained
 ```
 
 A test run alone covers far less than the suite, so a plain `diff` of the two
@@ -698,7 +698,7 @@ only those tests from the run: measure them again, and the merge keeps the
 rest of the run and leaves their old records out:
 
 ```sh supercov-example
-npx supercov runs <the suite's run> tests affected --names   # after changing a mock
+npx supercov runs <suite-run> tests affected --names   # after changing a mock
 npx supercov -- npx playwright test <those tests>
 npx supercov merge
 ```
