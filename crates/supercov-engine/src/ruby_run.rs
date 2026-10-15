@@ -153,9 +153,21 @@ fn environment(
         ),
         ("SUPERCOV_RUN_ID".into(), run_id.into()),
         ("SUPERCOV_PROJECT_ROOT".into(), root.as_os_str().to_owned()),
+        (
+            BOOTSNAP_COMPILE_CACHE.0.into(),
+            BOOTSNAP_COMPILE_CACHE.1.into(),
+        ),
     ]);
     variables
 }
+
+/// Bootsnap, which every Rails app loads from `config/boot.rb`, compiles each
+/// file once and loads the cached instructions after, past the loader that
+/// puts Supercov's probes in: lines still came from Ruby's own Coverage, and
+/// branches and conditions from nowhere -- 0.08% of a Rails server's branches
+/// against 1.9% with the cache off. Supercov compiles every measured file
+/// itself, so the cache saves nothing here.
+const BOOTSNAP_COMPILE_CACHE: (&str, &str) = ("DISABLE_BOOTSNAP_COMPILE_CACHE", "1");
 
 /// The fingerprint a later query compares against the stored run: the same
 /// discovery and inputs the run used, without preparing a plan.
@@ -526,6 +538,10 @@ impl RubyServer {
             (
                 "SUPERCOV_RUBY_SOURCE_ROOT".into(),
                 self.project.root.display().to_string(),
+            ),
+            (
+                BOOTSNAP_COMPILE_CACHE.0.into(),
+                BOOTSNAP_COMPILE_CACHE.1.into(),
             ),
         ])
     }

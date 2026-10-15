@@ -8,6 +8,7 @@
 
 **Fixed**
 
+- A Rails app measured no branches or conditions: Bootsnap, which `config/boot.rb` loads, runs each file from its compiled cache, past the loader that adds Supercov's probes, so only lines were counted (0.08% of a Rails server's branches against 1.9%). Measured Ruby now runs with Bootsnap's compile cache off; its load-path cache stays.
 - A Python project's virtual environment, linked into the run's copy, was synced by `uv run` there: its editable install was pointed at the copy, and a `hatch-vcs` version file regenerated and came back as a change, so the server's run read as stale at once. The copy now runs with `UV_NO_SYNC=1`.
 - A Rails app using Sprockets served no assets under Supercov: its `app/assets/config/manifest.js` had code put above its `//= link` directives, which Sprockets reads only from the top. Directives stay first.
 - A package whose `tsconfig.json` includes a sibling (`../packages/ui/src`) was refused ("source root is not a regular file or directory"). Such a root is outside the project and is left out.
