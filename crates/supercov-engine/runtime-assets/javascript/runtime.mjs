@@ -451,6 +451,12 @@ function persistBrowser() {
   persistBrowserListenersInstalled = true;
   try {
     addEventListener("beforeunload", handOverBrowser);
+    // An iframe the page removes (a client-side navigation away from the
+    // page that held it, an embed closed) gets no `beforeunload`: what it ran
+    // went with it, though the test clicked in it. Its `pagehide` reaches the
+    // collector, unlike a top-level document's.
+    if (typeof window !== "undefined" && window !== window.top)
+      addEventListener("pagehide", handOverBrowser);
     addEventListener("pagehide", persistBrowserNow);
     addEventListener("visibilitychange", () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden")

@@ -5,6 +5,7 @@
 **Fixed**
 
 - Playwright tests that share one page (a serial describe that opens it in `beforeAll`, a worker-scoped page) were each credited with everything the tests before them ran in that page, and with the `beforeAll`'s own work. Each test now gets only what ran during it; what ran before it counts in the run as no test's.
+- An iframe the page removed (a client-side navigation away from the page that held it, an embed closed) took everything it ran with it: a test that clicked in it was credited with none of it. Its evidence now reaches the test as it goes.
 
 ## 4.12.0
 
