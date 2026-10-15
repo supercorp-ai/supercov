@@ -11,6 +11,7 @@ pub mod coverage_html;
 pub mod coverage_index;
 pub mod coverage_query;
 pub mod coverage_report;
+pub mod docker_servers;
 pub mod evidence_archive;
 pub mod frontend_detection;
 pub mod frontend_protocol;

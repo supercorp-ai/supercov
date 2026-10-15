@@ -36,6 +36,8 @@ module Supercov
   RUN_ID_ENV = "SUPERCOV_RUN_ID"
   WORKER_ENV = "SUPERCOV_RUBY_WORKER"
   CONTEXT_ENV = "SUPERCOV_CONTEXT"
+  # Set by Supercov's `docker` launcher in a service built from the copy.
+  CONTAINER_ENV = "SUPERCOV_CONTAINER"
   SOURCE_ROOT_ENV = "SUPERCOV_RUBY_SOURCE_ROOT"
   DEBUG = !ENV["SUPERCOV_RUBY_DEBUG"].to_s.empty?
   # Escape hatch: a comma-separated list of path fragments to measure through
@@ -295,7 +297,8 @@ module Supercov
       safe_worker = worker.gsub(/[^A-Za-z0-9._-]/, "_")
       token = format("%x-%x", Process.clock_gettime(Process::CLOCK_REALTIME, :nanosecond), object_id & 0xFFFF)
       @path = File.join(directory, "#{safe_worker}.#{pid}.#{token}.mmap")
-      @file = File.open(@path, File::RDWR | File::CREAT | File::EXCL, 0o600)
+      # Readable outside a container, whose user (root) owns it there.
+      @file = File.open(@path, File::RDWR | File::CREAT | File::EXCL, ENV[CONTAINER_ENV] == "1" ? 0o644 : 0o600)
       @file.binmode
       @file.sync = true
       @capacity = TRANSPORT_INITIAL_CAPACITY
@@ -377,6 +380,12 @@ module Supercov
       source_root = ENV[SOURCE_ROOT_ENV].to_s
       @source_root = source_root.empty? ? nil : File.realpath(source_root)
       @files = @plan["files"]
+      # In an image built from the copy (Supercov's `docker` launcher says
+      # so), the copy's files are at a path of the image's own (`/app`),
+      # found from the first file loaded from it (`container_relative`).
+      @container_map = nil
+      @container_tried = {}
+      @in_container = ENV[CONTAINER_ENV] == "1"
       @probes = {}
       @plan["probes"].each { |key, target| @probes[Integer(key)] = target }
       @receiver = @plan["receiver"] || "$__supercov"
@@ -524,6 +533,11 @@ module Supercov
 
       absolute = realpath(path)
       edits = absolute && @edits_by_file[absolute]
+      # In an image of the copy, a file is the copy's by its path there.
+      if edits.nil? && @in_container && absolute && (inside = relative(absolute))
+        absolute = File.join(@root, inside)
+        edits = @edits_by_file[absolute]
+      end
       return nil if edits.nil?
 
       if SKIP_PROBES.any? { |fragment| absolute.include?(fragment) }
@@ -707,12 +721,61 @@ module Supercov
 
       @saw_file = true
       root = [@root, @source_root].compact.find { |candidate| absolute.start_with?(candidate + "/") }
+      if root.nil? && @in_container
+        return @container_map ? mapped_relative(absolute) : container_relative(absolute)
+      end
       return nil unless root
 
       relative = absolute[(root.length + 1)..]
       # A file of the copy under the checkout is the copy's, not a path of
       # the checkout's own.
       return nil unless root == @root || @files.key?(relative)
+
+      @matched_file = true
+      relative
+    end
+
+    # A Dockerfile copies the copy's files to a path of its own, and may move
+    # them (`COPY backend/lib/ ./lib/`): an image file and a planned file that
+    # end alike, a directory and the name at least, give the image's prefix
+    # for the copy's. The pair is taken only if at least three of the planned
+    # files under that prefix (all, when fewer) are at their places in the
+    # image too: one generic name, a gem's `version.rb`, is never taken for
+    # the project's.
+    def container_relative(absolute)
+      parts = absolute.split("/")
+      @files.each_key do |relative|
+        planned = relative.split("/")
+        next unless planned.last == parts.last
+
+        shared = 0
+        shared += 1 while shared < [parts.size, planned.size].min && parts[-1 - shared] == planned[-1 - shared]
+        next if shared < 2
+
+        image_prefix = parts[0...-shared].join("/")
+        copy_prefix = planned[0...-shared].join("/")
+        next if @container_tried[[image_prefix, copy_prefix]]
+
+        @container_tried[[image_prefix, copy_prefix]] = true
+        under = @files.keys.select { |name| copy_prefix.empty? || name.start_with?(copy_prefix + "/") }.first(64)
+        need = [3, under.size].min
+        next if need.zero?
+        next unless under.count { |name| File.file?(File.join(image_prefix, name.delete_prefix(copy_prefix).delete_prefix("/"))) } >= need
+
+        @container_map = [image_prefix, copy_prefix]
+        @matched_file = true
+        return relative
+      end
+      nil
+    end
+
+    def mapped_relative(absolute)
+      image_prefix, copy_prefix = @container_map
+      return nil unless absolute.start_with?(image_prefix + "/")
+
+      rest = absolute[(image_prefix.length + 1)..]
+      relative = copy_prefix.empty? ? rest : "#{copy_prefix}/#{rest}"
+      return nil unless @files.key?(relative)
 
       @matched_file = true
       relative

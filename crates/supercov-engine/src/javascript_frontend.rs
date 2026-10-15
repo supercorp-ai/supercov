@@ -1032,11 +1032,13 @@ fn bootstrap_loader(
     let Some(binding) = output.runtime.as_ref() else {
         return Ok(());
     };
-    let direct = format!(
-        "{} = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin",
-        binding.mcdc_begin
-    );
-    let Some(found) = output.code.find(&direct) else {
+    // A TypeScript file's helpers carry their types; its loader is one line.
+    let Some(found) = helper_declaration(
+        &output.code,
+        &binding.mcdc_begin,
+        "globalThis.__SUPERCOV_DIRECT_RUNTIME__",
+        true,
+    ) else {
         return Ok(());
     };
     let loader = format!(
@@ -1158,27 +1160,94 @@ fn compact_runtime(runtime_source: &str) -> String {
     format!("{compact}{}", &runtime_source[export_start..])
 }
 
+/// Where the declaration of a file's first helper starts: `<name> =
+/// <global>.mcdcBegin`, or, in TypeScript, `<name>: typeof import("…")
+/// .mcdcBegin = <global>.mcdcBegin`. With `typed` false, only the first.
+fn helper_declaration(code: &str, name: &str, global: &str, typed: bool) -> Option<usize> {
+    let value = format!("= {global}.mcdcBegin");
+    let mut from = 0;
+    while let Some(found) = code[from..].find(name) {
+        let at = from + found;
+        let rest = &code[at + name.len()..];
+        let declared = rest.split([',', ';', '\n']).next().unwrap_or_default();
+        if declared.trim() == value
+            || (typed && declared.starts_with(": ") && declared.trim_end().ends_with(&value))
+        {
+            return Some(at);
+        }
+        from = at + name.len();
+    }
+    None
+}
+
+/// Whether the project builds images: a Dockerfile or a compose file at its
+/// root or one directory down. Its code may run where no preload reaches.
+pub fn builds_images(root: &Path) -> bool {
+    let named = |directory: &Path| {
+        fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                name == "dockerfile"
+                    || name.ends_with(".dockerfile")
+                    || name.starts_with("dockerfile.")
+                    || matches!(
+                        name.as_str(),
+                        "compose.yaml"
+                            | "compose.yml"
+                            | "docker-compose.yaml"
+                            | "docker-compose.yml"
+                    )
+            })
+    };
+    named(root)
+        || fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && !entry.file_name().to_string_lossy().starts_with('.')
+                    && entry.file_name() != "node_modules"
+                    && named(&entry.path())
+            })
+}
+
 fn bootstrap_runtime(
     output: &mut crate::js_instrumenter::CandidateOutput,
     runtime_source: &str,
     browser_suite: bool,
+    images: bool,
 ) {
     let Some(binding) = output.runtime.as_ref() else {
         return;
     };
-    let script = format!(
-        "{} = globalThis.__supercovRuntime.mcdcBegin",
-        binding.mcdc_begin
-    );
-    let direct = format!(
-        "{} = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin",
-        binding.mcdc_begin
-    );
-    let Some(found) = output
-        .code
-        .find(&script)
-        .or_else(|| browser_suite.then(|| output.code.find(&direct)).flatten())
-    else {
+    // A TypeScript file declares its helpers with their types. Its copy of
+    // the runtime costs a browser page what a JavaScript file's does, 55 KB
+    // a module, so it carries one where it may be run without Supercov: a
+    // server or a build in an image of the copy. Without one, a TypeScript
+    // server built in a container, or a page an image's build prerenders,
+    // stopped at its first probe ("reading 'mcdcBegin'").
+    let Some(found) = helper_declaration(
+        &output.code,
+        &binding.mcdc_begin,
+        "globalThis.__supercovRuntime",
+        images,
+    )
+    .or_else(|| {
+        browser_suite
+            .then(|| {
+                helper_declaration(
+                    &output.code,
+                    &binding.mcdc_begin,
+                    "globalThis.__SUPERCOV_DIRECT_RUNTIME__",
+                    images,
+                )
+            })
+            .flatten()
+    }) else {
         return;
     };
     let Some(export_start) = runtime_source.rfind("\nexport {") else {
@@ -1319,6 +1388,49 @@ fn write_vitest_config(
     );
     atomic_write(&path, source.as_bytes())?;
     Ok(path)
+}
+
+/// The collector imports `@playwright/test` from Supercov's directory at the
+/// copy's root, which finds the package only where the root or a directory
+/// above it has it. A project whose Playwright is installed beside its config
+/// alone (`e2e/node_modules`), measured from its root because its server is
+/// built there, failed in every worker ("Cannot find package
+/// '@playwright/test'"). The package found from the config's directory is
+/// linked into Supercov's own: Node loads it by its real path, so the
+/// collector and the tests share one Playwright.
+fn link_playwright_package(workspace: &Path, project: &CoverageProject, runtime_directory: &Path) {
+    if project.playwright_module != "@playwright/test" {
+        return;
+    }
+    let package = |directory: &Path| directory.join("node_modules/@playwright/test");
+    if workspace
+        .ancestors()
+        .any(|directory| package(directory).is_dir())
+    {
+        return;
+    }
+    let Some(config) = project.playwright_config.as_ref() else {
+        return;
+    };
+    let Some(directory) = config
+        .strip_prefix(&project.root)
+        .ok()
+        .and_then(|relative| workspace.join(relative).parent().map(Path::to_path_buf))
+    else {
+        return;
+    };
+    let Some(found) = directory
+        .ancestors()
+        .take_while(|candidate| candidate.starts_with(workspace))
+        .map(package)
+        .find(|candidate| candidate.is_dir())
+    else {
+        return;
+    };
+    let scope = runtime_directory.join("@playwright");
+    if fs::create_dir_all(&scope).is_ok() {
+        let _ = crate::workspace::create_link(&found, &scope.join("test"), true);
+    }
 }
 
 fn configure_playwright_runtime(
@@ -1579,6 +1691,7 @@ pub fn prepare_javascript_frontend(
     })?;
     let configuration_started = Instant::now();
     configure_playwright_runtime(&runtime_directory, project)?;
+    link_playwright_package(workspace, project, &runtime_directory);
     let playwright_config_path = write_playwright_config(workspace, project, &generated)?;
     let vitest_config_path = write_vitest_config(workspace, project, &generated)?;
     account(&SETUP.config_ns, configuration_started);
@@ -1601,6 +1714,7 @@ pub fn prepare_javascript_frontend(
     // its first line ("reading 'mcdcBegin'"). The browser's evidence has no
     // adapter to reach the run, but its tests pass as they do without it.
     let browser_suite = project.playwright_config.is_some() || project.browser_runner;
+    let images = builds_images(workspace);
     let mut authored = BTreeSet::new();
     let sources_started = Instant::now();
     for file in &project.source_files {
@@ -1651,7 +1765,7 @@ pub fn prepare_javascript_frontend(
                 &runtime_specifier(file, "runtime.mjs")?,
             );
         }
-        bootstrap_runtime(&mut output, &standalone_runtime, browser_suite);
+        bootstrap_runtime(&mut output, &standalone_runtime, browser_suite, images);
         if !browser_suite {
             bootstrap_loader(&mut output, file)?;
         }
@@ -1839,6 +1953,28 @@ mod tests {
         let before = untouched.code.clone();
         keep_directives_first("x();\n//= not a directive\n", &mut untouched);
         assert_eq!(untouched.code, before);
+    }
+
+    // A TypeScript file's helpers are declared with their types.
+    #[test]
+    fn a_helper_declaration_is_found_with_or_without_its_type() {
+        let global = "globalThis.__SUPERCOV_DIRECT_RUNTIME__";
+        let untyped =
+            "var x = 1;\nvar h_1 = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin, c_1 = 2;";
+        assert_eq!(helper_declaration(untyped, "h_1", global, false), Some(15));
+        let typed = "var h_1: typeof import(\"./r.mjs\").mcdcBegin = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin, c_1 = 2;";
+        assert_eq!(helper_declaration(typed, "h_1", global, true), Some(4));
+        assert_eq!(helper_declaration(typed, "h_1", global, false), None);
+        // A use of the name elsewhere is not its declaration.
+        assert_eq!(
+            helper_declaration(
+                "h_1(); var h_1 = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin;",
+                "h_1",
+                global,
+                true
+            ),
+            Some(11)
+        );
     }
 
     // Each directly served file carries a copy, so it carries no comments.

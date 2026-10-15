@@ -221,6 +221,7 @@ fn main() -> ExitCode {
         Some("__run-js-direct") => run_js_direct(),
         Some("__sweep-trash") => sweep_trash(),
         Some(supercov_engine::source_tools::SOURCE_TOOL_COMMAND) => source_tool(),
+        Some(supercov_engine::docker_servers::DOCKER_COMMAND) => docker(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some(supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT) => ExitCode::from(
             supercov_engine::rust_owned_doctests::doctest_runtool(arguments.collect()).clamp(0, 255)
@@ -2811,6 +2812,15 @@ fn source_tool() -> ExitCode {
     };
     let code =
         supercov_engine::source_tools::run_source_tool(&tool, &arguments.collect::<Vec<_>>());
+    ExitCode::from(code.clamp(0, 255) as u8)
+}
+
+fn docker() -> ExitCode {
+    let mut arguments = std::env::args_os().skip(2);
+    let Some(docker) = arguments.next().map(PathBuf::from) else {
+        return ExitCode::from(2);
+    };
+    let code = supercov_engine::docker_servers::run(&docker, &arguments.collect::<Vec<_>>());
     ExitCode::from(code.clamp(0, 255) as u8)
 }
 

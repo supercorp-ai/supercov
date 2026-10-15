@@ -2,6 +2,22 @@ import { appendFileSync, existsSync, mkdirSync, openSync, closeSync, fsyncSync, 
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { Buffer } from "node:buffer";
+
+// In a container Supercov's `docker` launcher mounts the run's directory
+// into, its user (root) owns what it creates there; a directory made with
+// the usual mask would keep the run, outside, from removing what goes in it.
+function makeDirectory(directory) {
+    if (process.env.SUPERCOV_CONTAINER !== "1")
+        return mkdirSync(directory, { recursive: true });
+    const previous = process.umask(0);
+    try {
+        return mkdirSync(directory, { recursive: true, mode: 0o777 });
+    }
+    finally {
+        process.umask(previous);
+    }
+}
+
 function fsyncDirectory(path) {
     try {
         const directory = openSync(path, "r");
@@ -18,7 +34,7 @@ function fsyncDirectory(path) {
 }
 /** Write a complete sibling file and atomically replace the destination. */
 export function atomicWriteFileSync(path, data, options) {
-    mkdirSync(dirname(path), { recursive: true });
+    makeDirectory(dirname(path));
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     let descriptor;
     try {
@@ -41,7 +57,7 @@ export function atomicWriteFileSync(path, data, options) {
 }
 /** Append one recoverable JSONL record and make the completed line durable. */
 export function appendJsonLineDurableSync(path, data) {
-    mkdirSync(dirname(path), { recursive: true });
+    makeDirectory(dirname(path));
     const existed = existsSync(path);
     const descriptor = openSync(path, "a", 0o600);
     try {
@@ -56,12 +72,12 @@ export function appendJsonLineDurableSync(path, data) {
 }
 /** Append a complete local record; process exit closes it before publication. */
 export function appendJsonLineSync(path, data) {
-    mkdirSync(dirname(path), { recursive: true });
+    makeDirectory(dirname(path));
     appendFileSync(path, data.endsWith("\n") ? data : `${data}\n`, { mode: 0o600 });
 }
 /** Atomically publish a fully prepared file or directory and persist its entry. */
 export function atomicRenameSync(source, destination) {
-    mkdirSync(dirname(destination), { recursive: true });
+    makeDirectory(dirname(destination));
     renameSync(source, destination);
     fsyncDirectory(dirname(destination));
 }
