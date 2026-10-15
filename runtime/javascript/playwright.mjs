@@ -216,6 +216,9 @@ class CoveragePhaseController {
     // fixture override tears down before the collector's own fixture, and a
     // closed page cannot be evaluated, so the evidence is taken on the way out.
     earlySnapshots = [];
+    // Evidence documents gave as they left (`__supercovLeaving`), merged with
+    // the rest when there is any.
+    leftSnapshots = [];
     snapshottedPages = new WeakSet();
     snapshottedWorkers = new WeakSet();
     // Workers that did not answer an evaluation in time. They are not waited
@@ -279,8 +282,10 @@ class CoveragePhaseController {
             if (snapshot)
                 snapshots.push(snapshot);
         }
-        this.runtimeSnapshots = snapshots;
-        return snapshots;
+        this.runtimeSnapshots = this.leftSnapshots.length > 0
+            ? [mergeSnapshots([...this.leftSnapshots, ...snapshots])]
+            : snapshots;
+        return this.runtimeSnapshots;
     }
     /**
      * A worker's evidence, or nothing when it cannot be read. A worker that
@@ -291,20 +296,15 @@ class CoveragePhaseController {
         if (this.workersWithoutRuntime.has(worker)) {
             // Asked once more, without waiting: it may have loaded an
             // instrumented script since it was registered.
-            const answer = await bounded(worker
-                .evaluate(() => globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__?.())
-                .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
+            const answer = await bounded(readSnapshot(worker).catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
             if (answer && answer !== WORKER_TIMED_OUT) {
                 this.snapshottedWorkers.add(worker);
                 return answer;
             }
             return undefined;
         }
-        const answer = await bounded(worker
-            .evaluate(() => {
-            const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
-            return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
-        })
+        const answer = await bounded(readSnapshot(worker)
+            .then((snapshot) => snapshot ?? { decisions: [], hits: [], events: [] })
             .catch(() => undefined), WORKER_SNAPSHOT_WAIT_MS);
         if (answer === WORKER_TIMED_OUT) {
             this.unresponsiveWorkers.add(worker);
@@ -335,11 +335,11 @@ class CoveragePhaseController {
                 .evaluate(({ token, url }) => {
                 const entries = globalThis.__SUPERCOV_WORKER_EVIDENCE__?.() ?? [];
                 const byToken = token ? entries.find((entry) => entry.token === token) : undefined;
-                if (byToken)
-                    return byToken;
                 const byUrl = entries.filter((entry) => entry.url === url);
-                return byUrl.length === 1 ? byUrl[0] : undefined;
+                const found = byToken ?? (byUrl.length === 1 ? byUrl[0] : undefined);
+                return found ? JSON.stringify(found) : undefined;
             }, { token, url })
+                .then((text) => (typeof text === "string" ? JSON.parse(text) : undefined))
                 .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
             if (pushed && pushed !== WORKER_TIMED_OUT)
                 return pushed;
@@ -349,11 +349,8 @@ class CoveragePhaseController {
     async snapshotPage(page) {
         const snapshots = [];
         for (const frame of page.frames()) {
-            snapshots.push(await frame
-                .evaluate(() => {
-                const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
-                return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
-            })
+            snapshots.push(await readSnapshot(frame)
+                .then((snapshot) => snapshot ?? { decisions: [], hits: [], events: [] })
                 .catch(() => ({
                 decisions: [],
                 hits: [],
@@ -432,6 +429,20 @@ class CoveragePhaseController {
             // learned its phase only from the next action, after it had
             // loaded, and everything it ran while loading was placed by time.
             await cdp.send("Page.enable").catch(() => undefined);
+            // A document that leaves hands its evidence over here: the
+            // next one reads what it stored only on the same origin.
+            cdp.on("Runtime.bindingCalled", ({ name, payload }) => {
+                if (name !== LEAVING_BINDING || this.runtimeSnapshots)
+                    return;
+                try {
+                    this.leftSnapshots.push(JSON.parse(payload));
+                }
+                catch {
+                    // Not evidence.
+                }
+            });
+            await cdp.send("Runtime.enable").catch(() => undefined);
+            await cdp.send("Runtime.addBinding", { name: LEAVING_BINDING }).catch(() => undefined);
             this.cdpSessions.set(page, cdp);
         }
         const phaseId = this.requestPhaseId();
@@ -882,6 +893,63 @@ class CoveragePhaseController {
         });
         await this.scriptUpdate.catch(() => undefined);
     }
+}
+/**
+ * A page's or worker's evidence. It holds an event for every hit of every
+ * phase, tens of thousands of objects on a large frontend, and Playwright
+ * returns an object value by value: reading it took half a second a page at
+ * the end of every test (20,000 events: 470 ms, against 34 ms as one JSON
+ * string), and doubled a 76-test suite's time.
+ */
+const LEAVING_BINDING = "__supercovLeaving";
+/**
+ * One snapshot holding everything in `snapshots`, each observation once: a
+ * document that left gave its evidence, and the next one on its origin
+ * restored the same evidence and added to it.
+ */
+function mergeSnapshots(snapshots) {
+    const hits = new Set();
+    const events = new Map();
+    const decisions = new Map();
+    const logicals = new Map();
+    const vectorsOf = (map, key, initial) => {
+        let entry = map.get(key);
+        if (!entry) {
+            entry = { ...initial, seen: new Map() };
+            map.set(key, entry);
+        }
+        return entry;
+    };
+    for (const snapshot of snapshots) {
+        for (const id of snapshot?.hits ?? [])
+            hits.add(id);
+        for (const event of snapshot?.events ?? [])
+            events.set(JSON.stringify(event), event);
+        for (const decision of snapshot?.decisions ?? []) {
+            const entry = vectorsOf(decisions, decision.meta?.id, { meta: decision.meta });
+            for (const vector of decision.vectors ?? [])
+                entry.seen.set(JSON.stringify(vector), vector);
+        }
+        for (const logical of snapshot?.logicals ?? []) {
+            const entry = vectorsOf(logicals, logical.id, { id: logical.id });
+            for (const vector of logical.vectors ?? [])
+                entry.seen.set(JSON.stringify(vector), vector);
+        }
+    }
+    return {
+        decisions: [...decisions.values()].map(({ seen, meta }) => ({ meta, vectors: [...seen.values()] })),
+        hits: [...hits],
+        events: [...events.values()],
+        logicals: [...logicals.values()].map(({ seen, id }) => ({ id, vectors: [...seen.values()] })),
+    };
+}
+function readSnapshot(target) {
+    return target
+        .evaluate(() => {
+        const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
+        return getSnapshot ? JSON.stringify(getSnapshot()) : undefined;
+    })
+        .then((text) => (typeof text === "string" ? JSON.parse(text) : undefined));
 }
 let activeController;
 let bridgedAssertionDepth = 0;

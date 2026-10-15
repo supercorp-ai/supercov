@@ -412,6 +412,58 @@ try {
   }
 
 
+  // A thread with no phase of its own (an Action Cable worker beside
+  // Capybara's Puma) records under the process-wide phase while tests switch
+  // it. It opened a second evidence file beside the test thread's, and read a
+  // new phase before it was declared, so a run of Campfire's system tests
+  // could not be published ("references undeclared context").
+  const threadProject = resolve(temporary, 'threads');
+  mkdirSync(resolve(threadProject, 'lib'), { recursive: true });
+  mkdirSync(resolve(threadProject, 'test'), { recursive: true });
+  writeFileSync(
+    resolve(threadProject, 'lib/busy.rb'),
+    [
+      'module Busy',
+      '  def self.spin(n)',
+      '    total = 0',
+      '    n.times do |i|',
+      '      if i.even? && i % 3 == 0',
+      '        total += 1',
+      '      elsif i % 5 == 0 || i % 7 == 0',
+      '        total += 2',
+      '      end',
+      '    end',
+      '    total',
+      '  end',
+      'end',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    resolve(threadProject, 'test/busy_test.rb'),
+    [
+      'require "minitest/autorun"',
+      'require "busy"',
+      '',
+      // It yields each round: a thread that never did held the interpreter
+      // for whole time slices, and the suite crawled past CI's timeout on
+      // Windows. Yielding interleaves more, and 4.9.0 failed every run.
+      'Thread.new { loop { Busy.spin(40); Thread.pass } }',
+      '',
+      'class BusyTest < Minitest::Test',
+      '  300.times do |index|',
+      '    define_method("test_#{index}") do',
+      '      assert_operator Busy.spin(5), :>=, 0',
+      '    end',
+      '  end',
+      'end',
+      '',
+    ].join('\n'),
+  );
+  const threads = supercov(['--', 'ruby', '-Ilib', '-Itest', 'test/busy_test.rb'], environment, threadProject);
+  assert.equal(threads.status, 0, `${threads.stdout}\n${threads.stderr}`);
+  assert.equal(query(['runs', 'latest'], environment, threadProject).testOutcomes.passed, 300);
+
   // A suite stops a server it started by signalling it, and what a signalled
   // process keeps is not obvious: Ruby turns a terminating signal into
   // SignalException, which unwinds through the `at_exit` where Coverage's own

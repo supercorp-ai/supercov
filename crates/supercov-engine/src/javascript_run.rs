@@ -979,29 +979,6 @@ pub fn run_direct_javascript(
         .iter()
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
-    // The copy is of this directory alone. A package inside a repository
-    // whose tests reach outside it -- a Playwright `webServer` that runs
-    // `go run ../cmd/testserver` -- finds nothing there, and the suite fails
-    // on a path that exists in the checkout.
-    // Only where no test recorded anything: a suite that ran and failed
-    // failed for its own reasons.
-    let nothing_recorded =
-        std::fs::read_dir(&evidence_directory).map_or(true, |mut entries| entries.next().is_none());
-    if execution.exit_code != 0
-        && execution.interrupted_signal.is_none()
-        && nothing_recorded
-        && let Some(repository) = root
-            .ancestors()
-            .skip(1)
-            .find(|directory| directory.join(".git").exists())
-    {
-        let _ = writeln!(
-            diagnostics,
-            "[supercov] the command failed. It ran in a copy of {} alone, and anything its tests reach outside it, as `../`, is not in that copy; if they do, run Supercov from {} instead",
-            root.display(),
-            repository.display()
-        );
-    }
     // The copy starts without build output: `dist/`, `build/`, `.next/` and
     // the like are not copied, since they hold code that was never
     // instrumented. A suite that needs it fails on a missing file, which

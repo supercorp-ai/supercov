@@ -389,6 +389,7 @@ module Supercov
       @closed = false
       @mutex = Mutex.new
       @seen_lock = Mutex.new
+      @transport_lock = Mutex.new
       @transport = nil
       @transport_pid = nil
       @context = 0
@@ -406,6 +407,13 @@ module Supercov
       @open = {}
       @loop_state = {}
       @pending_loops = {}
+      # Guards adding to and settling the loops and arrivals a phase leaves
+      # open. Probes on a thread with no phase of its own add them while
+      # another thread's phase ends; adding to a hash being iterated raised,
+      # and a copy taken first was not atomic on Ruby 4.0, which then
+      # crashed. Taken once per loop or arrival a phase opens, never per
+      # iteration.
+      @settle_lock = Mutex.new
       @arrivals = {}
       @limitations = {}
       @active_threads = {}
@@ -736,7 +744,7 @@ module Supercov
           thread[:__supercov_context] = nil
           @active_threads.delete(thread)
         else
-          @context = @next_context
+          context = @next_context
           @next_context += 1
           stored = {
             "worker" => identity[:worker] || @worker,
@@ -744,10 +752,16 @@ module Supercov
             "retry" => identity[:retry].to_i,
             "phase" => identity[:phase],
           }
-          @identities[@context] = stored
-          record({ "t" => "phase", "ctx" => @context, "at" => now_ms }.merge(stored))
-          thread[:__supercov_context] = @context
-          @active_threads[thread] = @context
+          @identities[context] = stored
+          # Declared before any thread can read it: a thread with no phase of
+          # its own reads the process-wide one without this lock, and one that
+          # read it first recorded under a context the evidence had not
+          # declared yet (Campfire's system tests, a Puma request beside an
+          # Action Cable thread), and the run could not be published.
+          record({ "t" => "phase", "ctx" => context, "at" => now_ms }.merge(stored))
+          @context = context
+          thread[:__supercov_context] = context
+          @active_threads[thread] = context
           hook_assertions if identity[:phase] == "call"
         end
         @context
@@ -1244,7 +1258,7 @@ module Supercov
       state_key = [current_context, target["id"]]
       hit(current_context, target["zero"]) if @loop_state[state_key] == :pending
       @loop_state[state_key] = :pending
-      @pending_loops[state_key] = target["zero"]
+      @settle_lock.synchronize { @pending_loops[state_key] = target["zero"] }
       collection
     end
 
@@ -1253,19 +1267,21 @@ module Supercov
       state_key = [current_context, target["id"]]
       hit(current_context, target["entered"]) if @loop_state[state_key] == :pending
       @loop_state[state_key] = :entered
-      @pending_loops.delete(state_key)
+      @settle_lock.synchronize { @pending_loops.delete(state_key) } if @pending_loops.key?(state_key)
       nil
     end
 
     # A loop reached for the last time in a phase and never entered ran zero
     # times; nothing reaches it again to say so, so the phase's end does.
     def settle_loops(context)
-      @pending_loops.delete_if do |(ctx, id), zero|
-        next false unless ctx == context
-
+      settled = @settle_lock.synchronize do
+        ending = @pending_loops.select { |(ctx, _), _| ctx == context }
+        ending.each_key { |state_key| @pending_loops.delete(state_key) }
+        ending
+      end
+      settled.each do |(ctx, id), zero|
         hit(ctx, zero)
         @loop_state[[ctx, id]] = :settled
-        true
       end
     end
 
@@ -1285,7 +1301,7 @@ module Supercov
     # cannot be mistaken for one.
     def probe_arrival(key)
       target = @probes[key]
-      state = (@arrivals[[current_context, key]] ||= [0, 0])
+      state = arrival_state(current_context, key)
       settle_arrival(current_context, target, state)
       state[0] += 1
       nil
@@ -1293,7 +1309,7 @@ module Supercov
 
     def probe_evaluation_started(key)
       target = @probes[key]
-      state = (@arrivals[[current_context, key]] ||= [0, 0])
+      state = arrival_state(current_context, key)
       state[1] += 1
       hit(current_context, target["evaluated"])
       nil
@@ -1303,10 +1319,13 @@ module Supercov
       hit(context, target["shortCircuit"]) if state[0] > state[1]
     end
 
-    def settle_arrivals(context)
-      @arrivals.each do |(ctx, key), state|
-        next unless ctx == context
+    def arrival_state(context, key)
+      @arrivals[[context, key]] || @settle_lock.synchronize { @arrivals[[context, key]] ||= [0, 0] }
+    end
 
+    def settle_arrivals(context)
+      arrivals = @settle_lock.synchronize { @arrivals.select { |(ctx, _), _| ctx == context } }
+      arrivals.each do |(ctx, key), state|
         settle_arrival(ctx, @probes[key], state)
       end
     end
@@ -1372,17 +1391,23 @@ module Supercov
       pid = Process.pid
       return if @transport && @transport_pid == pid
 
+      # Two threads recording their first records at once each opened an
+      # evidence file, and the phases one declared went to the file the
+      # other then replaced: the run could not be published.
+      @transport_lock.synchronize { open_transport(pid) unless @transport && @transport_pid == pid }
+    end
+
+    def open_transport(pid)
       # A forked child inherits the parent's Ruby objects; it must own its
       # own evidence file and re-declare the phase it is running inside.
       forked = !@transport_pid.nil?
       @transport&.close if forked
       worker = forked ? "#{@worker}-#{pid}" : @worker
       @worker = worker
-      @transport = Transport.new(@evidence_dir, worker, pid)
-      @transport_pid = pid
+      transport = Transport.new(@evidence_dir, worker, pid)
       # A forked child's evidence file names its ids afresh.
       @id_numbers = {} if forked
-      @transport.write(
+      transport.write(
         "t" => "process",
         "v" => EVIDENCE_VERSION,
         "run" => @run_id,
@@ -1394,7 +1419,11 @@ module Supercov
         "lines" => @probes_supported ? "exact" : "first",
       )
       identity = @identities[@context]
-      @transport.write({ "t" => "phase", "ctx" => @context, "at" => now_ms }.merge(identity)) if forked && @context != 0 && identity
+      transport.write({ "t" => "phase", "ctx" => @context, "at" => now_ms }.merge(identity)) if forked && @context != 0 && identity
+      # Seen by threads that do not take the lock only once it holds its
+      # header.
+      @transport = transport
+      @transport_pid = pid
     end
 
     def close

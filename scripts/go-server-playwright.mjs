@@ -27,19 +27,41 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"example.com/gradebook/internal/grades"
+)
+
+// Two slow requests meet before either grades, and each holds its reply
+// after: each grade runs while both tests are running, however late the
+// second worker starts.
+var (
+	arrived = make(chan struct{}, 2)
+	met     = make(chan struct{})
+	meet    sync.Once
 )
 
 func main() {
 	http.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ready")) })
 	http.HandleFunc("/grade", func(w http.ResponseWriter, r *http.Request) {
 		score, _ := strconv.Atoi(r.URL.Query().Get("score"))
-		if r.URL.Query().Get("slow") != "" {
+		slow := r.URL.Query().Get("slow") != ""
+		if slow {
+			arrived <- struct{}{}
+			if len(arrived) == 2 {
+				meet.Do(func() { close(met) })
+			}
+			select {
+			case <-met:
+			case <-time.After(20 * time.Second):
+			}
+		}
+		grade := grades.Grade(score)
+		if slow {
 			time.Sleep(300 * time.Millisecond)
 		}
-		w.Write([]byte(grades.Grade(score)))
+		w.Write([]byte(grade))
 	})
 	http.ListenAndServe("127.0.0.1:"+os.Args[1], nil)
 }

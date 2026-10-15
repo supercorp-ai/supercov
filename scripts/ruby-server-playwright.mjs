@@ -37,7 +37,7 @@ assert.ok(major * 100 + minor >= 303, `Ruby ${version.stdout} is older than the 
 
 const files = {
   'package.json': '{ "name": "ruby-server", "private": true, "type": "module" }\n',
-  Gemfile: 'source "https://rubygems.org"\ngem "sinatra"\ngem "puma"\ngem "rackup"\ngem "webrick"\ngem "minitest"\n',
+  Gemfile: 'source "https://rubygems.org"\ngem "sinatra"\ngem "puma"\ngem "rackup"\ngem "webrick"\ngem "minitest"\ngem "bootsnap"\n',
   'app/grades.rb': 'module Grades\n  def self.grade(score)\n    return "A" if score >= 90\n    return "pass" if score >= 50\n\n    "fail"\n  end\n\n  def self.unused\n    "never"\n  end\nend\n',
   'app/payments.rb': 'module Payments\n  def self.settle(event)\n    return "paid" if event.include?("charge.succeeded")\n\n    "ignored"\n  end\nend\n',
   'app/web.rb': `require "net/http"
@@ -92,7 +92,7 @@ export default {
   // A server the suite runs in its own process, as Capybara runs Puma for a
   // Rails system test: its requests name no test, and each is the test's
   // that was running.
-  'test/live_test.rb': "require \"minitest/autorun\"\nrequire \"net/http\"\nrequire \"webrick\"\nrequire_relative \"../app/grades\"\n\n# A server the suite runs in its own process, as Capybara runs Puma.\nSERVER = WEBrick::HTTPServer.new(BindAddress: \"127.0.0.1\", Port: 0, Logger: WEBrick::Log.new(File::NULL), AccessLog: [])\nSERVER.mount_proc(\"/\") { |request, response| response.body = Grades.grade(Integer(request.query[\"score\"])) }\nThread.new { SERVER.start }\n\nclass LiveTest < Minitest::Test\n  def get(score)\n    Net::HTTP.get(URI(\"http://127.0.0.1:#{SERVER.config[:Port]}/?score=#{score}\"))\n  end\n\n  def test_a_low_score\n    assert_equal \"fail\", get(10)\n  end\n\n  def test_a_high_score\n    assert_equal \"A\", get(95)\n  end\nend\n",
+  'test/live_test.rb': "# As a Rails app's config/boot.rb does: Bootsnap caches compiled files.\nrequire \"bootsnap/setup\"\nrequire \"minitest/autorun\"\nrequire \"net/http\"\nrequire \"webrick\"\nrequire_relative \"../app/grades\"\n\n# A server the suite runs in its own process, as Capybara runs Puma.\nSERVER = WEBrick::HTTPServer.new(BindAddress: \"127.0.0.1\", Port: 0, Logger: WEBrick::Log.new(File::NULL), AccessLog: [])\nSERVER.mount_proc(\"/\") { |request, response| response.body = Grades.grade(Integer(request.query[\"score\"])) }\nThread.new { SERVER.start }\n\nclass LiveTest < Minitest::Test\n  def get(score)\n    Net::HTTP.get(URI(\"http://127.0.0.1:#{SERVER.config[:Port]}/?score=#{score}\"))\n  end\n\n  def test_a_low_score\n    assert_equal \"fail\", get(10)\n  end\n\n  def test_a_high_score\n    assert_equal \"A\", get(95)\n  end\nend\n",
   'tests/grades.spec.js': `import { spawnSync } from 'node:child_process';
 import { expect, test } from '@playwright/test';
 
@@ -159,12 +159,14 @@ try {
     assert.match(paid, /credited by time/u, paid);
     assert.doesNotMatch(page('test', 'a high score is an A'), /payments\.rb|credited by time/u);
   }
-  const live = run(binary, ['--', 'bundle', 'exec', 'ruby', 'test/live_test.rb']);
+  const live = run(binary, ['--', 'bundle', 'exec', 'ruby', 'test/live_test.rb'], { BOOTSNAP_CACHE_DIR: resolve(root, 'tmp/cache') });
   assert.equal(live.status, 0, live.stdout + live.stderr);
   const liveId = JSON.parse(run(binary, ['runs', '--json']).stdout).data.runs[0].id;
   const low = run(binary, ['runs', liveId, 'test', 'LiveTest#test_a_low_score']).stdout;
   assert.deepEqual(low.match(/app\/grades\.rb:\d+/gu), ['app/grades.rb:2', 'app/grades.rb:3', 'app/grades.rb:4', 'app/grades.rb:6'], low);
   assert.match(low, /credited by time/u, low);
+  // Branches come from probes, which Bootsnap's compile cache skipped.
+  assert.match(low, /[1-9][0-9]* decisions/u, `the test has lines and no decisions: Bootsnap's cache ran the file without probes\n${low}`);
   console.log('[ruby-server-playwright] a Ruby server under browser tests is measured, each request credited to its test');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'ruby-server-playwright-'))) rmSync(root, { recursive: true, force: true });

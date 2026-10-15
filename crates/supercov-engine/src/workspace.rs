@@ -226,6 +226,96 @@ fn project_name(root: &Path) -> Result<&std::ffi::OsStr, WorkspaceError> {
         .ok_or_else(|| WorkspaceError::UnsafePath(root.into()))
 }
 
+/// The git repository a project is a directory of, when it is not the
+/// repository itself: a package in a monorepo. None for a project inside one
+/// of Supercov's own copies, which is never laid out again.
+fn enclosing_repository(root: &Path) -> Option<&Path> {
+    let repository = root
+        .ancestors()
+        .skip(1)
+        .find(|directory| directory.join(".git").exists())?;
+    let relative = root.strip_prefix(repository).ok()?;
+    if relative
+        .components()
+        .any(|component| component.as_os_str() == ".supercov")
+    {
+        return None;
+    }
+    Some(repository)
+}
+
+/// Where in a copy directory the project's copy sits: under its own name, or,
+/// for a package of a repository, at its path in the repository, so that
+/// what its suite reaches as `../` is where it is in the checkout.
+fn copy_layout(root: &Path) -> Result<PathBuf, WorkspaceError> {
+    let Some(repository) = enclosing_repository(root) else {
+        return Ok(PathBuf::from(project_name(root)?));
+    };
+    let name = repository
+        .file_name()
+        .ok_or_else(|| WorkspaceError::UnsafePath(repository.into()))?;
+    let relative = root
+        .strip_prefix(repository)
+        .map_err(|_| WorkspaceError::UnsafePath(root.into()))?;
+    Ok(Path::new(name).join(relative))
+}
+
+/// Around a package's copy, the rest of its repository: each directory on
+/// the way up holds links to its entries in the checkout. A Playwright
+/// `webServer` running `go run ../cmd/testserver`, or a tsconfig extending
+/// `../../tsconfig.base.json`, found nothing beside a copy of the package
+/// alone. Only the package is copied: what lies outside it is the checkout's,
+/// as when the suite runs there, and `.git` is never shared. Best effort.
+fn link_repository_around(root: &Path, workspace: &Path) {
+    let Some(repository) = enclosing_repository(root) else {
+        return;
+    };
+    let (mut real, mut copy) = (root, workspace);
+    while real != repository {
+        let (Some(real_parent), Some(copy_parent)) = (real.parent(), copy.parent()) else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(real_parent) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            // A lockfile is never reached as `../`, and a tool that takes the
+            // topmost one as the root (Next.js) found the repository's twice,
+            // beside the copy and in the checkout above `.supercov`, and
+            // warned of a second lockfile the run alone had.
+            if Some(name.as_os_str()) == real.file_name()
+                || matches!(
+                    name.to_str(),
+                    Some(
+                        ".git"
+                            | ".supercov"
+                            | "package-lock.json"
+                            | "npm-shrinkwrap.json"
+                            | "yarn.lock"
+                            | "pnpm-lock.yaml"
+                            | "bun.lock"
+                            | "bun.lockb"
+                    )
+                )
+            {
+                continue;
+            }
+            let destination = copy_parent.join(&name);
+            if fs::symlink_metadata(&destination).is_ok() {
+                continue;
+            }
+            let target = entry.path();
+            let directory = fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir());
+            // Windows: a file link needs a privilege a junction does not.
+            if create_link(&target, &destination, directory).is_err() && !directory {
+                let _ = fs::copy(&target, &destination);
+            }
+        }
+        (real, copy) = (real_parent, copy_parent);
+    }
+}
+
 pub fn workspace_container(root: &Path) -> PathBuf {
     // Everything Supercov keeps in a project lives under .supercov: one
     // directory to gitignore, one directory to delete. Users interact with
@@ -260,12 +350,20 @@ pub fn planted_cargo_configuration(root: &Path, workspace: &Path) -> Option<Path
     if !workspace.starts_with(root) {
         return None;
     }
+    // A repository's own, linked around a package's copy, applies to the
+    // checkout too.
+    let repository = enclosing_repository(root).and_then(|path| canonicalize_simplified(path).ok());
     workspace
         .ancestors()
         .skip(1)
         .take_while(|directory| *directory != root)
         .map(|directory| directory.join(".cargo"))
-        .find(|path| fs::symlink_metadata(path).is_ok())
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .find(|path| {
+            repository.as_ref().is_none_or(|repository| {
+                !canonicalize_simplified(path).is_ok_and(|real| real.starts_with(repository))
+            })
+        })
 }
 
 /// The directory, in the container, that holds a copy of the project:
@@ -298,7 +396,7 @@ pub fn cached_workspace_path(root: &Path, lock: &ProjectLock) -> Result<PathBuf,
 pub fn copy_path(root: &Path, copy: usize) -> Result<PathBuf, WorkspaceError> {
     Ok(workspace_container(root)
         .join(copy_directory_name(copy))
-        .join(project_name(root)?))
+        .join(copy_layout(root)?))
 }
 
 pub fn isolated_workspace_path(root: &Path, run_id: &str) -> Result<PathBuf, WorkspaceError> {
@@ -314,7 +412,7 @@ pub fn isolated_workspace_path(root: &Path, run_id: &str) -> Result<PathBuf, Wor
     Ok(workspace_container(root)
         .join("work")
         .join(run_id)
-        .join(project_name(root)?))
+        .join(copy_layout(root)?))
 }
 
 pub(crate) fn owned_workspace_path(path: &Path) -> bool {
@@ -976,6 +1074,7 @@ pub fn prepare_isolated_workspace(
         &mut operations,
     )?;
     link_node_modules(root, &workspace, &mut operations)?;
+    link_repository_around(root, &workspace);
     Ok(workspace)
 }
 
@@ -1182,6 +1281,7 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
         if fs::symlink_metadata(&previous).is_ok() {
             remove_stored_tree_deferred(root, &previous)?;
         }
+        link_repository_around(root, &workspace);
         Ok(workspace.clone())
     })();
     if fs::symlink_metadata(&staging).is_ok() {
@@ -2671,6 +2771,39 @@ mod tests {
         lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(store).unwrap();
+    }
+
+    #[test]
+    fn a_package_copy_sits_where_the_package_is_in_its_repository() {
+        // skyhook-io/radar's Playwright config in web/ starts its server with
+        // `go run ../cmd/testserver`, which a copy of web/ alone did not have.
+        let repository = project();
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::create_dir_all(repository.join("cmd/testserver")).unwrap();
+        fs::write(repository.join("cmd/testserver/main.go"), "package main\n").unwrap();
+        fs::write(repository.join("tsconfig.base.json"), "{}").unwrap();
+        fs::write(repository.join("package-lock.json"), "{}").unwrap();
+        let root = repository.join("packages/web");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/app.js"), "export {};\n").unwrap();
+        fs::create_dir_all(repository.join("packages/ui")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        let name = repository.file_name().unwrap();
+        assert!(workspace.ends_with(Path::new(name).join("packages/web")));
+        assert!(workspace.join("src/app.js").is_file());
+        assert_eq!(
+            fs::read_to_string(workspace.join("../../cmd/testserver/main.go")).unwrap(),
+            "package main\n"
+        );
+        assert!(workspace.join("../../tsconfig.base.json").is_file());
+        assert!(workspace.join("../ui").is_dir());
+        // The repository's .git is never shared with a test, and its
+        // lockfile is not there to be found twice.
+        assert!(fs::symlink_metadata(workspace.join("../../.git")).is_err());
+        assert!(fs::symlink_metadata(workspace.join("../../package-lock.json")).is_err());
+        lock.release().unwrap();
+        fs::remove_dir_all(repository).unwrap();
     }
 
     #[test]

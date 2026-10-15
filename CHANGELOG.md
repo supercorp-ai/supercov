@@ -5,13 +5,19 @@
 **Added**
 
 - Browser tests of a Java or Kotlin server built by the test command (`./gradlew bootRun`, `mvn spring-boot:run`, `javac`) measure it as they do a Go server: what it ran is swept every 5 ms and credited, by time, to the browser test running then, if only one was.
+- Python and Ruby tests are given a kind by where they live, as JavaScript tests are: a Rails app's `test/system` and `spec/features` tests are end-to-end, `spec/requests` and `tests/integration` integration. Every one was a unit test.
+- A Go, Java or Kotlin server's run says how many browser tests had its work only while another test ran too, as under parallel workers, and so were credited none of it, and that `--workers=1` credits each its own.
 
 **Fixed**
 
+- Browser tests of a large instrumented frontend ran twice as long as without Supercov (76 tests of stemdeck: 2.4 min against 1.2; now 1.8). Each page's evidence was read back at the end of every test as tens of thousands of separate values, half a second a page; it is now read as one piece of text, 13 times faster. Each directly served file also carries a third less of Supercov's runtime, which a browser fetches once per file at every test's fresh context, and a page stores its evidence only when it is leaving.
+- A click whose handler sent the page to another origin (`window.location.href` to a sign-in or masquerade URL) recorded nothing the handler ran, though the test passed only because it ran: a page's evidence survived a navigation only through the origin's localStorage. A leaving page now hands its evidence to the collector.
+- A Ruby run with a thread of no test's own beside the tests (Action Cable beside Capybara's Puma in Campfire's system tests) could not be published ("references undeclared context"): two threads could each open an evidence file, and a new test phase was readable before it was declared. A test phase that ended while that thread entered a loop could also raise in the test's thread, or crash Ruby 4.0.
+- A Rails app measured no branches or conditions: Bootsnap, which `config/boot.rb` loads, runs each file from its compiled cache, past the loader that adds Supercov's probes, so only lines were counted (0.08% of a Rails server's branches against 1.9%). Measured Ruby now runs with Bootsnap's compile cache off; its load-path cache stays.
 - A Python project's virtual environment, linked into the run's copy, was synced by `uv run` there: its editable install was pointed at the copy, and a `hatch-vcs` version file regenerated and came back as a change, so the server's run read as stale at once. The copy now runs with `UV_NO_SYNC=1`.
 - A Rails app using Sprockets served no assets under Supercov: its `app/assets/config/manifest.js` had code put above its `//= link` directives, which Sprockets reads only from the top. Directives stay first.
 - A package whose `tsconfig.json` includes a sibling (`../packages/ui/src`) was refused ("source root is not a regular file or directory"). Such a root is outside the project and is left out.
-- When a command fails before any test records anything in a package inside a larger repository, Supercov says the copy holds only that package and to run from the repository root if the tests reach outside it.
+- A package inside a larger repository ran in a copy of that package alone, so anything its suite reached as `../` was missing: a Playwright `webServer` running `go run ../cmd/testserver`, a tsconfig extending `../../tsconfig.base.json`. The copy now sits at the package's path in the repository, with the repository's other entries linked beside it from the checkout. Only the package is copied and measured.
 
 ## 4.9.0
 

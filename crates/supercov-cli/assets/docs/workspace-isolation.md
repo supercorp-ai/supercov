@@ -85,6 +85,16 @@ When a run fails in a project that has a `build` script the command does not
 reach, it says this. `SUPERCOV_KEEP_WORKSPACE=1` leaves the instrumented copy
 in `.supercov/workspaces/` after a run, to inspect.
 
+A package inside a larger git repository (`web/` beside `cmd/`, or
+`packages/app` in a monorepo) is copied alone, but the copy sits at the
+package's path in the repository, with the repository's other files and
+directories linked beside it from your checkout. A suite that reaches outside
+the package, a `webServer` running `go run ../cmd/testserver` or a tsconfig
+extending `../../tsconfig.base.json`, finds them where it finds them without
+Supercov. They are your checkout's own files, not copies, and they are not
+measured; the repository's `.git` and lockfiles are never linked. To measure code outside the
+package too, run Supercov from the repository root.
+
 ## Files Supercov creates
 
 | Location | What it is for |
