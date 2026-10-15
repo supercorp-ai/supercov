@@ -11,13 +11,23 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 // Inside the repository, so the suite finds its Playwright.
 const root = resolve(repository, 'target', `docker-server-playwright-${process.pid}-${Date.now()}`);
-const port = 49100 + Math.floor(Math.random() * 400);
+// A port nothing holds now: other processes on a developer's machine take
+// random high ones.
+const freePort = () => new Promise((done, fail) => {
+  const server = createServer();
+  server.once('error', fail);
+  server.listen(0, '127.0.0.1', () => {
+    const { port } = server.address();
+    server.close(() => done(port));
+  });
+});
 
 const docker = spawnSync('docker', ['info', '--format', '{{.ServerVersion}}'], { encoding: 'utf8' });
 if (process.platform === 'win32' || docker.status !== 0) {
@@ -115,7 +125,8 @@ try {
     const cwd = resolve(root, entry.language.replace(/\W/g, '').toLowerCase());
     const project = `supercov-docker-gate-${process.pid}-${index}`;
     projects.push(project);
-    for (const [file, text] of Object.entries({ ...shared(port + index, project), ...entry.files })) {
+    const port = await freePort();
+    for (const [file, text] of Object.entries({ ...shared(port, project), ...entry.files })) {
       mkdirSync(dirname(resolve(cwd, file)), { recursive: true });
       writeFileSync(resolve(cwd, file), text);
     }
