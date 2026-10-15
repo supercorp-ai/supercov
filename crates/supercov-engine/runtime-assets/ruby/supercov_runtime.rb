@@ -1266,13 +1266,18 @@ module Supercov
 
     # A loop reached for the last time in a phase and never entered ran zero
     # times; nothing reaches it again to say so, so the phase's end does.
+    #
+    # Read from a copy: probes on other threads add loops while a phase
+    # ends, and adding to a hash being iterated raised in the test's thread
+    # (and crashed Ruby 4.0 on arm64 in the gate's busy-thread case).
+    # `to_a` copies without yielding, so no other thread runs mid-copy.
     def settle_loops(context)
-      @pending_loops.delete_if do |(ctx, id), zero|
-        next false unless ctx == context
+      @pending_loops.to_a.each do |(ctx, id), zero|
+        next unless ctx == context
 
+        @pending_loops.delete([ctx, id])
         hit(ctx, zero)
         @loop_state[[ctx, id]] = :settled
-        true
       end
     end
 
@@ -1311,7 +1316,8 @@ module Supercov
     end
 
     def settle_arrivals(context)
-      @arrivals.each do |(ctx, key), state|
+      # From a copy, as `settle_loops` reads its loops.
+      @arrivals.to_a.each do |(ctx, key), state|
         next unless ctx == context
 
         settle_arrival(ctx, @probes[key], state)
