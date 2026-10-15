@@ -407,6 +407,13 @@ module Supercov
       @open = {}
       @loop_state = {}
       @pending_loops = {}
+      # Guards adding to and settling the loops and arrivals a phase leaves
+      # open. Probes on a thread with no phase of its own add them while
+      # another thread's phase ends; adding to a hash being iterated raised,
+      # and a copy taken first was not atomic on Ruby 4.0, which then
+      # crashed. Taken once per loop or arrival a phase opens, never per
+      # iteration.
+      @settle_lock = Mutex.new
       @arrivals = {}
       @limitations = {}
       @active_threads = {}
@@ -1251,7 +1258,7 @@ module Supercov
       state_key = [current_context, target["id"]]
       hit(current_context, target["zero"]) if @loop_state[state_key] == :pending
       @loop_state[state_key] = :pending
-      @pending_loops[state_key] = target["zero"]
+      @settle_lock.synchronize { @pending_loops[state_key] = target["zero"] }
       collection
     end
 
@@ -1260,22 +1267,19 @@ module Supercov
       state_key = [current_context, target["id"]]
       hit(current_context, target["entered"]) if @loop_state[state_key] == :pending
       @loop_state[state_key] = :entered
-      @pending_loops.delete(state_key)
+      @settle_lock.synchronize { @pending_loops.delete(state_key) } if @pending_loops.key?(state_key)
       nil
     end
 
     # A loop reached for the last time in a phase and never entered ran zero
     # times; nothing reaches it again to say so, so the phase's end does.
-    #
-    # Read from a copy: probes on other threads add loops while a phase
-    # ends, and adding to a hash being iterated raised in the test's thread
-    # (and crashed Ruby 4.0 on arm64 in the gate's busy-thread case).
-    # `to_a` copies without yielding, so no other thread runs mid-copy.
     def settle_loops(context)
-      @pending_loops.to_a.each do |(ctx, id), zero|
-        next unless ctx == context
-
-        @pending_loops.delete([ctx, id])
+      settled = @settle_lock.synchronize do
+        ending = @pending_loops.select { |(ctx, _), _| ctx == context }
+        ending.each_key { |state_key| @pending_loops.delete(state_key) }
+        ending
+      end
+      settled.each do |(ctx, id), zero|
         hit(ctx, zero)
         @loop_state[[ctx, id]] = :settled
       end
@@ -1297,7 +1301,7 @@ module Supercov
     # cannot be mistaken for one.
     def probe_arrival(key)
       target = @probes[key]
-      state = (@arrivals[[current_context, key]] ||= [0, 0])
+      state = arrival_state(current_context, key)
       settle_arrival(current_context, target, state)
       state[0] += 1
       nil
@@ -1305,7 +1309,7 @@ module Supercov
 
     def probe_evaluation_started(key)
       target = @probes[key]
-      state = (@arrivals[[current_context, key]] ||= [0, 0])
+      state = arrival_state(current_context, key)
       state[1] += 1
       hit(current_context, target["evaluated"])
       nil
@@ -1315,11 +1319,13 @@ module Supercov
       hit(context, target["shortCircuit"]) if state[0] > state[1]
     end
 
-    def settle_arrivals(context)
-      # From a copy, as `settle_loops` reads its loops.
-      @arrivals.to_a.each do |(ctx, key), state|
-        next unless ctx == context
+    def arrival_state(context, key)
+      @arrivals[[context, key]] || @settle_lock.synchronize { @arrivals[[context, key]] ||= [0, 0] }
+    end
 
+    def settle_arrivals(context)
+      arrivals = @settle_lock.synchronize { @arrivals.select { |(ctx, _), _| ctx == context } }
+      arrivals.each do |(ctx, key), state|
         settle_arrival(ctx, @probes[key], state)
       end
     end
