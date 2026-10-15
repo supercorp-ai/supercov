@@ -2,6 +2,7 @@ package com.supercorp.supercov;
 
 import java.io.BufferedOutputStream;
 import java.io.DataOutputStream;
+import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -39,6 +40,12 @@ public final class Supercov {
    * turned a passing suite into a failing one.
    */
   static final int PROBE_COUNT = 0; // supercov:probe-count
+
+  /**
+   * Conditions per decision, for a server a browser suite starts: it has no
+   * listener to arm it with them. Substituted with {@link #PROBE_COUNT}.
+   */
+  static final int[] SERVER_WIDTHS = new int[0]; // supercov:server-widths
 
   /**
    * Per-probe bitmasks: bit 0 for false, bit 1 for true. A point or a branch
@@ -450,5 +457,91 @@ public final class Supercov {
     for (int shift = 0; shift < 64; shift += 8) {
       out.write((int) ((value >>> shift) & 0xFF));
     }
+  }
+
+  /** Names the directory a server a browser suite starts writes its windows to. */
+  static final String SERVER_EVIDENCE_ENV = "SUPERCOV_JVM_SERVER_EVIDENCE_DIR";
+
+  /** How often a server's probes are swept into a window of their own. */
+  private static final long SERVER_WINDOW_MILLIS = 5;
+
+  // Last, so every field the server mode reads is initialised before it runs.
+  // This class initialises when instrumented code first touches HITS.
+  static {
+    String directory = System.getenv(SERVER_EVIDENCE_ENV);
+    if (directory != null && !directory.isEmpty()) {
+      serve(directory);
+    }
+  }
+
+  /**
+   * Measures a program that is not a test run: a server a browser suite
+   * starts. It has no test boundaries to harvest at, and its requests arrive
+   * from tests it cannot see -- and one shared array cannot tell two
+   * concurrent requests apart -- so it harvests on a clock instead. Every
+   * window that reached anything becomes one line with when it began and
+   * ended, and the engine gives each to the browser test that was running
+   * throughout it, if only one was.
+   *
+   * <p>Each window is appended as it closes, and the JVM's shutdown hook
+   * writes the last one, so a server stopped by SIGTERM loses nothing. A sweep
+   * reads a slot and then clears it, so a probe storing a different bit in
+   * that instant can lose that bit; rare, and only between windows.
+   */
+  private static void serve(String directory) {
+    arm(PROBE_COUNT, SERVER_WIDTHS);
+    final File file =
+        new File(
+            directory,
+            "server-" + System.nanoTime() + "-" + Long.toHexString(Double.doubleToLongBits(Math.random())) + ".windows");
+    final long[] start = {System.currentTimeMillis()};
+    Thread sweeper =
+        new Thread(
+            () -> {
+              while (true) {
+                try {
+                  Thread.sleep(SERVER_WINDOW_MILLIS);
+                } catch (InterruptedException interrupted) {
+                  return;
+                }
+                window(file, start);
+              }
+            },
+            "supercov-server-windows");
+    sweeper.setDaemon(true);
+    sweeper.start();
+    Runtime.getRuntime().addShutdownHook(new Thread(() -> window(file, start)));
+  }
+
+  /** Sweeps the array into one window and appends it, if it reached anything. */
+  private static synchronized void window(File file, long[] start) {
+    Record record = new Record("window");
+    records.add(record);
+    current = records.size() - 1;
+    harvest();
+    records.remove(records.size() - 1);
+    current = -1;
+    long end = System.currentTimeMillis();
+    if (!record.probes.isEmpty() || !record.vectors.isEmpty()) {
+      StringBuilder line = new StringBuilder(64 + record.probes.size() * 12);
+      line.append("{\"start\":").append(start[0]).append(",\"end\":").append(end);
+      line.append(",\"probes\":[");
+      for (int index = 0; index < record.probes.size(); index++) {
+        int[] hit = record.probes.get(index);
+        line.append(index > 0 ? "," : "").append(hit[0]).append(',').append(hit[1]);
+      }
+      line.append("],\"vectors\":[");
+      for (int index = 0; index < record.vectors.size(); index++) {
+        long[] hit = record.vectors.get(index);
+        line.append(index > 0 ? "," : "").append(hit[0]).append(',').append(hit[1]);
+      }
+      line.append("]}\n");
+      try (FileOutputStream out = new FileOutputStream(file, true)) {
+        out.write(line.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      } catch (IOException error) {
+        System.err.println("supercov: could not record the server's coverage: " + error.getMessage());
+      }
+    }
+    start[0] = end;
   }
 }

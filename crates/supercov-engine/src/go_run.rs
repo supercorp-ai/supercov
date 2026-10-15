@@ -961,17 +961,6 @@ pub struct GoServer {
     directory: PathBuf,
 }
 
-/// One harvest of a server's probes, as the runtime appended it.
-#[derive(Deserialize)]
-struct ServerWindow {
-    start: i64,
-    end: i64,
-    /// Pairs: probe id, mask.
-    probes: Vec<u64>,
-    /// Pairs: decision, packed vector.
-    vectors: Vec<u64>,
-}
-
 impl GoServer {
     /// Instrument the copy's Go sources for a server, or None when the
     /// project has no Go module or no main package.
@@ -1073,212 +1062,27 @@ impl GoServer {
         served: &[crate::served_tests::ServedTest],
         diagnostics: &mut dyn Write,
     ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
-        let evidence_directory = self.directory.join("evidence");
-        let result = (|| {
-            let mut windows = Vec::new();
-            let mut files = fs::read_dir(&evidence_directory)
-                .map(|entries| {
-                    entries
-                        .filter_map(Result::ok)
-                        .map(|entry| entry.path())
-                        .filter(|path| {
-                            path.extension()
-                                .is_some_and(|extension| extension == "windows")
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            files.sort();
-            for file in &files {
-                let text = fs::read_to_string(file)
-                    .map_err(|error| format!("{}: {error}", file.display()))?;
-                // A line cut short by the server being killed is the one
-                // window it was writing.
-                windows.extend(
-                    text.lines()
-                        .filter_map(|line| serde_json::from_str::<ServerWindow>(line).ok()),
-                );
-            }
-            if served.is_empty() || windows.is_empty() {
-                return Ok(None);
-            }
-            let probe_count = self
-                .project
-                .probes
-                .keys()
-                .max()
-                .map_or(0, |highest| *highest as usize + 1);
-            let widths = self.project.decision_widths.clone();
-            let mut global = vec![0_u32; probe_count];
-            let mut decision_vectors = vec![Vec::<u64>::new(); widths.len()];
-            let mut by_test = BTreeMap::<usize, crate::owned_evidence::OwnedTestEvidence>::new();
-            for window in &windows {
-                // The one test whose span the window overlaps.
-                let mut running = served.iter().enumerate().filter(|(_, test)| {
-                    test.window
-                        .is_some_and(|(start, end)| start <= window.end && window.start <= end)
-                });
-                let owner = match (running.next(), running.next()) {
-                    (Some((index, _)), None) => Some(index),
-                    _ => None,
-                };
-                for pair in window.probes.chunks_exact(2) {
-                    let (index, mask) = (pair[0] as usize, pair[1] as u32);
-                    if let Some(total) = global.get_mut(index) {
-                        *total |= mask;
-                    }
-                    if let Some(owner) = owner {
-                        *by_test
-                            .entry(owner)
-                            .or_default()
-                            .probes
-                            .entry(index as u32)
-                            .or_default() |= mask;
-                    }
-                }
-                for pair in window.vectors.chunks_exact(2) {
-                    let (decision, key) = (pair[0] as u32, pair[1]);
-                    if let Some(seen) = decision_vectors.get_mut(decision as usize)
-                        && !seen.contains(&key)
-                    {
-                        seen.push(key);
-                    }
-                    if let Some(owner) = owner {
-                        let test = by_test.entry(owner).or_default();
-                        let vector = crate::owned_evidence::PackedVector { decision, key };
-                        if !test.vectors.contains(&vector) {
-                            test.vectors.push(vector);
-                        }
-                    }
-                }
-            }
-            let credited = by_test.keys().copied().collect::<BTreeSet<_>>();
-            let package = |test: &crate::served_tests::ServedTest| test.worker.clone();
-            let mut tests = Vec::new();
-            let mut outcomes = Vec::new();
-            for (index, test) in served.iter().enumerate() {
-                let status = match test.status.as_str() {
-                    "passed" => "passed",
-                    "skipped" => "skipped",
-                    _ => "failed",
-                };
-                let mut evidence = by_test.remove(&index).unwrap_or_default();
-                evidence.name = test.name.clone();
-                evidence.status = status.into();
-                evidence.runner = test.provenance.runner.clone();
-                tests.push(evidence);
-                outcomes.push(OwnedTestOutcome {
-                    name: test.name.clone(),
-                    runner: test.provenance.runner.clone(),
-                    package: package(test),
-                    file: Some(test.file.clone()),
-                    status: status.into(),
-                    attributed: true,
-                });
-            }
-            let evidence = crate::owned_evidence::OwnedEvidence {
-                global,
-                tests,
-                widths,
-                decision_vectors,
-            };
-            let mut declaration = go_declaration();
-            for runner in &mut declaration.runners {
-                runner.runner = "playwright".into();
-                runner.execution_model =
-                    supercov_contracts::ExecutionModel::ParallelContextPropagated;
-            }
-            let mut run = build_frontend_run(OwnedRunInputs {
-                declaration,
+        crate::owned_server::publish(
+            root,
+            crate::owned_server::OwnedServer {
+                language: "Go",
+                declaration: go_declaration(),
                 environment: "go",
+                coverage_model: go_coverage_model(),
                 manifest: &self.project.manifest,
                 probes: &self.project.probes,
-                evidence: &evidence,
-                outcomes: &outcomes,
-                run_id: &metadata.id,
-                generated_at: &metadata.started_at,
-                test_exit_code: metadata.test_exit_code.unwrap_or_default(),
-                coverage_model: go_coverage_model(),
-            })
-            .map_err(|error| error.to_string())?;
-            for (raw, (index, test)) in run
-                .request
-                .raw_results
-                .iter_mut()
-                .zip(served.iter().enumerate())
-            {
-                raw.title = Some(test.title.clone());
-                raw.expected_status = Some(test.expected_status.clone());
-                raw.status = Some(test.status.clone());
-                raw.provenance = crate::coverage_report::TestProvenance {
-                    source: raw.provenance.source.clone(),
-                    ..test.provenance.clone()
-                };
-                if credited.contains(&index) {
-                    raw.attribution = crate::coverage_report::ATTRIBUTION_BY_TIME.into();
-                }
-            }
-            validate_frontend_report_request(&run.declaration, &run.request)
-                .map_err(|error| error.to_string())?;
-            let archive_path = root
-                .join(".supercov/work")
-                .join(&metadata.id)
-                .join("go-evidence.raw.gz");
-            if let Some(parent) = archive_path.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
-            let raw = write_archive(
-                crate::source_capture::append(
-                    run.archive_entries().map_err(|error| error.to_string())?,
-                    &self.source_inputs,
-                )?,
-                &archive_path,
-            )
-            .map_err(|error| error.to_string())?;
-            let metadata = RunMetadata {
-                integrity: self.integrity.clone(),
-                raw_evidence: RawEvidenceMetadata {
-                    schema_version: raw.schema_version,
-                    format: raw.format.into(),
-                    file: raw.file.into(),
-                    files: raw.files,
-                    uncompressed_bytes: raw.uncompressed_bytes,
-                    compressed_bytes: raw.compressed_bytes,
-                },
+                widths: &self.project.decision_widths,
+                integrity: &self.integrity,
+                source_inputs: &self.source_inputs,
                 source_roots: self.source_roots.clone(),
-                ..metadata
-            };
-            let run_directory =
-                publish_run(root, &metadata, &archive_path).map_err(|error| error.to_string())?;
-            writeln!(
-                diagnostics,
-                "[supercov] Go server coverage: {} test(s) across {} source file(s), credited by time",
-                served.len(),
-                self.project.instrumented.len()
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(Some((run_directory, metadata)))
-        })();
-        let result = result.map_err(|error| {
-            note_kept_evidence(
-                root,
-                &evidence_directory,
-                &format!("{}-go", metadata_id(&self.directory)),
-                error,
-            )
-        });
-        let _ = remove_stored_tree_deferred(root, &self.directory);
-        result
+                directory: &self.directory,
+                source_files: self.project.instrumented.len(),
+            },
+            metadata,
+            served,
+            diagnostics,
+        )
     }
-}
-
-/// The run a work directory is of: `.supercov/work/<run>/go`.
-fn metadata_id(directory: &Path) -> String {
-    directory
-        .parent()
-        .and_then(Path::file_name)
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

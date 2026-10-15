@@ -62,6 +62,11 @@ jobs:
         with:
           go-version: stable
           cache: false
+      # The Java server gate compiles its server with `javac`.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
       - run: npm ci
       # Three of the scripts drive a real browser through Playwright.
       - run: npx playwright install --with-deps

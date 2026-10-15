@@ -571,7 +571,22 @@ pub fn run_direct_javascript(
     let serves_go = browser_suite
         && (root.join("go.mod").is_file()
             || !crate::go_project::workspace_modules(&root).is_empty());
-    if project.source_files.is_empty() && !serves_python && !serves_ruby && !serves_go {
+    let serves_jvm = browser_suite
+        && [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "src/main/java",
+            "src/main/kotlin",
+        ]
+        .iter()
+        .any(|name| root.join(name).exists());
+    if project.source_files.is_empty()
+        && !serves_python
+        && !serves_ruby
+        && !serves_go
+        && !serves_jvm
+    {
         return Err(
             crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
                 .to_string()
@@ -699,12 +714,18 @@ pub fn run_direct_javascript(
     if workspace != prior_workspace && !servers.is_empty() {
         servers = prepare_servers(workspace.clone())()?;
     }
-    // Go is rewritten in the copy, so it waits for the copy.
+    // Go, Java and Kotlin are rewritten in the copy, so they wait for it.
     if serves_go
         && let Some(server) =
             crate::go_run::GoServer::prepare(&root, &workspace, &run_id, &request.command)?
     {
         servers.push(Server::Go(server));
+    }
+    if serves_jvm
+        && let Some(server) =
+            crate::jvm_run::JvmServer::prepare(&root, &workspace, &run_id, &request.command)?
+    {
+        servers.push(Server::Jvm(server));
     }
     if project.source_files.is_empty() && servers.is_empty() {
         return Err(
@@ -828,6 +849,16 @@ pub fn run_direct_javascript(
     for server in &servers {
         overrides.extend(server.environment());
     }
+    // `uv run` syncs the environment before it runs, and the copy's is the
+    // project's own, linked in: a sync rewrote the project's editable install
+    // to point at the copy, and regenerated a `hatch-vcs` version file that
+    // then came back to the project as a change. The environment is used as
+    // it is; a command that wants it synced syncs it first, in the project.
+    if crate::workspace::links_a_virtual_environment(&workspace)
+        && std::env::var_os("UV_NO_SYNC").is_none()
+    {
+        overrides.insert("UV_NO_SYNC".into(), "1".into());
+    }
     // A tool that judges source as text, started without a package manager
     // or installed outside the project, is found through PATH.
     if let Some(path) = crate::source_tools::path_with_launchers(&workspace)
@@ -948,6 +979,29 @@ pub fn run_direct_javascript(
         .iter()
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
+    // The copy is of this directory alone. A package inside a repository
+    // whose tests reach outside it -- a Playwright `webServer` that runs
+    // `go run ../cmd/testserver` -- finds nothing there, and the suite fails
+    // on a path that exists in the checkout.
+    // Only where no test recorded anything: a suite that ran and failed
+    // failed for its own reasons.
+    let nothing_recorded =
+        std::fs::read_dir(&evidence_directory).map_or(true, |mut entries| entries.next().is_none());
+    if execution.exit_code != 0
+        && execution.interrupted_signal.is_none()
+        && nothing_recorded
+        && let Some(repository) = root
+            .ancestors()
+            .skip(1)
+            .find(|directory| directory.join(".git").exists())
+    {
+        let _ = writeln!(
+            diagnostics,
+            "[supercov] the command failed. It ran in a copy of {} alone, and anything its tests reach outside it, as `../`, is not in that copy; if they do, run Supercov from {} instead",
+            root.display(),
+            repository.display()
+        );
+    }
     // The copy starts without build output: `dist/`, `build/`, `.next/` and
     // the like are not copied, since they hold code that was never
     // instrumented. A suite that needs it fails on a missing file, which
@@ -1329,6 +1383,7 @@ enum Server {
     Python(crate::python_run::PythonServer),
     Ruby(crate::ruby_run::RubyServer),
     Go(crate::go_run::GoServer),
+    Jvm(crate::jvm_run::JvmServer),
 }
 
 impl Server {
@@ -1337,6 +1392,7 @@ impl Server {
             Self::Python(_) => "Python",
             Self::Ruby(_) => "Ruby",
             Self::Go(_) => "Go",
+            Self::Jvm(_) => "Java/Kotlin",
         }
     }
 
@@ -1345,6 +1401,7 @@ impl Server {
             Self::Python(server) => server.source_files(),
             Self::Ruby(server) => server.source_files(),
             Self::Go(server) => server.source_files(),
+            Self::Jvm(server) => server.source_files(),
         }
     }
 
@@ -1353,6 +1410,7 @@ impl Server {
             Self::Python(server) => server.environment(),
             Self::Ruby(server) => server.environment(),
             Self::Go(server) => server.environment(),
+            Self::Jvm(server) => server.environment(),
         }
     }
 
@@ -1372,6 +1430,9 @@ impl Server {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
             Self::Go(server) => {
+                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+            }
+            Self::Jvm(server) => {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
         }

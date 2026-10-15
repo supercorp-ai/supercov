@@ -1286,6 +1286,11 @@ pub fn discover_source_scope(
                     .chain(next_files)
                     .chain(entry_targets(directory, &manifest))
                     .chain(tsconfig_roots(directory))
+                    // A tsconfig that includes a sibling package
+                    // (`../packages/ui/src`) names code outside this
+                    // project: not its source, and not in its copy. Only
+                    // a root the user names is held to being inside.
+                    .filter(|candidate| within(&root, candidate))
                     .collect::<Vec<_>>();
                 // A declared package that keeps its code somewhere
                 // unconventional (a Shopify theme extension's `frontend/` and
