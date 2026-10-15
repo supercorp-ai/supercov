@@ -33,6 +33,35 @@ const ROOT_EXCLUSIONS: &[&str] = &[
     "target",
 ];
 const NESTED_EXCLUSIONS: &[&str] = &[".supercov", ".mcdc-pool"];
+
+/// Whether the copy uses a virtual environment of the project's own, linked
+/// in rather than copied: what the command does to it, it does to the
+/// project's. Read to the depth a project keeps one at -- `.venv`, or a
+/// service's `api/.venv`.
+pub fn links_a_virtual_environment(workspace: &Path) -> bool {
+    fn search(directory: &Path, depth: usize) -> bool {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return false;
+        };
+        entries.filter_map(Result::ok).any(|entry| {
+            let path = entry.path();
+            let name = entry.file_name();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                return false;
+            };
+            if metadata.file_type().is_symlink() {
+                return path.join("pyvenv.cfg").is_file();
+            }
+            depth > 0
+                && metadata.is_dir()
+                && name != "node_modules"
+                && name != ".supercov"
+                && name != ".git"
+                && search(&path, depth - 1)
+        })
+    }
+    search(workspace, 2)
+}
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]

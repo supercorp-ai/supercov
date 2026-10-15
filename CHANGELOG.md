@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- Browser tests of a Java or Kotlin server built by the test command (`./gradlew bootRun`, `mvn spring-boot:run`, `javac`) measure it as they do a Go server: what it ran is swept every 5 ms and credited, by time, to the browser test running then, if only one was.
+
+**Fixed**
+
+- A Python project's virtual environment, linked into the run's copy, was synced by `uv run` there: its editable install was pointed at the copy, and a `hatch-vcs` version file regenerated and came back as a change, so the server's run read as stale at once. The copy now runs with `UV_NO_SYNC=1`.
+- A Rails app using Sprockets served no assets under Supercov: its `app/assets/config/manifest.js` had code put above its `//= link` directives, which Sprockets reads only from the top. Directives stay first.
+- A package whose `tsconfig.json` includes a sibling (`../packages/ui/src`) was refused ("source root is not a regular file or directory"). Such a root is outside the project and is left out.
+- When a command fails before any test records anything in a package inside a larger repository, Supercov says the copy holds only that package and to run from the repository root if the tests reach outside it.
+
 ## 4.9.0
 
 **Added**

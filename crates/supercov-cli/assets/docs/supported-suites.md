@@ -436,6 +436,16 @@ Go run of its own, published as the run or beside the browser run, as for a
 A server binary built before the run is not the one Supercov instruments:
 start it with `go run`, or build it in the test command.
 
+### A Java or Kotlin server under browser tests
+
+A Playwright suite whose server is built by its own command (`./gradlew
+bootRun`, `mvn spring-boot:run`, or `javac` and `java`) measures it the way it
+measures a [Go server](#a-go-server-under-browser-tests): the copy's Java and
+Kotlin are rewritten with probes, the runtime goes in each module's main
+source set, and what the server ran is swept every 5 ms and credited by time
+to the browser test running then, if only one was. A jar built before the run
+is not the one Supercov instruments.
+
 ```sh
 npx supercov -- npx playwright test
 ```

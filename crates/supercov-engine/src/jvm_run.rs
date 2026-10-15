@@ -1850,6 +1850,161 @@ pub fn run_direct_jvm(
     }
 }
 
+/// The runtime for a server a browser suite starts: sized as for a test run,
+/// and with the conditions per decision a listener would otherwise arm it
+/// with, since a server has none.
+fn server_runtime_source(probe_count: usize, widths: &[u8]) -> String {
+    let marker = "static final int[] SERVER_WIDTHS = new int[0]; // supercov:server-widths";
+    debug_assert!(
+        RUNTIME_SOURCE.contains(marker),
+        "the runtime no longer declares the server widths Supercov substitutes"
+    );
+    let widths = widths
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    runtime_source(probe_count).replace(
+        marker,
+        &format!(
+            "static final int[] SERVER_WIDTHS = new int[] {{{widths}}}; // supercov:server-widths"
+        ),
+    )
+}
+
+/// Java or Kotlin measured inside a browser suite's run: a server its tests
+/// drive, built from the copy the suite runs in by the command's own build
+/// (`./gradlew bootRun`, `mvn spring-boot:run`, `javac`). Its sources there
+/// are rewritten with probes, and the runtime in each module's main source
+/// set sweeps them on a clock into windows, credited by time; see
+/// `owned_server`. A jar built before the run is not this one and is not
+/// measured.
+pub struct JvmServer {
+    project: PreparedJvmProject,
+    integrity: crate::run_store::RunIntegrity,
+    source_inputs: crate::source_manifest::Inputs,
+    source_roots: Option<Vec<String>>,
+    directory: PathBuf,
+}
+
+impl JvmServer {
+    /// Instrument the copy's Java and Kotlin for a server, or None when the
+    /// project has none.
+    pub fn prepare(
+        root: &Path,
+        workspace: &Path,
+        run_id: &str,
+        command: &[String],
+    ) -> Result<Option<Self>, String> {
+        let files = crate::jvm_project::discover_jvm_files(root)?;
+        if files.sources.is_empty() {
+            return Ok(None);
+        }
+        let ambient = std::env::vars().collect::<BTreeMap<_, _>>();
+        // Roots named for the JavaScript source may hold no Java at all.
+        let Ok(roots) = crate::source_discovery::ExplicitSourceRoots::from_environment_in(
+            root, workspace, &ambient,
+        ) else {
+            return Ok(None);
+        };
+        let source_roots = crate::source_discovery::configured_source_roots(&ambient);
+        let mut integrity_inputs = jvm_integrity_inputs(&files, command);
+        crate::source_discovery::fold_roots_into_configuration(
+            &mut integrity_inputs.execution_configuration,
+            source_roots.as_deref(),
+        );
+        let source_inputs =
+            crate::source_capture::capture(root, "jvm", integrity_inputs.assertion_paths())?;
+        let integrity = create_explicit_run_integrity(
+            root,
+            &integrity_inputs,
+            &FrontendIntegrityInputs::embedded_jvm(),
+        )
+        .map_err(|error| error.to_string())?;
+        let project = prepare_jvm_project(workspace, roots.as_ref())?;
+        if project.instrumented.is_empty() {
+            return Ok(None);
+        }
+        for (relative, instrumented) in &project.instrumented {
+            write(&workspace.join(relative), instrumented)?;
+        }
+        let probe_count = project
+            .probes
+            .keys()
+            .max()
+            .map_or(0, |highest| *highest as usize + 1);
+        let runtime = server_runtime_source(probe_count, &project.decision_widths);
+        let modules = project
+            .files
+            .sources
+            .iter()
+            .map(|(relative, _)| module_of(relative))
+            .collect::<BTreeSet<_>>();
+        for module in &modules {
+            write(
+                &workspace
+                    .join(module)
+                    .join(source_root("main"))
+                    .join(PACKAGE_DIRECTORY)
+                    .join("Supercov.java"),
+                &runtime,
+            )?;
+        }
+        let directory = root.join(".supercov/work").join(run_id).join("jvm");
+        fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
+        Ok(Some(Self {
+            project,
+            integrity,
+            source_inputs,
+            source_roots,
+            directory,
+        }))
+    }
+
+    pub fn source_files(&self) -> usize {
+        self.project.instrumented.len()
+    }
+
+    /// What the suite's environment needs for a server it builds to write
+    /// its windows.
+    pub fn environment(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([(
+            "SUPERCOV_JVM_SERVER_EVIDENCE_DIR".into(),
+            self.directory.join("evidence").display().to_string(),
+        )])
+    }
+
+    pub fn publish(
+        self,
+        root: &Path,
+        _evidence_run_id: &str,
+        metadata: RunMetadata,
+        served: &[crate::served_tests::ServedTest],
+        diagnostics: &mut dyn Write,
+    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
+        crate::owned_server::publish(
+            root,
+            crate::owned_server::OwnedServer {
+                language: "Java/Kotlin",
+                declaration: jvm_declaration(),
+                environment: "jvm",
+                coverage_model: jvm_coverage_model(),
+                manifest: &self.project.manifest,
+                probes: &self.project.probes,
+                widths: &self.project.decision_widths,
+                integrity: &self.integrity,
+                source_inputs: &self.source_inputs,
+                source_roots: self.source_roots.clone(),
+                directory: &self.directory,
+                source_files: self.project.instrumented.len(),
+            },
+            metadata,
+            served,
+            diagnostics,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

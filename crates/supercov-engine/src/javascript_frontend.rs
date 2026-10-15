@@ -1060,6 +1060,78 @@ fn bootstrap_loader(
     Ok(())
 }
 
+/// Sprockets reads a file's `//= require` and `//= link` directives only from
+/// the comments it opens with, and stops at the first line of code. The
+/// runtime and its bindings went above them, so a Rails app's
+/// `app/assets/config/manifest.js` linked nothing and every page raised
+/// "Asset `tailwind.css` was not declared to be precompiled". The directive
+/// lines the source opens with go back to the top, and the map moves with
+/// them so every other line stays where it was mapped.
+fn keep_directives_first(source: &str, output: &mut crate::js_instrumenter::CandidateOutput) {
+    let mut directives = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//=") {
+            directives.push(line);
+        } else if !(trimmed.is_empty() || trimmed.starts_with("//")) {
+            break;
+        }
+    }
+    if directives.is_empty() {
+        return;
+    }
+    let lines = output.code.split('\n').collect::<Vec<_>>();
+    let mut moved = Vec::new();
+    let mut from = 0;
+    for directive in &directives {
+        let Some(index) = lines[from..].iter().position(|line| line == directive) else {
+            return;
+        };
+        moved.push(from + index);
+        from += index + 1;
+    }
+    if moved
+        .iter()
+        .enumerate()
+        .all(|(position, index)| position == *index)
+    {
+        return;
+    }
+    let reorder = |items: Vec<&str>| -> Vec<String> {
+        let mut first = moved
+            .iter()
+            .map(|index| items[*index].to_owned())
+            .collect::<Vec<_>>();
+        first.extend(
+            items
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !moved.contains(index))
+                .map(|(_, item)| (*item).to_owned()),
+        );
+        first
+    };
+    // Segments are encoded relative to the one before, so a line that carries
+    // any cannot move without re-encoding the map. A directive is a comment
+    // and carries none; a map where one does is dropped, not left wrong.
+    let mut keep_map = true;
+    if let Some(serde_json::Value::String(mappings)) =
+        output.map.as_mut().and_then(|map| map.get_mut("mappings"))
+    {
+        let mut segments = mappings.split(';').collect::<Vec<_>>();
+        segments.resize(segments.len().max(lines.len()), "");
+        if moved.iter().all(|index| segments[*index].is_empty()) {
+            *mappings = reorder(segments).join(";");
+        } else {
+            keep_map = false;
+        }
+    }
+    if !keep_map {
+        output.map = None;
+    }
+    output.code = reorder(lines).join("\n");
+}
+
 fn bootstrap_runtime(
     output: &mut crate::js_instrumenter::CandidateOutput,
     runtime_source: &str,
@@ -1556,6 +1628,7 @@ pub fn prepare_javascript_frontend(
         if !browser_suite {
             bootstrap_loader(&mut output, file)?;
         }
+        keep_directives_first(&source, &mut output);
         // The command can compile TypeScript itself (`npm test` may begin
         // with `tsc`), and a probe's own code is not the project's to have
         // type-checked: the banner exempts the file, while what it exports
@@ -1711,6 +1784,35 @@ pub fn prepare_javascript_frontend(
 
 #[cfg(test)]
 mod tests {
+
+    // Sprockets reads directives only from the comments a file opens with.
+    #[test]
+    fn sprockets_directives_stay_where_sprockets_reads_them() {
+        let source = "// The manifest.\n//= link_tree ../images\n//= link_tree ../builds\n";
+        let mut output: crate::js_instrumenter::CandidateOutput = serde_json::from_value(serde_json::json!({
+            "engine": "", "complete": true, "supportedSurface": "",
+            "code": "(() => { runtime(); })();\nconst __b = 1;\n// The manifest.\n//= link_tree ../images\n//= link_tree ../builds\n",
+            "map": { "version": 3, "mappings": "AAAA;AACA;;;;" },
+            "decisions": [], "points": [], "branches": [], "coverageLimitations": [], "limitations": []
+        }))
+        .unwrap();
+        keep_directives_first(source, &mut output);
+        assert!(
+            output
+                .code
+                .starts_with("//= link_tree ../images\n//= link_tree ../builds\n(() =>"),
+            "{}",
+            output.code
+        );
+        // The code's own lines keep their segments, behind the moved lines.
+        assert_eq!(output.map.as_ref().unwrap()["mappings"], ";;AAAA;AACA;;");
+        // A file that opens with code is left alone.
+        let mut untouched = output.clone();
+        untouched.code = "x();\n//= not a directive\n".into();
+        let before = untouched.code.clone();
+        keep_directives_first("x();\n//= not a directive\n", &mut untouched);
+        assert_eq!(untouched.code, before);
+    }
     #[test]
     fn ancestor_description_names_each_component_and_its_state() {
         let root = std::env::temp_dir().join(format!("supercov-ancestors-{}", unique()));
