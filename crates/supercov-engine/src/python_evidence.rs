@@ -2043,6 +2043,10 @@ fn build_from_evidence(
         } else {
             attempt_status(&outcomes)
         };
+        let test_file = test_files
+            .get(&(worker.clone(), test.clone(), retry))
+            .and_then(|path| relative(root, path))
+            .or_else(|| test.split("::").next().map(str::to_owned));
         raw_results.push(RawTestResult {
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &worker, &test, retry)),
@@ -2050,10 +2054,7 @@ fn build_from_evidence(
             // What the runner named, as the project names it. A dotted
             // module path or a pytest node id is not a path, so the old
             // derivation stays only as a fallback.
-            test_file: test_files
-                .get(&(worker.clone(), test.clone(), retry))
-                .and_then(|path| relative(root, path))
-                .or_else(|| test.split("::").next().map(str::to_owned)),
+            test_file: test_file.clone(),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
             status: Some(status),
@@ -2068,7 +2069,7 @@ fn build_from_evidence(
             flaky: false,
             provenance: TestProvenance {
                 runner: runner.clone(),
-                kind: "unit".into(),
+                kind: crate::test_kind::from_path(test_file.as_deref()).into(),
                 project: None,
                 source: PYTHON_FRONTEND_VERSION.into(),
             },
@@ -2110,6 +2111,10 @@ fn build_from_evidence(
             });
             runtime.push(take(identity)?);
         }
+        let test_file = test_files
+            .get(&(worker.clone(), test.clone(), retry))
+            .and_then(|path| relative(root, path))
+            .or_else(|| test.split("::").next().map(str::to_owned));
         raw_results.push(RawTestResult {
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &worker, &test, retry)),
@@ -2117,10 +2122,7 @@ fn build_from_evidence(
             // What the runner named, as the project names it. A dotted
             // module path or a pytest node id is not a path, so the old
             // derivation stays only as a fallback.
-            test_file: test_files
-                .get(&(worker.clone(), test.clone(), retry))
-                .and_then(|path| relative(root, path))
-                .or_else(|| test.split("::").next().map(str::to_owned)),
+            test_file: test_file.clone(),
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
             status: Some("failed".into()),
@@ -2128,7 +2130,7 @@ fn build_from_evidence(
             flaky: false,
             provenance: TestProvenance {
                 runner: runner.clone(),
-                kind: "unit".into(),
+                kind: crate::test_kind::from_path(test_file.as_deref()).into(),
                 project: None,
                 source: PYTHON_FRONTEND_VERSION.into(),
             },

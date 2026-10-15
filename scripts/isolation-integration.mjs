@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, resolve } from "node:path";
+import { basename, relative, resolve } from "node:path";
 
 const root = resolve("tests/fixtures/generic-playwright");
 const launcher = resolve("bin/supercov.js");
@@ -312,10 +312,11 @@ await verifyUncatchableTestTreeRecovery();
 const projectBefore = snapshot(root);
 const workRoot = resolve(root, ".supercov/work");
 const runsBefore = new Set(existsSync(workRoot) ? readdirSync(workRoot) : []);
-const expectedCache = resolve(
-  root,
-  ".supercov/workspaces/workspace/generic-playwright",
-);
+// A fixture inside this repository is copied at its path in the repository.
+const repositoryRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: root, encoding: "utf8" }).stdout?.trim();
+const expectedCache = repositoryRoot
+  ? resolve(root, ".supercov/workspaces/workspace", basename(repositoryRoot), relative(repositoryRoot, root))
+  : resolve(root, ".supercov/workspaces/workspace/generic-playwright");
 
 const child = spawn(
   process.execPath,

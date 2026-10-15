@@ -92,7 +92,7 @@ directories linked beside it from your checkout. A suite that reaches outside
 the package, a `webServer` running `go run ../cmd/testserver` or a tsconfig
 extending `../../tsconfig.base.json`, finds them where it finds them without
 Supercov. They are your checkout's own files, not copies, and they are not
-measured; the repository's `.git` is never linked. To measure code outside the
+measured; the repository's `.git` and lockfiles are never linked. To measure code outside the
 package too, run Supercov from the repository root.
 
 ## Files Supercov creates

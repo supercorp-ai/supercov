@@ -5,6 +5,7 @@
 **Added**
 
 - Browser tests of a Java or Kotlin server built by the test command (`./gradlew bootRun`, `mvn spring-boot:run`, `javac`) measure it as they do a Go server: what it ran is swept every 5 ms and credited, by time, to the browser test running then, if only one was.
+- Python and Ruby tests are given a kind by where they live, as JavaScript tests are: a Rails app's `test/system` and `spec/features` tests are end-to-end, `spec/requests` and `tests/integration` integration. Every one was a unit test.
 - A Go, Java or Kotlin server's run says how many browser tests had its work only while another test ran too, as under parallel workers, and so were credited none of it, and that `--workers=1` credits each its own.
 
 **Fixed**

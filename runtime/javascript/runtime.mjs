@@ -450,7 +450,12 @@ function persistBrowser() {
     return;
   persistBrowserListenersInstalled = true;
   try {
-    addEventListener("beforeunload", handOverBrowser);
+    // `beforeunload` fires inside the assignment that starts the navigation,
+    // and the rest of that handler runs after it, before the document goes.
+    addEventListener("beforeunload", () => {
+      handOverBrowser();
+      Promise.resolve().then(handOverBrowser);
+    });
     addEventListener("pagehide", persistBrowserNow);
     addEventListener("visibilitychange", () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden")

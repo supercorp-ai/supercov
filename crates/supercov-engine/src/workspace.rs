@@ -280,8 +280,24 @@ fn link_repository_around(root: &Path, workspace: &Path) {
         };
         for entry in entries.filter_map(Result::ok) {
             let name = entry.file_name();
+            // A lockfile is never reached as `../`, and a tool that takes the
+            // topmost one as the root (Next.js) found the repository's twice,
+            // beside the copy and in the checkout above `.supercov`, and
+            // warned of a second lockfile the run alone had.
             if Some(name.as_os_str()) == real.file_name()
-                || matches!(name.to_str(), Some(".git") | Some(".supercov"))
+                || matches!(
+                    name.to_str(),
+                    Some(
+                        ".git"
+                            | ".supercov"
+                            | "package-lock.json"
+                            | "npm-shrinkwrap.json"
+                            | "yarn.lock"
+                            | "pnpm-lock.yaml"
+                            | "bun.lock"
+                            | "bun.lockb"
+                    )
+                )
             {
                 continue;
             }
@@ -2766,6 +2782,7 @@ mod tests {
         fs::create_dir_all(repository.join("cmd/testserver")).unwrap();
         fs::write(repository.join("cmd/testserver/main.go"), "package main\n").unwrap();
         fs::write(repository.join("tsconfig.base.json"), "{}").unwrap();
+        fs::write(repository.join("package-lock.json"), "{}").unwrap();
         let root = repository.join("packages/web");
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/app.js"), "export {};\n").unwrap();
@@ -2781,8 +2798,10 @@ mod tests {
         );
         assert!(workspace.join("../../tsconfig.base.json").is_file());
         assert!(workspace.join("../ui").is_dir());
-        // The repository's .git is never shared with a test.
+        // The repository's .git is never shared with a test, and its
+        // lockfile is not there to be found twice.
         assert!(fs::symlink_metadata(workspace.join("../../.git")).is_err());
+        assert!(fs::symlink_metadata(workspace.join("../../package-lock.json")).is_err());
         lock.release().unwrap();
         fs::remove_dir_all(repository).unwrap();
     }
