@@ -133,10 +133,25 @@ try {
     const containers = spawnSync('docker', ['compose', '-p', project, 'ps', '-a', '--format', '{{.Service}} {{.State}}'], { encoding: 'utf8' }).stdout;
     assert.match(containers, /api exited/u, containers);
     assert.doesNotMatch(containers, /running/u, containers);
+    // On Linux the container's root owns what it creates in the mount; the
+    // run must still be able to remove all of it.
+    if (process.platform === 'linux') {
+      const closed = spawnSync('find', [resolve(cwd, '.supercov'), '-type', 'd', '!', '-user', String(process.getuid()), '!', '-perm', '-0002', '-printf', '%u %m %p\n'], { encoding: 'utf8' }).stdout.trim();
+      assert.equal(closed, '', `${entry.language}: directories the run cannot empty:\n${closed}`);
+    }
   }
   console.log('[docker-server-playwright] Go, Java, Node, Python and Ruby servers compose builds from the copy are measured, each test credited its own work, and left stopped');
 } finally {
   for (const project of projects)
     spawnSync('docker', ['compose', '-p', project, 'down', '--rmi', 'local', '--volumes'], { stdio: 'ignore' });
-  if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'docker-server-playwright-'))) rmSync(root, { recursive: true, force: true });
+  if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'docker-server-playwright-'))) {
+    try {
+      rmSync(root, { recursive: true, force: true });
+    } catch {
+      // What a container left that this user cannot remove: removed by a
+      // container, so the next gate starts clean (the assertion above names it).
+      spawnSync('docker', ['run', '--rm', '-v', `${root}:${root}`, 'alpine:3.22', 'rm', '-rf', root], { stdio: 'ignore' });
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 }
