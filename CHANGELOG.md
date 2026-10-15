@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.10.0
+## 4.10.1
 
 **Added**
 
@@ -18,6 +18,12 @@
 - A Rails app using Sprockets served no assets under Supercov: its `app/assets/config/manifest.js` had code put above its `//= link` directives, which Sprockets reads only from the top. Directives stay first.
 - A package whose `tsconfig.json` includes a sibling (`../packages/ui/src`) was refused ("source root is not a regular file or directory"). Such a root is outside the project and is left out.
 - A package inside a larger repository ran in a copy of that package alone, so anything its suite reached as `../` was missing: a Playwright `webServer` running `go run ../cmd/testserver`, a tsconfig extending `../../tsconfig.base.json`. The copy now sits at the package's path in the repository, with the repository's other entries linked beside it from the checkout. Only the package is copied and measured.
+
+## 4.10.0
+
+**Changed**
+
+- Published to PyPI, RubyGems and crates.io only. npm reported one of its native packages published and kept it staged instead ([npm/cli#9889](https://github.com/npm/cli/issues/9889)), a version that can never be published, so 4.10.1 is this release on every channel.
 
 ## 4.9.0
 
