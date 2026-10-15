@@ -699,7 +699,7 @@ rest of the run and leaves their old records out:
 
 ```sh supercov-example
 npx supercov runs <suite-run> tests affected --names   # after changing a mock
-npx supercov -- npx playwright test <those tests>
+npx supercov -- <those tests alone>
 npx supercov merge
 ```
 
@@ -723,7 +723,7 @@ own:
 
 ```yaml
 # Each of two jobs:
-- run: npx supercov -- npx playwright test --shard=${{ matrix.shard }}/2
+- run: npx supercov -- <test command for shard ${{ matrix.shard }}>
 - uses: actions/upload-artifact@v4
   with: { name: "supercov-${{ matrix.shard }}", path: .supercov/runs, include-hidden-files: true }
 # Then one job:
