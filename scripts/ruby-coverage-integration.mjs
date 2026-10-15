@@ -445,7 +445,10 @@ try {
       'require "minitest/autorun"',
       'require "busy"',
       '',
-      'Thread.new { loop { Busy.spin(40) } }',
+      // It yields each round: a thread that never did held the interpreter
+      // for whole time slices, and the suite crawled past CI's timeout on
+      // Windows. Yielding interleaves more, and 4.9.0 failed every run.
+      'Thread.new { loop { Busy.spin(40); Thread.pass } }',
       '',
       'class BusyTest < Minitest::Test',
       '  300.times do |index|',
