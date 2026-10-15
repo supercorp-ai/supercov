@@ -429,7 +429,9 @@ server is built from that copy. Go has no per-request context Supercov can
 carry a test's name in to every probe, so the server sweeps what ran every
 5 ms, and each sweep is credited to the browser test that was running then,
 if only one was, and said to be. Work done while two tests ran at once, as
-with parallel workers, is the run's and no test's. The server's coverage is a
+with parallel workers, is the run's and no test's; the run says how many tests
+that left without their server work, and `--workers=1` gives each test its
+own. The server's coverage is a
 Go run of its own, published as the run or beside the browser run, as for a
 [Python server](#a-python-server-under-browser-tests).
 

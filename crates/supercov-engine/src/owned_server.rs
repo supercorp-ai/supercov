@@ -89,25 +89,40 @@ fn read_windows(directory: &Path) -> Result<Vec<ServerWindow>, String> {
 
 /// The run's evidence from its windows: run-wide totals from every window,
 /// and each browser test's from the windows that overlap its span and no
-/// other test's. Returns the tests that were credited any.
+/// other test's. Returns the tests that were credited any, and those whose
+/// server work was all done while another test ran too.
 fn credit(
     windows: &[ServerWindow],
     served: &[ServedTest],
     probe_count: usize,
     widths: &[u8],
-) -> (OwnedEvidence, Vec<OwnedTestOutcome>, BTreeSet<usize>) {
+) -> (
+    OwnedEvidence,
+    Vec<OwnedTestOutcome>,
+    BTreeSet<usize>,
+    BTreeSet<usize>,
+) {
     let mut global = vec![0_u32; probe_count];
     let mut decision_vectors = vec![Vec::<u64>::new(); widths.len()];
     let mut by_test = BTreeMap::<usize, OwnedTestEvidence>::new();
+    let mut overlapped = BTreeSet::new();
     for window in windows {
-        let mut running = served.iter().enumerate().filter(|(_, test)| {
-            test.window
-                .is_some_and(|(start, end)| start <= window.end && window.start <= end)
-        });
-        let owner = match (running.next(), running.next()) {
-            (Some((index, _)), None) => Some(index),
+        let running = served
+            .iter()
+            .enumerate()
+            .filter(|(_, test)| {
+                test.window
+                    .is_some_and(|(start, end)| start <= window.end && window.start <= end)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let owner = match running.as_slice() {
+            [index] => Some(*index),
             _ => None,
         };
+        if running.len() > 1 && !window.probes.is_empty() {
+            overlapped.extend(running);
+        }
         for pair in window.probes.chunks_exact(2) {
             let (index, mask) = (pair[0] as usize, pair[1] as u32);
             if let Some(total) = global.get_mut(index) {
@@ -139,6 +154,7 @@ fn credit(
         }
     }
     let credited = by_test.keys().copied().collect::<BTreeSet<_>>();
+    let overlapped = overlapped.difference(&credited).copied().collect();
     let mut tests = Vec::new();
     let mut outcomes = Vec::new();
     for (index, test) in served.iter().enumerate() {
@@ -170,6 +186,7 @@ fn credit(
         },
         outcomes,
         credited,
+        overlapped,
     )
 }
 
@@ -193,7 +210,8 @@ pub fn publish(
             .keys()
             .max()
             .map_or(0, |highest| *highest as usize + 1);
-        let (evidence, outcomes, credited) = credit(&windows, served, probe_count, server.widths);
+        let (evidence, outcomes, credited, overlapped) =
+            credit(&windows, served, probe_count, server.widths);
         // The tests came from the browser runner, whichever runner the
         // frontend declares for its own suites.
         let mut declaration = server.declaration;
@@ -272,6 +290,16 @@ pub fn publish(
             server.source_files
         )
         .map_err(|error| error.to_string())?;
+        // Parallel workers share one server, and its probes cannot tell
+        // their requests apart. Say what it cost, and how to have it all.
+        if !overlapped.is_empty() {
+            writeln!(
+                diagnostics,
+                "[supercov] {} of those test(s) had the server's work only while another test ran too, so it is the run's and none of theirs; with `--workers=1` each test's is its own",
+                overlapped.len()
+            )
+            .map_err(|error| error.to_string())?;
+        }
         Ok(Some((run_directory, metadata)))
     })();
     let result = result.map_err(|error| {
