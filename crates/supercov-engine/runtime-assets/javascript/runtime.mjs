@@ -1425,6 +1425,55 @@ emitterContextMaps.set(runtimeInstance, emitterCoverageContexts);
 if (runtimeGlobal.__SUPERCOV_EMITTER_PATCHED_INSTANCES__ == null)
   runtimeGlobal.__SUPERCOV_EMITTER_PATCHED_INSTANCES__ = new Set();
 const patchedEmitterInstances = runtimeGlobal.__SUPERCOV_EMITTER_PATCHED_INSTANCES__;
+// Which tests this process served, and when it served a request that named
+// none, in the file `register.mjs` named for it: the project files it loaded
+// and read are reached by those tests, and a change to one is a change for
+// them alone (`tests affected`, `merge`). Its CommonJS modules are noted
+// here, once each, as requests come; the loader notes its ES modules.
+var supportNoted = { served: new Set(), modules: new Set(), lastUnscoped: 0 };
+function noteSupport(scope) {
+  const file = typeof process !== "undefined" && process.env ? process.env.__SUPERCOV_SUPPORT_FILE : void 0;
+  if (!file)
+    return;
+  const fs = getFs();
+  if (!fs)
+    return;
+  const lines = [];
+  if (scope) {
+    if (!supportNoted.served.has(scope.testId)) {
+      supportNoted.served.add(scope.testId);
+      lines.push({ served: scope.testId });
+    }
+  } else {
+    const now = Date.now();
+    if (now - supportNoted.lastUnscoped >= 5) {
+      supportNoted.lastUnscoped = now;
+      lines.push({ unscoped: now });
+    }
+  }
+  try {
+    const moduleBuiltin = typeof process.getBuiltinModule === "function" ? process.getBuiltinModule("node:module") : void 0;
+    const cache = moduleBuiltin && moduleBuiltin._cache;
+    const root = process.env.SUPERCOV_PROJECT_ROOT;
+    if (cache && root) {
+      for (const name of Object.keys(cache)) {
+        // The copy lives under `.supercov/`: the project root decides.
+        const inside = name.indexOf(root) === 0 ? name.slice(root.length).replace(/^[\\/]/, "") : "";
+        if (supportNoted.modules.has(name) || inside === "" || /^\.supercov[\\/]/.test(inside) || /(?:^|[\\/])node_modules[\\/]/.test(inside))
+          continue;
+        supportNoted.modules.add(name);
+        lines.push({ loaded: name });
+      }
+    }
+  } catch (e) {
+  }
+  if (lines.length === 0)
+    return;
+  try {
+    fs.appendFileSync(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+  } catch (e) {
+  }
+}
 function installNodeRequestPropagation() {
   if (isBrowser || patchedEmitterInstances.has(runtimeInstance) || typeof process === "undefined") return;
   const builtin = (name) => typeof process.getBuiltinModule === "function" ? process.getBuiltinModule(name) : void 0;
@@ -1443,6 +1492,7 @@ function installNodeRequestPropagation() {
       // HTTP headers establish ownership even when Express/SDK listeners and
       // the server process were created by a shared before hook.
       const incoming = requestCoverageContext(args[0]);
+      noteSupport(incoming && incoming.scope);
       if (incoming) context = incoming.scope ? incoming : context != null ? context : currentRequestContext();
       if (incoming && incoming.scope)
         noteServedAttempt(incoming.scope);

@@ -1889,23 +1889,28 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
         IndexedQueryData::Diff(data) => {
             let page = page.expect("diff is paginated");
             let signed = |value: f64| format!("{}{value}", if value >= 0.0 { "+" } else { "" });
+            // A spec measured alone reads far below the suite's run; with
+            // `--gained` only what it added is the question.
+            let delta = format!(
+                "lines {}pp, branches {}pp, MC/DC {}pp",
+                signed(data.delta.lines),
+                signed(data.delta.branches),
+                signed(data.delta.mcdc)
+            );
             let mut lines = vec![
                 format!("{} -> {}", data.older, data.newer),
-                format!(
-                    "lines {}pp, branches {}pp, MC/DC {}pp",
-                    signed(data.delta.lines),
-                    signed(data.delta.branches),
-                    signed(data.delta.mcdc)
-                ),
                 format!(
                     "gained: {} lines, {} branches, {} MC/DC conditions",
                     data.gained.line_count, data.gained.branch_count, data.gained.mcdc_count
                 ),
-                format!(
+            ];
+            if !data.gained_only {
+                lines.insert(1, delta);
+                lines.push(format!(
                     "lost: {} lines, {} branches, {} MC/DC conditions",
                     data.lost.line_count, data.lost.branch_count, data.lost.mcdc_count
-                ),
-            ];
+                ));
+            }
             // Two runs of one commit differ a little wherever what runs
             // depends on timing, and a difference read as a regression.
             let differs = data.gained.line_count
@@ -1915,7 +1920,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 + data.lost.branch_count
                 + data.lost.mcdc_count
                 > 0;
-            match data.inputs {
+            match data.inputs.filter(|_| !data.gained_only) {
                 Some(inputs) if differs && !inputs.source_changed && !inputs.tests_changed => lines.push(
                     "Both runs measured the same source with the same test files, so nothing here is a change in the code: the runs themselves differ (timing, order, outside state). Run again before acting on a loss.".into(),
                 ),
@@ -1941,7 +1946,11 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     .collect::<Vec<_>>()
                     .join(", ")
                 };
-                lines.push(format!("in {} files, most lost first:", data.files));
+                lines.push(if data.gained_only {
+                    format!("in {} files:", data.files)
+                } else {
+                    format!("in {} files, most lost first:", data.files)
+                });
                 for file in data.by_file.iter().take(SHOWN) {
                     let sides = [
                         ("lost", counted(&file.lost)),
@@ -2135,6 +2144,7 @@ mod tests {
             max_states: None,
             group: None,
             depth: None,
+            gained_only: false,
         }
     }
 

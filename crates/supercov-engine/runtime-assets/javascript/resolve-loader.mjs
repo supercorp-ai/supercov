@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 const GENERATED_TARGET = "__SUPERCOV_PLAYWRIGHT_MODULE__";
@@ -27,8 +27,40 @@ function belongsToProject(parentURL) {
     return (parentURL.startsWith(projectURL) && !parentURL.startsWith(generatedURL));
 }
 let typescriptRequireHook = false;
+// Where this process notes the project modules it loads (`register.mjs`
+// names it): a mock server a suite starts is reached by the tests it serves,
+// and a change to a file it loaded is a change for them alone.
+let supportFile;
+const supportModules = new Set();
+// A project file, not a dependency nor Supercov's own: the copy itself lives
+// under `.supercov/`, so the project root decides.
+function projectFile(file) {
+    if (!PROJECT_ROOT || !file.startsWith(PROJECT_ROOT))
+        return false;
+    const relative = file.slice(PROJECT_ROOT.length).replace(/^[\\/]/, "");
+    return relative !== "" && !/^\.supercov[\\/]/.test(relative) && !/(?:^|[\\/])node_modules[\\/]/.test(relative);
+}
+function noteLoaded(url) {
+    if (!supportFile || !url.startsWith("file:") || supportModules.has(url))
+        return;
+    supportModules.add(url);
+    try {
+        if (!projectFile(fileURLToPath(url)))
+            return;
+    }
+    catch {
+        return;
+    }
+    try {
+        appendFileSync(supportFile, `${JSON.stringify({ loaded: url })}\n`);
+    }
+    catch {
+        // Not recorded: the file counts for every test, as before.
+    }
+}
 export function initialize(data) {
     typescriptRequireHook = data?.typescriptRequireHook === true;
+    supportFile = typeof data?.supportFile === "string" ? data.supportFile : undefined;
 }
 const packageTypes = new Map();
 function packageType(directory) {
@@ -144,6 +176,7 @@ function mapToCopy(source, filename) {
 }
 export async function load(url, context, nextLoad) {
     const result = await nextLoad(url, context);
+    noteLoaded(url);
     if (!NODE_COVERAGE_FILTERS || result.source == null || !url.startsWith("file:"))
         return result;
     const text = typeof result.source === "string" ? result.source : Buffer.from(result.source).toString("utf8");

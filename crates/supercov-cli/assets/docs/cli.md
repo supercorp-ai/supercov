@@ -349,6 +349,19 @@ same run:
 
 ## Export for other tools
 
+Every obligation a run left uncovered, one JSON object per line:
+
+```sh supercov-example
+npx supercov runs latest gaps --format jsonl --metric mcdc --output gaps.jsonl
+npx supercov runs latest gaps --format jsonl > gaps.jsonl
+```
+
+Each line holds the file, the line, the source of that line and what `runs
+<id> file` says of the obligation: for an MC/DC condition its decision, the
+condition and the vectors observed. `--metric`, `--filter`, `--kind` and
+`--runner` narrow it as they narrow `gaps`, and nothing is paged, so a tool or
+an agent reads a run's every gap in one pass instead of a page at a time.
+
 ```sh supercov-example
 npx supercov runs report --format lcov --output coverage/lcov.info
 npx supercov runs report --format cobertura --output coverage/cobertura.xml
@@ -468,6 +481,20 @@ The same filters can focus a comparison:
 npx supercov diff <older-run> <newer-run> --kind e2e
 ```
 
+To see what a new test covered that the suite did not, measure it alone and
+compare it with the suite's run, keeping only what it gained:
+
+```sh supercov-example
+npx supercov -- <the new test alone>
+npx supercov diff <suite-run> latest --gained
+```
+
+A test run alone covers far less than the suite, so a plain `diff` of the two
+lists nearly everything as lost. `--gained` lists only the lines, branches and
+MC/DC conditions the newer run covers and the older does not, which is how to
+check that a test reached the conditions it was written for without measuring
+the whole suite. In `--json`, `gainedOnly` is `true` and `lost` is empty.
+
 ## Generate a portable HTML report
 
 ```sh
@@ -532,6 +559,16 @@ as such; a test runner's settings affect only the runs that used that runner.
 A source file
 added since the run is outside every test's record; the working-tree check
 says so, and the suite should run in full.
+
+A server the suite starts is recorded too: a mock server `webServer` starts,
+or the application's own. Each Node process of a Playwright run notes the
+project files it loads and reads, and the tests it serves, by the test a
+request names or, for one that names none (a webhook), the test running
+then. A change to a file such a process loaded or read, a mock's code, a
+helper it imports or the data it reads, affects the tests it served and no
+others. A mock keeps its state between tests, so a mock's files count whole,
+not route by route; a file the application's server loaded, a preload of its
+own, affects every test it served.
 
 ### Which affected tests check the change
 
@@ -655,6 +692,19 @@ A run left out is named with the files and the functions that changed. The
 merged run lists what differed and why it does not reach the earlier runs:
 `merged across:` in `runs <id>`, and `mergedAcross` in JSON.
 
+A changed file that a server the run's tests reached loaded or read (see
+[Find the tests a change affects](#find-the-tests-a-change-affects)) takes
+only those tests from the run: measure them again, and the merge keeps the
+rest of the run and leaves their old records out:
+
+```sh supercov-example
+npx supercov runs <suite-run> tests affected --names   # after changing a mock
+npx supercov -- npx playwright test <those tests>
+npx supercov merge
+```
+
+Until they are measured again, the merge refuses and names them.
+
 When you know a change Supercov counts does not alter what the earlier tests
 ran, say so:
 
@@ -665,6 +715,22 @@ npx supercov merge --allow-changed
 The product code, the dependencies, and what is measured must still be the
 same, and a run whose own test files changed is still left out. What was
 accepted is listed in `merged across:` as accepted.
+
+Runs measured on different machines merge the same way. Each machine
+measures its part of the suite on the same commit and toolchain, and one job
+merges them after copying each run's directory from `.supercov/runs/` into its
+own:
+
+```yaml
+# Each of two jobs:
+- run: npx supercov -- npx playwright test --shard=${{ matrix.shard }}/2
+- uses: actions/upload-artifact@v4
+  with: { name: "supercov-${{ matrix.shard }}", path: .supercov/runs, include-hidden-files: true }
+# Then one job:
+- uses: actions/download-artifact@v4
+  with: { pattern: "supercov-*", path: .supercov/runs, merge-multiple: true }
+- run: npx supercov merge
+```
 
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` of a

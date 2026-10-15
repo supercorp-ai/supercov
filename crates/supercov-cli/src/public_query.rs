@@ -18,7 +18,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
     }
     if command == "diff" {
         return Some(
-            "Usage: supercov diff <older-run> <newer-run> [options]\n\nOptions:\n  --filter <all|passed|failed>\n  --kind <kind>\n  --runner <runner>\n  --metric <metric>\n  --offset <n>\n  --limit <n>\n  --json\n"
+            "Usage: supercov diff <older-run> <newer-run> [options]\n\nOptions:\n  --filter <all|passed|failed>\n  --kind <kind>\n  --runner <runner>\n  --metric <metric>\n  --gained                       only what the newer run covers that the older did not\n  --offset <n>\n  --limit <n>\n  --json\n"
                 .into(),
         );
     }
@@ -49,7 +49,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
             "supercov runs <run-id> files [--group dir [--depth <n>]] [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
         }
         "gaps" => {
-            "supercov runs <run-id> gaps [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> gaps [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]\n       supercov runs <run-id> gaps --format jsonl [--metric <metric>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--output <file>]"
         }
         "tests-without-evidence" => {
             "supercov runs <run-id> tests without-evidence [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
@@ -154,6 +154,8 @@ struct QueryOptions {
     /// `files --group dir`: files rolled up by directory.
     group_dir: bool,
     depth: Option<usize>,
+    /// `diff --gained`.
+    gained: bool,
     sort: DecisionSort,
     positional: Vec<String>,
 }
@@ -174,6 +176,7 @@ impl Default for QueryOptions {
             scope_files: false,
             group_dir: false,
             depth: None,
+            gained: false,
             sort: DecisionSort::Location,
             positional: Vec::new(),
         }
@@ -353,6 +356,7 @@ fn parse_options(
                     }
                 }
             }
+            "--gained" => options.gained = true,
             "--depth" => {
                 index += 1;
                 let Some(depth) = parse_unsigned(arguments.get(index), true) else {
@@ -458,6 +462,7 @@ fn coverage_invocation(
         max_states: None,
         group: None,
         depth: None,
+        gained_only: false,
     };
     match command {
         "summary" | "kinds" | "runners" | "gaps" | "tests-without-evidence" => {}
@@ -585,6 +590,7 @@ pub fn parse_public_query(
                 max_states: None,
                 group: None,
                 depth: None,
+                gained_only: options.gained,
             }),
             newer_run_id: Some(newer.clone()),
             agent_command: "diff".into(),

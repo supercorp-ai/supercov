@@ -2392,6 +2392,9 @@ pub struct CoverageDiffData {
     /// Absent where a run has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inputs: Option<CoverageDiffInputs>,
+    /// Asked with `--gained`: `lost` is left empty.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub gained_only: bool,
 }
 
 /// What two runs of a comparison had in common. With the same source, a
@@ -2414,6 +2417,10 @@ pub struct CoverageDiffQueryOptions<'a> {
     pub runner: Option<&'a str>,
     pub offset: usize,
     pub limit: usize,
+    /// Only what the newer run gained. A spec measured alone, compared with
+    /// the suite's run, loses nearly everything; what it newly covered is
+    /// the question.
+    pub gained_only: bool,
 }
 
 struct DiffSnapshot {
@@ -2535,6 +2542,11 @@ pub fn coverage_diff_query(
         .filter(|(id, _)| !newer.mcdc.contains_key(*id))
         .map(|(_, label)| label.clone())
         .collect::<Vec<_>>();
+    if options.gained_only {
+        lost_lines.clear();
+        lost_branches.clear();
+        lost_mcdc.clear();
+    }
     for values in [
         &mut gained_lines,
         &mut lost_lines,
@@ -2652,6 +2664,7 @@ pub fn coverage_diff_query(
             files,
             by_file,
             inputs: None,
+            gained_only: options.gained_only,
         },
         pagination(options.offset, options.limit, returned, total),
     ))
