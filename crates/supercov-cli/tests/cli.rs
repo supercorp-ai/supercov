@@ -5081,3 +5081,33 @@ fn changes_since_a_run_name_the_tests_they_reach_and_block_a_merge() {
         ],
     );
 }
+
+#[test]
+fn runs_of_two_languages_are_refused_for_what_they_are() {
+    // Each language's instrumenter is its own, so the two runs differed
+    // there first, and the refusal said the Python run was "recorded by
+    // another build of Supercov" -- the same build, minutes apart.
+    let project = Project::cart("two-languages");
+    project.write("pkg/__init__.py", "");
+    project.write(
+        "pkg/half.py",
+        "def half(x):\n    return x / 2 if x else 0\n",
+    );
+    project.write(
+        "test_half.py",
+        "import unittest\n\nfrom pkg.half import half\n\n\nclass Half(unittest.TestCase):\n    def test_half(self):\n        self.assertEqual(half(2), 1)\n",
+    );
+    project.commit("python beside");
+    let javascript = project.measure(&[]);
+    project
+        .supercov(&["--", "python3", "-m", "unittest", "-q", "test_half"])
+        .succeeds();
+    let python = project.latest();
+    let refused = project.supercov(&["merge", &javascript, &python]).exits(2);
+    assert!(
+        refused.contains(&format!(
+            "Cannot merge run {python}: it measured python, and run {javascript} measured javascript; runs of different languages are not merged"
+        )),
+        "{refused}"
+    );
+}

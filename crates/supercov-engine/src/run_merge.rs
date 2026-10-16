@@ -366,6 +366,15 @@ fn judged_against_latest(
     }))
 }
 
+/// The language a run measured, from its frontend declaration.
+fn measured_language(run: &StoredRun) -> Option<String> {
+    let entries = read_archive(&run.evidence_path).ok()?;
+    let entry = entries.iter().find(|entry| entry.path == "frontend.json")?;
+    serde_json::from_slice::<FrontendRunDeclaration>(&entry.contents)
+        .ok()
+        .map(|declaration| declaration.language)
+}
+
 /// Why a run of another Supercov release cannot be merged with this one's.
 pub fn recorded_by_another_release(run: &StoredRun) -> String {
     match run.metadata.recorded_by.as_deref() {
@@ -444,6 +453,19 @@ pub fn merge_coverage_runs(
             .iter()
             .any(|dimension| matches!(*dimension, "instrumenter" | "coverage schema"))
         {
+            // Each language's instrumenter is its own, so runs of two
+            // languages always differ here. Said as another build, a
+            // JavaScript run and a Python run of one project were "measured
+            // by another build of Supercov" -- the same build, minutes apart.
+            if let (Some(first_language), Some(language)) =
+                (measured_language(first), measured_language(input))
+                && first_language != language
+            {
+                return Err(format!(
+                    "Cannot merge run {}: it measured {language}, and run {} measured {first_language}; runs of different languages are not merged",
+                    input.id, first.id
+                ));
+            }
             let older = [first, *input]
                 .into_iter()
                 .find(|run| run.metadata.recorded_by.as_deref() != Some(env!("CARGO_PKG_VERSION")))
