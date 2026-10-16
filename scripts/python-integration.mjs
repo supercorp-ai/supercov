@@ -247,6 +247,32 @@ try {
   assert.deepEqual(decisionVectors(project, 'app/shapes.py:26', environment, 'failed'), ['TF->T']);
   assert.deepEqual(decisionVectors(project, 'app/shapes.py:26', environment, 'passed'), ['TT->F']);
 
+  // pytest's own verdicts: an xfail that fails is not a failure, one that
+  // passes is a pass unless the mark is strict, and a fixture that errors in
+  // setup or teardown fails its test.
+  const expected = supercov(
+    project,
+    ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests_extended/test_expected.py'],
+    environment,
+  );
+  assert.equal(expected.status, 1, `${expected.stdout}\n${expected.stderr}`);
+  const expectedSummary = query(project, ['runs', 'latest'], environment);
+  assert.deepEqual(
+    [expectedSummary.testOutcomes.passed, expectedSummary.testOutcomes.failed, expectedSummary.testOutcomes.skipped],
+    [1, 3, 1],
+    JSON.stringify(expectedSummary.testOutcomes),
+  );
+  for (const [name, outcome] of [
+    ['test_expected_failure', 'skipped'],
+    ['test_unexpected_pass', 'passed'],
+    ['test_strict_unexpected_pass', 'failed'],
+    ['test_setup_error', 'failed'],
+    ['test_teardown_error', 'failed'],
+  ]) {
+    const [test] = query(project, ['runs', 'latest', 'test', `tests_extended/test_expected.py::${name}`], environment).tests;
+    assert.equal(test.outcome, outcome, `${name}: ${JSON.stringify(test.attempts)}`);
+  }
+
   const crashEnvironment = {
     ...environment,
     SUPERCOV_PYTHON_CRASH_MARKER: resolve(temporary, 'worker-crashed'),

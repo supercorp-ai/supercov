@@ -159,6 +159,10 @@ pub struct DecisionPlan {
     pub when_true: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when_false: Option<String>,
+    /// Used as a value (`x = a or b or default`): its probes must hand back
+    /// what the expression returns, not its truth.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub value: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +344,14 @@ fn is_unobservable_statement(statement: &Stmt, first_in_body: bool) -> bool {
 /// indexes contributed by each operand.
 type DecisionBoolOp = (String, Vec<Vec<usize>>);
 
+/// A regrouped BoolOp's decision: its ID, the leaf indexes of each operand
+/// but the last, and the span the runtime regroups them under.
+type RegroupedBoolOp = (String, Vec<Vec<usize>>, PlanSpan);
+
+/// The BoolOps of a decision's and/or tree, each with the leaf indexes of
+/// its operands.
+type TreeBoolOps = Vec<(TextRange, Vec<Vec<usize>>)>;
+
 struct PythonObligationCollector<'a> {
     file: &'a str,
     locations: SourceLocations<'a>,
@@ -354,6 +366,10 @@ struct PythonObligationCollector<'a> {
     /// BoolOp ranges that form a decision's and/or tree, with the decision ID
     /// and the leaf indexes of each operand.
     decision_boolops: BTreeMap<(usize, usize), DecisionBoolOp>,
+    /// A BoolOp of three or more operands whose operands but the last are a
+    /// decision used as a value: the decision, the leaf indexes of each of
+    /// those operands, and the span the runtime regroups them under.
+    regrouped: BTreeMap<(usize, usize), RegroupedBoolOp>,
     error: Option<PythonInstrumenterError>,
 }
 
@@ -376,6 +392,7 @@ impl<'a> PythonObligationCollector<'a> {
             decision_ids: BTreeSet::new(),
             branch_ids: BTreeSet::new(),
             decision_boolops: BTreeMap::new(),
+            regrouped: BTreeMap::new(),
             error: None,
         }
     }
@@ -500,19 +517,29 @@ impl<'a> PythonObligationCollector<'a> {
     }
 
     fn decision(&mut self, test: &Expr, kind: &str) {
-        let range = test.range();
+        self.decision_over(test.range(), kind, false, |this, leaves, boolops| {
+            this.tree(test, leaves, boolops).map(|_| ())
+        });
+    }
+
+    /// A decision over `range`, its leaves and and/or tree built by `build`.
+    /// Returns the decision's id and the BoolOps of its tree.
+    fn decision_over(
+        &mut self,
+        range: TextRange,
+        kind: &str,
+        value: bool,
+        build: impl FnOnce(&mut Self, &mut Vec<ConditionPlan>, &mut TreeBoolOps) -> Option<()>,
+    ) -> Option<(String, TreeBoolOps)> {
         let id = stable_id(self.file, "decision", range, kind);
         if !self.decision_ids.insert(id.clone()) {
-            return;
+            return None;
         }
-        let Some((line, column, source)) = self.location_source(range) else {
-            return;
-        };
+        let (line, column, source) = self.location_source(range)?;
         let mut leaves = Vec::new();
         let mut boolops = Vec::new();
-        if self.tree(test, &mut leaves, &mut boolops).is_none() {
-            return;
-        }
+        build(self, &mut leaves, &mut boolops)?;
+        let tree = boolops.clone();
         let mut conditions = Vec::with_capacity(leaves.len());
         for leaf in &leaves {
             let leaf_range = TextRange::new(
@@ -532,8 +559,7 @@ impl<'a> PythonObligationCollector<'a> {
                     text
                 }),
                 Err(error) => {
-                    self.fail::<()>(error);
-                    return;
+                    return self.fail(error);
                 }
             }
         }
@@ -541,8 +567,7 @@ impl<'a> PythonObligationCollector<'a> {
             let (start, end) = match self.locations.range(boolop_range) {
                 Ok(bounds) => bounds,
                 Err(error) => {
-                    self.fail::<()>(error);
-                    return;
+                    return self.fail(error);
                 }
             };
             self.decision_boolops
@@ -565,11 +590,9 @@ impl<'a> PythonObligationCollector<'a> {
             source,
             [("true", "true"), ("false", "false")],
         );
-        let Some(span) = self.span(range) else {
-            return;
-        };
+        let span = self.span(range)?;
         self.plan.decisions.push(DecisionPlan {
-            id,
+            id: id.clone(),
             kind: kind.into(),
             span,
             conditions: leaves,
@@ -577,7 +600,83 @@ impl<'a> PythonObligationCollector<'a> {
             outcome_false: format!("{outcome_id}:false"),
             when_true: None,
             when_false: None,
+            value,
         });
+        Some((id, tree))
+    }
+
+    /// `and` and `or` used as a value: every operand but the last is read as
+    /// a boolean, whatever the expression returns, so those operands are a
+    /// decision as much as an `if`'s test is -- `x = a or b or default`,
+    /// `(a and b) or fallback`. The last is returned, not tested, and is
+    /// judged as a value in its turn. `not` reads its operand as a boolean.
+    fn value_decision(&mut self, expression: &Expr) {
+        let bounds = |this: &mut Self, range: TextRange| this.locations.range(range).ok();
+        match expression {
+            Expr::BoolOp(boolean) => {
+                let Some(own) = bounds(self, boolean.range) else {
+                    return;
+                };
+                if self.decision_boolops.contains_key(&own) {
+                    return;
+                }
+                let values = &boolean.values;
+                if values.len() >= 3 {
+                    // Python reads `a or b or c` as one BoolOp; the runtime
+                    // regroups it as `(a or b) or c`, which evaluates and
+                    // returns exactly what it did, so the left part has a
+                    // node to be measured at.
+                    let left = &values[..values.len() - 1];
+                    let range =
+                        TextRange::new(left[0].range().start(), left[left.len() - 1].range().end());
+                    let Some(span) = self.span(range) else {
+                        return;
+                    };
+                    if let Some((id, tree)) =
+                        self.decision_over(range, "value", true, |this, leaves, boolops| {
+                            let mut groups = Vec::with_capacity(left.len());
+                            for value in left {
+                                let first = leaves.len();
+                                this.tree(value, leaves, boolops)?;
+                                groups.push((first..leaves.len()).collect());
+                            }
+                            boolops.push((range, groups));
+                            Some(())
+                        })
+                        && let Some((_, groups)) =
+                            tree.into_iter().find(|(boolop, _)| *boolop == range)
+                    {
+                        self.regrouped.insert(own, (id, groups, span));
+                    }
+                } else if Self::is_compound(&values[0]) {
+                    self.decision_over(
+                        values[0].range(),
+                        "value",
+                        true,
+                        |this, leaves, boolops| this.tree(&values[0], leaves, boolops).map(|_| ()),
+                    );
+                }
+            }
+            Expr::UnaryOp(unary) if unary.op == UnaryOp::Not => {
+                let (operand, _) = Self::strip_not(expression);
+                let Expr::BoolOp(boolean) = operand else {
+                    return;
+                };
+                if bounds(self, boolean.range)
+                    .is_some_and(|own| self.decision_boolops.contains_key(&own))
+                {
+                    return;
+                }
+                self.decision_over(unary.range, "value", true, |this, leaves, boolops| {
+                    this.tree(expression, leaves, boolops).map(|_| ())
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn is_compound(expression: &Expr) -> bool {
+        matches!(Self::strip_not(expression).0, Expr::BoolOp(_))
     }
 
     fn branch<const N: usize>(
@@ -706,10 +805,12 @@ impl<'a> PythonObligationCollector<'a> {
             }
         };
         let decision = self.decision_boolops.get(&bounds).cloned();
+        let regrouped = self.regrouped.get(&bounds).cloned();
         let op = match boolean.op {
             BoolOp::And => "and",
             BoolOp::Or => "or",
         };
+        let last = boolean.values.len() - 1;
         for (index, value) in boolean.values.iter().enumerate().skip(1) {
             let Some(id) = self.branch(
                 value.range(),
@@ -721,20 +822,34 @@ impl<'a> PythonObligationCollector<'a> {
             ) else {
                 continue;
             };
-            let (decision_id, previous_leaves, operand_leaves) = match &decision {
-                Some((decision_id, groups)) => (
-                    Some(decision_id.clone()),
-                    Some(groups[index - 1].clone()),
-                    Some(groups[index].clone()),
-                ),
-                None => (None, None, None),
-            };
+            // Regrouped as `(a or b) or c`: the operands but the last are the
+            // inner BoolOp's, judged from its decision's vectors; the last is
+            // the outer one's second operand.
+            let (decision_id, previous_leaves, operand_leaves, boolop, operand) =
+                match (&decision, &regrouped) {
+                    (Some((decision_id, groups)), _) => (
+                        Some(decision_id.clone()),
+                        Some(groups[index - 1].clone()),
+                        Some(groups[index].clone()),
+                        boolop_span,
+                        index,
+                    ),
+                    (None, Some((decision_id, groups, inner))) if index < last => (
+                        Some(decision_id.clone()),
+                        Some(groups[index - 1].clone()),
+                        Some(groups[index].clone()),
+                        *inner,
+                        index,
+                    ),
+                    (None, Some(_)) => (None, None, None, boolop_span, 1),
+                    (None, None) => (None, None, None, boolop_span, index),
+                };
             self.plan.logical.push(LogicalPlan {
                 short_circuit: format!("{id}:short-circuit"),
                 evaluated: format!("{id}:evaluated"),
                 id,
-                boolop: boolop_span,
-                operand: index,
+                boolop,
+                operand,
                 decision: decision_id,
                 previous_leaves,
                 operand_leaves,
@@ -925,7 +1040,11 @@ impl<'a> Visitor<'a> for PythonObligationCollector<'a> {
             Expr::If(expression) => {
                 self.decision(&expression.test, "ternary");
             }
-            Expr::BoolOp(expression) => self.logical(expression),
+            Expr::BoolOp(boolean) => {
+                self.value_decision(expression);
+                self.logical(boolean);
+            }
+            Expr::UnaryOp(_) => self.value_decision(expression),
             _ => {}
         }
         walk_expr(self, expression);
@@ -1061,6 +1180,52 @@ mod tests {
         );
         assert!(manifest.unmeasured.is_empty());
         assert!(manifest.limitations.is_empty());
+    }
+
+    #[test]
+    fn a_compound_left_part_of_a_value_is_a_decision_whose_probes_keep_values() {
+        let source = "def pick(a, b, c):\n    first = a or b or c\n    return (a and b) or c, not (a and b), a or c\n";
+        let output = build_python_obligations("src/app.py", source).unwrap();
+        let values = output
+            .plan
+            .decisions
+            .iter()
+            .filter(|decision| decision.kind == "value")
+            .map(|decision| {
+                (
+                    decision.span.start,
+                    decision.span.end,
+                    decision.conditions.len(),
+                    decision.value,
+                )
+            })
+            .collect::<Vec<_>>();
+        // `a or b` of `a or b or c`, regrouped; `(a and b)`; `not (a and b)`.
+        // `a or c` has one operand before its last, and no decision.
+        assert_eq!(
+            values,
+            [
+                ([2, 12], [2, 18], 2, true),
+                ([3, 12], [3, 19], 2, true),
+                ([3, 27], [3, 40], 2, true),
+            ]
+        );
+        // The regrouped BoolOp's last operand is its outer second operand;
+        // the one before is the inner BoolOp's, judged from the decision.
+        let first = output
+            .plan
+            .logical
+            .iter()
+            .filter(|logical| logical.boolop.start == [2, 12])
+            .map(|logical| {
+                (
+                    logical.operand,
+                    logical.decision.is_some(),
+                    logical.boolop.end,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(first, [(1, true, [2, 18]), (1, false, [2, 23])]);
     }
 
     #[test]

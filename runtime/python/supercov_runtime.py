@@ -1187,6 +1187,19 @@ class Runtime:
             self._wide_vector(hits.context, d, mask, outcome)
         return outcome
 
+    def _condition_value_probe(self, d: int, index: int, value, inverted: bool):
+        """A condition of a decision used as a value (`x = a or b or c`): its
+        truth is recorded as any condition's, and the operand itself is
+        returned, since the expression hands back operands rather than truths.
+        The interpreter then reads its truth once more, as it would have."""
+        self._condition_probe(d, index, value, inverted)
+        return value
+
+    def _decision_value_probe(self, d: int, value):
+        """A decision used as a value: its vector is recorded, its value kept."""
+        self._decision_probe(d, value)
+        return value
+
     def _operand_probe(self, g: int, index: int, value):
         """A standalone BoolOp's right operand was evaluated."""
         key = (self.context.get(), g)
@@ -1279,6 +1292,8 @@ class Runtime:
                 "value_probe": self._value_probe,
                 "condition_probe": self._condition_probe,
                 "decision_probe": self._decision_probe,
+                "condition_value_probe": self._condition_value_probe,
+                "decision_value_probe": self._decision_value_probe,
                 "single_probe": self._single_probe,
                 "operand_probe": self._operand_probe,
                 "boolop_probe": self._boolop_probe,

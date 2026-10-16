@@ -345,56 +345,25 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let embedded = match topic.as_str() {
-        "getting-started" => Some(include_str!("../assets/docs/getting-started.md")),
-        "agent-loop" => Some(include_str!("../assets/docs/agent-loop.md")),
-        "assertions" => Some(include_str!("../assets/docs/assertions.md")),
-        "troubleshooting" => Some(include_str!("../assets/docs/troubleshooting.md")),
-        "cli" => Some(include_str!("../assets/docs/cli.md")),
-        "coverage-model" => Some(include_str!("../assets/docs/coverage-model.md")),
-        "quality" => Some(include_str!("../assets/docs/quality.md")),
-        "security" => Some(include_str!("../assets/docs/security.md")),
-        "evidence" => Some(include_str!("../assets/docs/evidence.md")),
-        "supported-suites" => Some(include_str!("../assets/docs/supported-suites.md")),
-        "verification" => Some(include_str!("../assets/docs/verification.md")),
-        "performance" => Some(include_str!("../assets/docs/performance.md")),
-        "workspace-isolation" => Some(include_str!("../assets/docs/workspace-isolation.md")),
-        _ => None,
+    let guide = match topic.as_str() {
+        "getting-started" => include_str!("../assets/docs/getting-started.md"),
+        "agent-loop" => include_str!("../assets/docs/agent-loop.md"),
+        "assertions" => include_str!("../assets/docs/assertions.md"),
+        "troubleshooting" => include_str!("../assets/docs/troubleshooting.md"),
+        "cli" => include_str!("../assets/docs/cli.md"),
+        "coverage-model" => include_str!("../assets/docs/coverage-model.md"),
+        "quality" => include_str!("../assets/docs/quality.md"),
+        "security" => include_str!("../assets/docs/security.md"),
+        "evidence" => include_str!("../assets/docs/evidence.md"),
+        "supported-suites" => include_str!("../assets/docs/supported-suites.md"),
+        "verification" => include_str!("../assets/docs/verification.md"),
+        "performance" => include_str!("../assets/docs/performance.md"),
+        "workspace-isolation" => include_str!("../assets/docs/workspace-isolation.md"),
+        "reports" => include_str!("../assets/docs/reports.md"),
+        _ => unreachable!("every listed guide is bundled"),
     };
-    let command = launcher_command();
-    if let Some(markdown) = embedded {
-        print!("{}", localize_guide(markdown, command));
-        return ExitCode::SUCCESS;
-    }
-    let mut roots = Vec::new();
-    if let Some(root) = std::env::var_os("SUPERCOV_PACKAGE_ROOT") {
-        roots.push(PathBuf::from(root));
-    }
-    if let Ok(root) = std::env::current_dir() {
-        roots.push(root);
-    }
-    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
-    for root in roots {
-        let path = root.join("docs").join(format!("{topic}.md"));
-        match fs::read_to_string(&path) {
-            Ok(markdown) => {
-                print!("{}", localize_guide(&markdown, command));
-                if !markdown.ends_with('\n') {
-                    println!();
-                }
-                return ExitCode::SUCCESS;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                eprintln!("[supercov] could not read {}: {error}", path.display());
-                return ExitCode::from(1);
-            }
-        }
-    }
-    eprintln!(
-        "[supercov] guide {topic:?} is not present in this installation; reinstall Supercov or use the repository documentation"
-    );
-    ExitCode::from(1)
+    print!("{}", localize_guide(guide, launcher_command()));
+    ExitCode::SUCCESS
 }
 
 fn merge_command(arguments: Vec<String>) -> ExitCode {
@@ -482,6 +451,59 @@ fn published(run_directory: &Path) {
     }
 }
 
+/// Why a measured command failed, as far as its run can say. A test that
+/// failed is named; only when none did -- the command stopped before its
+/// tests, or a test file never loaded -- is the build output the copy starts
+/// without the likely cause, and said to be.
+fn explain_failed_command(
+    root: &Path,
+    run_id: &str,
+    exit_code: i32,
+    unrun_build: &[String],
+    command: &str,
+) {
+    let failed = discover_runs(root)
+        .ok()
+        .and_then(|inventory| {
+            let run = select_run(&inventory, Some(run_id)).ok()?;
+            let container = open_or_rebuild_query_index(run).ok()?;
+            let index = CoverageIndex::new(&container).ok()?;
+            index
+                .test_summaries(supercov_engine::coverage_index::CoverageViewId::All)
+                .ok()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|test| {
+            test.role == "test" && matches!(test.outcome.as_str(), "failed" | "timedOut")
+        })
+        .map(|test| test.name)
+        .collect::<Vec<_>>();
+    if !failed.is_empty() {
+        let shown = failed
+            .iter()
+            .take(5)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = failed.len().saturating_sub(5);
+        eprintln!(
+            "[supercov] the command exited {exit_code}: {} test(s) failed: {shown}{}",
+            failed.len(),
+            if more > 0 {
+                format!(", and {more} more")
+            } else {
+                String::new()
+            }
+        );
+    } else if !unrun_build.is_empty() {
+        let build = unrun_build.join(" ");
+        eprintln!(
+            "[supercov] the command exited {exit_code} and no test it reported failed. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `supercov -- sh -c \"{build} && {command}\"`"
+        );
+    }
+}
+
 /// Names the file a run writes its id to.
 const RUN_ID_FILE: &str = "SUPERCOV_RUN_ID_FILE";
 
@@ -539,130 +561,147 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
         .iter()
         .filter(|run| run.metadata.merged != Some(true))
         .filter(|run| {
-            current_integrity_for_run(root, run).is_some_and(|current| {
-                let recorded = &run.metadata.integrity;
-                // A run of another release reads as current -- its checkout
-                // has not moved -- but cannot be merged with this release's.
-                if recorded.fingerprint.instrumenter != current.fingerprint.instrumenter {
+            // Said like any other run left out: a source that cannot be
+            // fingerprinted now (its last measured file deleted) is still a
+            // run missing from the total.
+            let Some(current) = current_integrity_for_run(root, run) else {
+                outdated.push((
+                    *run,
+                    "its source cannot be measured as it is now".to_owned(),
+                    true,
+                ));
+                return false;
+            };
+            let recorded = &run.metadata.integrity;
+            // A run of another release reads as current -- its checkout
+            // has not moved -- but cannot be merged with this release's.
+            if recorded.fingerprint.instrumenter != current.fingerprint.instrumenter {
+                outdated.push((
+                    *run,
+                    supercov_engine::run_merge::recorded_by_another_release(run),
+                    true,
+                ));
+                return false;
+            }
+            if !compare_run_integrity(Some(recorded), &current).stale {
+                return true;
+            }
+            let files = supercov_engine::source_manifest::load_manifest(run).ok();
+            // What is measured has moved on: nothing makes this run a
+            // record of it. Said, with the files, so that a run left out
+            // is not a run silently missing from the total.
+            let moved = |domain: &str| {
+                let named = files
+                    .as_ref()
+                    .map(|files| {
+                        supercov_engine::source_manifest::changed_files(
+                            &files.manifest.files,
+                            |file| {
+                                fs::read_to_string(root.join(file)).ok().map(|text| {
+                                    supercov_engine::source_manifest::FileFingerprint::of(&text)
+                                        .sha256
+                                })
+                            },
+                        )
+                        .into_iter()
+                        .filter(|file| {
+                            !tests.contains(file)
+                                && !supercov_engine::run_currency::configuration_file(file)
+                        })
+                        .take(3)
+                        .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                // An added file is in no record to compare against, so
+                // it is counted rather than named.
+                let added = current
+                    .fingerprint
+                    .source_files
+                    .saturating_sub(recorded.fingerprint.source_files);
+                if named.is_empty() && added > 0 {
+                    format!("the {domain} has changed ({added} file(s) added)")
+                } else if named.is_empty() {
+                    format!("the {domain} has changed")
+                } else {
+                    format!("the {domain} has changed ({})", named.join(", "))
+                }
+            };
+            // A measured file added or removed: what is measured differs.
+            // A change to a file is judged below, file by file.
+            if recorded.fingerprint.source != current.fingerprint.source
+                && (files.is_none()
+                    || recorded.fingerprint.source_files != current.fingerprint.source_files)
+            {
+                outdated.push((*run, moved("source"), true));
+                return false;
+            }
+            if recorded.fingerprint.dependencies != current.fingerprint.dependencies {
+                outdated.push((*run, "the dependencies have changed".to_owned(), true));
+                return false;
+            }
+            // Only test-side files differ: each is judged by what the
+            // run's tests did with it.
+            let Some(files) = files else {
+                return false;
+            };
+            let recorded_files = &files.manifest.files;
+            let configurations = recorded_files
+                .keys()
+                .filter(|file| supercov_engine::run_currency::configuration_file(file))
+                .cloned()
+                .collect::<Vec<_>>();
+            let now = supercov_engine::run_currency::checkout_files(
+                root,
+                recorded_files,
+                &configurations,
+            );
+            let ran = supercov_engine::run_currency::Ran::of(run);
+            let playwright_changed = configurations.iter().any(|file| {
+                supercov_engine::test_loads::configuration_runner(file) == Some("playwright")
+                    && now.get(file).map(|is| &is.sha256)
+                        != recorded_files.get(file).map(|was| &was.sha256)
+            });
+            let reference = if playwright_changed {
+                reference()
+            } else {
+                None
+            };
+            let mut judgment = supercov_engine::run_currency::judge(
+                &checkout,
+                &run.metadata.command.join(" "),
+                recorded_files,
+                &now,
+                &|file| fs::read_to_string(root.join(file)).ok(),
+                supercov_engine::source_manifest::test_files(run).as_ref(),
+                &ran,
+                reference.as_ref(),
+                allow_changed,
+            );
+            // A configuration file the run was not recorded with: one
+            // was added, and it may set how its tests run.
+            if judgment.outdated.is_empty()
+                && recorded.fingerprint.configuration != current.fingerprint.configuration
+                && !configurations.iter().any(|file| {
+                    now.get(file).map(|is| &is.sha256)
+                        != recorded_files.get(file).map(|was| &was.sha256)
+                })
+                && !allow_changed
+            {
+                judgment
+                    .outdated
+                    .push("a configuration file was added".to_owned());
+            }
+            match judgment.outdated.first() {
+                Some(_) => {
                     outdated.push((
                         *run,
-                        supercov_engine::run_merge::recorded_by_another_release(run),
-                        true,
+                        supercov_engine::run_merge::listed(&judgment.outdated),
+                        judgment.settled,
                     ));
-                    return false;
+                    false
                 }
-                if !compare_run_integrity(Some(recorded), &current).stale {
-                    return true;
-                }
-                let files = supercov_engine::source_manifest::load_manifest(run).ok();
-                // What is measured has moved on: nothing makes this run a
-                // record of it. Said, with the files, so that a run left out
-                // is not a run silently missing from the total.
-                let moved = |domain: &str| {
-                    let named = files
-                        .as_ref()
-                        .map(|files| {
-                            supercov_engine::source_manifest::changed_files(
-                                &files.manifest.files,
-                                |file| {
-                                    fs::read_to_string(root.join(file)).ok().map(|text| {
-                                        supercov_engine::source_manifest::FileFingerprint::of(&text)
-                                            .sha256
-                                    })
-                                },
-                            )
-                            .into_iter()
-                            .filter(|file| {
-                                !tests.contains(file)
-                                    && !supercov_engine::run_currency::configuration_file(file)
-                            })
-                            .take(3)
-                            .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    if named.is_empty() {
-                        format!("the {domain} has changed")
-                    } else {
-                        format!("the {domain} has changed ({})", named.join(", "))
-                    }
-                };
-                // A measured file added or removed: what is measured differs.
-                // A change to a file is judged below, file by file.
-                if recorded.fingerprint.source != current.fingerprint.source
-                    && (files.is_none()
-                        || recorded.fingerprint.source_files != current.fingerprint.source_files)
-                {
-                    outdated.push((*run, moved("source"), true));
-                    return false;
-                }
-                if recorded.fingerprint.dependencies != current.fingerprint.dependencies {
-                    outdated.push((*run, "the dependencies have changed".to_owned(), true));
-                    return false;
-                }
-                // Only test-side files differ: each is judged by what the
-                // run's tests did with it.
-                let Some(files) = files else {
-                    return false;
-                };
-                let recorded_files = &files.manifest.files;
-                let configurations = recorded_files
-                    .keys()
-                    .filter(|file| supercov_engine::run_currency::configuration_file(file))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let now = supercov_engine::run_currency::checkout_files(
-                    root,
-                    recorded_files,
-                    &configurations,
-                );
-                let ran = supercov_engine::run_currency::Ran::of(run);
-                let playwright_changed = configurations.iter().any(|file| {
-                    supercov_engine::test_loads::configuration_runner(file) == Some("playwright")
-                        && now.get(file).map(|is| &is.sha256)
-                            != recorded_files.get(file).map(|was| &was.sha256)
-                });
-                let reference = if playwright_changed {
-                    reference()
-                } else {
-                    None
-                };
-                let mut judgment = supercov_engine::run_currency::judge(
-                    &checkout,
-                    &run.metadata.command.join(" "),
-                    recorded_files,
-                    &now,
-                    &|file| fs::read_to_string(root.join(file)).ok(),
-                    supercov_engine::source_manifest::test_files(run).as_ref(),
-                    &ran,
-                    reference.as_ref(),
-                    allow_changed,
-                );
-                // A configuration file the run was not recorded with: one
-                // was added, and it may set how its tests run.
-                if judgment.outdated.is_empty()
-                    && recorded.fingerprint.configuration != current.fingerprint.configuration
-                    && !configurations.iter().any(|file| {
-                        now.get(file).map(|is| &is.sha256)
-                            != recorded_files.get(file).map(|was| &was.sha256)
-                    })
-                    && !allow_changed
-                {
-                    judgment
-                        .outdated
-                        .push("a configuration file was added".to_owned());
-                }
-                match judgment.outdated.first() {
-                    Some(_) => {
-                        outdated.push((
-                            *run,
-                            supercov_engine::run_merge::listed(&judgment.outdated),
-                            judgment.settled,
-                        ));
-                        false
-                    }
-                    None => true,
-                }
-            })
+                None => true,
+            }
         })
         .collect::<Vec<_>>();
     current.sort_by(|left, right| {
@@ -1855,6 +1894,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     let watchdog_program = std::env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
+    let command_text = command.join(" ");
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
         root: root.clone(),
         command,
@@ -1868,6 +1908,15 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     match result {
         Ok(result) => {
             published(&result.run_directory);
+            if result.exit_code != 0 {
+                explain_failed_command(
+                    &root,
+                    &result.run_id,
+                    result.exit_code,
+                    &result.unrun_build,
+                    &command_text,
+                );
+            }
             for (language, server) in &result.server_runs {
                 if let Some(id) = server.file_name().and_then(|id| id.to_str()) {
                     eprintln!(
@@ -2178,10 +2227,17 @@ fn selected_package_script(command: &[String]) -> Option<&str> {
     if !matches!(program, "npm" | "pnpm" | "yarn") {
         return None;
     }
-    match command.get(1).map(String::as_str) {
-        Some("test") => Some("test"),
-        Some("run") => command.get(2).map(String::as_str),
-        Some(value) if program != "npm" && !value.starts_with('-') => Some(value),
+    // Flags go before or after the subcommand (`npm -s run test:unit`,
+    // `npm run --silent test:unit`), and npm takes `t` and `run-script` for
+    // the commands they abbreviate.
+    let mut words = command[1..]
+        .iter()
+        .map(String::as_str)
+        .filter(|word| !word.starts_with('-'));
+    match words.next() {
+        Some("test" | "t" | "tst") => Some("test"),
+        Some("run" | "run-script") => words.next(),
+        Some(value) if program != "npm" => Some(value),
         _ => None,
     }
 }
@@ -2243,6 +2299,20 @@ enum PublicQueryOutput {
 }
 
 impl PublicQueryOutput {
+    /// How many entries of a page too large for one reply would fit, when
+    /// it is that and not something else.
+    fn page_that_fits(&self) -> Option<usize> {
+        let Self::Coverage { output, .. } = self else {
+            return None;
+        };
+        match output.agent_json() {
+            Err(supercov_engine::indexed_query::IndexedQueryError::PageTooLarge {
+                fits, ..
+            }) => Some(fits),
+            _ => None,
+        }
+    }
+
     fn agent_json(&self) -> Result<String, agent_json::AgentError> {
         match self {
             Self::Runs { data, pagination } => agent_json::success("runs", data, Some(pagination))
@@ -2590,16 +2660,44 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
         }
     };
     match execute_public_query(&root, &invocation) {
-        Ok(output) if json_output => match output.agent_json() {
-            Ok(output) => {
-                print!("{output}");
-                ExitCode::SUCCESS
+        Ok(output) if json_output => {
+            // A page too large for one reply is answered with the entries that
+            // fit and the offset after them, rather than refused: a pager that
+            // follows `nextOffset` reaches the end whatever its entries weigh.
+            // Refusing meant a page of large entries stopped it, even at the
+            // size the refusal had suggested for the page before.
+            let mut invocation = invocation;
+            let mut output = output;
+            while let Some(fits) = output.page_that_fits() {
+                let PublicQueryInvocation::Coverage { request, .. } = &mut invocation else {
+                    break;
+                };
+                if fits >= request.limit {
+                    break;
+                }
+                request.limit = fits;
+                match execute_public_query(&root, &invocation) {
+                    Ok(smaller) => output = smaller,
+                    Err(failure) => {
+                        print!(
+                            "{}",
+                            agent_json::failure(Some(&agent_command), &failure.error)
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
             }
-            Err(error) => {
-                print!("{}", agent_json::failure(Some(&agent_command), &error));
-                ExitCode::from(2)
+            match output.agent_json() {
+                Ok(output) => {
+                    print!("{output}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    print!("{}", agent_json::failure(Some(&agent_command), &error));
+                    ExitCode::from(2)
+                }
             }
-        },
+        }
         Ok(output) => {
             if let PublicQueryOutput::Coverage { warnings, .. } = &output {
                 for warning in warnings {

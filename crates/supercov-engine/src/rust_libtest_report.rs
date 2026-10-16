@@ -142,21 +142,37 @@ fn counts(stdout: &str) -> Option<Counts> {
 /// One report for the doctests of a package, of the reports rustdoc wrote for
 /// it: one for each doctest where each ran alone, one for several where it
 /// ran them together.
-pub(crate) fn merged_report(reports: &[&str], quiet: bool) -> String {
+pub(crate) fn merged_report(reports: &[&str], quiet: bool, known: &[(&str, &str)]) -> String {
     // One report is rustdoc's own, with whatever it says after the result
     // (how long the doctests took to compile, when it compiles them as one).
     if let ([only], false) = (reports, quiet) {
         return (*only).to_owned();
     }
-    let lines = reports
+    let mut lines = reports
         .iter()
         .flat_map(|report| {
             report
                 .lines()
                 .take_while(|line| *line != "failures:")
                 .filter(|line| line.starts_with("test ") && line.contains(" ... "))
+                .map(str::to_owned)
         })
         .collect::<Vec<_>>();
+    // A quiet harness prints a mark per case and no name, and a merged one
+    // cannot be asked for them; the cases it ran are known all the same.
+    if lines.is_empty() && quiet {
+        lines = known
+            .iter()
+            .map(|(name, status)| {
+                let result = match *status {
+                    "failed" => "FAILED",
+                    "skipped" => "ignored",
+                    _ => "ok",
+                };
+                format!("test {name} ... {result}")
+            })
+            .collect();
+    }
     let mut report = format!(
         "\nrunning {} test{}\n",
         lines.len(),
@@ -517,7 +533,7 @@ test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; 
         );
         assert_eq!(reported_tests(&failed), ["src/lib.rs - seal (line 7)"]);
         assert_eq!(
-            merged_report(&[passed, &failed], false),
+            merged_report(&[passed, &failed], false, &[]),
             "
 running 2 tests
 test src/lib.rs - seal (line 3) ... ok
@@ -588,7 +604,7 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
         // `cargo test -q` printed a report for each doctest.
         let passed = "\nrunning 1 test\ntest src/lib.rs - seal (line 3) ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.20s\n\n";
         assert_eq!(
-            merged_report(&[passed, passed], true),
+            merged_report(&[passed, passed], true, &[]),
             "\nrunning 2 tests\n..\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s\n\n"
         );
     }

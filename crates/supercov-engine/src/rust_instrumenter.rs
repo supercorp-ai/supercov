@@ -809,6 +809,9 @@ impl<'a> RustObligationCollector<'a> {
         for expression in standalone_matches(root, matches, assertions) {
             self.decision(&expression, "matches");
         }
+        for expression in value_decisions(root, assertions) {
+            self.decision(&expression, "value");
+        }
 
         for binary in root.descendants().filter_map(ast::BinExpr::cast) {
             let kind = match binary.op_kind() {
@@ -1194,6 +1197,11 @@ fn rewrite_expression_macros(
                             *byte = b' ';
                         }
                     }
+                    // A reference where `vec` was, so whatever the macro
+                    // starts -- `vec![x; n].into()`, a comparison -- still
+                    // starts there, and its probe goes before the macro
+                    // rather than between `vec!` and its brackets.
+                    text[prefix_start] = b'&';
                     changed = true;
                 }
             }
@@ -1272,15 +1280,12 @@ fn parse_for_instrumentation(source: &str) -> Result<ParsedSource, RustInstrumen
     }
 }
 
-/// The `matches!` calls that stand as decisions of their own: those not
-/// already serving as an atomic condition of an `if`, `while`, guard or
-/// assertion, whose decision records them.
-fn standalone_matches(
+/// The conditions of `if`, `while`, guards and assertions: decisions by
+/// where they stand.
+fn condition_expressions(
     root: &ra_ap_syntax::SyntaxNode,
-    matches: &[TextRange],
     assertions: &[TextRange],
 ) -> Vec<ast::Expr> {
-    let mut atoms = Vec::new();
     let mut conditions = Vec::new();
     for expression in root.descendants().filter_map(ast::IfExpr::cast) {
         conditions.extend(expression.condition());
@@ -1294,6 +1299,63 @@ fn standalone_matches(
     for arguments in assertions {
         conditions.extend(assertion_condition(root, *arguments));
     }
+    conditions
+}
+
+fn is_logical(expression: &ast::Expr) -> bool {
+    matches!(expression, ast::Expr::BinExpr(binary)
+        if matches!(binary.op_kind(), Some(BinaryOp::LogicOp(LogicOp::And | LogicOp::Or))))
+}
+
+/// `&&` and `||` used as a value -- `let ok = a && b;`, a returned or passed
+/// `x == 0 || y == 0` -- are decisions as much as a condition is: MC/DC asks
+/// of every boolean expression of two or more conditions that each be shown
+/// to decide it. Only the outermost operator of a tree is one, and not when
+/// the tree is itself a condition, which is a decision already.
+fn value_decisions(root: &ra_ap_syntax::SyntaxNode, assertions: &[TextRange]) -> Vec<ast::Expr> {
+    let conditions = condition_expressions(root, assertions)
+        .iter()
+        .map(|condition| unparenthesized(condition).syntax().text_range())
+        .collect::<Vec<_>>();
+    root.descendants()
+        .filter_map(ast::Expr::cast)
+        .filter(is_logical)
+        .filter(|expression| {
+            let mut parent = expression.syntax().parent();
+            while let Some(node) = parent
+                .clone()
+                .filter(|node| ast::ParenExpr::can_cast(node.kind()))
+            {
+                parent = node.parent();
+            }
+            !parent
+                .and_then(ast::Expr::cast)
+                .is_some_and(|parent| is_logical(&parent))
+        })
+        .filter(|expression| !conditions.contains(&expression.syntax().text_range()))
+        .collect()
+}
+
+fn unparenthesized(expression: &ast::Expr) -> ast::Expr {
+    match expression {
+        ast::Expr::ParenExpr(paren) => paren
+            .expr()
+            .map_or_else(|| expression.clone(), |inner| unparenthesized(&inner)),
+        _ => expression.clone(),
+    }
+}
+
+/// The `matches!` calls that stand as decisions of their own: those not
+/// already serving as an atomic condition of an `if`, `while`, guard or
+/// assertion, whose decision records them.
+fn standalone_matches(
+    root: &ra_ap_syntax::SyntaxNode,
+    matches: &[TextRange],
+    assertions: &[TextRange],
+) -> Vec<ast::Expr> {
+    let mut atoms = Vec::new();
+    let mut conditions = condition_expressions(root, assertions);
+    conditions.extend(value_decisions(root, assertions));
     for condition in &conditions {
         RustObligationCollector::atomic_condition_ranges(condition, &mut atoms);
     }
@@ -2524,6 +2586,17 @@ pub fn instrument_rust_file(
             &frame_name,
         );
     }
+    for expression in value_decisions(root, &assertions) {
+        let frame_name = allocate_frame_name(file, &expression, "value", &mut identifiers);
+        instrument_decision(
+            &mut insertions,
+            runtime_path,
+            file,
+            &expression,
+            "value",
+            &frame_name,
+        );
+    }
 
     // Nothing survives in code the compiler leaves out; a probe there would
     // name an obligation the manifest no longer has, if the item were built.
@@ -3059,6 +3132,26 @@ fn checked(value: bool) -> bool {
         assert!(!manifest.points.iter().any(|point| {
             point.kind == PointKind::Function && point.label.as_deref() == Some("doubled")
         }));
+    }
+
+    #[test]
+    fn a_vec_macro_that_starts_a_larger_expression_keeps_its_probe_outside() {
+        // smallvec's `vec![elem; n].into()`: blanking `vec!` to read the
+        // array moved where the statement starts, and its probe landed
+        // between `vec!` and the brackets, which does not parse.
+        let source = "pub fn grown(n: usize) -> Vec<u8> {\n    if n > 0 {\n        vec![0; n].into()\n    } else {\n        vec![1; 2] == vec![1, 1] && n == 0;\n        Vec::new()\n    }\n}\n";
+        let transformed =
+            instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert!(
+            !transformed.code.contains("vec!crate"),
+            "{}",
+            transformed.code
+        );
+        assert!(
+            transformed.code.contains("vec![0; n].into()"),
+            "{}",
+            transformed.code
+        );
     }
 
     #[test]

@@ -67,7 +67,7 @@ def _sha256(data: bytes):
     _sha256 = sha256
     return sha256(data)
 
-PROBE_VERSION = 7
+PROBE_VERSION = 8
 # A context's hit array is a slot file mapped into memory. Its first bytes
 # name the context for the reader, so obligations are numbered from here.
 SLOT_HEADER = 16
@@ -90,6 +90,8 @@ hits_get: Callable[[], object] = lambda: _inactive_hits  # noqa: E731 - replaced
 value_probe: Callable[[int, object], object] = lambda k, value: value  # noqa: E731
 condition_probe: Callable[[int, int, object, bool], bool] = lambda d, i, value, inv: bool(value)  # noqa: E731
 decision_probe: Callable[[int, object], bool] = lambda d, value: bool(value)  # noqa: E731
+condition_value_probe: Callable[[int, int, object, bool], object] = lambda d, i, value, inv: value  # noqa: E731
+decision_value_probe: Callable[[int, object], object] = lambda d, value: value  # noqa: E731
 single_probe: Callable[[int, object], bool] = lambda k, value: bool(value)  # noqa: E731
 operand_probe: Callable[[int, int, object], object] = lambda g, i, value: value  # noqa: E731
 boolop_probe: Callable[[int, object], object] = lambda g, value: value  # noqa: E731
@@ -192,6 +194,8 @@ class FileProbes:
                 (line, column), (end_line, end_column) = logical["boolop"]
                 standalone.setdefault((line, column, end_line, end_column), []).append(logical)
         heads_by_decision: dict[int, tuple] = {}
+        # Decisions used as values, whose probes return what they were given.
+        self.value_decisions: set[int] = set()
         for decision in file_plan.get("decisions", ()):
             (line, column), (end_line, end_column) = decision["span"]
             d = len(self.decision_plans)
@@ -201,6 +205,8 @@ class FileProbes:
                 statement_numbers.get(decision.get("whenTrue")),
                 statement_numbers.get(decision.get("whenFalse")),
             )
+            if decision.get("value"):
+                self.value_decisions.add(d)
             for index, condition in enumerate(decision["conditions"]):
                 (line, column), (end_line, end_column) = condition["span"]
                 self.leaves[(line, column, end_line, end_column)] = (d, index, condition["not"] % 2 == 1)
@@ -534,6 +540,8 @@ PROBE_NAMES = {
     "value_probe": "v",
     "condition_probe": "c",
     "decision_probe": "d",
+    "condition_value_probe": "cv",
+    "decision_value_probe": "dv",
     "single_probe": "d1",
     "operand_probe": "o",
     "boolop_probe": "b",

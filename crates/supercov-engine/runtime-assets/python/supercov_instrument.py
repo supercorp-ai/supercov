@@ -128,6 +128,7 @@ class _Inserter(ast.NodeTransformer):
         self.value = names["value_probe"]
         self.names = names
         self.inserted = 0
+        self._values = getattr(probes, "value_decisions", set())
         # Tests of `if` and `while` statements whose outcome their branches
         # record: the expression is left as the program wrote it.
         self.branch_tests: set[int] = set()
@@ -165,14 +166,18 @@ class _Inserter(ast.NodeTransformer):
         leaf = self.probes.leaves.get(span)
         if leaf is not None:
             d, index, inverted = leaf
+            # A decision used as a value hands back its operands, so its
+            # probes return what they were given rather than its truth.
+            probe = "condition_value_probe" if d in self._values else "condition_probe"
             node = self._call(
-                "condition_probe",
+                probe,
                 [ast.Constant(value=d), ast.Constant(value=index), node, ast.Constant(value=inverted)],
                 node,
             )
         d = self.probes.decisions.get(span)
         if d is not None:
-            node = self._call("decision_probe", [ast.Constant(value=d), node], node)
+            probe = "decision_value_probe" if d in self._values else "decision_probe"
+            node = self._call(probe, [ast.Constant(value=d), node], node)
         slot = None if branch_test else self.probes.singles.get(span)
         if slot is not None:
             # `d1(slot, test)`: the truth as written is the whole vector.
@@ -184,6 +189,7 @@ class _Inserter(ast.NodeTransformer):
         # one outside any decision reports its own short-circuits.
         g = self.probes.boolops.get(self._span(node))
         node = self.generic_visit(node)  # type: ignore[assignment]
+        node = self._regroup(node)
         if g is None:
             return node
         for index in range(1, len(node.values)):
@@ -192,6 +198,25 @@ class _Inserter(ast.NodeTransformer):
                 "operand_probe", [ast.Constant(value=g), ast.Constant(value=index), operand], operand
             )
         return self._call("boolop_probe", [ast.Constant(value=g), node], node)
+
+    def _regroup(self, node: ast.BoolOp) -> ast.BoolOp:
+        """`a or b or c` whose `a or b` is a decision used as a value: the
+        same operands as `(a or b) or c`, which evaluates and returns exactly
+        what it did, so the left part has a node for its decision probe."""
+        if len(node.values) < 3:
+            return node
+        first, before_last = node.values[0], node.values[-2]
+        d = self.probes.decisions.get(
+            (first.lineno, first.col_offset, before_last.end_lineno, before_last.end_col_offset)
+        )
+        if d is None:
+            return node
+        left = ast.BoolOp(op=node.op, values=node.values[:-1])
+        left.lineno, left.col_offset = first.lineno, first.col_offset
+        left.end_lineno, left.end_col_offset = before_last.end_lineno, before_last.end_col_offset
+        probe = "decision_value_probe" if d in self._values else "decision_probe"
+        node.values = [self._call(probe, [ast.Constant(value=d), left], left), node.values[-1]]
+        return node
 
     def _hit(self, k: int, line: int, column: int) -> ast.stmt:
         node = ast.Assign(
@@ -316,6 +341,14 @@ class _Inserter(ast.NodeTransformer):
             column,
         )
         self.inserted += 2
+        # A loop that never ran always takes its `else`, so the check goes
+        # first there: after the statement, an `else` that returns or raises
+        # left before it, and `for ...: ... else: return -1` never recorded
+        # running zero times.
+        orelse = node.orelse  # type: ignore[attr-defined]
+        if orelse:
+            orelse.insert(0, after)
+            return [reset, node]
         return [reset, node, after]
 
     visit_For = _loop
@@ -575,6 +608,8 @@ def _import_aliases(tree: ast.Module, names: dict[str, str]) -> None:
     fallbacks = {
         "condition_probe": "lambda d, i, value, inverted: not not value",
         "decision_probe": "lambda d, value: not not value",
+        "condition_value_probe": "lambda d, i, value, inverted: value",
+        "decision_value_probe": "lambda d, value: value",
         "single_probe": "lambda k, value: not not value",
         "site_probe": "lambda file, line: None",
     }

@@ -774,21 +774,32 @@ pub fn positive_milliseconds(
 }
 
 fn process_inventory() -> Vec<ProcessSnapshot> {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
 
     let system = System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing().with_cpu()),
+        RefreshKind::nothing().with_processes(
+            ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_exe(UpdateKind::OnlyIfNotSet),
+        ),
     );
     system
         .processes()
         .iter()
+        // Linux lists a process's threads beside it as tasks of their own;
+        // a thread keeps no command running that its process does not.
+        .filter(|(_, process)| process.thread_kind().is_none())
         .map(|(pid, process)| ProcessSnapshot {
             pid: pid.as_u32(),
             parent_pid: process.parent().map_or(0, sysinfo::Pid::as_u32),
             state: Some(process_status(process.status()).into()),
             cpu_tenths: Some(process.accumulated_cpu_time() / 100),
-            executable: Path::new(process.name())
-                .file_name()
+            // Named by what it runs: a process's own name is its main
+            // thread's, which Node renames `MainThread` on Linux.
+            executable: process
+                .exe()
+                .and_then(Path::file_name)
+                .or_else(|| Path::new(process.name()).file_name())
                 .and_then(|value| value.to_str())
                 .unwrap_or("unknown")
                 .to_owned(),

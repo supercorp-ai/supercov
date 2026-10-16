@@ -474,6 +474,14 @@ pub fn population_from(
             Language::Go if valued => go::rewrite(source, line, change),
             _ => None,
         };
+        // A replacement that writes the statement out as it already is --
+        // `return 0, nil` with zero values, `count := 0` -- is no change.
+        if replacement
+            .as_deref()
+            .is_some_and(|written| same_code(written, text))
+        {
+            continue;
+        }
         statements.push(Statement {
             file: file.clone(),
             line,
@@ -501,6 +509,18 @@ pub fn population_from(
         files: Default::default(),
         quotes: Default::default(),
     })
+}
+
+/// Whether two lines of code are the same but for spacing and a final `;`.
+fn same_code(a: &str, b: &str) -> bool {
+    let squash = |code: &str| {
+        code.trim()
+            .trim_end_matches(';')
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    squash(a) == squash(b)
 }
 
 /// The words of a name or a line of code: runs of letters and digits split at
@@ -2360,6 +2380,18 @@ fn normalize(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_replacement_that_is_the_statement_is_no_change() {
+        assert!(super::same_code("return 0, nil", "return 0,  nil"));
+        assert!(super::same_code("count := 0", "count := 0;"));
+        assert!(!super::same_code("return 0, nil", "return n, nil"));
+        let source = "package p\n\nfunc f(n int) (int, error) {\n\tif n > 0 {\n\t\treturn n, nil\n\t}\n\treturn 0, nil\n}\n";
+        assert_eq!(
+            super::go::rewrite(source, 7, Change::ReturnUndefined).as_deref(),
+            Some("return 0, nil")
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -219,7 +219,15 @@ fn doctest_reports(
             report: if its.is_empty() {
                 crate::rust_libtest_report::unasked_report(package.listed)
             } else {
-                crate::rust_libtest_report::merged_report(&its, quiet)
+                crate::rust_libtest_report::merged_report(
+                    &its,
+                    quiet,
+                    &package
+                        .cases
+                        .iter()
+                        .map(|case| (case.name.as_str(), case.status.as_str()))
+                        .collect::<Vec<_>>(),
+                )
             },
         });
     }
@@ -582,11 +590,7 @@ fn harness_lines(text: &str) -> Vec<(String, String)> {
             // libtest appends the test mode to `no_run`, `compile_fail` and
             // `should_panic` doctests when it prints them; the listing names
             // them plainly.
-            let name = name
-                .strip_suffix(" - compile fail")
-                .or_else(|| name.strip_suffix(" - compile"))
-                .or_else(|| name.strip_suffix(" - should panic"))
-                .unwrap_or(name);
+            let name = without_test_mode(name);
             let status = if outcome.starts_with("ok") {
                 "passed"
             } else if outcome.starts_with("FAILED") {
@@ -599,6 +603,103 @@ fn harness_lines(text: &str) -> Vec<(String, String)> {
             Some((name.to_owned(), status.to_owned()))
         })
         .collect()
+}
+
+/// What a quiet merged harness reported, named from what Supercov knows.
+///
+/// `cargo test -q` makes libtest print a dot per case and no name, and a
+/// merged harness has its arguments compiled in, so it cannot be asked for
+/// them instead. A case that ran is named by its child's index in the
+/// harness's order; one that failed is named in the `failures:` list the
+/// summary still prints; one that spawned nothing is skipped if its fence
+/// says `ignore` and compiled (`no_run`, `compile_fail`) otherwise. None at
+/// all unless the counts that come out are the counts the harness printed.
+fn quiet_cases(
+    text: &str,
+    order: &[String],
+    selected: &BTreeSet<String>,
+    ran: &BTreeSet<usize>,
+    manifest_dir: &Path,
+) -> Option<Vec<(String, String)>> {
+    let summary = text
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("test result: "))?;
+    let count = |label: &str| -> Option<usize> {
+        summary
+            .split([';', '.'])
+            .find_map(|part| part.trim().strip_suffix(label)?.trim().parse().ok())
+    };
+    let (passed, failed, ignored) = (count("passed")?, count("failed")?, count("ignored")?);
+    let failures = text
+        .rsplit_once("\nfailures:\n")
+        .map(|(_, rest)| {
+            rest.lines()
+                .skip_while(|line| line.trim().is_empty())
+                .take_while(|line| line.starts_with("    "))
+                .map(|line| without_test_mode(line.trim()).to_owned())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let cases = order
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| selected.contains(*name))
+        .map(|(index, name)| {
+            let status = if failures.contains(name) {
+                "failed"
+            } else if ran.contains(&index) || !fence_says_ignore(name, manifest_dir) {
+                "passed"
+            } else {
+                "skipped"
+            };
+            (name.clone(), status.to_owned())
+        })
+        .collect::<Vec<_>>();
+    let tally = |status: &str| cases.iter().filter(|(_, case)| case == status).count();
+    (tally("passed") == passed && tally("failed") == failed && tally("skipped") == ignored)
+        .then_some(cases)
+}
+
+/// Whether the fence a doctest is named for (`src/lib.rs - f (line 12)`)
+/// marks it `ignore`.
+fn fence_says_ignore(name: &str, manifest_dir: &Path) -> bool {
+    let Some((file, rest)) = name.split_once(" - ") else {
+        return false;
+    };
+    let Some(line) = rest
+        .rsplit_once("(line ")
+        .and_then(|(_, number)| number.strip_suffix(')'))
+        .and_then(|number| number.parse::<usize>().ok())
+    else {
+        return false;
+    };
+    fs::read_to_string(manifest_dir.join(file))
+        .ok()
+        .and_then(|source| {
+            source
+                .lines()
+                .nth(line.saturating_sub(1))
+                .map(str::to_owned)
+        })
+        .and_then(|fence| {
+            fence
+                .split_once("```")
+                .map(|(_, attributes)| attributes.to_owned())
+        })
+        .is_some_and(|attributes| {
+            attributes
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .any(|attribute| attribute == "ignore" || attribute.starts_with("ignore-"))
+        })
+}
+
+/// A case's name without the mode libtest appends when it prints one.
+fn without_test_mode(name: &str) -> &str {
+    name.strip_suffix(" - compile fail")
+        .or_else(|| name.strip_suffix(" - compile"))
+        .or_else(|| name.strip_suffix(" - should panic"))
+        .unwrap_or(name)
 }
 
 /// The names `--list --format terse` prints.
@@ -749,6 +850,17 @@ fn rustdoc_wrapper_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
         fs::write(
             package_dir.join("merged-order.json"),
             serde_json::to_vec(&merged_sorted)?,
+        )
+        .map_err(io_error)?;
+        // What a quiet harness leaves unnamed is named from these.
+        fs::write(
+            package_dir.join("merged-selected.json"),
+            serde_json::to_vec(&selected_merged)?,
+        )
+        .map_err(io_error)?;
+        fs::write(
+            package_dir.join("manifest-dir"),
+            manifest_dir.to_string_lossy().as_bytes(),
         )
         .map_err(io_error)?;
         let output = rustdoc(&harness_arguments, "merged", &[])?;
@@ -1074,6 +1186,19 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                     }
                 }
             }
+            let lines = if lines.is_empty() {
+                let selected: BTreeSet<String> = fs::read(package_dir.join("merged-selected.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                    .unwrap_or_default();
+                let manifest_dir = fs::read_to_string(package_dir.join("manifest-dir"))
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("."));
+                let ran = by_index.keys().copied().collect::<BTreeSet<_>>();
+                quiet_cases(&text, &order, &selected, &ran, &manifest_dir).unwrap_or_default()
+            } else {
+                lines
+            };
             let mut cases = Vec::new();
             for (name, status) in lines {
                 let position = order.iter().position(|candidate| candidate == &name);
@@ -1301,6 +1426,49 @@ mod tests {
         ]);
         assert_eq!(quiet.passthrough, ["--nocapture"]);
         assert!(quiet.filters.is_empty());
+    }
+
+    #[test]
+    fn a_quiet_merged_harness_is_named_from_its_children_failures_and_fences() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-quiet-doctests-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "/// ```\n/// a();\n/// ```\n/// ```ignore\n/// b();\n/// ```\n/// ```no_run\n/// c();\n/// ```\n/// ```\n/// d();\n/// ```\n",
+        )
+        .unwrap();
+        let order = [
+            "src/lib.rs - a (line 1)",
+            "src/lib.rs - b (line 4)",
+            "src/lib.rs - c (line 7)",
+            "src/lib.rs - d (line 10)",
+        ]
+        .map(str::to_owned);
+        let selected = order.iter().cloned().collect::<BTreeSet<_>>();
+        let ran = BTreeSet::from([0, 3]);
+        let text = "\nrunning 4 tests\n.i.\nsrc/lib.rs - d (line 10) --- FAILED\n\nfailures:\n\n---- src/lib.rs - d (line 10) stdout ----\nboom\n\nfailures:\n    src/lib.rs - d (line 10)\n\ntest result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        let cases = quiet_cases(text, &order, &selected, &ran, &root).unwrap();
+        assert_eq!(
+            cases,
+            [
+                ("src/lib.rs - a (line 1)", "passed"),
+                ("src/lib.rs - b (line 4)", "skipped"),
+                ("src/lib.rs - c (line 7)", "passed"),
+                ("src/lib.rs - d (line 10)", "failed"),
+            ]
+            .map(|(name, status)| (name.to_owned(), status.to_owned()))
+        );
+        // Counts that do not add up to what the harness printed name nothing.
+        let wrong = text.replace("2 passed", "3 passed");
+        assert!(quiet_cases(&wrong, &order, &selected, &ran, &root).is_none());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

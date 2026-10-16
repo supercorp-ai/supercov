@@ -81,8 +81,9 @@ npx supercov -- sh -c "npm run build && npm test"
 ```
 
 A `pretest` script, or a Playwright `webServer` that builds, does the same.
-When a run fails in a project that has a `build` script the command does not
-reach, it says this. `SUPERCOV_KEEP_WORKSPACE=1` leaves the instrumented copy
+When a run fails, it names the tests that failed. When none did and the
+project has a `build` script the command does not reach, it says the build
+output may be what is missing. `SUPERCOV_KEEP_WORKSPACE=1` leaves the instrumented copy
 in `.supercov/workspaces/` after a run, to inspect.
 
 A package inside a larger git repository (`web/` beside `cmd/`, or

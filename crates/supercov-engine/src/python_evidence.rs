@@ -2058,8 +2058,16 @@ fn build_from_evidence(
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
             status: Some(status),
+            // pytest's xfail is expected to fail, and passing it unexpectedly
+            // is still a pass unless the mark is strict -- in which case pytest
+            // reports the phase as failed and drops the mark. So only a phase
+            // that did not pass carries the expectation; one that passed with
+            // the mark on it (XPASS) is a passing test, as pytest counts it.
             expected_status: Some(
-                if outcomes.iter().any(|(_, _, xfail)| *xfail) {
+                if outcomes
+                    .iter()
+                    .any(|(_, outcome, xfail)| *xfail && outcome != "passed")
+                {
                     "failed"
                 } else {
                     "passed"

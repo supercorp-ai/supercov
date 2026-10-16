@@ -1539,6 +1539,11 @@ struct AssertionEdits<'s> {
     /// In TypeScript the call runs in place, under these two names, instead
     /// of in a callback, which TypeScript narrows nothing into.
     in_place: Option<(String, String)>,
+    /// The statement that is the body of the arrow being walked, written
+    /// without braces (`(page) => expect(page).toHaveURL(url)`). It is the
+    /// arrow's value, so it stays an expression: wrapped as a statement it
+    /// became a block that returned nothing.
+    arrow_body: Option<SpanKey>,
 }
 
 impl AssertionEdits<'_> {
@@ -1695,8 +1700,20 @@ impl AssertionEdits<'_> {
 }
 
 impl<'a> Visit<'a> for AssertionEdits<'_> {
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        let body = arrow
+            .expression
+            .then(|| arrow.body.statements.first())
+            .flatten()
+            .map(|statement| span_key(statement.span()));
+        let outer = std::mem::replace(&mut self.arrow_body, body);
+        walk::walk_arrow_function_expression(self, arrow);
+        self.arrow_body = outer;
+    }
+
     fn visit_expression_statement(&mut self, statement: &ExpressionStatement<'a>) {
         if self.in_place.is_some()
+            && self.arrow_body != Some(span_key(statement.span))
             && let Expression::CallExpression(call) = &statement.expression
             && let Some(&(_, _, bound)) = self.sites.get(&span_key(call.span))
         {
@@ -2445,6 +2462,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
                 sites: collector.sites,
                 edits: Vec::new(),
                 in_place,
+                arrow_body: None,
             };
             located.visit_program(&parsed.program);
             edits.extend(located.edits);
@@ -2537,9 +2555,36 @@ struct SafetyAnalysis {
 struct SourceReads<'s> {
     scoping: &'s oxc_semantic::Scoping,
     symbols: HashSet<SymbolId>,
+    /// Property names a method's source is read through: `box.method` in
+    /// `box.method.toString()` or `String(box.method)`. A property path has
+    /// no symbol to follow, so any method of that name in the file is taken
+    /// as the one read. Only the two explicit forms count: `"Total: " +
+    /// cart.total` reads a value almost always, and would cost a method
+    /// `total` its probes.
+    properties: HashSet<String>,
 }
 
 impl SourceReads<'_> {
+    fn read_property(&mut self, expression: &Expression<'_>) {
+        match expression {
+            Expression::StaticMemberExpression(member) => {
+                self.properties.insert(member.property.name.to_string());
+            }
+            Expression::ParenthesizedExpression(inner) => self.read_property(&inner.expression),
+            Expression::TSAsExpression(inner) => self.read_property(&inner.expression),
+            Expression::TSNonNullExpression(inner) => self.read_property(&inner.expression),
+            Expression::ConditionalExpression(inner) => {
+                self.read_property(&inner.consequent);
+                self.read_property(&inner.alternate);
+            }
+            Expression::LogicalExpression(inner) => {
+                self.read_property(&inner.left);
+                self.read_property(&inner.right);
+            }
+            _ => {}
+        }
+    }
+
     fn read(&mut self, expression: &Expression<'_>) {
         match expression {
             Expression::Identifier(identifier) => {
@@ -2574,6 +2619,7 @@ impl<'a> Visit<'a> for SourceReads<'_> {
     fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
         if member.property.name == "toString" {
             self.read(&member.object);
+            self.read_property(&member.object);
         }
         walk::walk_static_member_expression(self, member);
     }
@@ -2600,6 +2646,7 @@ impl<'a> Visit<'a> for SourceReads<'_> {
             && let Some(argument) = call.arguments.first().and_then(Argument::as_expression)
         {
             self.read(argument);
+            self.read_property(argument);
         }
         walk::walk_call_expression(self, call);
     }
@@ -2625,6 +2672,18 @@ impl<'a> Visit<'a> for SourceReads<'_> {
         }
         walk::walk_binary_expression(self, binary);
     }
+}
+
+/// The property a function is the value of: an object's method or property,
+/// a class's method or field.
+fn property_name_of_function<State>(context: &TraverseCtx<'_, State>) -> Option<String> {
+    let key = match context.parent() {
+        Ancestor::ObjectPropertyValue(property) => property.key(),
+        Ancestor::MethodDefinitionValue(method) => method.key(),
+        Ancestor::PropertyDefinitionValue(property) => property.key(),
+        _ => return None,
+    };
+    key.static_name().map(|name| name.to_string())
 }
 
 /// The bindings a function is reached through where it is defined: its own
@@ -2660,6 +2719,7 @@ struct SafetyScanner<'s> {
     file: &'s str,
     scoping: &'s oxc_semantic::Scoping,
     source_reads: HashSet<SymbolId>,
+    source_read_properties: HashSet<String>,
     source_sensitive_functions: HashSet<SpanKey>,
     function_limitations: Vec<CandidateLimitation>,
     with_limitations: Vec<CandidateLimitation>,
@@ -3111,6 +3171,7 @@ impl<'s> SafetyScanner<'s> {
             file,
             scoping,
             source_reads: HashSet::new(),
+            source_read_properties: HashSet::new(),
             source_sensitive_functions: HashSet::new(),
             function_limitations: Vec::new(),
             with_limitations: Vec::new(),
@@ -3158,7 +3219,9 @@ impl<'s> SafetyScanner<'s> {
         let sensitive = observes_function_source(span, context)
             || bindings
                 .iter()
-                .any(|symbol| self.source_reads.contains(symbol));
+                .any(|symbol| self.source_reads.contains(symbol))
+            || property_name_of_function(context)
+                .is_some_and(|name| self.source_read_properties.contains(&name));
         if sensitive {
             self.source_sensitive_functions.insert(span_key(span));
             let limitation = self.limitation(
@@ -3283,10 +3346,12 @@ fn analyze_safety<'a>(
     let mut reads = SourceReads {
         scoping: &scoping,
         symbols: HashSet::new(),
+        properties: HashSet::new(),
     };
     reads.visit_program(program);
     let mut scanner = SafetyScanner::new(source, file, &scoping);
     scanner.source_reads = reads.symbols;
+    scanner.source_read_properties = reads.properties;
     traverse_mut(&mut scanner, allocator, program, Default::default(), ());
     let mut semantic_limitations = scanner.function_limitations;
     semantic_limitations.extend(scanner.with_limitations);
@@ -3642,6 +3707,9 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
+        value_decisions: HashMap::new(),
+        logical_root: None,
+        value_logical_nodes: HashSet::new(),
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -3876,6 +3944,9 @@ fn instrument_candidate_with_binding(
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
+        value_decisions: HashMap::new(),
+        logical_root: None,
+        value_logical_nodes: HashSet::new(),
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -4183,6 +4254,8 @@ fn instrument_candidate_with_binding(
     let mut transformer = ControlProbeV2Transformer {
         ast,
         decisions: &collector.decisions,
+        value_decisions: &collector.value_decisions,
+        pending_values: HashMap::new(),
         mcdc_begin: mcdc_begin.clone(),
         mcdc_condition: mcdc_condition.clone(),
         mcdc_end: mcdc_end.clone(),
@@ -6946,9 +7019,18 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
         mut export: oxc_allocator::Box<'a, oxc_ast::ast::ExportDefaultDeclaration<'a>>,
         output: &mut oxc_allocator::Vec<'a, Statement<'a>>,
     ) {
-        if let ExportDefaultDeclarationKind::FunctionDeclaration(mut function) =
-            export.declaration.take_in(self.ast.allocator)
-        {
+        // Looked at before it is taken: taking it leaves a placeholder `null`,
+        // and a server entry that exported its handler by name (`export
+        // default handleRequest;`) exported `withRequestPhase(null)`.
+        if matches!(
+            export.declaration,
+            ExportDefaultDeclarationKind::FunctionDeclaration(_)
+        ) {
+            let ExportDefaultDeclarationKind::FunctionDeclaration(mut function) =
+                export.declaration.take_in(self.ast.allocator)
+            else {
+                unreachable!();
+            };
             let original_name = self
                 .names
                 .allocate("__supercovHandleRequestCoverageOriginal");
@@ -7189,6 +7271,12 @@ impl<'s> CandidateNames<'s> {
 struct ControlProbeV2Transformer<'a, 's> {
     ast: AstBuilder<'a>,
     decisions: &'s [CandidateDecision],
+    /// Expressions used as values that are decisions, by span, each with the
+    /// root of the tree whose evaluation records it.
+    value_decisions: &'s HashMap<SpanKey, SpanKey>,
+    /// Decisions applied below a tree root and not yet recorded there, with
+    /// the shape their outcome is read back from.
+    pending_values: HashMap<SpanKey, Vec<(AppliedDecision, ValueShape)>>,
     mcdc_begin: String,
     mcdc_condition: String,
     mcdc_end: String,
@@ -7512,6 +7600,113 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
 
     /// `mcdcEndV2(file, decision, vector, outcome)`, where the outcome is
     /// known from where the call stands: the branch that was taken.
+    /// The decisions used as values in one `&&`/`||` tree, recorded once the
+    /// tree has been evaluated: `(_f = 0, _v0 = 0, .., _r = tree, end(..),
+    /// _r)`. The tree stays whole -- a coverage tool the tests run counts it
+    /// as one branch, and TypeScript narrows across it as written -- and the
+    /// assignment keeps its value and its type. Each outcome is read back
+    /// from the decision's own temporaries with `&`, `|` and `^`, which no
+    /// tool counts as a branch; a decision the evaluation did not reach was
+    /// reset to nothing, and the runtime records no vector for it.
+    fn record_value_outcomes(
+        &mut self,
+        expression: &mut Expression<'a>,
+        pending: Vec<(AppliedDecision, ValueShape)>,
+    ) {
+        let inline = pending.iter().any(|(applied, _)| applied.inline);
+        let result = self.scratch_for("_supercovMcdcResult", inline);
+        let mut steps = self.ast.vec();
+        for (applied, _) in &pending {
+            steps.push(self.assign(&applied.frame, self.number(0)));
+            for name in &applied.values {
+                steps.push(self.assign(name, self.number(0)));
+            }
+        }
+        let value = expression.take_in(self.ast.allocator);
+        steps.push(self.assign(&result, value));
+        let mut names = Vec::new();
+        for (applied, shape) in &pending {
+            let truth = self.ast.expression_unary(
+                Span::default(),
+                UnaryOperator::LogicalNot,
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.shape_bits(shape, applied),
+                ),
+            );
+            steps.push(self.ast.expression_call(
+                Span::default(),
+                self.identifier(&self.mcdc_end_v2),
+                NONE,
+                self.ast.vec_from_array([
+                    Argument::from(self.identifier(&self.probe_file_v2)),
+                    Argument::from(self.number(applied.index as u64)),
+                    Argument::from(self.encoded(applied)),
+                    Argument::from(truth),
+                ]),
+                false,
+            ));
+            if applied.inline {
+                names.push(applied.frame.clone());
+                names.extend(applied.values.iter().cloned());
+            }
+        }
+        steps.push(self.identifier(&result));
+        let observed = self.ast.expression_parenthesized(
+            Span::default(),
+            self.ast.expression_sequence(Span::default(), steps),
+        );
+        *expression = if inline {
+            names.push(result);
+            self.wrap_inline_frame(observed, &names)
+        } else {
+            observed
+        };
+    }
+
+    /// A decision's outcome from its temporaries, as 0 or 1: a condition that
+    /// was not evaluated reads 0, which is never what decided the outcome.
+    fn shape_bits(&self, shape: &ValueShape, applied: &AppliedDecision) -> Expression<'a> {
+        let binary = |left, operator, right| {
+            self.ast.expression_parenthesized(
+                Span::default(),
+                self.ast
+                    .expression_binary(Span::default(), left, operator, right),
+            )
+        };
+        match shape {
+            ValueShape::Condition(index) => self.ast.expression_unary(
+                Span::default(),
+                UnaryOperator::UnaryPlus,
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.ast.expression_unary(
+                        Span::default(),
+                        UnaryOperator::LogicalNot,
+                        self.identifier(&applied.values[*index]),
+                    ),
+                ),
+            ),
+            ValueShape::And(left, right) => binary(
+                self.shape_bits(left, applied),
+                BinaryOperator::BitwiseAnd,
+                self.shape_bits(right, applied),
+            ),
+            ValueShape::Or(left, right) => binary(
+                self.shape_bits(left, applied),
+                BinaryOperator::BitwiseOR,
+                self.shape_bits(right, applied),
+            ),
+            ValueShape::Not(inner) => binary(
+                self.number(1),
+                BinaryOperator::BitwiseXOR,
+                self.shape_bits(inner, applied),
+            ),
+        }
+    }
+
     fn outcome(&self, applied: &AppliedDecision, outcome: bool) -> Expression<'a> {
         self.ast.expression_call(
             Span::default(),
@@ -7731,7 +7926,12 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         };
         let mut next_index = 0;
         self.instrument_conditions(test, &applied, &mut next_index);
-        debug_assert_eq!(next_index, plan.condition_count);
+        debug_assert_eq!(
+            next_index,
+            plan.condition_count,
+            "decision at {:?}",
+            test.span()
+        );
         Some(applied)
     }
 }
@@ -7823,12 +8023,33 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
     }
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        let key = span_key(expression.span());
+        let value = self.value_decisions.get(&key).copied().map(|root| {
+            let mut next = 0;
+            (
+                root,
+                self.reserve_decision(expression),
+                value_shape(expression, &mut next),
+            )
+        });
+        let is_root = self.value_decisions.values().any(|root| *root == key);
         walk_mut::walk_expression(self, expression);
         if let Some(names) = self.inline_names.take()
             && matches!(expression, Expression::ConditionalExpression(_))
         {
             let conditional = expression.take_in(self.ast.allocator);
             *expression = self.wrap_inline_frame(conditional, &names);
+        }
+        if let Some((root, plan, shape)) = value
+            && let Some(applied) = self.apply_decision(expression, plan)
+        {
+            self.pending_values
+                .entry(root)
+                .or_default()
+                .push((applied, shape));
+        }
+        if is_root && let Some(pending) = self.pending_values.remove(&key) {
+            self.record_value_outcomes(expression, pending);
         }
     }
 
@@ -7951,13 +8172,33 @@ struct DecisionCollector<'s> {
     decision_vector_counts: Vec<usize>,
     decision_logical_nodes: HashSet<SpanKey>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
+    /// The expressions recorded as decisions where they are used as values,
+    /// for the transformer to find by span, each with the root of the `&&`/`||`
+    /// tree it sits in: the outcome is recorded once that root has been
+    /// evaluated, so the tree stays one tree.
+    value_decisions: HashMap<SpanKey, SpanKey>,
+    /// The root of the `&&`/`||`/`??` tree being visited, through parentheses.
+    logical_root: Option<SpanKey>,
+    /// The operators inside a decision used as a value. They stay in their
+    /// value tree -- its branches and the one tree a coverage tool reads --
+    /// and only stop a decision being found inside the decision.
+    value_logical_nodes: HashSet<SpanKey>,
 }
 
 impl DecisionCollector<'_> {
+    fn in_a_decision(&self, span: Span) -> bool {
+        let key = span_key(span);
+        self.decision_logical_nodes.contains(&key) || self.value_logical_nodes.contains(&key)
+    }
+
     fn record_decision(&mut self, test: &Expression<'_>, kind: &str) {
         let mut condition_spans = Vec::new();
         collect_conditions(test, &mut condition_spans);
-        collect_decision_logical_nodes(test, &mut self.decision_logical_nodes);
+        if kind == "value" {
+            collect_decision_logical_nodes(test, &mut self.value_logical_nodes);
+        } else {
+            collect_decision_logical_nodes(test, &mut self.decision_logical_nodes);
+        }
         // Babel treats redundant parentheses as parser metadata rather than
         // part of the decision node. oxc preserves a ParenthesizedExpression,
         // so normalize it here to keep locations and stable IDs parser-neutral.
@@ -7982,6 +8223,25 @@ impl DecisionCollector<'_> {
                 0
             },
         );
+    }
+}
+
+/// The `&&` or `||` under any parentheses and `!`s: `!!(a && b)` is the
+/// decision `a && b` negated twice.
+fn compound_root<'e, 'a>(expression: &'e Expression<'a>) -> Option<&'e LogicalExpression<'a>> {
+    match expression {
+        Expression::ParenthesizedExpression(parenthesized) => {
+            compound_root(&parenthesized.expression)
+        }
+        Expression::UnaryExpression(unary) if unary.operator.is_not() => {
+            compound_root(&unary.argument)
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+        {
+            Some(logical)
+        }
+        _ => None,
     }
 }
 
@@ -9599,6 +9859,61 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
     // intercept probe identifiers (see `enter_with_statement`).
     fn visit_with_statement(&mut self, _statement: &WithStatement<'a>) {}
 
+    /// `&&` and `||` used as a value: the left operand is always read as a
+    /// boolean, whatever the operator returns, so a compound one is a decision
+    /// as much as an `if`'s test is -- `(a && b) || fallback`, `a || b ||
+    /// "default"`. What the operator returns from its right is a value, not a
+    /// condition, and is judged as one in its turn. A `!` reads its operand as
+    /// a boolean too.
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        let outer_root = self.logical_root;
+        // A coverage tool the tests run reads an `&&`/`||`/`??` tree as one
+        // branch, whatever parentheses are in it; a `!` or anything else is a
+        // leaf of it.
+        self.logical_root = match expression {
+            Expression::LogicalExpression(logical) => {
+                Some(outer_root.unwrap_or(span_key(logical.span)))
+            }
+            Expression::ParenthesizedExpression(_) => outer_root,
+            _ => None,
+        };
+        let candidate = match expression {
+            Expression::LogicalExpression(logical)
+                if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or)
+                    && !self.in_a_decision(logical.span) =>
+            {
+                Some(&logical.left)
+            }
+            Expression::UnaryExpression(unary)
+                if unary.operator.is_not()
+                    && has_compound_boolean_decision(&unary.argument)
+                    && !compound_root(&unary.argument)
+                        .is_some_and(|root| self.in_a_decision(root.span)) =>
+            {
+                Some(expression)
+            }
+            _ => None,
+        };
+        if let Some(decision) = candidate
+            && has_compound_boolean_decision(decision)
+            && decision_outcome_is_variable(decision)
+        {
+            let mut conditions = Vec::new();
+            collect_conditions(decision, &mut conditions);
+            if conditions.len() <= 32 {
+                // A `!` outside any tree is its own root.
+                let root = self
+                    .logical_root
+                    .or(outer_root)
+                    .unwrap_or(span_key(decision.span()));
+                self.value_decisions.insert(span_key(decision.span()), root);
+                self.record_decision(decision, "value");
+            }
+        }
+        walk::walk_expression(self, expression);
+        self.logical_root = outer_root;
+    }
+
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
         if decision_outcome_is_variable(&statement.test) {
             self.record_decision(&statement.test, "if");
@@ -9675,6 +9990,44 @@ fn has_compound_boolean_decision(expression: &Expression<'_>) -> bool {
             has_compound_boolean_decision(&unary.argument)
         }
         _ => false,
+    }
+}
+
+/// A decision's and/or/not structure over its conditions, numbered as
+/// `collect_conditions` numbers them.
+enum ValueShape {
+    Condition(usize),
+    And(Box<ValueShape>, Box<ValueShape>),
+    Or(Box<ValueShape>, Box<ValueShape>),
+    Not(Box<ValueShape>),
+}
+
+fn value_shape(expression: &Expression<'_>, next: &mut usize) -> ValueShape {
+    match expression {
+        Expression::ParenthesizedExpression(parenthesized) => {
+            value_shape(&parenthesized.expression, next)
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+        {
+            let left = Box::new(value_shape(&logical.left, next));
+            let right = Box::new(value_shape(&logical.right, next));
+            if logical.operator == LogicalOperator::And {
+                ValueShape::And(left, right)
+            } else {
+                ValueShape::Or(left, right)
+            }
+        }
+        Expression::UnaryExpression(unary)
+            if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
+        {
+            ValueShape::Not(Box::new(value_shape(&unary.argument, next)))
+        }
+        _ => {
+            let index = *next;
+            *next += 1;
+            ValueShape::Condition(index)
+        }
     }
 }
 
@@ -10075,6 +10428,57 @@ mod tests {
         assert_eq!(name_at(1, matcher).as_deref(), Some("toBe"));
         assert_eq!(name_at(0, 9).as_deref(), Some("expect"));
         assert_eq!(name_at(0, 18), None, "`from` is a keyword");
+    }
+
+    #[test]
+    fn a_server_entry_keeps_what_it_exports_by_default() {
+        // Taken before it was looked at, anything but a function declaration
+        // was replaced by a placeholder `null`: `export default handleRequest;`
+        // exported `withRequestPhase(null)`, and a class exported `null`.
+        for (source, export) in [
+            (
+                "function handleRequest(r) { return r; }\nexport default handleRequest;\n",
+                "export default __supercovWithRequestPhase13(handleRequest);",
+            ),
+            (
+                "export default class Entry {}\n",
+                "export default class Entry {}",
+            ),
+        ] {
+            let output = instrument_candidate_with_binding(
+                source,
+                "app/entry.server.ts",
+                RuntimeBinding::ModuleImport,
+                None,
+                false,
+            )
+            .unwrap();
+            assert!(
+                output.code.lines().any(|line| line == export),
+                "{export}\n{}",
+                output.code
+            );
+        }
+    }
+
+    #[test]
+    fn a_method_read_through_a_property_keeps_its_text() {
+        // `box.method.toString()` names no binding; any method of that name in
+        // the file is taken as the one read, and others keep their probes.
+        let source = "export const box = { method(v) { return v  * 2; } };\nexport class Shape { area(w) { return w  * w; } static make = () =>  new Shape(); }\nexport const other = { untouched(v) { return v  + 1; } };\nexport const texts = [box.method.toString(), String(Shape.prototype.area), Shape.make.toString()];\n";
+        let output = instrument_direct_candidate(source, "src/methods.js").unwrap();
+        for text in [
+            "method(v) { return v  * 2; }",
+            "area(w) { return w  * w; }",
+            "() =>  new Shape()",
+        ] {
+            assert!(output.code.contains(text), "{text}\n{}", output.code);
+        }
+        assert!(
+            !output.code.contains("untouched(v) { return v  + 1; }"),
+            "{}",
+            output.code
+        );
     }
 
     #[test]
@@ -10600,6 +11004,33 @@ mod tests {
         let output = instrument_node_assertion_phases(source, "tests/value.spec.mjs").unwrap();
         assert_eq!(output.assertions, 1);
         assert!(output.code.contains("expect.toBe"));
+    }
+
+    #[test]
+    fn an_arrow_that_returns_an_assertion_still_returns_it() {
+        // `await loginError(page)` waits for the matcher only if the arrow
+        // still returns it: made a block, it returned nothing at once.
+        let source = concat!(
+            "import { expect, test } from '@playwright/test';\n",
+            "const loginError = (page: Page, error: string) => expect(page).toHaveURL(error);\n",
+            "test('value', () => expect(value()).toBe(1));\n",
+        );
+        for file in ["tests/login.spec.ts", "tests/login.spec.js"] {
+            let source = if file.ends_with(".js") {
+                source.replace(": Page", "").replace(": string", "")
+            } else {
+                source.into()
+            };
+            let output = instrument_node_assertion_phases(&source, file).unwrap();
+            assert_eq!(output.assertions, 2, "{file}");
+            let code = output.code.split("\n//# sourceMappingURL").next().unwrap();
+            assert!(!code.contains("=> { const"), "{file}:\n{code}");
+            assert!(!code.contains("finally"), "{file}:\n{code}");
+            assert!(
+                code.contains("expect(page).toHaveURL(error)"),
+                "{file}:\n{code}"
+            );
+        }
     }
 
     #[test]
@@ -11689,8 +12120,11 @@ mod tests {
                 "export function name(user: { name: string } | false) {\n",
                 "  return user && user.name;\n",
                 "}\n",
-                "export function ok(total: number, name: string, force: boolean) {\n",
-                "  return (total > 0 && name !== 'x') || !!force;\n",
+                "export function ok(total: number, name: string) {\n",
+                "  return (total > 0 && name !== 'x') || !!name;\n",
+                "}\n",
+                "export function decided(total: number, name: string, force: boolean) {\n",
+                "  return (total > 0 && name !== 'x') || force;\n",
                 "}\n",
                 "export function pick(a: number | null, b: number | null, c: number) {\n",
                 "  return a ?? b ?? c;\n",
@@ -11703,20 +12137,26 @@ mod tests {
         );
         for expected in [
             "let s0: any;\n",
-            "return END2(10, (s0 = 0, user) && (s0 = 1, user.name), s0);",
+            "return END2(12, (s0 = 0, user) && (s0 = 1, user.name), s0);",
             // More than two leaves: the tree's own operators stay between
             // them, so a coverage tool the tests run reads one branch, and
             // what `total > 0` or `name !== 'x'` decided is recorded where
-            // evaluation went on to `!!force`, by which of them it left:
+            // evaluation went on to `!!name`, by which of them it left:
             // the runtime looks that up, because a choice written out here
-            // would be a branch of this line to that tool.
-            "return END(0, (s1 = 0, total > 0) && (s1 = 1, name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!force), s1);",
+            // would be a branch of this line to that tool. The compound left
+            // operand is a decision too: its conditions are recorded in the
+            // leaves and its outcome after the tree, from their values with
+            // `&`, so the tree stays one tree and narrows as written.
+            "(s1 = 0, _supercovMcdcFrame27 = 1, _supercovMcdcValue29 = 0, _supercovMcdcValue28 = total > 0) && (s1 = 1, _supercovMcdcFrame27 += 3, _supercovMcdcValue29 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
+            "!!(+!!_supercovMcdcValue28 & +!!_supercovMcdcValue29)), _supercovMcdcResult30;",
+            "|| (NEXT(1, s2, 2), s2 = 2, force), s2)",
+            "kind: \"value\"",
             // Only `b` can come before `c`: a first `??` that kept `a` ends
             // the second.
-            "return END(1, (s2 = 0, a) ?? (s2 = 1, b) ?? (HIT(24), s2 = 2, c), s2);",
+            "return END(2, (s3 = 0, a) ?? (s3 = 1, b) ?? (HIT(34), s3 = 2, c), s3);",
             // A parameter list cannot see a frame its function's body
             // declares: the leaves keep their calls there.
-            "SHORT(30, list, 0) || RIGHT(30, [])",
+            "SHORT(40, list, 0) || RIGHT(40, [])",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }

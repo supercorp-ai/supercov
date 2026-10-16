@@ -97,14 +97,21 @@ gates! {
     background_by_time => "background-by-time.mjs",
     cross_origin_requests => "cross-origin-requests.mjs",
     leaving_page => "leaving-page.mjs",
+    js_syntax_zoo => "js-syntax-zoo.mjs",
+    ruby_syntax_zoo => "ruby-syntax-zoo.mjs",
+    rust_syntax_zoo => "rust-syntax-zoo.mjs",
+    python_syntax_zoo => "python-syntax-zoo.mjs",
+    go_syntax_zoo => "go-syntax-zoo.mjs",
+    java_syntax_zoo => "java-syntax-zoo.mjs",
     shared_page => "shared-page.mjs",
     merge_across => "merge-across.mjs",
     mock_reach => "mock-reach.mjs",
     next_playwright => "next-playwright-integration.mjs",
     react_hydration => "react-hydration-compatibility.mjs",
-    // A sample: the binary here is the instrumented debug build, and the
+    // A sample of every sixteenth test, across the whole corpus and so across
+    // the language: the binary here is the instrumented debug build, and the
     // whole corpus runs in the conformance workflow.
-    test262_equivalence => "test262-equivalence.mjs" ["--limit", "2000"],
+    test262_equivalence => "test262-equivalence.mjs" ["--shard", "1/16"],
     clang_mcdc_oracle => "clang-mcdc-oracle.mjs",
     mocha_failure_output => "mocha-failure-output.mjs",
     python_servers => "python-server-playwright.mjs",

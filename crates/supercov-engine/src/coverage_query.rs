@@ -743,13 +743,14 @@ pub fn coverage_covers_query(
         file: options.file.into(),
         line: options.line,
     };
+    // A line's points, branches and decisions are all of its own file.
     let metadata = index
-        .hit_metadata(options.view)?
+        .hit_metadata_in_file(options.view, options.file)?
         .into_iter()
         .map(|value| (value.id.clone(), value))
         .collect::<HashMap<_, _>>();
     let decisions = index
-        .decision_details(options.view)?
+        .decision_details_in_file(options.view, options.file)?
         .into_iter()
         .map(|value| (value.meta.id.clone(), value))
         .collect::<HashMap<_, _>>();
@@ -1463,15 +1464,17 @@ pub struct CoverageDecisionQueryOptions<'a> {
     pub limit: usize,
 }
 
-fn selector_location(selector: &str) -> Option<(&str, usize)> {
+/// `file:line`, or `file:line:column` as a listing of a line's decisions
+/// prints each one.
+fn selector_location(selector: &str) -> Option<(&str, usize, Option<usize>)> {
     let (prefix, last) = selector.rsplit_once(':')?;
     let last = last.parse::<usize>().ok()?;
     if let Some((file, possible_line)) = prefix.rsplit_once(':')
         && let Ok(line) = possible_line.parse::<usize>()
     {
-        return Some((file, line));
+        return Some((file, line, Some(last)));
     }
-    Some((prefix, last))
+    Some((prefix, last, None))
 }
 
 fn selected_decision(
@@ -1555,12 +1558,16 @@ pub fn coverage_decision_query(
         .filter(|decision| decision.meta.id == options.selector)
         .collect::<Vec<_>>();
     if matches.is_empty()
-        && let Some((file, line)) = selector_location(options.selector)
+        && let Some((file, line, column)) = selector_location(options.selector)
     {
         matches = index
             .decision_details(options.view)?
             .into_iter()
-            .filter(|decision| decision.meta.file == file && decision.meta.line == line)
+            .filter(|decision| {
+                decision.meta.file == file
+                    && decision.meta.line == line
+                    && column.is_none_or(|column| decision.meta.column == column)
+            })
             .collect();
     }
     if matches.is_empty() {
@@ -1722,6 +1729,13 @@ pub struct CoverageMcdcObligation {
     #[serde(skip)]
     pub condition_index: usize,
     pub observed_vectors: Vec<String>,
+    /// The run that would show the missing condition deciding: an observed
+    /// one that evaluated it, with it flipped and the opposite outcome. The
+    /// conditions after it are left open (`-`): whatever makes the outcome
+    /// differ. None when no run evaluated it at all.
+    pub needed_vector: Option<String>,
+    /// `needed_vector` in words, or that no test evaluated the condition.
+    pub needs: String,
     pub other_coverage: CoverageOtherCoverage,
 }
 
@@ -1860,6 +1874,46 @@ fn other_coverage<T: AsRef<str>>(
     }
 }
 
+/// The run that would complete a condition's independence pair, from the runs
+/// observed: one that evaluated the condition, the conditions before it as
+/// they were, it flipped, and the outcome the other way.
+fn needed(
+    index: usize,
+    observed: &[&crate::coverage_analysis::McdcVector],
+    sources: &[&str],
+) -> (Option<String>, String) {
+    let condition = sources.get(index).copied().unwrap_or("the condition");
+    let Some(seen) = observed
+        .iter()
+        .find(|vector| vector.values.get(index).copied().flatten().is_some())
+    else {
+        return (None, format!("no test evaluated `{condition}`"));
+    };
+    let mut values = String::new();
+    let mut words = Vec::new();
+    for (position, value) in seen.values.iter().enumerate() {
+        let value = match position.cmp(&index) {
+            std::cmp::Ordering::Less => *value,
+            std::cmp::Ordering::Equal => value.map(|value| !value),
+            std::cmp::Ordering::Greater => None,
+        };
+        values.push(match value {
+            None => '-',
+            Some(false) => 'F',
+            Some(true) => 'T',
+        });
+        if let (Some(value), Some(source)) = (value, sources.get(position)) {
+            words.push(format!("`{source}` {value}"));
+        }
+    }
+    let outcome = !seen.outcome;
+    words.push(format!("decision {outcome}"));
+    (
+        Some(format!("{values} -> {}", if outcome { 'T' } else { 'F' })),
+        words.join(", "),
+    )
+}
+
 fn vector_text(vector: &crate::coverage_analysis::McdcVector) -> String {
     let values = vector
         .values
@@ -1933,6 +1987,68 @@ pub struct FileDetailSource {
 }
 
 impl FileDetailSource {
+    /// What one file's detail reads, and nothing of any other file's: a
+    /// query of one line used to decode every test, line, point and decision
+    /// of the run first. Every test is still summarized, for the filters.
+    pub fn read_file(
+        index: &CoverageIndex<'_>,
+        view: CoverageViewId,
+        file: &str,
+    ) -> Result<Self, QueryError> {
+        let test_summaries = index.test_summaries(view)?;
+        let tests_by_id = test_summaries
+            .iter()
+            .map(|test| (test.id.clone(), test.clone()))
+            .collect();
+        let lines = index.lines_in_file(view, file)?;
+        let points = index.hit_metadata_in_file(view, file)?;
+        let decisions = index.decision_details_in_file(view, file)?;
+        let limitations = index.limitations_in_file(view, file)?;
+        let mut source = Self {
+            view,
+            tests: Vec::new(),
+            test_summaries,
+            tests_by_id,
+            tests_by_file: HashMap::new(),
+            lines_by_file: BTreeMap::new(),
+            points_by_file: HashMap::new(),
+            decisions_by_file: HashMap::new(),
+            limitations: BTreeMap::new(),
+            lines,
+            points,
+            decisions,
+        };
+        if !source.lines.is_empty() {
+            source
+                .lines_by_file
+                .insert(file.to_owned(), (0..source.lines.len()).collect());
+            // The tests with a line in the file, from the lines' side of the
+            // same relation the full read takes from the tests' side.
+            let mut tests = source
+                .lines
+                .iter()
+                .flat_map(|line| line.tests.iter().cloned())
+                .collect::<Vec<_>>();
+            tests.sort_unstable();
+            tests.dedup();
+            source.tests_by_file.insert(file.to_owned(), tests);
+        }
+        if !source.points.is_empty() {
+            source
+                .points_by_file
+                .insert(file.to_owned(), (0..source.points.len()).collect());
+        }
+        if !source.decisions.is_empty() {
+            source
+                .decisions_by_file
+                .insert(file.to_owned(), (0..source.decisions.len()).collect());
+        }
+        if !limitations.is_empty() {
+            source.limitations.insert(file.to_owned(), limitations);
+        }
+        Ok(source)
+    }
+
     pub fn read(index: &CoverageIndex<'_>, view: CoverageViewId) -> Result<Self, QueryError> {
         let tests = index.test_details(view)?;
         let mut tests_by_file = HashMap::<String, Vec<String>>::new();
@@ -2028,6 +2144,12 @@ pub fn coverage_file_detail_query(
 ) -> Result<(CoverageFileDetailData, AgentPagination), QueryError> {
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
+    }
+    // A file named exactly reads that file alone; a part of a name has to
+    // be matched against every file the run has.
+    let scoped = FileDetailSource::read_file(index, options.view, options.selector)?;
+    if !scoped.lines.is_empty() || !scoped.limitations.is_empty() {
+        return coverage_file_detail_from(&scoped, options);
     }
     coverage_file_detail_from(&FileDetailSource::read(index, options.view)?, options)
 }
@@ -2172,6 +2294,17 @@ pub fn coverage_file_detail_from(
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
+            let observed = filtered
+                .vector_observations
+                .iter()
+                .map(|observation| &observation.vector)
+                .collect::<Vec<_>>();
+            let sources = filtered
+                .conditions
+                .iter()
+                .map(|condition| condition.source.as_str())
+                .collect::<Vec<_>>();
+            let (needed_vector, needs) = needed(condition.index, &observed, &sources);
             mcdc.push(CoverageFileObligation::Mcdc(CoverageMcdcObligation {
                 kind: "mcdc".into(),
                 id: original.meta.id.clone(),
@@ -2180,11 +2313,9 @@ pub fn coverage_file_detail_from(
                 decision: original.meta.source.clone(),
                 missing_condition: condition.source.clone(),
                 condition_index: condition.index,
-                observed_vectors: filtered
-                    .vector_observations
-                    .iter()
-                    .map(|observation| vector_text(&observation.vector))
-                    .collect(),
+                observed_vectors: observed.iter().map(|vector| vector_text(vector)).collect(),
+                needed_vector,
+                needs,
                 other_coverage: other_coverage(&original_tests, selected.as_ref(), tests_by_id),
             }));
         }

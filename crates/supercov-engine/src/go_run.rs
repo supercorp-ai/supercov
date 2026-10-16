@@ -59,6 +59,9 @@ use crate::{
 const RUNTIME_DIRECTORY: &str = "_supercov_runtime";
 
 const RUNTIME_SOURCE: &str = include_str!("../runtime-assets/go/supercov/supercov.go");
+/// The generic wrappers a decision used as a value calls, in a file of its
+/// own behind `go1.18`, so a module older than generics still builds the rest.
+const RUNTIME_VALUES_SOURCE: &str = include_str!("../runtime-assets/go/supercov/values.go");
 
 /// The generated file that declares a package's probe array.
 const PROBE_FILE: &str = "supercov_probes.go";
@@ -303,6 +306,10 @@ fn instrument_sources(
             &at.join(RUNTIME_DIRECTORY).join("supercov.go"),
             RUNTIME_SOURCE,
         )?;
+        write(
+            &at.join(RUNTIME_DIRECTORY).join("values.go"),
+            RUNTIME_VALUES_SOURCE,
+        )?;
         runtimes.push((directory.clone(), format!("{module}/{RUNTIME_DIRECTORY}")));
     }
     // Longest first, so a nested module wins over the root it sits under.
@@ -324,20 +331,64 @@ fn instrument_sources(
         .max()
         .map_or(0, |highest| *highest as usize + 1);
 
-    let mut source_packages: BTreeMap<String, String> = BTreeMap::new();
+    // A directory's probe file joins the package most of its files declare:
+    // one behind a constraint the build leaves out can name another (`package
+    // main` for a tool), and a probe file in that package stops the real one
+    // compiling. Its tests vote too, an external `p_test` for `p`, since they
+    // are built with the package the probe file has to join.
+    let mut declared: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for relative in &sources.project.files.tests {
+        if let Some(name) = package_name(&read(&project_root.join(relative))?) {
+            let name = name
+                .strip_suffix("_test")
+                .map_or(name.clone(), str::to_owned);
+            declared
+                .entry(directory_of(relative))
+                .or_default()
+                .push(name);
+        }
+    }
     for (relative, instrumented) in &sources.project.instrumented {
         let instrumented = instrumented.replace(RUNTIME_IMPORT, sources.import_for(relative));
         let path = workspace.join(relative);
         if let Some(name) = package_name(&instrumented) {
-            source_packages
+            declared
                 .entry(directory_of(relative))
-                .or_insert(name);
+                .or_default()
+                .push(name);
         }
         write(
             &path,
             &named_for_the_project(project_root, relative, &instrumented),
         )?;
     }
+    let measured: BTreeSet<String> = sources
+        .project
+        .instrumented
+        .iter()
+        .map(|(relative, _)| directory_of(relative))
+        .collect();
+    let source_packages: BTreeMap<String, String> = declared
+        .into_iter()
+        .filter(|(directory, _)| measured.contains(directory))
+        .map(|(directory, names)| {
+            let mut counts: Vec<(usize, String)> = Vec::new();
+            for name in names {
+                match counts.iter_mut().find(|(_, seen)| *seen == name) {
+                    Some((count, _)) => *count += 1,
+                    None => counts.push((1, name)),
+                }
+            }
+            // The first of the most declared, so a tie goes to the tests.
+            let mut best = 0;
+            for (index, (count, _)) in counts.iter().enumerate() {
+                if *count > counts[best].0 {
+                    best = index;
+                }
+            }
+            (directory, counts.swap_remove(best).1)
+        })
+        .collect();
     for (directory, package) in &source_packages {
         write(
             &workspace.join(directory).join(PROBE_FILE),
@@ -401,11 +452,6 @@ fn instrument_workspace(
             if internal || harness_package.is_none() {
                 harness_package = Some(name);
             }
-            // A file the toolchain never builds declares nothing Supercov has
-            // to work around, and reading its `TestMain` as the package's own
-            // stood the harness down for a package that had none -- so the
-            // runtime was never armed and a passing suite published nothing.
-            let built = !build_ignored(&source);
             let file =
                 match instrument_test_file(&source, RUNTIME_ALIAS, &evidence_literal, serialised) {
                     Ok(file) => file,
@@ -426,11 +472,11 @@ fn instrument_workspace(
                         // fail to measure, it fails to build -- so this is scanned
                         // for rather than parsed for, which is the one question
                         // that cannot go unanswered.
-                        declares_test_main |= built && declares_test_main_textually(&source);
+                        declares_test_main |= declares_test_main_textually(&source);
                         continue;
                     }
                 };
-            declares_test_main |= built && file.declares_test_main;
+            declares_test_main |= file.declares_test_main;
             for test in &file.tests {
                 declared_in.insert(test.clone(), relative.clone());
             }
@@ -472,43 +518,6 @@ fn instrument_workspace(
         packages,
         unparseable_tests,
     })
-}
-
-/// Whether the toolchain will refuse to build this file whatever it is asked.
-///
-/// Build constraints in general cannot be answered without knowing the GOOS,
-/// GOARCH and tags a build will use, and guessing at them would drop files a
-/// run does measure. `ignore` needs none of that: it is not a GOOS, not a
-/// GOARCH, and nothing defines it, which is exactly why it is the convention
-/// for Go kept beside Go without being compiled -- a reference harness, a
-/// generator's input. So it is the one constraint that can be read alone, and
-/// the only one that is.
-fn build_ignored(source: &str) -> bool {
-    // Constraints live above the package clause and nowhere else: the
-    // toolchain stops reading them there, so a `//go:build ignore` in a
-    // comment further down is text about Go rather than a constraint on it.
-    let header = if source.starts_with("package ") {
-        // Nothing precedes a clause on the first line, and looking for a
-        // newline before it would find none and read the whole file.
-        ""
-    } else {
-        source
-            .find("\npackage ")
-            .map_or(source, |clause| &source[..clause])
-    };
-    header
-        .lines()
-        .map(str::trim)
-        .filter_map(|line| {
-            line.strip_prefix("//go:build")
-                // The spelling Go used before 1.17, still in trees today.
-                .or_else(|| line.strip_prefix("// +build"))
-        })
-        .any(|constraint| {
-            constraint
-                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                .any(|term| term == "ignore")
-        })
 }
 
 /// Whether a file declares `TestMain`, read from the text rather than a tree.
@@ -1139,39 +1148,6 @@ mod tests {
         assert_ne!(evidence_name("internal/auth"), evidence_name("internal/db"));
         assert_eq!(evidence_name("."), "_.bin");
         assert!(!evidence_name("internal/auth").contains('/'));
-    }
-
-    #[test]
-    fn only_the_constraint_nothing_ever_defines_is_read_alone() {
-        // `ignore` is not a GOOS, not a GOARCH, and nothing sets it, which is
-        // why it is the convention for Go kept beside Go without being
-        // compiled. Every other constraint needs a GOOS, a GOARCH and a tag
-        // set to answer, and guessing at those would drop files a run does
-        // measure.
-        assert!(build_ignored("//go:build ignore\n\npackage p\n"));
-        assert!(build_ignored("// +build ignore\n\npackage p\n"));
-        assert!(build_ignored(
-            "// Copyright.\n\n//go:build ignore\n\npackage p\n"
-        ));
-        // Constraints combine, and one of the terms is still the term.
-        assert!(build_ignored("//go:build ignore || linux\n\npackage p\n"));
-
-        // Everything else is a question this cannot answer, so it does not.
-        assert!(!build_ignored("//go:build linux\n\npackage p\n"));
-        assert!(!build_ignored("//go:build !windows\n\npackage p\n"));
-        assert!(!build_ignored("package p\n"));
-        // A tag that merely starts with the word is a different tag.
-        assert!(!build_ignored("//go:build ignored\n\npackage p\n"));
-        assert!(!build_ignored("//go:build ignore_me\n\npackage p\n"));
-        // And a constraint has to be above the package clause to be one. The
-        // toolchain ignores the text below it, so reading it there would drop
-        // a file the build takes.
-        assert!(!build_ignored(
-            "package p\n\n//go:build ignore\n\nfunc f() {}\n"
-        ));
-        assert!(!build_ignored(
-            "package p\n\nvar doc = \"//go:build ignore\"\n"
-        ));
     }
 
     #[test]

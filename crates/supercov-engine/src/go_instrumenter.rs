@@ -424,6 +424,14 @@ struct Collector<'a> {
     /// index that meant "the first decision in this file" would land on every
     /// other file's first decision too.
     decision_base: u32,
+    /// Whether this file's Go has generics, which a decision used as a value
+    /// needs to keep its type.
+    generics: bool,
+    /// The conditions of `if` and `for`, unparenthesized: decisions where
+    /// they stand, so not decisions as values too.
+    conditions: std::collections::HashSet<(usize, usize)>,
+    /// Decisions used as values in a file without generics.
+    unmeasured_values: Vec<(String, usize, usize, String)>,
 }
 
 /// A branch whose condition is a single operand needs no independence
@@ -432,10 +440,15 @@ struct Collector<'a> {
 /// obligation, so it gets the form with no decision argument — which is the
 /// one small enough for Go to inline, and the majority of branches in real
 /// code.
+///
+/// The condition goes in converted, `bool(c)`: a named boolean type (`type
+/// Flag bool`) is not assignable to `bool`, and a condition of one stopped the
+/// package compiling. A condition needs only to be a boolean, so the
+/// conversion changes nothing it decides.
 fn branch_wrapper(alias: &str, when_true: u64, when_false: u64, decision: Option<usize>) -> String {
     match decision {
-        Some(index) => format!("{alias}.BD({when_true}, {when_false}, {index}, "),
-        None => format!("{alias}.B({when_true}, {when_false}, "),
+        Some(index) => format!("{alias}.BD({when_true}, {when_false}, {index}, bool("),
+        None => format!("{alias}.B({when_true}, {when_false}, bool("),
     }
 }
 
@@ -462,6 +475,34 @@ fn in_statement_position(node: Node) -> bool {
 
 /// The condition of a `for` loop, when it has one. A `range` clause and a bare
 /// `for {}` have none.
+/// A `for ... range` loop, as opposed to a bare `for {}`.
+fn is_range_loop(node: Node) -> bool {
+    node.children(&mut node.walk())
+        .any(|child| child.kind() == "range_clause")
+}
+
+/// Whether the function holding `node` has a `goto` anywhere in it.
+fn in_function_with_goto(node: Node) -> bool {
+    let mut function = node;
+    while !matches!(
+        function.kind(),
+        "function_declaration" | "method_declaration" | "func_literal" | "source_file"
+    ) {
+        match function.parent() {
+            Some(parent) => function = parent,
+            None => break,
+        }
+    }
+    let mut stack = vec![function];
+    while let Some(next) = stack.pop() {
+        if next.kind() == "goto_statement" {
+            return true;
+        }
+        stack.extend(next.children(&mut next.walk()));
+    }
+    false
+}
+
 fn loop_condition<'t>(node: Node<'t>) -> Option<Node<'t>> {
     if let Some(condition) = node.child_by_field_name("condition") {
         return Some(condition);
@@ -557,13 +598,22 @@ impl<'a> Collector<'a> {
     }
 
     fn add_branch(&mut self, node: Node, kind: &str, labels: &[&str]) -> Vec<u64> {
+        let pairs = labels
+            .iter()
+            .map(|label| (*label, *label))
+            .collect::<Vec<_>>();
+        self.add_branch_named(node, kind, &pairs)
+    }
+
+    /// `add_branch` with an id suffix of its own for each outcome's label.
+    fn add_branch_named(&mut self, node: Node, kind: &str, labels: &[(&str, &str)]) -> Vec<u64> {
         let (line, column) = self.position(node);
         let id = self.id(node, "branch");
         let mut probes = Vec::new();
         let alternatives = labels
             .iter()
-            .map(|label| {
-                let alternative = format!("{id}.{label}");
+            .map(|(suffix, label)| {
+                let alternative = format!("{id}.{suffix}");
                 probes.push(self.probe(
                     GoProbeTarget::Alternative {
                         branch: id.clone(),
@@ -595,6 +645,14 @@ impl<'a> Collector<'a> {
     /// Returns the runtime's index for this decision, or `None` when the
     /// expression has a single condition and needs no independence obligation.
     fn add_decision(&mut self, node: Node, kind: &str) -> Option<usize> {
+        self.add_decision_wrapping(node, kind, false)
+    }
+
+    /// `add_decision`, with each operand of a decision used as a value
+    /// wrapped so it keeps its type: a typed operand through the generic
+    /// `CV`, an untyped one (a comparison, `true`) as `C(...) == true`, which
+    /// is untyped again.
+    fn add_decision_wrapping(&mut self, node: Node, kind: &str, value: bool) -> Option<usize> {
         let mut leaves = Vec::new();
         condition_nodes(node, self.source, &mut leaves);
         if leaves.len() < 2 {
@@ -620,12 +678,21 @@ impl<'a> Collector<'a> {
             // Wrapping an operand keeps short-circuiting intact: Go evaluates a
             // call argument only when the call is reached, so the right-hand
             // wrapper runs exactly when the unwrapped operand would have.
-            self.edit(
-                leaf.start_byte(),
-                20,
-                format!("{alias}.C({index_of_decision}, {index}, "),
-            );
-            self.edit(leaf.end_byte(), 20, ")".to_owned());
+            let (open, close) = if !value {
+                (
+                    format!("{alias}.C({index_of_decision}, {index}, bool("),
+                    "))",
+                )
+            } else if untyped_boolean(*leaf, self.source) {
+                (
+                    format!("({alias}.C({index_of_decision}, {index}, "),
+                    ") == true)",
+                )
+            } else {
+                (format!("{alias}.CV({index_of_decision}, {index}, "), ")")
+            };
+            self.edit(leaf.start_byte(), 20, open);
+            self.edit(leaf.end_byte(), 20, close.to_owned());
         }
         self.decisions.push(DecisionMeta {
             id,
@@ -650,6 +717,8 @@ impl<'a> Collector<'a> {
             }
             "if_statement" => {
                 if let Some(condition) = node.child_by_field_name("condition") {
+                    let bare = unparenthesized(condition);
+                    self.conditions.insert((bare.start_byte(), bare.end_byte()));
                     // An `if` without an else still has two outcomes: the body
                     // ran, or control passed it by. Wrapping the condition
                     // records the arm that was *not* taken by never setting its
@@ -661,7 +730,7 @@ impl<'a> Collector<'a> {
                         5,
                         branch_wrapper(&alias, probes[0], probes[1], decision),
                     );
-                    self.edit(condition.end_byte(), 5, ")".to_owned());
+                    self.edit(condition.end_byte(), 5, "))".to_owned());
                 }
             }
             "for_statement" => {
@@ -671,6 +740,8 @@ impl<'a> Collector<'a> {
                 // measure.
                 match loop_condition(node) {
                     Some(condition) => {
+                        let bare = unparenthesized(condition);
+                        self.conditions.insert((bare.start_byte(), bare.end_byte()));
                         let probes = self.add_branch(node, "loop", &["true", "false"]);
                         let decision = self.add_decision(condition, "loop");
                         self.edit(
@@ -678,7 +749,41 @@ impl<'a> Collector<'a> {
                             5,
                             branch_wrapper(&alias, probes[0], probes[1], decision),
                         );
-                        self.edit(condition.end_byte(), 5, ")".to_owned());
+                        self.edit(condition.end_byte(), 5, "))".to_owned());
+                    }
+                    None if is_range_loop(node) && !in_function_with_goto(node) => {
+                        // A range loop's outcomes are whether it ran at all,
+                        // as every other language records them: a flag the
+                        // body sets, read after the loop. Declared before a
+                        // label, so `continue L` still names the loop; not in
+                        // a function with a `goto`, which may not jump over a
+                        // declaration.
+                        let probes = self.add_branch_named(
+                            node,
+                            "for",
+                            &[("zero", "zero iterations"), ("entered", "entered")],
+                        );
+                        let flag = format!("_scvRan{}", node.start_byte());
+                        let statement = node
+                            .parent()
+                            .filter(|parent| parent.kind() == "labeled_statement")
+                            .unwrap_or(node);
+                        self.edit(statement.start_byte(), 90, format!("var {flag} bool; "));
+                        if let Some(body) = node.child_by_field_name("body") {
+                            self.edit(
+                                body.start_byte() + 1,
+                                100,
+                                format!(
+                                    " if !{flag} {{ {flag} = true; {alias}.A({}) }};",
+                                    probes[1]
+                                ),
+                            );
+                        }
+                        self.edit(
+                            node.end_byte(),
+                            100,
+                            format!("; if !{flag} {{ {alias}.A({}) }}", probes[0]),
+                        );
                     }
                     None => {
                         let (line, column) = self.position(node);
@@ -800,6 +905,46 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
+            "binary_expression"
+                if is_logical(node, self.source)
+                    && !logical_parent(node, self.source)
+                    && !self
+                        .conditions
+                        .contains(&(node.start_byte(), node.end_byte()))
+                    && in_function_body(node) =>
+            {
+                // `&&` and `||` used as a value are decisions as much as a
+                // condition is: MC/DC asks it of every boolean expression of
+                // two or more conditions.
+                if self.generics {
+                    let probes = self.add_branch(node, "value", &["true", "false"]);
+                    let mut leaves = Vec::new();
+                    condition_nodes(node, self.source, &mut leaves);
+                    let typed = leaves
+                        .iter()
+                        .any(|leaf| !untyped_boolean(*leaf, self.source));
+                    if let Some(index) = self.add_decision_wrapping(node, "value", true) {
+                        let (open, close) = if typed {
+                            (
+                                format!("{alias}.BV({}, {}, {index}, ", probes[0], probes[1]),
+                                ")",
+                            )
+                        } else {
+                            (
+                                format!("({alias}.BD({}, {}, {index}, ", probes[0], probes[1]),
+                                ") == true)",
+                            )
+                        };
+                        self.edit(node.start_byte(), 5, open);
+                        self.edit(node.end_byte(), 5, close.to_owned());
+                    }
+                } else {
+                    let (line, column) = self.position(node);
+                    let id = self.limitation_id(node, "value-decision-before-generics");
+                    self.unmeasured_values
+                        .push((id, line, column, self.text(node)));
+                }
+            }
             kind if is_statement(kind) && in_statement_position(node) => {
                 self.add_point(node, PointKind::Statement, None);
             }
@@ -859,6 +1004,84 @@ fn condition_nodes<'t>(node: Node<'t>, source: &str, out: &mut Vec<Node<'t>>) {
             }
         }
         _ => out.push(node),
+    }
+}
+
+fn is_logical(node: Node, source: &str) -> bool {
+    node.kind() == "binary_expression"
+        && node
+            .child_by_field_name("operator")
+            .is_some_and(|op| matches!(&source[op.byte_range()], "&&" | "||"))
+}
+
+/// Whether the expression is an operand of an enclosing `&&` or `||`,
+/// through parentheses, so part of that decision rather than one of its own.
+fn logical_parent(node: Node, source: &str) -> bool {
+    let mut parent = node.parent();
+    while let Some(candidate) =
+        parent.filter(|candidate| candidate.kind() == "parenthesized_expression")
+    {
+        parent = candidate.parent();
+    }
+    parent.is_some_and(|parent| is_logical(parent, source))
+}
+
+fn unparenthesized(node: Node) -> Node {
+    if node.kind() == "parenthesized_expression"
+        && let Some(inner) = node
+            .children(&mut node.walk())
+            .find(|child| child.is_named())
+    {
+        return unparenthesized(inner);
+    }
+    node
+}
+
+/// Inside a function's body: a probe call is allowed there, and the runtime
+/// is armed. A constant cannot hold a call at all.
+fn in_function_body(node: Node) -> bool {
+    let mut current = node.parent();
+    while let Some(ancestor) = current {
+        match ancestor.kind() {
+            "const_declaration" => return false,
+            "block" => return true,
+            _ => current = ancestor.parent(),
+        }
+    }
+    false
+}
+
+/// Whether Go types the expression as an untyped boolean: a comparison,
+/// `true` or `false`, or `!`, `&&`, `||` and parentheses over only those.
+fn untyped_boolean(node: Node, source: &str) -> bool {
+    match node.kind() {
+        "true" | "false" => true,
+        "parenthesized_expression" => node
+            .children(&mut node.walk())
+            .find(|child| child.is_named())
+            .is_some_and(|inner| untyped_boolean(inner, source)),
+        "unary_expression" => {
+            node.child_by_field_name("operator")
+                .is_some_and(|op| &source[op.byte_range()] == "!")
+                && node
+                    .child_by_field_name("operand")
+                    .is_some_and(|operand| untyped_boolean(operand, source))
+        }
+        "binary_expression" => match node
+            .child_by_field_name("operator")
+            .map(|op| &source[op.byte_range()])
+        {
+            Some("==" | "!=" | "<" | "<=" | ">" | ">=") => true,
+            Some("&&" | "||") => {
+                node.child_by_field_name("left")
+                    .is_some_and(|left| untyped_boolean(left, source))
+                    && node
+                        .child_by_field_name("right")
+                        .is_some_and(|right| untyped_boolean(right, source))
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -951,6 +1174,21 @@ pub fn build_go_obligations_with_alias(
     next_decision: &mut u32,
     alias: &str,
 ) -> Result<GoFileObligations, GoInstrumenterError> {
+    build_go_obligations_for(file, source, next_probe, next_decision, alias, true)
+}
+
+/// `generics` says whether the file's language version (its module's `go`
+/// directive, or an older `//go:build go1.N`) has them; a decision used as
+/// a value needs them to keep its type, and is a declared limitation
+/// without.
+pub fn build_go_obligations_for(
+    file: &str,
+    source: &str,
+    next_probe: &mut u64,
+    next_decision: &mut u32,
+    alias: &str,
+    generics: bool,
+) -> Result<GoFileObligations, GoInstrumenterError> {
     let tree = parse(source)?;
     let decision_base = *next_decision;
     let mut collector = Collector {
@@ -966,12 +1204,28 @@ pub fn build_go_obligations_with_alias(
         probes: BTreeMap::new(),
         limitations: Vec::new(),
         widths: Vec::new(),
+        generics,
+        conditions: std::collections::HashSet::new(),
+        unmeasured_values: Vec::new(),
     };
     let mut cursor = tree.root_node().walk();
     for child in tree.root_node().children(&mut cursor) {
         if child.is_named() {
             collector.walk(child);
         }
+    }
+    // One limitation for the file, at the first such value, naming how many.
+    if let Some((id, line, column, source_text)) = collector.unmeasured_values.first().cloned() {
+        let count = collector.unmeasured_values.len();
+        collector.limitations.push(serde_json::json!({
+            "id": id,
+            "kind": "value-decision-before-generics",
+            "file": file,
+            "source": source_text,
+            "line": line,
+            "column": column,
+            "reason": format!("{count} `&&`/`||` used as a value in this file: keeping its type through a probe needs generics, and the module's go directive is older than 1.18"),
+        }));
     }
     *next_decision += collector.widths.len() as u32;
     let mut edits = collector.edits;
@@ -1245,23 +1499,35 @@ func classify(a int, b bool) string {
     }
 
     #[test]
-    fn a_loop_with_no_condition_records_a_limitation_not_an_obligation() {
-        // A `range` loop and a bare `for {}` have no expression to observe.
-        // Declaring a branch nothing can measure would put an obligation in the
-        // denominator that no test could ever satisfy.
+    fn a_range_loop_records_whether_it_ran_and_a_bare_loop_a_limitation() {
+        // A `range` loop's outcomes are whether it ran at all, as in every
+        // other language. A bare `for {}` always enters and has no expression
+        // to observe, so it records the limitation instead of an obligation no
+        // test could satisfy. A function with a `goto` keeps the limitation
+        // too: the flag's declaration may not be jumped over.
         let mut next = 0;
         let mut decisions = 0;
         let go = build_go_obligations(
             "x.go",
-            "package main\nfunc f(xs []int) {\n\tfor _, x := range xs {\n\t\t_ = x\n\t}\n\tfor {\n\t\tbreak\n\t}\n}\n",
+            "package main\nfunc f(xs []int) {\n\tfor _, x := range xs {\n\t\t_ = x\n\t}\n\tfor {\n\t\tbreak\n\t}\n}\nfunc g(xs []int) {\n\tfor range xs {\n\t}\n\tgoto end\nend:\n}\n",
             &mut next,
             &mut decisions,
         )
         .unwrap();
-        assert!(
-            go.manifest.branches.iter().all(|b| b.kind != "loop"),
-            "{:?}",
-            go.manifest.branches
+        let loops = go
+            .manifest
+            .branches
+            .iter()
+            .filter(|b| b.kind == "for")
+            .collect::<Vec<_>>();
+        assert_eq!(loops.len(), 1, "{:?}", go.manifest.branches);
+        assert_eq!(
+            loops[0]
+                .alternatives
+                .iter()
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>(),
+            ["zero iterations", "entered"]
         );
         assert_eq!(
             go.manifest.limitations.len(),
@@ -1269,7 +1535,12 @@ func classify(a int, b bool) string {
             "{:?}",
             go.manifest.limitations
         );
-        assert_eq!(go.manifest.limitations[0]["kind"], "loop-without-condition");
+        assert!(
+            go.manifest
+                .limitations
+                .iter()
+                .all(|limitation| limitation["kind"] == "loop-without-condition")
+        );
     }
 
     #[test]

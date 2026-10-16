@@ -2169,6 +2169,24 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// `&&` and `||` used as a value: the left operand is read as a boolean,
+    /// whatever the operator returns, so a compound one is a decision as much
+    /// as an `if`'s condition is -- `(a && b) || fallback`, `a || b ||
+    /// default`. The right is a value, judged as one in its turn. A `!` reads
+    /// its operand as a boolean too. Inside the operand's own logical probe.
+    fn value_decision<'n>(&mut self, operand: impl Fn() -> Node<'n>) {
+        if !self.is_compound(operand()) {
+            return;
+        }
+        let (root, _) = self.strip(operand());
+        if self.tree_logicals.contains(&root.location().start_offset()) {
+            return;
+        }
+        self.depth += 1;
+        self.probe_decision(operand(), "value", None, "d");
+        self.depth -= 1;
+    }
+
     fn value_logical(&mut self, op: &str, left: &Node<'_>, node_start: usize, node_end: usize) {
         let Some(id) = self.branch(
             node_start,
@@ -3066,6 +3084,22 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             // measured like any expression.
             self.depth += 1;
             self.visit(&node.predicate());
+            // A ternary's arms are expressions here too: probed as statements,
+            // `true ? :yes : :no` became `true ? hit; :yes : :no`, which Ruby
+            // refuses, and the whole file lost its branches.
+            if node.if_keyword_loc().is_none() {
+                if let Some(statements) = node.statements() {
+                    self.expression_lists
+                        .insert(statements.location().start_offset());
+                }
+                if let Some(subsequent) = node.subsequent()
+                    && let Some(else_node) = subsequent.as_else_node()
+                    && let Some(statements) = else_node.statements()
+                {
+                    self.expression_lists
+                        .insert(statements.location().start_offset());
+                }
+            }
             if truthy {
                 if let Some(statements) = node.statements() {
                     self.visit_statements_node(&statements);
@@ -3192,6 +3226,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         if !self.tree_logicals.contains(&location.start_offset()) {
             let left = node.left();
             self.value_logical("and", &left, location.start_offset(), location.end_offset());
+            self.value_decision(|| node.left());
         }
         self.depth += 1;
         ruby_prism::visit_and_node(self, node);
@@ -3203,6 +3238,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         if !self.tree_logicals.contains(&location.start_offset()) {
             let left = node.left();
             self.value_logical("or", &left, location.start_offset(), location.end_offset());
+            self.value_decision(|| node.left());
         }
         self.depth += 1;
         ruby_prism::visit_or_node(self, node);
@@ -3210,6 +3246,9 @@ impl<'pr> Visit<'pr> for Collector<'_> {
     }
 
     fn visit_call_node(&mut self, node: &CallNode<'pr>) {
+        if node.name().as_slice() == b"!" && node.arguments().is_none() && node.block().is_none() {
+            self.value_decision(|| node.as_node());
+        }
         if node.name().as_slice() == b"new"
             && node.receiver().is_some_and(|receiver| {
                 receiver
@@ -3524,6 +3563,30 @@ pub fn apply_edits(source: &[u8], edits: &[Edit]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ternary_on_a_literal_still_parses_once_probed() {
+        // Ruby compiles only the live arm of `true ? a : b`; that arm alone is
+        // probed. Probed as a statement, the arm left `true ? hit; :yes : :no`,
+        // which Ruby refuses, and the whole file lost its branches.
+        for condition in ["true", "1", "1.0", "'s'", ":s", "false", "nil", "(true)"] {
+            let source = format!("def go\n  x = {condition} ? :yes : :no\n  x\nend\n");
+            let mut next = 0;
+            let obligations =
+                build_ruby_obligations("lib/l.rb", source.as_bytes(), &mut next).unwrap();
+            let probed = apply_edits(source.as_bytes(), &obligations.plan.edits);
+            let parsed = ruby_prism::parse(&probed);
+            let errors = parsed
+                .errors()
+                .map(|error| error.message().to_owned())
+                .collect::<Vec<_>>();
+            assert!(
+                errors.is_empty(),
+                "{condition}: {errors:?}\n{}",
+                String::from_utf8_lossy(&probed)
+            );
+        }
+    }
 
     const SOURCE: &str = r#"class Shapes
   def classify(a, b, c)

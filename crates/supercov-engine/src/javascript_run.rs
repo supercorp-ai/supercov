@@ -69,6 +69,11 @@ pub struct DirectJavascriptRunResult {
     /// The runs of servers the suite drove, published beside this one, by
     /// language.
     pub server_runs: Vec<(String, PathBuf)>,
+    /// The project's build script, when the command did not run it. The copy
+    /// starts without build output, so a suite that needs it fails; the
+    /// caller says so when the failure is not a test's.
+    #[serde(skip)]
+    pub unrun_build: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -1041,21 +1046,6 @@ pub fn run_direct_javascript(
         .iter()
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
-    // The copy starts without build output: `dist/`, `build/`, `.next/` and
-    // the like are not copied, since they hold code that was never
-    // instrumented. A suite that needs it fails on a missing file, which
-    // reads as the project's own fault.
-    if execution.exit_code != 0
-        && execution.interrupted_signal.is_none()
-        && !project.unrun_build.is_empty()
-    {
-        let build = project.unrun_build.join(" ");
-        let _ = writeln!(
-            diagnostics,
-            "[supercov] the command failed. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `supercov -- sh -c \"{build} && {}\"`",
-            request.command.join(" ")
-        );
-    }
     if let Some(signal) = execution.interrupted_signal {
         interrupt_run_state(&root, &run_id, &started_at, signal_name(signal))
             .map_err(|error| error.to_string())?;
@@ -1273,6 +1263,7 @@ pub fn run_direct_javascript(
             recovered_runs,
             metadata,
             server_runs,
+            unrun_build: project.unrun_build.clone(),
         });
     }
     let archive_path = root
@@ -1422,6 +1413,7 @@ pub fn run_direct_javascript(
         recovered_runs,
         metadata,
         server_runs,
+        unrun_build: project.unrun_build.clone(),
     })
 }
 

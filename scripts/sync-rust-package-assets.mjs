@@ -19,6 +19,7 @@ const mappings = [
   ["docs/verification.md", "crates/supercov-cli/assets/docs/verification.md"],
   ["docs/performance.md", "crates/supercov-cli/assets/docs/performance.md"],
   ["docs/workspace-isolation.md", "crates/supercov-cli/assets/docs/workspace-isolation.md"],
+  ["docs/reports.md", "crates/supercov-cli/assets/docs/reports.md"],
   ["contracts/v1/contract.json", "crates/supercov-contracts/assets/v1/contract.json"],
   ["contracts/probe-v2/contract.json", "crates/supercov-contracts/assets/probe-v2/contract.json"],
   ["contracts/frontend-v2/contract.json", "crates/supercov-contracts/assets/frontend-v2/contract.json"],
@@ -90,7 +91,7 @@ const mappings = [
   ]),
   // Nested rather than flat: a Go package is a directory and a JVM class is
   // its package path, so the layout is part of what makes these compile.
-  ...runtimeFiles("go", ["supercov/supercov.go"]),
+  ...runtimeFiles("go", ["supercov/supercov.go", "supercov/values.go"]),
   ...runtimeFiles("jvm", [
     "com/supercorp/supercov/Supercov.java",
     "com/supercorp/supercov/SupercovListener.java",

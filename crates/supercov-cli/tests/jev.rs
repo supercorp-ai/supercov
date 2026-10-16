@@ -1743,3 +1743,443 @@ fn a_javascript_request_shows_the_function_a_statement_is_in_and_no_helper() {
         "{state}"
     );
 }
+
+/// A body larger than any answer Supercov accepts.
+fn oversized(_: usize) -> Option<(u16, &'static str)> {
+    static BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    Some((200, BODY.get_or_init(|| "x".repeat(1_048_577)).as_str()))
+}
+
+#[test]
+fn what_quality_cannot_read_or_was_asked_twice_is_named() {
+    let project = Project::cart("quality-limits");
+    let key = [("TYPESAFE_API_KEY", "sk-unused")];
+    for (args, message) in [
+        (
+            vec!["quality", "snapshots", "--limit", "1", "--limit", "2"],
+            "--limit may only be specified once",
+        ),
+        (
+            vec![
+                "quality",
+                "src/cart.js",
+                "--context",
+                "src/cart.js",
+                "--context",
+                "src/cart.js",
+            ],
+            "--context may only be specified once",
+        ),
+    ] {
+        let output = project.supercov_with(&args, &key).exits(2);
+        assert!(output.contains(message), "{args:?}: {output}");
+    }
+
+    // A source over the size limit is left out, and says why.
+    project.write(
+        "src/huge.js",
+        &format!("export const big = {:?};\n", "x".repeat(4 << 20)),
+    );
+    let (base, seen) = gateway(MODEL, answer_no);
+    let huge = project
+        .supercov_with(&["quality", "src/huge.js"], &through(&base))
+        .exits(2);
+    assert!(
+        huge.contains("larger than 4194304 bytes and is not assessed"),
+        "{huge}"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 0, "nothing is sent for it");
+
+    // An answer over the response limit is refused.
+    let (base, _) = gateway_with(MODEL, answer_no, oversized);
+    let flooded = project
+        .supercov_with(&["quality", "src/cart.js", "--refresh"], &through(&base))
+        .exits(2);
+    assert!(
+        flooded.contains("127.0.0.1 response exceeds size limit"),
+        "{flooded}"
+    );
+
+    // A gateway at an IPv6 address is named by it, brackets and all.
+    let unreachable = project
+        .supercov_with(
+            &["quality", "src/cart.js", "--refresh"],
+            &[
+                ("TYPESAFE_BASE_URL", "http://[::1]:1/api"),
+                ("TYPESAFE_DEFAULT_MODEL", "typesafe/jev-1.13"),
+                ("TYPESAFE_API_KEY", "sk-gateway"),
+            ],
+        )
+        .exits(2);
+    assert!(unreachable.contains("[::1]"), "{unreachable}");
+}
+
+#[test]
+fn a_saved_answer_to_another_question_is_not_used() {
+    let project = Project::cart("quality-stale-cache");
+    let (base, seen) = gateway(MODEL, answer_no);
+    let jev = through(&base);
+    project
+        .supercov_with(&["quality", "src/cart.js"], &jev)
+        .succeeds();
+    let requests = project.root.join(".supercov/quality/requests");
+    let saved = std::fs::read_dir(&requests)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    let mut entry: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&saved[0]).unwrap()).unwrap();
+    entry["request_hash"] = "another question".into();
+    std::fs::write(&saved[0], serde_json::to_vec(&entry).unwrap()).unwrap();
+    let refused = project
+        .supercov_with(&["quality", "src/cart.js"], &jev)
+        .exits(2);
+    assert!(
+        refused.contains("quality cache hash mismatch; use --refresh"),
+        "{refused}"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_patch_review_needs_a_repository() {
+    let project = Project::empty("quality-no-repository");
+    project.write("src/a.js", "export const a = 1;\n");
+    for lane in ["quality", "security"] {
+        let output = project
+            .supercov_with(&[lane, "patch"], &[("TYPESAFE_API_KEY", "sk-unused")])
+            .exits(2);
+        assert!(
+            output.contains(&format!(
+                "{lane} patch needs a Git repository; run it inside one"
+            )),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn security_lists_five_failures_and_counts_the_rest() {
+    let project = Project::empty("security-failures");
+    project.write(
+        "package.json",
+        r#"{ "name": "many", "private": true, "type": "module" }"#,
+    );
+    for index in 0..7 {
+        project.write(
+            &format!("src/handler{index}.js"),
+            &format!(
+                "export function handle{index}(request) {{\n  return request.query.name;\n}}\n"
+            ),
+        );
+    }
+    project.git(&["init", "-q"]);
+    project.commit("handlers");
+    let (base, _) = gateway_with(MODEL, answer_taint, |_| Some((500, "{}")));
+    let output = project
+        .supercov_with(&["security", "src"], &through(&base))
+        .exits(2);
+    assert!(output.contains("... and 2 more errors"), "{output}");
+}
+
+#[test]
+fn generated_files_are_left_out_unless_all_are_asked_for() {
+    let project = Project::cart("quality-generated");
+    for (file, text) in [
+        ("src/types.d.mts", "export declare const a: number;\n"),
+        ("src/types.d.cts", "export declare const b: number;\n"),
+        ("src/message.pb.cc", "int message() { return 1; }\n"),
+        ("src/message.pb.h", "int message();\n"),
+        ("src/service_pb2_grpc.py", "def call():\n    return 1\n"),
+        ("src/Form.g.cs", "class Form { int Size() { return 1; } }\n"),
+        (
+            "src/client.js",
+            "// Code generated by openapi-generator. DO NOT EDIT.\nexport function fetchUser(id) {\n  return id ? { id } : null;\n}\n",
+        ),
+    ] {
+        project.write(file, text);
+    }
+    let (base, seen) = gateway(MODEL, answer_no);
+    let jev = through(&base);
+    let default = project.supercov_with(&["quality", "src"], &jev).succeeds();
+    let asked_by_default = seen.lock().unwrap().len();
+    assert!(!default.contains("client.js"), "{default}");
+    let all = project
+        .supercov_with(&["quality", "src", "--all", "--refresh"], &jev)
+        .succeeds();
+    assert!(
+        seen.lock().unwrap().len() > asked_by_default * 2,
+        "--all also asks about the generated client\n{all}"
+    );
+}
+
+const KINDS: &str = r#"use std::cmp::Ordering;
+use std::fmt;
+use std::num::NonZeroU32;
+
+pub fn order(a: u32, b: u32) -> Ordering {
+    a.cmp(&b)
+}
+
+pub fn least() -> Ordering {
+    Ordering::Less
+}
+
+pub fn maybe_order(a: f64, b: f64) -> Option<Ordering> {
+    a.partial_cmp(&b)
+}
+
+pub fn greeting(name: &str) -> String {
+    if name.is_empty() {
+        String::from("hello")
+    } else if name == "admin" {
+        format!("welcome {name}")
+    } else {
+        name.to_string()
+    }
+}
+
+pub fn owned(text: &str) -> String {
+    text.to_owned()
+}
+
+pub fn empty_label() -> &'static str {
+    ""
+}
+
+pub fn items(n: usize) -> Vec<u32> {
+    if n == 0 {
+        Vec::new()
+    } else {
+        vec![1; n]
+    }
+}
+
+pub fn size(values: &[u32]) -> usize {
+    values.len()
+}
+
+pub fn odd_count(values: &[u32]) -> usize {
+    values.iter().filter(|v| *v % 2 == 1).count()
+}
+
+pub fn leading(x: u32) -> u32 {
+    x.leading_zeros()
+}
+
+pub fn width() -> usize {
+    std::mem::size_of::<u64>()
+}
+
+pub fn cleaned(text: &str) -> &str {
+    text.trim()
+}
+
+pub fn suffixless(text: &str) -> &str {
+    text.trim_end_matches('!')
+}
+
+pub fn first_char(text: &str) -> char {
+    text.chars().next().unwrap()
+}
+
+pub fn last_char(text: &str) -> char {
+    text.chars().next_back().unwrap()
+}
+
+pub fn nonzero(x: u32) -> Option<NonZeroU32> {
+    NonZeroU32::new(x)
+}
+
+pub fn parsed(text: &str) -> Result<u32, std::num::ParseIntError> {
+    let value = text.parse::<u32>()?;
+    Ok(value + 1)
+}
+
+pub fn first_even(values: &[u32]) -> Option<u32> {
+    let Some(first) = values.iter().copied().find(|v| v % 2 == 0) else {
+        return None;
+    };
+    Some(first)
+}
+
+pub fn tail(values: &[u32]) -> &[u32] {
+    &values[1..]
+}
+
+pub fn pair(x: u32) -> (u32, bool) {
+    (x * 2, x > 3)
+}
+
+pub fn grid() -> [u8; 3] {
+    [0; 3]
+}
+
+pub fn negated(flag: bool) -> bool {
+    !flag
+}
+
+pub fn ratio() -> f64 {
+    0.5
+}
+
+pub fn sign(n: i32) -> &'static str {
+    match n.cmp(&0) {
+        Ordering::Less => "negative",
+        Ordering::Equal => "zero",
+        Ordering::Greater => "positive",
+    }
+}
+
+pub struct Celsius(pub f64);
+
+impl fmt::Display for Celsius {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}C", self.0)
+    }
+}
+
+pub trait Scale {
+    type Output;
+    fn scale(&self) -> Self::Output;
+}
+
+impl Scale for Celsius {
+    type Output = f64;
+    fn scale(&self) -> f64 {
+        self.0 * 2.0
+    }
+}
+
+impl Celsius {
+    pub fn warmer(&self, by: f64) -> Self {
+        Celsius(self.0 + by)
+    }
+}
+
+pub fn counter() -> impl FnMut() -> u32 {
+    let mut count = 0;
+    move || {
+        count += 1;
+        count
+    }
+}
+
+pub fn address(values: &[u32]) -> *const u32 {
+    values.as_ptr()
+}
+
+pub fn blank() -> String {
+    String::new()
+}
+
+pub fn none_yet() -> Vec<u32> {
+    vec![]
+}
+"#;
+
+const KINDS_TESTS: &str = r#"use kinds::*;
+use std::cmp::Ordering;
+
+#[test]
+fn everything_runs() {
+    assert_eq!(order(1, 2), Ordering::Less);
+    assert_eq!(least(), Ordering::Less);
+    assert_eq!(maybe_order(1.0, 2.0), Some(Ordering::Less));
+    assert_eq!(greeting(""), "hello");
+    assert_eq!(greeting("admin"), "welcome admin");
+    assert_eq!(greeting("ann"), "ann");
+    assert_eq!(owned("x"), "x");
+    assert_eq!(empty_label(), "");
+    assert!(items(0).is_empty());
+    assert_eq!(items(2), vec![1, 1]);
+    assert_eq!(size(&[1, 2]), 2);
+    assert_eq!(odd_count(&[1, 2, 3]), 2);
+    assert_eq!(leading(1), 31);
+    assert_eq!(width(), 8);
+    assert_eq!(cleaned(" a "), "a");
+    assert_eq!(suffixless("a!!"), "a");
+    assert_eq!(first_char("ab"), 'a');
+    assert_eq!(last_char("ab"), 'b');
+    assert!(nonzero(0).is_none());
+    assert_eq!(parsed("1"), Ok(2));
+    assert_eq!(first_even(&[1, 4]), Some(4));
+    assert_eq!(first_even(&[1]), None);
+    assert_eq!(tail(&[1, 2]), &[2]);
+    assert_eq!(pair(4), (8, true));
+    assert_eq!(grid(), [0, 0, 0]);
+    assert!(negated(false));
+    assert_eq!(ratio(), 0.5);
+    assert_eq!(sign(-2), "negative");
+    assert_eq!(sign(0), "zero");
+    assert_eq!(sign(3), "positive");
+    assert_eq!(Celsius(1.0).to_string(), "1C");
+    assert_eq!(Celsius(2.0).scale(), 4.0);
+    assert_eq!(Celsius(1.0).warmer(1.0).0, 2.0);
+    let mut next = counter();
+    assert_eq!(next(), 1);
+    assert!(!address(&[1]).is_null());
+    assert!(blank().is_empty());
+    assert!(none_yet().is_empty());
+}
+"#;
+
+#[test]
+fn every_rust_return_shape_is_asked_as_a_change_of_its_type() {
+    let project = Project::empty("rust-kinds");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"kinds\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write("src/lib.rs", KINDS);
+    project.write("tests/kinds.rs", KINDS_TESTS);
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test", "-q"]).succeeds();
+    let (base, seen) = gateway(MODEL, answer_no);
+    let assessed = project
+        .supercov_with(&["runs", "latest", "assertions", "assess"], &through(&base))
+        .succeeds();
+    assert!(assessed.contains("0% asserted (0 of 43"), "{assessed}");
+    let asked = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|(_, _, request)| {
+            request["questions"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter_map(|question| question["instructions"]["task"].as_str())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for change in [
+        "`a.cmp(&b)` becomes `(a.cmp(&b)).reverse()`",
+        "`Ordering::Less` becomes `Ordering::Greater`",
+        "`a.partial_cmp(&b)` becomes `None`",
+        "`String::from(\"hello\")` becomes `String::new()`",
+        "`\"\"` becomes `\"supercov\"`",
+        "`vec![1; n]` becomes `Vec::new()`",
+        "`values.len()` becomes `0`",
+        "`text.trim()` becomes `\"\"`",
+        "`text.chars().next().unwrap()` becomes `'\\0'`",
+        "`NonZeroU32::new(x)` becomes `None`",
+        "`write!(f, \"{}C\", self.0)` becomes `Err(std::fmt::Error)`",
+        "`&values[1..]` becomes `&values[..0]`",
+        "`values.as_ptr()` becomes `std::ptr::null()`",
+        "`let Some(first) = values.iter().copied().find(|v| v % 2 == 0) else {` becomes `let Some(first) = None;`",
+        // An empty value changes to a non-empty one: the same empty value is
+        // no change, and a question no test could answer yes to.
+        "`Vec::new()` becomes `vec![Default::default()]`",
+        "`vec![]` becomes `vec![Default::default()]`",
+        "`String::new()` becomes `String::from(\"supercov\")`",
+    ] {
+        assert!(asked.contains(change), "{change} not asked:\n{asked}");
+    }
+    assert!(
+        !asked.contains("`Vec::new()` becomes `Vec::new()`"),
+        "{asked}"
+    );
+}

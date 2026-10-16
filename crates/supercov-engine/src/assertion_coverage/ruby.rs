@@ -68,6 +68,19 @@ impl Collector<'_> {
 
     fn change(&self, node: &Node<'_>) -> Option<Change> {
         let last = self.last.contains(&node.location().start_offset());
+        // Returning nil or assigning nil, changed to nil, is the same code: a
+        // question no test could answer yes to.
+        let location = node.location();
+        let statement = self.text(location.start_offset(), location.end_offset());
+        let statement = statement.trim();
+        if statement == "nil"
+            || statement == "return nil"
+            || statement.rsplit_once('=').is_some_and(|(head, value)| {
+                value.trim() == "nil" && !head.ends_with(['=', '!', '<', '>'])
+            })
+        {
+            return Some(Change::Skip);
+        }
         if let Some(i) = node.as_if_node() {
             return Some(if i.if_keyword_loc().is_some() {
                 Change::Invert
@@ -551,6 +564,20 @@ fn snake(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::assertion_coverage::{Language, change_at};
+
+    #[test]
+    fn nil_changed_to_nil_is_not_asked() {
+        // The same code is a question no test could answer yes to.
+        let source = "def f(x)\n  y = nil\n  return nil if x\n  z = x\n  nil\nend\n";
+        let starts = statement_starts(source);
+        let rb = Language::Ruby;
+        assert_eq!(change_at(&starts, 2, "y = nil", rb), Some(Change::Skip));
+        assert_eq!(
+            change_at(&starts, 4, "z = x", rb),
+            Some(Change::ValueUndefined)
+        );
+        assert_eq!(change_at(&starts, 5, "nil", rb), Some(Change::Skip));
+    }
 
     #[test]
     fn changes_follow_the_audit() {

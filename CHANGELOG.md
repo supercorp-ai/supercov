@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.13.0
+
+**Changed**
+
+- `&&` and `||` used as a value are MC/DC decisions in every language. In Java, Kotlin, Go and Rust the whole expression is the decision (`ok = a && b`); in JavaScript, TypeScript, Python and Ruby the compound left operand is (`(a && b) || fallback`, `a || b || "default"`), and so is the operand of `!`. A Kotlin operand that smart-casts the rest keeps branch outcomes; a Go module older than 1.18 declares a limitation. MC/DC totals rise where such expressions exist.
+- An MC/DC gap says what run would close it: `line` and `file` JSON gain `neededVector` and `needs` (`TF -> F`, "`a` true, `b` false, decision false"), or say no test evaluated the condition.
+- Go `range`, Java for-each and Kotlin `for (x in xs)` loops record whether they ran zero times or at least once, as other languages' loops do.
+
+**Fixed**
+
+- A test helper written as a one-line arrow that returns a check (`const loginError = (page) => expect(page).toHaveURL(url)`) returned nothing once measured in TypeScript, so `await loginError(page)` went on before the check finished: the check then ran against the next page, or a failure went unreported. The arrow now returns the check.
+- A failed JavaScript test was blamed on missing build output whenever the project had a build script. The run now names the failed tests and points at the build only when no reported test failed.
+- `runs <id> line` and `file` decoded the whole run to answer for one file: 3 to 5 s per query on a 1,100-test run, 13 s cold. They now read one file, 0.7 s on the same run, same answers.
+- A `--json` page larger than the 64 KB reply limit was refused, so a pager could stop after its first page. It now returns the entries that fit, with `nextOffset` after them.
+- Builds that failed only under measurement: Go conditions on a named boolean type (`type Flag bool`); a Go `//go:build ignore` file of another package beside the real one; Kotlin conditions smart-cast by `isNullOrEmpty()`/`isNullOrBlank()`; Rust files where `vec![x; n]` starts a longer expression; React Router/Remix server entries with `export default handleRequest;`.
+- `cargo test -q` on an edition 2024 crate with doctests failed ("merged doctest child 0 ran for a case the harness did not report"); quiet output now matches Cargo's.
+- A pytest `xfail` that passed read as failed; it is a pass, as pytest counts it (a strict one still fails).
+- A Python `for` whose `else` returns never recorded zero iterations; a Ruby ternary on a literal made its file unparseable to the probes.
+- `supercov docs reports` was missing from every installed copy.
+- On Linux, "command still running" listed each thread of a process as a process of its own and named Node `MainThread`.
+- `runs <id> decision file:line:column` ignored the column it lists.
+- `merge` dropped runs it could no longer fingerprint without a word, said "another build of Supercov" for runs of two languages, and now counts files added since a run.
+- The whole-suite hint told `npm t` and `npm run -s test` to run `npm test`.
+- Assessment asked whether a no-op change (`Vec::new()` to an empty value, `return nil`, `x = null`, `count := 0`) was caught, so those statements always read as not asserted.
+- A method read as text through a property (`box.method.toString()`) was instrumented, changing its text.
+
 ## 4.12.2
 
 **Fixed**

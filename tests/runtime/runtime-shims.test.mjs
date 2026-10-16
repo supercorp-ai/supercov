@@ -390,7 +390,9 @@ test("an execution-trace writer that meets a clone of itself rotates its log", {
          installLaunchSupervisor();
          spawnSync(process.execPath, ["-e", "0"]);
          const directory = ${JSON.stringify(root)};
-         const [log] = readdirSync(directory).filter((name) => name.startsWith("execution."));
+         // This process's own log: the child's sits beside it, and which one a
+         // directory lists first is the filesystem's choice.
+         const [log] = readdirSync(directory).filter((name) => name.startsWith("execution.host." + process.pid + "-"));
          appendFileSync(directory + "/" + log, JSON.stringify({ event: "from-a-clone" }) + String.fromCharCode(10));
          spawnSync(process.execPath, ["-e", "0"]);
          process.stdout.write(String(process.pid));`,

@@ -62,6 +62,20 @@ that the decision is safe.
 The same principle applies to Rust, Python, and Ruby boolean expressions and
 control flow.
 
+A decision is not only the condition of an `if` or a loop. `&&` and `||` used
+as a value are decisions too:
+
+- In Java, Kotlin, Go and Rust every operand is a boolean, so `ok = a && b`
+  is a decision over `a` and `b`.
+- In JavaScript, TypeScript, Python and Ruby, `&&` and `||` (`and`/`or`)
+  return an operand. The left operand is always tested, and the right one is
+  returned, so a compound left operand is the decision: `name = (a && b) ||
+  fallback` and `a || b || "default"` each give a decision over `a` and `b`.
+  A `!` makes its operand a decision too.
+
+Where a Kotlin operand smart-casts the rest of the expression, the
+expression keeps its branch outcomes and is not a decision.
+
 ## What 100% means
 
 Supercov derives the coverage denominator from source structure before the test

@@ -2594,6 +2594,21 @@ impl<'a> CoverageIndex<'a> {
         })
     }
 
+    /// Whether a string is `expected`, compared in place: a filter asks this
+    /// of every record, and copying each one out to compare it was most of
+    /// a one-file query's time.
+    fn string_equals(&self, id: u32, expected: &str) -> Result<bool, CoverageIndexError> {
+        let record = self.index.record(SECTION_STRINGS, u64::from(id))?;
+        let length = u64::from(get_u32(record, 8));
+        if length != expected.len() as u64 {
+            return Ok(false);
+        }
+        let value = self
+            .index
+            .bytes(SECTION_STRING_BYTES, get_u64(record, 0), length)?;
+        Ok(value == expected.as_bytes())
+    }
+
     fn string(&self, id: u32) -> Result<String, CoverageIndexError> {
         let record = self.index.record(SECTION_STRINGS, u64::from(id))?;
         if record[12..].iter().any(|byte| *byte != 0) {
@@ -3288,11 +3303,33 @@ impl<'a> CoverageIndex<'a> {
     }
 
     pub fn lines(&self, view: CoverageViewId) -> Result<Vec<IndexedLine>, CoverageIndexError> {
+        self.lines_where(view, None)
+    }
+
+    /// `lines`, of one file only: records of other files are skipped before anything in them is decoded.
+    pub fn lines_in_file(
+        &self,
+        view: CoverageViewId,
+        file: &str,
+    ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
+        self.lines_where(view, Some(file))
+    }
+
+    fn lines_where(
+        &self,
+        view: CoverageViewId,
+        file: Option<&str>,
+    ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
         let descriptor = self.index.descriptor(SECTION_LINES)?;
         let mut lines = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_LINES, index)?;
             if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if let Some(file) = file
+                && !self.string_equals(get_u32(record, 4), file)?
+            {
                 continue;
             }
             if record[3] != 0 || record[56..].iter().any(|byte| *byte != 0) {
@@ -3537,11 +3574,33 @@ impl<'a> CoverageIndex<'a> {
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
+        self.hit_metadata_where(view, None)
+    }
+
+    /// `hit_metadata`, of one file only: records of other files are skipped before anything in them is decoded.
+    pub fn hit_metadata_in_file(
+        &self,
+        view: CoverageViewId,
+        file: &str,
+    ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
+        self.hit_metadata_where(view, Some(file))
+    }
+
+    fn hit_metadata_where(
+        &self,
+        view: CoverageViewId,
+        file: Option<&str>,
+    ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
         let descriptor = self.index.descriptor(SECTION_HIT_METADATA)?;
         let mut metadata = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_HIT_METADATA, index)?;
             if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if let Some(file) = file
+                && !self.string_equals(get_u32(record, 8), file)?
+            {
                 continue;
             }
             if record[2..4].iter().any(|byte| *byte != 0)
@@ -3581,11 +3640,33 @@ impl<'a> CoverageIndex<'a> {
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedLimitation>, CoverageIndexError> {
+        self.limitations_where(view, None)
+    }
+
+    /// `limitations`, of one file only: records of other files are skipped before anything in them is decoded.
+    pub fn limitations_in_file(
+        &self,
+        view: CoverageViewId,
+        file: &str,
+    ) -> Result<Vec<IndexedLimitation>, CoverageIndexError> {
+        self.limitations_where(view, Some(file))
+    }
+
+    fn limitations_where(
+        &self,
+        view: CoverageViewId,
+        file: Option<&str>,
+    ) -> Result<Vec<IndexedLimitation>, CoverageIndexError> {
         let descriptor = self.index.descriptor(SECTION_LIMITATIONS)?;
         let mut limitations = Vec::new();
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_LIMITATIONS, index)?;
             if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if let Some(file) = file
+                && !self.string_equals(get_u32(record, 12), file)?
+            {
                 continue;
             }
             if record[2..4].iter().any(|byte| *byte != 0)
@@ -3703,6 +3784,24 @@ impl<'a> CoverageIndex<'a> {
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<crate::coverage_report::DecisionResult>, CoverageIndexError> {
+        self.decision_details_where(view, None)
+    }
+
+    /// `decision_details`, of one file only: a decision of another file is
+    /// skipped before its vectors and conditions are decoded.
+    pub fn decision_details_in_file(
+        &self,
+        view: CoverageViewId,
+        file: &str,
+    ) -> Result<Vec<crate::coverage_report::DecisionResult>, CoverageIndexError> {
+        self.decision_details_where(view, Some(file))
+    }
+
+    fn decision_details_where(
+        &self,
+        view: CoverageViewId,
+        file: Option<&str>,
+    ) -> Result<Vec<crate::coverage_report::DecisionResult>, CoverageIndexError> {
         let metadata = self
             .decision_metadata(view)?
             .into_iter()
@@ -3744,6 +3843,13 @@ impl<'a> CoverageIndex<'a> {
                 }
                 Ok(start..end)
             };
+            if let Some(file) = file
+                && metadata
+                    .get(&self.string(get_u32(record, 4))?)
+                    .is_some_and(|meta| meta.file != file)
+            {
+                continue;
+            }
             let observations = range(32, observation_count, "decision observation range")?
                 .map(|index| self.decision_vector_observation(index))
                 .collect::<Result<Vec<_>, _>>()?;
