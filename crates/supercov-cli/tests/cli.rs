@@ -4935,3 +4935,77 @@ fn the_copy_carries_what_a_project_holds_and_keeps_its_deletions() {
         "a file this large still names the copy it was written in"
     );
 }
+
+#[test]
+fn every_human_query_pages_and_names_its_filters() {
+    let project = Project::cart("human-pages");
+    project.write(
+        "src/tax.js",
+        "export function tax(amount, region) {\n  if (region === 'EU' || amount > 1000) {\n    return amount * 0.2;\n  }\n  return 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { tax } from '../src/tax.js';\n\ntest('EU pays tax', () => {\n  assert.equal(tax(10, 'EU'), 2);\n});\n",
+    );
+    project.commit("tax");
+    let run = project.measure(&[]);
+
+    // Every list cut to one row says how to read the next.
+    for args in [
+        vec!["files", "--limit", "1"],
+        vec!["gaps", "--limit", "1"],
+        vec!["file", "src/cart.js", "--limit", "1"],
+        vec!["decision", "src/tax.js:2", "--limit", "1"],
+        vec!["line", "src/tax.js:2", "--limit", "1"],
+        vec!["test", "EU pays tax", "--limit", "1"],
+    ] {
+        let mut all = vec!["runs", run.as_str()];
+        all.extend(args.iter().copied());
+        let output = project.supercov(&all).succeeds();
+        assert!(
+            output.contains("next page: supercov runs"),
+            "{args:?}\n{output}"
+        );
+        assert!(output.contains("--limit 1"), "{args:?}\n{output}");
+    }
+
+    // A narrowed view says what it was narrowed to.
+    let narrowed = project
+        .supercov(&[
+            "runs",
+            &run,
+            "files",
+            "--filter",
+            "passed",
+            "--kind",
+            "unit",
+            "--runner",
+            "node:test",
+        ])
+        .succeeds();
+    contains_all(&narrowed, &["passed", "unit", "node:test"]);
+
+    // A line the run recorded nothing about is read from the working tree,
+    // and says when that changed since the run.
+    let current = project
+        .supercov(&["runs", &run, "line", "src/tax.js:4"])
+        .succeeds();
+    assert!(
+        current.contains("(read from the current working tree)"),
+        "{current}"
+    );
+    project.edit("src/tax.js", "amount * 0.2", "amount * 0.25");
+    let stale = project
+        .supercov(&["runs", &run, "line", "src/tax.js:4"])
+        .succeeds();
+    assert!(
+        stale.contains("(read from the working tree, which changed since this run)"),
+        "{stale}"
+    );
+
+    // Only what a run gained over another.
+    let gained = project
+        .supercov(&["diff", &run, &run, "--gained"])
+        .succeeds();
+    assert!(!gained.is_empty(), "{gained}");
+}
