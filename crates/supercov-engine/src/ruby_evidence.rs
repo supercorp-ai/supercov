@@ -1554,7 +1554,7 @@ fn build_from_evidence(
             flaky: false,
             provenance: TestProvenance {
                 runner: default_observed.clone(),
-                kind: "unit".into(),
+                kind: "background".into(),
                 project: None,
                 source: RUBY_FRONTEND_VERSION.into(),
                 tags: Vec::new(),
@@ -2196,6 +2196,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(runners, ["minitest", "rspec"]);
         assert_eq!(run.ruby_versions, ["4.0.6"]);
+        // What ran while loading is no test's, so it is in no kind's row.
+        let background = run
+            .request
+            .raw_results
+            .iter()
+            .find(|raw| raw.role == "background")
+            .unwrap();
+        assert_eq!(background.provenance.kind, "background");
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -756,7 +756,7 @@ pub fn import_python_coverage_json(
             flaky: false,
             provenance: TestProvenance {
                 runner: export.runner.clone(),
-                kind: "unknown".into(),
+                kind: "background".into(),
                 project: None,
                 source: "python-coverage-v1".into(),
                 tags: Vec::new(),

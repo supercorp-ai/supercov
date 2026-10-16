@@ -2204,7 +2204,7 @@ fn build_from_evidence(
             flaky: false,
             provenance: TestProvenance {
                 runner: default_observed.clone(),
-                kind: "unit".into(),
+                kind: "background".into(),
                 project: None,
                 source: PYTHON_FRONTEND_VERSION.into(),
                 tags: Vec::new(),
