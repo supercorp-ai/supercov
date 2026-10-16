@@ -2908,6 +2908,53 @@ pub fn analyze_coverage_results(
     })
 }
 
+/// Parse each entry on its own, a share of them on each core, keeping their
+/// order. Every test's record is a JSON document of its own: one after another
+/// they were a fifth of re-indexing a 1,100-test run.
+fn parse_in_parallel<T: Send>(
+    entries: &[&EvidenceArchiveEntry],
+    parse: impl Fn(&&EvidenceArchiveEntry) -> Result<Vec<T>, ReportError> + Sync,
+) -> Result<Vec<T>, ReportError> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(entries.len().div_ceil(64))
+        .max(1);
+    if threads == 1 {
+        return entries.iter().try_fold(Vec::new(), |mut parsed, entry| {
+            parsed.extend(parse(entry)?);
+            Ok(parsed)
+        });
+    }
+    let chunk = entries.len().div_ceil(threads);
+    let parse = &parse;
+    let parts = std::thread::scope(|scope| {
+        let handles = entries
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter().try_fold(Vec::new(), |mut parsed, entry| {
+                        parsed.extend(parse(entry)?);
+                        Ok::<_, ReportError>(parsed)
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut parsed = Vec::new();
+    for part in parts {
+        parsed.extend(part?);
+    }
+    Ok(parsed)
+}
+
 fn parse_entry<T: for<'de> Deserialize<'de>>(
     entry: &EvidenceArchiveEntry,
 ) -> Result<T, ReportError> {
@@ -3008,15 +3055,20 @@ pub fn analyze_coverage_archive(
         .find(|entry| entry.path == "manifest.json")
         .ok_or(ReportError::MissingManifest)
         .and_then(parse_entry::<CoverageManifest>)?;
-    let mut raw_results = entries
+    let results = entries
         .iter()
         .filter(|entry| is_mcdc_result(&entry.path))
-        .map(parse_entry::<RawTestResult>)
-        .collect::<Result<Vec<_>, _>>()?;
-    let journal_results = parse_json_lines::<RawTestResult>(
-        entries.iter().filter(|entry| is_mcdc_journal(&entry.path)),
-    )?;
-    raw_results.extend(journal_results);
+        .collect::<Vec<_>>();
+    let mut raw_results = parse_in_parallel(&results, |entry| {
+        Ok(vec![parse_entry::<RawTestResult>(entry)?])
+    })?;
+    let journals = entries
+        .iter()
+        .filter(|entry| is_mcdc_journal(&entry.path))
+        .collect::<Vec<_>>();
+    raw_results.extend(parse_in_parallel(&journals, |entry| {
+        parse_json_lines::<RawTestResult>(std::iter::once(*entry))
+    })?);
 
     let scoped = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
         entry.path.starts_with("server/")
@@ -3199,7 +3251,12 @@ pub fn analyze_coverage_archive(
     // 3,900-test run -- and nothing reads them again, so they need not stay
     // resident while the views are built beside what was parsed from them.
     drop(entries);
-    analyze_frontend_request(&frontend, &normalized, transport)
+    let report = analyze_frontend_request(&frontend, &normalized, transport);
+    // Every test's records, gigabytes of small allocations on a large run:
+    // the views hold what they need, and freeing the rest is nobody's wait.
+    // It took 2 to 5 s of a 1,100-test run's re-index.
+    std::thread::spawn(move || drop(normalized));
+    report
 }
 
 /// Give a test that ran again under the same identity phases of its own.

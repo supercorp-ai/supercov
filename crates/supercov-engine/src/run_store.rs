@@ -973,12 +973,14 @@ pub fn open_or_build_filtered_query_index(
     }
     let report = analyze_stored_run_filtered(run, Some(filter))?;
     let sections = coverage_index_sections(&report)?;
+    std::thread::spawn(move || drop(report));
     let mut current = query_index_identity(run)?;
     current.analysis_sha256 = digest;
     if current != identity {
         return Err(RunIndexError::EvidenceChanged);
     }
     write_query_index(&sections, &identity, &path)?;
+    std::thread::spawn(move || drop(sections));
     prune_filtered_indexes(&path);
     open_written_query_index(&path, &identity)
 }
@@ -1080,6 +1082,7 @@ pub(crate) fn write_query_index_from(
     let identity = query_index_identity(run)?;
     let sections = coverage_index_sections(report)?;
     write_query_index(&sections, &identity, &run.query_index_path)?;
+    std::thread::spawn(move || drop(sections));
     Ok(())
 }
 
@@ -1097,10 +1100,14 @@ pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunInd
 
     let report = analyze_stored_run(run)?;
     let sections = coverage_index_sections(&report)?;
+    // The analysis and the sections are written; freeing them took seconds
+    // the query waited on.
+    std::thread::spawn(move || drop(report));
     if query_index_identity(run)? != identity {
         return Err(RunIndexError::EvidenceChanged);
     }
     write_query_index(&sections, &identity, &run.query_index_path)?;
+    std::thread::spawn(move || drop(sections));
     let index = open_written_query_index(&run.query_index_path, &identity)?;
     if query_index_identity(run)? != identity {
         return Err(RunIndexError::EvidenceChanged);

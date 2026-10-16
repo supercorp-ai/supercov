@@ -194,7 +194,6 @@ class CoveragePhaseController {
     pages = new Set();
     workers = new Set();
     contexts = new Set();
-    contextConfiguredHeaders = new Map();
     cdpSessions = new Map();
     newDocumentScriptIds = new Map();
     pendingRegistrations = new Set();
@@ -387,7 +386,7 @@ class CoveragePhaseController {
         for (const context of liveTrackedContexts()) {
             if (!this.contexts.has(context)) {
                 const headersKnown = trackedContextConfiguredHeaders.has(context);
-                await this.registerContext(context, trackedContextConfiguredHeaders.get(context) ?? this.configuredHeaders, { adopted: !headersKnown }).catch(() => undefined);
+                await this.registerContext(context, { adopted: !headersKnown }).catch(() => undefined);
             }
         }
     }
@@ -454,7 +453,7 @@ class CoveragePhaseController {
         const context = page.context();
         const tracked = liveTrackedContexts().has(context);
         const headersKnown = trackedContextConfiguredHeaders.has(context);
-        await this.registerContext(context, trackedContextConfiguredHeaders.get(context) ?? this.configuredHeaders, {
+        await this.registerContext(context, {
             adopted: !this.contexts.has(context) && tracked && !headersKnown,
         });
         const cdp = await page.context().newCDPSession(page).catch(() => undefined);
@@ -490,11 +489,10 @@ class CoveragePhaseController {
         for (const worker of page.workers())
             void this.registerWorker(worker);
     }
-    async registerContext(context, configuredHeaders = this.configuredHeaders, { adopted = false } = {}) {
+    async registerContext(context, { adopted = false } = {}) {
         if (this.contexts.has(context) || this.disposed)
             return;
         this.contexts.add(context);
-        this.contextConfiguredHeaders.set(context, configuredHeaders);
         if (adopted)
             this.adoptedContexts.add(context);
         await context.addInitScript({ content: browserRuntimePrelude }).catch(() => undefined);
@@ -646,14 +644,6 @@ class CoveragePhaseController {
         this.disposed = true;
         await Promise.all([...this.pendingRegistrations]);
         await this.scriptUpdate;
-        // A worker-scoped context survives this test. Remove its test scope
-        // while preserving the exact headers supplied by the suite so work
-        // between tests cannot be charged to the attempt that just ended.
-        await Promise.all([...this.contexts]
-            .filter((context) => !this.adoptedContexts.has(context))
-            .map((context) => context
-            .setExtraHTTPHeaders(this.contextConfiguredHeaders.get(context) ?? {})
-            .catch(() => undefined)));
         for (const [context, listeners] of this.contextListeners) {
             for (const [event, listener] of listeners)
                 context.off?.(event, listener);
@@ -773,7 +763,7 @@ class CoveragePhaseController {
             const configuredHeaders = sourceArgs?.[0]
                 ?.extraHTTPHeaders ?? this.configuredHeaders;
             trackContext(result, configuredHeaders);
-            await this.registerContext(result, configuredHeaders);
+            await this.registerContext(result);
         }
         if (typeof candidate["frames"] === "function" &&
             typeof candidate["context"] === "function")
@@ -896,11 +886,10 @@ class CoveragePhaseController {
             [scopeName, scope],
             ...(phase ? [[phaseName, phase]] : []),
         ];
+        // The context's own headers are left alone: they are the suite's, and
+        // a test that sets more with `setExtraHTTPHeaders` keeps them. Setting
+        // them back at every phase dropped a test's `X-Forwarded-For`.
         await Promise.all([
-            // The context's own headers are the owner's, unchanged.
-            context
-                .setExtraHTTPHeaders(this.contextConfiguredHeaders.get(context) ?? this.configuredHeaders)
-                .catch(() => undefined),
             ...this.appHosts.map((url) => {
                 const host = new URL(url);
                 // For the app's own site: requests, navigations and sockets.
@@ -1078,7 +1067,7 @@ function patchBrowserPrototype(browser) {
         trackContext(context, configuredHeaders);
         const controller = activeController;
         if (controller && !controller.contexts.has(context))
-            await controller.registerContext(context, configuredHeaders).catch(() => undefined);
+            await controller.registerContext(context).catch(() => undefined);
         return context;
     });
 }
@@ -1128,7 +1117,7 @@ function installBrowserLaunchTracking() {
         trackContext(context, configuredHeaders);
         const controller = activeController;
         if (controller)
-            await controller.registerContext(context, configuredHeaders).catch(() => undefined);
+            await controller.registerContext(context).catch(() => undefined);
         return context;
     });
 }
