@@ -3689,8 +3689,9 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
-        value_decisions: HashSet::new(),
-        typescript: parsed.program.source_type.is_typescript(),
+        value_decisions: HashMap::new(),
+        logical_root: None,
+        value_logical_nodes: HashSet::new(),
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -3925,8 +3926,9 @@ fn instrument_candidate_with_binding(
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
-        value_decisions: HashSet::new(),
-        typescript: parsed.program.source_type.is_typescript(),
+        value_decisions: HashMap::new(),
+        logical_root: None,
+        value_logical_nodes: HashSet::new(),
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -4235,6 +4237,7 @@ fn instrument_candidate_with_binding(
         ast,
         decisions: &collector.decisions,
         value_decisions: &collector.value_decisions,
+        pending_values: HashMap::new(),
         mcdc_begin: mcdc_begin.clone(),
         mcdc_condition: mcdc_condition.clone(),
         mcdc_end: mcdc_end.clone(),
@@ -7250,8 +7253,12 @@ impl<'s> CandidateNames<'s> {
 struct ControlProbeV2Transformer<'a, 's> {
     ast: AstBuilder<'a>,
     decisions: &'s [CandidateDecision],
-    /// Expressions used as values that are decisions, by span.
-    value_decisions: &'s HashSet<SpanKey>,
+    /// Expressions used as values that are decisions, by span, each with the
+    /// root of the tree whose evaluation records it.
+    value_decisions: &'s HashMap<SpanKey, SpanKey>,
+    /// Decisions applied below a tree root and not yet recorded there, with
+    /// the shape their outcome is read back from.
+    pending_values: HashMap<SpanKey, Vec<(AppliedDecision, ValueShape)>>,
     mcdc_begin: String,
     mcdc_condition: String,
     mcdc_end: String,
@@ -7575,51 +7582,111 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
 
     /// `mcdcEndV2(file, decision, vector, outcome)`, where the outcome is
     /// known from where the call stands: the branch that was taken.
-    /// A decision used as a value has no arms to record its outcome in, so
-    /// it is read from the value itself: `(_r = test, end(.., !!_r), _r)`.
-    /// The assignment keeps the value, and TypeScript types `_r` by what was
-    /// assigned to it, so the expression keeps its type too.
-    fn record_value_outcome(&mut self, expression: &mut Expression<'a>, applied: AppliedDecision) {
-        let result = self.scratch_for("_supercovMcdcResult", applied.inline);
+    /// The decisions used as values in one `&&`/`||` tree, recorded once the
+    /// tree has been evaluated: `(_f = 0, _v0 = 0, .., _r = tree, end(..),
+    /// _r)`. The tree stays whole -- a coverage tool the tests run counts it
+    /// as one branch, and TypeScript narrows across it as written -- and the
+    /// assignment keeps its value and its type. Each outcome is read back
+    /// from the decision's own temporaries with `&`, `|` and `^`, which no
+    /// tool counts as a branch; a decision the evaluation did not reach was
+    /// reset to nothing, and the runtime records no vector for it.
+    fn record_value_outcomes(
+        &mut self,
+        expression: &mut Expression<'a>,
+        pending: Vec<(AppliedDecision, ValueShape)>,
+    ) {
+        let inline = pending.iter().any(|(applied, _)| applied.inline);
+        let result = self.scratch_for("_supercovMcdcResult", inline);
+        let mut steps = self.ast.vec();
+        for (applied, _) in &pending {
+            steps.push(self.assign(&applied.frame, self.number(0)));
+            for name in &applied.values {
+                steps.push(self.assign(name, self.number(0)));
+            }
+        }
         let value = expression.take_in(self.ast.allocator);
-        let assign = self.assign(&result, value);
-        let truth = self.ast.expression_unary(
-            Span::default(),
-            UnaryOperator::LogicalNot,
-            self.ast.expression_unary(
+        steps.push(self.assign(&result, value));
+        let mut names = Vec::new();
+        for (applied, shape) in &pending {
+            let truth = self.ast.expression_unary(
                 Span::default(),
                 UnaryOperator::LogicalNot,
-                self.identifier(&result),
-            ),
-        );
-        let end = self.ast.expression_call(
-            Span::default(),
-            self.identifier(&self.mcdc_end_v2),
-            NONE,
-            self.ast.vec_from_array([
-                Argument::from(self.identifier(&self.probe_file_v2)),
-                Argument::from(self.number(applied.index as u64)),
-                Argument::from(self.encoded(&applied)),
-                Argument::from(truth),
-            ]),
-            false,
-        );
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.shape_bits(shape, applied),
+                ),
+            );
+            steps.push(self.ast.expression_call(
+                Span::default(),
+                self.identifier(&self.mcdc_end_v2),
+                NONE,
+                self.ast.vec_from_array([
+                    Argument::from(self.identifier(&self.probe_file_v2)),
+                    Argument::from(self.number(applied.index as u64)),
+                    Argument::from(self.encoded(applied)),
+                    Argument::from(truth),
+                ]),
+                false,
+            ));
+            if applied.inline {
+                names.push(applied.frame.clone());
+                names.extend(applied.values.iter().cloned());
+            }
+        }
+        steps.push(self.identifier(&result));
         let observed = self.ast.expression_parenthesized(
             Span::default(),
-            self.ast.expression_sequence(
-                Span::default(),
-                self.ast
-                    .vec_from_array([assign, end, self.identifier(&result)]),
-            ),
+            self.ast.expression_sequence(Span::default(), steps),
         );
-        *expression = if applied.inline {
-            let mut names = vec![applied.frame.clone()];
-            names.extend(applied.values.iter().cloned());
+        *expression = if inline {
             names.push(result);
             self.wrap_inline_frame(observed, &names)
         } else {
             observed
         };
+    }
+
+    /// A decision's outcome from its temporaries, as 0 or 1: a condition that
+    /// was not evaluated reads 0, which is never what decided the outcome.
+    fn shape_bits(&self, shape: &ValueShape, applied: &AppliedDecision) -> Expression<'a> {
+        let binary = |left, operator, right| {
+            self.ast.expression_parenthesized(
+                Span::default(),
+                self.ast
+                    .expression_binary(Span::default(), left, operator, right),
+            )
+        };
+        match shape {
+            ValueShape::Condition(index) => self.ast.expression_unary(
+                Span::default(),
+                UnaryOperator::UnaryPlus,
+                self.ast.expression_unary(
+                    Span::default(),
+                    UnaryOperator::LogicalNot,
+                    self.ast.expression_unary(
+                        Span::default(),
+                        UnaryOperator::LogicalNot,
+                        self.identifier(&applied.values[*index]),
+                    ),
+                ),
+            ),
+            ValueShape::And(left, right) => binary(
+                self.shape_bits(left, applied),
+                BinaryOperator::BitwiseAnd,
+                self.shape_bits(right, applied),
+            ),
+            ValueShape::Or(left, right) => binary(
+                self.shape_bits(left, applied),
+                BinaryOperator::BitwiseOR,
+                self.shape_bits(right, applied),
+            ),
+            ValueShape::Not(inner) => binary(
+                self.number(1),
+                BinaryOperator::BitwiseXOR,
+                self.shape_bits(inner, applied),
+            ),
+        }
     }
 
     fn outcome(&self, applied: &AppliedDecision, outcome: bool) -> Expression<'a> {
@@ -7938,10 +8005,16 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
     }
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
-        let value = self
-            .value_decisions
-            .contains(&span_key(expression.span()))
-            .then(|| self.reserve_decision(expression));
+        let key = span_key(expression.span());
+        let value = self.value_decisions.get(&key).copied().map(|root| {
+            let mut next = 0;
+            (
+                root,
+                self.reserve_decision(expression),
+                value_shape(expression, &mut next),
+            )
+        });
+        let is_root = self.value_decisions.values().any(|root| *root == key);
         walk_mut::walk_expression(self, expression);
         if let Some(names) = self.inline_names.take()
             && matches!(expression, Expression::ConditionalExpression(_))
@@ -7949,10 +8022,16 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
             let conditional = expression.take_in(self.ast.allocator);
             *expression = self.wrap_inline_frame(conditional, &names);
         }
-        if let Some(plan) = value
+        if let Some((root, plan, shape)) = value
             && let Some(applied) = self.apply_decision(expression, plan)
         {
-            self.record_value_outcome(expression, applied);
+            self.pending_values
+                .entry(root)
+                .or_default()
+                .push((applied, shape));
+        }
+        if is_root && let Some(pending) = self.pending_values.remove(&key) {
+            self.record_value_outcomes(expression, pending);
         }
     }
 
@@ -8076,18 +8155,32 @@ struct DecisionCollector<'s> {
     decision_logical_nodes: HashSet<SpanKey>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
     /// The expressions recorded as decisions where they are used as values,
-    /// for the transformer to find by span.
-    value_decisions: HashSet<SpanKey>,
-    /// TypeScript narrows what a left operand tests in the operand on its
-    /// right, which a recorded value would hide from it.
-    typescript: bool,
+    /// for the transformer to find by span, each with the root of the `&&`/`||`
+    /// tree it sits in: the outcome is recorded once that root has been
+    /// evaluated, so the tree stays one tree.
+    value_decisions: HashMap<SpanKey, SpanKey>,
+    /// The root of the `&&`/`||`/`??` tree being visited, through parentheses.
+    logical_root: Option<SpanKey>,
+    /// The operators inside a decision used as a value. They stay in their
+    /// value tree -- its branches and the one tree a coverage tool reads --
+    /// and only stop a decision being found inside the decision.
+    value_logical_nodes: HashSet<SpanKey>,
 }
 
 impl DecisionCollector<'_> {
+    fn in_a_decision(&self, span: Span) -> bool {
+        let key = span_key(span);
+        self.decision_logical_nodes.contains(&key) || self.value_logical_nodes.contains(&key)
+    }
+
     fn record_decision(&mut self, test: &Expression<'_>, kind: &str) {
         let mut condition_spans = Vec::new();
         collect_conditions(test, &mut condition_spans);
-        collect_decision_logical_nodes(test, &mut self.decision_logical_nodes);
+        if kind == "value" {
+            collect_decision_logical_nodes(test, &mut self.value_logical_nodes);
+        } else {
+            collect_decision_logical_nodes(test, &mut self.decision_logical_nodes);
+        }
         // Babel treats redundant parentheses as parser metadata rather than
         // part of the decision node. oxc preserves a ParenthesizedExpression,
         // so normalize it here to keep locations and stable IDs parser-neutral.
@@ -8132,32 +8225,6 @@ fn compound_root<'e, 'a>(expression: &'e Expression<'a>) -> Option<&'e LogicalEx
         }
         _ => None,
     }
-}
-
-/// Whether two expressions read a name in common, `this` included: the
-/// references TypeScript can narrow.
-fn shares_a_reference(left: &Expression<'_>, right: &Expression<'_>) -> bool {
-    #[derive(Default)]
-    struct References {
-        names: HashSet<String>,
-        this: bool,
-    }
-    impl<'a> Visit<'a> for References {
-        fn visit_identifier_reference(
-            &mut self,
-            identifier: &oxc_ast::ast::IdentifierReference<'a>,
-        ) {
-            self.names.insert(identifier.name.to_string());
-        }
-        fn visit_this_expression(&mut self, _expression: &oxc_ast::ast::ThisExpression) {
-            self.this = true;
-        }
-    }
-    let mut read_left = References::default();
-    read_left.visit_expression(left);
-    let mut read_right = References::default();
-    read_right.visit_expression(right);
-    (read_left.this && read_right.this) || !read_left.names.is_disjoint(&read_right.names)
 }
 
 /// MC/DC applies only when a decision can produce both Boolean outcomes.
@@ -9781,26 +9848,29 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
     /// condition, and is judged as one in its turn. A `!` reads its operand as
     /// a boolean too.
     fn visit_expression(&mut self, expression: &Expression<'a>) {
+        let outer_root = self.logical_root;
+        // A coverage tool the tests run reads an `&&`/`||`/`??` tree as one
+        // branch, whatever parentheses are in it; a `!` or anything else is a
+        // leaf of it.
+        self.logical_root = match expression {
+            Expression::LogicalExpression(logical) => {
+                Some(outer_root.unwrap_or(span_key(logical.span)))
+            }
+            Expression::ParenthesizedExpression(_) => outer_root,
+            _ => None,
+        };
         let candidate = match expression {
-            // In TypeScript, a left operand recorded through a temporary no
-            // longer narrows what the right reads (`user && user.ok` before
-            // `user.name`), so one whose names the right reads stays measured
-            // by its branches, as it was.
             Expression::LogicalExpression(logical)
                 if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or)
-                    && !self
-                        .decision_logical_nodes
-                        .contains(&span_key(logical.span))
-                    && !(self.typescript && shares_a_reference(&logical.left, &logical.right)) =>
+                    && !self.in_a_decision(logical.span) =>
             {
                 Some(&logical.left)
             }
             Expression::UnaryExpression(unary)
                 if unary.operator.is_not()
                     && has_compound_boolean_decision(&unary.argument)
-                    && !compound_root(&unary.argument).is_some_and(|root| {
-                        self.decision_logical_nodes.contains(&span_key(root.span))
-                    }) =>
+                    && !compound_root(&unary.argument)
+                        .is_some_and(|root| self.in_a_decision(root.span)) =>
             {
                 Some(expression)
             }
@@ -9813,11 +9883,17 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
             let mut conditions = Vec::new();
             collect_conditions(decision, &mut conditions);
             if conditions.len() <= 32 {
-                self.value_decisions.insert(span_key(decision.span()));
+                // A `!` outside any tree is its own root.
+                let root = self
+                    .logical_root
+                    .or(outer_root)
+                    .unwrap_or(span_key(decision.span()));
+                self.value_decisions.insert(span_key(decision.span()), root);
                 self.record_decision(decision, "value");
             }
         }
         walk::walk_expression(self, expression);
+        self.logical_root = outer_root;
     }
 
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
@@ -9896,6 +9972,44 @@ fn has_compound_boolean_decision(expression: &Expression<'_>) -> bool {
             has_compound_boolean_decision(&unary.argument)
         }
         _ => false,
+    }
+}
+
+/// A decision's and/or/not structure over its conditions, numbered as
+/// `collect_conditions` numbers them.
+enum ValueShape {
+    Condition(usize),
+    And(Box<ValueShape>, Box<ValueShape>),
+    Or(Box<ValueShape>, Box<ValueShape>),
+    Not(Box<ValueShape>),
+}
+
+fn value_shape(expression: &Expression<'_>, next: &mut usize) -> ValueShape {
+    match expression {
+        Expression::ParenthesizedExpression(parenthesized) => {
+            value_shape(&parenthesized.expression, next)
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+        {
+            let left = Box::new(value_shape(&logical.left, next));
+            let right = Box::new(value_shape(&logical.right, next));
+            if logical.operator == LogicalOperator::And {
+                ValueShape::And(left, right)
+            } else {
+                ValueShape::Or(left, right)
+            }
+        }
+        Expression::UnaryExpression(unary)
+            if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
+        {
+            ValueShape::Not(Box::new(value_shape(&unary.argument, next)))
+        }
+        _ => {
+            let index = *next;
+            *next += 1;
+            ValueShape::Condition(index)
+        }
     }
 }
 
@@ -11982,21 +12096,22 @@ mod tests {
             // More than two leaves: the tree's own operators stay between
             // them, so a coverage tool the tests run reads one branch, and
             // what `total > 0` or `name !== 'x'` decided is recorded where
-            // evaluation went on to `!!force`, by which of them it left:
+            // evaluation went on to `!!name`, by which of them it left:
             // the runtime looks that up, because a choice written out here
-            // would be a branch of this line to that tool.
-            "return END(0, (s1 = 0, total > 0) && (s1 = 1, name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1);",
-            // A compound left operand is read as a boolean: a decision, its
-            // outcome taken from the value it held. Not above, where the
-            // right reads `name` and TypeScript narrows it from the left.
-            "|| (s2 = 1, force), s2);",
+            // would be a branch of this line to that tool. The compound left
+            // operand is a decision too: its conditions are recorded in the
+            // leaves and its outcome after the tree, from their values with
+            // `&`, so the tree stays one tree and narrows as written.
+            "(s1 = 0, _supercovMcdcFrame27 = 1, _supercovMcdcValue29 = 0, _supercovMcdcValue28 = total > 0) && (s1 = 1, _supercovMcdcFrame27 += 3, _supercovMcdcValue29 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
+            "!!(+!!_supercovMcdcValue28 & +!!_supercovMcdcValue29)), _supercovMcdcResult30;",
+            "|| (NEXT(1, s2, 2), s2 = 2, force), s2)",
             "kind: \"value\"",
             // Only `b` can come before `c`: a first `??` that kept `a` ends
             // the second.
-            "return END(1, (s3 = 0, a) ?? (s3 = 1, b) ?? (HIT(30), s3 = 2, c), s3);",
+            "return END(2, (s3 = 0, a) ?? (s3 = 1, b) ?? (HIT(34), s3 = 2, c), s3);",
             // A parameter list cannot see a frame its function's body
             // declares: the leaves keep their calls there.
-            "SHORT(36, list, 0) || RIGHT(36, [])",
+            "SHORT(40, list, 0) || RIGHT(40, [])",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }

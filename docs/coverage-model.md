@@ -73,9 +73,8 @@ as a value are decisions too:
   fallback` and `a || b || "default"` each give a decision over `a` and `b`.
   A `!` makes its operand a decision too.
 
-Where an operand narrows a type the rest of the expression relies on (a
-Kotlin smart cast, a TypeScript narrowing), the expression keeps its branch
-outcomes and is not a decision.
+Where a Kotlin operand smart-casts the rest of the expression, the
+expression keeps its branch outcomes and is not a decision.
 
 ## What 100% means
 

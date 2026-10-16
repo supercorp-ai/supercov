@@ -1697,6 +1697,10 @@ function decodeProbeV2Vector(conditionCount, encoded, outcome) {
   return remaining === 0 ? { values, outcome } : void 0;
 }
 function mcdcEndV2(file, decisionIndex, encoded, value) {
+  // Nothing evaluated: a decision used as a value in a tree whose evaluation
+  // never reached it. Every evaluation evaluates its first condition.
+  if (encoded === 0)
+    return value;
   const clock = file.clock;
   if (clock.fast) {
     const seen = file.decisionEpochs[decisionIndex];

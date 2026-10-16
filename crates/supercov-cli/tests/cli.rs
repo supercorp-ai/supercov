@@ -5391,6 +5391,8 @@ fn cargo_reached_in_every_form_runs_what_it_was_asked() {
         String::from_utf8_lossy(&quiet.stderr)
     );
     assert_eq!(quiet.status.code(), Some(101), "{said}");
+    // rustdoc names the file as the platform writes paths.
+    let said = said.replace('\\', "/");
     contains_all(
         &said,
         &[
@@ -5530,7 +5532,16 @@ fn a_run_of_one_test_script_points_at_the_whole_suite_however_it_was_named() {
         assert_eq!(hints(command), Vec::<String>::new(), "{command:?}");
     }
     // One script of several names the others and the whole command.
-    for command in [&["npm", "run", "test:unit"][..], &["pnpm", "test:unit"]] {
+    // pnpm where it is installed: not every machine has it.
+    let pnpm = std::process::Command::new("pnpm")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    let mut commands = vec![&["npm", "run", "test:unit"][..]];
+    if pnpm {
+        commands.push(&["pnpm", "test:unit"]);
+    }
+    for command in commands {
         let said = hints(command).join("\n");
         contains_all(
             &said,

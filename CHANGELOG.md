@@ -4,7 +4,7 @@
 
 **Changed**
 
-- `&&` and `||` used as a value are MC/DC decisions in every language. In Java, Kotlin, Go and Rust the whole expression is the decision (`ok = a && b`); in JavaScript, TypeScript, Python and Ruby the compound left operand is (`(a && b) || fallback`, `a || b || "default"`), and so is the operand of `!`. An operand that narrows a type the rest relies on (Kotlin smart cast, TypeScript narrowing) keeps branch outcomes; a Go module older than 1.18 declares a limitation. MC/DC totals rise where such expressions exist.
+- `&&` and `||` used as a value are MC/DC decisions in every language. In Java, Kotlin, Go and Rust the whole expression is the decision (`ok = a && b`); in JavaScript, TypeScript, Python and Ruby the compound left operand is (`(a && b) || fallback`, `a || b || "default"`), and so is the operand of `!`. A Kotlin operand that smart-casts the rest keeps branch outcomes; a Go module older than 1.18 declares a limitation. MC/DC totals rise where such expressions exist.
 - An MC/DC gap says what run would close it: `line` and `file` JSON gain `neededVector` and `needs` (`TF -> F`, "`a` true, `b` false, decision false"), or say no test evaluated the condition.
 - Go `range`, Java for-each and Kotlin `for (x in xs)` loops record whether they ran zero times or at least once, as other languages' loops do.
 
@@ -18,6 +18,7 @@
 - A pytest `xfail` that passed read as failed; it is a pass, as pytest counts it (a strict one still fails).
 - A Python `for` whose `else` returns never recorded zero iterations; a Ruby ternary on a literal made its file unparseable to the probes.
 - `supercov docs reports` was missing from every installed copy.
+- On Linux, "command still running" listed each thread of a process as a process of its own and named Node `MainThread`.
 - `runs <id> decision file:line:column` ignored the column it lists.
 - `merge` dropped runs it could no longer fingerprint without a word, said "another build of Supercov" for runs of two languages, and now counts files added since a run.
 - The whole-suite hint told `npm t` and `npm run -s test` to run `npm test`.
