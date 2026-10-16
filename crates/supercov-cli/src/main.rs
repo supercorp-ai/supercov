@@ -837,7 +837,7 @@ fn public_run_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-const CHECK_USAGE: &str = "supercov runs <run-id> check [--min-lines <pct>] [--min-statements <pct>]\n                           [--min-functions <pct>] [--min-branches <pct>] [--min-mcdc <pct>]\n                           [--per-file] [--json]\n";
+const CHECK_USAGE: &str = "supercov runs <run-id> check [--min-lines <pct>] [--min-statements <pct>]\n                           [--min-functions <pct>] [--min-branches <pct>] [--min-mcdc <pct>]\n                           [--per-file] [--json]\n                           [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]\n";
 
 /// Gate a recorded run against percentage floors, without running tests again.
 ///
@@ -849,6 +849,7 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
     let mut floors: Vec<supercov_engine::run_view::Floor> = Vec::new();
     let mut per_file = false;
     let mut json = false;
+    let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
     let mut index = 0;
     // `runs <id> check ...`; the id may be absent, meaning the latest run.
@@ -890,6 +891,13 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
                 }
             }
             other => {
+                if let Some(taken) = test_filter_option(other, rest, &mut index, &mut filter) {
+                    if let Err(error) = taken {
+                        eprintln!("[supercov] {error}\n{CHECK_USAGE}");
+                        return ExitCode::from(2);
+                    }
+                    continue;
+                }
                 eprintln!("[supercov] unknown option {other}\n{CHECK_USAGE}");
                 return ExitCode::from(2);
             }
@@ -897,7 +905,7 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
     }
 
     let result = (|| -> Result<supercov_engine::run_view::Outcome, String> {
-        let view = load_run_view(selector)?;
+        let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
         let outcome = supercov_engine::run_view::check(&view, &floors, per_file);
         if json {
             print!(
@@ -999,7 +1007,36 @@ fn render_check(
     out
 }
 
-const PATCH_USAGE: &str = "supercov runs <run-id> patch --base <ref> [--min-lines <pct>]\n                           [--annotate github] [--max-annotations <n>] [--json]\n";
+const PATCH_USAGE: &str = "supercov runs <run-id> patch --base <ref> [--min-lines <pct>]\n                           [--annotate github] [--max-annotations <n>] [--json]\n                           [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]\n";
+
+/// The options that pick some of a run's tests, as `check`, `patch` and
+/// `report` read them. `Some` when `argument` is one of them: whether its
+/// value was there, after taking it.
+pub(crate) fn test_filter_option(
+    argument: &str,
+    rest: &[String],
+    index: &mut usize,
+    filter: &mut supercov_engine::coverage_report::TestFilter,
+) -> Option<Result<(), String>> {
+    if !matches!(
+        argument,
+        "--kind" | "--runner" | "--tag" | "--title" | "--test-file"
+    ) {
+        return None;
+    }
+    let Some(value) = rest.get(*index).filter(|value| !value.is_empty()) else {
+        return Some(Err(format!("{argument} needs a value")));
+    };
+    *index += 1;
+    match argument {
+        "--kind" => filter.kind = Some(value.to_lowercase()),
+        "--runner" => filter.runner = Some(value.to_lowercase()),
+        "--tag" => filter.tags.push(value.clone()),
+        "--title" => filter.titles.push(value.clone()),
+        _ => filter.files.push(value.clone()),
+    }
+    Some(Ok(()))
+}
 
 fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
@@ -1105,6 +1142,7 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
     let mut annotate = false;
     let mut max_annotations = 50_usize;
     let mut json = false;
+    let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
     if let Some(first) = arguments.first()
         && first != "patch"
@@ -1155,6 +1193,13 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
                 }
             }
             other => {
+                if let Some(taken) = test_filter_option(other, rest, &mut index, &mut filter) {
+                    if let Err(error) = taken {
+                        eprintln!("[supercov] {error}\n{PATCH_USAGE}");
+                        return ExitCode::from(2);
+                    }
+                    continue;
+                }
                 eprintln!("[supercov] unknown option {other}\n{PATCH_USAGE}");
                 return ExitCode::from(2);
             }
@@ -1167,7 +1212,7 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
 
     let result = (|| -> Result<u8, String> {
         let root = std::env::current_dir().map_err(|error| error.to_string())?;
-        let view = load_run_view(selector)?;
+        let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
         // Mapping a patch onto coverage recorded from different source would
         // annotate the wrong lines, which is worse than refusing.
         let blockers = view.blockers();
@@ -1285,7 +1330,7 @@ fn render_patch(
 
 /// A run's query index, or, when a filter picks tests, the index of only
 /// those tests' coverage, built from the run's evidence on first use.
-fn open_query_index_for(
+pub(crate) fn open_query_index_for(
     run: &StoredRun,
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::query_index::QueryIndex, RunIndexError> {
@@ -1307,6 +1352,12 @@ pub(crate) fn load_run_view_filtered(
     selector: Option<&str>,
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::run_view::RunView, String> {
+    if let Some(filter) = filter {
+        eprintln!(
+            "[supercov] reading only the tests {} picks",
+            filter.describe()
+        );
+    }
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
@@ -1454,21 +1505,14 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                 }
             }
             // The coverage of some tests alone, from the run as recorded.
-            "--kind" | "--runner" | "--tag" | "--title" | "--test-file" => {
-                let Some(value) = rest.get(index).filter(|value| !value.is_empty()) else {
-                    eprintln!("[supercov] {argument} needs a value\n{}", report_usage());
-                    return ExitCode::from(2);
-                };
-                index += 1;
-                match argument {
-                    "--kind" => filter.kind = Some(value.to_lowercase()),
-                    "--runner" => filter.runner = Some(value.to_lowercase()),
-                    "--tag" => filter.tags.push(value.clone()),
-                    "--title" => filter.titles.push(value.clone()),
-                    _ => filter.files.push(value.clone()),
-                }
-            }
             other => {
+                if let Some(taken) = test_filter_option(other, rest, &mut index, &mut filter) {
+                    if let Err(error) = taken {
+                        eprintln!("[supercov] {error}\n{}", report_usage());
+                        return ExitCode::from(2);
+                    }
+                    continue;
+                }
                 eprintln!("[supercov] unknown option {other}\n{}", report_usage());
                 return ExitCode::from(2);
             }

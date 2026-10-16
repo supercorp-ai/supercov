@@ -270,6 +270,10 @@ with `--min-lines`, `--min-statements`, `--min-functions`, `--min-branches` or
 eligible obligations, in addition to the whole run. Both report the counts
 behind the percentage and, for lines, where the gaps are.
 
+`--kind`, `--runner`, `--tag`, `--title` and `--test-file` hold some of the
+run's tests to a floor of their own, `--kind e2e --min-lines 60` say, from the
+same run.
+
 Floors are compared against the counts, never a rounded percentage: 9,999
 covered lines out of 10,000 displays as 99.99% and fails a 100% floor, and a
 run that displayed `100.00%` could never pass one while something is uncovered.
@@ -307,6 +311,9 @@ passes, rather than claiming 100% for a patch that changed only comments. A
 changed file that looks like product source but is absent from the run is named
 separately, because treating it as zero uncovered lines would report success for
 code nothing ran.
+
+`--kind`, `--runner`, `--tag`, `--title` and `--test-file` ask whether some of
+the tests reach the change: the E2E tests, or the tests of one file.
 
 `--annotate github` prints workflow-command annotations on stdout, combining
 adjacent misses into one range and capping the total (`--max-annotations`). It
@@ -569,6 +576,10 @@ automatically.
 npx supercov report --runs 10
 npx supercov report --output artifacts/supercov-report.html --no-open
 ```
+
+`--kind`, `--runner`, `--tag`, `--title` and `--test-file` make a report of
+only those tests' coverage, in every run it holds; a run with none of them is
+left out, and the report names the tests it shows.
 
 A report includes the five newest runs; `--runs N` includes up to 20. A large
 project's report can pass GitHub's 25 MB attachment limit; `--runs 1` makes

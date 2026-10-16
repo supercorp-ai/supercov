@@ -6334,6 +6334,37 @@ fn a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file() {
         .succeeds();
     assert!(lcov.contains("LH:3"), "{lcov}");
 
+    // Gates and the interactive report read the same tests.
+    project
+        .supercov(&["runs", &run, "check", "--min-lines", "80"])
+        .succeeds();
+    let gate = project
+        .supercov(&["runs", &run, "check", "--min-lines", "80", "--tag", "e2e"])
+        .exits(1);
+    contains_all(
+        &gate,
+        &[
+            "reading only the tests --tag e2e picks",
+            "lines 33.33%  2/6 below 80%",
+        ],
+    );
+    let written = project
+        .supercov(&[
+            "report",
+            &run,
+            "--no-open",
+            "--tag",
+            "api",
+            "--output",
+            "api.html",
+        ])
+        .exits(0);
+    assert!(written.contains("api.html"), "{written}");
+    let refused = project
+        .supercov(&["report", &run, "--no-open", "--tag", "nothing"])
+        .exits(2);
+    assert!(refused.contains("matches --tag nothing"), "{refused}");
+
     // Worked out once from the stored run, then read back.
     let filtered = |root: &std::path::Path| {
         std::fs::read_dir(root.join(".supercov/runs").join(&run))
