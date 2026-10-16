@@ -16,13 +16,19 @@ function option(name, fallback) {
 
 if (option("--engine", "rust") !== "rust")
   throw new Error("Rust is Supercov's only engine; --engine accepts only rust");
+// The binary the other gates take too (`SUPERCOV_BINARY`): run from the
+// end-to-end harness it is the one under measurement, and inside a Supercov
+// copy there is no `target/release` at all.
 const supercovBinary = resolve(
   option(
     "--rust-binary",
     process.env.SUPERCOV_RUST_BINARY ??
+      process.env.SUPERCOV_BINARY ??
       `target/release/supercov${process.platform === "win32" ? ".exe" : ""}`,
   ),
 );
+if (!existsSync(supercovBinary))
+  throw new Error(`Supercov binary not found at ${supercovBinary}: build it, or pass --rust-binary <path>`);
 
 function instrumentSources(cases) {
   const transformed = spawnSync(supercovBinary, ["__instrument-js"], {
@@ -77,13 +83,18 @@ const sourceReflectionTests = new Map([
     "built-ins/RegExp/prototype/exec/S15.10.6.2_A1_T9.js",
     "coerces a Function to its implementation-defined source string and matches that source with a RegExp",
   ],
+  // Methods: the source of `obj.method` is read through a property, which
+  // the instrumenter does not follow, so the method itself is instrumented.
   [
     "staging/sm/async-functions/toString.js",
-    "asserts exact Function.prototype.toString source text",
+    "asserts exact async method Function.prototype.toString source text",
   ],
+  // eshost reads a comment as a module import -- "Repeats the test from
+  // 'Function/function-toString-builtin.js'" -- and, when that file's source
+  // is in its cache by base name, writes it into a directory it never made.
   [
-    "staging/sm/generators/runtime.mjs",
-    "asserts exact generator Function.prototype.toString source text",
+    "staging/sm/Function/function-toString-builtin-name.js",
+    "the Test262 host harness reads a comment in it as a module import",
   ],
 ]);
 
@@ -304,8 +315,12 @@ const temporaryHarnessRunnerRoot = resolve(temporary, "test262-harness");
 let harnessRunSequence = 0;
 
 try {
+  // Its files, not a link to them: inside a Supercov copy `node_modules` is
+  // the project's own, linked, and patching a copied link patched the
+  // project's installed harness.
   cpSync(resolve("node_modules/test262-harness"), temporaryHarnessRunnerRoot, {
     recursive: true,
+    dereference: true,
   });
   const agentPoolPath = resolve(temporaryHarnessRunnerRoot, "lib/agent-pool.js");
   const agentPoolSource = readFileSync(agentPoolPath, "utf8");

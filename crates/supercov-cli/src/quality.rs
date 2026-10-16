@@ -1090,15 +1090,39 @@ fn discover_for(
             }
             files.insert(canonical);
         } else if metadata.is_dir() {
-            let walker = ignore::WalkBuilder::new(&canonical)
+            let mut builder = ignore::WalkBuilder::new(&canonical);
+            builder
                 .follow_links(false)
                 .require_git(false)
                 .filter_entry(|entry| {
                     entry.depth() == 0
                         || !entry.file_type().is_some_and(|t| t.is_dir())
                         || !ignored_directory_at(entry.path())
-                })
-                .build();
+                });
+            // A project inside one of Supercov's own copies has nothing above
+            // it but Supercov's: the `.supercov` directory's `.gitignore`,
+            // which ignores everything (`*`), and the repository holding the
+            // copy. Read from above, they hid every file of the project. Its
+            // own ignore files, from its root down, still apply.
+            if root
+                .ancestors()
+                .any(|ancestor| ancestor.file_name().is_some_and(|name| name == ".supercov"))
+            {
+                builder.parents(false);
+                for directory in canonical
+                    .ancestors()
+                    .skip(1)
+                    .take_while(|directory| directory.starts_with(root))
+                {
+                    for name in [".gitignore", ".ignore"] {
+                        let file = directory.join(name);
+                        if file.is_file() {
+                            let _ = builder.add_ignore(file);
+                        }
+                    }
+                }
+            }
+            let walker = builder.build();
             for entry in walker {
                 let entry = entry.map_err(|e| e.to_string())?;
                 if entry.file_type().is_some_and(|t| t.is_file())

@@ -519,6 +519,172 @@ fn shift_source_map(
     )
 }
 
+/// Puts back, as written, every function whose source text the program reads.
+///
+/// Such a function is left without probes, but the whole file is printed
+/// again from its tree, and the printer lays a function out its own way:
+/// `function f() { return 1; }` came back as `function f() {\n\treturn 1;\n}`,
+/// so `f.toString()` differed under measurement. A function of the output is
+/// matched to its source by the first position inside it the source map says
+/// was printed from somewhere (an arrow's is a parameter, not its start).
+/// Inside a restored function each line maps to its own line of the source.
+fn restore_function_source(
+    program: &Program<'_>,
+    sensitive: &HashSet<SpanKey>,
+    generated: &str,
+    map: oxc_sourcemap::SourceMap,
+) -> Result<(String, oxc_sourcemap::SourceMap), CandidateError> {
+    if sensitive.is_empty() {
+        return Ok((generated.to_string(), map));
+    }
+    let allocator = Allocator::default();
+    let reparsed = Parser::new(&allocator, generated, program.source_type).parse();
+    if !reparsed.errors.is_empty() {
+        return Err(CandidateError::Parse(
+            reparsed
+                .errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect(),
+        ));
+    }
+    struct Functions(Vec<Span>);
+    impl<'a> Visit<'a> for Functions {
+        fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
+            self.0.push(function.span);
+            walk::walk_function(self, function, flags);
+        }
+        fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+            self.0.push(arrow.span);
+            walk::walk_arrow_function_expression(self, arrow);
+        }
+    }
+    let mut functions = Functions(Vec::new());
+    functions.visit_program(&reparsed.program);
+    functions.0.sort_by_key(|span| span.start);
+
+    let source_lines = Utf16LineIndex::new(program.source_text);
+    let generated_lines = Utf16LineIndex::new(generated);
+    let mut printed_from = map
+        .get_tokens()
+        .filter_map(|token| {
+            token.get_source_id()?;
+            Some((
+                generated_lines
+                    .byte_offset(token.get_dst_line() as usize, token.get_dst_col() as usize),
+                source_lines
+                    .byte_offset(token.get_src_line() as usize, token.get_src_col() as usize),
+            ))
+        })
+        .collect::<Vec<_>>();
+    printed_from.sort_unstable();
+    let mut used = HashSet::new();
+    // (generated start, generated end, source start, source end)
+    let mut edits = Vec::<(usize, usize, usize, usize)>::new();
+    for span in &functions.0 {
+        let (start, end) = (span.start as usize, span.end as usize);
+        if edits.last().is_some_and(|edit| start < edit.1) {
+            continue;
+        }
+        let first = printed_from.partition_point(|(generated, _)| *generated < start);
+        let Some(&(_, source)) = printed_from
+            .get(first)
+            .filter(|(generated, _)| *generated < end)
+        else {
+            continue;
+        };
+        // The innermost source-read function holding that position.
+        let Some(&(source_start, source_end)) = sensitive
+            .iter()
+            .filter(|(from, to)| *from as usize <= source && source < *to as usize)
+            .min_by_key(|(from, to)| to - from)
+        else {
+            continue;
+        };
+        if !used.insert((source_start, source_end)) {
+            continue;
+        }
+        edits.push((start, end, source_start as usize, source_end as usize));
+    }
+    if edits.is_empty() {
+        return Ok((generated.to_string(), map));
+    }
+
+    let mut restored = String::with_capacity(generated.len());
+    let mut cursor = 0;
+    // Where each edit landed in the restored text.
+    let mut placed = Vec::with_capacity(edits.len());
+    for (start, end, source_start, source_end) in &edits {
+        restored.push_str(&generated[cursor..*start]);
+        placed.push(restored.len());
+        restored.push_str(&program.source_text[*source_start..*source_end]);
+        cursor = *end;
+    }
+    restored.push_str(&generated[cursor..]);
+
+    let restored_lines = Utf16LineIndex::new(&restored);
+    let shifted = |offset: usize| {
+        let before = edits.partition_point(|edit| edit.1 <= offset);
+        let shift = edits[..before]
+            .iter()
+            .map(|(start, end, source_start, source_end)| {
+                (source_end - source_start) as isize - (end - start) as isize
+            })
+            .sum::<isize>();
+        offset.saturating_add_signed(shift)
+    };
+    let mut tokens = Vec::new();
+    for token in map.get_tokens() {
+        let offset = generated_lines
+            .byte_offset(token.get_dst_line() as usize, token.get_dst_col() as usize);
+        // What the printer wrote inside a restored function is gone.
+        if edits
+            .iter()
+            .any(|(start, end, _, _)| *start < offset && offset < *end)
+        {
+            continue;
+        }
+        let (dst_line, dst_col) = restored_lines.line_col(shifted(offset));
+        tokens.push(oxc_sourcemap::Token::new(
+            dst_line,
+            dst_col,
+            token.get_src_line(),
+            token.get_src_col(),
+            token.get_source_id(),
+            token.get_name_id(),
+        ));
+    }
+    let source_id = map.get_tokens().find_map(|token| token.get_source_id());
+    for ((_, _, source_start, source_end), at) in edits.iter().zip(&placed) {
+        let text = &program.source_text[*source_start..*source_end];
+        let mut line_start = 0;
+        for line in text.split_inclusive('\n') {
+            if line_start > 0 {
+                let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+                let (dst_line, dst_col) = restored_lines.line_col(at + line_start + indent);
+                let (src_line, src_col) = source_lines.line_col(source_start + line_start + indent);
+                tokens.push(oxc_sourcemap::Token::new(
+                    dst_line, dst_col, src_line, src_col, source_id, None,
+                ));
+            }
+            line_start += line.len();
+        }
+    }
+    tokens.sort_by_key(|token| (token.get_dst_line(), token.get_dst_col()));
+    let map = oxc_sourcemap::SourceMap::new(
+        map.get_file().cloned(),
+        map.get_names().cloned().collect::<Vec<Arc<str>>>(),
+        map.get_source_root().map(str::to_string),
+        map.get_sources().cloned().collect::<Vec<Arc<str>>>(),
+        map.get_source_contents()
+            .map(|content| content.cloned())
+            .collect::<Vec<Option<Arc<str>>>>(),
+        tokens.into_boxed_slice(),
+        None,
+    );
+    Ok((restored, map))
+}
+
 /// Where a statement Supercov generated inside a function or block starts, in
 /// the source map: past the source's end, where no node of the program starts
 /// and no comment is attached (a comment ending the file is attached to its
@@ -830,6 +996,7 @@ fn map_closing_lines(
 fn generate_candidate(
     program: &Program<'_>,
     file: &str,
+    source_sensitive_functions: &HashSet<SpanKey>,
 ) -> Result<(String, Option<serde_json::Value>), CandidateError> {
     let options = CodegenOptions {
         source_map_path: Some(Path::new(file).to_path_buf()),
@@ -844,6 +1011,7 @@ fn generate_candidate(
         program.source_text,
     );
     let (code, map) = restore_comment_text(program, &generated.code, map)?;
+    let (code, map) = restore_function_source(program, source_sensitive_functions, &code, map)?;
     let map = map_closing_lines(map, &code, program.source_text);
     let map = Some({
         serde_json::from_str(&map.to_json_string())
@@ -3537,7 +3705,8 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         ast: AstBuilder::new(&allocator),
     }
     .visit_program(&mut parsed.program);
-    let (generated, map) = generate_candidate(&parsed.program, file)?;
+    let (generated, map) =
+        generate_candidate(&parsed.program, file, &safety.source_sensitive_functions)?;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
@@ -4222,7 +4391,8 @@ fn instrument_candidate_with_binding(
         ast: AstBuilder::new(&allocator),
     }
     .visit_program(&mut parsed.program);
-    let (code, map) = generate_candidate(&parsed.program, file)?;
+    let (code, map) =
+        generate_candidate(&parsed.program, file, &safety.source_sensitive_functions)?;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: true,
@@ -9905,6 +10075,39 @@ mod tests {
         assert_eq!(name_at(1, matcher).as_deref(), Some("toBe"));
         assert_eq!(name_at(0, 9).as_deref(), Some("expect"));
         assert_eq!(name_at(0, 18), None, "`from` is a keyword");
+    }
+
+    #[test]
+    fn a_function_whose_source_is_read_keeps_its_text_exactly() {
+        // Left without probes, it was still printed again: `f.toString()`
+        // read `function f() {\n\treturn 1;\n}` under measurement.
+        let source = "export function* g() { yield 1; }\nexport const add = (a,  b) =>   a + b;\nexport async function later(x) {\n  // kept\n  if (x) {\n      return x;\n  }\n  return 0;\n}\nexport function counted(n) { return n > 1 ? 'many' : 'one'; }\nexport const shown = () => [g.toString(), String(add), `${later}`];\n";
+        let output = instrument_direct_candidate(source, "src/text.js").unwrap();
+        for text in [
+            "function* g() { yield 1; }",
+            "(a,  b) =>   a + b",
+            "async function later(x) {\n  // kept\n  if (x) {\n      return x;\n  }\n  return 0;\n}",
+        ] {
+            assert!(output.code.contains(text), "{text}\n{}", output.code);
+        }
+        // A function nobody reads the source of is measured as before.
+        assert!(
+            !output
+                .code
+                .contains("function counted(n) { return n > 1 ? 'many' : 'one'; }"),
+            "{}",
+            output.code
+        );
+        // Typed source keeps its types as written.
+        let typed = "export function twice(value: number): number { return value  * 2; }\nexport const text = twice.toString();\n";
+        let output = instrument_direct_candidate(typed, "src/typed.ts").unwrap();
+        assert!(
+            output
+                .code
+                .contains("function twice(value: number): number { return value  * 2; }"),
+            "{}",
+            output.code
+        );
     }
 
     #[test]

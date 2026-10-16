@@ -312,9 +312,12 @@ await verifyUncatchableTestTreeRecovery();
 const projectBefore = snapshot(root);
 const workRoot = resolve(root, ".supercov/work");
 const runsBefore = new Set(existsSync(workRoot) ? readdirSync(workRoot) : []);
-// A fixture inside this repository is copied at its path in the repository.
+// A fixture inside this repository is copied at its path in the repository;
+// one the repository ignores (this gate run from inside a Supercov copy) is a
+// project of its own.
 const repositoryRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: root, encoding: "utf8" }).stdout?.trim();
-const expectedCache = repositoryRoot
+const ignoredByRepository = spawnSync("git", ["check-ignore", "-q", "--", root], { cwd: root }).status === 0;
+const expectedCache = repositoryRoot && !ignoredByRepository
   ? resolve(root, ".supercov/workspaces/workspace", basename(repositoryRoot), relative(repositoryRoot, root))
   : resolve(root, ".supercov/workspaces/workspace/generic-playwright");
 

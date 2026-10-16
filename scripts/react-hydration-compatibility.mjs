@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 const repository = resolve(import.meta.dirname, '..');
 const cwd = resolve(repository, 'examples/react-verification');
@@ -20,6 +21,9 @@ function run(command, args) {
   assert.equal(r.status, 0, r.stdout + r.stderr);
   return r.stdout;
 }
+// Run on its own, from the end-to-end harness, nothing installed the
+// example's packages first.
+if (!existsSync(resolve(cwd, 'node_modules'))) run('npm', ['ci', '--no-audit', '--no-fund']);
 const args = ['test', '--', '--config', 'vitest.hydration.config.ts'];
 run('npm', args);
 run(binary, ['--', 'npm', ...args]);

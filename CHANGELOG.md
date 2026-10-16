@@ -6,6 +6,7 @@
 
 - `supercov runs <run-id> gaps --format jsonl` refused every run too large for one JSON reply, the runs it exists for, with the reply's 64 KB message. It now writes every obligation however many there are.
 - A test command that ran `cargo build` in the copy (a test that builds the CLI it drives) had that build synced back over the project's `target/`, so the project's next build linked crates with Supercov's probes in them. What Cargo builds in the copy now stays there.
+- A function whose source the code reads (`f.toString()`, `String(f)`, a template) returned the text Supercov printed instead of what was written: `function f() { return 1; }` read back as `function f() {\n\treturn 1;\n}`. Such a function now keeps its text exactly, comments and spacing included.
 - The GitHub Action removes the file it reads the run's id from. A self-hosted runner, whose temporary directory is not emptied between jobs, kept one for every step.
 
 ## 4.12.1

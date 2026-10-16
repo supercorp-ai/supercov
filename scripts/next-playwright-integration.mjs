@@ -132,8 +132,14 @@ assert.match(e2e.output, /4 passed/);
 assert.match(e2e.output, /stayed in the isolated workspace[^\n]*\.next\/ \d+/);
 assert.ok(!existsSync(resolve(fixture, '.next')), 'an instrumented build reached the project');
 // Next warns about more than one lockfile above it. The copy's own, inside
-// the project, is not one of them.
-assert.doesNotMatch(e2e.output, /\* .*\.supercov\/workspaces\/[^\n]*lock/, e2e.output);
+// the project, is not one of them. (Lockfiles above the fixture are, and when
+// this gate itself runs inside a Supercov copy their paths hold
+// `.supercov/workspaces` too.)
+const ownCopy = resolve(fixture, '.supercov/workspaces');
+assert.ok(
+  !e2e.output.split('\n').some((line) => /^\[WebServer\]\s+\* /u.test(line) && line.includes(ownCopy)),
+  e2e.output,
+);
 const e2eRun = latest();
 // A route under a folder named `test` is served, measured and covered.
 const route = supercov(['runs', e2eRun, 'file', 'app/api/widget/test/route.ts']);
