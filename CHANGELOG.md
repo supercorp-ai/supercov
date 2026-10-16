@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- A server whose `emit` something else wrapped before Supercov loaded (a preload that put its own `emit` on `http.Server.prototype`) hid its requests from Supercov: what ran on a request's own events, a body read on `end` or a page rendered as the response went out, was credited to no test. Supercov now also reads each request from `diagnostics_channel`, which nothing hides.
 - A Playwright test read Supercov's own cookies: `context.cookies()` listed the cookies that carry the test's scope, so an assertion on cookies failed only under measurement, and `storageState({ path })` wrote them into the suite's saved login state. Both now give the suite's cookies alone.
 
 ## 4.14.0
