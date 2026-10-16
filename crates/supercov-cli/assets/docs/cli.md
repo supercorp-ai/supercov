@@ -210,8 +210,9 @@ locations from a file, one per line, skipping blank lines and `#` comments.
 Each line of several lists its state, its gaps and its first three covering
 tests, with `totalTests` and `totalPhases` for the rest; asked alone, a line
 lists every test and phase. In `--json` the reply is `coverage.lines`, one
-entry per location in order; any that do not fit one reply are listed in
-`remaining`, to ask for next.
+entry per location in order, each location once. Locations that do not fit one
+reply are listed in `remaining`, and `pagination.nextOffset` says where the next
+reply starts: ask again with `--offset`, as for any page.
 
 ```sh supercov
 npx supercov runs latest line app/routes/checkout.ts:42 app/routes/checkout.ts:57

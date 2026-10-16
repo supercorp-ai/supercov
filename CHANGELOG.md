@@ -12,6 +12,7 @@
 
 **Fixed**
 
+- `line` with many locations in `--json` answered as many as fit one reply and listed the rest in `remaining` only, so a pager following `nextOffset` stopped after the first reply, and a location given twice was answered twice. The reply now pages as every other query does (`pagination.nextOffset`, `--offset`), each location once.
 - A server whose `emit` something else wrapped before Supercov loaded (a preload that put its own `emit` on `http.Server.prototype`) hid its requests from Supercov: what ran on a request's own events, a body read on `end` or a page rendered as the response went out, was credited to no test. Supercov now also reads each request from `diagnostics_channel`, which nothing hides.
 - A Playwright test read Supercov's own cookies: `context.cookies()` listed the cookies that carry the test's scope, so an assertion on cookies failed only under measurement, and `storageState({ path })` wrote them into the suite's saved login state. Both now give the suite's cookies alone.
 
