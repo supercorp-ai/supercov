@@ -81,6 +81,22 @@ fn walk(node: Node, source: &str, starts: &[usize], kotlin: bool, out: &mut Star
 /// `Some(change)` for a statement (`Some(None)`: not assessed).
 fn change(node: Node, source: &str, kotlin: bool) -> Option<Option<Change>> {
     let text = source.get(node.byte_range()).unwrap_or("");
+    // Returning null or assigning null, changed to null, is the same code: a
+    // question no test could answer yes to.
+    let statement = text.trim().trim_end_matches(';').trim();
+    if statement == "return null"
+        || matches!(
+            node.kind(),
+            "local_variable_declaration"
+                | "expression_statement"
+                | "assignment"
+                | "property_declaration"
+        ) && statement.rsplit_once('=').is_some_and(|(head, value)| {
+            value.trim() == "null" && !head.ends_with(['=', '!', '<', '>'])
+        })
+    {
+        return Some(Some(Change::Skip));
+    }
     let has_value = || {
         let first = text.split('\n').next().unwrap_or("");
         super::split_initializer(first).is_some()
@@ -347,6 +363,23 @@ pub(super) fn imports(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::assertion_coverage::{Language, change_at};
+
+    #[test]
+    fn null_changed_to_null_is_not_asked() {
+        let source = "class A {\n    String f(String x) {\n        String y = null;\n        x = null;\n        if (x == null) {\n            return null;\n        }\n        return y;\n    }\n}\n";
+        let starts = statement_starts("A.java", source);
+        let j = Language::Jvm;
+        assert_eq!(
+            change_at(&starts, 3, "String y = null;", j),
+            Some(Change::Skip)
+        );
+        assert_eq!(change_at(&starts, 4, "x = null;", j), Some(Change::Skip));
+        assert_eq!(change_at(&starts, 6, "return null;", j), Some(Change::Skip));
+        assert_eq!(
+            change_at(&starts, 8, "return y;", j),
+            Some(Change::ReturnUndefined)
+        );
+    }
 
     #[test]
     fn java_changes_follow_the_audit() {

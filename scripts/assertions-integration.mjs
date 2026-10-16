@@ -708,7 +708,9 @@ try {
     scenario({ name: "Python", root: py, command: [python, "-m", "unittest", "discover", "-s", "tests", "-t", "."], logFile: "src/cart.py", logText: "print", logLine: 7,
       edit: ["src/format.py", "trimmed.upper()", "trimmed.upper().strip()"] });
   if (!javascriptOnly && hasGo)
-    scenario({ name: "Go", root: go, command: ["go", "test", "./..."], logFile: "cart.go", logText: "Println", logLine: 15,
+    // Go's \`sum := 0\` would be asked as becoming \`sum := 0\`, which is no
+    // change, so it is not asked: one statement fewer than the others.
+    scenario({ name: "Go", root: go, command: ["go", "test", "./..."], logFile: "cart.go", logText: "Println", logLine: 15, statements: 10,
       edit: ["format.go", "strings.ToUpper(trimmed)", "strings.ToUpper(strings.TrimSpace(trimmed))"] });
   else if (!javascriptOnly) console.log("[assertions] Go: skipped, go is not on PATH");
   if (!javascriptOnly && ruby) {
