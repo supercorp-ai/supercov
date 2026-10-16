@@ -184,15 +184,20 @@ fn page_label(page: &AgentPagination) -> String {
     format!("showing {start}-{end} of {}", page.total)
 }
 
+/// The next page, and the command that shows every entry at once: a page
+/// stops at 20, and a reader who wants them all should not have to find
+/// `--limit` in the help.
 fn next_page(base: &str, page: &AgentPagination) -> Option<String> {
     page.next_offset.map(|offset| {
         format!(
-            "{base} --offset {offset}{}",
+            "{base} --offset {offset}{}\nall {} at once: {base} --limit {}",
             if page.limit == DEFAULT_LIMIT {
                 String::new()
             } else {
                 format!(" --limit {}", page.limit)
-            }
+            },
+            page.total,
+            page.total
         )
     })
 }

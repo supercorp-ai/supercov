@@ -1328,6 +1328,65 @@ fn render_patch(
     out
 }
 
+/// The files that differ from what a stale run measured, tests and source:
+/// those it recorded that are not as they were, and those added since its
+/// commit. "Test files changed" alone sent readers comparing commit dates
+/// with the run's start to work out which.
+fn changed_since_run(root: &Path, run: &StoredRun) -> Vec<String> {
+    let Ok(stored) = supercov_engine::source_manifest::load_manifest(run) else {
+        return Vec::new();
+    };
+    let recorded = &stored.manifest.files;
+    let mut changed = supercov_engine::source_manifest::changed_files(recorded, |file| {
+        fs::read_to_string(root.join(file))
+            .ok()
+            .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256)
+    });
+    // Added files are in no record: git names them, of the kinds of file the
+    // run measured.
+    let extensions = recorded
+        .keys()
+        .filter_map(|file| Path::new(file).extension())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut added = Vec::new();
+    if let Some(revision) = run
+        .metadata
+        .integrity
+        .git
+        .as_ref()
+        .and_then(|git| git.revision.as_deref())
+        && let Ok(listed) = git_output(
+            root,
+            &[
+                "diff",
+                "--name-only",
+                "--relative",
+                "--diff-filter=A",
+                revision,
+            ],
+        )
+    {
+        added.extend(listed.lines().map(str::to_owned));
+    }
+    if let Ok(listed) = git_output(root, &["ls-files", "--others", "--exclude-standard"]) {
+        added.extend(listed.lines().map(str::to_owned));
+    }
+    for file in added {
+        let file = file.trim().to_owned();
+        if !file.is_empty()
+            && !recorded.contains_key(&file)
+            && !changed.contains(&file)
+            && Path::new(&file)
+                .extension()
+                .is_some_and(|extension| extensions.contains(extension))
+        {
+            changed.push(file);
+        }
+    }
+    changed.sort();
+    changed
+}
+
 /// A run's query index, or, when a filter picks tests, the index of only
 /// those tests' coverage, built from the run's evidence on first use.
 pub(crate) fn open_query_index_for(
@@ -2532,8 +2591,24 @@ fn execute_public_query(
                     .stale_reasons
                     .get_or_insert_with(|| comparison.reasons.clone());
                 if comparison.stale {
+                    let changed = changed_since_run(root, run);
+                    let named = if changed.is_empty() {
+                        String::new()
+                    } else {
+                        let shown = changed.iter().take(10).cloned().collect::<Vec<_>>();
+                        let more = changed.len().saturating_sub(shown.len());
+                        format!(
+                            "; changed since the run: {}{}",
+                            shown.join(", "),
+                            if more > 0 {
+                                format!(" and {more} more")
+                            } else {
+                                String::new()
+                            }
+                        )
+                    };
                     warnings.push(format!(
-                        "[supercov] stale run {}: {}",
+                        "[supercov] stale run {}: {}{named}",
                         run.id,
                         comparison.reasons.join(", ")
                     ));

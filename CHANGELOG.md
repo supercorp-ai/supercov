@@ -11,6 +11,9 @@
 - `runs <id> line` takes several locations in one call (`line a.ts:10 a.ts:20`), or a file of them with `--from-file`, and reads the run once for all of them: on a 1,100-test run twenty lines cost about what one does. Each line lists its state, its gaps and its first three covering tests; asked alone, a line lists them all. Its `--json` reply is `coverage.lines`, and locations that do not fit one reply are listed in `remaining`.
 - An MC/DC gap names the value each missing condition never took: `` `sum < 50` was never true `` in `file`, `line` and `decision`, and `missingOutcomes` (`["true"]`) in their `--json`. `file --group decision` lists the missing conditions under each decision, with the run that would show them deciding.
 
+- A query of a stale run names the files that changed since it, tests and source, those added included, beside "test files changed".
+- A page that stops short gives the command that shows every entry at once (`all 61 at once: ... --limit 61`), and `--help` says what `--limit` does.
+
 **Fixed**
 - A header a Playwright test set with `context.setExtraHTTPHeaders` (an `X-Forwarded-For`, say) did not reach the app under measurement: Supercov set the context's headers back to those it was created with at every step. A test's own headers are now left alone.
 - What Python and Ruby ran while loading, before any test, was counted in the `unit` row of `kinds` and `--kind unit`. It is now in no kind's row, as it is for JavaScript, so `--kind unit` and a tag picking the same tests agree.

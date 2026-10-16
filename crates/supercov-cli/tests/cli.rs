@@ -6469,3 +6469,33 @@ fn headers_a_test_sets_on_its_context_reach_the_app() {
         .succeeds();
     assert!(run.contains("1 passed"), "{run}");
 }
+
+#[test]
+fn a_stale_run_names_the_files_that_changed_since_it() {
+    let project = Project::empty("stale-names");
+    project.write(
+        "package.json",
+        r#"{ "name": "stale-names", "private": true, "type": "module" }"#,
+    );
+    project.write("src/shop.js", "export const price = (sum) => sum * 2;\n");
+    project.write(
+        "test/price.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { price } from \"../src/shop.js\";\ntest(\"doubles\", () => assert.equal(price(2), 4));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("start");
+    let run = project.measure(&["test/price.test.js"]);
+    project.write(
+        "test/price.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { price } from \"../src/shop.js\";\ntest(\"doubles\", () => assert.equal(price(3), 6));\n",
+    );
+    project.write(
+        "test/more.test.js",
+        "import test from \"node:test\";\ntest(\"more\", () => {});\n",
+    );
+    let said = project.supercov(&["runs", &run]).exits(0);
+    assert!(
+        said.contains("changed since the run: test/more.test.js, test/price.test.js"),
+        "{said}"
+    );
+}
