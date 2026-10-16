@@ -98,6 +98,7 @@ gates! {
     cross_origin_requests => "cross-origin-requests.mjs",
     leaving_page => "leaving-page.mjs",
     js_syntax_zoo => "js-syntax-zoo.mjs",
+    ruby_syntax_zoo => "ruby-syntax-zoo.mjs",
     shared_page => "shared-page.mjs",
     merge_across => "merge-across.mjs",
     mock_reach => "mock-reach.mjs",
