@@ -68,7 +68,10 @@ fn tokens(source: &str, conditions: &[&str]) -> Option<Vec<Token>> {
             (Token::Or, after)
         } else if let Some(after) = word(rest, "not") {
             (Token::Not, after)
-        } else if let Some(after) = rest.strip_prefix('!').filter(|after| !after.starts_with('=')) {
+        } else if let Some(after) = rest
+            .strip_prefix('!')
+            .filter(|after| !after.starts_with('='))
+        {
             (Token::Not, after)
         } else if let Some(after) = rest.strip_prefix('(') {
             (Token::Open, after)
@@ -213,7 +216,10 @@ mod tests {
             ("signedIn && !expired", vec!["signedIn", "!expired"]),
             ("member and not banned", vec!["member", "banned"]),
             ("(a || b) && !(c)", vec!["a", "b", "c"]),
-            ("user?.admin || flags[\"beta\"] != null", vec!["user?.admin", "flags[\"beta\"] != null"]),
+            (
+                "user?.admin || flags[\"beta\"] != null",
+                vec!["user?.admin", "flags[\"beta\"] != null"],
+            ),
         ] {
             assert!(possible_vectors(source, &conditions).is_some(), "{source}");
         }

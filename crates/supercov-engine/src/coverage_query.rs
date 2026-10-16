@@ -2015,12 +2015,18 @@ fn needed(
             .iter()
             .any(|vector| vector.values.get(index).copied().flatten().is_some())
         {
-            (None, format!("a run where `{condition}` alone changes the decision"))
+            (
+                None,
+                format!("a run where `{condition}` alone changes the decision"),
+            )
         } else {
             (None, format!("no test evaluated `{condition}`"))
         };
     };
-    let seen = observed.iter().map(|vector| (*vector).clone()).collect::<Vec<_>>();
+    let seen = observed
+        .iter()
+        .map(|vector| (*vector).clone())
+        .collect::<Vec<_>>();
     let unseen = possible
         .into_iter()
         .filter(|vector| !seen.contains(vector))
@@ -2063,7 +2069,10 @@ fn needed(
             }
         }
     }
-    (None, format!("`{condition}` cannot decide the result on its own"))
+    (
+        None,
+        format!("`{condition}` cannot decide the result on its own"),
+    )
 }
 
 fn vector_text(vector: &crate::coverage_analysis::McdcVector) -> String {
@@ -3768,12 +3777,8 @@ pub fn coverage_file_decisions_query(
                         .iter()
                         .filter(|condition| !condition.covered)
                         .map(|condition| {
-                            let (needed_vector, needs) = needed(
-                                condition.index,
-                                &observed,
-                                &sources,
-                                &decision.meta.source,
-                            );
+                            let (needed_vector, needs) =
+                                needed(condition.index, &observed, &sources, &decision.meta.source);
                             CoverageMissingCondition {
                                 index: condition.index,
                                 condition: condition.source.clone(),
@@ -4368,7 +4373,11 @@ mod tests {
         let observed = seen.iter().collect::<Vec<_>>();
         let sources = ["a", "b", "c", "d", "e"];
         let (values, words) = needed(0, &observed, &sources, "a || b || c || d || e");
-        assert_eq!(values.as_deref(), Some("FFFFF -> F and T---- -> T"), "{words}");
+        assert_eq!(
+            values.as_deref(),
+            Some("FFFFF -> F and T---- -> T"),
+            "{words}"
+        );
         let (values, _) = needed(4, &observed, &sources, "a || b || c || d || e");
         assert_eq!(values.as_deref(), Some("FFFFF -> F"));
         // An `||` that was never false: both of its conditions false.

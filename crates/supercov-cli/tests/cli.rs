@@ -5870,8 +5870,13 @@ fn a_decision_is_found_again_by_the_location_its_line_lists() {
         )),
         "{needs:?}"
     );
+    // No test evaluated `c`: both runs of the pair that would show it.
     assert!(
-        needs.contains(&("c".into(), String::new(), "no test evaluated `c`".into())),
+        needs.contains(&(
+            "c".into(),
+            "FF -> F and T- -> T".into(),
+            "`c` false, `a` false, decision false; and `c` true, decision true".into()
+        )),
         "{needs:?}"
     );
     for missing in ["src/pick.js:2:1", "src/pick.js:3"] {
