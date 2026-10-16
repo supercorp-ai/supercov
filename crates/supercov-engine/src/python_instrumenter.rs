@@ -344,6 +344,10 @@ fn is_unobservable_statement(statement: &Stmt, first_in_body: bool) -> bool {
 /// indexes contributed by each operand.
 type DecisionBoolOp = (String, Vec<Vec<usize>>);
 
+/// A regrouped BoolOp's decision: its ID, the leaf indexes of each operand
+/// but the last, and the span the runtime regroups them under.
+type RegroupedBoolOp = (String, Vec<Vec<usize>>, PlanSpan);
+
 struct PythonObligationCollector<'a> {
     file: &'a str,
     locations: SourceLocations<'a>,
@@ -361,7 +365,7 @@ struct PythonObligationCollector<'a> {
     /// A BoolOp of three or more operands whose operands but the last are a
     /// decision used as a value: the decision, the leaf indexes of each of
     /// those operands, and the span the runtime regroups them under.
-    regrouped: BTreeMap<(usize, usize), (String, Vec<Vec<usize>>, PlanSpan)>,
+    regrouped: BTreeMap<(usize, usize), RegroupedBoolOp>,
     error: Option<PythonInstrumenterError>,
 }
 
