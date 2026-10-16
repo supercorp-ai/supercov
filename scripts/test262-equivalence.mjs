@@ -304,8 +304,12 @@ const temporaryHarnessRunnerRoot = resolve(temporary, "test262-harness");
 let harnessRunSequence = 0;
 
 try {
+  // Its files, not a link to them: inside a Supercov copy `node_modules` is
+  // the project's own, linked, and patching a copied link patched the
+  // project's installed harness.
   cpSync(resolve("node_modules/test262-harness"), temporaryHarnessRunnerRoot, {
     recursive: true,
+    dereference: true,
   });
   const agentPoolPath = resolve(temporaryHarnessRunnerRoot, "lib/agent-pool.js");
   const agentPoolSource = readFileSync(agentPoolPath, "utf8");
