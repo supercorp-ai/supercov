@@ -1,6 +1,6 @@
 // Runs a test command under Supercov and says on the pull request what the change left untested.
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,6 +167,9 @@ async function main() {
   const exit = run.status ?? 1;
   // A Supercov older than 4.7.0 writes no id; its newest run is this one.
   const recorded = existsSync(idFile) ? readFileSync(idFile, 'utf8').trim() || 'latest' : 'latest';
+  // Read once; a self-hosted runner's temporary directory is not emptied
+  // between jobs, and each step left one behind.
+  rmSync(idFile, { force: true });
 
   const outputs = {};
   const floors = [];

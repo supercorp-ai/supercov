@@ -22,7 +22,7 @@
 // pytest already read the same. A language whose toolchain is not installed
 // is refused, not skipped: a gate that runs nothing proves nothing.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -30,11 +30,31 @@ import { spawnSync } from 'node:child_process';
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 
+// Every temporary directory the gate makes is removed as it exits, passed or
+// failed: left behind, a release check's runs filled gigabytes. `KEEP=1`
+// leaves them to look at.
+const temporaries = [];
+process.on('exit', () => {
+  if (process.env.KEEP) return;
+  for (const directory of temporaries) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // A process still holding a file on Windows; the system's cleaner takes it.
+    }
+  }
+});
+function temporary(prefix) {
+  const directory = mkdtempSync(resolve(realpathSync.native(tmpdir()), prefix));
+  temporaries.push(directory);
+  return directory;
+}
+
 function project(files) {
   // The directory's own name: on Windows the temporary directory is given by
   // its short name (`RUNNER~1`), which a run would print where Supercov, that
   // resolves the project, prints the long one.
-  const root = resolve(mkdtempSync(resolve(realpathSync.native(tmpdir()), 'supercov-failure-output-')), 'shop');
+  const root = resolve(temporary('supercov-failure-output-'), 'shop');
   for (const [file, text] of Object.entries(files)) {
     mkdirSync(dirname(resolve(root, file)), { recursive: true });
     writeFileSync(resolve(root, file), text);
@@ -77,7 +97,7 @@ function pythonWithPytest() {
     : ['python3.14', 'python3.13', 'python3.12', 'python3.11', 'python3.10', 'python3.9', 'python3', 'python'];
   const base = candidates.find((candidate) => spawnSync(candidate, ['-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)']).status === 0);
   assert.ok(base, 'failure-output needs CPython 3.9 or newer on PATH (or SUPERCOV_PYTHON)');
-  const venv = resolve(mkdtempSync(resolve(tmpdir(), 'supercov-failure-output-venv-')), 'venv');
+  const venv = resolve(temporary('supercov-failure-output-venv-'), 'venv');
   const made = spawnSync(base, ['-m', 'venv', venv], { encoding: 'utf8' });
   assert.equal(made.status, 0, made.stderr);
   const python = resolve(venv, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');

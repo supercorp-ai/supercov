@@ -3965,7 +3965,6 @@ fn percentage(covered: usize, total: usize) -> f64 {
 mod tests {
     use std::{
         fs,
-        path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -3983,7 +3982,7 @@ mod tests {
 
     static ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    fn root() -> PathBuf {
+    fn root() -> crate::test_directory::TestDirectory {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3993,8 +3992,8 @@ mod tests {
             std::process::id(),
             ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ));
-        fs::create_dir_all(&root).unwrap();
-        root
+        fs::create_dir(&root).unwrap();
+        crate::test_directory::TestDirectory::adopt(root)
     }
 
     fn identity() -> QueryIndexIdentity {

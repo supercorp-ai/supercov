@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -15,6 +15,26 @@ import { annotation, comment, input, marker, nativeTarget, percentage, ranges, u
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const targets = JSON.parse(readFileSync(join(repository, 'npm/native-targets.json'), 'utf8')).targets;
+
+// Every temporary directory these tests make is removed as the file's process
+// exits, passed or failed: left behind, each run added hundreds. `KEEP=1`
+// leaves them to look at.
+const temporaries = [];
+process.on('exit', () => {
+  if (process.env.KEEP) return;
+  for (const directory of temporaries) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // A process still holding a file on Windows; the system's cleaner takes it.
+    }
+  }
+});
+function temporary(prefix) {
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
+  temporaries.push(directory);
+  return directory;
+}
 
 function entry(name, content) {
   const header = Buffer.alloc(512);
@@ -98,7 +118,7 @@ const git = (cwd, ...arguments_) => execFileSync('git', arguments_, { cwd, encod
 
 /// A project with a tested function, and a change that adds one half of which no test runs.
 function project() {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'supercov-action-')));
+  const root = temporary('supercov-action-');
   const web = join(root, 'web');
   mkdirSync(join(web, 'src'), { recursive: true });
   mkdirSync(join(web, 'test'), { recursive: true });
@@ -154,7 +174,7 @@ async function api(status = 200) {
 }
 
 function act({ root, base, head }, url, inputs = {}) {
-  const files = mkdtempSync(join(tmpdir(), 'supercov-action-files-'));
+  const files = temporary('supercov-action-files-');
   const event = join(files, 'event.json');
   writeFileSync(event, JSON.stringify({ pull_request: { number: 7, base: { sha: base }, head: { sha: head } } }));
   const environment = {
