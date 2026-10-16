@@ -16,13 +16,19 @@ function option(name, fallback) {
 
 if (option("--engine", "rust") !== "rust")
   throw new Error("Rust is Supercov's only engine; --engine accepts only rust");
+// The binary the other gates take too (`SUPERCOV_BINARY`): run from the
+// end-to-end harness it is the one under measurement, and inside a Supercov
+// copy there is no `target/release` at all.
 const supercovBinary = resolve(
   option(
     "--rust-binary",
     process.env.SUPERCOV_RUST_BINARY ??
+      process.env.SUPERCOV_BINARY ??
       `target/release/supercov${process.platform === "win32" ? ".exe" : ""}`,
   ),
 );
+if (!existsSync(supercovBinary))
+  throw new Error(`Supercov binary not found at ${supercovBinary}: build it, or pass --rust-binary <path>`);
 
 function instrumentSources(cases) {
   const transformed = spawnSync(supercovBinary, ["__instrument-js"], {

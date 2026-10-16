@@ -102,7 +102,9 @@ gates! {
     mock_reach => "mock-reach.mjs",
     next_playwright => "next-playwright-integration.mjs",
     react_hydration => "react-hydration-compatibility.mjs",
-    test262_equivalence => "test262-equivalence.mjs",
+    // A sample: the binary here is the instrumented debug build, and the
+    // whole corpus runs in the conformance workflow.
+    test262_equivalence => "test262-equivalence.mjs" ["--limit", "2000"],
     clang_mcdc_oracle => "clang-mcdc-oracle.mjs",
     mocha_failure_output => "mocha-failure-output.mjs",
     python_servers => "python-server-playwright.mjs",
