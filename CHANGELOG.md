@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- A Go package whose conditions used a named boolean type (`type Flag bool`, `if a && b` on two of them) failed to build under measurement with "cannot use a (variable of bool type Flag) as bool value". Conditions are now converted inside the probe.
 - A Rust file where `vec![x; n]` began a longer expression (`vec![elem; n].into()`, as in smallvec) could not be instrumented: a probe went between `vec!` and its brackets, so the file was left unmeasured.
 - `cargo test -q` on an edition 2024 crate with doctests failed with "merged doctest child 0 ran for a case the harness did not report": quiet doctests print no names. Each case is now named from where it ran, and the output matches Cargo's, failures included.
 - A pytest test marked `xfail` that passed (XPASS) was reported as failed, so its run read as failing and its coverage was left out of the passed view, while pytest counted it as a pass. It is now passed, as pytest counts it; a strict `xfail` that passes is still failed.

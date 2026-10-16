@@ -5,7 +5,7 @@
 // A small module whose tests drive each construct both ways: `if` and
 // `switch` with init statements, `fallthrough`, a type switch, `range` over an
 // int, a labelled `continue`, `select`, `defer` with `recover`, closures,
-// generics and compound conditions. Each file is read back for what its tests
+// generics, a named boolean type and compound conditions. Each file is read back for what its tests
 // showed: a construct measured wrongly reads as uncovered here.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -115,6 +115,18 @@ func Counter() func(int) int {
 	}
 }
 
+type Flag bool
+
+func Open(a, b Flag) string {
+	if a && b {
+		return "open"
+	}
+	if a {
+		return "half"
+	}
+	return "shut"
+}
+
 func Max[T int | float64](a, b T) T {
 	if a > b {
 		return a
@@ -186,6 +198,9 @@ func TestFlow(t *testing.T) {
 	add := Counter()
 	if add(2) != 2 || add(-1) != 2 {
 		t.Fatal("counter")
+	}
+	if Open(true, true) != "open" || Open(true, false) != "half" || Open(false, true) != "shut" {
+		t.Fatal("open")
 	}
 	if Max(1, 2) != 2 || Max(2.5, 1.0) != 2.5 {
 		t.Fatal("max")

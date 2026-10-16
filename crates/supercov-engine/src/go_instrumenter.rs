@@ -432,10 +432,15 @@ struct Collector<'a> {
 /// obligation, so it gets the form with no decision argument — which is the
 /// one small enough for Go to inline, and the majority of branches in real
 /// code.
+///
+/// The condition goes in converted, `bool(c)`: a named boolean type (`type
+/// Flag bool`) is not assignable to `bool`, and a condition of one stopped the
+/// package compiling. A condition needs only to be a boolean, so the
+/// conversion changes nothing it decides.
 fn branch_wrapper(alias: &str, when_true: u64, when_false: u64, decision: Option<usize>) -> String {
     match decision {
-        Some(index) => format!("{alias}.BD({when_true}, {when_false}, {index}, "),
-        None => format!("{alias}.B({when_true}, {when_false}, "),
+        Some(index) => format!("{alias}.BD({when_true}, {when_false}, {index}, bool("),
+        None => format!("{alias}.B({when_true}, {when_false}, bool("),
     }
 }
 
@@ -660,9 +665,9 @@ impl<'a> Collector<'a> {
             self.edit(
                 leaf.start_byte(),
                 20,
-                format!("{alias}.C({index_of_decision}, {index}, "),
+                format!("{alias}.C({index_of_decision}, {index}, bool("),
             );
-            self.edit(leaf.end_byte(), 20, ")".to_owned());
+            self.edit(leaf.end_byte(), 20, "))".to_owned());
         }
         self.decisions.push(DecisionMeta {
             id,
@@ -698,7 +703,7 @@ impl<'a> Collector<'a> {
                         5,
                         branch_wrapper(&alias, probes[0], probes[1], decision),
                     );
-                    self.edit(condition.end_byte(), 5, ")".to_owned());
+                    self.edit(condition.end_byte(), 5, "))".to_owned());
                 }
             }
             "for_statement" => {
@@ -715,7 +720,7 @@ impl<'a> Collector<'a> {
                             5,
                             branch_wrapper(&alias, probes[0], probes[1], decision),
                         );
-                        self.edit(condition.end_byte(), 5, ")".to_owned());
+                        self.edit(condition.end_byte(), 5, "))".to_owned());
                     }
                     None if is_range_loop(node) && !in_function_with_goto(node) => {
                         // A range loop's outcomes are whether it ran at all,
