@@ -345,56 +345,25 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let embedded = match topic.as_str() {
-        "getting-started" => Some(include_str!("../assets/docs/getting-started.md")),
-        "agent-loop" => Some(include_str!("../assets/docs/agent-loop.md")),
-        "assertions" => Some(include_str!("../assets/docs/assertions.md")),
-        "troubleshooting" => Some(include_str!("../assets/docs/troubleshooting.md")),
-        "cli" => Some(include_str!("../assets/docs/cli.md")),
-        "coverage-model" => Some(include_str!("../assets/docs/coverage-model.md")),
-        "quality" => Some(include_str!("../assets/docs/quality.md")),
-        "security" => Some(include_str!("../assets/docs/security.md")),
-        "evidence" => Some(include_str!("../assets/docs/evidence.md")),
-        "supported-suites" => Some(include_str!("../assets/docs/supported-suites.md")),
-        "verification" => Some(include_str!("../assets/docs/verification.md")),
-        "performance" => Some(include_str!("../assets/docs/performance.md")),
-        "workspace-isolation" => Some(include_str!("../assets/docs/workspace-isolation.md")),
-        _ => None,
+    let guide = match topic.as_str() {
+        "getting-started" => include_str!("../assets/docs/getting-started.md"),
+        "agent-loop" => include_str!("../assets/docs/agent-loop.md"),
+        "assertions" => include_str!("../assets/docs/assertions.md"),
+        "troubleshooting" => include_str!("../assets/docs/troubleshooting.md"),
+        "cli" => include_str!("../assets/docs/cli.md"),
+        "coverage-model" => include_str!("../assets/docs/coverage-model.md"),
+        "quality" => include_str!("../assets/docs/quality.md"),
+        "security" => include_str!("../assets/docs/security.md"),
+        "evidence" => include_str!("../assets/docs/evidence.md"),
+        "supported-suites" => include_str!("../assets/docs/supported-suites.md"),
+        "verification" => include_str!("../assets/docs/verification.md"),
+        "performance" => include_str!("../assets/docs/performance.md"),
+        "workspace-isolation" => include_str!("../assets/docs/workspace-isolation.md"),
+        "reports" => include_str!("../assets/docs/reports.md"),
+        _ => unreachable!("every listed guide is bundled"),
     };
-    let command = launcher_command();
-    if let Some(markdown) = embedded {
-        print!("{}", localize_guide(markdown, command));
-        return ExitCode::SUCCESS;
-    }
-    let mut roots = Vec::new();
-    if let Some(root) = std::env::var_os("SUPERCOV_PACKAGE_ROOT") {
-        roots.push(PathBuf::from(root));
-    }
-    if let Ok(root) = std::env::current_dir() {
-        roots.push(root);
-    }
-    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
-    for root in roots {
-        let path = root.join("docs").join(format!("{topic}.md"));
-        match fs::read_to_string(&path) {
-            Ok(markdown) => {
-                print!("{}", localize_guide(&markdown, command));
-                if !markdown.ends_with('\n') {
-                    println!();
-                }
-                return ExitCode::SUCCESS;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                eprintln!("[supercov] could not read {}: {error}", path.display());
-                return ExitCode::from(1);
-            }
-        }
-    }
-    eprintln!(
-        "[supercov] guide {topic:?} is not present in this installation; reinstall Supercov or use the repository documentation"
-    );
-    ExitCode::from(1)
+    print!("{}", localize_guide(guide, launcher_command()));
+    ExitCode::SUCCESS
 }
 
 fn merge_command(arguments: Vec<String>) -> ExitCode {

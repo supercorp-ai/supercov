@@ -19,6 +19,7 @@ const mappings = [
   ["docs/verification.md", "crates/supercov-cli/assets/docs/verification.md"],
   ["docs/performance.md", "crates/supercov-cli/assets/docs/performance.md"],
   ["docs/workspace-isolation.md", "crates/supercov-cli/assets/docs/workspace-isolation.md"],
+  ["docs/reports.md", "crates/supercov-cli/assets/docs/reports.md"],
   ["contracts/v1/contract.json", "crates/supercov-contracts/assets/v1/contract.json"],
   ["contracts/probe-v2/contract.json", "crates/supercov-contracts/assets/probe-v2/contract.json"],
   ["contracts/frontend-v2/contract.json", "crates/supercov-contracts/assets/frontend-v2/contract.json"],

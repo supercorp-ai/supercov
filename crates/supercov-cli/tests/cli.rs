@@ -794,6 +794,12 @@ fn help_and_bundled_guides_need_no_project() {
     );
     let guide = project.supercov(&["docs", "assertions"]).succeeds();
     assert!(guide.starts_with("# Assertion coverage"), "{guide}");
+    // Every guide listed is in the binary: an installed one has no
+    // repository to read a missing one from.
+    for topic in guides.lines().skip(1).map(str::trim) {
+        let guide = project.supercov(&["docs", topic]).succeeds();
+        assert!(guide.starts_with("# "), "{topic}: {guide}");
+    }
     let missing = project.supercov(&["docs", "no-such-guide"]);
     assert_ne!(missing.code(), 0);
     let version = project.supercov(&["--version"]).succeeds();
