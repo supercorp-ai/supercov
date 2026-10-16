@@ -5009,3 +5009,75 @@ fn every_human_query_pages_and_names_its_filters() {
         .succeeds();
     assert!(!gained.is_empty(), "{gained}");
 }
+
+#[test]
+fn changes_since_a_run_name_the_tests_they_reach_and_block_a_merge() {
+    let project = Project::empty("changes-since");
+    project.write(
+        "package.json",
+        r#"{ "name": "changes", "private": true, "type": "module", "dependencies": {} }"#,
+    );
+    project.write(
+        "src/a.js",
+        "export const a = (x) => (x > 1 ? 'big' : 'small');\n",
+    );
+    project.write("src/b.js", "export const b = (x) => (x ? 1 : 0);\n");
+    project.write("test/helper.js", "export const helper = () => 1;\n");
+    project.write(
+        "test/a.test.js",
+        "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { a } from '../src/a.js';\nimport { helper } from './helper.js';\n\ntest('a', () => {\n  assert.equal(a(2), 'big');\n  assert.equal(helper(), 1);\n});\n",
+    );
+    project.write(
+        "__tests__/b.test.js",
+        "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { b } from '../src/b.js';\n\ntest('b', () => {\n  assert.equal(b(1), 1);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("changes");
+    let first = project.measure(&["test/a.test.js"]);
+
+    // A dependency added between two runs keeps them apart.
+    project.edit(
+        "package.json",
+        r#""dependencies": {}"#,
+        r#""dependencies": { "left-pad": "1.3.0" }"#,
+    );
+    let second = project.measure(&["__tests__/b.test.js"]);
+    let refused = project.supercov(&["merge", &first, &second]).exits(2);
+    assert!(
+        refused.contains("differing domains: dependencies"),
+        "{refused}"
+    );
+
+    // A removed source, a changed helper and the dependency change, each
+    // named with the tests it reaches.
+    project.edit(
+        "package.json",
+        r#""dependencies": { "left-pad": "1.3.0" }"#,
+        r#""dependencies": {}"#,
+    );
+    std::fs::remove_file(project.root.join("src/b.js")).unwrap();
+    project.edit("test/helper.js", "=> 1", "=> 2");
+    let since_first = project
+        .supercov(&["runs", &first, "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &since_first,
+        &[
+            "test/a.test.js › a",
+            "test/helper.js changed: helper (line 1) (this test's file loads it)",
+            "src/b.js  removed",
+        ],
+    );
+    let since_second = project
+        .supercov(&["runs", &second, "tests", "affected"])
+        .succeeds();
+    contains_all(
+        &since_second,
+        &[
+            "__tests__/b.test.js › b",
+            "dependencies or lockfile changed (every test)",
+            "src/b.js removed (this test ran code in it)",
+            "test/helper.js changed: helper (line 1) (a file tests may load)",
+        ],
+    );
+}
