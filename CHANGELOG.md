@@ -6,7 +6,7 @@
 
 - `--tag`, `--title` and `--test-file` leave tests out with a leading `!`: `--tag '!api' --tag '!cron'` reads the tests with neither tag, the browser tests of a suite whose others are tagged, from the one run.
 - Upgrading Supercov re-indexes a stored run on its first query only when the analysis that writes its index changed, not on every release: a release that changes only instrumentation, runners or queries reads a 1,100-test run in 3.6 s, not 23 s.
-- Re-indexing a run builds its three views (all, passed, failed attempts) one at a time and parses each test's record as the evidence is read, so the decompressed evidence and the three views are never held at once: 4.2 GB at most became 3.3 GB on a 1,100-test run, with the same index.
+- Re-indexing a run builds its three views (all, passed, failed attempts) one at a time and parses each test's record as the evidence is read, so the decompressed evidence and the three views are never held at once: on a run of about 3,000 tests the first query peaks at 6.5 GB instead of 8.1 GB, in the same 12 s, with the same index.
 
 **Fixed**
 

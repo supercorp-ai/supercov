@@ -491,8 +491,9 @@ JUnit `@Tag` or a TestNG group. Tags are written with or without the `@` and in
 any case. `runs <id> test <name>` lists a test's tags.
 
 The first query with a filter works out its coverage from the run's evidence
-and keeps it beside the run (about half a minute for a 1,100-test run); asking
-again reads it back. Nothing is added to the test run itself.
+and keeps it beside the run (12 s for a run of about 3,000 tests); asking again
+reads it back in a fraction of a second. Nothing is added to the test run
+itself.
 
 For a large file, group and rank its decisions:
 
