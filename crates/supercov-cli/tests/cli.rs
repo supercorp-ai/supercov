@@ -5732,3 +5732,84 @@ fn a_decision_is_found_again_by_the_location_its_line_lists() {
         "{file}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_package_runs_with_its_own_node_modules_and_tools() {
+    let project = Project::empty("monorepo");
+    project.write(
+        "package.json",
+        r#"{ "name": "mono", "private": true, "workspaces": ["packages/*"] }"#,
+    );
+    project.write(".gitignore", "node_modules\n");
+    // The root holds one version of a dependency, the package another; a
+    // pnpm-style package is a link into the root's store; the package's own
+    // tool is in its own `.bin`.
+    project.write(
+        "node_modules/dep/package.json",
+        r#"{ "name": "dep", "version": "1.0.0", "main": "index.js" }"#,
+    );
+    project.write(
+        "node_modules/dep/index.js",
+        "module.exports = { version: 1 };\n",
+    );
+    project.write(
+        "packages/app/node_modules/dep/package.json",
+        r#"{ "name": "dep", "version": "2.0.0", "main": "index.js" }"#,
+    );
+    project.write(
+        "packages/app/node_modules/dep/index.js",
+        "module.exports = { version: 2 };\n",
+    );
+    let store = "node_modules/.pnpm/left@3.0.0/node_modules/left";
+    project.write(
+        &format!("{store}/package.json"),
+        r#"{ "name": "left", "version": "3.0.0", "main": "index.js" }"#,
+    );
+    project.write(
+        &format!("{store}/index.js"),
+        "module.exports = (s) => \" \" + s;\n",
+    );
+    std::os::unix::fs::symlink(
+        format!("../../../{store}"),
+        project.root.join("packages/app/node_modules/left"),
+    )
+    .unwrap();
+    project.write_script(
+        "packages/app/node_modules/.bin/apptool",
+        "#!/usr/bin/env node\nconsole.log(\"the package's own tool ran\");\n",
+    );
+    project.write(
+        "packages/app/package.json",
+        r#"{ "name": "app", "private": true, "scripts": { "test": "apptool && node --test" } }"#,
+    );
+    project.write(
+        "packages/app/src/label.js",
+        "const dep = require(\"dep\");\nconst left = require(\"left\");\nexports.label = (n) => (dep.version === 2 && n > 0 ? left(\"v2\") : \"other\");\n",
+    );
+    project.write(
+        "packages/app/test/label.test.js",
+        "const test = require(\"node:test\");\nconst assert = require(\"node:assert\");\nconst { label } = require(\"../src/label.js\");\ntest(\"label\", () => {\n  assert.equal(label(1), \" v2\");\n  assert.equal(label(0), \"other\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    let ran = project.supercov(&["--", "npm", "test", "-w", "packages/app"]);
+    let said = format!("{}{}", ran.stdout(), ran.stderr());
+    assert_eq!(ran.code(), 0, "{said}");
+    assert!(said.contains("the package's own tool ran"), "{said}");
+    let line = project
+        .supercov(&["runs", "latest", "line", "packages/app/src/label.js:3"])
+        .succeeds();
+    // Measured and run: the test's " v2" was only reachable through the
+    // package's own `dep` and the linked `left`.
+    assert!(
+        line.contains("dep.version === 2") && !line.contains("NOT COVERED"),
+        "{line}"
+    );
+    // The links in the project are as they were.
+    assert!(
+        std::fs::symlink_metadata(project.root.join("packages/app/node_modules/left"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
