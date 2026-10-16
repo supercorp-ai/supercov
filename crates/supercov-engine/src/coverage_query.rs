@@ -1463,15 +1463,17 @@ pub struct CoverageDecisionQueryOptions<'a> {
     pub limit: usize,
 }
 
-fn selector_location(selector: &str) -> Option<(&str, usize)> {
+/// `file:line`, or `file:line:column` as a listing of a line's decisions
+/// prints each one.
+fn selector_location(selector: &str) -> Option<(&str, usize, Option<usize>)> {
     let (prefix, last) = selector.rsplit_once(':')?;
     let last = last.parse::<usize>().ok()?;
     if let Some((file, possible_line)) = prefix.rsplit_once(':')
         && let Ok(line) = possible_line.parse::<usize>()
     {
-        return Some((file, line));
+        return Some((file, line, Some(last)));
     }
-    Some((prefix, last))
+    Some((prefix, last, None))
 }
 
 fn selected_decision(
@@ -1555,12 +1557,16 @@ pub fn coverage_decision_query(
         .filter(|decision| decision.meta.id == options.selector)
         .collect::<Vec<_>>();
     if matches.is_empty()
-        && let Some((file, line)) = selector_location(options.selector)
+        && let Some((file, line, column)) = selector_location(options.selector)
     {
         matches = index
             .decision_details(options.view)?
             .into_iter()
-            .filter(|decision| decision.meta.file == file && decision.meta.line == line)
+            .filter(|decision| {
+                decision.meta.file == file
+                    && decision.meta.line == line
+                    && column.is_none_or(|column| decision.meta.column == column)
+            })
             .collect();
     }
     if matches.is_empty() {

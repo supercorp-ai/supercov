@@ -5568,3 +5568,65 @@ fn the_latest_run_answers_patch_and_report_without_its_id() {
         assert!(project.read(file).contains("src/sign.js"), "{file}");
     }
 }
+
+#[test]
+fn a_decision_is_found_again_by_the_location_its_line_lists() {
+    let project = Project::empty("decision-location");
+    project.write(
+        "package.json",
+        r#"{ "name": "pick", "private": true, "type": "module" }"#,
+    );
+    let long = format!(
+        "  return (a && {name}) || (c && {name}) ? 4 : c || a ? 5 : 6;",
+        name = "an_argument_named_at_such_length_that_the_line_it_sits_on_runs_on"
+    );
+    project.write(
+        "src/pick.js",
+        &format!(
+            "export function pick(a, b, c) {{\n  return a && b ? 1 : (c || a) ? 2 : 3;\n}}\n\nexport function long(a, c, an_argument_named_at_such_length_that_the_line_it_sits_on_runs_on) {{\n{long}\n}}\n"
+        ),
+    );
+    project.write(
+        "test/pick.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { pick, long } from \"../src/pick.js\";\ntest(\"pick\", () => {\n  assert.equal(pick(1, 1, 0), 1);\n  assert.equal(long(0, 0, 1), 6);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+
+    // A line of two decisions lists both, each at its own column.
+    let listed = project
+        .supercov(&["runs", "latest", "decision", "src/pick.js:2"])
+        .succeeds();
+    assert!(
+        listed.contains("showing 1-2 of 2 matching decisions"),
+        "{listed}"
+    );
+    let location = listed
+        .lines()
+        .find(|line| line.ends_with("c || a"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_else(|| panic!("{listed}"))
+        .to_owned();
+    // Named by the location listed, it is the one decision.
+    let one = project
+        .supercov(&["runs", "latest", "decision", &location])
+        .succeeds();
+    contains_all(&one, &[&location, "c || a", "C1 MISSING: c"]);
+    assert!(!one.contains("matching decisions"), "{one}");
+    for missing in ["src/pick.js:2:1", "src/pick.js:3"] {
+        let refused = project
+            .supercov(&["runs", "latest", "decision", missing])
+            .exits(2);
+        assert!(refused.contains("Decision not found"), "{refused}");
+    }
+
+    // The file's gaps quote a decision too long to show whole, cut short.
+    let file = project
+        .supercov(&["runs", "latest", "file", "src/pick.js"])
+        .succeeds();
+    assert!(
+        file.lines()
+            .any(|line| line.contains("(a && an_argument") && line.ends_with('…')),
+        "{file}"
+    );
+}

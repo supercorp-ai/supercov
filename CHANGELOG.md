@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- `runs <id> decision` lists a line's decisions as `file:line:column`, but passing one of those locations back listed every decision on the line again. The column now selects the decision at it.
 - `merge` with no run named dropped, without a word, any run whose source it could no longer fingerprint (every measured file deleted), and said only "the source has changed" for a run left out because a measured file was added. The first is now listed as left out, and the second says how many files were added.
 - A run of `npm t`, `npm run -s test` or `npm run-script test` was told to measure `npm test` instead, which is the same command. The hint now reads npm's aliases and skips flags before the script name.
 - A Go package with a `//go:build ignore` file of another package beside it, such as a `go generate` program in `package main`, failed to build under measurement ("found packages"). Such files are no longer measured, since the build never compiles them, and a directory's probe file joins the package its tests are built with.
