@@ -1194,6 +1194,11 @@ fn rewrite_expression_macros(
                             *byte = b' ';
                         }
                     }
+                    // A reference where `vec` was, so whatever the macro
+                    // starts -- `vec![x; n].into()`, a comparison -- still
+                    // starts there, and its probe goes before the macro
+                    // rather than between `vec!` and its brackets.
+                    text[prefix_start] = b'&';
                     changed = true;
                 }
             }
@@ -3059,6 +3064,26 @@ fn checked(value: bool) -> bool {
         assert!(!manifest.points.iter().any(|point| {
             point.kind == PointKind::Function && point.label.as_deref() == Some("doubled")
         }));
+    }
+
+    #[test]
+    fn a_vec_macro_that_starts_a_larger_expression_keeps_its_probe_outside() {
+        // smallvec's `vec![elem; n].into()`: blanking `vec!` to read the
+        // array moved where the statement starts, and its probe landed
+        // between `vec!` and the brackets, which does not parse.
+        let source = "pub fn grown(n: usize) -> Vec<u8> {\n    if n > 0 {\n        vec![0; n].into()\n    } else {\n        vec![1; 2] == vec![1, 1] && n == 0;\n        Vec::new()\n    }\n}\n";
+        let transformed =
+            instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert!(
+            !transformed.code.contains("vec!crate"),
+            "{}",
+            transformed.code
+        );
+        assert!(
+            transformed.code.contains("vec![0; n].into()"),
+            "{}",
+            transformed.code
+        );
     }
 
     #[test]
