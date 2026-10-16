@@ -743,13 +743,14 @@ pub fn coverage_covers_query(
         file: options.file.into(),
         line: options.line,
     };
+    // A line's points, branches and decisions are all of its own file.
     let metadata = index
-        .hit_metadata(options.view)?
+        .hit_metadata_in_file(options.view, options.file)?
         .into_iter()
         .map(|value| (value.id.clone(), value))
         .collect::<HashMap<_, _>>();
     let decisions = index
-        .decision_details(options.view)?
+        .decision_details_in_file(options.view, options.file)?
         .into_iter()
         .map(|value| (value.meta.id.clone(), value))
         .collect::<HashMap<_, _>>();
@@ -1986,6 +1987,68 @@ pub struct FileDetailSource {
 }
 
 impl FileDetailSource {
+    /// What one file's detail reads, and nothing of any other file's: a
+    /// query of one line used to decode every test, line, point and decision
+    /// of the run first. Every test is still summarized, for the filters.
+    pub fn read_file(
+        index: &CoverageIndex<'_>,
+        view: CoverageViewId,
+        file: &str,
+    ) -> Result<Self, QueryError> {
+        let test_summaries = index.test_summaries(view)?;
+        let tests_by_id = test_summaries
+            .iter()
+            .map(|test| (test.id.clone(), test.clone()))
+            .collect();
+        let lines = index.lines_in_file(view, file)?;
+        let points = index.hit_metadata_in_file(view, file)?;
+        let decisions = index.decision_details_in_file(view, file)?;
+        let limitations = index.limitations_in_file(view, file)?;
+        let mut source = Self {
+            view,
+            tests: Vec::new(),
+            test_summaries,
+            tests_by_id,
+            tests_by_file: HashMap::new(),
+            lines_by_file: BTreeMap::new(),
+            points_by_file: HashMap::new(),
+            decisions_by_file: HashMap::new(),
+            limitations: BTreeMap::new(),
+            lines,
+            points,
+            decisions,
+        };
+        if !source.lines.is_empty() {
+            source
+                .lines_by_file
+                .insert(file.to_owned(), (0..source.lines.len()).collect());
+            // The tests with a line in the file, from the lines' side of the
+            // same relation the full read takes from the tests' side.
+            let mut tests = source
+                .lines
+                .iter()
+                .flat_map(|line| line.tests.iter().cloned())
+                .collect::<Vec<_>>();
+            tests.sort_unstable();
+            tests.dedup();
+            source.tests_by_file.insert(file.to_owned(), tests);
+        }
+        if !source.points.is_empty() {
+            source
+                .points_by_file
+                .insert(file.to_owned(), (0..source.points.len()).collect());
+        }
+        if !source.decisions.is_empty() {
+            source
+                .decisions_by_file
+                .insert(file.to_owned(), (0..source.decisions.len()).collect());
+        }
+        if !limitations.is_empty() {
+            source.limitations.insert(file.to_owned(), limitations);
+        }
+        Ok(source)
+    }
+
     pub fn read(index: &CoverageIndex<'_>, view: CoverageViewId) -> Result<Self, QueryError> {
         let tests = index.test_details(view)?;
         let mut tests_by_file = HashMap::<String, Vec<String>>::new();
@@ -2081,6 +2144,12 @@ pub fn coverage_file_detail_query(
 ) -> Result<(CoverageFileDetailData, AgentPagination), QueryError> {
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
+    }
+    // A file named exactly reads that file alone; a part of a name has to
+    // be matched against every file the run has.
+    let scoped = FileDetailSource::read_file(index, options.view, options.selector)?;
+    if !scoped.lines.is_empty() || !scoped.limitations.is_empty() {
+        return coverage_file_detail_from(&scoped, options);
     }
     coverage_file_detail_from(&FileDetailSource::read(index, options.view)?, options)
 }
