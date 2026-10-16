@@ -46,17 +46,21 @@ fn go_language_version(go: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn temporary(label: &str) -> PathBuf {
+fn temporary(label: &str) -> common::TestDirectory {
+    // The clock ticks once per microsecond: the counter is what keeps two
+    // tests that start together apart.
+    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
-        "supercov-go-run-{label}-{}-{}",
+        "supercov-go-run-{label}-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&root).unwrap();
-    root
+    std::fs::create_dir(&root).unwrap();
+    common::TestDirectory::adopt(root)
 }
 
 fn write(root: &Path, relative: &str, contents: &str) {
@@ -104,7 +108,7 @@ fn a_multi_package_module_runs_and_publishes_what_each_test_reached() {
 
     let before = std::fs::read_to_string(root.join("auth/auth.go")).unwrap();
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-multi".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -167,7 +171,7 @@ fn decisions_in_different_packages_keep_their_own_condition_state() {
     fixture(&root);
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-decisions".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -254,7 +258,7 @@ fn every_module_of_a_workspace_is_measured_and_merged() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![
             go.display().to_string(),
             "test".into(),
@@ -334,7 +338,7 @@ fn a_nested_module_does_not_break_the_build_around_it() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-nested".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -386,7 +390,7 @@ fn a_parallel_tests_coverage_counts_even_though_no_test_can_claim_it() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-parallel".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -467,7 +471,7 @@ fn a_package_whose_tests_are_all_parallel_still_publishes_what_it_measured() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-all-parallel".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -541,7 +545,7 @@ fn a_suite_whose_tests_reach_nothing_is_published_as_the_zero_it_is() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-reaches-nothing".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -593,7 +597,7 @@ fn a_run_that_observed_no_test_at_all_is_refused() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-observed-nothing".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -646,7 +650,7 @@ fn a_source_file_using_go_1_26_new_is_measured_like_any_other() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-new-value".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -702,7 +706,7 @@ fn a_project_whose_sources_none_parse_is_refused_rather_than_reported_green() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-unreadable".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -755,7 +759,7 @@ fn an_unparseable_file_among_readable_ones_is_published_and_counted() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-partial-hole".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -851,7 +855,7 @@ fn go_1_26_new_of_a_value_compiles_instrumented_and_reports_what_ran() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-new-value-live".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -924,7 +928,7 @@ fn a_package_of_nothing_but_examples_publishes_what_it_measured() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-examples-only".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -986,7 +990,7 @@ fn a_package_of_nothing_but_fuzz_targets_publishes_what_it_measured() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-fuzz-only".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -1044,7 +1048,7 @@ fn an_unparseable_test_file_is_a_hole_rather_than_the_end_of_the_run() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-unparseable-test".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -1117,7 +1121,7 @@ fn a_test_file_the_build_ignores_does_not_stand_the_harness_down() {
     );
 
     let mut request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-ignored-test-main".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -1204,7 +1208,7 @@ fn a_test_main_inside_an_unparseable_file_is_not_declared_twice() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-unparseable-test-main".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -1259,7 +1263,7 @@ fn a_parallel_test_is_recorded_as_having_run_and_credited_with_nothing() {
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-parallel-records".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -1367,7 +1371,7 @@ fn a_change_selects_the_tests_nothing_could_attribute_when_it_could_have_reached
     );
 
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-affected-parallel".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -1480,7 +1484,7 @@ fn exact_attribution_credits_a_parallel_test_by_running_it_alone() {
     );
 
     let base = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-as-written".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),
@@ -1566,7 +1570,7 @@ fn a_case_entered_by_fallthrough_is_not_credited_as_selected() {
         "package levels\n\nimport \"testing\"\n\nfunc TestHigh(t *testing.T) {\n\tif Level(20) != \"high mid\" {\n\t\tt.Fatal(Level(20))\n\t}\n}\n\nfunc TestCount(t *testing.T) {\n\tif Count([]int{0, -1, 7}) != 1 {\n\t\tt.Fatal(Count([]int{0, -1, 7}))\n\t}\n}\n",
     );
     let request = DirectGoRunRequest {
-        root: root.clone(),
+        root: root.to_path_buf(),
         command: vec![go.display().to_string(), "test".into(), "./...".into()],
         run_id: "run-go-fallthrough".into(),
         started_at: "2026-01-01T00:00:00.000Z".into(),

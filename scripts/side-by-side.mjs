@@ -11,7 +11,7 @@
 // A language whose toolchain is not installed is refused, not skipped.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 
@@ -19,8 +19,28 @@ const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const AT_ONCE = 3;
 
+// Every temporary directory the gate makes is removed as it exits, passed or
+// failed: left behind, a release check's runs filled gigabytes. `KEEP=1`
+// leaves them to look at.
+const temporaries = [];
+process.on('exit', () => {
+  if (process.env.KEEP) return;
+  for (const directory of temporaries) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // A process still holding a file on Windows; the system's cleaner takes it.
+    }
+  }
+});
+function temporary(prefix) {
+  const directory = mkdtempSync(resolve(realpathSync.native(tmpdir()), prefix));
+  temporaries.push(directory);
+  return directory;
+}
+
 function project(files) {
-  const root = resolve(mkdtempSync(resolve(realpathSync.native(tmpdir()), 'supercov-side-by-side-')), 'shop');
+  const root = resolve(temporary('supercov-side-by-side-'), 'shop');
   for (const [file, text] of Object.entries(files)) {
     mkdirSync(dirname(resolve(root, file)), { recursive: true });
     writeFileSync(resolve(root, file), text);

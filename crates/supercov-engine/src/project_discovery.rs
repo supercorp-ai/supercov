@@ -839,16 +839,21 @@ mod tests {
 
     use super::*;
 
-    fn project(label: &str, files: &[(&str, &str)]) -> PathBuf {
+    fn project(label: &str, files: &[(&str, &str)]) -> crate::test_directory::TestDirectory {
+        // The clock ticks once per microsecond: the counter is what keeps two
+        // tests that start together apart.
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "supercov-project-{label}-{}-{nonce}",
-            std::process::id()
+            "supercov-project-{label}-{}-{nonce}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        fs::create_dir_all(&root).unwrap();
+        fs::create_dir(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
         for (file, contents) in files {
             let path = root.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -47,7 +47,8 @@ function supercov(args, env) {
 // environment that sends a command's questions to it. `asked()` is how many
 // requests it has answered.
 async function standIn(answer) {
-  const seen = resolve(mkdtempSync(resolve(tmpdir(), 'supercov-jev-')), 'seen');
+  const directory = mkdtempSync(resolve(tmpdir(), 'supercov-jev-'));
+  const seen = resolve(directory, 'seen');
   const child = spawn(process.execPath, [resolve(repository, 'scripts/jev-stand-in.mjs')], {
     env: { ...process.env, ANSWER: answer, SEEN: seen },
     stdio: ['ignore', 'pipe', 'inherit'],
@@ -64,7 +65,16 @@ async function standIn(answer) {
       TYPESAFE_DEFAULT_MODEL: 'typesafe/jev-1.13',
     },
     asked: () => (existsSync(seen) ? Number(readFileSync(seen, 'utf8')) : 0),
-    stop: () => child.kill(),
+    // The directory goes with the server: left behind, every run of the gate
+    // added one.
+    stop: () => {
+      child.kill();
+      try {
+        rmSync(directory, { recursive: true, force: true });
+      } catch {
+        // The killed server still holding its file on Windows.
+      }
+    },
   };
 }
 

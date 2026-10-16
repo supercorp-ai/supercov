@@ -208,3 +208,46 @@ pub fn building() -> std::sync::MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// A directory a test made, removed when the test is done with it.
+///
+/// Tests removed their directory as their last step, so one that failed or
+/// returned early left it in the system's temporary directory. Dropped as the
+/// test ends, passed or panicked, this removes it. `KEEP=1` leaves it to look
+/// at.
+#[allow(dead_code)]
+pub struct TestDirectory(std::path::PathBuf);
+
+#[allow(dead_code)]
+impl TestDirectory {
+    /// Takes over a directory the test has just created.
+    pub fn adopt(path: std::path::PathBuf) -> Self {
+        Self(path)
+    }
+
+    pub fn as_path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for TestDirectory {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for TestDirectory {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        if std::env::var_os("KEEP").is_none() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}

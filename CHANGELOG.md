@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- The GitHub Action removes the file it reads the run's id from. A self-hosted runner, whose temporary directory is not emptied between jobs, kept one for every step.
+
 ## 4.12.1
 
 **Fixed**

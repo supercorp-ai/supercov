@@ -718,14 +718,14 @@ mod tests {
         )
     }
 
-    fn temporary() -> std::path::PathBuf {
+    fn temporary() -> crate::test_directory::TestDirectory {
         let root = std::env::temp_dir().join(temporary_name());
         // `create_dir`, not `create_dir_all`: if a root is ever handed out
         // twice, the second test must fail here saying so, rather than share a
         // directory and fail somewhere else for a reason that reads as a bug in
         // the code under test.
         fs::create_dir(&root).unwrap();
-        root
+        crate::test_directory::TestDirectory::adopt(root)
     }
 
     #[test]
