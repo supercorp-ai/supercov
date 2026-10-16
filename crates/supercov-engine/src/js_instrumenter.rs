@@ -3689,6 +3689,8 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
+        value_decisions: HashSet::new(),
+        typescript: parsed.program.source_type.is_typescript(),
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -3923,6 +3925,8 @@ fn instrument_candidate_with_binding(
         decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
+        value_decisions: HashSet::new(),
+        typescript: parsed.program.source_type.is_typescript(),
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -4230,6 +4234,7 @@ fn instrument_candidate_with_binding(
     let mut transformer = ControlProbeV2Transformer {
         ast,
         decisions: &collector.decisions,
+        value_decisions: &collector.value_decisions,
         mcdc_begin: mcdc_begin.clone(),
         mcdc_condition: mcdc_condition.clone(),
         mcdc_end: mcdc_end.clone(),
@@ -7245,6 +7250,8 @@ impl<'s> CandidateNames<'s> {
 struct ControlProbeV2Transformer<'a, 's> {
     ast: AstBuilder<'a>,
     decisions: &'s [CandidateDecision],
+    /// Expressions used as values that are decisions, by span.
+    value_decisions: &'s HashSet<SpanKey>,
     mcdc_begin: String,
     mcdc_condition: String,
     mcdc_end: String,
@@ -7568,6 +7575,53 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
 
     /// `mcdcEndV2(file, decision, vector, outcome)`, where the outcome is
     /// known from where the call stands: the branch that was taken.
+    /// A decision used as a value has no arms to record its outcome in, so
+    /// it is read from the value itself: `(_r = test, end(.., !!_r), _r)`.
+    /// The assignment keeps the value, and TypeScript types `_r` by what was
+    /// assigned to it, so the expression keeps its type too.
+    fn record_value_outcome(&mut self, expression: &mut Expression<'a>, applied: AppliedDecision) {
+        let result = self.scratch_for("_supercovMcdcResult", applied.inline);
+        let value = expression.take_in(self.ast.allocator);
+        let assign = self.assign(&result, value);
+        let truth = self.ast.expression_unary(
+            Span::default(),
+            UnaryOperator::LogicalNot,
+            self.ast.expression_unary(
+                Span::default(),
+                UnaryOperator::LogicalNot,
+                self.identifier(&result),
+            ),
+        );
+        let end = self.ast.expression_call(
+            Span::default(),
+            self.identifier(&self.mcdc_end_v2),
+            NONE,
+            self.ast.vec_from_array([
+                Argument::from(self.identifier(&self.probe_file_v2)),
+                Argument::from(self.number(applied.index as u64)),
+                Argument::from(self.encoded(&applied)),
+                Argument::from(truth),
+            ]),
+            false,
+        );
+        let observed = self.ast.expression_parenthesized(
+            Span::default(),
+            self.ast.expression_sequence(
+                Span::default(),
+                self.ast
+                    .vec_from_array([assign, end, self.identifier(&result)]),
+            ),
+        );
+        *expression = if applied.inline {
+            let mut names = vec![applied.frame.clone()];
+            names.extend(applied.values.iter().cloned());
+            names.push(result);
+            self.wrap_inline_frame(observed, &names)
+        } else {
+            observed
+        };
+    }
+
     fn outcome(&self, applied: &AppliedDecision, outcome: bool) -> Expression<'a> {
         self.ast.expression_call(
             Span::default(),
@@ -7787,7 +7841,12 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         };
         let mut next_index = 0;
         self.instrument_conditions(test, &applied, &mut next_index);
-        debug_assert_eq!(next_index, plan.condition_count);
+        debug_assert_eq!(
+            next_index,
+            plan.condition_count,
+            "decision at {:?}",
+            test.span()
+        );
         Some(applied)
     }
 }
@@ -7879,12 +7938,21 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
     }
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        let value = self
+            .value_decisions
+            .contains(&span_key(expression.span()))
+            .then(|| self.reserve_decision(expression));
         walk_mut::walk_expression(self, expression);
         if let Some(names) = self.inline_names.take()
             && matches!(expression, Expression::ConditionalExpression(_))
         {
             let conditional = expression.take_in(self.ast.allocator);
             *expression = self.wrap_inline_frame(conditional, &names);
+        }
+        if let Some(plan) = value
+            && let Some(applied) = self.apply_decision(expression, plan)
+        {
+            self.record_value_outcome(expression, applied);
         }
     }
 
@@ -8007,6 +8075,12 @@ struct DecisionCollector<'s> {
     decision_vector_counts: Vec<usize>,
     decision_logical_nodes: HashSet<SpanKey>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
+    /// The expressions recorded as decisions where they are used as values,
+    /// for the transformer to find by span.
+    value_decisions: HashSet<SpanKey>,
+    /// TypeScript narrows what a left operand tests in the operand on its
+    /// right, which a recorded value would hide from it.
+    typescript: bool,
 }
 
 impl DecisionCollector<'_> {
@@ -8039,6 +8113,51 @@ impl DecisionCollector<'_> {
             },
         );
     }
+}
+
+/// The `&&` or `||` under any parentheses and `!`s: `!!(a && b)` is the
+/// decision `a && b` negated twice.
+fn compound_root<'e, 'a>(expression: &'e Expression<'a>) -> Option<&'e LogicalExpression<'a>> {
+    match expression {
+        Expression::ParenthesizedExpression(parenthesized) => {
+            compound_root(&parenthesized.expression)
+        }
+        Expression::UnaryExpression(unary) if unary.operator.is_not() => {
+            compound_root(&unary.argument)
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+        {
+            Some(logical)
+        }
+        _ => None,
+    }
+}
+
+/// Whether two expressions read a name in common, `this` included: the
+/// references TypeScript can narrow.
+fn shares_a_reference(left: &Expression<'_>, right: &Expression<'_>) -> bool {
+    #[derive(Default)]
+    struct References {
+        names: HashSet<String>,
+        this: bool,
+    }
+    impl<'a> Visit<'a> for References {
+        fn visit_identifier_reference(
+            &mut self,
+            identifier: &oxc_ast::ast::IdentifierReference<'a>,
+        ) {
+            self.names.insert(identifier.name.to_string());
+        }
+        fn visit_this_expression(&mut self, _expression: &oxc_ast::ast::ThisExpression) {
+            self.this = true;
+        }
+    }
+    let mut read_left = References::default();
+    read_left.visit_expression(left);
+    let mut read_right = References::default();
+    read_right.visit_expression(right);
+    (read_left.this && read_right.this) || !read_left.names.is_disjoint(&read_right.names)
 }
 
 /// MC/DC applies only when a decision can produce both Boolean outcomes.
@@ -9654,6 +9773,52 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
     // A with body is left uninstrumented: its object environment can
     // intercept probe identifiers (see `enter_with_statement`).
     fn visit_with_statement(&mut self, _statement: &WithStatement<'a>) {}
+
+    /// `&&` and `||` used as a value: the left operand is always read as a
+    /// boolean, whatever the operator returns, so a compound one is a decision
+    /// as much as an `if`'s test is -- `(a && b) || fallback`, `a || b ||
+    /// "default"`. What the operator returns from its right is a value, not a
+    /// condition, and is judged as one in its turn. A `!` reads its operand as
+    /// a boolean too.
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        let candidate = match expression {
+            // In TypeScript, a left operand recorded through a temporary no
+            // longer narrows what the right reads (`user && user.ok` before
+            // `user.name`), so one whose names the right reads stays measured
+            // by its branches, as it was.
+            Expression::LogicalExpression(logical)
+                if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or)
+                    && !self
+                        .decision_logical_nodes
+                        .contains(&span_key(logical.span))
+                    && !(self.typescript && shares_a_reference(&logical.left, &logical.right)) =>
+            {
+                Some(&logical.left)
+            }
+            Expression::UnaryExpression(unary)
+                if unary.operator.is_not()
+                    && has_compound_boolean_decision(&unary.argument)
+                    && !compound_root(&unary.argument).is_some_and(|root| {
+                        self.decision_logical_nodes.contains(&span_key(root.span))
+                    }) =>
+            {
+                Some(expression)
+            }
+            _ => None,
+        };
+        if let Some(decision) = candidate
+            && has_compound_boolean_decision(decision)
+            && decision_outcome_is_variable(decision)
+        {
+            let mut conditions = Vec::new();
+            collect_conditions(decision, &mut conditions);
+            if conditions.len() <= 32 {
+                self.value_decisions.insert(span_key(decision.span()));
+                self.record_decision(decision, "value");
+            }
+        }
+        walk::walk_expression(self, expression);
+    }
 
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
         if decision_outcome_is_variable(&statement.test) {
@@ -11796,8 +11961,11 @@ mod tests {
                 "export function name(user: { name: string } | false) {\n",
                 "  return user && user.name;\n",
                 "}\n",
-                "export function ok(total: number, name: string, force: boolean) {\n",
-                "  return (total > 0 && name !== 'x') || !!force;\n",
+                "export function ok(total: number, name: string) {\n",
+                "  return (total > 0 && name !== 'x') || !!name;\n",
+                "}\n",
+                "export function decided(total: number, name: string, force: boolean) {\n",
+                "  return (total > 0 && name !== 'x') || force;\n",
                 "}\n",
                 "export function pick(a: number | null, b: number | null, c: number) {\n",
                 "  return a ?? b ?? c;\n",
@@ -11810,20 +11978,25 @@ mod tests {
         );
         for expected in [
             "let s0: any;\n",
-            "return END2(10, (s0 = 0, user) && (s0 = 1, user.name), s0);",
+            "return END2(12, (s0 = 0, user) && (s0 = 1, user.name), s0);",
             // More than two leaves: the tree's own operators stay between
             // them, so a coverage tool the tests run reads one branch, and
             // what `total > 0` or `name !== 'x'` decided is recorded where
             // evaluation went on to `!!force`, by which of them it left:
             // the runtime looks that up, because a choice written out here
             // would be a branch of this line to that tool.
-            "return END(0, (s1 = 0, total > 0) && (s1 = 1, name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!force), s1);",
+            "return END(0, (s1 = 0, total > 0) && (s1 = 1, name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1);",
+            // A compound left operand is read as a boolean: a decision, its
+            // outcome taken from the value it held. Not above, where the
+            // right reads `name` and TypeScript narrows it from the left.
+            "|| (s2 = 1, force), s2);",
+            "kind: \"value\"",
             // Only `b` can come before `c`: a first `??` that kept `a` ends
             // the second.
-            "return END(1, (s2 = 0, a) ?? (s2 = 1, b) ?? (HIT(24), s2 = 2, c), s2);",
+            "return END(1, (s3 = 0, a) ?? (s3 = 1, b) ?? (HIT(30), s3 = 2, c), s3);",
             // A parameter list cannot see a frame its function's body
             // declares: the leaves keep their calls there.
-            "SHORT(30, list, 0) || RIGHT(30, [])",
+            "SHORT(36, list, 0) || RIGHT(36, [])",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }

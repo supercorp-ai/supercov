@@ -5,8 +5,8 @@
 // A small project whose tests drive each construct both ways: loops with
 // parts left out, negated compound decisions, logical assignment, optional
 // calls and members (deleted through, too, and called by a computed key),
-// parenthesized logic, rest patterns, decisions on a unary or a template,
-// source read through a computed key or a string,
+// parenthesized logic, `&&`/`||` used as values, rest patterns, decisions on
+// a unary or a template, source read through a computed key or a string,
 // sloppy `with` and direct `eval`, TypeScript `declare`, a shebang CLI, route
 // handlers and a server entry. Each file is read back for what its tests
 // showed: a construct measured wrongly reads as uncovered here.
@@ -208,6 +208,10 @@ export function scaled(value: number, factor: number = 2): number {
 }
 
 export const kind = (n: number): string => (n > 0 ? 'positive' : 'other');
+
+export function shout(user: { name: string; loud: boolean } | false) {
+  return (user && user.loud) && user.name.toUpperCase();
+}
 `,
   'src/cli.js': `#!/usr/bin/env node
 export function greet(name) {
@@ -355,7 +359,7 @@ test('with and eval still read the scope', () => {
 `,
   'test/typed.test.mjs': `import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Box, kind, scaled } from '../src/typed.ts';
+import { Box, kind, scaled, shout } from '../src/typed.ts';
 import { greet } from '../src/cli.js';
 
 test('typed and shebang modules', () => {
@@ -364,6 +368,9 @@ test('typed and shebang modules', () => {
   assert.equal(scaled(2, 3), 6);
   assert.equal(kind(1), 'positive');
   assert.equal(kind(0), 'other');
+  assert.equal(shout({ name: 'a', loud: true }), 'A');
+  assert.equal(shout({ name: 'a', loud: false }), false);
+  assert.equal(shout(false), false);
   assert.equal(greet('ann'), 'hello ann');
   assert.equal(greet(''), 'hello');
 });
@@ -396,10 +403,18 @@ export function nested(a, b) {
   const result = ((a)) ? ((b || a)) : null;
   return result;
 }
+
+export function fallback(a, b) {
+  return a || b || 'default';
+}
+
+export function neither(a, b) {
+  return !(a && b);
+}
 `,
   'test/grouped.test.mjs': `import assert from 'node:assert/strict';
 import test from 'node:test';
-import { both, call, chain, grouped, inIf, nested } from '../src/grouped.js';
+import { both, call, chain, fallback, grouped, inIf, neither, nested } from '../src/grouped.js';
 
 test('parenthesized logic, computed optional calls and chains', () => {
   assert.equal(both(1, 2), 2);
@@ -422,6 +437,12 @@ test('parenthesized logic, computed optional calls and chains', () => {
   assert.equal(nested(1, 0), 1);
   assert.equal(nested(1, 2), 2);
   assert.equal(nested(0, 0), null);
+  assert.equal(fallback('x', 0), 'x');
+  assert.equal(fallback(0, 'y'), 'y');
+  assert.equal(fallback(0, 0), 'default');
+  assert.equal(neither(1, 1), false);
+  assert.equal(neither(0, 1), true);
+  assert.equal(neither(1, 0), true);
 });
 `,
   'test/routes.test.mjs': `import assert from 'node:assert/strict';
