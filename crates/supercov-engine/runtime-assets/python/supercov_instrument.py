@@ -316,6 +316,14 @@ class _Inserter(ast.NodeTransformer):
             column,
         )
         self.inserted += 2
+        # A loop that never ran always takes its `else`, so the check goes
+        # first there: after the statement, an `else` that returns or raises
+        # left before it, and `for ...: ... else: return -1` never recorded
+        # running zero times.
+        orelse = node.orelse  # type: ignore[attr-defined]
+        if orelse:
+            orelse.insert(0, after)
+            return [reset, node]
         return [reset, node, after]
 
     visit_For = _loop

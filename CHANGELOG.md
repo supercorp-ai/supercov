@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A Python `for` loop whose `else` returned or raised (`for x in items: ... else: return -1`) never recorded running zero times, so an empty input read as untested.
 - A Ruby ternary on a literal condition (`true ? a : b`, `1 ? a : b`, a string or a symbol) made the file's probed source unparseable, so the whole file fell back to line coverage, with no branches or conditions.
 - A React Router or Remix server entry that exported its handler by name, an arrow or a class (`export default handleRequest;`) exported `null` under measurement, so every request failed. Only `export default function` was kept.
 

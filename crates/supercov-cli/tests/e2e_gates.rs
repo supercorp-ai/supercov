@@ -100,6 +100,7 @@ gates! {
     js_syntax_zoo => "js-syntax-zoo.mjs",
     ruby_syntax_zoo => "ruby-syntax-zoo.mjs",
     rust_syntax_zoo => "rust-syntax-zoo.mjs",
+    python_syntax_zoo => "python-syntax-zoo.mjs",
     shared_page => "shared-page.mjs",
     merge_across => "merge-across.mjs",
     mock_reach => "mock-reach.mjs",
