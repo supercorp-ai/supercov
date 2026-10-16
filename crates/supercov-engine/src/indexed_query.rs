@@ -346,7 +346,23 @@ impl IndexedQueryError {
     }
 }
 
-/// Several lines asked in one call, each answered as `line` answers it.
+/// How many covering tests each line of several lists: enough to name who
+/// reaches it, few enough that twenty lines fit in one reply.
+const BATCH_LINE_TESTS: usize = 3;
+
+/// A line of several: its state, gaps and counts, without the per-test and
+/// per-phase detail that a line asked alone lists in full.
+fn compact_line(mut data: CoverageCoversData) -> CoverageCoversData {
+    if let CoverageCoversData::Line(line) = &mut data {
+        line.phases.clear();
+        line.confidence.tests.clear();
+        line.confidence.asserted_tests.clear();
+    }
+    data
+}
+
+/// Several lines asked in one call, each answered as `line` answers it, but
+/// compactly: see [`compact_line`].
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageLinesData {
@@ -561,8 +577,9 @@ pub fn query_indexed(
         );
         let mut lines = Vec::new();
         let mut pages = Vec::new();
+        let mut cache = crate::coverage_query::CoversCache::default();
         for (file, line) in std::iter::once(first).chain(request.more_lines.iter().cloned()) {
-            let (data, page) = coverage_covers_query(
+            let (data, page) = crate::coverage_query::coverage_covers_query_cached(
                 index,
                 CoverageCoversQueryOptions {
                     run: &request.run_id,
@@ -571,11 +588,12 @@ pub fn query_indexed(
                     runner: request.runner.as_deref(),
                     file: &file,
                     line,
-                    offset: request.offset,
-                    limit: request.limit,
+                    offset: 0,
+                    limit: request.limit.min(BATCH_LINE_TESTS),
                 },
+                &mut cache,
             )?;
-            lines.push(data);
+            lines.push(compact_line(data));
             pages.push(page);
         }
         return Ok(IndexedQueryOutput {

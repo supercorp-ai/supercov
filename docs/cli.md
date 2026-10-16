@@ -159,7 +159,7 @@ npx supercov runs <run-id> [query] [options]
 | `files` | See every included file, including fully covered files; `--group dir` shows coverage by directory, split by test kind |
 | `file <path>` | Inspect the open obligations in one file |
 | `decision <id \| path:line>` | Understand missing boolean outcomes and MC/DC witnesses |
-| `line <path:line>` | See one line's state, obligations, and covering tests |
+| `line <path:line>...` | See a line's state, obligations, and covering tests; several lines, or `--from-file` with one per line, in one call |
 | `test <id \| name>` | See the coverage attributed to one test |
 | `tests without-evidence` | List the tests that made assertions and recorded no coverage, which the summary counts in a warning |
 | `kinds` | Group coverage by test level, such as unit or E2E |
@@ -203,6 +203,27 @@ starting before the first test. The column is there when a directory has any.
 In `--json`, every file of `files` and `gaps` carries `totals` and `covered`
 for each metric beside what is missing, so a percentage can be worked out for
 any file or set of files.
+
+`line` reads the run once for every location it is given, so asking for
+twenty lines in one call costs about what one does. `--from-file` takes the
+locations from a file, one per line, skipping blank lines and `#` comments.
+Each line of several lists its state, its gaps and its first three covering
+tests, with `totalTests` and `totalPhases` for the rest; asked alone, a line
+lists every test and phase. In `--json` the reply is `coverage.lines`, one
+entry per location in order; any that do not fit one reply are listed in
+`remaining`, to ask for next.
+
+```sh supercov
+npx supercov runs latest line app/routes/checkout.ts:42 app/routes/checkout.ts:57
+npx supercov runs latest line --from-file lines.txt --json
+```
+
+An MC/DC gap names the value each missing condition never took, in `file`,
+`line` and `decision` (`` `sum < 50` was never true; needs `express` false,
+`sum < 50` true, decision true ``). In `--json` it is `missingOutcomes`:
+`["true"]` or `["false"]`, both when no test evaluated the condition, and
+none when it took both values but never decided the result alone.
+`file --group decision` lists the missing conditions under each decision.
 
 Run any query with `--help` to see only the options valid for that query:
 

@@ -728,36 +728,113 @@ fn selected_test_ids(
     Ok(Some(selected))
 }
 
+/// What the lines of one call share: the run's tests, phases and
+/// limitations, and each file's points, decisions and gaps, read once
+/// however many lines of the file are asked. One call has one view and one
+/// set of filters, so nothing here depends on the line.
+#[derive(Default)]
+pub struct CoversCache {
+    tests: Vec<IndexedTestSummary>,
+    phases: HashMap<String, crate::coverage_index::IndexedPhaseSummary>,
+    limitations: Vec<crate::coverage_index::IndexedLimitation>,
+    read: bool,
+    files: HashMap<String, CoversFile>,
+}
+
+struct CoversFile {
+    metadata: HashMap<String, IndexedHitMetadata>,
+    decisions: HashMap<String, crate::coverage_report::DecisionResult>,
+    gap_lines: Vec<CoverageFileGapLine>,
+}
+
+impl CoversCache {
+    fn fill(
+        &mut self,
+        index: &CoverageIndex<'_>,
+        options: &CoverageCoversQueryOptions<'_>,
+    ) -> Result<(), QueryError> {
+        if !self.read {
+            self.tests = index.test_summaries(options.view)?;
+            self.phases = index
+                .phase_summaries(options.view)?
+                .into_iter()
+                .map(|phase| (phase.id.clone(), phase))
+                .collect();
+            self.limitations = index.limitations(options.view)?;
+            self.read = true;
+        }
+        if self.files.contains_key(options.file) {
+            return Ok(());
+        }
+        // A line's points, branches and decisions are all of its own file.
+        let metadata = index
+            .hit_metadata_in_file(options.view, options.file)?
+            .into_iter()
+            .map(|value| (value.id.clone(), value))
+            .collect();
+        let decisions = index
+            .decision_details_in_file(options.view, options.file)?
+            .into_iter()
+            .map(|value| (value.meta.id.clone(), value))
+            .collect();
+        let (detail, _) = coverage_file_detail_query(
+            index,
+            CoverageFileDetailOptions {
+                run: options.run,
+                view: options.view,
+                kind: options.kind,
+                runner: options.runner,
+                selector: options.file,
+                metric: MinimizeMetric::All,
+                offset: 0,
+                limit: usize::MAX,
+            },
+        )?;
+        self.files.insert(
+            options.file.into(),
+            CoversFile {
+                metadata,
+                decisions,
+                gap_lines: detail.gap_lines,
+            },
+        );
+        Ok(())
+    }
+}
+
 pub fn coverage_covers_query(
     index: &CoverageIndex<'_>,
     options: CoverageCoversQueryOptions<'_>,
 ) -> Result<(CoverageCoversData, AgentPagination), QueryError> {
+    coverage_covers_query_cached(index, options, &mut CoversCache::default())
+}
+
+/// [`coverage_covers_query`] for one of several lines, reading what the
+/// lines share through `cache`.
+pub fn coverage_covers_query_cached(
+    index: &CoverageIndex<'_>,
+    options: CoverageCoversQueryOptions<'_>,
+    cache: &mut CoversCache,
+) -> Result<(CoverageCoversData, AgentPagination), QueryError> {
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
-    let tests = index.test_summaries(options.view)?;
-    let selected = selected_test_ids(&tests, options.kind, options.runner)?;
+    cache.fill(index, &options)?;
+    let cache = &*cache;
+    let tests = &cache.tests;
+    let selected = selected_test_ids(tests, options.kind, options.runner)?;
     let selected_includes = |id: &str| selected.as_ref().is_none_or(|ids| ids.contains(id));
     let filters = query_filters(options.view, options.kind, options.runner);
     let location = CoverageLocation {
         file: options.file.into(),
         line: options.line,
     };
-    // A line's points, branches and decisions are all of its own file.
-    let metadata = index
-        .hit_metadata_in_file(options.view, options.file)?
-        .into_iter()
-        .map(|value| (value.id.clone(), value))
-        .collect::<HashMap<_, _>>();
-    let decisions = index
-        .decision_details_in_file(options.view, options.file)?
-        .into_iter()
-        .map(|value| (value.meta.id.clone(), value))
-        .collect::<HashMap<_, _>>();
+    let file = &cache.files[options.file];
+    let (metadata, decisions) = (&file.metadata, &file.decisions);
     let anchors = index.anchors(options.view, options.file, options.line)?;
     let tests_by_id = tests
         .iter()
-        .map(|test| (test.id.clone(), test.clone()))
+        .map(|test| (test.id.as_str(), test))
         .collect::<HashMap<_, _>>();
     let mut anchor_test_ids = anchors
         .iter()
@@ -778,7 +855,7 @@ pub fn coverage_covers_query(
     let all_anchor_tests = anchor_test_ids
         .iter()
         .map(|id| {
-            let test = tests_by_id.get(id);
+            let test = tests_by_id.get(id.as_str());
             CoverageCoveringTest {
                 id: id.clone(),
                 name: test.map_or_else(|| id.clone(), |test| test.name.clone()),
@@ -890,10 +967,11 @@ pub fn coverage_covers_query(
         .iter()
         .filter(|anchor| anchor.covered)
         .count();
-    let all_limitations = index
-        .limitations(options.view)?
-        .into_iter()
+    let all_limitations = cache
+        .limitations
+        .iter()
         .filter(|limitation| limitation.file == options.file && limitation.line == options.line)
+        .cloned()
         .map(|limitation| CoverageFileLimitation {
             id: limitation.id,
             kind: limitation.kind,
@@ -913,23 +991,11 @@ pub fn coverage_covers_query(
         .take(options.limit)
         .cloned()
         .collect::<Vec<_>>();
-    let (file_detail, _) = coverage_file_detail_query(
-        index,
-        CoverageFileDetailOptions {
-            run: options.run,
-            view: options.view,
-            kind: options.kind,
-            runner: options.runner,
-            selector: options.file,
-            metric: MinimizeMetric::All,
-            offset: 0,
-            limit: usize::MAX,
-        },
-    )?;
-    let gap_line = file_detail
+    let gap_line = file
         .gap_lines
-        .into_iter()
-        .find(|gap| gap.line == options.line);
+        .iter()
+        .find(|gap| gap.line == options.line)
+        .cloned();
     // Covered lines are absent from the gap projection, but their anchored
     // statement/branch/decision metadata still carries the source snippet.
     // Prefer the exact gap-line text when present and otherwise retain that
@@ -993,7 +1059,7 @@ pub fn coverage_covers_query(
         .iter()
         .filter(|id| selected_includes(id))
         .map(|id| {
-            let test = tests_by_id.get(id);
+            let test = tests_by_id.get(id.as_str());
             CoverageCoveringTest {
                 id: id.clone(),
                 name: test.map_or_else(|| id.clone(), |test| test.name.clone()),
@@ -1002,11 +1068,7 @@ pub fn coverage_covers_query(
             }
         })
         .collect::<Vec<_>>();
-    let phases_by_id = index
-        .phase_summaries(options.view)?
-        .into_iter()
-        .map(|phase| (phase.id.clone(), phase))
-        .collect::<HashMap<_, _>>();
+    let phases_by_id = &cache.phases;
     let all_phases = line
         .phases
         .iter()

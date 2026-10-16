@@ -834,14 +834,28 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 one.file = Some(location.file.clone());
                 one.line = Some(location.line);
                 one.more_lines = Vec::new();
-                render_coverage(
+                // A line of several lists a few tests; asked alone it lists
+                // them all, which is the next page here.
+                let mut page = page.clone();
+                let more = page.has_more;
+                page.has_more = false;
+                page.next_offset = None;
+                let mut text = render_coverage(
                     &one,
                     &IndexedQueryOutput {
                         command: "coverage.line",
                         data: IndexedQueryData::Line(Box::new(line.clone())),
-                        pagination: Some(page.clone()),
+                        pagination: Some(page),
                     },
-                )
+                );
+                if more {
+                    text.push_str(&format!(
+                        "\nevery test and phase: supercov runs {} line {}",
+                        shell_quote(&request.run_id),
+                        shell_quote(&format!("{}:{}", location.file, location.line))
+                    ));
+                }
+                text
             })
             .collect::<Vec<_>>()
             .join("\n\n");
