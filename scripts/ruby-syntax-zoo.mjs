@@ -3,7 +3,8 @@
 //   node scripts/ruby-syntax-zoo.mjs
 //
 // A small library whose tests drive each construct both ways: parenthesized
-// conditions, a call with a receiver as a condition, `not`, pattern matching
+// conditions, `&&`/`||` used as values, a call with a receiver as a
+// condition, `not`, pattern matching
 // with guards, rescue clauses that retry, `redo` and `break` ending a branch,
 // multiple assignment, `alias`, `undef`, endless methods, `Class.new`,
 // refinements, safe navigation with a block, method and block bodies that
@@ -64,6 +65,18 @@ const files = {
     in String if value.empty? then 'blank'
     else 'other'
     end
+  end
+
+  def self.first_set(a, b, default)
+    a || b || default
+  end
+
+  def self.grouped_value(a, b, c)
+    (a && b) || c
+  end
+
+  def self.neither(a, b)
+    !(a && b)
   end
 
   def self.choose(flag)
@@ -208,6 +221,16 @@ class ZooTest < Minitest::Test
     assert_equal 'second', Flow.negated(false, true)
     assert_equal 'off', Flow.choose(false)
     assert_equal 'on', Flow.choose(true)
+    # Used as values, they return their operands, not their truth.
+    assert_equal 'x', Flow.first_set('x', nil, 'd')
+    assert_equal 'y', Flow.first_set(nil, 'y', 'd')
+    assert_equal 'd', Flow.first_set(nil, false, 'd')
+    assert_equal [2], Flow.grouped_value([1], [2], 'c')
+    assert_equal 'c', Flow.grouped_value(nil, [2], 'c')
+    assert_equal 'c', Flow.grouped_value([1], false, 'c')
+    assert_equal false, Flow.neither(1, 1)
+    assert_equal true, Flow.neither(nil, 1)
+    assert_equal true, Flow.neither(1, nil)
   end
 
   def test_patterns

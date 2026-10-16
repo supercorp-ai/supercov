@@ -2169,6 +2169,24 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// `&&` and `||` used as a value: the left operand is read as a boolean,
+    /// whatever the operator returns, so a compound one is a decision as much
+    /// as an `if`'s condition is -- `(a && b) || fallback`, `a || b ||
+    /// default`. The right is a value, judged as one in its turn. A `!` reads
+    /// its operand as a boolean too. Inside the operand's own logical probe.
+    fn value_decision<'n>(&mut self, operand: impl Fn() -> Node<'n>) {
+        if !self.is_compound(operand()) {
+            return;
+        }
+        let (root, _) = self.strip(operand());
+        if self.tree_logicals.contains(&root.location().start_offset()) {
+            return;
+        }
+        self.depth += 1;
+        self.probe_decision(operand(), "value", None, "d");
+        self.depth -= 1;
+    }
+
     fn value_logical(&mut self, op: &str, left: &Node<'_>, node_start: usize, node_end: usize) {
         let Some(id) = self.branch(
             node_start,
@@ -3208,6 +3226,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         if !self.tree_logicals.contains(&location.start_offset()) {
             let left = node.left();
             self.value_logical("and", &left, location.start_offset(), location.end_offset());
+            self.value_decision(|| node.left());
         }
         self.depth += 1;
         ruby_prism::visit_and_node(self, node);
@@ -3219,6 +3238,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         if !self.tree_logicals.contains(&location.start_offset()) {
             let left = node.left();
             self.value_logical("or", &left, location.start_offset(), location.end_offset());
+            self.value_decision(|| node.left());
         }
         self.depth += 1;
         ruby_prism::visit_or_node(self, node);
@@ -3226,6 +3246,9 @@ impl<'pr> Visit<'pr> for Collector<'_> {
     }
 
     fn visit_call_node(&mut self, node: &CallNode<'pr>) {
+        if node.name().as_slice() == b"!" && node.arguments().is_none() && node.block().is_none() {
+            self.value_decision(|| node.as_node());
+        }
         if node.name().as_slice() == b"new"
             && node.receiver().is_some_and(|receiver| {
                 receiver
