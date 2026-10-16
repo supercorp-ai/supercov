@@ -24,19 +24,20 @@ fn repository() -> PathBuf {
         .expect("the repository root")
 }
 
-fn gate(script: &str) {
+fn gate(script: &str, arguments: &[&str]) {
     let turn = File::create(std::env::temp_dir().join("supercov-e2e-gates.lock"))
         .expect("the gate lock file");
     turn.lock().expect("a turn at the gates");
     let output = Command::new("node")
         .arg(repository().join("scripts").join(script))
+        .args(arguments)
         .current_dir(repository())
         .env("SUPERCOV_BINARY", env!("CARGO_BIN_EXE_supercov"))
         .output()
         .expect("node runs");
     assert!(
         output.status.success(),
-        "{script} failed ({})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        "{script} {arguments:?} failed ({})\n--- stdout ---\n{}\n--- stderr ---\n{}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -44,12 +45,12 @@ fn gate(script: &str) {
 }
 
 macro_rules! gates {
-    ($($name:ident => $script:literal),* $(,)?) => {
+    ($($name:ident => $script:literal $([$($argument:literal),*])?),* $(,)?) => {
         $(
             #[test]
             #[ignore = "an end-to-end gate: needs its toolchains and takes minutes"]
             fn $name() {
-                gate($script);
+                gate($script, &[$($($argument),*)?]);
             }
         )*
     };
@@ -93,4 +94,31 @@ gates! {
     node_test => "node-test-integration.mjs",
     workspaces_attribution => "workspaces-attribution-integration.mjs",
     agent_query_eval => "agent-query-eval.mjs",
+    background_by_time => "background-by-time.mjs",
+    cross_origin_requests => "cross-origin-requests.mjs",
+    leaving_page => "leaving-page.mjs",
+    shared_page => "shared-page.mjs",
+    merge_across => "merge-across.mjs",
+    mock_reach => "mock-reach.mjs",
+    next_playwright => "next-playwright-integration.mjs",
+    react_hydration => "react-hydration-compatibility.mjs",
+    test262_equivalence => "test262-equivalence.mjs",
+    clang_mcdc_oracle => "clang-mcdc-oracle.mjs",
+    mocha_failure_output => "mocha-failure-output.mjs",
+    python_servers => "python-server-playwright.mjs",
+    ruby_servers => "ruby-server-playwright.mjs",
+    go_servers => "go-server-playwright.mjs",
+    jvm_servers => "jvm-server-playwright.mjs",
+    docker_servers => "docker-server-playwright.mjs",
+    failure_output_node => "failure-output.mjs" ["node", "ava", "tap"],
+    failure_output_python => "failure-output.mjs" ["python"],
+    failure_output_ruby => "failure-output.mjs" ["ruby"],
+    failure_output_go => "failure-output.mjs" ["go"],
+    failure_output_rust => "failure-output.mjs" ["rust"],
+    side_by_side_node => "side-by-side.mjs" ["node"],
+    side_by_side_python => "side-by-side.mjs" ["python"],
+    side_by_side_ruby => "side-by-side.mjs" ["ruby"],
+    side_by_side_go => "side-by-side.mjs" ["go"],
+    side_by_side_rust => "side-by-side.mjs" ["rust"],
+    side_by_side_jvm => "side-by-side.mjs" ["jvm"],
 }
