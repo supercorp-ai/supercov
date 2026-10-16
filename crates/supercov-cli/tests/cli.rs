@@ -5321,16 +5321,7 @@ fn cargo_reached_in_every_form_runs_what_it_was_asked() {
 
 #[test]
 fn a_go_run_names_the_tests_it_could_not_claim_and_the_files_it_could_not_read() {
-    // Homebrew's Go is not on a non-login shell's PATH on macOS.
-    let Some(go) = ["go", "/opt/homebrew/bin/go", "/usr/local/go/bin/go"]
-        .into_iter()
-        .find(|go| {
-            std::process::Command::new(go)
-                .arg("version")
-                .output()
-                .is_ok_and(|out| out.status.success())
-        })
-    else {
+    let Some(go) = go() else {
         eprintln!("skipping: no Go toolchain found");
         return;
     };
@@ -5812,4 +5803,44 @@ fn a_workspace_package_runs_with_its_own_node_modules_and_tools() {
             .file_type()
             .is_symlink()
     );
+}
+
+/// Homebrew's Go is not on a non-login shell's PATH on macOS.
+fn go() -> Option<&'static str> {
+    ["go", "/opt/homebrew/bin/go", "/usr/local/go/bin/go"]
+        .into_iter()
+        .find(|go| {
+            std::process::Command::new(go)
+                .arg("version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        })
+}
+
+#[test]
+fn a_file_a_test_deletes_in_the_copy_is_named_and_kept() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-deletes");
+    project.write("go.mod", "module example.com/deletes\n\ngo 1.22\n");
+    project.write("stale.txt", "left from a run before\n");
+    project.write(
+        "clean.go",
+        "package deletes\n\nimport \"os\"\n\nfunc Clean(path string) bool {\n\tif err := os.Remove(path); err != nil {\n\t\treturn false\n\t}\n\treturn true\n}\n",
+    );
+    project.write(
+        "clean_test.go",
+        "package deletes\n\nimport \"testing\"\n\nfunc TestClean(t *testing.T) {\n\tif !Clean(\"stale.txt\") || Clean(\"stale.txt\") {\n\t\tt.Fatal(\"clean\")\n\t}\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let ran = project.supercov(&["--", go, "test", "./..."]);
+    let said = format!("{}{}", ran.stdout(), ran.stderr());
+    assert_eq!(ran.code(), 0, "{said}");
+    assert!(
+        said.contains("the command deleted 1 file(s) in the isolated workspace; deletions are not propagated to the project: stale.txt"),
+        "{said}"
+    );
+    assert_eq!(project.read("stale.txt"), "left from a run before\n");
 }
