@@ -458,7 +458,7 @@ one as a public artifact.
 | `--filter all \| passed \| failed` | Recalculate the view from all, successful, or failed attempts |
 | `--kind <kind>` | Restrict to a test level such as `unit`, `integration`, or `e2e` |
 | `--runner <runner>` | Restrict to one runner |
-| `--tag <tag>` | Restrict to tests with this tag; repeat it for tests with any of several |
+| `--tag <tag>` | Restrict to tests with this tag; repeat it for tests with any of several, and start a value with `!` to leave those tests out |
 | `--title <text>` | Restrict to tests whose name contains this text |
 | `--test-file <path>` | Restrict to tests in this file, or in this directory |
 | `--metric all \| lines \| statements \| functions \| branches \| mcdc` | Choose a metric for `files`, `gaps`, `diff`, or `minimize` |
@@ -473,12 +473,14 @@ Collection output includes a copyable command for the next page.
 pick, from a run already measured: the API tests of a Playwright suite, the
 tests of one spec file, everything named `checkout`. Each takes several values
 for tests matching any of them, and when several are given a test must match
-each.
+each. A value starting with `!` leaves those tests out, so the browser tests of
+a suite whose other tests are tagged read as the tests with none of the tags.
 
 ```sh supercov
 npx supercov runs latest --tag @api
 npx supercov runs latest gaps --test-file tests/e2e/checkout.spec.ts
 npx supercov runs latest files --title checkout --tag smoke
+npx supercov runs latest --tag '!api' --tag '!cron' --tag '!webhook'
 ```
 
 A tag is what the runner gives a test: a Playwright tag (`{ tag: '@api' }`, or

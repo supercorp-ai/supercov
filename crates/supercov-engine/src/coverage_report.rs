@@ -938,6 +938,18 @@ pub struct TestFilter {
     pub runner: Option<String>,
 }
 
+/// Whether a test passes one criterion's values: one of the values it names
+/// matches, and none it excludes with a leading `!` does (`--tag '!api'`, as
+/// ripgrep's `-g '!*.js'`). With only exclusions, every other test passes.
+fn picks(values: &[String], matches: impl Fn(&str) -> bool) -> bool {
+    let (excluded, wanted): (Vec<&str>, Vec<&str>) = values
+        .iter()
+        .map(String::as_str)
+        .partition(|value| value.starts_with('!'));
+    (wanted.is_empty() || wanted.iter().any(|value| matches(value)))
+        && !excluded.iter().any(|value| matches(&value[1..]))
+}
+
 impl TestFilter {
     pub fn is_empty(&self) -> bool {
         self.tags.is_empty()
@@ -964,31 +976,27 @@ impl TestFilter {
                 .is_none_or(|runner| provenance.runner == *runner);
         let tags = &provenance.tags;
         let tag = |value: &str| value.trim_start_matches('@').to_lowercase();
-        let tagged = self.tags.is_empty()
-            || self
-                .tags
-                .iter()
-                .any(|wanted| tags.iter().any(|carried| tag(carried) == tag(wanted)));
+        let tagged = picks(&self.tags, |wanted| {
+            tags.iter().any(|carried| tag(carried) == tag(wanted))
+        });
         // The full name, and the title where the name is only a position
         // (`spec/cart_spec.rb[1:2]`, with "Cart adds an item" its title).
         let name = name.to_lowercase();
         let title = title.map(str::to_lowercase).unwrap_or_default();
-        let titled = self.titles.is_empty()
-            || self.titles.iter().any(|wanted| {
-                let wanted = wanted.to_lowercase();
-                name.contains(&wanted) || title.contains(&wanted)
-            });
-        let filed = self.files.is_empty()
-            || file.is_some_and(|file| {
-                let file = file.trim_start_matches("./");
-                self.files.iter().any(|wanted| {
-                    let wanted = wanted.trim_start_matches("./").trim_end_matches('/');
-                    file == wanted
-                        || file
-                            .strip_prefix(wanted)
-                            .is_some_and(|rest| rest.starts_with('/'))
-                })
-            });
+        let titled = picks(&self.titles, |wanted| {
+            let wanted = wanted.to_lowercase();
+            name.contains(&wanted) || title.contains(&wanted)
+        });
+        let file = file.map(|file| file.trim_start_matches("./"));
+        let filed = picks(&self.files, |wanted| {
+            let wanted = wanted.trim_start_matches("./").trim_end_matches('/');
+            file.is_some_and(|file| {
+                file == wanted
+                    || file
+                        .strip_prefix(wanted)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+        });
         kinded && tagged && titled && filed
     }
 
@@ -3424,6 +3432,12 @@ mod tests {
         // A directory is a whole segment, not a prefix of a name.
         assert!(!filter(&[], &[], &["tests/e"]).matches(name, None, file, &api));
         assert!(!filter(&["api"], &[], &["tests/unit"]).matches(name, None, file, &api));
+        // A leading `!` excludes; with only exclusions, every other test.
+        assert!(!filter(&["!api"], &[], &[]).matches(name, None, file, &api));
+        assert!(filter(&["!ui", "!cron"], &[], &[]).matches(name, None, file, &api));
+        assert!(!filter(&["smoke", "!API"], &[], &[]).matches(name, None, file, &api));
+        assert!(filter(&[], &["!refund"], &["!tests/unit"]).matches(name, None, file, &api));
+        assert!(!filter(&[], &[], &["!tests/e2e"]).matches(name, None, file, &api));
         let kinded = TestFilter {
             kind: Some("unit".into()),
             ..TestFilter::default()

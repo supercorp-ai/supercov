@@ -6281,6 +6281,13 @@ fn a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file() {
     // Any of one criterion; every criterion given.
     assert_eq!(lines(&["--tag", "api", "--tag", "ui"]), (5, 6));
     assert_eq!(lines(&["--tag", "api", "--test-file", "test/api"]), (3, 6));
+    // A leading `!` leaves tests out: everything but the API tests.
+    assert_eq!(lines(&["--tag", "!api"]), (2, 6));
+    assert_eq!(lines(&["--test-file", "!test/api"]), (2, 6));
+    let neither = project
+        .supercov(&["runs", &run, "--tag", "!api", "--tag", "!e2e", "--json"])
+        .json();
+    assert_eq!(neither["error"]["code"], "TEST_FILTER_EMPTY", "{neither}");
     let none = project
         .supercov(&[
             "runs",

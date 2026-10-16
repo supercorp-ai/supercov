@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Changed**
+
+- `--tag`, `--title` and `--test-file` leave tests out with a leading `!`: `--tag '!api' --tag '!cron'` reads the tests with neither tag, the browser tests of a suite whose others are tagged, from the one run.
+
 **Fixed**
 
 - A Playwright test read Supercov's own cookies: `context.cookies()` listed the cookies that carry the test's scope, so an assertion on cookies failed only under measurement, and `storageState({ path })` wrote them into the suite's saved login state. Both now give the suite's cookies alone.
