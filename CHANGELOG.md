@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- A pytest test marked `xfail` that passed (XPASS) was reported as failed, so its run read as failing and its coverage was left out of the passed view, while pytest counted it as a pass. It is now passed, as pytest counts it; a strict `xfail` that passes is still failed.
 - `supercov docs reports` failed in every installed copy with "guide \"reports\" is not present in this installation", though `supercov docs` listed it. The guide is now bundled like the others.
 - `runs <id> decision` lists a line's decisions as `file:line:column`, but passing one of those locations back listed every decision on the line again. The column now selects the decision at it.
 - `merge` with no run named dropped, without a word, any run whose source it could no longer fingerprint (every measured file deleted), and said only "the source has changed" for a run left out because a measured file was added. The first is now listed as left out, and the second says how many files were added.
