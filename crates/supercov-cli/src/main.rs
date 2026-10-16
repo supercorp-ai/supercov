@@ -2178,10 +2178,17 @@ fn selected_package_script(command: &[String]) -> Option<&str> {
     if !matches!(program, "npm" | "pnpm" | "yarn") {
         return None;
     }
-    match command.get(1).map(String::as_str) {
-        Some("test") => Some("test"),
-        Some("run") => command.get(2).map(String::as_str),
-        Some(value) if program != "npm" && !value.starts_with('-') => Some(value),
+    // Flags go before or after the subcommand (`npm -s run test:unit`,
+    // `npm run --silent test:unit`), and npm takes `t` and `run-script` for
+    // the commands they abbreviate.
+    let mut words = command[1..]
+        .iter()
+        .map(String::as_str)
+        .filter(|word| !word.starts_with('-'));
+    match words.next() {
+        Some("test" | "t" | "tst") => Some("test"),
+        Some("run" | "run-script") => words.next(),
+        Some(value) if program != "npm" => Some(value),
         _ => None,
     }
 }

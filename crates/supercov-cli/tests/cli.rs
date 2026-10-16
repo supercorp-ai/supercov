@@ -5302,3 +5302,72 @@ fn a_go_run_names_the_tests_it_could_not_claim_and_the_files_it_could_not_read()
         "{files}"
     );
 }
+
+#[test]
+fn a_run_of_one_test_script_points_at_the_whole_suite_however_it_was_named() {
+    let project = Project::cart("scripts");
+    let scripts = |scripts: &str| {
+        project.write(
+            "package.json",
+            &format!(r#"{{ "name": "cart", "private": true, "type": "module", "scripts": {{ {scripts} }} }}"#),
+        );
+    };
+    let hints = |command: &[&str]| {
+        let mut args = vec!["--"];
+        args.extend_from_slice(command);
+        let ran = project.supercov(&args);
+        assert_eq!(
+            ran.code(),
+            0,
+            "{command:?}\n{}{}",
+            ran.stdout(),
+            ran.stderr()
+        );
+        let run = project.latest();
+        project.supercov(&["runs", &run, "--json"]).json()["data"]["hints"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|hint| hint.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    scripts(
+        r#""test": "node --test", "test:unit": "node --test test/cart.test.js", "test:other": "node --test""#,
+    );
+    // The whole suite, by any of its names, needs no pointer to itself.
+    for command in [
+        &["npm", "test"][..],
+        &["npm", "t"],
+        &["npm", "run", "-s", "test"],
+        &["npm", "--silent", "run-script", "test"],
+    ] {
+        assert_eq!(hints(command), Vec::<String>::new(), "{command:?}");
+    }
+    // One script of several names the others and the whole command.
+    for command in [&["npm", "run", "test:unit"][..], &["pnpm", "test:unit"]] {
+        let said = hints(command).join("\n");
+        contains_all(
+            &said,
+            &[
+                &format!("wrapped `{}`", command.join(" ")),
+                "Other test scripts include test:other.",
+                "-- npm test`",
+            ],
+        );
+        assert!(!said.contains("include test:unit"), "{said}");
+    }
+    // With nothing else to name, it still names the whole command.
+    scripts(r#""test": "node --test", "test:unit": "node --test test/cart.test.js""#);
+    let said = hints(&["npm", "run", "test:unit"]).join("\n");
+    assert!(
+        said.contains("-- npm test`") && !said.contains("Other test scripts"),
+        "{said}"
+    );
+    // A command of its own beside a lone `test` script is not one of several,
+    // and a project with no `test` script has no whole suite to point at.
+    scripts(r#""test": "node --test""#);
+    assert_eq!(hints(&["node", "--test"]), Vec::<String>::new());
+    scripts(r#""unit": "node --test""#);
+    assert_eq!(hints(&["npm", "run", "unit"]), Vec::<String>::new());
+}
