@@ -839,7 +839,9 @@ fn changed(e: &str, ty: Option<&str>, crate_view: &Crate) -> Option<String> {
     let local = crate_view.locals.get(e).cloned();
     let ty = ty.or(local.as_deref());
     let first = replacement(e, ty);
-    if !first.contains("Default::default()") {
+    // A default is a guess the steps below may improve on; a vector given one
+    // element is not, and dropping it gave an empty vector back as its change.
+    if !first.contains("Default::default()") || first == "vec![Default::default()]" {
         return Some(first);
     }
     if let Some(swapped) = result_swap(e, ty, crate_view) {
@@ -1429,6 +1431,11 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
         Some("bool") => format!("!({e})"),
         Some(t) if INTEGERS.contains(&t) => "0".into(),
         Some("f32" | "f64") => "0.0".into(),
+        // An empty value changed to an empty one is no change at all, and a
+        // question no test could answer yes to.
+        Some("String") if e == "String::new()" || empty_string_source(e) => {
+            "String::from(\"supercov\")".into()
+        }
         Some("String") => "String::new()".into(),
         Some(t) if t.starts_with('&') && t.ends_with("str") => "\"\"".into(),
         Some(t) if t.starts_with("Option<") && !e.starts_with("None") => "None".into(),
@@ -1436,6 +1443,7 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
         Some(t) if t.ends_with("Ordering") => {
             ordering(e).unwrap_or_else(|| format!("({e}).reverse()"))
         }
+        Some(t) if t.starts_with("Vec<") && empty_vec(e) => "vec![Default::default()]".into(),
         Some(t) if t.starts_with("Vec<") => "Vec::new()".into(),
         Some("()") => "()".into(),
         Some(_) => "Default::default()".into(),
@@ -1459,13 +1467,26 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
             } else if let Some(o) = ordering(e) {
                 o
             } else if e.starts_with("vec![") || e.starts_with("Vec::new()") {
-                "Vec::new()".into()
+                // An empty vector changed to an empty one is no change at all,
+                // and a question no test could answer yes to: it read as
+                // unasserted however well the tests checked it.
+                if empty_vec(e) {
+                    "vec![Default::default()]".into()
+                } else {
+                    "Vec::new()".into()
+                }
+            } else if e == "String::new()" {
+                "String::from(\"supercov\")".into()
             } else if e.starts_with("String::from(")
                 || e.starts_with("format!(")
                 || e.ends_with(".to_string()")
                 || e.ends_with(".to_owned()")
             {
-                "String::new()".into()
+                if empty_string_source(e) {
+                    "String::from(\"supercov\")".into()
+                } else {
+                    "String::new()".into()
+                }
             } else if e.ends_with(".len()")
                 || e.ends_with(".count()")
                 || e.ends_with(".leading_zeros()")
@@ -1485,6 +1506,20 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
             }
         }
     }
+}
+
+/// `Vec::new()` or `vec![]`: a vector with nothing in it.
+fn empty_vec(e: &str) -> bool {
+    e == "Vec::new()" || e.replace(char::is_whitespace, "") == "vec![]"
+}
+
+/// A string built from nothing: `String::from("")`, `"".to_string()`,
+/// `"".to_owned()`, `format!("")`.
+fn empty_string_source(e: &str) -> bool {
+    matches!(
+        e.replace(char::is_whitespace, "").as_str(),
+        "String::from(\"\")" | "\"\".to_string()" | "\"\".to_owned()" | "format!(\"\")"
+    )
 }
 
 /// `0`, `42u8`, `1_000` -> the digits and the suffix.

@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- Assessing a Rust run asked whether a test would catch an empty `Vec::new()`, `vec![]` or `String::new()` becoming the same empty value. That is no change, so the statement always read as not asserted. An empty value now becomes a non-empty one.
 - A method whose source is read through a property (`box.method.toString()`, `String(Shape.prototype.area)`) was instrumented, so its text changed. Any method of that name in the file is now kept as written.
 - `merge` refused a JavaScript run and a Python run of one project saying the second was "recorded by another build of Supercov". It now says the runs measured different languages.
 - A Python `for` loop whose `else` returned or raised (`for x in items: ... else: return -1`) never recorded running zero times, so an empty input read as untested.
