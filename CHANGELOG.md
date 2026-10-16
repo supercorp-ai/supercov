@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- A Kotlin condition that relied on a smart cast from `isNullOrEmpty()` or `isNullOrBlank()` (`if (!s.isNullOrEmpty() && s.length > 3)`) stopped the file compiling under measurement. It is now recorded from its branches, as a condition with a null check already was.
 - A Go package whose conditions used a named boolean type (`type Flag bool`, `if a && b` on two of them) failed to build under measurement with "cannot use a (variable of bool type Flag) as bool value". Conditions are now converted inside the probe.
 - A Rust file where `vec![x; n]` began a longer expression (`vec![elem; n].into()`, as in smallvec) could not be instrumented: a probe went between `vec!` and its brackets, so the file was left unmeasured.
 - `cargo test -q` on an edition 2024 crate with doctests failed with "merged doctest child 0 ran for a case the harness did not report": quiet doctests print no names. Each case is now named from where it ran, and the output matches Cargo's, failures included.

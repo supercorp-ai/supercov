@@ -627,8 +627,19 @@ fn narrows_a_type(node: Node, source: &str, language: JvmLanguage) -> bool {
                         .any(|child| child.kind().ends_with("_pattern"))
                 })
         }
+        // A Kotlin smart cast also follows a null check, and a library call
+        // whose contract implies one: `!s.isNullOrEmpty() && s.length > 1`
+        // compiles only while the first operand stays as written.
         JvmLanguage::Kotlin => {
             node.kind() == "is_expression"
+                || (node.kind() == "call_expression"
+                    && ["isNullOrEmpty", "isNullOrBlank"].iter().any(|name| {
+                        node.children(&mut node.walk())
+                            .next()
+                            .is_some_and(|callee| {
+                                source[callee.byte_range()].trim_end().ends_with(name)
+                            })
+                    }))
                 || (node.kind() == "binary_expression"
                     && matches!(
                         node.child_by_field_name("operator")
@@ -747,31 +758,43 @@ fn walk(collector: &mut Collector, node: Node) {
                 .map(|name| collector.source[name.byte_range()].to_owned());
             collector.add_point(node, PointKind::Function, label);
         }
-        // `return x == 0 || y == 0;`, `boolean ok = a && b;`, a ternary's
-        // condition: a Java `&&`/`||` used as a value is a decision, as it is
-        // in JavaScript. Only the outermost one, outside the conditions
-        // measured above, and where its value need not stay a compile-time
-        // constant or keep a pattern variable in scope.
+        // `return x == 0 || y == 0;`, `boolean ok = a && b;`, `val ok = a &&
+        // b`, a ternary's condition: `&&`/`||` used as a value is a decision,
+        // since MC/DC asks it of every boolean expression of two or more
+        // conditions. Only the outermost one, outside the conditions measured
+        // above, and where its value need not stay a compile-time constant or
+        // keep a pattern variable or a smart cast in scope.
         "binary_expression"
-            if language == JvmLanguage::Java
-                && is_logical(node, collector.source)
+            if is_logical(node, collector.source)
                 && !node
                     .parent()
                     .is_some_and(|parent| is_logical_operand_parent(parent, collector.source))
                 && !in_measured_condition(node)
-                && !in_constant_context(node, collector.source)
-                && !narrows_a_type(node, collector.source, language) =>
+                && !in_constant_context(node, collector.source) =>
         {
-            let probes = collector.add_branch(node, "value", &["true", "false"]);
-            let decision = collector.add_decision(node, "value");
-            let wrapper = match decision {
-                Some(index) => {
-                    format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1])
-                }
-                None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
-            };
-            collector.edit(node.start_byte(), 5, wrapper);
-            collector.edit(node.end_byte(), 5, ")".to_owned());
+            if narrows_a_type(node, collector.source, language) {
+                let limitation = collector.limitation_id(node, "value-narrows-a-type");
+                collector.limitations.push(serde_json::json!({
+                    "id": limitation,
+                    "kind": "value-narrows-a-type",
+                    "file": collector.file,
+                    "source": collector.text(node),
+                    "line": collector.position(node).0,
+                    "column": collector.position(node).1,
+                    "reason": "the compiler reads an operand of this value to narrow a type in the operands after it, so observing them would stop the code compiling; it carries no condition vectors",
+                }));
+            } else {
+                let probes = collector.add_branch(node, "value", &["true", "false"]);
+                let decision = collector.add_decision(node, "value");
+                let wrapper = match decision {
+                    Some(index) => {
+                        format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1])
+                    }
+                    None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
+                };
+                collector.edit(node.start_byte(), 5, wrapper);
+                collector.edit(node.end_byte(), 5, ")".to_owned());
+            }
         }
         "if_statement" | "if_expression" => {
             if let Some(condition) = condition_of(node, language) {
@@ -984,13 +1007,24 @@ fn in_measured_condition(node: Node) -> bool {
     while let Some(parent) = child.parent() {
         if matches!(
             parent.kind(),
-            "lambda_expression" | "class_body" | "method_declaration" | "constructor_declaration"
+            "lambda_expression"
+                | "class_body"
+                | "method_declaration"
+                | "constructor_declaration"
+                | "lambda_literal"
+                | "anonymous_function"
+                | "function_declaration"
         ) {
             return false;
         }
         if matches!(
             parent.kind(),
-            "if_statement" | "while_statement" | "for_statement" | "do_statement"
+            "if_statement"
+                | "while_statement"
+                | "for_statement"
+                | "do_statement"
+                | "if_expression"
+                | "do_while_statement"
         ) && parent
             .child_by_field_name("condition")
             .is_some_and(|condition| condition.byte_range().contains(&node.start_byte()))
@@ -1020,7 +1054,23 @@ fn in_constant_context(node: Node, source: &str) -> bool {
                     .find(|child| child.kind() == "modifiers")
                     .is_some_and(|modifiers| source[modifiers.byte_range()].contains("final"));
             }
-            "method_declaration" | "constructor_declaration" | "lambda_expression" => return false,
+            // Kotlin's `const val`.
+            "property_declaration" => {
+                return parent
+                    .children(&mut parent.walk())
+                    .find(|child| child.kind() == "modifiers")
+                    .is_some_and(|modifiers| {
+                        source[modifiers.byte_range()]
+                            .split_whitespace()
+                            .any(|word| word == "const")
+                    });
+            }
+            "method_declaration"
+            | "constructor_declaration"
+            | "lambda_expression"
+            | "function_declaration"
+            | "lambda_literal"
+            | "anonymous_function" => return false,
             _ => current = parent,
         }
     }

@@ -1599,3 +1599,133 @@ fn a_strict_junit_4_build_is_relaxed_only_in_the_copy_and_says_how() {
     assert!(pom.contains("<arg>-Werror</arg>") && !pom.contains("vintage"));
     std::fs::remove_dir_all(root).ok();
 }
+
+const KOTLIN_VALUES_SOURCE: &str = r#"package app
+
+const val STRICT = true && false
+
+annotation class Marked(val on: Boolean)
+
+@Marked(STRICT || true)
+object Logic {
+    fun onAxis(x: Int, y: Int): Boolean = x == 0 || y == 0
+
+    fun both(a: Boolean, b: Boolean): Boolean {
+        val ok = a && b
+        return ok
+    }
+
+    fun longEnough(s: String?): Boolean = s != null && s.length > 2
+
+    fun named(s: String?): Boolean = !s.isNullOrEmpty() && s.length > 1
+
+    fun inBand(values: List<Int>): List<Int> = values.filter { it > 0 && it < 10 }
+
+    fun gate(s: String?): String {
+        if (!s.isNullOrEmpty() && s.length > 3) {
+            return "long"
+        }
+        return "short"
+    }
+}
+"#;
+
+const KOTLIN_VALUES_SUITE: &str = r#"package app
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class LogicTest {
+    @Test
+    fun values() {
+        assertEquals(true, Logic.onAxis(0, 1))
+        assertEquals(false, Logic.both(false, true))
+        assertEquals(true, Logic.longEnough("abc"))
+        assertEquals(true, Logic.named("ab"))
+        assertEquals(listOf(5), Logic.inBand(listOf(5, -1, 20)))
+        assertEquals("long", Logic.gate("abcd"))
+    }
+}
+"#;
+
+/// `&&` and `||` used as a value are decisions in Kotlin as in Java, except
+/// where a value must stay constant (`const val`, an annotation) or where an
+/// operand smart-casts the ones after it -- a null check, or a library call
+/// whose contract implies one (`isNullOrEmpty`), which no longer stops a
+/// condition compiling either.
+#[test]
+#[ignore = "drives a real Maven or Gradle build; run it with `npm run test:jvm`"]
+fn a_kotlin_logical_value_is_a_decision_unless_it_smart_casts() {
+    let _building = common::building();
+    let Some(gradle) = common::tool("gradle") else {
+        common::skip("jvm", "no Gradle found");
+        return;
+    };
+    let root = temporary("kotlin-values");
+    write(&root, "settings.gradle", "rootProject.name = 'values'\n");
+    write(&root, "build.gradle", KOTLIN_BUILD_GRADLE);
+    write(&root, "src/main/kotlin/app/Logic.kt", KOTLIN_VALUES_SOURCE);
+    write(
+        &root,
+        "src/test/kotlin/app/LogicTest.kt",
+        KOTLIN_VALUES_SUITE,
+    );
+    let request = DirectJvmRunRequest {
+        root: root.clone(),
+        command: vec![
+            gradle.display().to_string(),
+            "--quiet".into(),
+            "--console=plain".into(),
+            "test".into(),
+        ],
+        run_id: "run-jvm-kotlin-values".into(),
+        started_at: "2026-01-01T00:00:00.000Z".into(),
+        exact_attribution: false,
+    };
+    let mut diagnostics = Vec::new();
+    let result = run_direct_jvm(&request, &mut diagnostics);
+    let said = String::from_utf8_lossy(&diagnostics).into_owned();
+    let result = match result {
+        Ok(result) => result,
+        Err(error) if said.contains("Could not resolve") => {
+            common::skip(
+                "jvm",
+                &format!("Gradle cannot resolve the build here: {error}"),
+            );
+            return;
+        }
+        Err(error) => panic!("run failed: {error}\n--- diagnostics ---\n{said}"),
+    };
+    assert_eq!(result.exit_code, 0, "{said}");
+    let manifest = supercov_engine::evidence_archive::read_archive(
+        &result.run_directory.join("evidence.raw.gz"),
+    )
+    .expect("published archive")
+    .into_iter()
+    .find(|entry| entry.path.ends_with("manifest.json"))
+    .map(|entry| serde_json::from_slice::<serde_json::Value>(&entry.contents).unwrap())
+    .expect("the run declares what it measured");
+    let values = manifest["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|decision| decision["kind"] == "value")
+        .map(|decision| decision["source"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        ["x == 0 || y == 0", "a && b", "it > 0 && it < 10"],
+        "{manifest}"
+    );
+    let limited = |kind: &str| {
+        manifest["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|limitation| limitation["kind"] == kind)
+            .count()
+    };
+    assert_eq!(limited("value-narrows-a-type"), 2, "{manifest}");
+    assert_eq!(limited("condition-narrows-a-type"), 1, "{manifest}");
+    std::fs::remove_dir_all(root).ok();
+}
