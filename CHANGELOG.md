@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- `runs <id> line` takes several locations in one call (`line a.ts:10 a.ts:20`), or a file of them with `--from-file`, and reads the run once for all of them: on a 1,100-test run twenty lines cost about what one does. Each line lists its state, its gaps and its first three covering tests; asked alone, a line lists them all. Its `--json` reply is `coverage.lines`, and locations that do not fit one reply are listed in `remaining`.
+- An MC/DC gap names the value each missing condition never took: `` `sum < 50` was never true `` in `file`, `line` and `decision`, and `missingOutcomes` (`["true"]`) in their `--json`. `file --group decision` lists the missing conditions under each decision, with the run that would show them deciding.
+
 ## 4.13.0
 
 **Changed**
