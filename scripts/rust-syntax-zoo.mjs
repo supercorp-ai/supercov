@@ -4,7 +4,8 @@
 //
 // A small crate whose tests drive each construct both ways: let chains,
 // `while let`, a labelled loop broken with a value, match guards and ranges,
-// `?` on Result and Option, `matches!`, `vec![x; n]`, a closure returned as
+// `?` on Result and Option, `matches!`, `&&` and `||` used as values,
+// `vec![x; n]`, a closure returned as
 // `impl Fn`, a statement longer than a line, a trait with a declared and a
 // default method, an extern declaration. Each file is read back for what its
 // tests showed; const contexts and macro expansions, which cannot hold a
@@ -90,6 +91,24 @@ pub fn zeros(n: usize) -> Vec<u8> {
 
 pub fn adder(step: u32) -> impl Fn(u32) -> u32 {
     move |x| if step > 0 { x + step } else { x }
+}
+
+pub fn on_axis(x: i32, y: i32) -> bool {
+    x == 0 || y == 0
+}
+
+pub fn both(a: bool, b: bool) -> bool {
+    let ok = a && b;
+    ok
+}
+
+pub fn in_band(values: &[i32]) -> Vec<i32> {
+    let keep = |v: &i32| *v > 0 && *v < 10;
+    values.iter().copied().filter(|v| keep(v)).collect()
+}
+
+pub fn gate(a: bool, b: bool, c: bool) -> &'static str {
+    if std::convert::identity(a || b) && c { "open" } else { "shut" }
 }
 
 pub fn describe(name: &str, count: usize) -> String {
@@ -183,6 +202,21 @@ fn expressions() {
     assert_eq!(adder(0)(1), 1);
     assert!(describe("cart", 2).contains("plural"));
     assert_eq!(describe("cart", 1), "cart has one item");
+}
+
+#[test]
+fn logical_values() {
+    assert!(on_axis(0, 1));
+    assert!(on_axis(1, 0));
+    assert!(!on_axis(1, 1));
+    assert!(both(true, true));
+    assert!(!both(false, true));
+    assert!(!both(true, false));
+    assert_eq!(in_band(&[5, -1, 20]), vec![5]);
+    assert_eq!(gate(true, false, true), "open");
+    assert_eq!(gate(false, true, true), "open");
+    assert_eq!(gate(false, false, true), "shut");
+    assert_eq!(gate(true, false, false), "shut");
 }
 
 #[test]
