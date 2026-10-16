@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- A test helper written as a one-line arrow that returns a check (`const loginError = (page) => expect(page).toHaveURL(url)`) returned nothing once measured in TypeScript, so `await loginError(page)` went on before the check finished: the check then ran against the next page, or a failure went unreported. The arrow now returns the check.
 - A failed JavaScript test was blamed on missing build output whenever the project had a build script. The run now names the failed tests and points at the build only when no reported test failed.
 - `runs <id> line` and `file` decoded the whole run to answer for one file: 3 to 5 s per query on a 1,100-test run, 13 s cold. They now read one file, 0.7 s on the same run, same answers.
 - A `--json` page larger than the 64 KB reply limit was refused, so a pager could stop after its first page. It now returns the entries that fit, with `nextOffset` after them.

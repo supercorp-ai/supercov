@@ -1539,6 +1539,11 @@ struct AssertionEdits<'s> {
     /// In TypeScript the call runs in place, under these two names, instead
     /// of in a callback, which TypeScript narrows nothing into.
     in_place: Option<(String, String)>,
+    /// The statement that is the body of the arrow being walked, written
+    /// without braces (`(page) => expect(page).toHaveURL(url)`). It is the
+    /// arrow's value, so it stays an expression: wrapped as a statement it
+    /// became a block that returned nothing.
+    arrow_body: Option<SpanKey>,
 }
 
 impl AssertionEdits<'_> {
@@ -1695,8 +1700,20 @@ impl AssertionEdits<'_> {
 }
 
 impl<'a> Visit<'a> for AssertionEdits<'_> {
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        let body = arrow
+            .expression
+            .then(|| arrow.body.statements.first())
+            .flatten()
+            .map(|statement| span_key(statement.span()));
+        let outer = std::mem::replace(&mut self.arrow_body, body);
+        walk::walk_arrow_function_expression(self, arrow);
+        self.arrow_body = outer;
+    }
+
     fn visit_expression_statement(&mut self, statement: &ExpressionStatement<'a>) {
         if self.in_place.is_some()
+            && self.arrow_body != Some(span_key(statement.span))
             && let Expression::CallExpression(call) = &statement.expression
             && let Some(&(_, _, bound)) = self.sites.get(&span_key(call.span))
         {
@@ -2445,6 +2462,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
                 sites: collector.sites,
                 edits: Vec::new(),
                 in_place,
+                arrow_body: None,
             };
             located.visit_program(&parsed.program);
             edits.extend(located.edits);
@@ -10986,6 +11004,33 @@ mod tests {
         let output = instrument_node_assertion_phases(source, "tests/value.spec.mjs").unwrap();
         assert_eq!(output.assertions, 1);
         assert!(output.code.contains("expect.toBe"));
+    }
+
+    #[test]
+    fn an_arrow_that_returns_an_assertion_still_returns_it() {
+        // `await loginError(page)` waits for the matcher only if the arrow
+        // still returns it: made a block, it returned nothing at once.
+        let source = concat!(
+            "import { expect, test } from '@playwright/test';\n",
+            "const loginError = (page: Page, error: string) => expect(page).toHaveURL(error);\n",
+            "test('value', () => expect(value()).toBe(1));\n",
+        );
+        for file in ["tests/login.spec.ts", "tests/login.spec.js"] {
+            let source = if file.ends_with(".js") {
+                source.replace(": Page", "").replace(": string", "")
+            } else {
+                source.into()
+            };
+            let output = instrument_node_assertion_phases(&source, file).unwrap();
+            assert_eq!(output.assertions, 2, "{file}");
+            let code = output.code.split("\n//# sourceMappingURL").next().unwrap();
+            assert!(!code.contains("=> { const"), "{file}:\n{code}");
+            assert!(!code.contains("finally"), "{file}:\n{code}");
+            assert!(
+                code.contains("expect(page).toHaveURL(error)"),
+                "{file}:\n{code}"
+            );
+        }
     }
 
     #[test]

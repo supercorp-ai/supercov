@@ -3421,6 +3421,40 @@ fn mocha_tests_are_attributed_one_by_one_and_selected_by_grep() {
 
 #[cfg(unix)]
 #[test]
+fn a_one_line_helper_that_returns_a_check_is_still_awaited() {
+    let project = Project::empty("returned-check");
+    project.write(
+        "package.json",
+        r#"{ "name": "returned-check", "private": true, "type": "module" }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write("src/one.ts", "export const one = () => 1;\n");
+    project.write(
+        "playwright.config.ts",
+        "export default { testDir: \"tests\", reporter: \"line\" };\n",
+    );
+    // `settles` returns the check; `await settles(...)` waits for it only if
+    // the helper still does once its `expect` is measured.
+    project.write(
+        "tests/helper.spec.ts",
+        "import { expect, test } from \"@playwright/test\";\nimport { one } from \"../src/one\";\nlet done = false;\nconst slow = () => new Promise<number>((resolve) => setTimeout(() => { done = true; resolve(one()); }, 300));\nconst settles = (value: Promise<number>) => expect(value).resolves.toBe(1);\ntest(\"waits for its check\", async () => {\n  await settles(slow());\n  expect(done).toBe(true);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("returned check");
+    let run = project
+        .supercov(&["--", "npx", "playwright", "test"])
+        .succeeds();
+    assert!(run.contains("1 passed"), "{run}");
+}
+
+#[cfg(unix)]
+#[test]
 fn ava_tests_running_at_once_are_attributed_each_to_its_own() {
     let project = Project::empty("ava-tests");
     project.write(
