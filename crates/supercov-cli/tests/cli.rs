@@ -5111,3 +5111,56 @@ fn runs_of_two_languages_are_refused_for_what_they_are() {
         "{refused}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_command_is_watched_stopped_and_passed_through_whole() {
+    let project = Project::cart("supervision");
+    // A timeout of nothing is refused before anything runs.
+    let refused = project
+        .supercov_with(
+            &["--", "node", "--test"],
+            &[("SUPERCOV_COMMAND_TIMEOUT_MS", "0")],
+        )
+        .exits(1);
+    assert!(
+        refused.contains(
+            "SUPERCOV_COMMAND_TIMEOUT_MS must be a positive integer number of milliseconds"
+        ),
+        "{refused}"
+    );
+    // A command that ignores SIGTERM is killed once the grace runs out.
+    let stubborn = project.supercov_with(
+        &[
+            "--",
+            "node",
+            "-e",
+            "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+        ],
+        &[("SUPERCOV_COMMAND_TIMEOUT_MS", "300")],
+    );
+    let said = format!("{}{}", stubborn.stdout(), stubborn.stderr());
+    assert_eq!(stubborn.code(), 124, "{said}");
+    assert!(said.contains("command still running after"), "{said}");
+    // Asked to be verbose, a slow command's diagnostics name its processes.
+    let verbose = project.supercov_with(
+        &["--", "node", "-e", "setTimeout(() => {}, 900)"],
+        &[
+            ("SUPERCOV_DIAGNOSTIC_INTERVAL_MS", "200"),
+            ("SUPERCOV_VERBOSE", "1"),
+        ],
+    );
+    let said = format!("{}{}", verbose.stdout(), verbose.stderr());
+    assert_eq!(verbose.code(), 0, "{said}");
+    assert!(said.contains("exe=node"), "{said}");
+    // A line longer than any relay buffer, with no newline, comes through whole.
+    let long = project
+        .supercov(&[
+            "--",
+            "node",
+            "-e",
+            "process.stdout.write('x'.repeat(70000))",
+        ])
+        .succeeds();
+    assert!(long.contains(&"x".repeat(70000)), "{} bytes", long.len());
+}
