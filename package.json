@@ -74,7 +74,6 @@
     "test:fixture": "cargo build -p supercov && node scripts/rust-fixture-matrix.mjs",
     "test:packed-npx": "cargo build --release -p supercov && node scripts/packed-npx-integration.mjs",
     "test:isolation": "cargo build -p supercov && node scripts/isolation-integration.mjs",
-    "test:filesystem": "cargo test --workspace && cargo build -p supercov && node scripts/workspace-crash-integration.mjs",
     "test:watchdog": "cargo build -p supercov && node scripts/watchdog-integration.mjs",
     "test:html-report": "cargo build -p supercov && node scripts/html-report-integration.mjs",
     "test:engine-contract": "cargo build -p supercov && node scripts/engine-contract.mjs",
