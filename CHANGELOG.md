@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Changed**
+
+- Go `range` loops record whether they ran at least once and whether they ran zero times, as loops in the other languages do. They were a measurement limitation; a Go run now has two more branch outcomes per range loop.
+
 **Fixed**
 
 - A method whose source is read through a property (`box.method.toString()`, `String(Shape.prototype.area)`) was instrumented, so its text changed. Any method of that name in the file is now kept as written.

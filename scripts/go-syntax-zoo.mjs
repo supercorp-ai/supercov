@@ -216,9 +216,7 @@ try {
     assert.equal(entry.covered[metric], entry.totals[metric], `flow/flow.go: ${metric}\n${report}`);
   }
   assert.ok(entry.totals.mcdcConditions > 0, report);
-  // Go range loops record no entered or zero-iteration outcome (the other
-  // languages do): the three here say so, and nothing else is limited.
-  assert.equal(entry.measurementLimitations, 3, report);
+  assert.equal(entry.measurementLimitations, 0, report);
   console.log('[go-syntax-zoo] every construct the Go instrumenter rewrites reads as its tests drove it');
 } finally {
   if (!process.env.KEEP) rmSync(temporary, { recursive: true, force: true });

@@ -462,6 +462,34 @@ fn in_statement_position(node: Node) -> bool {
 
 /// The condition of a `for` loop, when it has one. A `range` clause and a bare
 /// `for {}` have none.
+/// A `for ... range` loop, as opposed to a bare `for {}`.
+fn is_range_loop(node: Node) -> bool {
+    node.children(&mut node.walk())
+        .any(|child| child.kind() == "range_clause")
+}
+
+/// Whether the function holding `node` has a `goto` anywhere in it.
+fn in_function_with_goto(node: Node) -> bool {
+    let mut function = node;
+    while !matches!(
+        function.kind(),
+        "function_declaration" | "method_declaration" | "func_literal" | "source_file"
+    ) {
+        match function.parent() {
+            Some(parent) => function = parent,
+            None => break,
+        }
+    }
+    let mut stack = vec![function];
+    while let Some(next) = stack.pop() {
+        if next.kind() == "goto_statement" {
+            return true;
+        }
+        stack.extend(next.children(&mut next.walk()));
+    }
+    false
+}
+
 fn loop_condition<'t>(node: Node<'t>) -> Option<Node<'t>> {
     if let Some(condition) = node.child_by_field_name("condition") {
         return Some(condition);
@@ -557,13 +585,22 @@ impl<'a> Collector<'a> {
     }
 
     fn add_branch(&mut self, node: Node, kind: &str, labels: &[&str]) -> Vec<u64> {
+        let pairs = labels
+            .iter()
+            .map(|label| (*label, *label))
+            .collect::<Vec<_>>();
+        self.add_branch_named(node, kind, &pairs)
+    }
+
+    /// `add_branch` with an id suffix of its own for each outcome's label.
+    fn add_branch_named(&mut self, node: Node, kind: &str, labels: &[(&str, &str)]) -> Vec<u64> {
         let (line, column) = self.position(node);
         let id = self.id(node, "branch");
         let mut probes = Vec::new();
         let alternatives = labels
             .iter()
-            .map(|label| {
-                let alternative = format!("{id}.{label}");
+            .map(|(suffix, label)| {
+                let alternative = format!("{id}.{suffix}");
                 probes.push(self.probe(
                     GoProbeTarget::Alternative {
                         branch: id.clone(),
@@ -679,6 +716,40 @@ impl<'a> Collector<'a> {
                             branch_wrapper(&alias, probes[0], probes[1], decision),
                         );
                         self.edit(condition.end_byte(), 5, ")".to_owned());
+                    }
+                    None if is_range_loop(node) && !in_function_with_goto(node) => {
+                        // A range loop's outcomes are whether it ran at all,
+                        // as every other language records them: a flag the
+                        // body sets, read after the loop. Declared before a
+                        // label, so `continue L` still names the loop; not in
+                        // a function with a `goto`, which may not jump over a
+                        // declaration.
+                        let probes = self.add_branch_named(
+                            node,
+                            "for",
+                            &[("zero", "zero iterations"), ("entered", "entered")],
+                        );
+                        let flag = format!("_scvRan{}", node.start_byte());
+                        let statement = node
+                            .parent()
+                            .filter(|parent| parent.kind() == "labeled_statement")
+                            .unwrap_or(node);
+                        self.edit(statement.start_byte(), 90, format!("var {flag} bool; "));
+                        if let Some(body) = node.child_by_field_name("body") {
+                            self.edit(
+                                body.start_byte() + 1,
+                                100,
+                                format!(
+                                    " if !{flag} {{ {flag} = true; {alias}.A({}) }};",
+                                    probes[1]
+                                ),
+                            );
+                        }
+                        self.edit(
+                            node.end_byte(),
+                            100,
+                            format!("; if !{flag} {{ {alias}.A({}) }}", probes[0]),
+                        );
                     }
                     None => {
                         let (line, column) = self.position(node);
@@ -1245,23 +1316,35 @@ func classify(a int, b bool) string {
     }
 
     #[test]
-    fn a_loop_with_no_condition_records_a_limitation_not_an_obligation() {
-        // A `range` loop and a bare `for {}` have no expression to observe.
-        // Declaring a branch nothing can measure would put an obligation in the
-        // denominator that no test could ever satisfy.
+    fn a_range_loop_records_whether_it_ran_and_a_bare_loop_a_limitation() {
+        // A `range` loop's outcomes are whether it ran at all, as in every
+        // other language. A bare `for {}` always enters and has no expression
+        // to observe, so it records the limitation instead of an obligation no
+        // test could satisfy. A function with a `goto` keeps the limitation
+        // too: the flag's declaration may not be jumped over.
         let mut next = 0;
         let mut decisions = 0;
         let go = build_go_obligations(
             "x.go",
-            "package main\nfunc f(xs []int) {\n\tfor _, x := range xs {\n\t\t_ = x\n\t}\n\tfor {\n\t\tbreak\n\t}\n}\n",
+            "package main\nfunc f(xs []int) {\n\tfor _, x := range xs {\n\t\t_ = x\n\t}\n\tfor {\n\t\tbreak\n\t}\n}\nfunc g(xs []int) {\n\tfor range xs {\n\t}\n\tgoto end\nend:\n}\n",
             &mut next,
             &mut decisions,
         )
         .unwrap();
-        assert!(
-            go.manifest.branches.iter().all(|b| b.kind != "loop"),
-            "{:?}",
-            go.manifest.branches
+        let loops = go
+            .manifest
+            .branches
+            .iter()
+            .filter(|b| b.kind == "for")
+            .collect::<Vec<_>>();
+        assert_eq!(loops.len(), 1, "{:?}", go.manifest.branches);
+        assert_eq!(
+            loops[0]
+                .alternatives
+                .iter()
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>(),
+            ["zero iterations", "entered"]
         );
         assert_eq!(
             go.manifest.limitations.len(),
@@ -1269,7 +1352,12 @@ func classify(a int, b bool) string {
             "{:?}",
             go.manifest.limitations
         );
-        assert_eq!(go.manifest.limitations[0]["kind"], "loop-without-condition");
+        assert!(
+            go.manifest
+                .limitations
+                .iter()
+                .all(|limitation| limitation["kind"] == "loop-without-condition")
+        );
     }
 
     #[test]
