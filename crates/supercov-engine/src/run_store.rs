@@ -756,13 +756,20 @@ fn file_sha256(path: &Path) -> Result<([u8; 32], u64), RunStoreError> {
     Ok((hash.finalize().into(), metadata.len()))
 }
 
+/// A version of the code that writes a run's query index: the versions it
+/// declares and the source it is built from (`build.rs` names the files).
+/// Keyed to the analysis alone, not the whole engine, an upgrade that left it
+/// as it was keeps every stored run's index; one that changed it re-indexes,
+/// whether or not anyone bumped a version.
 fn domain_hash(domain: &str, version: u32) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(domain.as_bytes());
     hash.update([0]);
     hash.update(version.to_le_bytes());
     hash.update([0]);
-    hash.update(env!("SUPERCOV_ENGINE_SOURCE_SHA256").as_bytes());
+    hash.update(supercov_contracts::COVERAGE_MODEL_SCHEMA_VERSION.to_le_bytes());
+    hash.update([0]);
+    hash.update(env!("SUPERCOV_ANALYSIS_SOURCE_SHA256").as_bytes());
     hash.finalize().into()
 }
 
@@ -1435,6 +1442,12 @@ mod tests {
         assert_ne!(first.evidence_bytes, second.evidence_bytes);
         assert_eq!(first.analysis_sha256, second.analysis_sha256);
         assert_eq!(env!("SUPERCOV_ENGINE_SOURCE_SHA256").len(), 64);
+        // The index is keyed to the analysis's source, not the whole engine's.
+        assert_eq!(env!("SUPERCOV_ANALYSIS_SOURCE_SHA256").len(), 64);
+        assert_ne!(
+            env!("SUPERCOV_ANALYSIS_SOURCE_SHA256"),
+            env!("SUPERCOV_ENGINE_SOURCE_SHA256")
+        );
 
         let mut current = integrity();
         current.schema_version += 1;

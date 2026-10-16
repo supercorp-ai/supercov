@@ -78,6 +78,27 @@ fn main() {
         "cargo:rustc-env=SUPERCOV_ENGINE_SOURCE_SHA256={}",
         digest_files(&files, &crate_root)
     );
+    // What a run's query index is made of: the analysis of its stored
+    // evidence and the index written from it. The evidence was normalised
+    // when the run was measured, so instrumenters, runtimes, frontends,
+    // queries and the CLI do not change it, and a release that changes only
+    // them does not re-index every stored run on its first query.
+    let analysis = [
+        "coverage_report.rs",
+        "coverage_analysis.rs",
+        "coverage_index.rs",
+        "query_index.rs",
+        "frontend_protocol.rs",
+        "evidence_archive.rs",
+        "interned.rs",
+        "test_directory.rs",
+        "run_store.rs",
+    ]
+    .map(|file| crate_root.join("src").join(file));
+    println!(
+        "cargo:rustc-env=SUPERCOV_ANALYSIS_SOURCE_SHA256={}",
+        digest_files(&analysis, &crate_root)
+    );
     let javascript_frontend = [
         crate_root.join("src/js_instrumenter.rs"),
         crate_root.join("src/typescript_imports.rs"),
