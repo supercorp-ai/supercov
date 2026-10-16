@@ -1486,6 +1486,50 @@ impl<'a> BuiltDirectories<'a> {
     }
 }
 
+/// Cargo's target directories inside a copy, judged once each. Anything
+/// Cargo built in a copy was compiled from its instrumented sources: a test
+/// command that ran `cargo build` there synced thousands of files back over
+/// the project's `target/`, and the project's next build linked crates with
+/// probes in them. A target directory is told by what Cargo keeps in it:
+/// `.rustc_info.json` at its root, `.cargo-lock` in each profile directory,
+/// and a `CACHEDIR.TAG` naming Cargo -- which Cargo writes only when it made
+/// the directory itself, and a test had already made `target/` there.
+struct CargoTargets<'a> {
+    workspace: &'a Path,
+    judged: BTreeMap<PathBuf, bool>,
+}
+
+impl<'a> CargoTargets<'a> {
+    fn new(workspace: &'a Path) -> Self {
+        Self {
+            workspace,
+            judged: BTreeMap::new(),
+        }
+    }
+
+    fn hold(&mut self, relative: &Path) -> bool {
+        let mut directory = PathBuf::new();
+        let Some(parent) = relative.parent() else {
+            return false;
+        };
+        for component in parent.components() {
+            directory.push(component);
+            let workspace = self.workspace;
+            let target = *self.judged.entry(directory.clone()).or_insert_with(|| {
+                let path = workspace.join(&directory);
+                path.join(".rustc_info.json").is_file()
+                    || path.join(".cargo-lock").is_file()
+                    || fs::read(path.join("CACHEDIR.TAG"))
+                        .is_ok_and(|tag| tag.windows(5).any(|window| window == b"cargo"))
+            });
+            if target {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 /// A bundle, a module or the source map of one.
 fn compiled_javascript(path: &Path) -> bool {
     path.extension()
@@ -1757,6 +1801,7 @@ pub fn sync_outputs_of(
     let mut changed = Vec::new();
     let mut built = BTreeSet::new();
     let mut built_directories = BuiltDirectories::new(root);
+    let mut cargo_targets = CargoTargets::new(workspace);
     for (relative, state) in &current {
         if baseline.entries.get(relative) == Some(state) {
             continue;
@@ -1791,7 +1836,8 @@ pub fn sync_outputs_of(
                 // Cargo writes when a project has none is what the run's
                 // dependencies are read from: returned, it made the run
                 // that wrote it stale the moment it ended, and every test
-                // affected by a change to one line.
+                // affected by a change to one line. What Cargo built in the
+                // copy was built from those rewritten files.
                 CommandOutputs::Rust => {
                     if relative
                         .extension()
@@ -1799,6 +1845,7 @@ pub fn sync_outputs_of(
                         || relative
                             .file_name()
                             .is_some_and(|name| name == "Cargo.lock")
+                        || cargo_targets.hold(relative)
                     {
                         built.insert(relative.clone());
                     }
@@ -2455,6 +2502,64 @@ mod tests {
         );
         assert_eq!(sync.synced, 0);
         assert!(!root.join("dist").exists());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn what_cargo_built_in_the_copy_stays_there() {
+        // A test command that runs `cargo build` in the copy compiles its
+        // instrumented crates. Synced back, the project's next build linked
+        // them: Supercov's own end-to-end gates did this to its `target/`.
+        let (root, workspace) = writeback_fixture("cargo-target");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        for target in ["target", "tests/fixture/target"] {
+            fs::create_dir_all(workspace.join(target).join("debug/deps")).unwrap();
+            fs::write(
+                workspace.join(target).join("debug/deps/libapp.rlib"),
+                b"\0rlib",
+            )
+            .unwrap();
+        }
+        // Cargo made this one, and tagged it.
+        fs::write(
+            workspace.join("tests/fixture/target/CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n",
+        )
+        .unwrap();
+        // A test made this one before Cargo built into it: no tag, only what
+        // Cargo keeps there. Supercov's own suite does this.
+        fs::write(workspace.join("target/.rustc_info.json"), "{}").unwrap();
+        fs::write(workspace.join("target/debug/.cargo-lock"), "").unwrap();
+        // A directory named `target` that Cargo did not make is the
+        // command's own.
+        fs::create_dir_all(workspace.join("reports/target")).unwrap();
+        fs::write(workspace.join("reports/target/summary.txt"), "ok\n").unwrap();
+
+        let sync = sync_outputs_of(
+            CommandOutputs::Rust,
+            &root,
+            &workspace,
+            &baseline,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sync.skipped_instrumented,
+            vec![
+                PathBuf::from("target/.rustc_info.json"),
+                PathBuf::from("target/debug/.cargo-lock"),
+                PathBuf::from("target/debug/deps/libapp.rlib"),
+                PathBuf::from("tests/fixture/target/CACHEDIR.TAG"),
+                PathBuf::from("tests/fixture/target/debug/deps/libapp.rlib"),
+            ]
+        );
+        assert_eq!(sync.synced, 1);
+        assert!(!root.join("target").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("reports/target/summary.txt")).unwrap(),
+            "ok\n"
+        );
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 

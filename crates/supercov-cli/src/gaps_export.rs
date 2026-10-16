@@ -54,13 +54,20 @@ pub fn command(arguments: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The query's data itself, not its reply: a reply stops at 64 KB, and the
+    // export exists for the runs whose gaps do not fit in one. Read through
+    // the reply, it refused exactly those.
     let query = |arguments: Vec<String>| -> Result<Value, String> {
         let invocation = super::parse_public_query("runs", &arguments)
             .map_err(|error| error.error.message.clone())?;
-        let output = super::execute_public_query(&root, &invocation)
-            .map_err(|failure| failure.error.message.clone())?;
-        let text = output.agent_json().map_err(|error| error.message.clone())?;
-        serde_json::from_str::<Value>(&text).map_err(|error| error.to_string())
+        match super::execute_public_query(&root, &invocation)
+            .map_err(|failure| failure.error.message.clone())?
+        {
+            super::PublicQueryOutput::Coverage { output, .. } => serde_json::to_value(&output.data)
+                .map(|data| serde_json::json!({ "data": data }))
+                .map_err(|error| error.to_string()),
+            super::PublicQueryOutput::Runs { .. } => Err("not a coverage query".into()),
+        }
     };
     let mut gaps_arguments = passed.clone();
     gaps_arguments.extend(["--json", "--limit", ALL].map(str::to_owned));
