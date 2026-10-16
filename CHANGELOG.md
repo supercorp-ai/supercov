@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `gaps --format jsonl` opened the run and checked the checkout again for every file: 129 s for 17,454 rows of a 1,100-test run. It reads the run once, at 5 s, with the same rows.
+
 ## 4.14.0
 
 **Changed**
