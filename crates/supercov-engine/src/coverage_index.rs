@@ -1988,14 +1988,30 @@ fn coverage_model_record(
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
-    let views = [
-        (CoverageViewId::All, &report.view),
-        (CoverageViewId::Passed, &report.filters.passed),
-        (CoverageViewId::Failed, &report.filters.failed),
-    ];
+    coverage_index_sections_from(
+        [
+            (CoverageViewId::All, &report.view),
+            (CoverageViewId::Passed, &report.filters.passed),
+            (CoverageViewId::Failed, &report.filters.failed),
+        ]
+        .map(Ok),
+    )
+}
+
+/// The index of a run's views, given one at a time: a view built for the
+/// index is freed once its records are written, so the three are never held
+/// at once. The first view must be [`CoverageViewId::All`].
+pub fn coverage_index_sections_from<V, E>(
+    views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
+) -> Result<Vec<QueryIndexSection>, E>
+where
+    V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
+    E: From<CoverageIndexError>,
+{
+    let mut model_of_all = None;
     let mut strings = StringTable::default();
     let mut relations = StringRelations::default();
-    let mut summaries = Vec::with_capacity(views.len() * SUMMARY_RECORD_SIZE);
+    let mut summaries = Vec::with_capacity(3 * SUMMARY_RECORD_SIZE);
     let mut gaps = Vec::new();
     let mut decision_gaps = Vec::new();
     let mut dimensions = Vec::new();
@@ -2019,7 +2035,12 @@ pub fn coverage_index_sections(
     let mut decision_vector_observations = Vec::new();
     let mut decision_conditions = Vec::new();
     let mut limitations = Vec::new();
-    for (id, view) in views {
+    for item in views {
+        let (id, owned) = item?;
+        let view = owned.borrow();
+        if id == CoverageViewId::All {
+            model_of_all = Some((view.variant.clone(), view.model.clone()));
+        }
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
         projection_records.extend_from_slice(&projection_record(
             id,
@@ -2368,12 +2389,9 @@ pub fn coverage_index_sections(
             }
         }
     }
-    let model = coverage_model_record(
-        &report.view.variant,
-        &report.view.model,
-        &mut strings,
-        &mut relations,
-    )?;
+    let (variant, model) =
+        model_of_all.ok_or(CoverageIndexError::InvalidRecord("no view of every test"))?;
+    let model = coverage_model_record(&variant, &model, &mut strings, &mut relations)?;
     let [blob, string_records] = strings.sections()?;
     let string_relations = relations.section()?;
     Ok(vec![

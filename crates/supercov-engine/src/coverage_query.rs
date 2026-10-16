@@ -1985,36 +1985,93 @@ fn needed(
     index: usize,
     observed: &[&crate::coverage_analysis::McdcVector],
     sources: &[&str],
+    decision: &str,
 ) -> (Option<String>, String) {
+    use crate::coverage_analysis::{McdcVector, find_witnesses_for_conditions};
     let condition = sources.get(index).copied().unwrap_or("the condition");
-    let Some(seen) = observed
-        .iter()
-        .find(|vector| vector.values.get(index).copied().flatten().is_some())
-    else {
-        return (None, format!("no test evaluated `{condition}`"));
+    let describe = |vector: &McdcVector| {
+        let mut values = String::new();
+        let mut words = Vec::new();
+        for (position, value) in vector.values.iter().enumerate() {
+            values.push(match value {
+                None => '-',
+                Some(false) => 'F',
+                Some(true) => 'T',
+            });
+            if let (Some(value), Some(source)) = (value, sources.get(position)) {
+                words.push(format!("`{source}` {value}"));
+            }
+        }
+        words.push(format!("decision {}", vector.outcome));
+        (
+            format!("{values} -> {}", if vector.outcome { 'T' } else { 'F' }),
+            words.join(", "),
+        )
     };
-    let mut values = String::new();
-    let mut words = Vec::new();
-    for (position, value) in seen.values.iter().enumerate() {
-        let value = match position.cmp(&index) {
-            std::cmp::Ordering::Less => *value,
-            std::cmp::Ordering::Equal => value.map(|value| !value),
-            std::cmp::Ordering::Greater => None,
+    let Some(possible) = crate::decision_shape::possible_vectors(decision, sources) else {
+        // A decision whose source is not conditions and operators: what to
+        // run is not guessed at, since a guess can be a run that cannot happen.
+        return if observed
+            .iter()
+            .any(|vector| vector.values.get(index).copied().flatten().is_some())
+        {
+            (
+                None,
+                format!("a run where `{condition}` alone changes the decision"),
+            )
+        } else {
+            (None, format!("no test evaluated `{condition}`"))
         };
-        values.push(match value {
-            None => '-',
-            Some(false) => 'F',
-            Some(true) => 'T',
+    };
+    let seen = observed
+        .iter()
+        .map(|vector| (*vector).clone())
+        .collect::<Vec<_>>();
+    let unseen = possible
+        .into_iter()
+        .filter(|vector| !seen.contains(vector))
+        .collect::<Vec<_>>();
+    // The run that, with those seen, shows the condition deciding by the
+    // engine's own rule: the one that shows the most conditions, then the
+    // shortest.
+    let shows = |added: &[&McdcVector]| {
+        let mut vectors = seen.clone();
+        vectors.extend(added.iter().map(|vector| (*vector).clone()));
+        find_witnesses_for_conditions(&vectors, sources.len())
+            .ok()
+            .filter(|witnesses| witnesses.get(index).is_some_and(Option::is_some))
+            .map(|witnesses| witnesses.iter().filter(|witness| witness.is_some()).count())
+    };
+    let best = unseen
+        .iter()
+        .filter_map(|vector| shows(&[vector]).map(|shown| (shown, vector)))
+        .max_by_key(|(shown, vector)| {
+            (
+                *shown,
+                std::cmp::Reverse(vector.values.iter().flatten().count()),
+            )
         });
-        if let (Some(value), Some(source)) = (value, sources.get(position)) {
-            words.push(format!("`{source}` {value}"));
+    if let Some((_, vector)) = best {
+        let (values, words) = describe(vector);
+        return (Some(values), words);
+    }
+    // No run alone does it: no test evaluated the condition, so both of a
+    // pair are needed.
+    for (position, first) in unseen.iter().enumerate() {
+        for second in &unseen[position + 1..] {
+            if shows(&[first, second]).is_some() {
+                let (first_values, first_words) = describe(first);
+                let (second_values, second_words) = describe(second);
+                return (
+                    Some(format!("{first_values} and {second_values}")),
+                    format!("{first_words}; and {second_words}"),
+                );
+            }
         }
     }
-    let outcome = !seen.outcome;
-    words.push(format!("decision {outcome}"));
     (
-        Some(format!("{values} -> {}", if outcome { 'T' } else { 'F' })),
-        words.join(", "),
+        None,
+        format!("`{condition}` cannot decide the result on its own"),
     )
 }
 
@@ -2408,7 +2465,8 @@ pub fn coverage_file_detail_from(
                 .iter()
                 .map(|condition| condition.source.as_str())
                 .collect::<Vec<_>>();
-            let (needed_vector, needs) = needed(condition.index, &observed, &sources);
+            let (needed_vector, needs) =
+                needed(condition.index, &observed, &sources, &original.meta.source);
             mcdc.push(CoverageFileObligation::Mcdc(CoverageMcdcObligation {
                 kind: "mcdc".into(),
                 id: original.meta.id.clone(),
@@ -3720,7 +3778,7 @@ pub fn coverage_file_decisions_query(
                         .filter(|condition| !condition.covered)
                         .map(|condition| {
                             let (needed_vector, needs) =
-                                needed(condition.index, &observed, &sources);
+                                needed(condition.index, &observed, &sources, &decision.meta.source);
                             CoverageMissingCondition {
                                 index: condition.index,
                                 condition: condition.source.clone(),
@@ -4293,6 +4351,45 @@ mod tests {
             measurement_limitations: 0,
             limitation_kinds: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_needed_run_is_one_the_decision_can_produce() {
+        use crate::coverage_analysis::McdcVector;
+        let vector = |values: &str, outcome: bool| McdcVector {
+            values: values
+                .chars()
+                .map(|value| match value {
+                    'T' => Some(true),
+                    'F' => Some(false),
+                    _ => None,
+                })
+                .collect(),
+            outcome,
+        };
+        // Only the last condition of an `||` chain decided the runs seen:
+        // `a` true is the decision true, never false.
+        let seen = [vector("FFFFT", true)];
+        let observed = seen.iter().collect::<Vec<_>>();
+        let sources = ["a", "b", "c", "d", "e"];
+        let (values, words) = needed(0, &observed, &sources, "a || b || c || d || e");
+        assert_eq!(
+            values.as_deref(),
+            Some("FFFFF -> F and T---- -> T"),
+            "{words}"
+        );
+        let (values, _) = needed(4, &observed, &sources, "a || b || c || d || e");
+        assert_eq!(values.as_deref(), Some("FFFFF -> F"));
+        // An `||` that was never false: both of its conditions false.
+        let seen = [vector("T-", true), vector("FT", true)];
+        let observed = seen.iter().collect::<Vec<_>>();
+        let (values, words) = needed(0, &observed, &["a", "b"], "a || b");
+        assert_eq!(values.as_deref(), Some("FF -> F"));
+        assert_eq!(words, "`a` false, `b` false, decision false");
+        // A source that is not conditions and operators is not guessed at.
+        let (values, words) = needed(0, &observed, &["a", "b"], "pick(a, b)");
+        assert_eq!(values, None);
+        assert!(words.contains("alone changes the decision"), "{words}");
     }
 
     #[test]

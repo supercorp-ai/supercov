@@ -5870,8 +5870,13 @@ fn a_decision_is_found_again_by_the_location_its_line_lists() {
         )),
         "{needs:?}"
     );
+    // No test evaluated `c`: both runs of the pair that would show it.
     assert!(
-        needs.contains(&("c".into(), String::new(), "no test evaluated `c`".into())),
+        needs.contains(&(
+            "c".into(),
+            "FF -> F and T- -> T".into(),
+            "`c` false, `a` false, decision false; and `c` true, decision true".into()
+        )),
         "{needs:?}"
     );
     for missing in ["src/pick.js:2:1", "src/pick.js:3"] {
@@ -6219,16 +6224,49 @@ fn many_lines_are_answered_in_one_call_and_every_gap_says_what_is_missing() {
         ],
     );
 
-    // More than one reply holds: the lines that fit, and the rest by name.
-    let mut many = vec!["runs", "latest", "line"];
-    many.extend(std::iter::repeat_n("src/ship.js:5", 150));
-    many.push("--json");
-    let overflow = project.supercov(&many).json();
-    assert_eq!(overflow["ok"], true, "{overflow}");
-    let answered = overflow["data"]["lines"].as_array().unwrap().len();
-    let remaining = overflow["data"]["remaining"].as_array().unwrap().len();
-    assert!(answered > 0 && remaining > 0, "{answered} {remaining}");
-    assert_eq!(answered + remaining, 150);
+    // More than one reply holds: a page of the lines that fit, the rest by
+    // name, and `nextOffset` for a pager. A location asked twice is one.
+    let mut source = String::new();
+    for value in 0..200 {
+        source.push_str(&format!("export const v{value} = {value};\n"));
+    }
+    project.write("src/many.js", &source);
+    project.write(
+        "test/many.test.js",
+        "import test from \"node:test\";\nimport \"../src/many.js\";\ntest(\"loads\", () => {});\n",
+    );
+    let many_run = project.measure(&["test/many.test.js"]);
+    let mut locations = (1..=200)
+        .map(|line| format!("src/many.js:{line}"))
+        .collect::<Vec<_>>();
+    locations.push("src/many.js:1".into());
+    let mut answered = Vec::new();
+    let mut offset = 0;
+    loop {
+        let mut arguments = vec!["runs".to_owned(), many_run.clone(), "line".into()];
+        arguments.extend(locations.iter().cloned());
+        arguments.extend(["--json".into(), "--offset".into(), offset.to_string()]);
+        let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        let page = project.supercov(&arguments).json();
+        assert_eq!(page["ok"], true, "{page}");
+        assert_eq!(page["pagination"]["total"], 200, "{page}");
+        for line in page["data"]["lines"].as_array().unwrap() {
+            answered.push(line["location"]["line"].as_u64().unwrap());
+        }
+        match page["pagination"]["nextOffset"].as_u64() {
+            Some(next) => {
+                assert!(
+                    page["data"]["remaining"]
+                        .as_array()
+                        .is_some_and(|rest| !rest.is_empty())
+                );
+                offset = next as usize;
+            }
+            None => break,
+        }
+    }
+    assert!(offset > 0, "200 lines take more than one reply");
+    assert_eq!(answered, (1..=200).collect::<Vec<_>>());
 }
 
 #[test]
@@ -6281,6 +6319,13 @@ fn a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file() {
     // Any of one criterion; every criterion given.
     assert_eq!(lines(&["--tag", "api", "--tag", "ui"]), (5, 6));
     assert_eq!(lines(&["--tag", "api", "--test-file", "test/api"]), (3, 6));
+    // A leading `!` leaves tests out: everything but the API tests.
+    assert_eq!(lines(&["--tag", "!api"]), (2, 6));
+    assert_eq!(lines(&["--test-file", "!test/api"]), (2, 6));
+    let neither = project
+        .supercov(&["runs", &run, "--tag", "!api", "--tag", "!e2e", "--json"])
+        .json();
+    assert_eq!(neither["error"]["code"], "TEST_FILTER_EMPTY", "{neither}");
     let none = project
         .supercov(&[
             "runs",

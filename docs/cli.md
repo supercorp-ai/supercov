@@ -210,8 +210,9 @@ locations from a file, one per line, skipping blank lines and `#` comments.
 Each line of several lists its state, its gaps and its first three covering
 tests, with `totalTests` and `totalPhases` for the rest; asked alone, a line
 lists every test and phase. In `--json` the reply is `coverage.lines`, one
-entry per location in order; any that do not fit one reply are listed in
-`remaining`, to ask for next.
+entry per location in order, each location once. Locations that do not fit one
+reply are listed in `remaining`, and `pagination.nextOffset` says where the next
+reply starts: ask again with `--offset`, as for any page.
 
 ```sh supercov
 npx supercov runs latest line app/routes/checkout.ts:42 app/routes/checkout.ts:57
@@ -458,7 +459,7 @@ one as a public artifact.
 | `--filter all \| passed \| failed` | Recalculate the view from all, successful, or failed attempts |
 | `--kind <kind>` | Restrict to a test level such as `unit`, `integration`, or `e2e` |
 | `--runner <runner>` | Restrict to one runner |
-| `--tag <tag>` | Restrict to tests with this tag; repeat it for tests with any of several |
+| `--tag <tag>` | Restrict to tests with this tag; repeat it for tests with any of several, and start a value with `!` to leave those tests out |
 | `--title <text>` | Restrict to tests whose name contains this text |
 | `--test-file <path>` | Restrict to tests in this file, or in this directory |
 | `--metric all \| lines \| statements \| functions \| branches \| mcdc` | Choose a metric for `files`, `gaps`, `diff`, or `minimize` |
@@ -473,12 +474,14 @@ Collection output includes a copyable command for the next page.
 pick, from a run already measured: the API tests of a Playwright suite, the
 tests of one spec file, everything named `checkout`. Each takes several values
 for tests matching any of them, and when several are given a test must match
-each.
+each. A value starting with `!` leaves those tests out, so the browser tests of
+a suite whose other tests are tagged read as the tests with none of the tags.
 
 ```sh supercov
 npx supercov runs latest --tag @api
 npx supercov runs latest gaps --test-file tests/e2e/checkout.spec.ts
 npx supercov runs latest files --title checkout --tag smoke
+npx supercov runs latest --tag '!api' --tag '!cron' --tag '!webhook'
 ```
 
 A tag is what the runner gives a test: a Playwright tag (`{ tag: '@api' }`, or
@@ -488,8 +491,9 @@ JUnit `@Tag` or a TestNG group. Tags are written with or without the `@` and in
 any case. `runs <id> test <name>` lists a test's tags.
 
 The first query with a filter works out its coverage from the run's evidence
-and keeps it beside the run (about half a minute for a 1,100-test run); asking
-again reads it back. Nothing is added to the test run itself.
+and keeps it beside the run (12 s for a run of about 3,000 tests); asking again
+reads it back in a fraction of a second. Nothing is added to the test run
+itself.
 
 For a large file, group and rank its decisions:
 

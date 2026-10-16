@@ -8,11 +8,11 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
 };
 import { createHash, randomBytes } from "node:crypto";
 import childProcess from "node:child_process";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
-import { relative, resolve, sep } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
@@ -493,6 +493,7 @@ class CoveragePhaseController {
         if (this.contexts.has(context) || this.disposed)
             return;
         this.contexts.add(context);
+        patchContextPrototype(context);
         if (adopted)
             this.adoptedContexts.add(context);
         await context.addInitScript({ content: browserRuntimePrelude }).catch(() => undefined);
@@ -1077,7 +1078,29 @@ function patchBrowserPrototype(browser) {
  * a customer context opened mid-test is usually closed in a `finally`; either
  * way the page is gone by the time the test's snapshots are collected.
  */
+/** The cookies Supercov gives a context to carry the test's scope. */
+const OWN_COOKIES = new Set([COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE]);
+const suiteCookies = (cookies) => (Array.isArray(cookies) ? cookies.filter((cookie) => !OWN_COOKIES.has(cookie?.name)) : cookies);
 function patchContextPrototype(context) {
+    // A test reads and saves the cookies it and its app set, never
+    // Supercov's: an assertion on `cookies()` failed only under measurement,
+    // and `storageState({ path })` wrote the scope into the suite's saved
+    // login. A `clearCookies()` takes the scope too, and the test's next
+    // action puts it back, as every action does.
+    patchOnce(context, "cookies", (original) => async function (...args) {
+        return suiteCookies(await original.apply(this, args));
+    });
+    patchOnce(context, "storageState", (original) => async function (options, ...rest) {
+        const { path, ...others } = options && typeof options === "object" ? options : {};
+        const state = await original.call(this, others, ...rest);
+        const own = state && typeof state === "object" ? { ...state, cookies: suiteCookies(state.cookies) } : state;
+        if (path) {
+            // As Playwright writes it.
+            mkdirSync(dirname(resolve(path)), { recursive: true });
+            writeFileSync(path, JSON.stringify(own, undefined, 2));
+        }
+        return own;
+    });
     patchOnce(context, "close", (original) => async function (...args) {
         for (const page of this.pages()) {
             await controllerOwning(page)?.snapshotBeforeClose(page).catch(() => undefined);

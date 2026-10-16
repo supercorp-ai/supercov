@@ -2465,6 +2465,15 @@ impl PublicQueryOutput {
             };
             data.remaining
                 .insert(0, format!("{}:{}", location.file, location.line));
+            // The standard page: a pager following `nextOffset` asks for the
+            // rest as it asks for any page.
+            let returned = data.lines.len();
+            if let Some(page) = output.pagination.as_mut() {
+                page.returned = returned;
+                page.limit = returned;
+                page.has_more = true;
+                page.next_offset = Some(page.offset + returned);
+            }
         }
     }
 

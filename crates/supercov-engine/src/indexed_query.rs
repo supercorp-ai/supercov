@@ -596,10 +596,19 @@ pub fn query_indexed(
                 .line
                 .ok_or(IndexedQueryError::MissingArgument("a line"))?,
         );
+        // Each location once, in the order asked; `--offset` skips the
+        // locations a reply before this one answered.
+        let mut locations = Vec::new();
+        for location in std::iter::once(first).chain(request.more_lines.iter().cloned()) {
+            if !locations.contains(&location) {
+                locations.push(location);
+            }
+        }
+        let total = locations.len();
         let mut lines = Vec::new();
         let mut pages = Vec::new();
         let mut cache = crate::coverage_query::CoversCache::default();
-        for (file, line) in std::iter::once(first).chain(request.more_lines.iter().cloned()) {
+        for (file, line) in locations.into_iter().skip(request.offset) {
             let (data, page) = crate::coverage_query::coverage_covers_query_cached(
                 index,
                 CoverageCoversQueryOptions {
@@ -617,6 +626,7 @@ pub fn query_indexed(
             lines.push(compact_line(data));
             pages.push(page);
         }
+        let returned = lines.len();
         return Ok(IndexedQueryOutput {
             command: "coverage.lines",
             data: IndexedQueryData::Lines(Box::new(CoverageLinesData {
@@ -625,7 +635,14 @@ pub fn query_indexed(
                 remaining: Vec::new(),
                 pages,
             })),
-            pagination: None,
+            pagination: Some(supercov_contracts::AgentPagination {
+                offset: request.offset,
+                limit: returned,
+                returned,
+                total,
+                has_more: false,
+                next_offset: None,
+            }),
         });
     }
 

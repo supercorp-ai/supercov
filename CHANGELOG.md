@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.15.0
+
+**Changed**
+
+- `--tag`, `--title` and `--test-file` leave tests out with a leading `!`: `--tag '!api' --tag '!cron'` reads the tests with neither tag, the browser tests of a suite whose others are tagged, from the one run.
+- Upgrading Supercov re-indexes a stored run on its first query only when the analysis that writes its index changed, not on every release: a release that changes only instrumentation, runners or queries reads a 1,100-test run in 3.6 s, not 23 s.
+- Re-indexing a run builds its three views (all, passed, failed attempts) one at a time and parses each test's record as the evidence is read, so the decompressed evidence and the three views are never held at once: on a run of about 3,000 tests the first query peaks at 6.5 GB instead of 8.1 GB, in the same 12 s, with the same index.
+
+**Fixed**
+
+- `gaps --format jsonl` opened the run and checked the checkout again for every file: 129 s for 17,454 rows of a 1,100-test run. It reads the run once, at 5 s, with the same rows.
+- `line` with many locations in `--json` answered as many as fit one reply and listed the rest in `remaining` only, so a pager following `nextOffset` stopped after the first reply, and a location given twice was answered twice. The reply now pages as every other query does (`pagination.nextOffset`, `--offset`), each location once.
+- A server whose `emit` something else wrapped before Supercov loaded (a preload that put its own `emit` on `http.Server.prototype`) hid its requests from Supercov: what ran on a request's own events, a body read on `end` or a page rendered as the response went out, was credited to no test. Supercov now also reads each request from `diagnostics_channel`, which nothing hides.
+- A Playwright test read Supercov's own cookies: `context.cookies()` listed the cookies that carry the test's scope, so an assertion on cookies failed only under measurement, and `storageState({ path })` wrote them into the suite's saved login state. Both now give the suite's cookies alone.
+- The run a missing MC/DC condition `needs` could be one its decision cannot produce, such as `a` true and the decision false for `a || b`. It is now worked out from the decision's own `&&`, `||` and `!`: one run, or the pair when no test evaluated the condition, that shows the condition deciding by the rule Supercov counts by.
+
 ## 4.14.0
 
 **Changed**

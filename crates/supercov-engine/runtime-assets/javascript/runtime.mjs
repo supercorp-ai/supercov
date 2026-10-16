@@ -1491,30 +1491,55 @@ function installNodeRequestPropagation() {
   const SecureServer = https && https.Server;
   if (!EventEmitter) return;
   const original = EventEmitter.prototype.emit;
+  // The test a request is for, worked out once, from whichever sees it first.
+  const requestContexts = new WeakMap();
+  const owningRequest = (server, request, response) => {
+    if (requestContexts.has(request))
+      return requestContexts.get(request);
+    let context = emitterCoverageContexts.get(server);
+    // HTTP headers establish ownership even when Express/SDK listeners and
+    // the server process were created by a shared before hook.
+    const incoming = requestCoverageContext(request);
+    noteSupport(incoming && incoming.scope);
+    if (incoming) context = incoming.scope ? incoming : context != null ? context : currentRequestContext();
+    if (incoming && incoming.scope)
+      noteServedAttempt(incoming.scope);
+    // A request that names no test, to a server no test owns, is numbered:
+    // the report credits its work to the test running when it came.
+    if (incoming && serverPhaseStorage && !(context && (context.scope || context.phaseId)))
+      context = { request: nextUnscopedRequest() };
+    // Node emits a request's body and its response's events outside the
+    // handler's context, so a handler that reads the body -- `req.on('end')`
+    // -- ran as no test's. The request and response carry it with them.
+    if (incoming && context) {
+      for (const emitter of [request, response]) {
+        if (emitter && typeof emitter === "object" && typeof emitter.emit === "function")
+          emitterCoverageContexts.set(emitter, context);
+      }
+    }
+    if (request && typeof request === "object")
+      requestContexts.set(request, incoming ? context : void 0);
+    return incoming ? context : void 0;
+  };
+  // Node publishes every request here before it emits it. An `emit` of the
+  // server's own, defined before this patch by a preload that called the
+  // emit it found, hid every request from the patch below, and what ran on
+  // the request's events -- a page rendered as the response went out --
+  // was credited to no test. Nothing hides this channel.
+  try {
+    const channels = builtin("node:diagnostics_channel");
+    if (channels && typeof channels.subscribe === "function")
+      channels.subscribe("http.server.request.start", (message) => {
+        if (message && message.request)
+          owningRequest(message.server, message.request, message.response);
+      });
+  } catch {}
   EventEmitter.prototype.emit = function(event, ...args) {
     let context = emitterCoverageContexts.get(this);
     if ((event === "request" || event === "upgrade") &&
         ((Server && this instanceof Server) || (SecureServer && this instanceof SecureServer))) {
-      // HTTP headers establish ownership even when Express/SDK listeners and
-      // the server process were created by a shared before hook.
-      const incoming = requestCoverageContext(args[0]);
-      noteSupport(incoming && incoming.scope);
-      if (incoming) context = incoming.scope ? incoming : context != null ? context : currentRequestContext();
-      if (incoming && incoming.scope)
-        noteServedAttempt(incoming.scope);
-      // A request that names no test, to a server no test owns, is numbered:
-      // the report credits its work to the test running when it came.
-      if (incoming && serverPhaseStorage && !(context && (context.scope || context.phaseId)))
-        context = { request: nextUnscopedRequest() };
-      // Node emits a request's body and its response's events outside the
-      // handler's context, so a handler that reads the body -- `req.on('end')`
-      // -- ran as no test's. The request and response carry it with them.
-      if (incoming && context) {
-        for (const emitter of args.slice(0, 2)) {
-          if (emitter && typeof emitter === "object" && typeof emitter.emit === "function")
-            emitterCoverageContexts.set(emitter, context);
-        }
-      }
+      const owner = owningRequest(this, args[0], args[1]);
+      if (owner) context = owner;
     }
     const invoke = () => Reflect.apply(original, this, [event, ...args]);
     try {

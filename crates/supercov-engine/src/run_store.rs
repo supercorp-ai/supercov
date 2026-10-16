@@ -756,13 +756,20 @@ fn file_sha256(path: &Path) -> Result<([u8; 32], u64), RunStoreError> {
     Ok((hash.finalize().into(), metadata.len()))
 }
 
+/// A version of the code that writes a run's query index: the versions it
+/// declares and the source it is built from (`build.rs` names the files).
+/// Keyed to the analysis alone, not the whole engine, an upgrade that left it
+/// as it was keeps every stored run's index; one that changed it re-indexes,
+/// whether or not anyone bumped a version.
 fn domain_hash(domain: &str, version: u32) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(domain.as_bytes());
     hash.update([0]);
     hash.update(version.to_le_bytes());
     hash.update([0]);
-    hash.update(env!("SUPERCOV_ENGINE_SOURCE_SHA256").as_bytes());
+    hash.update(supercov_contracts::COVERAGE_MODEL_SCHEMA_VERSION.to_le_bytes());
+    hash.update([0]);
+    hash.update(env!("SUPERCOV_ANALYSIS_SOURCE_SHA256").as_bytes());
     hash.finalize().into()
 }
 
@@ -900,6 +907,38 @@ pub fn analyze_stored_run_filtered(
     })?)
 }
 
+/// A stored run's query index, its views built and written one at a time.
+fn index_sections(
+    run: &StoredRun,
+    filter: Option<&crate::coverage_report::TestFilter>,
+) -> Result<Vec<crate::query_index::QueryIndexSection>, RunIndexError> {
+    use crate::coverage_index::CoverageViewId;
+    let (_, normalized, transport) =
+        crate::coverage_report::archive_request(&ArchiveReportRequest {
+            archive_path: run.evidence_path.clone(),
+            run_id: run.id.clone(),
+            generated_at: run.metadata.started_at.clone(),
+            integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
+            test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
+            test_filter: filter.cloned(),
+        })?;
+    let sections = crate::coverage_index::coverage_index_sections_from(
+        crate::coverage_report::coverage_views(
+            &normalized,
+            &[
+                CoverageViewId::All,
+                CoverageViewId::Passed,
+                CoverageViewId::Failed,
+            ],
+            Some(transport),
+        )?
+        .map(|view| view.map_err(RunIndexError::Report)),
+    )?;
+    // Every test's records, freed by nobody's wait.
+    std::thread::spawn(move || drop(normalized));
+    Ok(sections)
+}
+
 /// The filter as one key: its values normalized and sorted, so the same
 /// tests asked for in another order or case find the same index.
 fn filter_digest(filter: &crate::coverage_report::TestFilter) -> [u8; 32] {
@@ -971,9 +1010,7 @@ pub fn open_or_build_filtered_query_index(
         touch(&path);
         return Ok(index);
     }
-    let report = analyze_stored_run_filtered(run, Some(filter))?;
-    let sections = coverage_index_sections(&report)?;
-    std::thread::spawn(move || drop(report));
+    let sections = index_sections(run, Some(filter))?;
     let mut current = query_index_identity(run)?;
     current.analysis_sha256 = digest;
     if current != identity {
@@ -1098,11 +1135,7 @@ pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunInd
         return Ok(index);
     }
 
-    let report = analyze_stored_run(run)?;
-    let sections = coverage_index_sections(&report)?;
-    // The analysis and the sections are written; freeing them took seconds
-    // the query waited on.
-    std::thread::spawn(move || drop(report));
+    let sections = index_sections(run, None)?;
     if query_index_identity(run)? != identity {
         return Err(RunIndexError::EvidenceChanged);
     }
@@ -1435,6 +1468,12 @@ mod tests {
         assert_ne!(first.evidence_bytes, second.evidence_bytes);
         assert_eq!(first.analysis_sha256, second.analysis_sha256);
         assert_eq!(env!("SUPERCOV_ENGINE_SOURCE_SHA256").len(), 64);
+        // The index is keyed to the analysis's source, not the whole engine's.
+        assert_eq!(env!("SUPERCOV_ANALYSIS_SOURCE_SHA256").len(), 64);
+        assert_ne!(
+            env!("SUPERCOV_ANALYSIS_SOURCE_SHA256"),
+            env!("SUPERCOV_ENGINE_SOURCE_SHA256")
+        );
 
         let mut current = integrity();
         current.schema_version += 1;
