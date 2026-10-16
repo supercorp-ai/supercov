@@ -4,8 +4,9 @@
 //
 // A small project whose tests drive each construct both ways: loops with
 // parts left out, negated compound decisions, logical assignment, optional
-// calls and members (deleted through, too), rest patterns, decisions on a
-// unary or a template, source read through a computed key or a string,
+// calls and members (deleted through, too, and called by a computed key),
+// parenthesized logic, rest patterns, decisions on a unary or a template,
+// source read through a computed key or a string,
 // sloppy `with` and direct `eval`, TypeScript `declare`, a shebang CLI, route
 // handlers and a server entry. Each file is read back for what its tests
 // showed: a construct measured wrongly reads as uncovered here.
@@ -367,6 +368,62 @@ test('typed and shebang modules', () => {
   assert.equal(greet(''), 'hello');
 });
 `,
+  'src/grouped.js': `export function both(a, b) {
+  const ok = (a && b);
+  return ok;
+}
+
+export function grouped(a, b, c) {
+  return (a || b) && c;
+}
+
+export function inIf(a, b) {
+  if ((a && b)) {
+    return 1;
+  }
+  return 0;
+}
+
+export function call(box, name) {
+  return box[name]?.() ?? 'none';
+}
+
+export function chain(o) {
+  return o?.inner?.['value'] ?? -1;
+}
+
+export function nested(a, b) {
+  const result = ((a)) ? ((b || a)) : null;
+  return result;
+}
+`,
+  'test/grouped.test.mjs': `import assert from 'node:assert/strict';
+import test from 'node:test';
+import { both, call, chain, grouped, inIf, nested } from '../src/grouped.js';
+
+test('parenthesized logic, computed optional calls and chains', () => {
+  assert.equal(both(1, 2), 2);
+  assert.equal(both(0, 2), 0);
+  assert.equal(both(1, 0), 0);
+  assert.equal(grouped(1, 0, 1), 1);
+  assert.equal(grouped(0, 1, 1), 1);
+  assert.equal(grouped(0, 0, 1), 0);
+  assert.equal(grouped(1, 0, 0), 0);
+  assert.equal(inIf(1, 1), 1);
+  assert.equal(inIf(0, 1), 0);
+  assert.equal(inIf(1, 0), 0);
+  assert.equal(call({ m: () => 1 }, 'm'), 1);
+  assert.equal(call({}, 'm'), 'none');
+  assert.equal(call({ m: () => null }, 'm'), 'none');
+  assert.equal(chain({ inner: { value: 3 } }), 3);
+  assert.equal(chain(null), -1);
+  assert.equal(chain({}), -1);
+  assert.equal(chain({ inner: {} }), -1);
+  assert.equal(nested(1, 0), 1);
+  assert.equal(nested(1, 2), 2);
+  assert.equal(nested(0, 0), null);
+});
+`,
   'test/routes.test.mjs': `import assert from 'node:assert/strict';
 import test from 'node:test';
 import ItemsPage, { action, headers, helper, loader, page, title } from '../app/routes/items.ts';
@@ -411,7 +468,7 @@ try {
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');
   if (process.env.ZOO_REPORT) console.log(report);
   // Each construct was driven both ways, so nothing is left uncovered.
-  for (const file of ['src/flow.js', 'src/values.js', 'src/typed.ts', 'src/cli.js', 'app/routes/items.ts', 'app/routes/shared.ts', 'app/entry.server.ts']) {
+  for (const file of ['src/flow.js', 'src/values.js', 'src/grouped.js', 'src/typed.ts', 'src/cli.js', 'app/routes/items.ts', 'app/routes/shared.ts', 'app/entry.server.ts']) {
     const entry = byFile[file];
     assert.ok(entry, `${file} was not measured\n${report}`);
     for (const metric of ['lines', 'branches', 'mcdcConditions']) {
