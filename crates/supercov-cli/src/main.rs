@@ -451,6 +451,59 @@ fn published(run_directory: &Path) {
     }
 }
 
+/// Why a measured command failed, as far as its run can say. A test that
+/// failed is named; only when none did -- the command stopped before its
+/// tests, or a test file never loaded -- is the build output the copy starts
+/// without the likely cause, and said to be.
+fn explain_failed_command(
+    root: &Path,
+    run_id: &str,
+    exit_code: i32,
+    unrun_build: &[String],
+    command: &str,
+) {
+    let failed = discover_runs(root)
+        .ok()
+        .and_then(|inventory| {
+            let run = select_run(&inventory, Some(run_id)).ok()?;
+            let container = open_or_rebuild_query_index(run).ok()?;
+            let index = CoverageIndex::new(&container).ok()?;
+            index
+                .test_summaries(supercov_engine::coverage_index::CoverageViewId::All)
+                .ok()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|test| {
+            test.role == "test" && matches!(test.outcome.as_str(), "failed" | "timedOut")
+        })
+        .map(|test| test.name)
+        .collect::<Vec<_>>();
+    if !failed.is_empty() {
+        let shown = failed
+            .iter()
+            .take(5)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = failed.len().saturating_sub(5);
+        eprintln!(
+            "[supercov] the command exited {exit_code}: {} test(s) failed: {shown}{}",
+            failed.len(),
+            if more > 0 {
+                format!(", and {more} more")
+            } else {
+                String::new()
+            }
+        );
+    } else if !unrun_build.is_empty() {
+        let build = unrun_build.join(" ");
+        eprintln!(
+            "[supercov] the command exited {exit_code} and no test it reported failed. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `supercov -- sh -c \"{build} && {command}\"`"
+        );
+    }
+}
+
 /// Names the file a run writes its id to.
 const RUN_ID_FILE: &str = "SUPERCOV_RUN_ID_FILE";
 
@@ -1841,6 +1894,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     let watchdog_program = std::env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
+    let command_text = command.join(" ");
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
         root: root.clone(),
         command,
@@ -1854,6 +1908,15 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     match result {
         Ok(result) => {
             published(&result.run_directory);
+            if result.exit_code != 0 {
+                explain_failed_command(
+                    &root,
+                    &result.run_id,
+                    result.exit_code,
+                    &result.unrun_build,
+                    &command_text,
+                );
+            }
             for (language, server) in &result.server_runs {
                 if let Some(id) = server.file_name().and_then(|id| id.to_str()) {
                     eprintln!(

@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- A JavaScript run that failed because a test failed was told the copy "starts without build output" and to put `npm run build` in the command, whenever the project had a build script. It now names the failed tests (`the command exited 1: 1 test(s) failed: ...`), and points at the build only when no test it reported failed.
 - A Kotlin condition that relied on a smart cast from `isNullOrEmpty()` or `isNullOrBlank()` (`if (!s.isNullOrEmpty() && s.length > 3)`) stopped the file compiling under measurement. It is now recorded from its branches, as a condition with a null check already was.
 - A Go package whose conditions used a named boolean type (`type Flag bool`, `if a && b` on two of them) failed to build under measurement with "cannot use a (variable of bool type Flag) as bool value". Conditions are now converted inside the probe.
 - A Rust file where `vec![x; n]` began a longer expression (`vec![elem; n].into()`, as in smallvec) could not be instrumented: a probe went between `vec!` and its brackets, so the file was left unmeasured.

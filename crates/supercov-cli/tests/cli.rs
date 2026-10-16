@@ -3637,6 +3637,25 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         .supercov(&["runs", "latest", "line", "src/fee.js:2"])
         .succeeds();
     assert!(line.contains("small orders pay"), "{line}");
+
+    // A test that fails on its own is named, and the build is not blamed.
+    project.write(
+        "test/wrong.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('large orders are free', () => equal(fee(200), 5));\n",
+    );
+    let failed = project.supercov(&[
+        "--",
+        "sh",
+        "-c",
+        "npm run build && node --test test/fee.test.js test/wrong.test.js",
+    ]);
+    assert_ne!(failed.code(), 0, "{}", failed.stdout());
+    let said = failed.stderr();
+    assert!(
+        said.contains("1 test(s) failed: large orders are free"),
+        "{said}"
+    );
+    assert!(!said.contains("starts without build output"), "{said}");
 }
 
 #[cfg(unix)]
