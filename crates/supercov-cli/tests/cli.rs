@@ -62,7 +62,8 @@ fn a_measured_suite_reads_back_through_every_query() {
             "Functions not called            2",
             "Tests touching this file: 3",
             "zero-iteration outcome not observed",
-            "no witness pair shows `express` independently changing the decision result",
+            "`express` was never true; needs `express` true, decision true",
+            "`express` was never evaluated\n",
         ],
     );
 
@@ -6102,4 +6103,130 @@ fn assertions_reached_through_require_a_shebang_or_types_are_credited() {
         refused.contains("the wrapped test command did not pass"),
         "{refused}"
     );
+}
+
+#[test]
+fn many_lines_are_answered_in_one_call_and_every_gap_says_what_is_missing() {
+    let project = Project::empty("line-batch");
+    project.write(
+        "package.json",
+        r#"{ "name": "ship", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/ship.js",
+        "export function ship(sum, express, member) {\n  if (express || sum < 50) {\n    return express ? 15 : 5;\n  }\n  if (member && sum > 100) {\n    return 0;\n  }\n  return 2;\n}\n",
+    );
+    project.write(
+        "test/ship.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { ship } from \"../src/ship.js\";\ntest(\"express\", () => assert.equal(ship(10, true, false), 15));\ntest(\"member\", () => assert.equal(ship(200, false, true), 0));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+
+    // Each missing condition names the value it never took, in every view.
+    let decisions = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/ship.js",
+            "--group",
+            "decision",
+        ])
+        .succeeds();
+    contains_all(
+        &decisions,
+        &[
+            "`sum < 50` was never true; needs `express` false, `sum < 50` true, decision true",
+            "`member` was never false; needs `member` false, decision false",
+        ],
+    );
+    let rows = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/ship.js",
+            "--group",
+            "decision",
+            "--json",
+        ])
+        .json();
+    let first = &rows["data"]["decisions"][0];
+    assert_eq!(first["missing"][0]["condition"], "sum < 50", "{rows}");
+    assert_eq!(
+        first["missing"][0]["missingOutcomes"],
+        serde_json::json!(["true"]),
+        "{rows}"
+    );
+    let decision = project
+        .supercov(&["runs", "latest", "decision", "src/ship.js:2"])
+        .succeeds();
+    assert!(
+        decision.contains("C2 MISSING: sum < 50 (never true)"),
+        "{decision}"
+    );
+
+    // Several lines, named or listed in a file, from one opened run.
+    let both = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/ship.js:2",
+            "src/ship.js:5",
+            "--json",
+        ])
+        .json();
+    assert_eq!(both["command"], "coverage.lines", "{both}");
+    let lines = both["data"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2, "{both}");
+    assert_eq!(lines[1]["location"]["line"], 5);
+    let gaps = lines[1]["remaining"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|gap| gap["kind"] == "mcdc")
+        .map(|gap| {
+            (
+                gap["missingCondition"].as_str().unwrap().to_owned(),
+                gap["missingOutcomes"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        gaps,
+        [
+            ("member".to_owned(), serde_json::json!(["false"])),
+            ("sum > 100".to_owned(), serde_json::json!(["false"])),
+        ]
+    );
+    // One line answers as it always did.
+    let one = project
+        .supercov(&["runs", "latest", "line", "src/ship.js:2", "--json"])
+        .json();
+    assert_eq!(one["command"], "coverage.line", "{one}");
+    project.write("lines.txt", "src/ship.js:2\n# skipped\n\nsrc/ship.js:5\n");
+    let listed = project
+        .supercov(&["runs", "latest", "line", "--from-file", "lines.txt"])
+        .succeeds();
+    contains_all(
+        &listed,
+        &[
+            "src/ship.js:2",
+            "src/ship.js:5",
+            "`sum > 100` was never false",
+        ],
+    );
+
+    // More than one reply holds: the lines that fit, and the rest by name.
+    let mut many = vec!["runs", "latest", "line"];
+    many.extend(std::iter::repeat_n("src/ship.js:5", 150));
+    many.push("--json");
+    let overflow = project.supercov(&many).json();
+    assert_eq!(overflow["ok"], true, "{overflow}");
+    let answered = overflow["data"]["lines"].as_array().unwrap().len();
+    let remaining = overflow["data"]["remaining"].as_array().unwrap().len();
+    assert!(answered > 0 && remaining > 0, "{answered} {remaining}");
+    assert_eq!(answered + remaining, 150);
 }

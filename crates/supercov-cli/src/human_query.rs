@@ -622,10 +622,9 @@ fn render_needed_obligation(obligation: &CoverageFileObligation) -> String {
         }
         CoverageFileObligation::Point(item) => format!("{} not covered", item.kind),
         CoverageFileObligation::Branch(item) => branch_need(&item.missing),
-        CoverageFileObligation::Mcdc(item) => format!(
-            "no witness pair shows `{}` independently changing the decision result; needs {}",
-            item.missing_condition, item.needs
-        ),
+        CoverageFileObligation::Mcdc(item) => {
+            condition_gap(&item.missing_condition, &item.missing_outcomes, &item.needs)
+        }
     }
 }
 
@@ -804,9 +803,52 @@ fn push_line_pagination(
     }
 }
 
+/// A missing condition in words: the value it never took and the run that
+/// would show it deciding. One never evaluated has no run to flip.
+fn condition_gap(condition: &str, missing: &[String], needs: &str) -> String {
+    let words = supercov_engine::coverage_query::missing_outcome_words(condition, missing);
+    if missing.len() > 1 {
+        words
+    } else {
+        format!("{words}; needs {needs}")
+    }
+}
+
 fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
+    // Several lines: each as one line reads, one after another.
+    if let IndexedQueryData::Lines(data) = &output.data {
+        return data
+            .lines
+            .iter()
+            .zip(&data.pages)
+            .map(|(line, page)| {
+                let location = match line {
+                    supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+                        &data.location
+                    }
+                    supercov_engine::coverage_query::CoverageCoversData::Line(data) => {
+                        &data.location
+                    }
+                };
+                let mut one = request.clone();
+                one.file = Some(location.file.clone());
+                one.line = Some(location.line);
+                one.more_lines = Vec::new();
+                render_coverage(
+                    &one,
+                    &IndexedQueryOutput {
+                        command: "coverage.line",
+                        data: IndexedQueryData::Line(Box::new(line.clone())),
+                        pagination: Some(page.clone()),
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+    }
     let page = output.pagination.as_ref();
     match &output.data {
+        IndexedQueryData::Lines(_) => unreachable!("several lines render one by one above"),
         IndexedQueryData::Summary(data) => {
             let label = filter_label(request);
             let mut first = format!("run {}", data.run);
@@ -1256,18 +1298,31 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     data.totals.conditions,
                 ),
             ];
-            lines.extend(data.decisions.iter().map(|row| {
-                let compact = row.source.split_whitespace().collect::<Vec<_>>().join(" ");
+            for row in &data.decisions {
+                let gap = &row.gap;
+                let compact = gap.source.split_whitespace().collect::<Vec<_>>().join(" ");
                 let snippet = if compact.chars().count() > 96 {
                     format!("{}…", compact.chars().take(95).collect::<String>())
                 } else {
                     compact
                 };
-                format!(
+                lines.push(format!(
                     "{}:{}  [{}]  missing {}/{}  {snippet}",
-                    row.line, row.column, row.id, row.missing_conditions, row.conditions,
-                )
-            }));
+                    gap.line, gap.column, gap.id, gap.missing_conditions, gap.conditions,
+                ));
+                // Which value each one never took, and the run that would
+                // show it deciding: what a test has to do.
+                for condition in &row.missing {
+                    lines.push(format!(
+                        "    {}",
+                        condition_gap(
+                            &condition.condition,
+                            &condition.missing_outcomes,
+                            &condition.needs
+                        )
+                    ));
+                }
+            }
             if data.decisions.is_empty() {
                 lines.push(String::new());
             }
@@ -1421,8 +1476,16 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             decision.meta.source.clone(),
                         ];
                         lines.extend(decision.conditions.iter().map(|condition| {
+                            // What a missing condition lacks: a value it never
+                            // took, or deciding the result alone.
+                            let lacks = match condition.missing_outcomes.as_deref() {
+                                None => String::new(),
+                                Some([]) => " (seen both ways, never deciding alone)".into(),
+                                Some([value]) => format!(" (never {value})"),
+                                Some(_) => " (never evaluated)".into(),
+                            };
                             format!(
-                                "C{} {}: {}",
+                                "C{} {}: {}{lacks}",
                                 condition.index + 1,
                                 if condition.covered {
                                     "covered"
@@ -2132,6 +2195,7 @@ mod tests {
             runner: None,
             file: None,
             line: None,
+            more_lines: Vec::new(),
             selector: None,
             sort: None,
             valid: None,

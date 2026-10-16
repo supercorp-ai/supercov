@@ -2299,6 +2299,36 @@ enum PublicQueryOutput {
 }
 
 impl PublicQueryOutput {
+    /// Several lines too many for one reply keep the ones that fit and name
+    /// the rest, to be asked again.
+    fn fit_lines(&mut self) {
+        let Self::Coverage { output, .. } = self else {
+            return;
+        };
+        loop {
+            if output.agent_json().is_ok() {
+                return;
+            }
+            let supercov_engine::indexed_query::IndexedQueryData::Lines(data) = &mut output.data
+            else {
+                return;
+            };
+            if data.lines.len() <= 1 {
+                return;
+            }
+            let line = data.lines.pop().expect("more than one line");
+            data.pages.pop();
+            let location = match &line {
+                supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+                    &data.location
+                }
+                supercov_engine::coverage_query::CoverageCoversData::Line(data) => &data.location,
+            };
+            data.remaining
+                .insert(0, format!("{}:{}", location.file, location.line));
+        }
+    }
+
     /// How many entries of a page too large for one reply would fit, when
     /// it is that and not something else.
     fn page_that_fits(&self) -> Option<usize> {
@@ -2337,6 +2367,30 @@ impl From<agent_json::AgentError> for PublicQueryExecutionError {
         Self {
             error: Box::new(error),
             warnings: Vec::new(),
+        }
+    }
+}
+
+/// What the assertion map says about a line, beside its coverage.
+fn line_assertions(
+    run: &StoredRun,
+    data: &mut supercov_engine::coverage_query::CoverageCoversData,
+) {
+    use supercov_engine::coverage_query::CoverageCoversData;
+    match data {
+        CoverageCoversData::Anchors(data) => {
+            data.assertions = Some(assertions_command::for_line(
+                run,
+                &data.location.file,
+                data.location.line,
+            ));
+        }
+        CoverageCoversData::Line(data) => {
+            data.assertions = Some(assertions_command::for_line(
+                run,
+                &data.location.file,
+                data.location.line,
+            ));
         }
     }
 }
@@ -2504,6 +2558,19 @@ fn execute_public_query(
                             data,
                         );
                     }
+                    // Each line of several is given what one line is given.
+                    if let supercov_engine::indexed_query::IndexedQueryData::Lines(data) =
+                        &mut output.data
+                    {
+                        for line in &mut data.lines {
+                            hydrate_line_source_from_working_tree(
+                                root,
+                                request.stale.unwrap_or(false),
+                                line,
+                            );
+                            line_assertions(run, line);
+                        }
+                    }
                     if let supercov_engine::indexed_query::IndexedQueryData::Diff(data) =
                         &mut output.data
                     {
@@ -2514,23 +2581,7 @@ fn execute_public_query(
                             data.assertions = Some(assertions_command::for_file(run, &data.file));
                         }
                         supercov_engine::indexed_query::IndexedQueryData::Line(data) => {
-                            use supercov_engine::coverage_query::CoverageCoversData;
-                            match data.as_mut() {
-                                CoverageCoversData::Anchors(data) => {
-                                    data.assertions = Some(assertions_command::for_line(
-                                        run,
-                                        &data.location.file,
-                                        data.location.line,
-                                    ));
-                                }
-                                CoverageCoversData::Line(data) => {
-                                    data.assertions = Some(assertions_command::for_line(
-                                        run,
-                                        &data.location.file,
-                                        data.location.line,
-                                    ));
-                                }
-                            }
+                            line_assertions(run, data);
                         }
                         _ => {}
                     }
@@ -2668,6 +2719,7 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
             // size the refusal had suggested for the page before.
             let mut invocation = invocation;
             let mut output = output;
+            output.fit_lines();
             while let Some(fits) = output.page_that_fits() {
                 let PublicQueryInvocation::Coverage { request, .. } = &mut invocation else {
                     break;

@@ -1406,6 +1406,9 @@ pub struct CoverageDecisionCondition {
     pub witness: Option<[crate::coverage_analysis::McdcVector; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witness_tests: Option<[Vec<Id>; 2]>,
+    /// For a condition not covered: the values it was never seen to take.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_outcomes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1622,6 +1625,11 @@ pub fn coverage_decision_query(
         .iter()
         .map(|observation| observation.vector.clone())
         .collect::<Vec<_>>();
+    let observed = filtered
+        .vector_observations
+        .iter()
+        .map(|observation| &observation.vector)
+        .collect::<Vec<_>>();
     let conditions = filtered
         .conditions
         .iter()
@@ -1634,6 +1642,8 @@ pub fn coverage_decision_query(
             assertion_covered: selected.is_none().then_some(condition.assertion_covered),
             witness: condition.witness.clone(),
             witness_tests: condition.witness_tests.clone(),
+            missing_outcomes: (!condition.covered)
+                .then(|| missing_outcomes(condition.index, &observed)),
         })
         .collect::<Vec<_>>();
     let tests = filtered
@@ -1729,6 +1739,9 @@ pub struct CoverageMcdcObligation {
     #[serde(skip)]
     pub condition_index: usize,
     pub observed_vectors: Vec<String>,
+    /// The values the condition was never seen to take (`["false"]`); empty
+    /// when it took both and never decided the result alone.
+    pub missing_outcomes: Vec<String>,
     /// The run that would show the missing condition deciding: an observed
     /// one that evaluated it, with it flipped and the opposite outcome. The
     /// conditions after it are left open (`-`): whatever makes the outcome
@@ -1871,6 +1884,35 @@ fn other_coverage<T: AsRef<str>>(
                 name: test.name.clone(),
             })
             .collect(),
+    }
+}
+
+/// The values a condition was never seen to take, `"true"` or `"false"`, among
+/// the runs that evaluated it: the half of a test that is missing. Empty when
+/// it was seen both ways and only never shown deciding the result alone.
+fn missing_outcomes(
+    index: usize,
+    observed: &[&crate::coverage_analysis::McdcVector],
+) -> Vec<String> {
+    let seen = |value: bool| {
+        observed
+            .iter()
+            .any(|vector| vector.values.get(index).copied().flatten() == Some(value))
+    };
+    [true, false]
+        .into_iter()
+        .filter(|value| !seen(*value))
+        .map(|value| value.to_string())
+        .collect()
+}
+
+/// A condition's gap in words: which value it never took, or that it never
+/// decided alone.
+pub fn missing_outcome_words(condition: &str, missing: &[String]) -> String {
+    match missing {
+        [] => format!("`{condition}` was seen both ways but never deciding the result alone"),
+        [value] => format!("`{condition}` was never {value}"),
+        _ => format!("`{condition}` was never evaluated"),
     }
 }
 
@@ -2314,6 +2356,7 @@ pub fn coverage_file_detail_from(
                 missing_condition: condition.source.clone(),
                 condition_index: condition.index,
                 observed_vectors: observed.iter().map(|vector| vector_text(vector)).collect(),
+                missing_outcomes: missing_outcomes(condition.index, &observed),
                 needed_vector,
                 needs,
                 other_coverage: other_coverage(&original_tests, selected.as_ref(), tests_by_id),
@@ -3400,7 +3443,28 @@ pub struct CoverageFileDecisionsData {
     pub group: String,
     pub sort: DecisionSort,
     pub totals: DecisionGapTotals,
-    pub decisions: Vec<IndexedDecisionGap>,
+    pub decisions: Vec<CoverageFileDecisionRow>,
+}
+
+/// A decision with conditions missing, and what each of them is missing.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageFileDecisionRow {
+    #[serde(flatten)]
+    pub gap: IndexedDecisionGap,
+    pub missing: Vec<CoverageMissingCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageMissingCondition {
+    pub index: usize,
+    pub condition: String,
+    /// The values it was never seen to take; empty when it took both and
+    /// never decided the result alone.
+    pub missing_outcomes: Vec<String>,
+    pub needed_vector: Option<String>,
+    pub needs: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3553,6 +3617,61 @@ pub fn coverage_file_decisions_query(
         .into_iter()
         .skip(options.offset)
         .take(options.limit)
+        .collect::<Vec<_>>();
+    // What each missing condition lacks, from the file's decisions as the
+    // filters see them: a count of missing conditions does not say which
+    // test to write.
+    let selected = if options.kind.is_some() || options.runner.is_some() {
+        selected_test_ids(
+            &index.test_summaries(options.view)?,
+            options.kind,
+            options.runner,
+        )?
+    } else {
+        None
+    };
+    let details = index
+        .decision_details_in_file(options.view, options.file)?
+        .into_iter()
+        .map(|decision| (decision.meta.id.clone(), decision))
+        .collect::<HashMap<_, _>>();
+    let rows = rows
+        .into_iter()
+        .map(|gap| {
+            let missing = details
+                .get(&gap.id)
+                .map(|decision| {
+                    let filtered = selected_decision(decision.clone(), selected.as_ref());
+                    let observed = filtered
+                        .vector_observations
+                        .iter()
+                        .map(|observation| &observation.vector)
+                        .collect::<Vec<_>>();
+                    let sources = filtered
+                        .conditions
+                        .iter()
+                        .map(|condition| condition.source.as_str())
+                        .collect::<Vec<_>>();
+                    filtered
+                        .conditions
+                        .iter()
+                        .filter(|condition| !condition.covered)
+                        .map(|condition| {
+                            let (needed_vector, needs) =
+                                needed(condition.index, &observed, &sources);
+                            CoverageMissingCondition {
+                                index: condition.index,
+                                condition: condition.source.clone(),
+                                missing_outcomes: missing_outcomes(condition.index, &observed),
+                                needed_vector,
+                                needs,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            CoverageFileDecisionRow { gap, missing }
+        })
         .collect::<Vec<_>>();
     let returned = rows.len();
     let filters = CoverageQueryFilters {

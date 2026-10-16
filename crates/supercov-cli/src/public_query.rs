@@ -139,6 +139,8 @@ pub enum PublicQueryInvocation {
 
 #[derive(Debug)]
 struct QueryOptions {
+    /// `line --from-file <path>`: locations to ask, one per line.
+    from_file: Option<String>,
     run: Option<String>,
     kind: Option<String>,
     runner: Option<String>,
@@ -163,6 +165,7 @@ struct QueryOptions {
 impl Default for QueryOptions {
     fn default() -> Self {
         Self {
+            from_file: None,
             run: None,
             kind: None,
             runner: None,
@@ -327,6 +330,17 @@ fn parse_options(
                 }
                 options.scope_files = true;
             }
+            "--from-file" => {
+                index += 1;
+                let Some(path) = arguments.get(index) else {
+                    return Err(PublicQueryError::invalid(
+                        Some(&agent_command),
+                        json_output,
+                        "--from-file needs a file of <source-file>:<line> locations, one per line",
+                    ));
+                };
+                options.from_file = Some(path.clone());
+            }
             "--group" => {
                 index += 1;
                 let group = arguments.get(index).map(|group| group.to_lowercase());
@@ -463,6 +477,7 @@ fn coverage_invocation(
         group: None,
         depth: None,
         gained_only: false,
+        more_lines: Vec::new(),
     };
     match command {
         "summary" | "kinds" | "runners" | "gaps" | "tests-without-evidence" => {}
@@ -504,24 +519,49 @@ fn coverage_invocation(
             request.selector = Some(selector.clone());
         }
         "line" => {
-            let Some(selector) = options.positional.first() else {
+            // Every location named, and every line of a file of them: one
+            // call answers them all from one opened run, which is most of
+            // what a query costs.
+            let mut selectors = options.positional.clone();
+            if let Some(path) = &options.from_file {
+                let text = std::fs::read_to_string(path).map_err(|error| {
+                    PublicQueryError::invalid(
+                        Some(&agent_command),
+                        json_output,
+                        format!("Could not read {path}: {error}"),
+                    )
+                })?;
+                selectors.extend(
+                    text.lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                        .map(str::to_owned),
+                );
+            }
+            if selectors.is_empty() {
                 return Err(PublicQueryError::invalid(
                     Some(&agent_command),
                     json_output,
-                    "Usage: supercov runs <run-id> line <source-file:line>",
+                    "Usage: supercov runs <run-id> line <source-file:line>... [--from-file <path>]",
                 ));
-            };
-            let Some((file, line)) = parse_location(selector) else {
-                let mut error = PublicQueryError::invalid(
-                    Some(&agent_command),
-                    json_output,
-                    "Expected <source-file>:<line>",
-                );
-                error.error.details = Some(json!({ "selector": selector }));
-                return Err(error);
-            };
+            }
+            let mut locations = Vec::with_capacity(selectors.len());
+            for selector in &selectors {
+                let Some(location) = parse_location(selector) else {
+                    let mut error = PublicQueryError::invalid(
+                        Some(&agent_command),
+                        json_output,
+                        "Expected <source-file>:<line>",
+                    );
+                    error.error.details = Some(json!({ "selector": selector }));
+                    return Err(error);
+                };
+                locations.push(location);
+            }
+            let (file, line) = locations.remove(0);
             request.file = Some(file);
             request.line = Some(line);
+            request.more_lines = locations;
         }
         "test" => {
             if options.positional.is_empty() {
@@ -591,6 +631,7 @@ pub fn parse_public_query(
                 group: None,
                 depth: None,
                 gained_only: options.gained,
+                more_lines: Vec::new(),
             }),
             newer_run_id: Some(newer.clone()),
             agent_command: "diff".into(),

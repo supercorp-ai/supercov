@@ -62,6 +62,10 @@ pub struct IndexedQueryRequest {
     /// and nothing it does not.
     #[serde(default)]
     pub gained_only: bool,
+    /// `line` asked about more locations than `file:line`: these, answered
+    /// from the same opened run.
+    #[serde(default)]
+    pub more_lines: Vec<(String, usize)>,
 }
 
 fn default_limit() -> usize {
@@ -342,6 +346,22 @@ impl IndexedQueryError {
     }
 }
 
+/// Several lines asked in one call, each answered as `line` answers it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageLinesData {
+    pub run: String,
+    pub lines: Vec<CoverageCoversData>,
+    /// Locations asked that did not fit in one reply, as `file:line`: ask
+    /// them in another call.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remaining: Vec<String>,
+    /// Each line's own page of tests and obligations, for a reader that
+    /// renders them one by one.
+    #[serde(skip)]
+    pub pages: Vec<supercov_contracts::AgentPagination>,
+}
+
 pub struct NewerQuery<'a> {
     pub run_id: &'a str,
     pub index: &'a CoverageIndex<'a>,
@@ -353,6 +373,7 @@ pub enum IndexedQueryData {
     Summary(Box<CoverageSummaryData>),
     Scope(Box<CoverageScopeData>),
     Line(Box<CoverageCoversData>),
+    Lines(Box<CoverageLinesData>),
     Test(Box<CoverageTestData>),
     Decision(Box<CoverageDecisionData>),
     FileDetail(Box<CoverageFileDetailData>),
@@ -525,6 +546,47 @@ pub fn query_indexed(
             command: "coverage.scope",
             data: IndexedQueryData::Scope(Box::new(data)),
             pagination: Some(page),
+        });
+    }
+
+    if request.command == "line" && !request.more_lines.is_empty() {
+        let first = (
+            request
+                .file
+                .clone()
+                .ok_or(IndexedQueryError::MissingArgument("a file"))?,
+            request
+                .line
+                .ok_or(IndexedQueryError::MissingArgument("a line"))?,
+        );
+        let mut lines = Vec::new();
+        let mut pages = Vec::new();
+        for (file, line) in std::iter::once(first).chain(request.more_lines.iter().cloned()) {
+            let (data, page) = coverage_covers_query(
+                index,
+                CoverageCoversQueryOptions {
+                    run: &request.run_id,
+                    view,
+                    kind: request.kind.as_deref(),
+                    runner: request.runner.as_deref(),
+                    file: &file,
+                    line,
+                    offset: request.offset,
+                    limit: request.limit,
+                },
+            )?;
+            lines.push(data);
+            pages.push(page);
+        }
+        return Ok(IndexedQueryOutput {
+            command: "coverage.lines",
+            data: IndexedQueryData::Lines(Box::new(CoverageLinesData {
+                run: request.run_id.clone(),
+                lines,
+                remaining: Vec::new(),
+                pages,
+            })),
+            pagination: None,
         });
     }
 
