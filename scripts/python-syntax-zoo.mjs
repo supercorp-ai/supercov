@@ -4,8 +4,9 @@
 //
 // A small package whose unittest suite drives each construct both ways:
 // comprehensions with conditions, assignment expressions, `match` with guards,
-// chained comparisons, `and`/`or` as values, try/except/else/finally,
-// for/else and while/else, generators, coroutines, lambdas, decorators,
+// chained comparisons, `and`/`or` as values (decisions where compound),
+// try/except/else/finally, for/else and while/else, generators, coroutines,
+// lambdas, decorators,
 // f-strings, `assert`, `global` and `nonlocal`. Each file is read back for
 // what its tests showed: a construct measured wrongly reads as uncovered.
 import assert from 'node:assert/strict';
@@ -70,6 +71,18 @@ def name_or_default(name, fallback):
 
 def both(a, b):
     return a and b
+
+
+def first_set(a, b, default):
+    return a or b or default
+
+
+def grouped_value(a, b, c):
+    return (a and b) or c
+
+
+def negated(a, b):
+    return not (a and b)
 
 
 def parse(text):
@@ -181,6 +194,16 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(flow.name_or_default("", "x"), "x")
         self.assertEqual(flow.both(1, 2), 2)
         self.assertEqual(flow.both(0, 2), 0)
+        # Used as values, they return their operands, not their truth.
+        self.assertEqual(flow.first_set("x", 0, "d"), "x")
+        self.assertEqual(flow.first_set(0, "y", "d"), "y")
+        self.assertEqual(flow.first_set(0, 0, "d"), "d")
+        self.assertEqual(flow.grouped_value([1], [2], "c"), [2])
+        self.assertEqual(flow.grouped_value([], [2], "c"), "c")
+        self.assertEqual(flow.grouped_value([1], [], "c"), "c")
+        self.assertIs(flow.negated(1, 1), False)
+        self.assertIs(flow.negated(0, 1), True)
+        self.assertIs(flow.negated(1, 0), True)
         self.assertEqual(flow.sign(-1), "negative")
         self.assertEqual(flow.sign(1), "not negative")
 
