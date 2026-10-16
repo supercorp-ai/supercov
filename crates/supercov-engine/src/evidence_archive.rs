@@ -531,8 +531,8 @@ fn read_exact_or_truncated<R: Read>(
 fn read_framed_entries<R: Read>(
     reader: &mut R,
     retain: impl Fn(&str) -> bool,
-) -> Result<Vec<EvidenceArchiveEntry>, EvidenceArchiveError> {
-    let mut entries = Vec::new();
+    mut visit: impl FnMut(EvidenceArchiveEntry) -> Result<(), EvidenceArchiveError>,
+) -> Result<(), EvidenceArchiveError> {
     let mut seen = BTreeSet::new();
     let mut previous: Option<String> = None;
     let mut discarded = Vec::new();
@@ -587,10 +587,10 @@ fn read_framed_entries<R: Read>(
         if retain(&header.path) {
             let mut contents = vec![0; payload_size];
             read_exact_or_truncated(reader, &mut contents, "payload")?;
-            entries.push(EvidenceArchiveEntry {
+            visit(EvidenceArchiveEntry {
                 path: header.path,
                 contents,
-            });
+            })?;
         } else {
             // A bounded, reused buffer avoids retaining a whole test trace.
             // 256 KiB also lets the decoder process long matches efficiently;
@@ -616,7 +616,7 @@ fn read_framed_entries<R: Read>(
     if !seen.contains("coverage-model.json") {
         return Err(EvidenceArchiveError::MissingCoverageModel);
     }
-    Ok(entries)
+    Ok(())
 }
 
 pub fn read_archive(path: &Path) -> Result<Vec<EvidenceArchiveEntry>, EvidenceArchiveError> {
@@ -630,18 +630,35 @@ pub(crate) fn read_archive_selected(
     path: &Path,
     retain: impl Fn(&str) -> bool,
 ) -> Result<Vec<EvidenceArchiveEntry>, EvidenceArchiveError> {
+    let mut entries = Vec::new();
+    read_archive_each(path, retain, |entry| {
+        entries.push(entry);
+        Ok(())
+    })?;
+    Ok(entries)
+}
+
+/// Hand each retained entry to `visit` as it is read, validating the whole
+/// archive as [`read_archive_selected`] does. A reader that parses an entry
+/// and drops its bytes never holds the decompressed archive whole: a gigabyte
+/// on a 1,100-test run.
+pub(crate) fn read_archive_each(
+    path: &Path,
+    retain: impl Fn(&str) -> bool,
+    visit: impl FnMut(EvidenceArchiveEntry) -> Result<(), EvidenceArchiveError>,
+) -> Result<(), EvidenceArchiveError> {
     let input = BufReader::new(File::open(path)?);
     let mut decoder = GzDecoder::new(input);
     let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
     read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
     schema_version_from_magic(&magic)?;
-    let entries = read_framed_entries(&mut decoder, retain)?;
+    read_framed_entries(&mut decoder, retain, visit)?;
     let mut input = decoder.into_inner();
     let mut trailing = [0; 1];
     if input.read(&mut trailing)? != 0 {
         return Err(EvidenceArchiveError::TrailingCompressedData);
     }
-    Ok(entries)
+    Ok(())
 }
 
 fn schema_version_from_magic(magic: &[u8]) -> Result<u32, EvidenceArchiveError> {

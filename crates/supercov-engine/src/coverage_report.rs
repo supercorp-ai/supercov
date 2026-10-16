@@ -17,7 +17,7 @@ use crate::coverage_analysis::{
     AnalysisError, BranchCoverage, CoverageCoreInput, CoverageSummary, DecisionCoverage,
     McdcVector, PointCoverage, PointKind, analyze_core, find_witnesses_for_conditions,
 };
-use crate::evidence_archive::{EvidenceArchiveEntry, read_archive};
+use crate::evidence_archive::EvidenceArchiveEntry;
 use crate::interned::{FastMap, Id, Interner};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2838,6 +2838,69 @@ fn create_coverage_view_with_model(
     })
 }
 
+/// A run's views one at a time, each built when asked for: what the index
+/// and a reader of one view need without the three held at once, which was
+/// 1.7 GB of a 1,100-test run's re-index.
+pub fn coverage_views(
+    request: &CoverageReportRequest,
+    views: &[crate::coverage_index::CoverageViewId],
+    transport: Option<TransportStats>,
+) -> Result<
+    impl Iterator<Item = Result<(crate::coverage_index::CoverageViewId, CoverageView), ReportError>>,
+    ReportError,
+> {
+    check_results(request)?;
+    let coverage_model = request
+        .coverage_model
+        .clone()
+        .unwrap_or_else(javascript_coverage_model);
+    Ok(views.iter().copied().map(move |id| {
+        use crate::coverage_index::CoverageViewId;
+        let results = match id {
+            CoverageViewId::All => request.raw_results.iter().collect::<Vec<_>>(),
+            CoverageViewId::Passed => passing_coverage_results(&request.raw_results),
+            CoverageViewId::Failed => failed_coverage_results(&request.raw_results),
+        };
+        let mut view = create_coverage_view_with_model(
+            &request.manifest,
+            &results,
+            &request.generated_at,
+            &coverage_model,
+            &mut Interner::default(),
+        )?;
+        view.integrity.clone_from(&request.integrity);
+        view.transport.clone_from(&transport);
+        Ok((id, view))
+    }))
+}
+
+/// What every analysis of a request first establishes.
+fn check_results(request: &CoverageReportRequest) -> Result<(), ReportError> {
+    if let Some(scope) = request
+        .raw_results
+        .iter()
+        .filter_map(|raw| raw.scope.as_ref())
+        .find(|scope| scope.run_id != request.run_id)
+    {
+        return Err(ReportError::ScopeMismatch {
+            expected: request.run_id.clone(),
+            actual: scope.run_id.clone(),
+        });
+    }
+    if request.raw_results.is_empty() {
+        return Err(ReportError::NoEvidence(request.run_id.clone()));
+    }
+    let default_model = javascript_coverage_model();
+    let coverage_model = request.coverage_model.as_ref().unwrap_or(&default_model);
+    PersistedCoverageModel::from_declaration(coverage_model).map_err(|reason| {
+        ReportError::InvalidJson {
+            path: "coverage-model.json".into(),
+            reason: reason.into(),
+        }
+    })?;
+    Ok(())
+}
+
 pub fn analyze_coverage_results(
     request: &CoverageReportRequest,
 ) -> Result<CoverageReport, ReportError> {
@@ -3056,27 +3119,94 @@ fn is_mcdc_journal(path: &str) -> bool {
 pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
-    let entries = read_archive(Path::new(&request.archive_path))
-        .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
+    let (_, normalized, transport) = archive_request(request)?;
+    let report = analyze_coverage_results(&normalized).map(|mut report| {
+        report.view.transport = Some(transport.clone());
+        report.filters.passed.transport = Some(transport.clone());
+        report.filters.failed.transport = Some(transport);
+        report
+    });
+    // Every test's records, gigabytes of small allocations on a large run:
+    // the views hold what they need, and freeing the rest is nobody's wait.
+    // It took 2 to 5 s of a 1,100-test run's re-index.
+    std::thread::spawn(move || drop(normalized));
+    report
+}
+
+/// A stored run's evidence as the request its views are built from, with the
+/// frontend that declared it and what its processes reported.
+pub fn archive_request(
+    request: &ArchiveReportRequest,
+) -> Result<
+    (
+        FrontendRunDeclaration,
+        CoverageReportRequest,
+        TransportStats,
+    ),
+    ReportError,
+> {
+    // Every test's record is parsed as it is read, a batch at a time, and its
+    // bytes dropped: holding the decompressed archive whole beside what was
+    // parsed from it was a gigabyte of a 1,100-test run's 3.6 GB.
+    const BATCH: usize = 256;
+    let mut entries = Vec::new();
+    let mut raw_results = Vec::new();
+    let mut journal_results = Vec::new();
+    let mut results = Vec::new();
+    let mut journals = Vec::new();
+    let mut failure = None;
+    let mut flush = |results: &mut Vec<EvidenceArchiveEntry>,
+                     journals: &mut Vec<EvidenceArchiveEntry>,
+                     failure: &mut Option<ReportError>| {
+        if failure.is_some() {
+            results.clear();
+            journals.clear();
+            return;
+        }
+        let parsed = parse_in_parallel(&results.iter().collect::<Vec<_>>(), |entry| {
+            Ok(vec![parse_entry::<RawTestResult>(entry)?])
+        })
+        .and_then(|parsed| {
+            raw_results.extend(parsed);
+            parse_in_parallel(&journals.iter().collect::<Vec<_>>(), |entry| {
+                parse_json_lines::<RawTestResult>(std::iter::once(*entry))
+            })
+        });
+        match parsed {
+            Ok(parsed) => journal_results.extend(parsed),
+            Err(error) => *failure = Some(error),
+        }
+        results.clear();
+        journals.clear();
+    };
+    crate::evidence_archive::read_archive_each(
+        Path::new(&request.archive_path),
+        |_| true,
+        |entry| {
+            if is_mcdc_result(&entry.path) {
+                results.push(entry);
+            } else if is_mcdc_journal(&entry.path) {
+                journals.push(entry);
+            } else {
+                entries.push(entry);
+            }
+            if results.len() + journals.len() >= BATCH {
+                flush(&mut results, &mut journals, &mut failure);
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
+    flush(&mut results, &mut journals, &mut failure);
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    raw_results.extend(journal_results);
     let manifest = entries
         .iter()
         .find(|entry| entry.path == "manifest.json")
         .ok_or(ReportError::MissingManifest)
         .and_then(parse_entry::<CoverageManifest>)?;
-    let results = entries
-        .iter()
-        .filter(|entry| is_mcdc_result(&entry.path))
-        .collect::<Vec<_>>();
-    let mut raw_results = parse_in_parallel(&results, |entry| {
-        Ok(vec![parse_entry::<RawTestResult>(entry)?])
-    })?;
-    let journals = entries
-        .iter()
-        .filter(|entry| is_mcdc_journal(&entry.path))
-        .collect::<Vec<_>>();
-    raw_results.extend(parse_in_parallel(&journals, |entry| {
-        parse_json_lines::<RawTestResult>(std::iter::once(*entry))
-    })?);
 
     let scoped = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
         entry.path.starts_with("server/")
@@ -3259,12 +3389,9 @@ pub fn analyze_coverage_archive(
     // 3,900-test run -- and nothing reads them again, so they need not stay
     // resident while the views are built beside what was parsed from them.
     drop(entries);
-    let report = analyze_frontend_request(&frontend, &normalized, transport);
-    // Every test's records, gigabytes of small allocations on a large run:
-    // the views hold what they need, and freeing the rest is nobody's wait.
-    // It took 2 to 5 s of a 1,100-test run's re-index.
-    std::thread::spawn(move || drop(normalized));
-    report
+    crate::frontend_protocol::validate_frontend_report_request(&frontend, &normalized)
+        .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
+    Ok((frontend, normalized, transport))
 }
 
 /// Give a test that ran again under the same identity phases of its own.

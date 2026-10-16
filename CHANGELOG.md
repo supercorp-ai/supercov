@@ -8,6 +8,8 @@
 
 - Upgrading Supercov re-indexes a stored run on its first query only when the analysis that writes its index changed, not on every release: a release that changes only instrumentation, runners or queries reads a 1,100-test run in 3.6 s, not 23 s.
 
+- Re-indexing a run builds its three views (all, passed, failed attempts) one at a time and parses each test's record as the evidence is read, so the decompressed evidence and the three views are never held at once: 4.2 GB at most became 3.3 GB on a 1,100-test run, with the same index.
+
 **Fixed**
 
 - A Playwright test read Supercov's own cookies: `context.cookies()` listed the cookies that carry the test's scope, so an assertion on cookies failed only under measurement, and `storageState({ path })` wrote them into the suite's saved login state. Both now give the suite's cookies alone.

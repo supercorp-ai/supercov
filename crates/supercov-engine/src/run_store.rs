@@ -907,6 +907,38 @@ pub fn analyze_stored_run_filtered(
     })?)
 }
 
+/// A stored run's query index, its views built and written one at a time.
+fn index_sections(
+    run: &StoredRun,
+    filter: Option<&crate::coverage_report::TestFilter>,
+) -> Result<Vec<crate::query_index::QueryIndexSection>, RunIndexError> {
+    use crate::coverage_index::CoverageViewId;
+    let (_, normalized, transport) =
+        crate::coverage_report::archive_request(&ArchiveReportRequest {
+            archive_path: run.evidence_path.clone(),
+            run_id: run.id.clone(),
+            generated_at: run.metadata.started_at.clone(),
+            integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
+            test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
+            test_filter: filter.cloned(),
+        })?;
+    let sections = crate::coverage_index::coverage_index_sections_from(
+        crate::coverage_report::coverage_views(
+            &normalized,
+            &[
+                CoverageViewId::All,
+                CoverageViewId::Passed,
+                CoverageViewId::Failed,
+            ],
+            Some(transport),
+        )?
+        .map(|view| view.map_err(RunIndexError::Report)),
+    )?;
+    // Every test's records, freed by nobody's wait.
+    std::thread::spawn(move || drop(normalized));
+    Ok(sections)
+}
+
 /// The filter as one key: its values normalized and sorted, so the same
 /// tests asked for in another order or case find the same index.
 fn filter_digest(filter: &crate::coverage_report::TestFilter) -> [u8; 32] {
@@ -978,9 +1010,7 @@ pub fn open_or_build_filtered_query_index(
         touch(&path);
         return Ok(index);
     }
-    let report = analyze_stored_run_filtered(run, Some(filter))?;
-    let sections = coverage_index_sections(&report)?;
-    std::thread::spawn(move || drop(report));
+    let sections = index_sections(run, Some(filter))?;
     let mut current = query_index_identity(run)?;
     current.analysis_sha256 = digest;
     if current != identity {
@@ -1105,11 +1135,7 @@ pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunInd
         return Ok(index);
     }
 
-    let report = analyze_stored_run(run)?;
-    let sections = coverage_index_sections(&report)?;
-    // The analysis and the sections are written; freeing them took seconds
-    // the query waited on.
-    std::thread::spawn(move || drop(report));
+    let sections = index_sections(run, None)?;
     if query_index_identity(run)? != identity {
         return Err(RunIndexError::EvidenceChanged);
     }
