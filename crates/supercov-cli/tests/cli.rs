@@ -4806,3 +4806,86 @@ fn a_test_is_affected_by_a_helper_its_file_loads() {
         "{found:?}"
     );
 }
+
+#[test]
+fn gaps_export_writes_every_obligation_of_a_run_too_large_for_one_reply() {
+    // `gaps --format jsonl` exists for the runs whose gaps do not fit in a
+    // JSON reply. It read its data back through that reply, so it refused
+    // exactly those, with the reply's 64 KB message.
+    const FILES: usize = 400;
+    let project = Project::empty("gaps-export");
+    project.write(
+        "package.json",
+        r#"{ "name": "rules", "private": true, "type": "module" }"#,
+    );
+    let mut imports = String::new();
+    let mut calls = String::new();
+    for index in 0..FILES {
+        project.write(
+            &format!("src/rules/rule{index}.js"),
+            "export function allowed(admin, owner, open) {\n  if ((admin && owner) || open) {\n    return true;\n  }\n  return false;\n}\n",
+        );
+        imports.push_str(&format!(
+            "import {{ allowed as rule{index} }} from '../src/rules/rule{index}.js';\n"
+        ));
+        calls.push_str(&format!(
+            "  assert.equal(rule{index}(true, true, false), true);\n"
+        ));
+    }
+    project.write(
+        "test/rules.test.js",
+        &format!(
+            "import assert from 'node:assert/strict';\nimport test from 'node:test';\n{imports}\ntest('admins who own it are allowed', () => {{\n{calls}}});\n"
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("rules");
+    let run = project.measure(&[]);
+
+    // Too large for one reply: the paged form says so.
+    let paged = project
+        .supercov(&["runs", &run, "gaps", "--json", "--limit", "1000"])
+        .exits(2);
+    assert!(paged.contains("the maximum is 65536 bytes"), "{paged}");
+
+    let written = project
+        .supercov(&[
+            "runs",
+            &run,
+            "gaps",
+            "--format",
+            "jsonl",
+            "--metric",
+            "mcdc",
+            "--output",
+            "gaps.jsonl",
+        ])
+        .exits(0);
+    let exported = project.read("gaps.jsonl");
+    let rows: Vec<serde_json::Value> = exported
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON object per line"))
+        .collect();
+    // Only the all-true call ran, so no condition of `(admin && owner) ||
+    // open` is shown to matter: three each, on the decision's line.
+    assert_eq!(rows.len(), FILES * 3, "{written}");
+    assert!(rows.iter().all(|row| row["line"] == 2), "{exported}");
+    let files: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|row| row["file"].as_str()).collect();
+    assert_eq!(files.len(), FILES);
+    assert!(
+        written.contains(&format!(
+            "wrote {} uncovered obligation(s) in {FILES} file(s)",
+            FILES * 3
+        )),
+        "{written}"
+    );
+
+    // And the same on standard output.
+    let printed = project
+        .supercov(&[
+            "runs", &run, "gaps", "--format", "jsonl", "--metric", "mcdc",
+        ])
+        .succeeds();
+    assert_eq!(printed, exported);
+}
