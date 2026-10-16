@@ -5,7 +5,7 @@
 **Changed**
 
 - Java for-each loops and Kotlin `for (x in xs)` loops record whether they ran at least once and whether they ran zero times. A loop that is not a statement of a block, such as the body of a brace-less `if`, stays a measurement limitation.
-- A Java `&&`/`||` used as a value (`return x == 0 || y == 0;`, `boolean ok = a && b;`, a ternary's condition, a lambda's body) is measured as a decision with MC/DC, as in JavaScript. Constants in annotations and `final` fields are left alone.
+- A Java `&&`/`||` used as a value (`return x == 0 || y == 0;`, `boolean ok = a && b;`, a ternary's condition, a lambda's body) is measured as a decision with MC/DC. JavaScript, Python, Go and Rust record such a value's branch outcomes only. Constants in annotations and `final` fields are left alone.
 - Go `range` loops record whether they ran at least once and whether they ran zero times, as loops in the other languages do. They were a measurement limitation; a Go run now has two more branch outcomes per range loop.
 
 **Fixed**
