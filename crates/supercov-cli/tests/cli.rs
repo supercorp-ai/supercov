@@ -5450,3 +5450,121 @@ fn merge_says_what_moved_under_each_run_it_leaves_out() {
     let merged = project.supercov(&["merge", "--allow-changed"]).succeeds();
     assert!(merged.contains("merging 2 runs"), "{merged}");
 }
+
+#[test]
+fn a_floor_on_what_a_run_has_none_of_cannot_pass() {
+    let project = Project::empty("nothing-eligible");
+    project.write(
+        "package.json",
+        r#"{ "name": "flat", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/add.js",
+        "export function add(a, b) {\n  return a + b;\n}\n",
+    );
+    project.write(
+        "test/add.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { add } from \"../src/add.js\";\ntest(\"add\", () => assert.equal(add(1, 2), 3));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+    // No branch anywhere is not every branch taken.
+    let refused = project
+        .supercov(&["runs", "check", "--min-branches", "80"])
+        .exits(2);
+    contains_all(
+        &refused,
+        &[
+            "branches         n/a  0/0  (floor 80%)",
+            "branches has nothing eligible in this run, which is not the same as complete",
+        ],
+    );
+
+    // Per file, a file with none is passed over and the rest are judged.
+    project.write(
+        "src/sign.js",
+        "export function sign(n) {\n  if (n > 0) {\n    return 1;\n  }\n  return -1;\n}\n",
+    );
+    project.write(
+        "test/sign.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { sign } from \"../src/sign.js\";\ntest(\"sign\", () => assert.equal(sign(1), 1));\n",
+    );
+    project.measure(&[]);
+    let failed = project
+        .supercov(&["runs", "check", "--min-branches", "80", "--per-file"])
+        .exits(1);
+    contains_all(
+        &failed,
+        &[
+            "src/sign.js: branches 50.00%  1/2 below 80%",
+            "uncovered lines: 5\n",
+        ],
+    );
+    assert!(!failed.contains("src/add.js"), "{failed}");
+}
+
+#[test]
+fn the_latest_run_answers_patch_and_report_without_its_id() {
+    let project = Project::empty("latest-patch");
+    project.write(
+        "package.json",
+        r#"{ "name": "latest", "private": true, "type": "module" }"#,
+    );
+    let sign = "export function sign(n) {\n  if (n > 0) {\n    return 1;\n  }\n  return -1;\n}\n";
+    project.write("src/sign.js", sign);
+    project.write(
+        "test/sign.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { sign } from \"../src/sign.js\";\ntest(\"sign\", () => {\n  assert.equal(sign(1), 1);\n  assert.equal(sign(-1), -1);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("base");
+
+    // A comment changes nothing a floor could judge.
+    project.write("src/sign.js", &format!("// Which side of zero.\n{sign}"));
+    project.measure(&[]);
+    let quiet = project
+        .supercov(&["runs", "patch", "--base", "HEAD", "--min-lines", "90"])
+        .succeeds();
+    contains_all(
+        &quiet,
+        &[
+            "No executable changes.",
+            "PASS: nothing executable changed, so 90% does not apply.",
+        ],
+    );
+
+    // A block no test enters reads as one range.
+    project.write(
+        "src/sign.js",
+        "export function sign(n) {\n  if (n > 0) {\n    return 1;\n  }\n  if (n < -100) {\n    const big = n * 2;\n    return big;\n  }\n  return -1;\n}\n",
+    );
+    project.measure(&[]);
+    let patch = project
+        .supercov(&["runs", "patch", "--base", "HEAD"])
+        .succeeds();
+    contains_all(
+        &patch,
+        &[
+            "1 of 3 changed executable line(s) covered (33.33%)",
+            "src/sign.js: 6-7\n",
+        ],
+    );
+
+    // An HTML report goes to the file named, or into the directory named.
+    project
+        .supercov(&[
+            "runs",
+            "report",
+            "--format",
+            "html",
+            "--output",
+            "out/sign.html",
+        ])
+        .succeeds();
+    project
+        .supercov(&["runs", "report", "--format", "html", "--output", "out/site"])
+        .succeeds();
+    for file in ["out/sign.html", "out/site/index.html"] {
+        assert!(project.read(file).contains("src/sign.js"), "{file}");
+    }
+}
