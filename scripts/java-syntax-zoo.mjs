@@ -217,7 +217,8 @@ try {
     writeFileSync(resolve(root, file), text);
   }
   run('git', ['init', '-q']);
-  const plain = run('mvn', ['-q', '-o', 'test']);
+  // The plain run may download what Maven lacks; the measured one then has it.
+  const plain = run('mvn', ['-q', 'test']);
   assert.equal(plain.status, 0, `${plain.stdout}${plain.stderr}`);
   const measured = run(binary, ['--', 'mvn', '-q', '-o', 'test']);
   assert.equal(measured.status, 0, `${measured.stdout}${measured.stderr}`);
