@@ -4889,3 +4889,49 @@ fn gaps_export_writes_every_obligation_of_a_run_too_large_for_one_reply() {
         .succeeds();
     assert_eq!(printed, exported);
 }
+
+#[cfg(unix)]
+#[test]
+fn the_copy_carries_what_a_project_holds_and_keeps_its_deletions() {
+    let project = Project::cart("copy-shapes");
+    // A package of its own, with its own installed tools.
+    project.write(
+        "packages/tool/node_modules/dep/index.js",
+        "module.exports = 1;\n",
+    );
+    project.write_script(
+        "packages/tool/node_modules/.bin/tool",
+        "#!/bin/sh\necho tool\n",
+    );
+    // A link to a directory of the project, and one to somewhere outside it.
+    std::os::unix::fs::symlink("src", project.root.join("linked-src")).unwrap();
+    let outside = Project::empty("copy-shapes-outside");
+    outside.write("readme.txt", "outside\n");
+    std::os::unix::fs::symlink(&outside.root, project.root.join("outside")).unwrap();
+    project.write("notes/old.txt", "keep me\n");
+    project.write(
+        "test/shapes.test.js",
+        "import assert from 'node:assert/strict';\nimport { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';\nimport test from 'node:test';\n\ntest('reads through a link, deletes a note, writes a large report', () => {\n  assert.match(readFileSync('linked-src/cart.js', 'utf8'), /export function/);\n  rmSync('notes/old.txt');\n  mkdirSync('out', { recursive: true });\n  writeFileSync('out/big.txt', process.cwd() + '\\n' + 'x'.repeat(17 << 20));\n});\n",
+    );
+    project.commit("shapes");
+
+    let measured = project.supercov(&["--", "node", "--test", "test/shapes.test.js"]);
+    let said = format!("{}{}", measured.stdout(), measured.stderr());
+    assert_eq!(measured.code(), 0, "{said}");
+    contains_all(
+        &said,
+        &[
+            "the command deleted 1 file(s) in the isolated workspace; deletions are not propagated to the project: notes/ 1",
+            "omitting symlink outside the isolated project",
+        ],
+    );
+    assert_eq!(project.read("notes/old.txt"), "keep me\n");
+    // Too large to rewrite, the report comes back as the command wrote it.
+    let report = std::fs::read(project.root.join("out/big.txt")).unwrap();
+    assert!(report.len() > 17 << 20);
+    let copy = format!("{}/.supercov/workspaces/", project.root.display());
+    assert!(
+        report.starts_with(copy.as_bytes()),
+        "a file this large still names the copy it was written in"
+    );
+}
