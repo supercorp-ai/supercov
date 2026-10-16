@@ -57,6 +57,38 @@ fn discovery_honors_ignores_deduplicates_and_checks_scope() {
 }
 
 #[test]
+fn a_project_inside_a_copy_is_not_hidden_by_supercov_s_own_ignore_file() {
+    // Every `.supercov` directory ignores everything in it. Read from above,
+    // that rule hid every file of a project copied there, and `security
+    // --run` found no source to assess.
+    let temp = Temp::new();
+    temp.write(".gitignore", ".supercov\n");
+    temp.write(".supercov/.gitignore", "*\n");
+    let project = temp.0.join(".supercov/workspaces/workspace/app");
+    temp.write(
+        ".supercov/workspaces/workspace/app/.gitignore",
+        "ignored.ts\n",
+    );
+    temp.write(
+        ".supercov/workspaces/workspace/app/src/a.ts",
+        "export const a = 1;",
+    );
+    temp.write(
+        ".supercov/workspaces/workspace/app/src/ignored.ts",
+        "ignored",
+    );
+    assert_eq!(
+        discover(&project, &[".".into()]).unwrap(),
+        vec![project.join("src/a.ts")]
+    );
+    // Walked from below its root, the project's own ignore file still holds.
+    assert_eq!(
+        discover(&project, &["src".into()]).unwrap(),
+        vec![project.join("src/a.ts")]
+    );
+}
+
+#[test]
 fn scan_rejects_unknown_or_missing_options() {
     // --review-below overrode a rubric cutoff. The rubric is gone and no
     // threshold here is calibrated, so the option is refused rather than
