@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Playwright test read Supercov's own cookies: `context.cookies()` listed the cookies that carry the test's scope, so an assertion on cookies failed only under measurement, and `storageState({ path })` wrote them into the suite's saved login state. Both now give the suite's cookies alone.
+
 ## 4.14.0
 
 **Changed**
