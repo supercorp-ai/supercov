@@ -5,8 +5,9 @@
 // A small module whose tests drive each construct both ways: `if` and
 // `switch` with init statements, `fallthrough`, a type switch, `range` over an
 // int, a labelled `continue`, `select`, `defer` with `recover`, closures,
-// generics, a named boolean type and compound conditions. Each file is read back for what its tests
-// showed: a construct measured wrongly reads as uncovered here.
+// generics, a named boolean type, compound conditions and `&&`/`||` used
+// as values. Each file is read back for what its tests showed: a construct
+// measured wrongly reads as uncovered here.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -127,6 +128,35 @@ func Open(a, b Flag) string {
 	return "shut"
 }
 
+func (f Flag) String() string {
+	if f {
+		return "yes"
+	}
+	return "no"
+}
+
+func OnAxis(x, y int) bool {
+	return x == 0 || y == 0
+}
+
+func Both(a, b Flag) Flag {
+	ok := a && b
+	return ok
+}
+
+func Ready(f Flag, n int) string {
+	return (f && n > 0).String()
+}
+
+func keep(v bool) bool { return v }
+
+func Gate(a, b, c bool) string {
+	if keep(a || b) && c {
+		return "open"
+	}
+	return "shut"
+}
+
 func Max[T int | float64](a, b T) T {
 	if a > b {
 		return a
@@ -201,6 +231,18 @@ func TestFlow(t *testing.T) {
 	}
 	if Open(true, true) != "open" || Open(true, false) != "half" || Open(false, true) != "shut" {
 		t.Fatal("open")
+	}
+	if !OnAxis(0, 1) || !OnAxis(1, 0) || OnAxis(1, 1) {
+		t.Fatal("on axis")
+	}
+	if !Both(true, true) || Both(false, true) || Both(true, false) {
+		t.Fatal("both")
+	}
+	if Ready(true, 1) != "yes" || Ready(false, 1) != "no" || Ready(true, 0) != "no" {
+		t.Fatal("ready")
+	}
+	if Gate(true, false, true) != "open" || Gate(false, true, true) != "open" || Gate(false, false, true) != "shut" || Gate(true, false, false) != "shut" {
+		t.Fatal("gate")
 	}
 	if Max(1, 2) != 2 || Max(2.5, 1.0) != 2.5 {
 		t.Fatal("max")

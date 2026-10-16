@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::coverage_report::CoverageManifest;
-use crate::go_instrumenter::{GoProbe, build_go_obligations};
+use crate::go_instrumenter::GoProbe;
 use crate::integrity::ExplicitIntegrityInputs;
 
 /// Directories whose contents are never this project's measured source.
@@ -402,7 +402,14 @@ pub fn prepare_go_project(
             unparseable.push((relative.clone(), reason.to_owned()));
             continue;
         };
-        match build_go_obligations(relative, &source, &mut next_probe, &mut next_decision) {
+        match crate::go_instrumenter::build_go_obligations_for(
+            relative,
+            &source,
+            &mut next_probe,
+            &mut next_decision,
+            crate::go_instrumenter::RUNTIME_ALIAS,
+            has_generics(root, relative, &source),
+        ) {
             Ok(obligations) => {
                 manifest.decisions.extend(obligations.manifest.decisions);
                 manifest.points.extend(obligations.manifest.points);
@@ -488,6 +495,49 @@ pub fn go_integrity_inputs(files: &GoFiles, command: &[String]) -> ExplicitInteg
         configuration_files: files.configuration_files.clone(),
         execution_configuration: command.join("\0").into_bytes(),
     }
+}
+
+/// Whether a file's Go has generics (1.18): its module's `go` directive --
+/// 1.16 when it has none, as the toolchain reads it -- unless a
+/// `//go:build go1.N` line above its package clause sets an older one.
+fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
+    let minor = |text: &str| -> Option<u32> {
+        text.strip_prefix("1.")?
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    let mut directory = root.join(relative);
+    let module = loop {
+        if !directory.pop() || !directory.starts_with(root) {
+            break None;
+        }
+        if let Ok(text) = std::fs::read_to_string(directory.join("go.mod")) {
+            break Some(text);
+        }
+    };
+    let declared = module
+        .as_deref()
+        .and_then(|text| {
+            text.lines()
+                .map(str::trim)
+                .find_map(|line| line.strip_prefix("go ").map(str::trim))
+                .and_then(minor)
+        })
+        .unwrap_or(16);
+    let header = source.split("\npackage ").next().unwrap_or("");
+    let constrained = header
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("//go:build"))
+        .flat_map(|constraint| {
+            constraint
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '!'))
+                .filter_map(|term| term.strip_prefix("go").and_then(minor))
+                .collect::<Vec<_>>()
+        })
+        .min();
+    constrained.map_or(declared, |file| file.min(declared)) >= 18
 }
 
 /// The module path declared in `go.mod`, which package identities are relative

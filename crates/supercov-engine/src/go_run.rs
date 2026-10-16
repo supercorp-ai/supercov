@@ -59,6 +59,9 @@ use crate::{
 const RUNTIME_DIRECTORY: &str = "_supercov_runtime";
 
 const RUNTIME_SOURCE: &str = include_str!("../runtime-assets/go/supercov/supercov.go");
+/// The generic wrappers a decision used as a value calls, in a file of its
+/// own behind `go1.18`, so a module older than generics still builds the rest.
+const RUNTIME_VALUES_SOURCE: &str = include_str!("../runtime-assets/go/supercov/values.go");
 
 /// The generated file that declares a package's probe array.
 const PROBE_FILE: &str = "supercov_probes.go";
@@ -302,6 +305,10 @@ fn instrument_sources(
         write(
             &at.join(RUNTIME_DIRECTORY).join("supercov.go"),
             RUNTIME_SOURCE,
+        )?;
+        write(
+            &at.join(RUNTIME_DIRECTORY).join("values.go"),
+            RUNTIME_VALUES_SOURCE,
         )?;
         runtimes.push((directory.clone(), format!("{module}/{RUNTIME_DIRECTORY}")));
     }
