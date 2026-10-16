@@ -231,9 +231,8 @@ try {
     assert.equal(entry.covered[metric], entry.totals[metric], `Flow.java: ${metric}\n${report}`);
   }
   assert.ok(entry.totals.mcdcConditions > 0, report);
-  // A narrowing `instanceof` cannot carry operand probes, and a for-each loop
-  // records no entered or zero-iteration outcome: three say so, nothing else.
-  assert.equal(entry.measurementLimitations, 3, report);
+  // A narrowing `instanceof` cannot carry operand probes: the two say so.
+  assert.equal(entry.measurementLimitations, 2, report);
   console.log('[java-syntax-zoo] every construct the JVM instrumenter rewrites reads as its tests drove it');
 } finally {
   if (!process.env.KEEP) rmSync(temporary, { recursive: true, force: true });

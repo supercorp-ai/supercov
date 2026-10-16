@@ -370,13 +370,22 @@ impl Collector<'_> {
     }
 
     fn add_branch(&mut self, node: Node, kind: &str, labels: &[&str]) -> Vec<u64> {
+        let pairs = labels
+            .iter()
+            .map(|label| (*label, *label))
+            .collect::<Vec<_>>();
+        self.add_branch_named(node, kind, &pairs)
+    }
+
+    /// `add_branch` with an id suffix of its own for each outcome's label.
+    fn add_branch_named(&mut self, node: Node, kind: &str, labels: &[(&str, &str)]) -> Vec<u64> {
         let (line, column) = self.position(node);
         let id = self.id(node, "branch");
         let mut probes = Vec::new();
         let alternatives = labels
             .iter()
-            .map(|label| {
-                let alternative = format!("{id}.{label}");
+            .map(|(suffix, label)| {
+                let alternative = format!("{id}.{suffix}");
                 probes.push(self.probe(
                     GoProbeTarget::Alternative {
                         branch: id.clone(),
@@ -738,6 +747,32 @@ fn walk(collector: &mut Collector, node: Node) {
                 .map(|name| collector.source[name.byte_range()].to_owned());
             collector.add_point(node, PointKind::Function, label);
         }
+        // `return x == 0 || y == 0;`, `boolean ok = a && b;`, a ternary's
+        // condition: a Java `&&`/`||` used as a value is a decision, as it is
+        // in JavaScript. Only the outermost one, outside the conditions
+        // measured above, and where its value need not stay a compile-time
+        // constant or keep a pattern variable in scope.
+        "binary_expression"
+            if language == JvmLanguage::Java
+                && is_logical(node, collector.source)
+                && !node
+                    .parent()
+                    .is_some_and(|parent| is_logical_operand_parent(parent, collector.source))
+                && !in_measured_condition(node)
+                && !in_constant_context(node, collector.source)
+                && !narrows_a_type(node, collector.source, language) =>
+        {
+            let probes = collector.add_branch(node, "value", &["true", "false"]);
+            let decision = collector.add_decision(node, "value");
+            let wrapper = match decision {
+                Some(index) => {
+                    format!("{RUNTIME_CLASS}.bd({}, {}, {index}, ", probes[0], probes[1])
+                }
+                None => format!("{RUNTIME_CLASS}.b({}, {}, ", probes[0], probes[1]),
+            };
+            collector.edit(node.start_byte(), 5, wrapper);
+            collector.edit(node.end_byte(), 5, ")".to_owned());
+        }
         "if_statement" | "if_expression" => {
             if let Some(condition) = condition_of(node, language) {
                 let probes = collector.add_branch(node, "if", &["true", "false"]);
@@ -852,6 +887,9 @@ fn walk(collector: &mut Collector, node: Node) {
                         collector.edit(inner.end_byte(), 5, ")".to_owned());
                     }
                 }
+                None if language == JvmLanguage::Kotlin
+                    && node.kind() == "for_statement"
+                    && record_loop_ran(collector, node, language) => {}
                 None => {
                     let (line, column) = collector.position(node);
                     let limitation = collector.limitation_id(node, "loop-without-condition");
@@ -866,6 +904,11 @@ fn walk(collector: &mut Collector, node: Node) {
                     }));
                 }
             }
+            if let Some(body) = node.child_by_field_name("body") {
+                collector.ensure_block(body);
+            }
+        }
+        "enhanced_for_statement" if record_loop_ran(collector, node, language) => {
             if let Some(body) = node.child_by_field_name("body") {
                 collector.ensure_block(body);
             }
@@ -916,6 +959,155 @@ fn is_statement(node: Node, source: &str, language: JvmLanguage) -> bool {
 /// `try-with-resources`. A probe there does not compile. Everything that is
 /// genuinely a statement is a child of a block or a switch group, so that is
 /// the rule rather than a list of exceptions to remember.
+/// A Java `&&` or `||`.
+fn is_logical(node: Node, source: &str) -> bool {
+    node.kind() == "binary_expression"
+        && node
+            .child_by_field_name("operator")
+            .is_some_and(|operator| matches!(&source[operator.byte_range()], "&&" | "||"))
+}
+
+/// Whether `parent` makes its child an operand of a larger `&&`/`||`: the
+/// logical itself, or parentheses one stands in.
+fn is_logical_operand_parent(parent: Node, source: &str) -> bool {
+    is_logical(parent, source)
+        || parent.kind() == "parenthesized_expression"
+            && parent
+                .parent()
+                .is_some_and(|grand| is_logical(grand, source))
+}
+
+/// Whether `node` sits in the condition of an `if` or a loop, which is
+/// measured there, before any lambda or class that starts code of its own.
+fn in_measured_condition(node: Node) -> bool {
+    let mut child = node;
+    while let Some(parent) = child.parent() {
+        if matches!(
+            parent.kind(),
+            "lambda_expression" | "class_body" | "method_declaration" | "constructor_declaration"
+        ) {
+            return false;
+        }
+        if matches!(
+            parent.kind(),
+            "if_statement" | "while_statement" | "for_statement" | "do_statement"
+        ) && parent
+            .child_by_field_name("condition")
+            .is_some_and(|condition| condition.byte_range().contains(&node.start_byte()))
+        {
+            return true;
+        }
+        child = parent;
+    }
+    false
+}
+
+/// Whether `node`'s value must stay a compile-time constant: in an annotation,
+/// or initializing a `final` field another constant expression may read.
+fn in_constant_context(node: Node, source: &str) -> bool {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            "annotation"
+            | "marker_annotation"
+            | "element_value_pair"
+            | "annotation_argument_list" => {
+                return true;
+            }
+            "field_declaration" => {
+                return parent
+                    .children(&mut parent.walk())
+                    .find(|child| child.kind() == "modifiers")
+                    .is_some_and(|modifiers| source[modifiers.byte_range()].contains("final"));
+            }
+            "method_declaration" | "constructor_declaration" | "lambda_expression" => return false,
+            _ => current = parent,
+        }
+    }
+    false
+}
+
+/// A for-each loop's outcomes are whether it ran at all, as every other
+/// language records them: a flag the body sets, read after the loop. Only
+/// where a declaration and a statement may stand beside the loop -- it is a
+/// statement of a block, under its label if it has one -- and the body is a
+/// block or one statement (a Kotlin loop: a block, unlabelled). Returns
+/// whether the loop was instrumented; otherwise the caller records the
+/// limitation as before.
+fn record_loop_ran(collector: &mut Collector, node: Node, language: JvmLanguage) -> bool {
+    let statement = node
+        .parent()
+        .filter(|parent| parent.kind() == "labeled_statement")
+        .unwrap_or(node);
+    if !in_statement_position(statement, language) {
+        return false;
+    }
+    let java = language == JvmLanguage::Java;
+    // Where the flag is set: just inside the body's brace, or before its one
+    // statement, which `ensure_block` then braces.
+    let (set_at, set_rank) = if java {
+        match node.child_by_field_name("body") {
+            Some(body) if body.kind() == "block" => (body.start_byte() + 1, 100),
+            Some(body) => (body.start_byte(), 80),
+            None => return false,
+        }
+    } else {
+        if collector.source[..node.start_byte()]
+            .trim_end()
+            .ends_with('@')
+            || collector.text(node).contains('@')
+                && collector
+                    .text(node)
+                    .split('{')
+                    .next()
+                    .is_some_and(|head| head.contains('@'))
+        {
+            return false;
+        }
+        let block = node
+            .children(&mut node.walk())
+            .find(|child| child.kind() == "control_structure_body")
+            .and_then(|body| {
+                body.children(&mut body.walk())
+                    .find(|child| child.kind() == "block")
+            });
+        match block {
+            Some(block) => (block.start_byte() + 1, 100),
+            None => return false,
+        }
+    };
+    let probes = collector.add_branch_named(
+        node,
+        "for",
+        &[("zero", "zero iterations"), ("entered", "entered")],
+    );
+    let flag = format!("_scvRan{}", node.start_byte());
+    let end = if java { ";" } else { "" };
+    collector.edit(
+        statement.start_byte(),
+        90,
+        if java {
+            format!("boolean {flag} = false; ")
+        } else {
+            format!("var {flag} = false; ")
+        },
+    );
+    collector.edit(
+        set_at,
+        set_rank,
+        format!(
+            " if (!{flag}) {{ {flag} = true; {HITS}[{}] = 2{end} }} ",
+            probes[1]
+        ),
+    );
+    collector.edit(
+        statement.end_byte(),
+        100,
+        format!("; if (!{flag}) {{ {HITS}[{}] = 2{end} }}", probes[0]),
+    );
+    true
+}
+
 fn in_statement_position(node: Node, _language: JvmLanguage) -> bool {
     node.parent().is_some_and(|parent| {
         matches!(
@@ -1204,24 +1396,50 @@ class Outer {
     }
 
     #[test]
-    fn a_for_each_loop_records_a_limitation_not_an_obligation() {
-        // There is no condition to observe. Declaring a branch nothing can
-        // measure would put an obligation in the denominator no test could
-        // ever satisfy.
-        let (obligations, _) =
-            java("class X { void f(int[] xs) { for (int x : xs) { g(x); } } void g(int x) {} }");
-        assert!(
-            obligations
-                .manifest
-                .branches
+    fn a_for_each_loop_records_whether_it_ran() {
+        // Its outcomes are whether it ran at all, as in every other language;
+        // a loop that is not a statement of a block cannot hold the flag and
+        // stays a limitation.
+        let (obligations, _) = java(
+            "class X { void f(int[] xs) { for (int x : xs) { g(x); } if (xs.length > 0) for (int x : xs) g(x); } void g(int x) {} }",
+        );
+        let loops = obligations
+            .manifest
+            .branches
+            .iter()
+            .filter(|b| b.kind == "for")
+            .collect::<Vec<_>>();
+        assert_eq!(loops.len(), 1, "{:?}", obligations.manifest.branches);
+        assert_eq!(
+            loops[0]
+                .alternatives
                 .iter()
-                .all(|b| b.kind != "loop")
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>(),
+            ["zero iterations", "entered"]
         );
         assert_eq!(obligations.manifest.limitations.len(), 1);
         assert_eq!(
             obligations.manifest.limitations[0]["kind"],
             "loop-without-condition"
         );
+    }
+
+    #[test]
+    fn a_java_logical_value_is_a_decision_and_a_constant_stays_one() {
+        // `return a && b;` is a decision as JavaScript measures it; a final
+        // field and an annotation keep their compile-time constants.
+        let (obligations, _) = java(
+            "class X { static final boolean ON = true && false; @SuppressWarnings(\"x\") boolean f(int a, int b) { boolean c = a > 0 || b > 0; return c && a < b; } }",
+        );
+        let values = obligations
+            .manifest
+            .decisions
+            .iter()
+            .filter(|d| d.kind == "value")
+            .map(|d| d.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["a > 0 || b > 0", "c && a < b"]);
     }
 
     #[test]
