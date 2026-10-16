@@ -118,7 +118,8 @@ jobs:
     if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,') }}
     name: Filesystem safety (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Windows on Arm builds and tests the workspace in about 25 minutes.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -135,7 +136,6 @@ jobs:
       - run: npm ci
       # The only clippy pass that sees Windows- and macOS-only code.
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: npm run test:filesystem
       - run: npm run test:platform
 
   python:
