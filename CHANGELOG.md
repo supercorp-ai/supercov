@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- `cargo test -q` on an edition 2024 crate with doctests failed with "merged doctest child 0 ran for a case the harness did not report": quiet doctests print no names. Each case is now named from where it ran, and the output matches Cargo's, failures included.
 - A pytest test marked `xfail` that passed (XPASS) was reported as failed, so its run read as failing and its coverage was left out of the passed view, while pytest counted it as a pass. It is now passed, as pytest counts it; a strict `xfail` that passes is still failed.
 - `supercov docs reports` failed in every installed copy with "guide \"reports\" is not present in this installation", though `supercov docs` listed it. The guide is now bundled like the others.
 - `runs <id> decision` lists a line's decisions as `file:line:column`, but passing one of those locations back listed every decision on the line again. The column now selects the decision at it.

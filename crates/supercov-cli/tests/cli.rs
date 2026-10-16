@@ -5308,6 +5308,36 @@ fn cargo_reached_in_every_form_runs_what_it_was_asked() {
     assert_eq!(doc.code(), 0, "{said}");
     assert!(said.contains("Rust coverage: 1 test"), "{said}");
 
+    // Edition 2024 merges doctests into one harness, which `-q` leaves
+    // printing a mark per case and no name.
+    project.write(
+        "merged/Cargo.toml",
+        "[package]\nname = \"merged\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+    );
+    project.write(
+        "merged/src/lib.rs",
+        "/// ```\n/// assert_eq!(merged::half(4), 2);\n/// ```\n///\n/// ```ignore\n/// merged::half(0);\n/// ```\n///\n/// ```\n/// assert_eq!(merged::half(2), 5);\n/// ```\npub fn half(x: u32) -> u32 {\n    if x > 0 { x / 2 } else { 0 }\n}\n",
+    );
+    let quiet = std::process::Command::new(env!("CARGO_BIN_EXE_supercov"))
+        .args(["--", "cargo", "test", "-q", "--doc"])
+        .current_dir(project.root.join("merged"))
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&quiet.stdout),
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    assert_eq!(quiet.status.code(), Some(101), "{said}");
+    contains_all(
+        &said,
+        &[
+            "running 3 tests",
+            "failures:\n    src/lib.rs - half (line 9)",
+            "test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out",
+        ],
+    );
+
     // A test that does not compile is reported as the build failing.
     project.write(
         "tests/broken.rs",
