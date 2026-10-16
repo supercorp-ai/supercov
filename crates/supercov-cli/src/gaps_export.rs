@@ -9,7 +9,15 @@ use std::{io::Write, path::PathBuf, process::ExitCode};
 use serde_json::Value;
 
 /// Options of `gaps` that `file` shares, passed on to each file.
-const SHARED: &[&str] = &["--metric", "--filter", "--kind", "--runner"];
+const SHARED: &[&str] = &[
+    "--metric",
+    "--filter",
+    "--kind",
+    "--runner",
+    "--tag",
+    "--title",
+    "--test-file",
+];
 
 /// Everything one page holds: the export asks for all of it at once.
 const ALL: &str = "1000000000";

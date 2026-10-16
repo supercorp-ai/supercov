@@ -1283,16 +1283,36 @@ fn render_patch(
     out
 }
 
+/// A run's query index, or, when a filter picks tests, the index of only
+/// those tests' coverage, built from the run's evidence on first use.
+fn open_query_index_for(
+    run: &StoredRun,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+) -> Result<supercov_engine::query_index::QueryIndex, RunIndexError> {
+    match filter {
+        Some(filter) => supercov_engine::run_store::open_or_build_filtered_query_index(run, filter),
+        None => open_or_rebuild_query_index(run),
+    }
+}
+
 /// Resolve a run and build the shared view every workflow command reads.
 pub(crate) fn load_run_view(
     selector: Option<&str>,
+) -> Result<supercov_engine::run_view::RunView, String> {
+    load_run_view_filtered(selector, None)
+}
+
+/// [`load_run_view`] for only the tests `filter` picks.
+pub(crate) fn load_run_view_filtered(
+    selector: Option<&str>,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::run_view::RunView, String> {
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
     let comparison = current_integrity_for_run(&root, run)
         .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
-    let report = analyze_stored_run(run)?;
+    let report = analyze_stored_run_filtered(run, filter)?;
     let passed = run.metadata.test_exit_code == Some(0);
     // A passing run is read whole, as its summary reads it: what passing
     // tests ran alone leaves out what ran outside any test -- a module's top
@@ -1363,7 +1383,7 @@ pub(crate) fn load_point_tests(
 /// look like it invokes the tools they are named after.
 fn report_usage() -> String {
     format!(
-        "supercov runs <run-id> report --format {} [--output <path>] [--force]\n",
+        "supercov runs <run-id> report --format {} [--output <path>] [--force] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]\n",
         supercov_engine::coverage_export::FORMATS
     )
 }
@@ -1402,6 +1422,7 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     let mut format: Option<String> = None;
     let mut output: Option<PathBuf> = None;
     let mut force = false;
+    let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
     if let Some(first) = arguments.first()
         && first != "report"
@@ -1432,6 +1453,21 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                     output = Some(PathBuf::from(value));
                 }
             }
+            // The coverage of some tests alone, from the run as recorded.
+            "--kind" | "--runner" | "--tag" | "--title" | "--test-file" => {
+                let Some(value) = rest.get(index).filter(|value| !value.is_empty()) else {
+                    eprintln!("[supercov] {argument} needs a value\n{}", report_usage());
+                    return ExitCode::from(2);
+                };
+                index += 1;
+                match argument {
+                    "--kind" => filter.kind = Some(value.to_lowercase()),
+                    "--runner" => filter.runner = Some(value.to_lowercase()),
+                    "--tag" => filter.tags.push(value.clone()),
+                    "--title" => filter.titles.push(value.clone()),
+                    _ => filter.files.push(value.clone()),
+                }
+            }
             other => {
                 eprintln!("[supercov] unknown option {other}\n{}", report_usage());
                 return ExitCode::from(2);
@@ -1444,7 +1480,7 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     };
 
     let result = (|| -> Result<(), String> {
-        let view = load_run_view(selector)?;
+        let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
         // A report from a failed or stale run is still worth reading, so this
         // writes it and says so on stderr rather than refusing. Only a gate
         // must never go green over one.
@@ -2461,7 +2497,16 @@ fn execute_public_query(
             }
             let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
                 let progress = ProgressLine::start("loading run evidence");
-                let container = open_or_rebuild_query_index(run).map_err(|error| {
+                let test_filter = request.test_filter();
+                let container = open_query_index_for(run, test_filter.as_ref()).map_err(|error| {
+                    if let RunIndexError::Report(ReportError::NoTestMatches(filter)) = &error {
+                        return agent_json::AgentError {
+                            code: agent_json::ErrorCode::TestFilterEmpty,
+                            message: format!("No tests match {filter}"),
+                            retryable: false,
+                            details: Some(serde_json::json!({ "filter": filter })),
+                        };
+                    }
                     let message = if matches!(
                         error,
                         RunIndexError::Report(ReportError::NoEvidence(_))
@@ -2483,7 +2528,7 @@ fn execute_public_query(
                 drop(progress);
                 let report = if request.command == "minimize" {
                     Some(
-                        analyze_stored_run(run)
+                        analyze_stored_run_filtered(run, test_filter.as_ref())
                             .map_err(|error| internal_agent_error(error.to_string()))?,
                     )
                 } else {
@@ -2526,11 +2571,12 @@ fn execute_public_query(
                         });
                     }
                     let comparison_progress = ProgressLine::start("loading comparison run");
-                    newer_container = open_or_rebuild_query_index(newer_run).map_err(|error| {
-                        internal_agent_error(format!(
-                            "Failed to open newer coverage index: {error}"
-                        ))
-                    })?;
+                    newer_container = open_query_index_for(newer_run, test_filter.as_ref())
+                        .map_err(|error| {
+                            internal_agent_error(format!(
+                                "Failed to open newer coverage index: {error}"
+                            ))
+                        })?;
                     newer_index = CoverageIndex::new(&newer_container).map_err(|error| {
                         internal_agent_error(format!(
                             "Failed to read newer coverage index: {error}"
@@ -2999,8 +3045,10 @@ struct StoredQueryRequest {
     newer_run_id: Option<String>,
 }
 
-fn analyze_stored_run(
+/// A stored run's coverage, of only the tests `filter` picks when it is given.
+fn analyze_stored_run_filtered(
     run: &StoredRun,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::coverage_report::CoverageReport, String> {
     analyze_coverage_archive(&ArchiveReportRequest {
         archive_path: run.evidence_path.clone(),
@@ -3010,8 +3058,12 @@ fn analyze_stored_run(
         test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(
             run.metadata.test_exit_code,
         ),
+        test_filter: filter.cloned(),
     })
-    .map_err(|error| format!("invalid coverage archive: {error:?}"))
+    .map_err(|error| match error {
+        ReportError::NoTestMatches(filter) => format!("no test of the run matches {filter}"),
+        error => format!("invalid coverage archive: {error:?}"),
+    })
 }
 
 /// Internal differential surface for real persisted-run opening and indexing.
@@ -3040,10 +3092,12 @@ fn query_stored_run() -> ExitCode {
             .query
             .valid
             .get_or_insert(run.metadata.test_exit_code == Some(0));
-        let container = open_or_rebuild_query_index(run).map_err(|error| error.to_string())?;
+        let test_filter = request.query.test_filter();
+        let container =
+            open_query_index_for(run, test_filter.as_ref()).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
         let report = if request.query.command == "minimize" {
-            Some(analyze_stored_run(run)?)
+            Some(analyze_stored_run_filtered(run, test_filter.as_ref())?)
         } else {
             None
         };
@@ -3057,8 +3111,8 @@ fn query_stored_run() -> ExitCode {
                 .ok_or_else(|| "stored diff requires a newer run ID".to_owned())?;
             let newer_run =
                 select_run(&inventory, Some(selector)).map_err(|error| error.to_string())?;
-            newer_container =
-                open_or_rebuild_query_index(newer_run).map_err(|error| error.to_string())?;
+            newer_container = open_query_index_for(newer_run, test_filter.as_ref())
+                .map_err(|error| error.to_string())?;
             newer_index =
                 CoverageIndex::new(&newer_container).map_err(|error| error.to_string())?;
             Some(NewerQuery {

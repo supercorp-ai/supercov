@@ -60,8 +60,13 @@ public final class SupercovListener implements TestExecutionListener {
   @Override
   public void executionStarted(TestIdentifier identifier) {
     if (identifier.isTest()) {
-      Supercov.enterTest(name(identifier), RUNNER);
+      Supercov.enterTest(name(identifier), RUNNER, tags(identifier));
     }
+  }
+
+  /** The test's `@Tag`s, its class's among them, as `--include-tags` reads them. */
+  private static String[] tags(TestIdentifier identifier) {
+    return identifier.getTags().stream().map(tag -> tag.getName()).distinct().toArray(String[]::new);
   }
 
   @Override
@@ -80,7 +85,7 @@ public final class SupercovListener implements TestExecutionListener {
   @Override
   public void executionSkipped(TestIdentifier identifier, String reason) {
     if (identifier.isTest()) {
-      Supercov.enterTest(name(identifier), RUNNER);
+      Supercov.enterTest(name(identifier), RUNNER, tags(identifier));
       Supercov.exitTest("skipped");
     }
   }

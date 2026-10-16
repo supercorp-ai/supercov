@@ -1301,6 +1301,7 @@ pub fn coverage(run: &StoredRun) -> Result<CoverageReport, String> {
         generated_at: run.metadata.started_at.clone(),
         integrity: None,
         test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
+        test_filter: None,
     })
     .map_err(|e| format!("{e:?}"))
 }

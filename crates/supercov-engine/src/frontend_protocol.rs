@@ -434,6 +434,7 @@ mod tests {
                     kind: "integration".into(),
                     project: None,
                     source: "explicit".into(),
+                    tags: Vec::new(),
                 },
                 role: "test".into(),
                 attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),

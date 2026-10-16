@@ -16,7 +16,7 @@ import { relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
-import { inferTestProvenance } from "./provenance.mjs";
+import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
 import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.mjs";
 export * from "@playwright/test";
@@ -1603,6 +1603,7 @@ const instrumentedFixtures = {
                             file: testFile,
                             project: testInfo.project.name,
                             explicitKind: process.env["SUPERCOV_TEST_KIND"],
+                            tags: testTags(testInfo.tags, testInfo.titlePath),
                         }),
                         phases: mergeCollectedPhases(controller.phases, directRuntime()?.takeNodeAssertionPhases(scope) ?? []),
                         ...(controller.workerEvidenceMissing ? { attribution: "partial" } : {}),

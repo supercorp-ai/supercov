@@ -727,6 +727,7 @@ pub fn import_python_coverage_json(
                 kind: "unknown".into(),
                 project: None,
                 source: "python-coverage-v1".into(),
+                tags: Vec::new(),
             },
             role: "test".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -758,6 +759,7 @@ pub fn import_python_coverage_json(
                 kind: "unknown".into(),
                 project: None,
                 source: "python-coverage-v1".into(),
+                tags: Vec::new(),
             },
             role: "background".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -1335,6 +1337,7 @@ mod tests {
             generated_at: "2026-08-25T00:00:00.000Z".into(),
             integrity: None,
             test_exit_code: ExitCodeInput::Present(Some(0)),
+            test_filter: None,
         })
         .unwrap();
         assert_eq!(report.view.variant, "python-native-branch");
@@ -1366,6 +1369,7 @@ mod tests {
                 generated_at: "2026-08-25T00:00:00.000Z".into(),
                 integrity: None,
                 test_exit_code: ExitCodeInput::Present(Some(0)),
+                test_filter: None,
             }),
             Err(crate::coverage_report::ReportError::InvalidJson { path, .. })
                 if path == "coverage-model.json"

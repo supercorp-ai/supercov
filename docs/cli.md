@@ -379,9 +379,10 @@ npx supercov runs latest gaps --format jsonl > gaps.jsonl
 
 Each line holds the file, the line, the source of that line and what `runs
 <id> file` says of the obligation: for an MC/DC condition its decision, the
-condition and the vectors observed. `--metric`, `--filter`, `--kind` and
-`--runner` narrow it as they narrow `gaps`, and nothing is paged, so a tool or
-an agent reads a run's every gap in one pass instead of a page at a time.
+condition and the vectors observed. `--metric`, `--filter`, `--kind`,
+`--runner`, `--tag`, `--title` and `--test-file` narrow it as they narrow
+`gaps`, and nothing is paged, so a tool or an agent reads a run's every gap in
+one pass instead of a page at a time.
 
 ```sh supercov-example
 npx supercov runs report --format lcov --output coverage/lcov.info
@@ -390,7 +391,14 @@ npx supercov runs report --format html --output coverage/report
 ```
 
 Both are written from the same view `check` and `patch` read, so a viewer,
-hosted service or CI integration sees the totals Supercov enforced. Paths are
+hosted service or CI integration sees the totals Supercov enforced. `--kind`,
+`--runner`, `--tag`, `--title` and `--test-file` write the coverage of only
+those tests, from the same run:
+
+```sh supercov-example
+npx supercov runs report --format lcov --kind e2e --output coverage/e2e.info
+```
+ Paths are
 repository-relative with forward slashes, ordering is stable, and the file is
 written atomically; an existing file is kept unless you pass `--force`. Without
 `--output` the report goes to stdout and diagnostics to stderr, so a redirect
@@ -443,11 +451,38 @@ one as a public artifact.
 | `--filter all \| passed \| failed` | Recalculate the view from all, successful, or failed attempts |
 | `--kind <kind>` | Restrict to a test level such as `unit`, `integration`, or `e2e` |
 | `--runner <runner>` | Restrict to one runner |
+| `--tag <tag>` | Restrict to tests with this tag; repeat it for tests with any of several |
+| `--title <text>` | Restrict to tests whose name contains this text |
+| `--test-file <path>` | Restrict to tests in this file, or in this directory |
 | `--metric all \| lines \| statements \| functions \| branches \| mcdc` | Choose a metric for `files`, `gaps`, `diff`, or `minimize` |
 | `--limit N`, `--offset N` | Page through a collection |
 | `--json` | Return the machine-readable form |
 
 Collection output includes a copyable command for the next page.
+
+### Read some of a run's tests
+
+`--tag`, `--title` and `--test-file` read the coverage of only the tests they
+pick, from a run already measured: the API tests of a Playwright suite, the
+tests of one spec file, everything named `checkout`. Each takes several values
+for tests matching any of them, and when several are given a test must match
+each.
+
+```sh supercov
+npx supercov runs latest --tag @api
+npx supercov runs latest gaps --test-file tests/e2e/checkout.spec.ts
+npx supercov runs latest files --title checkout --tag smoke
+```
+
+A tag is what the runner gives a test: a Playwright tag (`{ tag: '@api' }`, or
+an `@word` in the title), an `@word` in a Jest, Vitest, Mocha, `node:test`,
+AVA or tap title, a pytest marker, an RSpec tag or `type`, a Cucumber tag, a
+JUnit `@Tag` or a TestNG group. Tags are written with or without the `@` and in
+any case. `runs <id> test <name>` lists a test's tags.
+
+The first query with a filter works out its coverage from the run's evidence
+and keeps it beside the run (about half a minute for a 1,100-test run); asking
+again reads it back. Nothing is added to the test run itself.
 
 For a large file, group and rank its decisions:
 

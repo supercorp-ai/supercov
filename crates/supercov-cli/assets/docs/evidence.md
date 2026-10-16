@@ -126,6 +126,11 @@ proof of what the test checks. A name such as `gatewayE2e.test.ts` identifies an
 E2E test. Ambiguous names keep the runner's default, and the report tells you
 how many tests use that default.
 
+A tag naming a level — `@unit`, `@component`, `@integration` or `@e2e` — sets
+a test's kind, ahead of its path and runner: a Playwright tag or an `@word` in
+a JavaScript test's title, a pytest marker, an RSpec tag, a Cucumber tag, a
+JUnit `@Tag` or a TestNG group. Other tags stay tags, which `--tag` selects by.
+
 If your suite has a known kind, set it when running the command:
 
 ```sh supercov-example

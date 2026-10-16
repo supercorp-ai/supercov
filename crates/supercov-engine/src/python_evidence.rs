@@ -108,6 +108,9 @@ enum Record {
         /// synthesised tests that cannot name a file.
         #[serde(default)]
         file: Option<String>,
+        /// The test's markers, as pytest's `-m` reads them.
+        #[serde(default)]
+        tags: Vec<String>,
     },
     Hit {
         ctx: u64,
@@ -292,6 +295,8 @@ type OutcomesByAttempt = BTreeMap<(String, String, usize), Vec<(String, String, 
 type RunnersByAttempt = BTreeMap<(String, String, usize), String>;
 /// (worker, test, retry) -> the source file the runner named for the test
 type TestFilesByAttempt = BTreeMap<(String, String, usize), String>;
+/// (worker, test, retry) -> the tags the runner named for the test
+type TestTagsByAttempt = BTreeMap<(String, String, usize), Vec<String>>;
 
 /// A runtime path, project-relative. Python reports both forms: a frame's
 /// `co_filename` is whatever the interpreter loaded, absolute or relative. A
@@ -341,6 +346,7 @@ struct Evidence {
     outcomes: OutcomesByAttempt,
     runners: RunnersByAttempt,
     test_files: TestFilesByAttempt,
+    test_tags: TestTagsByAttempt,
     limitations: BTreeMap<(String, Option<String>, Option<String>), RuntimeLimitation>,
     /// The layout's ids, which slot hits are positions in.
     slot_ids: Vec<String>,
@@ -1223,6 +1229,7 @@ fn apply_transport(
                 xfail,
                 runner,
                 file,
+                tags,
             } => {
                 if !matches!(phase.as_str(), "setup" | "call" | "teardown") {
                     return Err(invalid("unknown test outcome phase"));
@@ -1245,6 +1252,14 @@ fn apply_transport(
                 evidence.runners.insert(key.clone(), runner);
                 if let Some(file) = file.filter(|path| !path.is_empty()) {
                     evidence.test_files.entry(key.clone()).or_insert(file);
+                }
+                if !tags.is_empty() {
+                    let known = evidence.test_tags.entry(key.clone()).or_default();
+                    for tag in tags {
+                        if !known.contains(&tag) {
+                            known.push(tag);
+                        }
+                    }
                 }
                 fold_outcome(
                     evidence.outcomes.entry(key).or_default(),
@@ -1893,6 +1908,7 @@ fn build_from_evidence(
         outcomes,
         runners,
         test_files,
+        test_tags,
         limitations,
         slot_ids,
         ..
@@ -2075,11 +2091,18 @@ fn build_from_evidence(
                 .into(),
             ),
             flaky: false,
-            provenance: TestProvenance {
-                runner: runner.clone(),
-                kind: crate::test_kind::from_path(test_file.as_deref()).into(),
-                project: None,
-                source: PYTHON_FRONTEND_VERSION.into(),
+            provenance: {
+                let tags = test_tags
+                    .get(&(worker.clone(), test.clone(), retry))
+                    .cloned()
+                    .unwrap_or_default();
+                TestProvenance {
+                    runner: runner.clone(),
+                    kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
+                    project: None,
+                    source: PYTHON_FRONTEND_VERSION.into(),
+                    tags,
+                }
             },
             role: "test".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -2136,11 +2159,18 @@ fn build_from_evidence(
             status: Some("failed".into()),
             expected_status: Some("passed".into()),
             flaky: false,
-            provenance: TestProvenance {
-                runner: runner.clone(),
-                kind: crate::test_kind::from_path(test_file.as_deref()).into(),
-                project: None,
-                source: PYTHON_FRONTEND_VERSION.into(),
+            provenance: {
+                let tags = test_tags
+                    .get(&(worker.clone(), test.clone(), retry))
+                    .cloned()
+                    .unwrap_or_default();
+                TestProvenance {
+                    runner: runner.clone(),
+                    kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
+                    project: None,
+                    source: PYTHON_FRONTEND_VERSION.into(),
+                    tags,
+                }
             },
             role: "test".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -2177,6 +2207,7 @@ fn build_from_evidence(
                 kind: "unit".into(),
                 project: None,
                 source: PYTHON_FRONTEND_VERSION.into(),
+                tags: Vec::new(),
             },
             role: "background".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -3085,6 +3116,7 @@ mod tests {
             generated_at: "then".into(),
             integrity: Some(integrity.clone()),
             test_exit_code: ExitCodeInput::Present(Some(0)),
+            test_filter: None,
         })
         .unwrap();
         let in_memory = analyze_frontend_request(

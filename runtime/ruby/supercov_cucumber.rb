@@ -97,12 +97,14 @@ module Supercov
 
       identity = identity(test_case)
       overall = status_of(result)
+      tags = test_case.tags.map { |tag| tag.name.to_s.delete_prefix("@") }.uniq rescue []
+      title = test_case.name.to_s rescue nil
       %w[setup call teardown].each do |phase|
         status = state[:phases][phase]
         next if status.nil?
 
         status = overall if phase == "call" && overall != "passed" && status == "passed"
-        @runtime.outcome(identity[:worker], identity[:test], 0, phase, status, false, RUNNER, source_file(test_case))
+        @runtime.outcome(identity[:worker], identity[:test], 0, phase, status, false, RUNNER, source_file(test_case), tags, title)
       end
       @runtime.switch(nil)
     end

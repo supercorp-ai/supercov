@@ -1591,6 +1591,7 @@ fn a_case_entered_by_fallthrough_is_not_credited_as_selected() {
             generated_at: "2026-01-01T00:00:00.000Z".into(),
             integrity: None,
             test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(Some(0)),
+            test_filter: None,
         },
     )
     .expect("report");

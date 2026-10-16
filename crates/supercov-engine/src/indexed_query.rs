@@ -66,6 +66,15 @@ pub struct IndexedQueryRequest {
     /// from the same opened run.
     #[serde(default)]
     pub more_lines: Vec<(String, usize)>,
+    /// `--tag`: only tests carrying one of these tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// `--title`: only tests whose full name contains one of these.
+    #[serde(default)]
+    pub titles: Vec<String>,
+    /// `--test-file`: only tests in one of these files or directories.
+    #[serde(default)]
+    pub test_files: Vec<String>,
 }
 
 fn default_limit() -> usize {
@@ -77,6 +86,18 @@ fn default_metric() -> MinimizeMetric {
 }
 
 impl IndexedQueryRequest {
+    /// The tests `--tag`, `--title` and `--test-file` pick, when any is given.
+    pub fn test_filter(&self) -> Option<crate::coverage_report::TestFilter> {
+        let filter = crate::coverage_report::TestFilter {
+            tags: self.tags.clone(),
+            titles: self.titles.clone(),
+            files: self.test_files.clone(),
+            kind: None,
+            runner: None,
+        };
+        (!filter.is_empty()).then_some(filter)
+    }
+
     pub fn view(&self) -> Result<CoverageViewId, IndexedQueryError> {
         match self.filter.as_str() {
             "all" => Ok(CoverageViewId::All),

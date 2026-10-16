@@ -109,6 +109,14 @@ enum Record {
         /// synthesised methods that cannot name a file.
         #[serde(default)]
         file: Option<String>,
+        /// The test's tags: RSpec metadata set to true and its `type`, or a
+        /// Cucumber scenario's tags.
+        #[serde(default)]
+        tags: Vec<String>,
+        /// What the test says it does, where its identity is a position:
+        /// RSpec's full description, a Cucumber scenario's name.
+        #[serde(default)]
+        title: Option<String>,
     },
     Hit {
         ctx: u64,
@@ -272,6 +280,10 @@ type OutcomesByAttempt = BTreeMap<(String, String, usize), Vec<(String, String, 
 type RunnersByAttempt = BTreeMap<(String, String, usize), String>;
 /// (worker, test, retry) -> the source file the runner named for the test
 type TestFilesByAttempt = BTreeMap<(String, String, usize), String>;
+/// (worker, test, retry) -> the tags the runner named for the test
+type TestTagsByAttempt = BTreeMap<(String, String, usize), Vec<String>>;
+/// (worker, test, retry) -> what the runner says the test does
+type TestTitlesByAttempt = BTreeMap<(String, String, usize), String>;
 /// A runtime path, project-relative. Ruby reports both forms: a backtrace
 /// frame is absolute, while a method defined by a file the interpreter loaded
 /// by a relative path keeps that path. A path outside the project names nothing.
@@ -309,6 +321,8 @@ struct Evidence {
     outcomes: OutcomesByAttempt,
     runners: RunnersByAttempt,
     test_files: TestFilesByAttempt,
+    test_tags: TestTagsByAttempt,
+    test_titles: TestTitlesByAttempt,
     limitations: Vec<RuntimeLimitation>,
     /// Some process credited a line to the first test that ran it only.
     first_sighting: bool,
@@ -603,6 +617,8 @@ fn read_evidence_file(
                 xfail,
                 runner,
                 file,
+                tags,
+                title,
             } => {
                 if !matches!(phase.as_str(), "setup" | "call" | "teardown") {
                     return Err(invalid("unknown test outcome phase"));
@@ -628,6 +644,17 @@ fn read_evidence_file(
                 evidence.runners.insert(key.clone(), runner);
                 if let Some(file) = file.filter(|path| !path.is_empty()) {
                     evidence.test_files.entry(key.clone()).or_insert(file);
+                }
+                if let Some(title) = title.filter(|title| !title.is_empty()) {
+                    evidence.test_titles.entry(key.clone()).or_insert(title);
+                }
+                if !tags.is_empty() {
+                    let known = evidence.test_tags.entry(key.clone()).or_default();
+                    for tag in tags {
+                        if !known.contains(&tag) {
+                            known.push(tag);
+                        }
+                    }
                 }
                 fold_outcome(
                     evidence.outcomes.entry(key).or_default(),
@@ -1235,6 +1262,8 @@ fn build_from_evidence(
         outcomes,
         runners,
         test_files,
+        test_tags,
+        test_titles,
         limitations,
         first_sighting,
         ..
@@ -1384,7 +1413,10 @@ fn build_from_evidence(
             // identity is not a path, so the old derivation stays only as a
             // fallback for an adapter that cannot name the file.
             test_file: test_file.clone(),
-            title: test.rsplit("::").next().map(str::to_owned),
+            title: test_titles
+                .get(&(worker.clone(), test.clone(), retry))
+                .cloned()
+                .or_else(|| test.rsplit("::").next().map(str::to_owned)),
             retry: Some(retry),
             status: Some(status),
             expected_status: Some(
@@ -1396,11 +1428,18 @@ fn build_from_evidence(
                 .into(),
             ),
             flaky: false,
-            provenance: TestProvenance {
-                runner: runner.clone(),
-                kind: crate::test_kind::from_path(test_file.as_deref()).into(),
-                project: None,
-                source: RUBY_FRONTEND_VERSION.into(),
+            provenance: {
+                let tags = test_tags
+                    .get(&(worker.clone(), test.clone(), retry))
+                    .cloned()
+                    .unwrap_or_default();
+                TestProvenance {
+                    runner: runner.clone(),
+                    kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
+                    project: None,
+                    source: RUBY_FRONTEND_VERSION.into(),
+                    tags,
+                }
             },
             role: "test".into(),
             // Ruby 3.3+ probes every statement, so what a test is recorded as
@@ -1457,16 +1496,26 @@ fn build_from_evidence(
             // identity is not a path, so the old derivation stays only as a
             // fallback for an adapter that cannot name the file.
             test_file: test_file.clone(),
-            title: test.rsplit("::").next().map(str::to_owned),
+            title: test_titles
+                .get(&(worker.clone(), test.clone(), retry))
+                .cloned()
+                .or_else(|| test.rsplit("::").next().map(str::to_owned)),
             retry: Some(retry),
             status: Some("failed".into()),
             expected_status: Some("passed".into()),
             flaky: false,
-            provenance: TestProvenance {
-                runner: runner.clone(),
-                kind: crate::test_kind::from_path(test_file.as_deref()).into(),
-                project: None,
-                source: RUBY_FRONTEND_VERSION.into(),
+            provenance: {
+                let tags = test_tags
+                    .get(&(worker.clone(), test.clone(), retry))
+                    .cloned()
+                    .unwrap_or_default();
+                TestProvenance {
+                    runner: runner.clone(),
+                    kind: crate::test_kind::with_tags(test_file.as_deref(), &tags).into(),
+                    project: None,
+                    source: RUBY_FRONTEND_VERSION.into(),
+                    tags,
+                }
             },
             role: "test".into(),
             // Ruby 3.3+ probes every statement, so what a test is recorded as
@@ -1508,6 +1557,7 @@ fn build_from_evidence(
                 kind: "unit".into(),
                 project: None,
                 source: RUBY_FRONTEND_VERSION.into(),
+                tags: Vec::new(),
             },
             role: "background".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -2146,6 +2196,44 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(runners, ["minitest", "rspec"]);
         assert_eq!(run.ruby_versions, ["4.0.6"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_rspec_example_carries_its_tags_and_description_and_a_level_tag_is_its_kind() {
+        let source = "def f(a)\n  a ? 1 : 0\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let directory = temporary("tags");
+        let outcome = |phase: &str| serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":phase,"outcome":"passed","xfail":false,"runner":"rspec","tags":["api","e2e"],"title":"M pays a member"});
+        let records = [
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.10","executable":"ruby","argv":["rspec"]}),
+            serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call"}),
+            outcome("setup"),
+            outcome("call"),
+            outcome("teardown"),
+            serde_json::json!({"t":"exit","at":9}),
+        ];
+        fs::write(directory.join("main.7.a.mmap"), transport(&records)).unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+        )
+        .unwrap();
+        let test = run
+            .request
+            .raw_results
+            .iter()
+            .find(|raw| raw.role == "test")
+            .unwrap();
+        assert_eq!(test.provenance.tags, ["api", "e2e"]);
+        assert_eq!(test.provenance.kind, "e2e");
+        assert_eq!(test.title.as_deref(), Some("M pays a member"));
         fs::remove_dir_all(directory).unwrap();
     }
 

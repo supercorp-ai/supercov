@@ -11,7 +11,7 @@ import { realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { appendEvidenceRecord } from "./atomic.mjs";
-import { inferTestProvenance } from "./provenance.mjs";
+import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { runnerExecutionScope } from "./runnerEvidence.mjs";
 
 const SETUP_HOOK = /^"(?:before|after) all" hook/;
@@ -156,6 +156,7 @@ function observe(runner, runtime, write) {
                 runner: "mocha",
                 file: testFile,
                 explicitKind: process.env.SUPERCOV_TEST_KIND,
+                tags: id.role ? [] : testTags(undefined, [id.name]),
             }),
             ...(scope ? { phases: runtime.takeNodeAssertionPhases(scope) } : {}),
             runtime: snapshot ? [snapshot] : [],

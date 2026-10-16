@@ -83,6 +83,8 @@ public final class Supercov {
     /// TestNG in one JVM, and a report that named the wrong one would say the
     /// test was attributed by a lifecycle that never saw it.
     String runner = "";
+    /// The tags the framework gives the test: a JUnit `@Tag`, a TestNG group.
+    String[] tags = new String[0];
     // How the test ended, as the framework saw it. Defaulted rather than
     // required: a test that reports nothing finished normally, and the
     // runtime should not need the framework's cooperation to say so.
@@ -146,6 +148,11 @@ public final class Supercov {
 
   /** Binds every probe that fires next to this test of this runner. */
   public static synchronized void enterTest(String name, String runner) {
+    enterTest(name, runner, new String[0]);
+  }
+
+  /** Binds every probe that fires next to this test, which carries these tags. */
+  public static synchronized void enterTest(String name, String runner, String[] tags) {
     harvest();
     if (open > 0) {
       overlap();
@@ -153,6 +160,7 @@ public final class Supercov {
     open++;
     Record record = new Record(name);
     record.runner = runner;
+    record.tags = tags == null ? new String[0] : tags;
     if (overlapped) {
       // Named and credited with nothing. `current` is left alone so no probe
       // is attributed to it, and the thread remembers which record is its own
@@ -427,6 +435,12 @@ public final class Supercov {
         byte[] runner = record.runner.getBytes("UTF-8");
         putLong(out, runner.length);
         out.write(runner);
+        putLong(out, record.tags.length);
+        for (String tag : record.tags) {
+          byte[] bytes = tag.getBytes("UTF-8");
+          putLong(out, bytes.length);
+          out.write(bytes);
+        }
         putLong(out, record.probes.size());
         for (int[] hit : record.probes) {
           putLong(out, hit[0]);

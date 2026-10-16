@@ -257,6 +257,7 @@ fn javascript_archive_entries(
                 kind: "setup".into(),
                 project: None,
                 source: "engine".into(),
+                tags: Vec::new(),
             },
             role: "setup".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),

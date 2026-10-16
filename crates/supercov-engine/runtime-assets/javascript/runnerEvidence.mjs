@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { appendEvidenceRecord } from "./atomic.mjs";
-import { inferTestProvenance } from "./provenance.mjs";
+import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { serverEvidencePath } from "./transport.mjs";
 
 let cachedProcessInstanceToken;
@@ -123,6 +123,7 @@ export function writeRunnerEvidence(identity, status, scope, evidenceDirectoryOv
             runner: identity.runner,
             file: testFile,
             explicitKind: process.env["SUPERCOV_TEST_KIND"],
+            tags: identity.role ? [] : testTags(identity.tags, [identity.name]),
         }),
         ...(phases.length > 0 ? { phases } : {}),
         runtime: [],

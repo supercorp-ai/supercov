@@ -4439,6 +4439,7 @@ mod tests {
                 kind: "unit".into(),
                 project: None,
                 source: "runner-default".into(),
+                tags: Vec::new(),
             },
             role: "test".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),

@@ -18,7 +18,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
     }
     if command == "diff" {
         return Some(
-            "Usage: supercov diff <older-run> <newer-run> [options]\n\nOptions:\n  --filter <all|passed|failed>\n  --kind <kind>\n  --runner <runner>\n  --metric <metric>\n  --gained                       only what the newer run covers that the older did not\n  --offset <n>\n  --limit <n>\n  --json\n"
+            "Usage: supercov diff <older-run> <newer-run> [options]\n\nOptions:\n  --filter <all|passed|failed>\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --metric <metric>\n  --gained                       only what the newer run covers that the older did not\n  --offset <n>\n  --limit <n>\n  --json\n"
                 .into(),
         );
     }
@@ -37,44 +37,44 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .map(String::as_str);
     let Some(child) = child else {
         return Some(
-            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --offset <n>\n  --limit <n>\n  --json\n\nRun any query with --help for its exact usage.\n"
+            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>\n  --json\n\nRun any query with --help for its exact usage.\n"
                 .replace("  minimize              ", "  source <path>         matching current source with line numbers\n  minimize              "),
         );
     };
     let usage = match child {
         "summary" => {
-            "supercov runs <run-id> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
+            "supercov runs <run-id> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--json]"
         }
         "files" => {
-            "supercov runs <run-id> files [--group dir [--depth <n>]] [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> files [--group dir [--depth <n>]] [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--offset <n>] [--limit <n>] [--json]"
         }
         "gaps" => {
-            "supercov runs <run-id> gaps [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]\n       supercov runs <run-id> gaps --format jsonl [--metric <metric>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--output <file>]"
+            "supercov runs <run-id> gaps [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--offset <n>] [--limit <n>] [--json]\n       supercov runs <run-id> gaps --format jsonl [--metric <metric>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--output <file>]"
         }
         "tests-without-evidence" => {
-            "supercov runs <run-id> tests without-evidence [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> tests without-evidence [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--offset <n>] [--limit <n>] [--json]"
         }
         "kinds" => {
-            "supercov runs <run-id> kinds [--filter <all|passed|failed>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> kinds [--filter <all|passed|failed>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--offset <n>] [--limit <n>] [--json]"
         }
         "runners" => {
             "supercov runs <run-id> runners [--filter <all|passed|failed>] [--kind <kind>] [--offset <n>] [--limit <n>] [--json]"
         }
         "scope" => "supercov runs <run-id> scope [--files] [--offset <n>] [--limit <n>] [--json]",
         "file" => {
-            "supercov runs <run-id> file <path> [--group decision] [--sort <location|missing>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> file <path> [--group decision] [--sort <location|missing>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--offset <n>] [--limit <n>] [--json]"
         }
         "decision" => {
-            "supercov runs <run-id> decision <id|source-file:line> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
+            "supercov runs <run-id> decision <id|source-file:line> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--json]"
         }
         "line" => {
-            "supercov runs <run-id> line <source-file:line> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> line <source-file:line> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--offset <n>] [--limit <n>] [--json]"
         }
         "test" => {
             "supercov runs <run-id> test <id|name-fragment> [--filter <all|passed|failed>] [--json]"
         }
         "minimize" => {
-            "supercov runs <run-id> minimize [--target <0..100>] [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
+            "supercov runs <run-id> minimize [--target <0..100>] [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--json]"
         }
         _ => "supercov runs <run-id> --help",
     };
@@ -144,6 +144,10 @@ struct QueryOptions {
     run: Option<String>,
     kind: Option<String>,
     runner: Option<String>,
+    /// `--tag`, `--title`, `--test-file`: tests picked by what they carry.
+    tags: Vec<String>,
+    titles: Vec<String>,
+    test_files: Vec<String>,
     filter: String,
     limit: usize,
     offset: usize,
@@ -169,6 +173,9 @@ impl Default for QueryOptions {
             run: None,
             kind: None,
             runner: None,
+            tags: Vec::new(),
+            titles: Vec::new(),
+            test_files: Vec::new(),
             filter: "all".into(),
             limit: DEFAULT_LIMIT,
             offset: 0,
@@ -251,6 +258,25 @@ fn parse_options(
                     ));
                 };
                 options.runner = Some(runner.to_lowercase());
+            }
+            flag @ ("--tag" | "--title" | "--test-file") => {
+                index += 1;
+                let Some(value) = arguments.get(index).filter(|value| !value.is_empty()) else {
+                    return Err(PublicQueryError::invalid(
+                        Some(&agent_command),
+                        json_output,
+                        match flag {
+                            "--tag" => "--tag requires a tag, such as @e2e",
+                            "--title" => "--title requires text the test's name contains",
+                            _ => "--test-file requires a test file or directory",
+                        },
+                    ));
+                };
+                match flag {
+                    "--tag" => options.tags.push(value.clone()),
+                    "--title" => options.titles.push(value.clone()),
+                    _ => options.test_files.push(value.clone()),
+                }
             }
             "--filter" => {
                 index += 1;
@@ -478,6 +504,9 @@ fn coverage_invocation(
         depth: None,
         gained_only: false,
         more_lines: Vec::new(),
+        tags: options.tags.clone(),
+        titles: options.titles.clone(),
+        test_files: options.test_files.clone(),
     };
     match command {
         "summary" | "kinds" | "runners" | "gaps" | "tests-without-evidence" => {}
@@ -632,6 +661,9 @@ pub fn parse_public_query(
                 depth: None,
                 gained_only: options.gained,
                 more_lines: Vec::new(),
+                tags: options.tags.clone(),
+                titles: options.titles.clone(),
+                test_files: options.test_files.clone(),
             }),
             newer_run_id: Some(newer.clone()),
             agent_command: "diff".into(),

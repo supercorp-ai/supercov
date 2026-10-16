@@ -282,6 +282,7 @@ pub(crate) fn run_nextest(
                 kind: artifact.kind.clone(),
                 project: Some(artifact.binary_name.clone()),
                 source: "supercov-owned-process-per-test".into(),
+                tags: Vec::new(),
             },
             role: "test".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),

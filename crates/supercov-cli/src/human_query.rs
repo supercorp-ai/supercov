@@ -212,6 +212,7 @@ fn coverage_command(run: &str, request: &IndexedQueryRequest, child: &str) -> St
     if let Some(runner) = &request.runner {
         values.push(format!("--runner {}", shell_quote(runner)));
     }
+    values.extend(test_filter_flags(request));
     if request.metric != MinimizeMetric::All {
         values.push(format!("--metric {}", metric_name(request.metric)));
     }
@@ -243,7 +244,38 @@ fn filter_label(request: &IndexedQueryRequest) -> String {
     if let Some(runner) = &request.runner {
         labels.push(format!("runner {runner}"));
     }
+    labels.extend(request.tags.iter().map(|tag| format!("tag {tag}")));
+    labels.extend(
+        request
+            .titles
+            .iter()
+            .map(|title| format!("title containing {title:?}")),
+    );
+    labels.extend(
+        request
+            .test_files
+            .iter()
+            .map(|file| format!("tests in {file}")),
+    );
     labels.join(", ")
+}
+
+/// `--tag`, `--title` and `--test-file` as they were given, for a command
+/// that should read the same tests.
+fn test_filter_flags(request: &IndexedQueryRequest) -> Vec<String> {
+    let mut flags = Vec::new();
+    for (flag, values) in [
+        ("--tag", &request.tags),
+        ("--title", &request.titles),
+        ("--test-file", &request.test_files),
+    ] {
+        flags.extend(
+            values
+                .iter()
+                .map(|value| format!("{flag} {}", shell_quote(value))),
+        );
+    }
+    flags
 }
 
 fn summary_line(summary: &CoverageSummary) -> String {
@@ -1790,6 +1822,26 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                                 )
                             }
                         ),
+                        // What kind of test it is and what it is tagged, as
+                        // `--kind` and `--tag` select it.
+                        format!(
+                            "{} {}{}",
+                            test.provenance.runner,
+                            test.provenance.kind,
+                            if test.provenance.tags.is_empty() {
+                                String::new()
+                            } else {
+                                format!(
+                                    "; tags {}",
+                                    test.provenance
+                                        .tags
+                                        .iter()
+                                        .map(|tag| format!("@{tag}"))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                )
+                            }
+                        ),
                         // Zero here means two different things, and only one
                         // of them is "this test reached nothing". A Go test
                         // that called t.Parallel() stores into the same probe
@@ -2083,6 +2135,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             if let Some(runner) = &request.runner {
                 base.push_str(&format!(" --runner {}", shell_quote(runner)));
             }
+            for flag in test_filter_flags(request) {
+                base.push(' ');
+                base.push_str(&flag);
+            }
             if let Some(next) = next_page(&base, page) {
                 lines.push(format!("next page: {next}"));
             }
@@ -2223,6 +2279,9 @@ mod tests {
             group: None,
             depth: None,
             gained_only: false,
+            tags: Vec::new(),
+            titles: Vec::new(),
+            test_files: Vec::new(),
         }
     }
 

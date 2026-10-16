@@ -48,6 +48,25 @@ fn segment_kind(segment: &str) -> Option<&'static str> {
     best.map(|(_, kind)| kind)
 }
 
+/// The kind a tag names, as `@e2e` does: a test's own statement of what it
+/// is, which outranks where it lives.
+pub fn from_tags(tags: &[String]) -> Option<&'static str> {
+    tags.iter().find_map(
+        |tag| match tag.trim_start_matches('@').to_ascii_lowercase().as_str() {
+            "unit" => Some("unit"),
+            "component" => Some("component"),
+            "integration" => Some("integration"),
+            "e2e" => Some("e2e"),
+            _ => None,
+        },
+    )
+}
+
+/// A test's kind: the one a tag names, else the one its path names.
+pub fn with_tags(file: Option<&str>, tags: &[String]) -> &'static str {
+    from_tags(tags).unwrap_or_else(|| from_path(file))
+}
+
 pub fn from_path(file: Option<&str>) -> &'static str {
     let Some(file) = file else {
         return "unit";
@@ -70,7 +89,27 @@ pub fn from_path(file: Option<&str>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::from_path;
+    use super::{from_path, from_tags, with_tags};
+
+    #[test]
+    fn a_tag_naming_a_level_is_the_kind_and_outranks_the_path() {
+        let tags = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(from_tags(&tags(&["api", "@E2E"])), Some("e2e"));
+        assert_eq!(from_tags(&tags(&["api", "smoke"])), None);
+        assert_eq!(
+            with_tags(Some("spec/models/a_spec.rb"), &tags(&["integration"])),
+            "integration"
+        );
+        assert_eq!(
+            with_tags(Some("test/e2e/a_test.py"), &tags(&["api"])),
+            "e2e"
+        );
+    }
 
     #[test]
     fn a_test_is_the_kind_its_directory_names() {

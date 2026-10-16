@@ -1930,6 +1930,7 @@ pub fn run_prepared_rust_tests(
                 kind: artifact.kind,
                 project: Some(artifact.name),
                 source: "supercov-owned-process-per-test".into(),
+                tags: Vec::new(),
             },
             role: "test".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -2926,6 +2927,7 @@ mod tests {
             generated_at: "2026-08-26T00:00:00.000Z".into(),
             integrity: None,
             test_exit_code: ExitCodeInput::Present(Some(0)),
+            test_filter: None,
         })
         .unwrap();
         assert_eq!(report.view.tests.len(), 16);

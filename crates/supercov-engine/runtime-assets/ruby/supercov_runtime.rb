@@ -983,7 +983,7 @@ module Supercov
     # ("CalcTest#test_x", "spec/m_spec.rb[1:1]") is not a path. Adapters that
     # cannot name the file leave it nil and the report falls back to deriving
     # one from the identity.
-    def outcome(worker, test, retry_index, phase, outcome, xfail, runner, file = nil)
+    def outcome(worker, test, retry_index, phase, outcome, xfail, runner, file = nil, tags = nil, title = nil)
       @mutex.synchronize do
         entry = {
           "t" => "outcome",
@@ -996,6 +996,8 @@ module Supercov
           "runner" => runner,
         }
         entry["file"] = file if file
+        entry["tags"] = tags if tags && !tags.empty?
+        entry["title"] = title if title.is_a?(String) && !title.empty?
         record(entry)
       end
     end

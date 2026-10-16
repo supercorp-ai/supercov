@@ -264,6 +264,7 @@ fn create_analyzable_run(root: &Path, id: &str, attribution: Option<&str>) -> Pa
             kind: "unit".into(),
             project: None,
             source: "test-fixture".into(),
+            tags: Vec::new(),
         },
         role: "test".into(),
         attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -798,6 +799,9 @@ impl std::fmt::Display for RunIndexError {
             Self::Report(ReportError::NoEvidence(_)) => {
                 write!(formatter, "no coverage evidence was published")
             }
+            Self::Report(ReportError::NoTestMatches(filter)) => {
+                write!(formatter, "no test of the run matches {filter}")
+            }
             Self::Report(error) => write!(formatter, "coverage analysis failed: {error:?}"),
             Self::Metadata(error) => write!(formatter, "run integrity is invalid: {error}"),
             Self::EvidenceChanged => write!(formatter, "evidence changed while indexing"),
@@ -877,13 +881,142 @@ pub fn open_existing_query_index(run: &StoredRun) -> Result<Option<QueryIndex>, 
 
 /// A run's coverage, analysed from its evidence archive as its query index is.
 pub fn analyze_stored_run(run: &StoredRun) -> Result<CoverageReport, RunIndexError> {
+    analyze_stored_run_filtered(run, None)
+}
+
+/// [`analyze_stored_run`] for only the tests `filter` picks: their coverage
+/// alone, read from what the run already recorded.
+pub fn analyze_stored_run_filtered(
+    run: &StoredRun,
+    filter: Option<&crate::coverage_report::TestFilter>,
+) -> Result<CoverageReport, RunIndexError> {
     Ok(analyze_coverage_archive(&ArchiveReportRequest {
         archive_path: run.evidence_path.clone(),
         run_id: run.id.clone(),
         generated_at: run.metadata.started_at.clone(),
         integrity: Some(serde_json::to_value(&run.metadata.integrity)?),
         test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
+        test_filter: filter.cloned(),
     })?)
+}
+
+/// The filter as one key: its values normalized and sorted, so the same
+/// tests asked for in another order or case find the same index.
+fn filter_digest(filter: &crate::coverage_report::TestFilter) -> [u8; 32] {
+    let mut parts = [
+        filter
+            .tags
+            .iter()
+            .map(|tag| tag.trim_start_matches('@').to_lowercase())
+            .collect::<Vec<_>>(),
+        filter
+            .titles
+            .iter()
+            .map(|title| title.to_lowercase())
+            .collect(),
+        filter
+            .files
+            .iter()
+            .map(|file| {
+                file.trim_start_matches("./")
+                    .trim_end_matches('/')
+                    .to_owned()
+            })
+            .collect(),
+    ];
+    parts[0].extend(filter.kind.iter().map(|kind| format!("kind\0{kind}")));
+    parts[0].extend(
+        filter
+            .runner
+            .iter()
+            .map(|runner| format!("runner\0{runner}")),
+    );
+    let mut hash = Sha256::new();
+    hash.update(domain_hash(
+        "supercov-test-filter",
+        QUERY_INDEX_SCHEMA_VERSION,
+    ));
+    for part in &mut parts {
+        part.sort();
+        part.dedup();
+        for value in part.iter() {
+            hash.update(value.as_bytes());
+            hash.update([0]);
+        }
+        hash.update([1]);
+    }
+    hash.finalize().into()
+}
+
+/// The query index of only the tests `filter` picks, built from the run's
+/// evidence the first time it is asked for and kept beside the run's own
+/// index. Nothing of it is worked out while the tests run or the run is
+/// stored: only a query that names a filter pays for it, once.
+pub fn open_or_build_filtered_query_index(
+    run: &StoredRun,
+    filter: &crate::coverage_report::TestFilter,
+) -> Result<QueryIndex, RunIndexError> {
+    let digest = filter_digest(filter);
+    let mut identity = query_index_identity(run)?;
+    identity.analysis_sha256 = digest;
+    let name = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let path = run
+        .query_index_path
+        .with_file_name(format!("filtered-{name}.index"));
+    if let Ok(index) = open_validated_query_index(&path, &identity) {
+        touch(&path);
+        return Ok(index);
+    }
+    let report = analyze_stored_run_filtered(run, Some(filter))?;
+    let sections = coverage_index_sections(&report)?;
+    let mut current = query_index_identity(run)?;
+    current.analysis_sha256 = digest;
+    if current != identity {
+        return Err(RunIndexError::EvidenceChanged);
+    }
+    write_query_index(&sections, &identity, &path)?;
+    prune_filtered_indexes(&path);
+    open_written_query_index(&path, &identity)
+}
+
+/// How many filtered indexes a run keeps. Each is about half the run's own
+/// index, so a run asked about many filters would otherwise grow without end.
+const KEPT_FILTERED_INDEXES: usize = 8;
+
+/// Mark a filtered index as just used, so pruning keeps the ones still asked.
+fn touch(path: &Path) {
+    if let Ok(file) = fs::File::options().append(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// Remove all but the most recently used filtered indexes beside `kept`.
+fn prune_filtered_indexes(kept: &Path) {
+    let Some(directory) = kept.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut filtered = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("filtered-") && name.ends_with(".index")
+        })
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect::<Vec<_>>();
+    filtered.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, path) in filtered.into_iter().skip(KEPT_FILTERED_INDEXES) {
+        if path != kept {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 /// Write a run's query index from coverage already analysed from its evidence,
