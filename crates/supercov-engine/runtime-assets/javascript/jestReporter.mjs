@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
-import { inferTestProvenance } from "./provenance.mjs";
+import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendEvidenceRecord } from "./atomic.mjs";
 function digest(value) {
     return createHash("sha256").update(value).digest("hex").slice(0, 24);
@@ -52,6 +52,7 @@ export default class SupercovJestReporter {
             runner: "jest",
             file: testFile,
             explicitKind: process.env["SUPERCOV_TEST_KIND"],
+            tags: testTags(undefined, [result.fullName]),
         });
         const record = (attempt, attemptStatus, flaky) => {
             const payload = {

@@ -16,7 +16,7 @@ use supercov_engine::{
         CoverageFileDetailOptions, CoverageScopeQueryOptions, CoverageSummaryQueryOptions,
         FileDetailSource, coverage_file_detail_from, coverage_scope_query, coverage_summary_query,
     },
-    run_store::{StoredRun, compare_run_integrity, open_or_rebuild_query_index, select_run},
+    run_store::{StoredRun, compare_run_integrity, select_run},
 };
 
 use crate::{current_integrity_for_run, full_suite_hints, public_run_inventory};
@@ -42,11 +42,13 @@ struct ReportOptions {
     output: Option<PathBuf>,
     open: bool,
     runs: usize,
+    /// Only these tests' coverage, in every run the report holds.
+    filter: supercov_engine::coverage_report::TestFilter,
 }
 
 fn help() -> &'static str {
     "Usage: supercov report [run-id] [options]\n\nGenerates one private, self-contained interactive HTML file from stored runs.\nNo server or network connection is required.\n\nOptions:\n  --compare <run-id>   choose the initial comparison run\n  --runs <n>           include up to n runs (default: 5, maximum: 20)\n  --output <path>      write to this path, relative to the working directory
-                       (default: .supercov/reports/supercov-report.html in the project)\n  --no-open            do not open the report in the default browser\n  -h, --help           show this help\n"
+                       (default: .supercov/reports/supercov-report.html in the project)\n  --no-open            do not open the report in the default browser\n  --kind <kind>, --runner <runner>, --tag <tag>, --title <text>, --test-file <path>\n                       only the coverage of the tests these pick\n  -h, --help           show this help\n"
 }
 
 fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
@@ -55,6 +57,7 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
     let mut output: Option<PathBuf> = None;
     let mut open = true;
     let mut runs = DEFAULT_RUNS;
+    let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -85,6 +88,17 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
             }
             "--no-open" => open = false,
             "--help" | "-h" => return Err(help().into()),
+            value
+                if matches!(
+                    value,
+                    "--kind" | "--runner" | "--tag" | "--title" | "--test-file"
+                ) =>
+            {
+                let mut next = index + 1;
+                crate::test_filter_option(value, arguments, &mut next, &mut filter)
+                    .expect("a test filter option")?;
+                index = next - 1;
+            }
             value if value.starts_with('-') => {
                 return Err(format!("Unknown report option: {value}"));
             }
@@ -105,6 +119,7 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
         output,
         open,
         runs,
+        filter,
     })
 }
 
@@ -113,6 +128,9 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
 struct ReportBundle {
     schema_version: u32,
     project: String,
+    /// The tests the report reads, when it reads only some: `--tag e2e`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tests: Option<String>,
     /// The timeline item the report opens on, which may be an assessment that
     /// no run pairs with.
     selected_id: String,
@@ -359,7 +377,13 @@ fn project_name(root: &Path) -> String {
         .unwrap_or_else(|| "project".into())
 }
 
-fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
+/// A run as the report shows it; `None` when the filter picks none of its
+/// tests.
+fn build_run(
+    root: &Path,
+    run: &StoredRun,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+) -> Result<Option<ReportRun>, String> {
     let current_integrity = current_integrity_for_run(root, run);
     let source_exact = current_integrity.as_ref().is_some_and(|current| {
         current.fingerprint.source == run.metadata.integrity.fingerprint.source
@@ -374,8 +398,13 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
         .map(|value| value.reasons.clone())
         .or_else(|| run.metadata.integrity.stale_reasons.clone())
         .unwrap_or_default();
-    let container = open_or_rebuild_query_index(run)
-        .map_err(|error| format!("could not open run {}: {error}", run.id))?;
+    let container = match crate::open_query_index_for(run, filter) {
+        Ok(container) => container,
+        Err(supercov_engine::run_store::RunIndexError::Report(
+            supercov_engine::coverage_report::ReportError::NoTestMatches(_),
+        )) => return Ok(None),
+        Err(error) => return Err(format!("could not open run {}: {error}", run.id)),
+    };
     let index = CoverageIndex::new(&container)
         .map_err(|error| format!("could not read run {}: {error}", run.id))?;
     let mut summary = coverage_summary_query(
@@ -507,7 +536,7 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
     };
     let (sources, omitted_sources) = collect_sources(root, &files, source_exact);
 
-    Ok(ReportRun {
+    Ok(Some(ReportRun {
         id: run.id.clone(),
         git: run.metadata.integrity.git.clone(),
         started_at: run.metadata.started_at.clone(),
@@ -530,7 +559,7 @@ fn build_run(root: &Path, run: &StoredRun) -> Result<ReportRun, String> {
         lines,
         scope,
         sources,
-    })
+    }))
 }
 
 /// The run's assessed assertions coverage, when `assertions assess` saved one:
@@ -998,7 +1027,20 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
                 run.id
             );
             let _ = std::io::stderr().flush();
-            runs.push(build_run(&root, run)?);
+            let filter = (!options.filter.is_empty()).then_some(&options.filter);
+            match build_run(&root, run, filter)? {
+                Some(built) => runs.push(built),
+                // The run asked for must have the tests; an older one
+                // without them is left out of the comparison.
+                None if position == 0 => {
+                    return Err(format!(
+                        "no test of run {} matches {}",
+                        run.id,
+                        options.filter.describe()
+                    ));
+                }
+                None => {}
+            }
         }
         eprint!("\r{}\r", " ".repeat(96));
         let _ = std::io::stderr().flush();
@@ -1017,6 +1059,7 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
             .unwrap_or_else(|| timeline[0].id.clone());
         let bundle = ReportBundle {
             schema_version: REPORT_SCHEMA_VERSION,
+            tests: (!options.filter.is_empty()).then(|| options.filter.describe()),
             project: project_name(&root),
             selected_id,
             selected_run_id,

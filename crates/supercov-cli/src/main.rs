@@ -837,7 +837,7 @@ fn public_run_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-const CHECK_USAGE: &str = "supercov runs <run-id> check [--min-lines <pct>] [--min-statements <pct>]\n                           [--min-functions <pct>] [--min-branches <pct>] [--min-mcdc <pct>]\n                           [--per-file] [--json]\n";
+const CHECK_USAGE: &str = "supercov runs <run-id> check [--min-lines <pct>] [--min-statements <pct>]\n                           [--min-functions <pct>] [--min-branches <pct>] [--min-mcdc <pct>]\n                           [--per-file] [--json]\n                           [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]\n";
 
 /// Gate a recorded run against percentage floors, without running tests again.
 ///
@@ -849,6 +849,7 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
     let mut floors: Vec<supercov_engine::run_view::Floor> = Vec::new();
     let mut per_file = false;
     let mut json = false;
+    let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
     let mut index = 0;
     // `runs <id> check ...`; the id may be absent, meaning the latest run.
@@ -890,6 +891,13 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
                 }
             }
             other => {
+                if let Some(taken) = test_filter_option(other, rest, &mut index, &mut filter) {
+                    if let Err(error) = taken {
+                        eprintln!("[supercov] {error}\n{CHECK_USAGE}");
+                        return ExitCode::from(2);
+                    }
+                    continue;
+                }
                 eprintln!("[supercov] unknown option {other}\n{CHECK_USAGE}");
                 return ExitCode::from(2);
             }
@@ -897,7 +905,7 @@ fn coverage_check_command(arguments: &[String]) -> ExitCode {
     }
 
     let result = (|| -> Result<supercov_engine::run_view::Outcome, String> {
-        let view = load_run_view(selector)?;
+        let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
         let outcome = supercov_engine::run_view::check(&view, &floors, per_file);
         if json {
             print!(
@@ -999,7 +1007,36 @@ fn render_check(
     out
 }
 
-const PATCH_USAGE: &str = "supercov runs <run-id> patch --base <ref> [--min-lines <pct>]\n                           [--annotate github] [--max-annotations <n>] [--json]\n";
+const PATCH_USAGE: &str = "supercov runs <run-id> patch --base <ref> [--min-lines <pct>]\n                           [--annotate github] [--max-annotations <n>] [--json]\n                           [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]\n";
+
+/// The options that pick some of a run's tests, as `check`, `patch` and
+/// `report` read them. `Some` when `argument` is one of them: whether its
+/// value was there, after taking it.
+pub(crate) fn test_filter_option(
+    argument: &str,
+    rest: &[String],
+    index: &mut usize,
+    filter: &mut supercov_engine::coverage_report::TestFilter,
+) -> Option<Result<(), String>> {
+    if !matches!(
+        argument,
+        "--kind" | "--runner" | "--tag" | "--title" | "--test-file"
+    ) {
+        return None;
+    }
+    let Some(value) = rest.get(*index).filter(|value| !value.is_empty()) else {
+        return Some(Err(format!("{argument} needs a value")));
+    };
+    *index += 1;
+    match argument {
+        "--kind" => filter.kind = Some(value.to_lowercase()),
+        "--runner" => filter.runner = Some(value.to_lowercase()),
+        "--tag" => filter.tags.push(value.clone()),
+        "--title" => filter.titles.push(value.clone()),
+        _ => filter.files.push(value.clone()),
+    }
+    Some(Ok(()))
+}
 
 fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
@@ -1105,6 +1142,7 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
     let mut annotate = false;
     let mut max_annotations = 50_usize;
     let mut json = false;
+    let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
     if let Some(first) = arguments.first()
         && first != "patch"
@@ -1155,6 +1193,13 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
                 }
             }
             other => {
+                if let Some(taken) = test_filter_option(other, rest, &mut index, &mut filter) {
+                    if let Err(error) = taken {
+                        eprintln!("[supercov] {error}\n{PATCH_USAGE}");
+                        return ExitCode::from(2);
+                    }
+                    continue;
+                }
                 eprintln!("[supercov] unknown option {other}\n{PATCH_USAGE}");
                 return ExitCode::from(2);
             }
@@ -1167,7 +1212,7 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
 
     let result = (|| -> Result<u8, String> {
         let root = std::env::current_dir().map_err(|error| error.to_string())?;
-        let view = load_run_view(selector)?;
+        let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
         // Mapping a patch onto coverage recorded from different source would
         // annotate the wrong lines, which is worse than refusing.
         let blockers = view.blockers();
@@ -1283,16 +1328,101 @@ fn render_patch(
     out
 }
 
+/// The files that differ from what a stale run measured, tests and source:
+/// those it recorded that are not as they were, and those added since its
+/// commit. "Test files changed" alone sent readers comparing commit dates
+/// with the run's start to work out which.
+fn changed_since_run(root: &Path, run: &StoredRun) -> Vec<String> {
+    let Ok(stored) = supercov_engine::source_manifest::load_manifest(run) else {
+        return Vec::new();
+    };
+    let recorded = &stored.manifest.files;
+    let mut changed = supercov_engine::source_manifest::changed_files(recorded, |file| {
+        fs::read_to_string(root.join(file))
+            .ok()
+            .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256)
+    });
+    // Added files are in no record: git names them, of the kinds of file the
+    // run measured.
+    let extensions = recorded
+        .keys()
+        .filter_map(|file| Path::new(file).extension())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut added = Vec::new();
+    if let Some(revision) = run
+        .metadata
+        .integrity
+        .git
+        .as_ref()
+        .and_then(|git| git.revision.as_deref())
+        && let Ok(listed) = git_output(
+            root,
+            &[
+                "diff",
+                "--name-only",
+                "--relative",
+                "--diff-filter=A",
+                revision,
+            ],
+        )
+    {
+        added.extend(listed.lines().map(str::to_owned));
+    }
+    if let Ok(listed) = git_output(root, &["ls-files", "--others", "--exclude-standard"]) {
+        added.extend(listed.lines().map(str::to_owned));
+    }
+    for file in added {
+        let file = file.trim().to_owned();
+        if !file.is_empty()
+            && !recorded.contains_key(&file)
+            && !changed.contains(&file)
+            && Path::new(&file)
+                .extension()
+                .is_some_and(|extension| extensions.contains(extension))
+        {
+            changed.push(file);
+        }
+    }
+    changed.sort();
+    changed
+}
+
+/// A run's query index, or, when a filter picks tests, the index of only
+/// those tests' coverage, built from the run's evidence on first use.
+pub(crate) fn open_query_index_for(
+    run: &StoredRun,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+) -> Result<supercov_engine::query_index::QueryIndex, RunIndexError> {
+    match filter {
+        Some(filter) => supercov_engine::run_store::open_or_build_filtered_query_index(run, filter),
+        None => open_or_rebuild_query_index(run),
+    }
+}
+
 /// Resolve a run and build the shared view every workflow command reads.
 pub(crate) fn load_run_view(
     selector: Option<&str>,
 ) -> Result<supercov_engine::run_view::RunView, String> {
+    load_run_view_filtered(selector, None)
+}
+
+/// [`load_run_view`] for only the tests `filter` picks.
+pub(crate) fn load_run_view_filtered(
+    selector: Option<&str>,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+) -> Result<supercov_engine::run_view::RunView, String> {
+    if let Some(filter) = filter {
+        eprintln!(
+            "[supercov] reading only the tests {} picks",
+            filter.describe()
+        );
+    }
     let root = std::env::current_dir().map_err(|error| error.to_string())?;
     let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
     let comparison = current_integrity_for_run(&root, run)
         .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
-    let report = analyze_stored_run(run)?;
+    let report = analyze_stored_run_filtered(run, filter)?;
     let passed = run.metadata.test_exit_code == Some(0);
     // A passing run is read whole, as its summary reads it: what passing
     // tests ran alone leaves out what ran outside any test -- a module's top
@@ -1363,7 +1493,7 @@ pub(crate) fn load_point_tests(
 /// look like it invokes the tools they are named after.
 fn report_usage() -> String {
     format!(
-        "supercov runs <run-id> report --format {} [--output <path>] [--force]\n",
+        "supercov runs <run-id> report --format {} [--output <path>] [--force] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]\n",
         supercov_engine::coverage_export::FORMATS
     )
 }
@@ -1402,6 +1532,7 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     let mut format: Option<String> = None;
     let mut output: Option<PathBuf> = None;
     let mut force = false;
+    let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
     if let Some(first) = arguments.first()
         && first != "report"
@@ -1432,7 +1563,15 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                     output = Some(PathBuf::from(value));
                 }
             }
+            // The coverage of some tests alone, from the run as recorded.
             other => {
+                if let Some(taken) = test_filter_option(other, rest, &mut index, &mut filter) {
+                    if let Err(error) = taken {
+                        eprintln!("[supercov] {error}\n{}", report_usage());
+                        return ExitCode::from(2);
+                    }
+                    continue;
+                }
                 eprintln!("[supercov] unknown option {other}\n{}", report_usage());
                 return ExitCode::from(2);
             }
@@ -1444,7 +1583,7 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     };
 
     let result = (|| -> Result<(), String> {
-        let view = load_run_view(selector)?;
+        let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
         // A report from a failed or stale run is still worth reading, so this
         // writes it and says so on stderr rather than refusing. Only a gate
         // must never go green over one.
@@ -2299,6 +2438,36 @@ enum PublicQueryOutput {
 }
 
 impl PublicQueryOutput {
+    /// Several lines too many for one reply keep the ones that fit and name
+    /// the rest, to be asked again.
+    fn fit_lines(&mut self) {
+        let Self::Coverage { output, .. } = self else {
+            return;
+        };
+        loop {
+            if output.agent_json().is_ok() {
+                return;
+            }
+            let supercov_engine::indexed_query::IndexedQueryData::Lines(data) = &mut output.data
+            else {
+                return;
+            };
+            if data.lines.len() <= 1 {
+                return;
+            }
+            let line = data.lines.pop().expect("more than one line");
+            data.pages.pop();
+            let location = match &line {
+                supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+                    &data.location
+                }
+                supercov_engine::coverage_query::CoverageCoversData::Line(data) => &data.location,
+            };
+            data.remaining
+                .insert(0, format!("{}:{}", location.file, location.line));
+        }
+    }
+
     /// How many entries of a page too large for one reply would fit, when
     /// it is that and not something else.
     fn page_that_fits(&self) -> Option<usize> {
@@ -2337,6 +2506,30 @@ impl From<agent_json::AgentError> for PublicQueryExecutionError {
         Self {
             error: Box::new(error),
             warnings: Vec::new(),
+        }
+    }
+}
+
+/// What the assertion map says about a line, beside its coverage.
+fn line_assertions(
+    run: &StoredRun,
+    data: &mut supercov_engine::coverage_query::CoverageCoversData,
+) {
+    use supercov_engine::coverage_query::CoverageCoversData;
+    match data {
+        CoverageCoversData::Anchors(data) => {
+            data.assertions = Some(assertions_command::for_line(
+                run,
+                &data.location.file,
+                data.location.line,
+            ));
+        }
+        CoverageCoversData::Line(data) => {
+            data.assertions = Some(assertions_command::for_line(
+                run,
+                &data.location.file,
+                data.location.line,
+            ));
         }
     }
 }
@@ -2398,8 +2591,24 @@ fn execute_public_query(
                     .stale_reasons
                     .get_or_insert_with(|| comparison.reasons.clone());
                 if comparison.stale {
+                    let changed = changed_since_run(root, run);
+                    let named = if changed.is_empty() {
+                        String::new()
+                    } else {
+                        let shown = changed.iter().take(10).cloned().collect::<Vec<_>>();
+                        let more = changed.len().saturating_sub(shown.len());
+                        format!(
+                            "; changed since the run: {}{}",
+                            shown.join(", "),
+                            if more > 0 {
+                                format!(" and {more} more")
+                            } else {
+                                String::new()
+                            }
+                        )
+                    };
                     warnings.push(format!(
-                        "[supercov] stale run {}: {}",
+                        "[supercov] stale run {}: {}{named}",
                         run.id,
                         comparison.reasons.join(", ")
                     ));
@@ -2407,7 +2616,16 @@ fn execute_public_query(
             }
             let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
                 let progress = ProgressLine::start("loading run evidence");
-                let container = open_or_rebuild_query_index(run).map_err(|error| {
+                let test_filter = request.test_filter();
+                let container = open_query_index_for(run, test_filter.as_ref()).map_err(|error| {
+                    if let RunIndexError::Report(ReportError::NoTestMatches(filter)) = &error {
+                        return agent_json::AgentError {
+                            code: agent_json::ErrorCode::TestFilterEmpty,
+                            message: format!("No tests match {filter}"),
+                            retryable: false,
+                            details: Some(serde_json::json!({ "filter": filter })),
+                        };
+                    }
                     let message = if matches!(
                         error,
                         RunIndexError::Report(ReportError::NoEvidence(_))
@@ -2429,7 +2647,7 @@ fn execute_public_query(
                 drop(progress);
                 let report = if request.command == "minimize" {
                     Some(
-                        analyze_stored_run(run)
+                        analyze_stored_run_filtered(run, test_filter.as_ref())
                             .map_err(|error| internal_agent_error(error.to_string()))?,
                     )
                 } else {
@@ -2472,11 +2690,12 @@ fn execute_public_query(
                         });
                     }
                     let comparison_progress = ProgressLine::start("loading comparison run");
-                    newer_container = open_or_rebuild_query_index(newer_run).map_err(|error| {
-                        internal_agent_error(format!(
-                            "Failed to open newer coverage index: {error}"
-                        ))
-                    })?;
+                    newer_container = open_query_index_for(newer_run, test_filter.as_ref())
+                        .map_err(|error| {
+                            internal_agent_error(format!(
+                                "Failed to open newer coverage index: {error}"
+                            ))
+                        })?;
                     newer_index = CoverageIndex::new(&newer_container).map_err(|error| {
                         internal_agent_error(format!(
                             "Failed to read newer coverage index: {error}"
@@ -2504,6 +2723,19 @@ fn execute_public_query(
                             data,
                         );
                     }
+                    // Each line of several is given what one line is given.
+                    if let supercov_engine::indexed_query::IndexedQueryData::Lines(data) =
+                        &mut output.data
+                    {
+                        for line in &mut data.lines {
+                            hydrate_line_source_from_working_tree(
+                                root,
+                                request.stale.unwrap_or(false),
+                                line,
+                            );
+                            line_assertions(run, line);
+                        }
+                    }
                     if let supercov_engine::indexed_query::IndexedQueryData::Diff(data) =
                         &mut output.data
                     {
@@ -2514,23 +2746,7 @@ fn execute_public_query(
                             data.assertions = Some(assertions_command::for_file(run, &data.file));
                         }
                         supercov_engine::indexed_query::IndexedQueryData::Line(data) => {
-                            use supercov_engine::coverage_query::CoverageCoversData;
-                            match data.as_mut() {
-                                CoverageCoversData::Anchors(data) => {
-                                    data.assertions = Some(assertions_command::for_line(
-                                        run,
-                                        &data.location.file,
-                                        data.location.line,
-                                    ));
-                                }
-                                CoverageCoversData::Line(data) => {
-                                    data.assertions = Some(assertions_command::for_line(
-                                        run,
-                                        &data.location.file,
-                                        data.location.line,
-                                    ));
-                                }
-                            }
+                            line_assertions(run, data);
                         }
                         _ => {}
                     }
@@ -2668,6 +2884,7 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
             // size the refusal had suggested for the page before.
             let mut invocation = invocation;
             let mut output = output;
+            output.fit_lines();
             while let Some(fits) = output.page_that_fits() {
                 let PublicQueryInvocation::Coverage { request, .. } = &mut invocation else {
                     break;
@@ -2947,8 +3164,10 @@ struct StoredQueryRequest {
     newer_run_id: Option<String>,
 }
 
-fn analyze_stored_run(
+/// A stored run's coverage, of only the tests `filter` picks when it is given.
+fn analyze_stored_run_filtered(
     run: &StoredRun,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::coverage_report::CoverageReport, String> {
     analyze_coverage_archive(&ArchiveReportRequest {
         archive_path: run.evidence_path.clone(),
@@ -2958,8 +3177,12 @@ fn analyze_stored_run(
         test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(
             run.metadata.test_exit_code,
         ),
+        test_filter: filter.cloned(),
     })
-    .map_err(|error| format!("invalid coverage archive: {error:?}"))
+    .map_err(|error| match error {
+        ReportError::NoTestMatches(filter) => format!("no test of the run matches {filter}"),
+        error => format!("invalid coverage archive: {error:?}"),
+    })
 }
 
 /// Internal differential surface for real persisted-run opening and indexing.
@@ -2988,10 +3211,12 @@ fn query_stored_run() -> ExitCode {
             .query
             .valid
             .get_or_insert(run.metadata.test_exit_code == Some(0));
-        let container = open_or_rebuild_query_index(run).map_err(|error| error.to_string())?;
+        let test_filter = request.query.test_filter();
+        let container =
+            open_query_index_for(run, test_filter.as_ref()).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
         let report = if request.query.command == "minimize" {
-            Some(analyze_stored_run(run)?)
+            Some(analyze_stored_run_filtered(run, test_filter.as_ref())?)
         } else {
             None
         };
@@ -3005,8 +3230,8 @@ fn query_stored_run() -> ExitCode {
                 .ok_or_else(|| "stored diff requires a newer run ID".to_owned())?;
             let newer_run =
                 select_run(&inventory, Some(selector)).map_err(|error| error.to_string())?;
-            newer_container =
-                open_or_rebuild_query_index(newer_run).map_err(|error| error.to_string())?;
+            newer_container = open_query_index_for(newer_run, test_filter.as_ref())
+                .map_err(|error| error.to_string())?;
             newer_index =
                 CoverageIndex::new(&newer_container).map_err(|error| error.to_string())?;
             Some(NewerQuery {

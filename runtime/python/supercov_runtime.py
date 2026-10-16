@@ -771,7 +771,7 @@ class Runtime:
             return {}
         return {CONTEXT_ENV: _json_text({key: identity[key] for key in sorted(identity)})}
 
-    def outcome(self, worker: str, test: str, retry: int, phase: str, outcome: str, xfail: bool, runner: str = "pytest", file: "str | None" = None) -> None:
+    def outcome(self, worker: str, test: str, retry: int, phase: str, outcome: str, xfail: bool, runner: str = "pytest", file: "str | None" = None, tags: "list[str] | None" = None) -> None:
         """`file` is where the runner says the test is defined.
 
         An assertion map selects tests by source file and name, and a runner
@@ -781,13 +781,14 @@ class Runtime:
         """
         text = self._json_id
         self._record_payload(
-            b'{%s"outcome":%s,"phase":%s,"retry":%d,"runner":%s,"t":"outcome","test":%s,"worker":%s,"xfail":%s}'
+            b'{%s"outcome":%s,"phase":%s,"retry":%d,"runner":%s,"t":"outcome",%s"test":%s,"worker":%s,"xfail":%s}'
             % (
                 b'"file":%s,' % text(file) if file else b"",
                 text(outcome),
                 text(phase),
                 int(retry),
                 text(runner),
+                b'"tags":[%s],' % b",".join(text(tag) for tag in tags) if tags else b"",
                 text(test),
                 text(worker),
                 b"true" if xfail else b"false",

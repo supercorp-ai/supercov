@@ -10,7 +10,7 @@ import {
   decodeCoverageScope,
   encodeCoverageScope,
 } from "../../runtime/javascript/transport.mjs";
-import { inferTestProvenance } from "../../runtime/javascript/provenance.mjs";
+import { inferTestProvenance, testTags } from "../../runtime/javascript/provenance.mjs";
 import { callerLocation } from "../../runtime/javascript/runnerEvidence.mjs";
 import {
   discoverWorkspaceMapping,
@@ -245,6 +245,41 @@ test("test provenance prefers explicit, project, path, then runner defaults", ()
       explicitKind: "integration",
     }).kind,
     "integration",
+  );
+});
+
+test("a test's tags are the runner's and the @words of its titles, and a level tag is its kind", () => {
+  assert.deepEqual(
+    testTags(["@smoke", "api"], ["checkout @e2e", "pays @api", "mails x@y.com", undefined]),
+    ["smoke", "api", "e2e"],
+  );
+  assert.deepEqual(testTags(undefined, ["no tags here"]), []);
+  assert.deepEqual(testTags({ not: "a list" }, "not a list"), []);
+  const tagged = inferTestProvenance({
+    runner: "vitest",
+    file: "tests/unit/cart.test.ts",
+    tags: ["smoke", "E2E"],
+  });
+  assert.deepEqual(tagged, {
+    runner: "vitest",
+    kind: "e2e",
+    source: "tag",
+    tags: ["smoke", "E2E"],
+  });
+  // An explicit kind still wins, and the tags stay.
+  assert.deepEqual(
+    inferTestProvenance({
+      runner: "vitest",
+      file: "a.test.ts",
+      explicitKind: "integration",
+      tags: ["e2e"],
+    }),
+    { runner: "vitest", kind: "integration", source: "explicit", tags: ["e2e"] },
+  );
+  // A tag that names no level leaves the kind to the path.
+  assert.equal(
+    inferTestProvenance({ runner: "vitest", file: "tests/unit/a.test.ts", tags: ["api"] }).kind,
+    "unit",
   );
 });
 

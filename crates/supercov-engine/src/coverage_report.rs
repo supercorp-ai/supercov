@@ -217,6 +217,12 @@ pub struct TestProvenance {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     pub source: String,
+    /// The labels the test carries, without a leading `@`: a Playwright tag
+    /// or an `@word` in a title, a pytest marker, an RSpec or Cucumber tag, a
+    /// JUnit `@Tag`. Read from what the runner already hands over, in its
+    /// order, each once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl Default for TestProvenance {
@@ -226,6 +232,7 @@ impl Default for TestProvenance {
             kind: "unknown".into(),
             project: None,
             source: "unknown".into(),
+            tags: Vec::new(),
         }
     }
 }
@@ -909,6 +916,134 @@ pub struct ArchiveReportRequest {
     pub integrity: Option<Value>,
     #[serde(default, deserialize_with = "deserialize_exit_code")]
     pub test_exit_code: ExitCodeInput,
+    /// Only the coverage of the tests this names, when it names any.
+    #[serde(skip)]
+    pub test_filter: Option<TestFilter>,
+}
+
+/// Tests picked by a tag, a title or a file, for the coverage of those tests
+/// alone, read from a run already measured. Any value of one kind of
+/// criterion picks a test; every kind given must pick it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestFilter {
+    /// Tags, with or without the `@`, in any case.
+    pub tags: Vec<String>,
+    /// Text the test's full name contains, in any case.
+    pub titles: Vec<String>,
+    /// Test files, or directories that hold them, from the project root.
+    pub files: Vec<String>,
+    /// A test kind and a runner, for a reader with no index to project them:
+    /// a query's index already holds coverage by kind and by runner.
+    pub kind: Option<String>,
+    pub runner: Option<String>,
+}
+
+impl TestFilter {
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+            && self.titles.is_empty()
+            && self.files.is_empty()
+            && self.kind.is_none()
+            && self.runner.is_none()
+    }
+
+    pub fn matches(
+        &self,
+        name: &str,
+        title: Option<&str>,
+        file: Option<&str>,
+        provenance: &TestProvenance,
+    ) -> bool {
+        let kinded = self
+            .kind
+            .as_ref()
+            .is_none_or(|kind| provenance.kind == *kind)
+            && self
+                .runner
+                .as_ref()
+                .is_none_or(|runner| provenance.runner == *runner);
+        let tags = &provenance.tags;
+        let tag = |value: &str| value.trim_start_matches('@').to_lowercase();
+        let tagged = self.tags.is_empty()
+            || self
+                .tags
+                .iter()
+                .any(|wanted| tags.iter().any(|carried| tag(carried) == tag(wanted)));
+        // The full name, and the title where the name is only a position
+        // (`spec/cart_spec.rb[1:2]`, with "Cart adds an item" its title).
+        let name = name.to_lowercase();
+        let title = title.map(str::to_lowercase).unwrap_or_default();
+        let titled = self.titles.is_empty()
+            || self.titles.iter().any(|wanted| {
+                let wanted = wanted.to_lowercase();
+                name.contains(&wanted) || title.contains(&wanted)
+            });
+        let filed = self.files.is_empty()
+            || file.is_some_and(|file| {
+                let file = file.trim_start_matches("./");
+                self.files.iter().any(|wanted| {
+                    let wanted = wanted.trim_start_matches("./").trim_end_matches('/');
+                    file == wanted
+                        || file
+                            .strip_prefix(wanted)
+                            .is_some_and(|rest| rest.starts_with('/'))
+                })
+            });
+        kinded && tagged && titled && filed
+    }
+
+    /// The filter in words, as `--tag api --title checkout`.
+    pub fn describe(&self) -> String {
+        let mut words = Vec::new();
+        for (flag, value) in [("--kind", &self.kind), ("--runner", &self.runner)] {
+            if let Some(value) = value {
+                words.push(format!("{flag} {value}"));
+            }
+        }
+        for (flag, values) in [
+            ("--tag", &self.tags),
+            ("--title", &self.titles),
+            ("--test-file", &self.files),
+        ] {
+            for value in values {
+                words.push(format!("{flag} {value}"));
+            }
+        }
+        words.join(" ")
+    }
+
+    /// The tests the filter picks, with the setup that ran in their files;
+    /// what ran outside any test is no picked test's.
+    fn select(&self, raw_results: Vec<RawTestResult>) -> Result<Vec<RawTestResult>, ReportError> {
+        let picked = |raw: &RawTestResult| {
+            raw.role == "test"
+                && self.matches(
+                    &raw.test,
+                    raw.title.as_deref(),
+                    raw.test_file.as_deref(),
+                    &raw.provenance,
+                )
+        };
+        let files = raw_results
+            .iter()
+            .filter(|raw| picked(raw))
+            .filter_map(|raw| raw.test_file.clone())
+            .collect::<BTreeSet<_>>();
+        if !raw_results.iter().any(picked) {
+            return Err(ReportError::NoTestMatches(self.describe()));
+        }
+        Ok(raw_results
+            .into_iter()
+            .filter(|raw| {
+                picked(raw)
+                    || (raw.role == "setup"
+                        && raw
+                            .test_file
+                            .as_ref()
+                            .is_some_and(|file| files.contains(file)))
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -945,6 +1080,8 @@ pub enum ReportError {
         actual: String,
     },
     NoEvidence(String),
+    /// No test of the run is one the filter names.
+    NoTestMatches(String),
 }
 
 impl From<AnalysisError> for ReportError {
@@ -2771,6 +2908,53 @@ pub fn analyze_coverage_results(
     })
 }
 
+/// Parse each entry on its own, a share of them on each core, keeping their
+/// order. Every test's record is a JSON document of its own: one after another
+/// they were a fifth of re-indexing a 1,100-test run.
+fn parse_in_parallel<T: Send>(
+    entries: &[&EvidenceArchiveEntry],
+    parse: impl Fn(&&EvidenceArchiveEntry) -> Result<Vec<T>, ReportError> + Sync,
+) -> Result<Vec<T>, ReportError> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(entries.len().div_ceil(64))
+        .max(1);
+    if threads == 1 {
+        return entries.iter().try_fold(Vec::new(), |mut parsed, entry| {
+            parsed.extend(parse(entry)?);
+            Ok(parsed)
+        });
+    }
+    let chunk = entries.len().div_ceil(threads);
+    let parse = &parse;
+    let parts = std::thread::scope(|scope| {
+        let handles = entries
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter().try_fold(Vec::new(), |mut parsed, entry| {
+                        parsed.extend(parse(entry)?);
+                        Ok::<_, ReportError>(parsed)
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut parsed = Vec::new();
+    for part in parts {
+        parsed.extend(part?);
+    }
+    Ok(parsed)
+}
+
 fn parse_entry<T: for<'de> Deserialize<'de>>(
     entry: &EvidenceArchiveEntry,
 ) -> Result<T, ReportError> {
@@ -2871,15 +3055,20 @@ pub fn analyze_coverage_archive(
         .find(|entry| entry.path == "manifest.json")
         .ok_or(ReportError::MissingManifest)
         .and_then(parse_entry::<CoverageManifest>)?;
-    let mut raw_results = entries
+    let results = entries
         .iter()
         .filter(|entry| is_mcdc_result(&entry.path))
-        .map(parse_entry::<RawTestResult>)
-        .collect::<Result<Vec<_>, _>>()?;
-    let journal_results = parse_json_lines::<RawTestResult>(
-        entries.iter().filter(|entry| is_mcdc_journal(&entry.path)),
-    )?;
-    raw_results.extend(journal_results);
+        .collect::<Vec<_>>();
+    let mut raw_results = parse_in_parallel(&results, |entry| {
+        Ok(vec![parse_entry::<RawTestResult>(entry)?])
+    })?;
+    let journals = entries
+        .iter()
+        .filter(|entry| is_mcdc_journal(&entry.path))
+        .collect::<Vec<_>>();
+    raw_results.extend(parse_in_parallel(&journals, |entry| {
+        parse_json_lines::<RawTestResult>(std::iter::once(*entry))
+    })?);
 
     let scoped = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
         entry.path.starts_with("server/")
@@ -2971,6 +3160,7 @@ pub fn analyze_coverage_archive(
                 kind: "background".into(),
                 project: None,
                 source: "explicit".into(),
+                tags: Vec::new(),
             },
             role: "background".into(),
             attribution: ATTRIBUTION_EXACT.into(),
@@ -3007,7 +3197,7 @@ pub fn analyze_coverage_archive(
             + execution.corrupt_records,
         corrupt_files: scoped.corrupt_files + background.corrupt_files + execution.corrupt_files,
     };
-    let frontend = entries
+    let mut frontend = entries
         .iter()
         .find(|entry| entry.path == "frontend.json")
         .ok_or_else(|| ReportError::InvalidArchive("missing frontend.json".into()))
@@ -3032,6 +3222,22 @@ pub fn analyze_coverage_archive(
     }
     separate_repeated_executions(&mut raw_results);
     release_leaked_phases(&mut raw_results);
+    // After server work was credited to its tests by time, so a picked test
+    // keeps what its requests did.
+    if let Some(filter) = request
+        .test_filter
+        .as_ref()
+        .filter(|filter| !filter.is_empty())
+    {
+        raw_results = filter.select(raw_results)?;
+        // The runners the picked tests ran under: one whose tests were all
+        // left out, background included, is not in this view.
+        frontend.runners.retain(|declared| {
+            raw_results
+                .iter()
+                .any(|raw| raw.provenance.runner == declared.runner)
+        });
+    }
     let normalized = CoverageReportRequest {
         run_id: request.run_id.clone(),
         manifest,
@@ -3045,7 +3251,12 @@ pub fn analyze_coverage_archive(
     // 3,900-test run -- and nothing reads them again, so they need not stay
     // resident while the views are built beside what was parsed from them.
     drop(entries);
-    analyze_frontend_request(&frontend, &normalized, transport)
+    let report = analyze_frontend_request(&frontend, &normalized, transport);
+    // Every test's records, gigabytes of small allocations on a large run:
+    // the views hold what they need, and freeing the rest is nobody's wait.
+    // It took 2 to 5 s of a 1,100-test run's re-index.
+    std::thread::spawn(move || drop(normalized));
+    report
 }
 
 /// Give a test that ran again under the same identity phases of its own.
@@ -3177,6 +3388,52 @@ impl TransportStats {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_test_filter_picks_by_any_value_of_each_criterion_and_every_criterion_given() {
+        let provenance = |tags: &[&str]| TestProvenance {
+            runner: "playwright".into(),
+            kind: "e2e".into(),
+            tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            ..TestProvenance::default()
+        };
+        let api = provenance(&["api", "smoke"]);
+        let filter = |tags: &[&str], titles: &[&str], files: &[&str]| TestFilter {
+            tags: tags.iter().map(|value| value.to_string()).collect(),
+            titles: titles.iter().map(|value| value.to_string()).collect(),
+            files: files.iter().map(|value| value.to_string()).collect(),
+            kind: None,
+            runner: None,
+        };
+        let name = "checkout > pays by card @api";
+        let file = Some("tests/e2e/checkout.spec.ts");
+        assert!(filter(&["@API"], &[], &[]).matches(name, None, file, &api));
+        assert!(filter(&["ui", "smoke"], &[], &[]).matches(name, None, file, &api));
+        assert!(!filter(&["ui"], &[], &[]).matches(name, None, file, &api));
+        assert!(filter(&[], &["PAYS BY"], &[]).matches(name, None, file, &api));
+        // A positional name matches by its title.
+        assert!(filter(&[], &["adds an item"], &[]).matches(
+            "spec/cart_spec.rb[1:2]",
+            Some("Cart adds an item"),
+            None,
+            &api
+        ));
+        assert!(filter(&[], &[], &["tests/e2e"]).matches(name, None, file, &api));
+        assert!(filter(&[], &[], &["./tests/e2e/"]).matches(name, None, file, &api));
+        assert!(filter(&[], &[], &["tests/e2e/checkout.spec.ts"]).matches(name, None, file, &api));
+        // A directory is a whole segment, not a prefix of a name.
+        assert!(!filter(&[], &[], &["tests/e"]).matches(name, None, file, &api));
+        assert!(!filter(&["api"], &[], &["tests/unit"]).matches(name, None, file, &api));
+        let kinded = TestFilter {
+            kind: Some("unit".into()),
+            ..TestFilter::default()
+        };
+        assert!(!kinded.matches(name, None, file, &api));
+        assert_eq!(
+            filter(&["api"], &["pays"], &["tests"]).describe(),
+            "--tag api --title pays --test-file tests"
+        );
+    }
     use std::{
         fs,
         sync::atomic::{AtomicU64, Ordering},
@@ -3324,6 +3581,7 @@ mod tests {
                 kind: "unit".into(),
                 project: None,
                 source: "runner-default".into(),
+                tags: Vec::new(),
             },
             role: "test".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -4020,6 +4278,7 @@ mod tests {
             generated_at: "time".into(),
             integrity: None,
             test_exit_code: ExitCodeInput::Missing,
+            test_filter: None,
         });
         assert!(matches!(
             result,
@@ -4128,6 +4387,7 @@ mod tests {
             generated_at: "time".into(),
             integrity: None,
             test_exit_code: ExitCodeInput::Missing,
+            test_filter: None,
         })
         .expect("a torn evidence line must not fail the whole run");
         let transport = report.view.transport.expect("transport stats");
@@ -4175,6 +4435,7 @@ mod tests {
                 generated_at: "time".into(),
                 integrity: None,
                 test_exit_code: ExitCodeInput::Missing,
+                test_filter: None,
             }),
             Err(ReportError::InvalidArchive(reason))
                 if reason.contains("expected=run actual=other-run")
@@ -4238,6 +4499,7 @@ mod tests {
                 generated_at: "time".into(),
                 integrity: None,
                 test_exit_code: ExitCodeInput::Missing,
+                test_filter: None,
             }),
             Err(ReportError::InvalidArchive(reason))
                 if reason.contains("javascript differs from coverage model language rust")
@@ -4428,6 +4690,7 @@ mod tests {
                 kind: kind.into(),
                 project: None,
                 source: String::new(),
+                tags: Vec::new(),
             },
             role: "test".into(),
             attribution: ATTRIBUTION_EXACT.into(),

@@ -72,6 +72,8 @@ pub struct OwnedTestEvidence {
     /// Which runner announced it. Empty where the frontend has only one, in
     /// which case that one is the answer.
     pub runner: String,
+    /// The tags the framework gave the test: a JUnit `@Tag`, a TestNG group.
+    pub tags: Vec<String>,
     /// Whether what this test reached could be credited to it. False for a Go
     /// test that called `t.Parallel()`, an Example or a Fuzz target: the test
     /// ran and its coverage is in the run-wide totals, and nothing can say
@@ -143,6 +145,15 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
         let unattributed = cursor.u64("test attribution")? != 0;
         let runner_length = cursor.u64("test runner")? as usize;
         let runner = cursor.text(runner_length, "test runner")?;
+        let tag_count = cursor.u64("test tags")? as usize;
+        let mut tags = Vec::with_capacity(tag_count.min(64));
+        for _ in 0..tag_count {
+            let tag_length = cursor.u64("test tags")? as usize;
+            let tag = cursor.text(tag_length, "test tags")?;
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
         let hits = cursor.u64("test probes")? as usize;
         let mut probes = BTreeMap::new();
         for _ in 0..hits {
@@ -162,6 +173,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
             name,
             status,
             runner,
+            tags,
             unattributed,
             probes,
             vectors,
@@ -659,9 +671,12 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 } else {
                     default_runner.clone()
                 },
-                kind: "unit".into(),
+                kind: crate::test_kind::from_tags(&test.tags)
+                    .unwrap_or("unit")
+                    .into(),
                 project: Some(outcome.package.clone()),
                 source: source.clone(),
+                tags: test.tags.clone(),
             };
             RawTestResult {
                 scope: Some(ExecutionScope {
@@ -761,6 +776,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             name: "background".into(),
             status: "unknown".into(),
             runner: String::new(),
+            tags: Vec::new(),
             // This record is where unattributed coverage goes; it is not
             // itself a test whose coverage went elsewhere.
             unattributed: false,
@@ -790,6 +806,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 kind: "background".into(),
                 project: None,
                 source: source.clone(),
+                tags: Vec::new(),
             },
             role: "background".into(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -899,6 +916,33 @@ mod tests {
         // vector from the one above.
         let first_false = unpack_vector(0b11 | (0b01 << 24), 2);
         assert_eq!(first_false.values, [Some(true), Some(false)]);
+    }
+
+    #[test]
+    fn a_test_carries_the_tags_its_framework_gave_it() {
+        let mut bytes = Vec::new();
+        let mut put = |value: u64| bytes.extend_from_slice(&value.to_le_bytes());
+        put(0); // no probes
+        put(1); // one test
+        let text = |bytes: &mut Vec<u8>, value: &str| {
+            bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        };
+        text(&mut bytes, "ShopTest.discounts()");
+        text(&mut bytes, "passed");
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // attributed
+        text(&mut bytes, "junit-platform");
+        bytes.extend_from_slice(&3_u64.to_le_bytes());
+        for tag in ["api", "e2e", "api"] {
+            text(&mut bytes, tag);
+        }
+        for value in [0_u64, 0, 0] {
+            // no probes, no vectors, no decisions
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let evidence = read_evidence(&bytes).unwrap();
+        assert_eq!(evidence.tests[0].tags, ["api", "e2e"]);
+        assert_eq!(evidence.tests[0].runner, "junit-platform");
     }
 
     #[test]
@@ -1138,6 +1182,7 @@ mod tests {
                     name: "TestSerial".into(),
                     status: "passed".into(),
                     runner: String::new(),
+                    tags: Vec::new(),
                     unattributed: false,
                     probes: BTreeMap::from([(0, 1)]),
                     vectors: Vec::new(),
@@ -1146,6 +1191,7 @@ mod tests {
                     name: "TestParallel".into(),
                     status: "passed".into(),
                     runner: String::new(),
+                    tags: Vec::new(),
                     unattributed: true,
                     probes: BTreeMap::from([(0, 1), (1, 1)]),
                     vectors: Vec::new(),

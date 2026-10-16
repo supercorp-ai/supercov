@@ -1202,6 +1202,7 @@
       const brand = node("div", "sidebar-brand"); brand.append(brandMark(), node("span", "", "Supercov"), themeToggle()); aside.append(brand);
       aside.append(node("div", "sidebar-project", "Project"));
       const project = node("div", "sidebar-project-name", state.bundle.project); project.title = state.bundle.project; aside.append(project);
+      if (state.bundle.tests) { aside.append(node("div", "sidebar-project", "Tests")); const tests = node("div", "sidebar-project-name", state.bundle.tests); tests.title = state.bundle.tests; aside.append(tests); }
       const history = node("div", "run-history"); const list = node("div", "run-list");
       const selected = currentItem();
       state.bundle.timeline.forEach(item => {

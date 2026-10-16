@@ -1563,6 +1563,7 @@ fn test_summary_record(
     view_id: CoverageViewId,
     test: &crate::coverage_report::TestCoverageResult,
     strings: &mut StringTable,
+    relations: &mut StringRelations,
 ) -> Result<[u8; TEST_SUMMARY_RECORD_SIZE], CoverageIndexError> {
     let mut record = [0_u8; TEST_SUMMARY_RECORD_SIZE];
     record[0] = view_id as u8;
@@ -1614,6 +1615,14 @@ fn test_summary_record(
         optional_string_id(test.provenance.project.as_deref(), strings)?,
     );
     put_u32(&mut record, 32, strings.intern(&test.provenance.source)?);
+    // The test's tags, as a run of strings: bytes 40..52 were reserved.
+    let (tags_offset, tags_count) = relations.push(&test.provenance.tags, strings)?;
+    put_u64(&mut record, 40, tags_offset);
+    put_u32(
+        &mut record,
+        48,
+        u32::try_from(tags_count).map_err(|_| CoverageIndexError::SizeOverflow)?,
+    );
     Ok(record)
 }
 
@@ -2043,7 +2052,12 @@ pub fn coverage_index_sections(
             )?);
         }
         for test in &view.tests {
-            test_summaries.extend_from_slice(&test_summary_record(id, test, &mut strings)?);
+            test_summaries.extend_from_slice(&test_summary_record(
+                id,
+                test,
+                &mut strings,
+                &mut relations,
+            )?);
             for retry in &test.retries {
                 test_retries.extend_from_slice(&test_retry_record(
                     id,
@@ -3360,7 +3374,11 @@ impl<'a> CoverageIndex<'a> {
             if CoverageViewId::try_from(record[0])? != view {
                 continue;
             }
-            if record[36..].iter().any(|byte| *byte != 0) {
+            if record[36..40]
+                .iter()
+                .chain(&record[52..])
+                .any(|byte| *byte != 0)
+            {
                 return Err(CoverageIndexError::InvalidRecord("test summary record"));
             }
             tests.push(IndexedTestSummary {
@@ -3401,6 +3419,8 @@ impl<'a> CoverageIndex<'a> {
                     kind: self.string(get_u32(record, 24))?,
                     project: self.optional_string(get_u32(record, 28))?,
                     source: self.string(get_u32(record, 32))?,
+                    tags: self
+                        .relation_strings(get_u64(record, 40), u64::from(get_u32(record, 48)))?,
                 },
             });
         }
@@ -4164,6 +4184,7 @@ mod tests {
                     kind: "unit".into(),
                     project: None,
                     source: "runner-default".into(),
+                    tags: Vec::new(),
                 },
                 role: "test".into(),
                 attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
@@ -4488,6 +4509,7 @@ mod tests {
                     kind: "unit".into(),
                     project: None,
                     source: "selected-but-not-started".into(),
+                    tags: Vec::new(),
                 },
                 role: "test".into(),
                 attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),

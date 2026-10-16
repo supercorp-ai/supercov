@@ -67,14 +67,27 @@ const KINDS = [
     ["integration", /(^|[/_.-])(integration|int)([/_.-]|$)/i],
     ["e2e", /(^|[/_.-])(e2e|end-to-end|offline|online)([/_.-]|$)/i],
 ];
-function provenance(testFile) {
+// As provenance.mjs reads them: `@word` in a test's name, without the `@`.
+const TITLE_TAG = /(?:^|\s)@([\p{L}\p{N}_][\p{L}\p{N}_:./-]*)/gu;
+const KIND_TAGS = new Set(["unit", "component", "integration", "e2e"]);
+function provenance(testFile, name) {
+    const tags = [];
+    if (typeof name === "string" && name.includes("@")) {
+        for (const match of name.matchAll(TITLE_TAG))
+            if (!tags.includes(match[1]))
+                tags.push(match[1]);
+    }
+    const carried = tags.length > 0 ? { tags } : {};
     const explicit = process.env.SUPERCOV_TEST_KIND?.trim();
     if (explicit)
-        return { runner: "jest", kind: explicit.toLowerCase(), source: "explicit" };
+        return { runner: "jest", kind: explicit.toLowerCase(), source: "explicit", ...carried };
+    const tagged = tags.find((tag) => KIND_TAGS.has(tag.toLowerCase()));
+    if (tagged)
+        return { runner: "jest", kind: tagged.toLowerCase(), source: "tag", ...carried };
     const kind = KINDS.find(([, pattern]) => pattern.test(testFile))?.[0];
     return kind
-        ? { runner: "jest", kind, source: "path" }
-        : { runner: "jest", kind: "unit", source: "runner-default" };
+        ? { runner: "jest", kind, source: "path", ...carried }
+        : { runner: "jest", kind: "unit", source: "runner-default", ...carried };
 }
 // One journal per writer, as atomic.mjs's appendEvidenceRecord keeps it: a
 // file per test cost a directory, a file and a rename each. Jest gives every
@@ -185,7 +198,7 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
             retry: current.retry,
             // The reporter's record carries the outcome.
             status: "unknown",
-            provenance: provenance(current.testFile),
+            provenance: provenance(current.testFile, current.fullName),
             phases: runtime.takeNodeAssertionPhases(scope),
             runtime: [runtime.coverageSnapshot()],
             browser: [],

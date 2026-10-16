@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.14.0
+
+**Changed**
+
+- A run reads back for some of its tests: `--tag`, `--title` and `--test-file` narrow every `runs <id>` query and `gaps --format jsonl` to the tests they pick, from the run already measured, with no second run. The first query with a filter works it out from the run's evidence and keeps it beside the run (about half a minute on a 1,100-test run); the test run itself does no more than before.
+- Supercov records each test's tags: Playwright tags and `@word`s in JavaScript test titles, pytest markers, RSpec tags and `type`, Cucumber tags, JUnit `@Tag`s and TestNG groups. A tag naming a level (`@unit`, `@component`, `@integration`, `@e2e`) sets the test's kind, ahead of its path. `runs <id> test` lists a test's runner, kind and tags.
+- `runs report`, `runs check`, `runs patch` and `supercov report` take `--kind`, `--runner`, `--tag`, `--title` and `--test-file`, and read only those tests: an `lcov` file of the E2E tests alone, a floor for them, or whether they reach a change.
+- An RSpec example or Cucumber scenario is titled by its description, so `--title` finds it, though its identity stays the `spec/cart_spec.rb[1:2]` position.
+- `runs <id> line` takes several locations in one call (`line a.ts:10 a.ts:20`), or a file of them with `--from-file`, and reads the run once for all of them: on a 1,100-test run twenty lines cost about what one does. Each line lists its state, its gaps and its first three covering tests; asked alone, a line lists them all. Its `--json` reply is `coverage.lines`, and locations that do not fit one reply are listed in `remaining`.
+- An MC/DC gap names the value each missing condition never took: `` `sum < 50` was never true `` in `file`, `line` and `decision`, and `missingOutcomes` (`["true"]`) in their `--json`. `file --group decision` lists the missing conditions under each decision, with the run that would show them deciding.
+
+- A query of a stale run names the files that changed since it, tests and source, those added included, beside "test files changed".
+- A page that stops short gives the command that shows every entry at once (`all 61 at once: ... --limit 61`), and `--help` says what `--limit` does.
+
+**Fixed**
+- A header a Playwright test set with `context.setExtraHTTPHeaders` (an `X-Forwarded-For`, say) did not reach the app under measurement: Supercov set the context's headers back to those it was created with at every step. A test's own headers are now left alone.
+- What Python and Ruby ran while loading, before any test, was counted in the `unit` row of `kinds` and `--kind unit`. It is now in no kind's row, as it is for JavaScript, so `--kind unit` and a tag picking the same tests agree.
+- Re-indexing a run, after an upgrade or for a new filter, waited seconds to free the analysis it had written: 30 to 45 s became 18 to 25 s on a 1,100-test run.
+
 ## 4.13.0
 
 **Changed**

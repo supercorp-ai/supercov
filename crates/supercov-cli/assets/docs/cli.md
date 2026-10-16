@@ -159,7 +159,7 @@ npx supercov runs <run-id> [query] [options]
 | `files` | See every included file, including fully covered files; `--group dir` shows coverage by directory, split by test kind |
 | `file <path>` | Inspect the open obligations in one file |
 | `decision <id \| path:line>` | Understand missing boolean outcomes and MC/DC witnesses |
-| `line <path:line>` | See one line's state, obligations, and covering tests |
+| `line <path:line>...` | See a line's state, obligations, and covering tests; several lines, or `--from-file` with one per line, in one call |
 | `test <id \| name>` | See the coverage attributed to one test |
 | `tests without-evidence` | List the tests that made assertions and recorded no coverage, which the summary counts in a warning |
 | `kinds` | Group coverage by test level, such as unit or E2E |
@@ -203,6 +203,27 @@ starting before the first test. The column is there when a directory has any.
 In `--json`, every file of `files` and `gaps` carries `totals` and `covered`
 for each metric beside what is missing, so a percentage can be worked out for
 any file or set of files.
+
+`line` reads the run once for every location it is given, so asking for
+twenty lines in one call costs about what one does. `--from-file` takes the
+locations from a file, one per line, skipping blank lines and `#` comments.
+Each line of several lists its state, its gaps and its first three covering
+tests, with `totalTests` and `totalPhases` for the rest; asked alone, a line
+lists every test and phase. In `--json` the reply is `coverage.lines`, one
+entry per location in order; any that do not fit one reply are listed in
+`remaining`, to ask for next.
+
+```sh supercov
+npx supercov runs latest line app/routes/checkout.ts:42 app/routes/checkout.ts:57
+npx supercov runs latest line --from-file lines.txt --json
+```
+
+An MC/DC gap names the value each missing condition never took, in `file`,
+`line` and `decision` (`` `sum < 50` was never true; needs `express` false,
+`sum < 50` true, decision true ``). In `--json` it is `missingOutcomes`:
+`["true"]` or `["false"]`, both when no test evaluated the condition, and
+none when it took both values but never decided the result alone.
+`file --group decision` lists the missing conditions under each decision.
 
 Run any query with `--help` to see only the options valid for that query:
 
@@ -249,6 +270,10 @@ with `--min-lines`, `--min-statements`, `--min-functions`, `--min-branches` or
 eligible obligations, in addition to the whole run. Both report the counts
 behind the percentage and, for lines, where the gaps are.
 
+`--kind`, `--runner`, `--tag`, `--title` and `--test-file` hold some of the
+run's tests to a floor of their own, `--kind e2e --min-lines 60` say, from the
+same run.
+
 Floors are compared against the counts, never a rounded percentage: 9,999
 covered lines out of 10,000 displays as 99.99% and fails a 100% floor, and a
 run that displayed `100.00%` could never pass one while something is uncovered.
@@ -286,6 +311,9 @@ passes, rather than claiming 100% for a patch that changed only comments. A
 changed file that looks like product source but is absent from the run is named
 separately, because treating it as zero uncovered lines would report success for
 code nothing ran.
+
+`--kind`, `--runner`, `--tag`, `--title` and `--test-file` ask whether some of
+the tests reach the change: the E2E tests, or the tests of one file.
 
 `--annotate github` prints workflow-command annotations on stdout, combining
 adjacent misses into one range and capping the total (`--max-annotations`). It
@@ -358,9 +386,10 @@ npx supercov runs latest gaps --format jsonl > gaps.jsonl
 
 Each line holds the file, the line, the source of that line and what `runs
 <id> file` says of the obligation: for an MC/DC condition its decision, the
-condition and the vectors observed. `--metric`, `--filter`, `--kind` and
-`--runner` narrow it as they narrow `gaps`, and nothing is paged, so a tool or
-an agent reads a run's every gap in one pass instead of a page at a time.
+condition and the vectors observed. `--metric`, `--filter`, `--kind`,
+`--runner`, `--tag`, `--title` and `--test-file` narrow it as they narrow
+`gaps`, and nothing is paged, so a tool or an agent reads a run's every gap in
+one pass instead of a page at a time.
 
 ```sh supercov-example
 npx supercov runs report --format lcov --output coverage/lcov.info
@@ -369,7 +398,14 @@ npx supercov runs report --format html --output coverage/report
 ```
 
 Both are written from the same view `check` and `patch` read, so a viewer,
-hosted service or CI integration sees the totals Supercov enforced. Paths are
+hosted service or CI integration sees the totals Supercov enforced. `--kind`,
+`--runner`, `--tag`, `--title` and `--test-file` write the coverage of only
+those tests, from the same run:
+
+```sh supercov-example
+npx supercov runs report --format lcov --kind e2e --output coverage/e2e.info
+```
+ Paths are
 repository-relative with forward slashes, ordering is stable, and the file is
 written atomically; an existing file is kept unless you pass `--force`. Without
 `--output` the report goes to stdout and diagnostics to stderr, so a redirect
@@ -422,11 +458,38 @@ one as a public artifact.
 | `--filter all \| passed \| failed` | Recalculate the view from all, successful, or failed attempts |
 | `--kind <kind>` | Restrict to a test level such as `unit`, `integration`, or `e2e` |
 | `--runner <runner>` | Restrict to one runner |
+| `--tag <tag>` | Restrict to tests with this tag; repeat it for tests with any of several |
+| `--title <text>` | Restrict to tests whose name contains this text |
+| `--test-file <path>` | Restrict to tests in this file, or in this directory |
 | `--metric all \| lines \| statements \| functions \| branches \| mcdc` | Choose a metric for `files`, `gaps`, `diff`, or `minimize` |
 | `--limit N`, `--offset N` | Page through a collection |
 | `--json` | Return the machine-readable form |
 
 Collection output includes a copyable command for the next page.
+
+### Read some of a run's tests
+
+`--tag`, `--title` and `--test-file` read the coverage of only the tests they
+pick, from a run already measured: the API tests of a Playwright suite, the
+tests of one spec file, everything named `checkout`. Each takes several values
+for tests matching any of them, and when several are given a test must match
+each.
+
+```sh supercov
+npx supercov runs latest --tag @api
+npx supercov runs latest gaps --test-file tests/e2e/checkout.spec.ts
+npx supercov runs latest files --title checkout --tag smoke
+```
+
+A tag is what the runner gives a test: a Playwright tag (`{ tag: '@api' }`, or
+an `@word` in the title), an `@word` in a Jest, Vitest, Mocha, `node:test`,
+AVA or tap title, a pytest marker, an RSpec tag or `type`, a Cucumber tag, a
+JUnit `@Tag` or a TestNG group. Tags are written with or without the `@` and in
+any case. `runs <id> test <name>` lists a test's tags.
+
+The first query with a filter works out its coverage from the run's evidence
+and keeps it beside the run (about half a minute for a 1,100-test run); asking
+again reads it back. Nothing is added to the test run itself.
 
 For a large file, group and rank its decisions:
 
@@ -513,6 +576,10 @@ automatically.
 npx supercov report --runs 10
 npx supercov report --output artifacts/supercov-report.html --no-open
 ```
+
+`--kind`, `--runner`, `--tag`, `--title` and `--test-file` make a report of
+only those tests' coverage, in every run it holds; a run with none of them is
+left out, and the report names the tests it shows.
 
 A report includes the five newest runs; `--runs N` includes up to 20. A large
 project's report can pass GitHub's 25 MB attachment limit; `--runs 1` makes

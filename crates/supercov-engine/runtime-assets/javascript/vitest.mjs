@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
 import { afterEach, beforeEach } from "vitest";
 import { coverageSnapshot as localCoverageSnapshot, activateCoverageScope as localActivateCoverageScope, enableRuntimeSnapshotEvidence as localEnableRuntimeSnapshotEvidence, resetCoverage as localResetCoverage, takeNodeAssertionPhases as localTakeNodeAssertionPhases, } from "./runtime.mjs";
-import { inferTestProvenance } from "./provenance.mjs";
+import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendEvidenceRecord } from "./atomic.mjs";
 const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
 const emittedSetupFiles = new Set();
@@ -109,6 +109,7 @@ afterEach((context) => {
             file: testFile,
             project: task.file.projectName,
             explicitKind: process.env["SUPERCOV_TEST_KIND"],
+            tags: testTags(task.tags, [...titlePath(task)]),
         }),
         ...(scope ? { phases: runtime.takeNodeAssertionPhases(scope) } : {}),
         runtime: [runtime.coverageSnapshot()],

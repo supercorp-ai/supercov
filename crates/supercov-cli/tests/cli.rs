@@ -62,7 +62,8 @@ fn a_measured_suite_reads_back_through_every_query() {
             "Functions not called            2",
             "Tests touching this file: 3",
             "zero-iteration outcome not observed",
-            "no witness pair shows `express` independently changing the decision result",
+            "`express` was never true; needs `express` true, decision true",
+            "`express` was never evaluated\n",
         ],
     );
 
@@ -6101,5 +6102,363 @@ fn assertions_reached_through_require_a_shebang_or_types_are_credited() {
     assert!(
         refused.contains("the wrapped test command did not pass"),
         "{refused}"
+    );
+}
+
+#[test]
+fn many_lines_are_answered_in_one_call_and_every_gap_says_what_is_missing() {
+    let project = Project::empty("line-batch");
+    project.write(
+        "package.json",
+        r#"{ "name": "ship", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/ship.js",
+        "export function ship(sum, express, member) {\n  if (express || sum < 50) {\n    return express ? 15 : 5;\n  }\n  if (member && sum > 100) {\n    return 0;\n  }\n  return 2;\n}\n",
+    );
+    project.write(
+        "test/ship.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { ship } from \"../src/ship.js\";\ntest(\"express\", () => assert.equal(ship(10, true, false), 15));\ntest(\"member\", () => assert.equal(ship(200, false, true), 0));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+
+    // Each missing condition names the value it never took, in every view.
+    let decisions = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/ship.js",
+            "--group",
+            "decision",
+        ])
+        .succeeds();
+    contains_all(
+        &decisions,
+        &[
+            "`sum < 50` was never true; needs `express` false, `sum < 50` true, decision true",
+            "`member` was never false; needs `member` false, decision false",
+        ],
+    );
+    let rows = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/ship.js",
+            "--group",
+            "decision",
+            "--json",
+        ])
+        .json();
+    let first = &rows["data"]["decisions"][0];
+    assert_eq!(first["missing"][0]["condition"], "sum < 50", "{rows}");
+    assert_eq!(
+        first["missing"][0]["missingOutcomes"],
+        serde_json::json!(["true"]),
+        "{rows}"
+    );
+    let decision = project
+        .supercov(&["runs", "latest", "decision", "src/ship.js:2"])
+        .succeeds();
+    assert!(
+        decision.contains("C2 MISSING: sum < 50 (never true)"),
+        "{decision}"
+    );
+
+    // Several lines, named or listed in a file, from one opened run.
+    let both = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/ship.js:2",
+            "src/ship.js:5",
+            "--json",
+        ])
+        .json();
+    assert_eq!(both["command"], "coverage.lines", "{both}");
+    let lines = both["data"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2, "{both}");
+    assert_eq!(lines[1]["location"]["line"], 5);
+    let gaps = lines[1]["remaining"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|gap| gap["kind"] == "mcdc")
+        .map(|gap| {
+            (
+                gap["missingCondition"].as_str().unwrap().to_owned(),
+                gap["missingOutcomes"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        gaps,
+        [
+            ("member".to_owned(), serde_json::json!(["false"])),
+            ("sum > 100".to_owned(), serde_json::json!(["false"])),
+        ]
+    );
+    // One line answers as it always did.
+    let one = project
+        .supercov(&["runs", "latest", "line", "src/ship.js:2", "--json"])
+        .json();
+    assert_eq!(one["command"], "coverage.line", "{one}");
+    project.write("lines.txt", "src/ship.js:2\n# skipped\n\nsrc/ship.js:5\n");
+    let listed = project
+        .supercov(&["runs", "latest", "line", "--from-file", "lines.txt"])
+        .succeeds();
+    contains_all(
+        &listed,
+        &[
+            "src/ship.js:2",
+            "src/ship.js:5",
+            "`sum > 100` was never false",
+        ],
+    );
+
+    // More than one reply holds: the lines that fit, and the rest by name.
+    let mut many = vec!["runs", "latest", "line"];
+    many.extend(std::iter::repeat_n("src/ship.js:5", 150));
+    many.push("--json");
+    let overflow = project.supercov(&many).json();
+    assert_eq!(overflow["ok"], true, "{overflow}");
+    let answered = overflow["data"]["lines"].as_array().unwrap().len();
+    let remaining = overflow["data"]["remaining"].as_array().unwrap().len();
+    assert!(answered > 0 && remaining > 0, "{answered} {remaining}");
+    assert_eq!(answered + remaining, 150);
+}
+
+#[test]
+fn a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file() {
+    let project = Project::empty("test-filters");
+    project.write(
+        "package.json",
+        r#"{ "name": "shop", "private": true, "type": "module" }"#,
+    );
+    project.write(
+        "src/shop.js",
+        "export function price(sum, member) {\n  if (member && sum > 100) {\n    return sum * 0.9;\n  }\n  return sum;\n}\nexport function label(sum) {\n  return sum > 50 ? \"big\" : \"small\";\n}\n",
+    );
+    project.write(
+        "test/api/price.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { price } from \"../../src/shop.js\";\ntest(\"member discount @api\", () => assert.equal(price(200, true), 180));\n",
+    );
+    project.write(
+        "test/ui/label.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { label } from \"../../src/shop.js\";\ntest(\"big label @ui @e2e\", () => assert.equal(label(60), \"big\"));\n",
+    );
+    project.git(&["init", "-q"]);
+    let run = project.measure(&["test/api/price.test.js", "test/ui/label.test.js"]);
+
+    // A tag naming a test level is the test's kind; the others stay tags.
+    let kinds = project.supercov(&["runs", &run, "kinds"]).succeeds();
+    contains_all(&kinds, &["e2e  1 test(s)", "unit  1 test(s)"]);
+    let detail = project
+        .supercov(&["runs", &run, "test", "big label"])
+        .succeeds();
+    assert!(detail.contains("node:test e2e; tags @ui @e2e"), "{detail}");
+
+    let lines = |arguments: &[&str]| {
+        let mut all = vec!["runs", run.as_str(), "--json"];
+        all.extend_from_slice(arguments);
+        let summary = project.supercov(&all).json();
+        let lines = &summary["data"]["coverage"]["lines"];
+        (
+            lines["covered"].as_u64().unwrap(),
+            lines["total"].as_u64().unwrap(),
+        )
+    };
+    assert_eq!(lines(&[]), (5, 6));
+    // The price test runs the discount; the label test the ternary.
+    assert_eq!(lines(&["--tag", "@api"]), (3, 6));
+    assert_eq!(lines(&["--tag", "API"]), (3, 6));
+    assert_eq!(lines(&["--title", "big label"]), (2, 6));
+    assert_eq!(lines(&["--test-file", "test/ui"]), (2, 6));
+    assert_eq!(lines(&["--test-file", "test/ui/label.test.js"]), (2, 6));
+    // Any of one criterion; every criterion given.
+    assert_eq!(lines(&["--tag", "api", "--tag", "ui"]), (5, 6));
+    assert_eq!(lines(&["--tag", "api", "--test-file", "test/api"]), (3, 6));
+    let none = project
+        .supercov(&[
+            "runs",
+            &run,
+            "--tag",
+            "api",
+            "--test-file",
+            "test/ui",
+            "--json",
+        ])
+        .json();
+    assert_eq!(none["error"]["code"], "TEST_FILTER_EMPTY", "{none}");
+    assert_eq!(
+        none["error"]["message"],
+        "No tests match --tag api --test-file test/ui"
+    );
+
+    // Every query reads the same tests, and says which.
+    let summary = project
+        .supercov(&["runs", &run, "--test-file", "test/api"])
+        .succeeds();
+    assert!(summary.contains("(tests in test/api)"), "{summary}");
+    let file = project
+        .supercov(&["runs", &run, "file", "src/shop.js", "--tag", "ui"])
+        .succeeds();
+    assert!(file.contains("member && sum > 100"), "{file}");
+    let line = project
+        .supercov(&[
+            "runs",
+            &run,
+            "line",
+            "src/shop.js:3",
+            "--tag",
+            "ui",
+            "--json",
+        ])
+        .json();
+    assert_eq!(line["data"]["covered"], false, "{line}");
+    let gaps = project
+        .supercov(&["runs", &run, "gaps", "--format", "jsonl", "--tag", "api"])
+        .succeeds();
+    assert!(gaps.lines().any(|gap| gap.contains("sum > 50")), "{gaps}");
+
+    // Reports too, which a CI step uploads.
+    let lcov = project
+        .supercov(&["runs", &run, "report", "--format", "lcov", "--tag", "e2e"])
+        .succeeds();
+    contains_all(&lcov, &["SF:src/shop.js", "LH:2", "LF:6"]);
+    let lcov = project
+        .supercov(&["runs", &run, "report", "--format", "lcov", "--kind", "unit"])
+        .succeeds();
+    assert!(lcov.contains("LH:3"), "{lcov}");
+
+    // Gates and the interactive report read the same tests.
+    project
+        .supercov(&["runs", &run, "check", "--min-lines", "80"])
+        .succeeds();
+    let gate = project
+        .supercov(&["runs", &run, "check", "--min-lines", "80", "--tag", "e2e"])
+        .exits(1);
+    contains_all(
+        &gate,
+        &[
+            "reading only the tests --tag e2e picks",
+            "lines 33.33%  2/6 below 80%",
+        ],
+    );
+    let written = project
+        .supercov(&[
+            "report",
+            &run,
+            "--no-open",
+            "--tag",
+            "api",
+            "--output",
+            "api.html",
+        ])
+        .exits(0);
+    assert!(written.contains("api.html"), "{written}");
+    let refused = project
+        .supercov(&["report", &run, "--no-open", "--tag", "nothing"])
+        .exits(2);
+    assert!(refused.contains("matches --tag nothing"), "{refused}");
+
+    // Worked out once from the stored run, then read back.
+    let filtered = |root: &std::path::Path| {
+        std::fs::read_dir(root.join(".supercov/runs").join(&run))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("filtered-"))
+            .count()
+    };
+    let before = filtered(&project.root);
+    lines(&["--tag", "@API"]);
+    assert_eq!(
+        filtered(&project.root),
+        before,
+        "the same filter reads its index"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_playwright_suite_reads_back_by_its_tags() {
+    let project = Project::empty("playwright-tags");
+    project.write(
+        "package.json",
+        r#"{ "name": "playwright-tags", "private": true, "type": "module" }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write(
+        "src/ship.js",
+        "export const ship = (sum) => (sum > 100 ? 0 : 5);\nexport const label = (sum) => (sum > 50 ? \"big\" : \"small\");\n",
+    );
+    project.write(
+        "playwright.config.js",
+        "export default { testDir: \"tests\", reporter: \"line\" };\n",
+    );
+    // A tag given to the test, and one in the title of its group.
+    project.write(
+        "tests/ship.spec.js",
+        "import { test, expect } from \"@playwright/test\";\nimport { ship, label } from \"../src/ship.js\";\ntest(\"small orders pay\", { tag: \"@api\" }, () => expect(ship(10)).toBe(5));\ntest.describe(\"labels @ui\", () => {\n  test(\"big label\", () => expect(label(60)).toBe(\"big\"));\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("playwright tags");
+    project
+        .supercov(&["--", "npx", "playwright", "test"])
+        .succeeds();
+    let detail = project
+        .supercov(&["runs", "latest", "test", "small orders"])
+        .succeeds();
+    assert!(detail.contains("playwright e2e; tags @api"), "{detail}");
+    // The run declares a background runner, which no picked test ran under.
+    for tag in ["@api", "ui"] {
+        let summary = project
+            .supercov(&["runs", "latest", "--tag", tag, "--json"])
+            .json();
+        let lines = &summary["data"]["coverage"]["lines"];
+        assert_eq!(
+            (lines["covered"].as_u64(), lines["total"].as_u64()),
+            (Some(1), Some(2)),
+            "{tag}: {summary}"
+        );
+    }
+}
+
+#[test]
+fn a_stale_run_names_the_files_that_changed_since_it() {
+    let project = Project::empty("stale-names");
+    project.write(
+        "package.json",
+        r#"{ "name": "stale-names", "private": true, "type": "module" }"#,
+    );
+    project.write("src/shop.js", "export const price = (sum) => sum * 2;\n");
+    project.write(
+        "test/price.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { price } from \"../src/shop.js\";\ntest(\"doubles\", () => assert.equal(price(2), 4));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("start");
+    let run = project.measure(&["test/price.test.js"]);
+    project.write(
+        "test/price.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport { price } from \"../src/shop.js\";\ntest(\"doubles\", () => assert.equal(price(3), 6));\n",
+    );
+    project.write(
+        "test/more.test.js",
+        "import test from \"node:test\";\ntest(\"more\", () => {});\n",
+    );
+    let said = project.supercov(&["runs", &run]).exits(0);
+    assert!(
+        said.contains("changed since the run: test/more.test.js, test/price.test.js"),
+        "{said}"
     );
 }

@@ -184,15 +184,20 @@ fn page_label(page: &AgentPagination) -> String {
     format!("showing {start}-{end} of {}", page.total)
 }
 
+/// The next page, and the command that shows every entry at once: a page
+/// stops at 20, and a reader who wants them all should not have to find
+/// `--limit` in the help.
 fn next_page(base: &str, page: &AgentPagination) -> Option<String> {
     page.next_offset.map(|offset| {
         format!(
-            "{base} --offset {offset}{}",
+            "{base} --offset {offset}{}\nall {} at once: {base} --limit {}",
             if page.limit == DEFAULT_LIMIT {
                 String::new()
             } else {
                 format!(" --limit {}", page.limit)
-            }
+            },
+            page.total,
+            page.total
         )
     })
 }
@@ -212,6 +217,7 @@ fn coverage_command(run: &str, request: &IndexedQueryRequest, child: &str) -> St
     if let Some(runner) = &request.runner {
         values.push(format!("--runner {}", shell_quote(runner)));
     }
+    values.extend(test_filter_flags(request));
     if request.metric != MinimizeMetric::All {
         values.push(format!("--metric {}", metric_name(request.metric)));
     }
@@ -243,7 +249,38 @@ fn filter_label(request: &IndexedQueryRequest) -> String {
     if let Some(runner) = &request.runner {
         labels.push(format!("runner {runner}"));
     }
+    labels.extend(request.tags.iter().map(|tag| format!("tag {tag}")));
+    labels.extend(
+        request
+            .titles
+            .iter()
+            .map(|title| format!("title containing {title:?}")),
+    );
+    labels.extend(
+        request
+            .test_files
+            .iter()
+            .map(|file| format!("tests in {file}")),
+    );
     labels.join(", ")
+}
+
+/// `--tag`, `--title` and `--test-file` as they were given, for a command
+/// that should read the same tests.
+fn test_filter_flags(request: &IndexedQueryRequest) -> Vec<String> {
+    let mut flags = Vec::new();
+    for (flag, values) in [
+        ("--tag", &request.tags),
+        ("--title", &request.titles),
+        ("--test-file", &request.test_files),
+    ] {
+        flags.extend(
+            values
+                .iter()
+                .map(|value| format!("{flag} {}", shell_quote(value))),
+        );
+    }
+    flags
 }
 
 fn summary_line(summary: &CoverageSummary) -> String {
@@ -622,10 +659,9 @@ fn render_needed_obligation(obligation: &CoverageFileObligation) -> String {
         }
         CoverageFileObligation::Point(item) => format!("{} not covered", item.kind),
         CoverageFileObligation::Branch(item) => branch_need(&item.missing),
-        CoverageFileObligation::Mcdc(item) => format!(
-            "no witness pair shows `{}` independently changing the decision result; needs {}",
-            item.missing_condition, item.needs
-        ),
+        CoverageFileObligation::Mcdc(item) => {
+            condition_gap(&item.missing_condition, &item.missing_outcomes, &item.needs)
+        }
     }
 }
 
@@ -804,9 +840,66 @@ fn push_line_pagination(
     }
 }
 
+/// A missing condition in words: the value it never took and the run that
+/// would show it deciding. One never evaluated has no run to flip.
+fn condition_gap(condition: &str, missing: &[String], needs: &str) -> String {
+    let words = supercov_engine::coverage_query::missing_outcome_words(condition, missing);
+    if missing.len() > 1 {
+        words
+    } else {
+        format!("{words}; needs {needs}")
+    }
+}
+
 fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
+    // Several lines: each as one line reads, one after another.
+    if let IndexedQueryData::Lines(data) = &output.data {
+        return data
+            .lines
+            .iter()
+            .zip(&data.pages)
+            .map(|(line, page)| {
+                let location = match line {
+                    supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+                        &data.location
+                    }
+                    supercov_engine::coverage_query::CoverageCoversData::Line(data) => {
+                        &data.location
+                    }
+                };
+                let mut one = request.clone();
+                one.file = Some(location.file.clone());
+                one.line = Some(location.line);
+                one.more_lines = Vec::new();
+                // A line of several lists a few tests; asked alone it lists
+                // them all, which is the next page here.
+                let mut page = page.clone();
+                let more = page.has_more;
+                page.has_more = false;
+                page.next_offset = None;
+                let mut text = render_coverage(
+                    &one,
+                    &IndexedQueryOutput {
+                        command: "coverage.line",
+                        data: IndexedQueryData::Line(Box::new(line.clone())),
+                        pagination: Some(page),
+                    },
+                );
+                if more {
+                    text.push_str(&format!(
+                        "\nevery test and phase: supercov runs {} line {}",
+                        shell_quote(&request.run_id),
+                        shell_quote(&format!("{}:{}", location.file, location.line))
+                    ));
+                }
+                text
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+    }
     let page = output.pagination.as_ref();
     match &output.data {
+        IndexedQueryData::Lines(_) => unreachable!("several lines render one by one above"),
         IndexedQueryData::Summary(data) => {
             let label = filter_label(request);
             let mut first = format!("run {}", data.run);
@@ -1256,18 +1349,31 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     data.totals.conditions,
                 ),
             ];
-            lines.extend(data.decisions.iter().map(|row| {
-                let compact = row.source.split_whitespace().collect::<Vec<_>>().join(" ");
+            for row in &data.decisions {
+                let gap = &row.gap;
+                let compact = gap.source.split_whitespace().collect::<Vec<_>>().join(" ");
                 let snippet = if compact.chars().count() > 96 {
                     format!("{}…", compact.chars().take(95).collect::<String>())
                 } else {
                     compact
                 };
-                format!(
+                lines.push(format!(
                     "{}:{}  [{}]  missing {}/{}  {snippet}",
-                    row.line, row.column, row.id, row.missing_conditions, row.conditions,
-                )
-            }));
+                    gap.line, gap.column, gap.id, gap.missing_conditions, gap.conditions,
+                ));
+                // Which value each one never took, and the run that would
+                // show it deciding: what a test has to do.
+                for condition in &row.missing {
+                    lines.push(format!(
+                        "    {}",
+                        condition_gap(
+                            &condition.condition,
+                            &condition.missing_outcomes,
+                            &condition.needs
+                        )
+                    ));
+                }
+            }
             if data.decisions.is_empty() {
                 lines.push(String::new());
             }
@@ -1421,8 +1527,16 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             decision.meta.source.clone(),
                         ];
                         lines.extend(decision.conditions.iter().map(|condition| {
+                            // What a missing condition lacks: a value it never
+                            // took, or deciding the result alone.
+                            let lacks = match condition.missing_outcomes.as_deref() {
+                                None => String::new(),
+                                Some([]) => " (seen both ways, never deciding alone)".into(),
+                                Some([value]) => format!(" (never {value})"),
+                                Some(_) => " (never evaluated)".into(),
+                            };
                             format!(
-                                "C{} {}: {}",
+                                "C{} {}: {}{lacks}",
                                 condition.index + 1,
                                 if condition.covered {
                                     "covered"
@@ -1710,6 +1824,26 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                                         ))
                                         .collect::<Vec<_>>()
                                         .join(", ")
+                                )
+                            }
+                        ),
+                        // What kind of test it is and what it is tagged, as
+                        // `--kind` and `--tag` select it.
+                        format!(
+                            "{} {}{}",
+                            test.provenance.runner,
+                            test.provenance.kind,
+                            if test.provenance.tags.is_empty() {
+                                String::new()
+                            } else {
+                                format!(
+                                    "; tags {}",
+                                    test.provenance
+                                        .tags
+                                        .iter()
+                                        .map(|tag| format!("@{tag}"))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
                                 )
                             }
                         ),
@@ -2006,6 +2140,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             if let Some(runner) = &request.runner {
                 base.push_str(&format!(" --runner {}", shell_quote(runner)));
             }
+            for flag in test_filter_flags(request) {
+                base.push(' ');
+                base.push_str(&flag);
+            }
             if let Some(next) = next_page(&base, page) {
                 lines.push(format!("next page: {next}"));
             }
@@ -2132,6 +2270,7 @@ mod tests {
             runner: None,
             file: None,
             line: None,
+            more_lines: Vec::new(),
             selector: None,
             sort: None,
             valid: None,
@@ -2145,6 +2284,9 @@ mod tests {
             group: None,
             depth: None,
             gained_only: false,
+            tags: Vec::new(),
+            titles: Vec::new(),
+            test_files: Vec::new(),
         }
     }
 

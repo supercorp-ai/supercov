@@ -154,6 +154,8 @@ fn decode(bytes: &[u8]) -> Evidence {
         // empty and the engine reads the frontend's own.
         let runner_length = cursor.u64() as usize;
         assert_eq!(runner_length, 0, "Go declares a single runner");
+        // Tags: Go tests carry none.
+        assert_eq!(cursor.u64(), 0, "a Go test has no tags");
         let entries = cursor.u64() as usize;
         let mut probes = std::collections::BTreeMap::new();
         for _ in 0..entries {

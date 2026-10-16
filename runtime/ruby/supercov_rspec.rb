@@ -68,6 +68,24 @@ module Supercov
       { worker: @runtime.worker, test: id, retry: retry_index, phase: nil }
     end
 
+    # RSpec's own switches say how to run an example, not what it is.
+    RUN_KEYS = %i[skip pending focus aggregate_failures].freeze
+
+    # The example's tags: metadata set to true (`it "pays", :api`), with its
+    # group's, and its `type` (`type: :request`), as `--tag` selects them.
+    def self.tags(example)
+      metadata = example.metadata
+      tags = []
+      metadata.each do |key, value|
+        tags << key.to_s if value == true && key.is_a?(Symbol) && !RUN_KEYS.include?(key)
+      end
+      type = metadata[:type]
+      tags << type.to_s if type.is_a?(Symbol) || type.is_a?(String)
+      tags.uniq
+    rescue StandardError
+      []
+    end
+
     # RSpec's identity is "spec/m_spec.rb[1:1]" -- a path with a scope suffix,
     # not a path. Metadata carries the file itself.
     def self.source_file(example)
@@ -103,6 +121,8 @@ module Supercov
         else "failed"
         end
       xfail = example.execution_result.pending_fixed? || (status == :pending && !example.execution_result.exception.nil?)
+      tags = tags(example)
+      title = example.full_description rescue nil
       %w[setup call teardown].each do |phase|
         outcome = if state[:failed][phase]
           "failed"
@@ -111,7 +131,7 @@ module Supercov
         else
           "passed"
         end
-        @runtime.outcome(identity[:worker], identity[:test], identity[:retry], phase, outcome, xfail, RUNNER, source_file(example))
+        @runtime.outcome(identity[:worker], identity[:test], identity[:retry], phase, outcome, xfail, RUNNER, source_file(example), tags, title)
       end
       @runtime.switch(nil)
     end

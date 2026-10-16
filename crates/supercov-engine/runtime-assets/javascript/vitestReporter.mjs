@@ -1,6 +1,6 @@
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inferTestProvenance } from "./provenance.mjs";
+import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendEvidenceRecord } from "./atomic.mjs";
 function sourcePath(moduleId) {
     const absolute = moduleId.startsWith("file:")
@@ -59,6 +59,7 @@ export default class SupercovVitestReporter {
                 file: testFile,
                 project: testCase.project.name,
                 explicitKind: process.env["SUPERCOV_TEST_KIND"],
+                tags: testTags(testCase.tags ?? testCase.options?.tags, [testCase.fullName]),
             }),
             runtime: [],
             browser: [],
@@ -104,6 +105,7 @@ export default class SupercovVitestReporter {
                         file: testFile,
                         project: file.projectName,
                         explicitKind: process.env["SUPERCOV_TEST_KIND"],
+                        tags: testTags(task.tags, names),
                     }),
                     runtime: [],
                     browser: [],

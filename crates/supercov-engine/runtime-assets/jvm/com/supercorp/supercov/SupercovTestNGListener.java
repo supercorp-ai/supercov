@@ -65,7 +65,17 @@ public final class SupercovTestNGListener implements IExecutionListener, ITestLi
 
   @Override
   public void onTestStart(ITestResult result) {
-    Supercov.enterTest(name(result), RUNNER);
+    Supercov.enterTest(name(result), RUNNER, groups(result));
+  }
+
+  /** The test's groups, as `-groups` reads them. */
+  private static String[] groups(ITestResult result) {
+    try {
+      String[] groups = result.getMethod().getGroups();
+      return groups == null ? new String[0] : groups;
+    } catch (RuntimeException ignored) {
+      return new String[0];
+    }
   }
 
   @Override

@@ -29,9 +29,22 @@ def _retry_from_item(item) -> int:
         return 0
 
 
+# pytest's own marks say how to run a test, not what it is.
+_RUN_MARKS = frozenset(("parametrize", "skip", "skipif", "xfail", "usefixtures", "filterwarnings"))
+# Each test's markers by node id, read once as it is set up and sent with
+# its outcomes: the markers `-m` selects by.
+_tags = {}
+
+
 def _switch(item, phase: str) -> None:
     if _runtime is None or _xdist_controller:
         return
+    if phase == "setup" and item.nodeid not in _tags:
+        tags = []
+        for mark in item.iter_markers():
+            if mark.name not in _RUN_MARKS and mark.name not in tags:
+                tags.append(mark.name)
+        _tags[item.nodeid] = tags
     _runtime.switch(
         {
             "worker": _worker,
@@ -263,6 +276,7 @@ def pytest_runtest_logreport(report):
         report.outcome,
         bool(getattr(report, "wasxfail", False)),
         file=_report_file(report),
+        tags=_tags.get(report.nodeid),
     )
 
 

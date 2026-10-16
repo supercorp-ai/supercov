@@ -62,6 +62,19 @@ pub struct IndexedQueryRequest {
     /// and nothing it does not.
     #[serde(default)]
     pub gained_only: bool,
+    /// `line` asked about more locations than `file:line`: these, answered
+    /// from the same opened run.
+    #[serde(default)]
+    pub more_lines: Vec<(String, usize)>,
+    /// `--tag`: only tests carrying one of these tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// `--title`: only tests whose full name contains one of these.
+    #[serde(default)]
+    pub titles: Vec<String>,
+    /// `--test-file`: only tests in one of these files or directories.
+    #[serde(default)]
+    pub test_files: Vec<String>,
 }
 
 fn default_limit() -> usize {
@@ -73,6 +86,18 @@ fn default_metric() -> MinimizeMetric {
 }
 
 impl IndexedQueryRequest {
+    /// The tests `--tag`, `--title` and `--test-file` pick, when any is given.
+    pub fn test_filter(&self) -> Option<crate::coverage_report::TestFilter> {
+        let filter = crate::coverage_report::TestFilter {
+            tags: self.tags.clone(),
+            titles: self.titles.clone(),
+            files: self.test_files.clone(),
+            kind: None,
+            runner: None,
+        };
+        (!filter.is_empty()).then_some(filter)
+    }
+
     pub fn view(&self) -> Result<CoverageViewId, IndexedQueryError> {
         match self.filter.as_str() {
             "all" => Ok(CoverageViewId::All),
@@ -342,6 +367,38 @@ impl IndexedQueryError {
     }
 }
 
+/// How many covering tests each line of several lists: enough to name who
+/// reaches it, few enough that twenty lines fit in one reply.
+const BATCH_LINE_TESTS: usize = 3;
+
+/// A line of several: its state, gaps and counts, without the per-test and
+/// per-phase detail that a line asked alone lists in full.
+fn compact_line(mut data: CoverageCoversData) -> CoverageCoversData {
+    if let CoverageCoversData::Line(line) = &mut data {
+        line.phases.clear();
+        line.confidence.tests.clear();
+        line.confidence.asserted_tests.clear();
+    }
+    data
+}
+
+/// Several lines asked in one call, each answered as `line` answers it, but
+/// compactly: see [`compact_line`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageLinesData {
+    pub run: String,
+    pub lines: Vec<CoverageCoversData>,
+    /// Locations asked that did not fit in one reply, as `file:line`: ask
+    /// them in another call.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remaining: Vec<String>,
+    /// Each line's own page of tests and obligations, for a reader that
+    /// renders them one by one.
+    #[serde(skip)]
+    pub pages: Vec<supercov_contracts::AgentPagination>,
+}
+
 pub struct NewerQuery<'a> {
     pub run_id: &'a str,
     pub index: &'a CoverageIndex<'a>,
@@ -353,6 +410,7 @@ pub enum IndexedQueryData {
     Summary(Box<CoverageSummaryData>),
     Scope(Box<CoverageScopeData>),
     Line(Box<CoverageCoversData>),
+    Lines(Box<CoverageLinesData>),
     Test(Box<CoverageTestData>),
     Decision(Box<CoverageDecisionData>),
     FileDetail(Box<CoverageFileDetailData>),
@@ -525,6 +583,49 @@ pub fn query_indexed(
             command: "coverage.scope",
             data: IndexedQueryData::Scope(Box::new(data)),
             pagination: Some(page),
+        });
+    }
+
+    if request.command == "line" && !request.more_lines.is_empty() {
+        let first = (
+            request
+                .file
+                .clone()
+                .ok_or(IndexedQueryError::MissingArgument("a file"))?,
+            request
+                .line
+                .ok_or(IndexedQueryError::MissingArgument("a line"))?,
+        );
+        let mut lines = Vec::new();
+        let mut pages = Vec::new();
+        let mut cache = crate::coverage_query::CoversCache::default();
+        for (file, line) in std::iter::once(first).chain(request.more_lines.iter().cloned()) {
+            let (data, page) = crate::coverage_query::coverage_covers_query_cached(
+                index,
+                CoverageCoversQueryOptions {
+                    run: &request.run_id,
+                    view,
+                    kind: request.kind.as_deref(),
+                    runner: request.runner.as_deref(),
+                    file: &file,
+                    line,
+                    offset: 0,
+                    limit: request.limit.min(BATCH_LINE_TESTS),
+                },
+                &mut cache,
+            )?;
+            lines.push(compact_line(data));
+            pages.push(page);
+        }
+        return Ok(IndexedQueryOutput {
+            command: "coverage.lines",
+            data: IndexedQueryData::Lines(Box::new(CoverageLinesData {
+                run: request.run_id.clone(),
+                lines,
+                remaining: Vec::new(),
+                pages,
+            })),
+            pagination: None,
         });
     }
 

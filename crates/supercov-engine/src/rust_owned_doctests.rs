@@ -383,6 +383,7 @@ pub(crate) fn run_doctests(
                     kind: "doctest".into(),
                     project: Some(package.package.clone()),
                     source: "supercov-owned-process-per-test".into(),
+                    tags: Vec::new(),
                 },
                 role: "test".into(),
                 attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),

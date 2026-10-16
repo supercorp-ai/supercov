@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { inferTestProvenance } from "./provenance.mjs";
+import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
 const GENERATED_EVIDENCE_DIRECTORY = "__SUPERCOV_EVIDENCE_DIRECTORY__";
 const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?? `pid-${process.pid}`)
@@ -94,6 +94,7 @@ export default class SupercovPlaywrightReporter {
                 file: testFile,
                 project: test.parent.project()?.name,
                 explicitKind: process.env["SUPERCOV_TEST_KIND"],
+                tags: testTags(test.tags, test.titlePath()),
             }),
             browser: [],
             server: [],

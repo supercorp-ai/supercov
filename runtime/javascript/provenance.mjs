@@ -49,7 +49,46 @@ function basenameKind(file) {
         return undefined;
     return segmentKind(file.split(/[/\\]/).pop());
 }
-export function inferTestProvenance({ runner, file, project, explicitKind, }) {
+// A tag naming a test level says what the test is, as an explicit kind does.
+const KIND_TAGS = new Set(["unit", "component", "integration", "e2e"]);
+// `@word` in a title is a tag, as Playwright reads one: `checkout @e2e`.
+const TITLE_TAG = /(?:^|\s)@([\p{L}\p{N}_][\p{L}\p{N}_:./-]*)/gu;
+// The tags a test carries: those its runner names, then any `@word` in its
+// titles, without the `@`, each once. Only text the runner already handed
+// over is read, so a run costs what it did.
+export function testTags(named, titles) {
+    const tags = [];
+    const add = (value) => {
+        const tag = String(value).trim().replace(/^@/, "");
+        if (tag && !tags.includes(tag))
+            tags.push(tag);
+    };
+    for (const tag of Array.isArray(named) ? named : [])
+        add(tag);
+    for (const title of Array.isArray(titles) ? titles : []) {
+        if (typeof title !== "string" || !title.includes("@"))
+            continue;
+        for (const match of title.matchAll(TITLE_TAG))
+            add(match[1]);
+    }
+    return tags;
+}
+export function inferTestProvenance({ runner, file, project, explicitKind, tags, }) {
+    const carried = tags ?? [];
+    const kindTag = explicitKind?.trim()
+        ? undefined
+        : carried.find((tag) => KIND_TAGS.has(tag.toLowerCase()));
+    const provenance = kindTag
+        ? {
+            runner,
+            kind: kindTag.toLowerCase(),
+            ...(project ? { project } : {}),
+            source: "tag",
+        }
+        : inferredProvenance({ runner, file, project, explicitKind });
+    return carried.length > 0 ? { ...provenance, tags: carried } : provenance;
+}
+function inferredProvenance({ runner, file, project, explicitKind, }) {
     if (explicitKind?.trim()) {
         return {
             runner,

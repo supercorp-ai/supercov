@@ -684,6 +684,10 @@ func writeLocked(path string) error {
 		if err := put(0); err != nil {
 			return err
 		}
+		// Tags: Go tests carry none.
+		if err := put(0); err != nil {
+			return err
+		}
 		// Sparse: only what this test reached, so the transport is
 		// proportional to what ran rather than to the size of the project.
 		if err := put(uint64(len(record.probes))); err != nil {
