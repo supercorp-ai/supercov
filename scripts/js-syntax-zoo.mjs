@@ -165,6 +165,8 @@ export function reflective(o, x, y) {
 }
 
 export const reflectiveText = String(reflective);
+export const shelf = { label(name) { return name ? name.toUpperCase() : 'none'; } };
+export const shelfText = shelf.label.toString();
 export const keyed = { [plain]: true };
 export const wrapped = '(' + concatenated + ')';
 export const viaString = String(stringified);
@@ -325,7 +327,7 @@ test('values', async () => {
 `,
   'test/source.test.mjs': `import assert from 'node:assert';
 import test from 'node:test';
-import { keyed, plain, reflective, reflectiveText, viaString, wrapped } from '../src/source.js';
+import { keyed, plain, reflective, reflectiveText, shelf, shelfText, viaString, wrapped } from '../src/source.js';
 
 test('source read three ways keeps its text', () => {
   assert.deepEqual(Object.keys(keyed), ['function plain(x) {\\n  return x + 1;\\n}']);
@@ -335,6 +337,8 @@ test('source read three ways keeps its text', () => {
   assert.ok(reflectiveText.startsWith('function reflective(o, x, y) {\\n  let v = x;'));
   assert.equal(reflective({ f: () => 'w' }, 1, 2), 'w');
   assert.equal(reflective(null, 0, 3), 0);
+  assert.equal(shelfText, "label(name) { return name ? name.toUpperCase() : 'none'; }");
+  assert.equal(shelf.label('a'), 'A');
 });
 `,
   'test/legacy.test.cjs': `const { strict: assert } = require('node:assert');

@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A method whose source is read through a property (`box.method.toString()`, `String(Shape.prototype.area)`) was instrumented, so its text changed. Any method of that name in the file is now kept as written.
 - `merge` refused a JavaScript run and a Python run of one project saying the second was "recorded by another build of Supercov". It now says the runs measured different languages.
 - A Python `for` loop whose `else` returned or raised (`for x in items: ... else: return -1`) never recorded running zero times, so an empty input read as untested.
 - A Ruby ternary on a literal condition (`true ? a : b`, `1 ? a : b`, a string or a symbol) made the file's probed source unparseable, so the whole file fell back to line coverage, with no branches or conditions.

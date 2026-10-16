@@ -2537,9 +2537,36 @@ struct SafetyAnalysis {
 struct SourceReads<'s> {
     scoping: &'s oxc_semantic::Scoping,
     symbols: HashSet<SymbolId>,
+    /// Property names a method's source is read through: `box.method` in
+    /// `box.method.toString()` or `String(box.method)`. A property path has
+    /// no symbol to follow, so any method of that name in the file is taken
+    /// as the one read. Only the two explicit forms count: `"Total: " +
+    /// cart.total` reads a value almost always, and would cost a method
+    /// `total` its probes.
+    properties: HashSet<String>,
 }
 
 impl SourceReads<'_> {
+    fn read_property(&mut self, expression: &Expression<'_>) {
+        match expression {
+            Expression::StaticMemberExpression(member) => {
+                self.properties.insert(member.property.name.to_string());
+            }
+            Expression::ParenthesizedExpression(inner) => self.read_property(&inner.expression),
+            Expression::TSAsExpression(inner) => self.read_property(&inner.expression),
+            Expression::TSNonNullExpression(inner) => self.read_property(&inner.expression),
+            Expression::ConditionalExpression(inner) => {
+                self.read_property(&inner.consequent);
+                self.read_property(&inner.alternate);
+            }
+            Expression::LogicalExpression(inner) => {
+                self.read_property(&inner.left);
+                self.read_property(&inner.right);
+            }
+            _ => {}
+        }
+    }
+
     fn read(&mut self, expression: &Expression<'_>) {
         match expression {
             Expression::Identifier(identifier) => {
@@ -2574,6 +2601,7 @@ impl<'a> Visit<'a> for SourceReads<'_> {
     fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
         if member.property.name == "toString" {
             self.read(&member.object);
+            self.read_property(&member.object);
         }
         walk::walk_static_member_expression(self, member);
     }
@@ -2600,6 +2628,7 @@ impl<'a> Visit<'a> for SourceReads<'_> {
             && let Some(argument) = call.arguments.first().and_then(Argument::as_expression)
         {
             self.read(argument);
+            self.read_property(argument);
         }
         walk::walk_call_expression(self, call);
     }
@@ -2625,6 +2654,18 @@ impl<'a> Visit<'a> for SourceReads<'_> {
         }
         walk::walk_binary_expression(self, binary);
     }
+}
+
+/// The property a function is the value of: an object's method or property,
+/// a class's method or field.
+fn property_name_of_function<State>(context: &TraverseCtx<'_, State>) -> Option<String> {
+    let key = match context.parent() {
+        Ancestor::ObjectPropertyValue(property) => property.key(),
+        Ancestor::MethodDefinitionValue(method) => method.key(),
+        Ancestor::PropertyDefinitionValue(property) => property.key(),
+        _ => return None,
+    };
+    key.static_name().map(|name| name.to_string())
 }
 
 /// The bindings a function is reached through where it is defined: its own
@@ -2660,6 +2701,7 @@ struct SafetyScanner<'s> {
     file: &'s str,
     scoping: &'s oxc_semantic::Scoping,
     source_reads: HashSet<SymbolId>,
+    source_read_properties: HashSet<String>,
     source_sensitive_functions: HashSet<SpanKey>,
     function_limitations: Vec<CandidateLimitation>,
     with_limitations: Vec<CandidateLimitation>,
@@ -3111,6 +3153,7 @@ impl<'s> SafetyScanner<'s> {
             file,
             scoping,
             source_reads: HashSet::new(),
+            source_read_properties: HashSet::new(),
             source_sensitive_functions: HashSet::new(),
             function_limitations: Vec::new(),
             with_limitations: Vec::new(),
@@ -3158,7 +3201,9 @@ impl<'s> SafetyScanner<'s> {
         let sensitive = observes_function_source(span, context)
             || bindings
                 .iter()
-                .any(|symbol| self.source_reads.contains(symbol));
+                .any(|symbol| self.source_reads.contains(symbol))
+            || property_name_of_function(context)
+                .is_some_and(|name| self.source_read_properties.contains(&name));
         if sensitive {
             self.source_sensitive_functions.insert(span_key(span));
             let limitation = self.limitation(
@@ -3283,10 +3328,12 @@ fn analyze_safety<'a>(
     let mut reads = SourceReads {
         scoping: &scoping,
         symbols: HashSet::new(),
+        properties: HashSet::new(),
     };
     reads.visit_program(program);
     let mut scanner = SafetyScanner::new(source, file, &scoping);
     scanner.source_reads = reads.symbols;
+    scanner.source_read_properties = reads.properties;
     traverse_mut(&mut scanner, allocator, program, Default::default(), ());
     let mut semantic_limitations = scanner.function_limitations;
     semantic_limitations.extend(scanner.with_limitations);
@@ -10115,6 +10162,26 @@ mod tests {
                 output.code
             );
         }
+    }
+
+    #[test]
+    fn a_method_read_through_a_property_keeps_its_text() {
+        // `box.method.toString()` names no binding; any method of that name in
+        // the file is taken as the one read, and others keep their probes.
+        let source = "export const box = { method(v) { return v  * 2; } };\nexport class Shape { area(w) { return w  * w; } static make = () =>  new Shape(); }\nexport const other = { untouched(v) { return v  + 1; } };\nexport const texts = [box.method.toString(), String(Shape.prototype.area), Shape.make.toString()];\n";
+        let output = instrument_direct_candidate(source, "src/methods.js").unwrap();
+        for text in [
+            "method(v) { return v  * 2; }",
+            "area(w) { return w  * w; }",
+            "() =>  new Shape()",
+        ] {
+            assert!(output.code.contains(text), "{text}\n{}", output.code);
+        }
+        assert!(
+            !output.code.contains("untouched(v) { return v  + 1; }"),
+            "{}",
+            output.code
+        );
     }
 
     #[test]
