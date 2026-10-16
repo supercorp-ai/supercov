@@ -5392,6 +5392,17 @@ fn a_go_run_names_the_tests_it_could_not_claim_and_the_files_it_could_not_read()
         files.contains("sign.go") && !files.contains("gen.go"),
         "{files}"
     );
+    // Asked about, the parallel test says why it holds nothing.
+    let parallel = project
+        .supercov(&["runs", "latest", "test", "TestParallel"])
+        .succeeds();
+    contains_all(
+        &parallel,
+        &[
+            "outcome passed",
+            "coverage not attributable to this test; it ran alongside others",
+        ],
+    );
 }
 
 #[test]
