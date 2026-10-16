@@ -623,8 +623,8 @@ fn render_needed_obligation(obligation: &CoverageFileObligation) -> String {
         CoverageFileObligation::Point(item) => format!("{} not covered", item.kind),
         CoverageFileObligation::Branch(item) => branch_need(&item.missing),
         CoverageFileObligation::Mcdc(item) => format!(
-            "no witness pair shows `{}` independently changing the decision result",
-            item.missing_condition
+            "no witness pair shows `{}` independently changing the decision result; needs {}",
+            item.missing_condition, item.needs
         ),
     }
 }

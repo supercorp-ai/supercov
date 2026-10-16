@@ -1728,6 +1728,13 @@ pub struct CoverageMcdcObligation {
     #[serde(skip)]
     pub condition_index: usize,
     pub observed_vectors: Vec<String>,
+    /// The run that would show the missing condition deciding: an observed
+    /// one that evaluated it, with it flipped and the opposite outcome. The
+    /// conditions after it are left open (`-`): whatever makes the outcome
+    /// differ. None when no run evaluated it at all.
+    pub needed_vector: Option<String>,
+    /// `needed_vector` in words, or that no test evaluated the condition.
+    pub needs: String,
     pub other_coverage: CoverageOtherCoverage,
 }
 
@@ -1864,6 +1871,46 @@ fn other_coverage<T: AsRef<str>>(
             })
             .collect(),
     }
+}
+
+/// The run that would complete a condition's independence pair, from the runs
+/// observed: one that evaluated the condition, the conditions before it as
+/// they were, it flipped, and the outcome the other way.
+fn needed(
+    index: usize,
+    observed: &[&crate::coverage_analysis::McdcVector],
+    sources: &[&str],
+) -> (Option<String>, String) {
+    let condition = sources.get(index).copied().unwrap_or("the condition");
+    let Some(seen) = observed
+        .iter()
+        .find(|vector| vector.values.get(index).copied().flatten().is_some())
+    else {
+        return (None, format!("no test evaluated `{condition}`"));
+    };
+    let mut values = String::new();
+    let mut words = Vec::new();
+    for (position, value) in seen.values.iter().enumerate() {
+        let value = match position.cmp(&index) {
+            std::cmp::Ordering::Less => *value,
+            std::cmp::Ordering::Equal => value.map(|value| !value),
+            std::cmp::Ordering::Greater => None,
+        };
+        values.push(match value {
+            None => '-',
+            Some(false) => 'F',
+            Some(true) => 'T',
+        });
+        if let (Some(value), Some(source)) = (value, sources.get(position)) {
+            words.push(format!("`{source}` {value}"));
+        }
+    }
+    let outcome = !seen.outcome;
+    words.push(format!("decision {outcome}"));
+    (
+        Some(format!("{values} -> {}", if outcome { 'T' } else { 'F' })),
+        words.join(", "),
+    )
 }
 
 fn vector_text(vector: &crate::coverage_analysis::McdcVector) -> String {
@@ -2178,6 +2225,17 @@ pub fn coverage_file_detail_from(
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
+            let observed = filtered
+                .vector_observations
+                .iter()
+                .map(|observation| &observation.vector)
+                .collect::<Vec<_>>();
+            let sources = filtered
+                .conditions
+                .iter()
+                .map(|condition| condition.source.as_str())
+                .collect::<Vec<_>>();
+            let (needed_vector, needs) = needed(condition.index, &observed, &sources);
             mcdc.push(CoverageFileObligation::Mcdc(CoverageMcdcObligation {
                 kind: "mcdc".into(),
                 id: original.meta.id.clone(),
@@ -2186,11 +2244,9 @@ pub fn coverage_file_detail_from(
                 decision: original.meta.source.clone(),
                 missing_condition: condition.source.clone(),
                 condition_index: condition.index,
-                observed_vectors: filtered
-                    .vector_observations
-                    .iter()
-                    .map(|observation| vector_text(&observation.vector))
-                    .collect(),
+                observed_vectors: observed.iter().map(|vector| vector_text(vector)).collect(),
+                needed_vector,
+                needs,
                 other_coverage: other_coverage(&original_tests, selected.as_ref(), tests_by_id),
             }));
         }

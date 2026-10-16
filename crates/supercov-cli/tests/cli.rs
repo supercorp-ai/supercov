@@ -5755,6 +5755,36 @@ fn a_decision_is_found_again_by_the_location_its_line_lists() {
         .succeeds();
     contains_all(&one, &[&location, "c || a", "C1 MISSING: c"]);
     assert!(!one.contains("matching decisions"), "{one}");
+    // A gap says what run would close it: the one seen, the condition
+    // flipped, the outcome the other way; or that nothing evaluated it.
+    let gaps = project
+        .supercov(&["runs", "latest", "line", "src/pick.js:2", "--json"])
+        .json();
+    let needs = gaps["data"]["remaining"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|gap| gap["kind"] == "mcdc")
+        .map(|gap| {
+            (
+                gap["missingCondition"].as_str().unwrap().to_owned(),
+                gap["neededVector"].as_str().unwrap_or("").to_owned(),
+                gap["needs"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        needs.contains(&(
+            "a".into(),
+            "F- -> F".into(),
+            "`a` false, decision false".into()
+        )),
+        "{needs:?}"
+    );
+    assert!(
+        needs.contains(&("c".into(), String::new(), "no test evaluated `c`".into())),
+        "{needs:?}"
+    );
     for missing in ["src/pick.js:2:1", "src/pick.js:3"] {
         let refused = project
             .supercov(&["runs", "latest", "decision", missing])
