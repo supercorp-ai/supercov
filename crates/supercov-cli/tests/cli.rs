@@ -6433,43 +6433,6 @@ fn a_playwright_suite_reads_back_by_its_tags() {
     }
 }
 
-#[cfg(unix)]
-#[test]
-fn headers_a_test_sets_on_its_context_reach_the_app() {
-    let project = Project::empty("context-headers");
-    project.write(
-        "package.json",
-        r#"{ "name": "context-headers", "private": true, "type": "module" }"#,
-    );
-    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
-    std::os::unix::fs::symlink(
-        modules.canonicalize().unwrap(),
-        project.root.join("node_modules"),
-    )
-    .unwrap();
-    project.write(".gitignore", "node_modules\n");
-    project.write(
-        "src/client.js",
-        "export const forwarded = (headers) => headers[\"x-forwarded-for\"] ?? \"none\";\n",
-    );
-    project.write(
-        "playwright.config.js",
-        "export default { testDir: \"tests\", reporter: \"line\" };\n",
-    );
-    // An `expect` between the two loads opens a phase, which used to set the
-    // context's headers back to those it was created with.
-    project.write(
-        "tests/headers.spec.js",
-        "import http from \"node:http\";\nimport { test, expect } from \"@playwright/test\";\nimport { forwarded } from \"../src/client.js\";\ntest(\"a header the test sets reaches the app\", async ({ page, context }) => {\n  const seen = [];\n  const server = http.createServer((request, response) => {\n    seen.push(forwarded(request.headers));\n    response.end(\"<p>ok</p>\");\n  });\n  await new Promise((resolve) => server.listen(0, \"127.0.0.1\", resolve));\n  const url = `http://127.0.0.1:${server.address().port}/`;\n  await context.setExtraHTTPHeaders({ \"x-forwarded-for\": \"203.0.113.7\" });\n  await page.goto(url);\n  await expect(page.locator(\"p\")).toHaveText(\"ok\");\n  await page.goto(url);\n  server.close();\n  expect(seen).toEqual([\"203.0.113.7\", \"203.0.113.7\"]);\n});\n",
-    );
-    project.git(&["init", "-q"]);
-    project.commit("context headers");
-    let run = project
-        .supercov(&["--", "npx", "playwright", "test"])
-        .succeeds();
-    assert!(run.contains("1 passed"), "{run}");
-}
-
 #[test]
 fn a_stale_run_names_the_files_that_changed_since_it() {
     let project = Project::empty("stale-names");

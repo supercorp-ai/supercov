@@ -37,7 +37,9 @@ later queries faster; it can rebuild that index from the run.
 
 Supercov compares a stored run with the current workspace. If relevant source,
 tests, dependencies, configuration, or toolchain inputs changed, the run is
-marked stale.
+marked stale. A query of a stale run names the files that changed since it,
+tests and source, those added since its commit included, so you can tell which
+tests are newer than the run.
 
 A stale run is still valid history. It simply should not be presented as the
 current state of the repository. Run the complete suite again before choosing
