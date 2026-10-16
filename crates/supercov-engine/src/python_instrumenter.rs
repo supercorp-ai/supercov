@@ -348,6 +348,10 @@ type DecisionBoolOp = (String, Vec<Vec<usize>>);
 /// but the last, and the span the runtime regroups them under.
 type RegroupedBoolOp = (String, Vec<Vec<usize>>, PlanSpan);
 
+/// The BoolOps of a decision's and/or tree, each with the leaf indexes of
+/// its operands.
+type TreeBoolOps = Vec<(TextRange, Vec<Vec<usize>>)>;
+
 struct PythonObligationCollector<'a> {
     file: &'a str,
     locations: SourceLocations<'a>,
@@ -525,12 +529,8 @@ impl<'a> PythonObligationCollector<'a> {
         range: TextRange,
         kind: &str,
         value: bool,
-        build: impl FnOnce(
-            &mut Self,
-            &mut Vec<ConditionPlan>,
-            &mut Vec<(TextRange, Vec<Vec<usize>>)>,
-        ) -> Option<()>,
-    ) -> Option<(String, Vec<(TextRange, Vec<Vec<usize>>)>)> {
+        build: impl FnOnce(&mut Self, &mut Vec<ConditionPlan>, &mut TreeBoolOps) -> Option<()>,
+    ) -> Option<(String, TreeBoolOps)> {
         let id = stable_id(self.file, "decision", range, kind);
         if !self.decision_ids.insert(id.clone()) {
             return None;
@@ -831,18 +831,18 @@ impl<'a> PythonObligationCollector<'a> {
                         Some(decision_id.clone()),
                         Some(groups[index - 1].clone()),
                         Some(groups[index].clone()),
-                        boolop_span.clone(),
+                        boolop_span,
                         index,
                     ),
                     (None, Some((decision_id, groups, inner))) if index < last => (
                         Some(decision_id.clone()),
                         Some(groups[index - 1].clone()),
                         Some(groups[index].clone()),
-                        inner.clone(),
+                        *inner,
                         index,
                     ),
-                    (None, Some(_)) => (None, None, None, boolop_span.clone(), 1),
-                    (None, None) => (None, None, None, boolop_span.clone(), index),
+                    (None, Some(_)) => (None, None, None, boolop_span, 1),
+                    (None, None) => (None, None, None, boolop_span, index),
                 };
             self.plan.logical.push(LogicalPlan {
                 short_circuit: format!("{id}:short-circuit"),
