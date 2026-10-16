@@ -77,13 +77,18 @@ const sourceReflectionTests = new Map([
     "built-ins/RegExp/prototype/exec/S15.10.6.2_A1_T9.js",
     "coerces a Function to its implementation-defined source string and matches that source with a RegExp",
   ],
+  // Methods: the source of `obj.method` is read through a property, which
+  // the instrumenter does not follow, so the method itself is instrumented.
   [
     "staging/sm/async-functions/toString.js",
-    "asserts exact Function.prototype.toString source text",
+    "asserts exact async method Function.prototype.toString source text",
   ],
+  // eshost reads a comment as a module import -- "Repeats the test from
+  // 'Function/function-toString-builtin.js'" -- and, when that file's source
+  // is in its cache by base name, writes it into a directory it never made.
   [
-    "staging/sm/generators/runtime.mjs",
-    "asserts exact generator Function.prototype.toString source text",
+    "staging/sm/Function/function-toString-builtin-name.js",
+    "the Test262 host harness reads a comment in it as a module import",
   ],
 ]);
 
