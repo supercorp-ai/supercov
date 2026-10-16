@@ -1231,6 +1231,91 @@ fn a_run_of_two_test_kinds_narrows_pages_and_groups() {
         .succeeds();
     assert!(line.contains("PARTIAL"), "{line}");
 
+    // Directories, the summary and a file's decisions narrow to one kind or
+    // runner, and a filter no test matches is refused.
+    for (args, expected) in [
+        (
+            &["runs", "latest", "files", "--group", "dir", "--kind", "e2e"][..],
+            &[
+                "Coverage by directory, 1 deep — kind e2e",
+                "src            2     15  13.33%",
+            ][..],
+        ),
+        (
+            &[
+                "runs",
+                "latest",
+                "files",
+                "--group",
+                "dir",
+                "--runner",
+                "node:test",
+            ],
+            &["— runner node:test", "src            2     15  80.00%"],
+        ),
+        (
+            &["runs", "latest", "files", "--group", "dir"],
+            &[
+                "Lines     e2e    unit     All",
+                "src            2     15  13.33%  66.67%  80.00%",
+            ],
+        ),
+        (
+            &["runs", "latest", "--kind", "e2e"],
+            &["(kind e2e)", "Lines      13.33% (2/15)", "Total       1"],
+        ),
+        (
+            &["runs", "latest", "--runner", "node:test"],
+            &[
+                "(runner node:test)",
+                "Lines      80.00% (12/15)",
+                "Total       4",
+            ],
+        ),
+        (
+            &[
+                "runs",
+                "latest",
+                "file",
+                "src/cart.js",
+                "--group",
+                "decision",
+                "--kind",
+                "e2e",
+            ],
+            &["decisions 3, with missing conditions 3; conditions missing 5/5"],
+        ),
+    ] {
+        contains_all(&project.supercov(args).succeeds(), expected);
+    }
+    for args in [
+        &[
+            "runs",
+            "latest",
+            "files",
+            "--group",
+            "dir",
+            "--kind",
+            "integration",
+        ][..],
+        &[
+            "runs",
+            "latest",
+            "file",
+            "src/cart.js",
+            "--group",
+            "decision",
+            "--kind",
+            "integration",
+        ],
+    ] {
+        let refused = project.supercov(args).exits(2);
+        assert!(
+            refused.contains("No tests match kind=integration"),
+            "{refused}"
+        );
+    }
+
     // After an edit, the summary says the run is stale.
     project.edit("src/tax.js", "0.21", "0.2");
     let summary = project.supercov(&["runs", "latest"]).succeeds();
