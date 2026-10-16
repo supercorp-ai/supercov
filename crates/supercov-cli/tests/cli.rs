@@ -4930,13 +4930,25 @@ fn gaps_export_writes_every_obligation_of_a_run_too_large_for_one_reply() {
     );
     let mut imports = String::new();
     let mut calls = String::new();
+    // The second half under long paths: a page of them weighs more than a
+    // page of the first half, as entries do in a real run.
+    let path = |index: usize| {
+        if index < FILES / 2 {
+            format!("src/rules/rule{index}.js")
+        } else {
+            format!(
+                "src/rules/a/directory/named/at/the/length/real/projects/nest/their/rules/rule{index}.js"
+            )
+        }
+    };
     for index in 0..FILES {
         project.write(
-            &format!("src/rules/rule{index}.js"),
+            &path(index),
             "export function allowed(admin, owner, open) {\n  if ((admin && owner) || open) {\n    return true;\n  }\n  return false;\n}\n",
         );
         imports.push_str(&format!(
-            "import {{ allowed as rule{index} }} from '../src/rules/rule{index}.js';\n"
+            "import {{ allowed as rule{index} }} from '../{}';\n",
+            path(index)
         ));
         calls.push_str(&format!(
             "  assert.equal(rule{index}(true, true, false), true);\n"
@@ -4952,11 +4964,42 @@ fn gaps_export_writes_every_obligation_of_a_run_too_large_for_one_reply() {
     project.commit("rules");
     let run = project.measure(&[]);
 
-    // Too large for one reply: the paged form says so.
-    let paged = project
-        .supercov(&["runs", &run, "gaps", "--json", "--limit", "1000"])
-        .exits(2);
-    assert!(paged.contains("the maximum is 65536 bytes"), "{paged}");
+    // Too large for one reply: each page holds what fits and names the next,
+    // and following them reaches every file. A page that did not fit used to
+    // be refused, which stopped a pager after its first page.
+    let mut offset = 0;
+    let mut paged = std::collections::BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        let page = project
+            .supercov(&[
+                "runs",
+                &run,
+                "gaps",
+                "--json",
+                "--limit",
+                "1000",
+                "--offset",
+                &offset.to_string(),
+            ])
+            .json();
+        assert_eq!(page["ok"], true, "{page}");
+        pages += 1;
+        for gap in page["data"]["gaps"].as_array().unwrap() {
+            paged.insert(gap["file"].as_str().unwrap().to_owned());
+        }
+        let pagination = &page["pagination"];
+        if pagination["hasMore"] != true {
+            break;
+        }
+        assert!(
+            pagination["returned"].as_u64().unwrap() < 1000,
+            "{pagination}"
+        );
+        offset = pagination["nextOffset"].as_u64().unwrap();
+    }
+    assert!(pages > 1, "a run this size takes more than one reply");
+    assert_eq!(paged.len(), FILES);
 
     let written = project
         .supercov(&[

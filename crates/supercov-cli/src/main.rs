@@ -2299,6 +2299,20 @@ enum PublicQueryOutput {
 }
 
 impl PublicQueryOutput {
+    /// How many entries of a page too large for one reply would fit, when
+    /// it is that and not something else.
+    fn page_that_fits(&self) -> Option<usize> {
+        let Self::Coverage { output, .. } = self else {
+            return None;
+        };
+        match output.agent_json() {
+            Err(supercov_engine::indexed_query::IndexedQueryError::PageTooLarge {
+                fits, ..
+            }) => Some(fits),
+            _ => None,
+        }
+    }
+
     fn agent_json(&self) -> Result<String, agent_json::AgentError> {
         match self {
             Self::Runs { data, pagination } => agent_json::success("runs", data, Some(pagination))
@@ -2646,16 +2660,44 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
         }
     };
     match execute_public_query(&root, &invocation) {
-        Ok(output) if json_output => match output.agent_json() {
-            Ok(output) => {
-                print!("{output}");
-                ExitCode::SUCCESS
+        Ok(output) if json_output => {
+            // A page too large for one reply is answered with the entries that
+            // fit and the offset after them, rather than refused: a pager that
+            // follows `nextOffset` reaches the end whatever its entries weigh.
+            // Refusing meant a page of large entries stopped it, even at the
+            // size the refusal had suggested for the page before.
+            let mut invocation = invocation;
+            let mut output = output;
+            while let Some(fits) = output.page_that_fits() {
+                let PublicQueryInvocation::Coverage { request, .. } = &mut invocation else {
+                    break;
+                };
+                if fits >= request.limit {
+                    break;
+                }
+                request.limit = fits;
+                match execute_public_query(&root, &invocation) {
+                    Ok(smaller) => output = smaller,
+                    Err(failure) => {
+                        print!(
+                            "{}",
+                            agent_json::failure(Some(&agent_command), &failure.error)
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
             }
-            Err(error) => {
-                print!("{}", agent_json::failure(Some(&agent_command), &error));
-                ExitCode::from(2)
+            match output.agent_json() {
+                Ok(output) => {
+                    print!("{output}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    print!("{}", agent_json::failure(Some(&agent_command), &error));
+                    ExitCode::from(2)
+                }
             }
-        },
+        }
         Ok(output) => {
             if let PublicQueryOutput::Coverage { warnings, .. } = &output {
                 for warning in warnings {
