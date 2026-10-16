@@ -5844,3 +5844,95 @@ fn a_file_a_test_deletes_in_the_copy_is_named_and_kept() {
     );
     assert_eq!(project.read("stale.txt"), "left from a run before\n");
 }
+
+#[test]
+fn assertions_reached_through_require_a_shebang_or_types_are_credited() {
+    let project = Project::empty("assert-forms");
+    project.write("package.json", r#"{ "name": "forms", "private": true }"#);
+    project.write(
+        "src/lib.js",
+        "exports.label = (v) => (v ? \"on:\" + v : \"off\");\n",
+    );
+    project.write(
+        "src/item.ts",
+        "export interface Item { name: string }\nexport const named = (item: Item): string => (item.name ? item.name : \"anonymous\");\n",
+    );
+    project.write(
+        "test/strict.test.js",
+        "const test = require(\"node:test\");\nconst assert = require(\"assert\").strict;\nconst { label } = require(\"../src/lib.js\");\ntest(\"strict property\", () => {\n  assert.equal(label(\"x\"), \"on:x\");\n});\n",
+    );
+    project.write(
+        "test/destructured.test.js",
+        "const test = require(\"node:test\");\nconst { strictEqual, notEqual: differs } = require(\"node:assert\");\nconst { label } = require(\"../src/lib.js\");\ntest(\"destructured\", () => {\n  strictEqual(label(\"\"), \"off\");\n  differs(label(1), \"off\");\n});\n",
+    );
+    project.write(
+        "test/shebang.test.js",
+        "#!/usr/bin/env node\nconst test = require(\"node:test\");\nconst assert = require(\"node:assert\");\nconst { label } = require(\"../src/lib.js\");\ntest(\"shebang\", () => {\n  assert.ok(label(2));\n});\n",
+    );
+    project.write(
+        "test/typed.test.ts",
+        "import test from \"node:test\";\nimport assert from \"node:assert\";\nimport type { Item } from \"../src/item.ts\";\nimport { named } from \"../src/item.ts\";\ntest(\"typed\", () => {\n  const item: Item = { name: \"\" };\n  assert.equal(named(item), \"anonymous\");\n  assert.equal(named({ name: \"b\" }), \"b\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    let measured = project.supercov(&["--", "node", "--test"]);
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured
+            .stderr()
+            .contains("attributed 6 native node:assert call(s)"),
+        "{}",
+        measured.stderr()
+    );
+    for (test, assertions) in [
+        (
+            "strict property",
+            &["node:assert/strict.equal at test/strict.test.js:5:3"][..],
+        ),
+        (
+            "destructured",
+            &[
+                "node:assert.strictEqual at test/destructured.test.js:5:3",
+                "node:assert.notEqual at test/destructured.test.js:6:3",
+            ],
+        ),
+        ("shebang", &["node:assert.ok at test/shebang.test.js:6:3"]),
+        (
+            "typed",
+            &[
+                "node:assert.equal at test/typed.test.ts:7:3",
+                "node:assert.equal at test/typed.test.ts:8:3",
+            ],
+        ),
+    ] {
+        let read = project
+            .supercov(&["runs", "latest", "test", test])
+            .succeeds();
+        contains_all(&read, assertions);
+    }
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Lines      100.00% (2/2)", "Branches   100.00% (4/4)"],
+    );
+
+    // A test file that does not parse runs as written, fails as Node fails
+    // it, and the run cannot pass a gate.
+    project.write(
+        "test/broken.test.js",
+        "const test = require(\"node:test\");\nconst assert = require(\"node:assert\");\ntest(\"broken\", () => {\n  assert.ok(1;\n});\n",
+    );
+    let broken = project.supercov(&["--", "node", "--test"]);
+    assert_eq!(broken.code(), 1, "{}", broken.stderr());
+    assert!(
+        broken.stdout().contains("SyntaxError"),
+        "{}",
+        broken.stdout()
+    );
+    let refused = project
+        .supercov(&["runs", "latest", "check", "--min-lines", "50"])
+        .exits(2);
+    assert!(
+        refused.contains("the wrapped test command did not pass"),
+        "{refused}"
+    );
+}
