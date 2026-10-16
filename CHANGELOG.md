@@ -4,33 +4,25 @@
 
 **Changed**
 
-- An MC/DC gap says what run would close it. `runs <id> line` and `file` gain `neededVector` and `needs` in JSON (`TF -> F`, "`a` true, `b` false, decision false": a run seen, the condition flipped, the outcome the other way), or say that no test evaluated the condition.
-- Java for-each loops and Kotlin `for (x in xs)` loops record whether they ran at least once and whether they ran zero times. A loop that is not a statement of a block, such as the body of a brace-less `if`, stays a measurement limitation.
-- `&&` and `||` used as a value are now MC/DC decisions in every language, not only in conditions. In Java, Kotlin, Go and Rust the whole expression is the decision (`ok = a && b`). In JavaScript, TypeScript, Python and Ruby the operator returns an operand, so its compound left operand is the decision (`(a && b) || fallback`, `a || b || "default"`), and so is the operand of `!`. Where an operand narrows a type the rest relies on (a Kotlin smart cast, a TypeScript narrowing) the expression keeps its branch outcomes; in a Go module older than 1.18, which has no generics to keep the type, it is a declared limitation. MC/DC totals rise where such expressions exist.
-- Go `range` loops record whether they ran at least once and whether they ran zero times, as loops in the other languages do. They were a measurement limitation; a Go run now has two more branch outcomes per range loop.
+- `&&` and `||` used as a value are MC/DC decisions in every language. In Java, Kotlin, Go and Rust the whole expression is the decision (`ok = a && b`); in JavaScript, TypeScript, Python and Ruby the compound left operand is (`(a && b) || fallback`, `a || b || "default"`), and so is the operand of `!`. An operand that narrows a type the rest relies on (Kotlin smart cast, TypeScript narrowing) keeps branch outcomes; a Go module older than 1.18 declares a limitation. MC/DC totals rise where such expressions exist.
+- An MC/DC gap says what run would close it: `line` and `file` JSON gain `neededVector` and `needs` (`TF -> F`, "`a` true, `b` false, decision false"), or say no test evaluated the condition.
+- Go `range`, Java for-each and Kotlin `for (x in xs)` loops record whether they ran zero times or at least once, as other languages' loops do.
 
 **Fixed**
 
-- A `--json` page too large for one 64 KB reply was refused, even at the page size the previous refusal suggested, so a pager following `nextOffset` could stop after its first page. Such a page now returns the entries that fit, with `nextOffset` after them.
-- `runs <id> line` and `runs <id> file` decoded every test, line, point and decision of the run to answer for one file, so on a large run each took seconds (3 to 5 s on a 1,100-test Rust run, 13 s cold). They now read the one file, at 0.7 s on the same run, with the same answers.
-- A JavaScript run that failed because a test failed was told the copy "starts without build output" and to put `npm run build` in the command, whenever the project had a build script. It now names the failed tests (`the command exited 1: 1 test(s) failed: ...`), and points at the build only when no test it reported failed.
-- A Kotlin condition that relied on a smart cast from `isNullOrEmpty()` or `isNullOrBlank()` (`if (!s.isNullOrEmpty() && s.length > 3)`) stopped the file compiling under measurement. It is now recorded from its branches, as a condition with a null check already was.
-- A Go package whose conditions used a named boolean type (`type Flag bool`, `if a && b` on two of them) failed to build under measurement with "cannot use a (variable of bool type Flag) as bool value". Conditions are now converted inside the probe.
-- A Rust file where `vec![x; n]` began a longer expression (`vec![elem; n].into()`, as in smallvec) could not be instrumented: a probe went between `vec!` and its brackets, so the file was left unmeasured.
-- `cargo test -q` on an edition 2024 crate with doctests failed with "merged doctest child 0 ran for a case the harness did not report": quiet doctests print no names. Each case is now named from where it ran, and the output matches Cargo's, failures included.
-- A pytest test marked `xfail` that passed (XPASS) was reported as failed, so its run read as failing and its coverage was left out of the passed view, while pytest counted it as a pass. It is now passed, as pytest counts it; a strict `xfail` that passes is still failed.
-- `supercov docs reports` failed in every installed copy with "guide \"reports\" is not present in this installation", though `supercov docs` listed it. The guide is now bundled like the others.
-- `runs <id> decision` lists a line's decisions as `file:line:column`, but passing one of those locations back listed every decision on the line again. The column now selects the decision at it.
-- `merge` with no run named dropped, without a word, any run whose source it could no longer fingerprint (every measured file deleted), and said only "the source has changed" for a run left out because a measured file was added. The first is now listed as left out, and the second says how many files were added.
-- A run of `npm t`, `npm run -s test` or `npm run-script test` was told to measure `npm test` instead, which is the same command. The hint now reads npm's aliases and skips flags before the script name.
-- A Go package with a `//go:build ignore` file of another package beside it, such as a `go generate` program in `package main`, failed to build under measurement ("found packages"). Such files are no longer measured, since the build never compiles them, and a directory's probe file joins the package its tests are built with.
-- Assessing a Rust run asked whether a test would catch an empty `Vec::new()`, `vec![]` or `String::new()` becoming the same empty value. That is no change, so the statement always read as not asserted. An empty value now becomes a non-empty one.
-- Assessing Ruby, Java/Kotlin and Go runs asked about `return nil`, `x = nil`, `return null;`, `y = null`, `count := 0` and `return 0, nil` becoming the same value, so these always read as not asserted. They are no longer asked, as JavaScript's `return undefined` and Python's `return None` already were not.
-- A method whose source is read through a property (`box.method.toString()`, `String(Shape.prototype.area)`) was instrumented, so its text changed. Any method of that name in the file is now kept as written.
-- `merge` refused a JavaScript run and a Python run of one project saying the second was "recorded by another build of Supercov". It now says the runs measured different languages.
-- A Python `for` loop whose `else` returned or raised (`for x in items: ... else: return -1`) never recorded running zero times, so an empty input read as untested.
-- A Ruby ternary on a literal condition (`true ? a : b`, `1 ? a : b`, a string or a symbol) made the file's probed source unparseable, so the whole file fell back to line coverage, with no branches or conditions.
-- A React Router or Remix server entry that exported its handler by name, an arrow or a class (`export default handleRequest;`) exported `null` under measurement, so every request failed. Only `export default function` was kept.
+- A failed JavaScript test was blamed on missing build output whenever the project had a build script. The run now names the failed tests and points at the build only when no reported test failed.
+- `runs <id> line` and `file` decoded the whole run to answer for one file: 3 to 5 s per query on a 1,100-test run, 13 s cold. They now read one file, 0.7 s on the same run, same answers.
+- A `--json` page larger than the 64 KB reply limit was refused, so a pager could stop after its first page. It now returns the entries that fit, with `nextOffset` after them.
+- Builds that failed only under measurement: Go conditions on a named boolean type (`type Flag bool`); a Go `//go:build ignore` file of another package beside the real one; Kotlin conditions smart-cast by `isNullOrEmpty()`/`isNullOrBlank()`; Rust files where `vec![x; n]` starts a longer expression; React Router/Remix server entries with `export default handleRequest;`.
+- `cargo test -q` on an edition 2024 crate with doctests failed ("merged doctest child 0 ran for a case the harness did not report"); quiet output now matches Cargo's.
+- A pytest `xfail` that passed read as failed; it is a pass, as pytest counts it (a strict one still fails).
+- A Python `for` whose `else` returns never recorded zero iterations; a Ruby ternary on a literal made its file unparseable to the probes.
+- `supercov docs reports` was missing from every installed copy.
+- `runs <id> decision file:line:column` ignored the column it lists.
+- `merge` dropped runs it could no longer fingerprint without a word, said "another build of Supercov" for runs of two languages, and now counts files added since a run.
+- The whole-suite hint told `npm t` and `npm run -s test` to run `npm test`.
+- Assessment asked whether a no-op change (`Vec::new()` to an empty value, `return nil`, `x = null`, `count := 0`) was caught, so those statements always read as not asserted.
+- A method read as text through a property (`box.method.toString()`) was instrumented, changing its text.
 
 ## 4.12.2
 
