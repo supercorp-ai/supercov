@@ -5164,3 +5164,66 @@ fn a_command_is_watched_stopped_and_passed_through_whole() {
         .succeeds();
     assert!(long.contains(&"x".repeat(70000)), "{} bytes", long.len());
 }
+
+#[test]
+fn cargo_reached_in_every_form_runs_what_it_was_asked() {
+    let project = Project::empty("cargo-forms");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"forms\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nloud = []\nextra = []\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "/// Doubles.\n///\n/// ```\n/// assert_eq!(forms::double(2), 4);\n/// ```\npub fn double(x: u32) -> u32 {\n    if cfg!(feature = \"loud\") { x * 2 } else { x + x }\n}\n",
+    );
+    project.write(
+        "tests/forms.rs",
+        "#[test]\nfn doubles() {\n    assert_eq!(forms::double(3), 6);\n}\n\n#[test]\nfn slow_one() {\n    assert_eq!(forms::double(1), 2);\n}\n",
+    );
+    // Through a package script, split as a shell splits it: attached short
+    // flags, a quoted feature list and a quoted skip after `--`.
+    project.write(
+        "package.json",
+        r#"{ "name": "forms", "private": true, "scripts": { "test": "cargo test -pforms -j2 --features \"loud extra\" --test forms -- --skip='slow_one'" } }"#,
+    );
+    project.git(&["init", "-q"]);
+    project.commit("forms");
+    let scripted = project.supercov(&["--", "npm", "test"]);
+    let said = format!("{}{}", scripted.stdout(), scripted.stderr());
+    assert_eq!(scripted.code(), 0, "{said}");
+    assert!(
+        said.contains("1 passed") || said.contains("Rust coverage: 1 test"),
+        "{said}"
+    );
+
+    // Verbose, timed and quiet forms, with colour asked for and refused.
+    for (args, env) in [
+        (
+            vec!["--", "cargo", "test", "-vv", "--timings"],
+            vec![("CLICOLOR_FORCE", "1")],
+        ),
+        (
+            vec!["--", "cargo", "test", "-q"],
+            vec![("NO_COLOR", "1"), ("CLICOLOR", "0")],
+        ),
+    ] {
+        let ran = project.supercov_with(&args, &env);
+        assert_eq!(ran.code(), 0, "{args:?}\n{}{}", ran.stdout(), ran.stderr());
+    }
+
+    // Doctests alone.
+    let doc = project.supercov(&["--", "cargo", "test", "--doc"]);
+    let said = format!("{}{}", doc.stdout(), doc.stderr());
+    assert_eq!(doc.code(), 0, "{said}");
+    assert!(said.contains("Rust coverage: 1 test"), "{said}");
+
+    // A test that does not compile is reported as the build failing.
+    project.write(
+        "tests/broken.rs",
+        "#[test]\nfn broken() {\n    let x: u32 = \"text\";\n}\n",
+    );
+    let broken = project.supercov(&["--", "cargo", "test"]);
+    let said = format!("{}{}", broken.stdout(), broken.stderr());
+    assert_ne!(broken.code(), 0, "{said}");
+    assert!(said.contains("mismatched types"), "{said}");
+}
