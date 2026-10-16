@@ -1490,8 +1490,10 @@ impl<'a> BuiltDirectories<'a> {
 /// Cargo built in a copy was compiled from its instrumented sources: a test
 /// command that ran `cargo build` there synced thousands of files back over
 /// the project's `target/`, and the project's next build linked crates with
-/// probes in them. Cargo marks every target directory it creates with a
-/// `CACHEDIR.TAG` that names it.
+/// probes in them. A target directory is told by what Cargo keeps in it:
+/// `.rustc_info.json` at its root, `.cargo-lock` in each profile directory,
+/// and a `CACHEDIR.TAG` naming Cargo -- which Cargo writes only when it made
+/// the directory itself, and a test had already made `target/` there.
 struct CargoTargets<'a> {
     workspace: &'a Path,
     judged: BTreeMap<PathBuf, bool>,
@@ -1514,8 +1516,11 @@ impl<'a> CargoTargets<'a> {
             directory.push(component);
             let workspace = self.workspace;
             let target = *self.judged.entry(directory.clone()).or_insert_with(|| {
-                fs::read(workspace.join(&directory).join("CACHEDIR.TAG"))
-                    .is_ok_and(|tag| tag.windows(5).any(|window| window == b"cargo"))
+                let path = workspace.join(&directory);
+                path.join(".rustc_info.json").is_file()
+                    || path.join(".cargo-lock").is_file()
+                    || fs::read(path.join("CACHEDIR.TAG"))
+                        .is_ok_and(|tag| tag.windows(5).any(|window| window == b"cargo"))
             });
             if target {
                 return true;
@@ -2510,16 +2515,21 @@ mod tests {
         for target in ["target", "tests/fixture/target"] {
             fs::create_dir_all(workspace.join(target).join("debug/deps")).unwrap();
             fs::write(
-                workspace.join(target).join("CACHEDIR.TAG"),
-                "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n",
-            )
-            .unwrap();
-            fs::write(
                 workspace.join(target).join("debug/deps/libapp.rlib"),
                 b"\0rlib",
             )
             .unwrap();
         }
+        // Cargo made this one, and tagged it.
+        fs::write(
+            workspace.join("tests/fixture/target/CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n",
+        )
+        .unwrap();
+        // A test made this one before Cargo built into it: no tag, only what
+        // Cargo keeps there. Supercov's own suite does this.
+        fs::write(workspace.join("target/.rustc_info.json"), "{}").unwrap();
+        fs::write(workspace.join("target/debug/.cargo-lock"), "").unwrap();
         // A directory named `target` that Cargo did not make is the
         // command's own.
         fs::create_dir_all(workspace.join("reports/target")).unwrap();
@@ -2537,7 +2547,8 @@ mod tests {
         assert_eq!(
             sync.skipped_instrumented,
             vec![
-                PathBuf::from("target/CACHEDIR.TAG"),
+                PathBuf::from("target/.rustc_info.json"),
+                PathBuf::from("target/debug/.cargo-lock"),
                 PathBuf::from("target/debug/deps/libapp.rlib"),
                 PathBuf::from("tests/fixture/target/CACHEDIR.TAG"),
                 PathBuf::from("tests/fixture/target/debug/deps/libapp.rlib"),
