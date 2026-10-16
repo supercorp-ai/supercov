@@ -5227,3 +5227,78 @@ fn cargo_reached_in_every_form_runs_what_it_was_asked() {
     assert_ne!(broken.code(), 0, "{said}");
     assert!(said.contains("mismatched types"), "{said}");
 }
+
+#[test]
+fn a_go_run_names_the_tests_it_could_not_claim_and_the_files_it_could_not_read() {
+    // Homebrew's Go is not on a non-login shell's PATH on macOS.
+    let Some(go) = ["go", "/opt/homebrew/bin/go", "/usr/local/go/bin/go"]
+        .into_iter()
+        .find(|go| {
+            std::process::Command::new(go)
+                .arg("version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        })
+    else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-holes");
+    project.write("go.mod", "module example.com/holes\n\ngo 1.22\n");
+    project.write(
+        "sign.go",
+        "package holes\n\nimport \"fmt\"\n\nfunc Sign(n int) string {\n\tif n > 0 {\n\t\treturn \"positive\"\n\t}\n\treturn \"not positive\"\n}\n\nfunc Show(n int) { fmt.Println(Sign(n)) }\n",
+    );
+    // A generator kept beside the package, as `go generate` keeps them: the
+    // build never compiles it, so it is no obligation and no package of
+    // the directory's.
+    project.write(
+        "gen.go",
+        "//go:build ignore\n\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tif len(\"x\") > 0 {\n\t\tfmt.Println(\"generated\")\n\t}\n}\n",
+    );
+    // Behind a tag nothing sets: a tool of another package, and a source and
+    // a test that would not parse if anything read them. Discovery cannot
+    // answer a tag, so it reads them.
+    project.write(
+        "a_tool.go",
+        "//go:build tools\n\npackage main\n\nfunc main() {}\n",
+    );
+    project.write(
+        "broken.go",
+        "//go:build never\n\npackage holes\n\nfunc Broken( {\n",
+    );
+    project.write(
+        "broken_test.go",
+        "//go:build never\n\npackage holes\n\nfunc Broken( {\n",
+    );
+    project.write(
+        "sign_test.go",
+        "package holes\n\nimport \"testing\"\n\nfunc TestPositive(t *testing.T) {\n\tif Sign(1) != \"positive\" {\n\t\tt.Fatal(\"positive\")\n\t}\n}\n\nfunc TestParallel(t *testing.T) {\n\tt.Parallel()\n\tif Sign(-1) != \"not positive\" {\n\t\tt.Fatal(\"not positive\")\n\t}\n}\n\nfunc ExampleShow() {\n\tShow(2)\n\t// Output: positive\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let ran = project.supercov(&["--", go, "test", "./..."]);
+    let said = format!("{}{}", ran.stdout(), ran.stderr());
+    assert_eq!(ran.code(), 0, "{said}");
+    contains_all(
+        &said,
+        &[
+            "Go coverage: 3 test(s) across 2 source file(s) in 1 package(s)",
+            "2 test(s) could not announce themselves (t.Parallel, Example or Fuzz)",
+            "1 source file(s) did not parse and are absent from the denominator",
+            "1 test file(s) did not parse; the tests they declare ran unattributed",
+        ],
+    );
+    // What the unclaimed tests reached still counts.
+    let line = project
+        .supercov(&["runs", "latest", "line", "sign.go:9"])
+        .succeeds();
+    assert!(
+        line.contains("COVERED") && !line.contains("NOT COVERED"),
+        "{line}"
+    );
+    let files = project.supercov(&["runs", "latest", "files"]).succeeds();
+    assert!(
+        files.contains("sign.go") && !files.contains("gen.go"),
+        "{files}"
+    );
+}

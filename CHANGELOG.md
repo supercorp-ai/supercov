@@ -10,6 +10,7 @@
 
 **Fixed**
 
+- A Go package with a `//go:build ignore` file of another package beside it, such as a `go generate` program in `package main`, failed to build under measurement ("found packages"). Such files are no longer measured, since the build never compiles them, and a directory's probe file joins the package its tests are built with.
 - Assessing a Rust run asked whether a test would catch an empty `Vec::new()`, `vec![]` or `String::new()` becoming the same empty value. That is no change, so the statement always read as not asserted. An empty value now becomes a non-empty one.
 - Assessing Ruby, Java/Kotlin and Go runs asked about `return nil`, `x = nil`, `return null;`, `y = null`, `count := 0` and `return 0, nil` becoming the same value, so these always read as not asserted. They are no longer asked, as JavaScript's `return undefined` and Python's `return None` already were not.
 - A method whose source is read through a property (`box.method.toString()`, `String(Shape.prototype.area)`) was instrumented, so its text changed. Any method of that name in the file is now kept as written.

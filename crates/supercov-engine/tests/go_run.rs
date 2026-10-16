@@ -641,7 +641,7 @@ fn a_source_file_using_go_1_26_new_is_measured_like_any_other() {
     write(
         root.as_path(),
         "boxed.go",
-        "//go:build ignore\n\npackage newvalue\n\nfunc Boxed() *string {\n\treturn new(\"hello\")\n}\n\nfunc Sum(a, b int) *int {\n\treturn new(a + b)\n}\n",
+        "//go:build supercov_unset\n\npackage newvalue\n\nfunc Boxed() *string {\n\treturn new(\"hello\")\n}\n\nfunc Sum(a, b int) *int {\n\treturn new(a + b)\n}\n",
     );
     write(
         root.as_path(),
@@ -750,7 +750,7 @@ fn an_unparseable_file_among_readable_ones_is_published_and_counted() {
     write(
         root.as_path(),
         "gen.go",
-        "//go:build ignore\n\npackage partial\n\nfunc Broken( {\n",
+        "//go:build supercov_unset\n\npackage partial\n\nfunc Broken( {\n",
     );
     write(
         root.as_path(),
@@ -1039,12 +1039,13 @@ fn an_unparseable_test_file_is_a_hole_rather_than_the_end_of_the_run() {
         "lib_test.go",
         "package badtest\n\nimport \"testing\"\n\nfunc TestGood(t *testing.T) {\n\tif Classify(1) != \"positive\" {\n\t\tt.Fatal(\"no\")\n\t}\n}\n",
     );
-    // A build constraint the toolchain honours and discovery does not: the
-    // suite compiles and passes, and only Supercov has a problem with it.
+    // A build constraint the toolchain honours and discovery does not (a tag
+    // nothing sets): the suite compiles and passes, and only Supercov has a
+    // problem with it.
     write(
         root.as_path(),
         "gen_test.go",
-        "//go:build ignore\n\npackage badtest\n\nfunc Broken( {\n",
+        "//go:build supercov_unset\n\npackage badtest\n\nfunc Broken( {\n",
     );
 
     let request = DirectGoRunRequest {

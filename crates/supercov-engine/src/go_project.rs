@@ -204,6 +204,15 @@ fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String
             files.excluded.push((relative, IGNORED_BY_THE_TOOLCHAIN));
             continue;
         }
+        // And so is one constrained to `ignore`: the convention for Go kept
+        // beside Go without being compiled -- a generator's `package main`,
+        // a reference harness. Measured, it is an obligation nothing can
+        // reach, and its package clause can name the directory's package
+        // for the probe file it shares with the real one.
+        if build_ignored(&read_source(&path)?) {
+            files.excluded.push((relative, IGNORED_BY_THE_TOOLCHAIN));
+            continue;
+        }
         if is_test_file(&relative) {
             files.tests.push(relative);
         } else {
@@ -214,6 +223,53 @@ fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String
 }
 
 const IGNORED_BY_THE_TOOLCHAIN: &str = "ignored by the Go toolchain";
+
+/// A Go file's text, for the constraints above its package clause.
+fn read_source(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Whether the toolchain will refuse to build this file whatever it is asked.
+///
+/// Build constraints in general cannot be answered without knowing the GOOS,
+/// GOARCH and tags a build will use, and guessing at them would drop files a
+/// run does measure. `ignore` needs none of that: it is not a GOOS, not a
+/// GOARCH, and nothing defines it, which is exactly why it is the convention
+/// for Go kept beside Go without being compiled -- a reference harness, a
+/// generator's input. So a constraint that requires it can be read alone:
+/// one that merely mentions it (`ignore || linux`) is built on Linux.
+pub(crate) fn build_ignored(source: &str) -> bool {
+    // Constraints live above the package clause and nowhere else: the
+    // toolchain stops reading them there, so a `//go:build ignore` in a
+    // comment further down is text about Go rather than a constraint on it.
+    let header = if source.starts_with("package ") {
+        // Nothing precedes a clause on the first line, and looking for a
+        // newline before it would find none and read the whole file.
+        ""
+    } else {
+        source
+            .find("\npackage ")
+            .map_or(source, |clause| &source[..clause])
+    };
+    let terms = |expression: &str, and: &str| -> bool {
+        expression.split(and).any(|term| term.trim() == "ignore")
+    };
+    header.lines().map(str::trim).any(|line| {
+        if let Some(expression) = line.strip_prefix("//go:build") {
+            // Required only when it is a term of a plain conjunction.
+            !expression.contains("||") && !expression.contains('(') && terms(expression, "&&")
+        } else if let Some(options) = line.strip_prefix("// +build") {
+            // The spelling Go used before 1.17, still in trees today: spaces
+            // separate alternatives, commas join terms, lines join each other.
+            let options = options.split_whitespace().collect::<Vec<_>>();
+            options.len() == 1 && terms(options[0], ",")
+        } else {
+            false
+        }
+    })
+}
 
 /// Every `.go` file under a directory the toolchain ignores.
 fn ignored_by_the_toolchain(
@@ -463,6 +519,44 @@ pub fn test_packages(files: &GoFiles) -> Vec<String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn only_the_constraint_nothing_ever_defines_is_read_alone() {
+        // `ignore` is not a GOOS, not a GOARCH, and nothing sets it, which is
+        // why it is the convention for Go kept beside Go without being
+        // compiled. Every other constraint needs a GOOS, a GOARCH and a tag
+        // set to answer, and guessing at those would drop files a run does
+        // measure.
+        assert!(build_ignored("//go:build ignore\n\npackage p\n"));
+        assert!(build_ignored("// +build ignore\n\npackage p\n"));
+        assert!(build_ignored(
+            "// Copyright.\n\n//go:build ignore\n\npackage p\n"
+        ));
+        // Constraints combine: a required term is still required, and an
+        // alternative to it is built wherever the alternative holds.
+        assert!(build_ignored("//go:build ignore && linux\n\npackage p\n"));
+        assert!(build_ignored("// +build linux,ignore\n\npackage p\n"));
+        assert!(!build_ignored("//go:build ignore || linux\n\npackage p\n"));
+        assert!(!build_ignored("// +build ignore linux\n\npackage p\n"));
+        assert!(!build_ignored("//go:build !ignore\n\npackage p\n"));
+
+        // Everything else is a question this cannot answer, so it does not.
+        assert!(!build_ignored("//go:build linux\n\npackage p\n"));
+        assert!(!build_ignored("//go:build !windows\n\npackage p\n"));
+        assert!(!build_ignored("package p\n"));
+        // A tag that merely starts with the word is a different tag.
+        assert!(!build_ignored("//go:build ignored\n\npackage p\n"));
+        assert!(!build_ignored("//go:build ignore_me\n\npackage p\n"));
+        // And a constraint has to be above the package clause to be one. The
+        // toolchain ignores the text below it, so reading it there would drop
+        // a file the build takes.
+        assert!(!build_ignored(
+            "package p\n\n//go:build ignore\n\nfunc f() {}\n"
+        ));
+        assert!(!build_ignored(
+            "package p\n\nvar doc = \"//go:build ignore\"\n"
+        ));
+    }
 
     fn fixture(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
