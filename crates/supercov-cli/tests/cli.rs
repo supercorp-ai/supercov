@@ -5371,3 +5371,82 @@ fn a_run_of_one_test_script_points_at_the_whole_suite_however_it_was_named() {
     scripts(r#""unit": "node --test""#);
     assert_eq!(hints(&["npm", "run", "unit"]), Vec::<String>::new());
 }
+
+#[test]
+fn merge_says_what_moved_under_each_run_it_leaves_out() {
+    let project = Project::cart("merge-moved");
+    project.write(
+        "test/more.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { shipping } from \"../src/cart.js\";\n\ntest(\"more\", () => {\n  assert.equal(shipping(10, true), 15);\n});\n",
+    );
+    project.write("src/util.js", "export const util = 1;\n");
+    project.commit("more");
+    // A script that measures suites one by one is told each run's id.
+    let id_file = project.root.join("first-run-id");
+    let first = project.supercov_with(
+        &["--", "node", "--test", "test/cart.test.js"],
+        &[("SUPERCOV_RUN_ID_FILE", id_file.to_str().unwrap())],
+    );
+    assert_eq!(first.code(), 0, "{}", first.stderr());
+    assert_eq!(
+        project.read("first-run-id").trim(),
+        project.latest(),
+        "the id written is the run published"
+    );
+    // A file it cannot write to costs the id, not the run.
+    let unwritable = project.root.join("missing/run-id");
+    let second = project.supercov_with(
+        &["--", "node", "--test", "test/more.test.js"],
+        &[("SUPERCOV_RUN_ID_FILE", unwritable.to_str().unwrap())],
+    );
+    assert_eq!(second.code(), 0, "{}", second.stderr());
+    assert!(
+        second.stderr().contains("could not write the run id to"),
+        "{}",
+        second.stderr()
+    );
+
+    let left_out = |because: &str| {
+        let refused = project.supercov(&["merge"]);
+        assert_eq!(refused.code(), 2, "{}", refused.stdout());
+        let said = format!("{}{}", refused.stdout(), refused.stderr());
+        contains_all(
+            &said,
+            &[
+                &format!("(node --test test/cart.test.js): {because}"),
+                &format!("(node --test test/more.test.js): {because}"),
+            ],
+        );
+    };
+    // A measured file added is counted, one removed is named, and with
+    // every one removed there is no source left to compare.
+    project.write("src/extra.js", "export const extra = 1;\n");
+    left_out("the source has changed (1 file(s) added)");
+    std::fs::remove_file(project.root.join("src/extra.js")).unwrap();
+    std::fs::remove_file(project.root.join("src/util.js")).unwrap();
+    left_out("the source has changed (src/util.js)");
+    let cart = project.read("src/cart.js");
+    std::fs::remove_file(project.root.join("src/cart.js")).unwrap();
+    left_out("its source cannot be measured as it is now");
+    project.write("src/cart.js", &cart);
+    project.write("src/util.js", "export const util = 1;\n");
+
+    let manifest = project.read("package.json");
+    project.write(
+        "package.json",
+        &manifest.replacen(
+            "\"private\": true,",
+            "\"private\": true, \"dependencies\": { \"left-pad\": \"1.3.0\" },",
+            1,
+        ),
+    );
+    left_out("the dependencies have changed");
+    project.write("package.json", &manifest);
+
+    // A configuration file added may change how the tests run; told it does
+    // not, merge counts both runs.
+    project.write("test.config.mjs", "export default {};\n");
+    left_out("a configuration file was added");
+    let merged = project.supercov(&["merge", "--allow-changed"]).succeeds();
+    assert!(merged.contains("merging 2 runs"), "{merged}");
+}

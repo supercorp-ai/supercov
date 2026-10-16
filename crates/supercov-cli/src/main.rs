@@ -539,130 +539,147 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
         .iter()
         .filter(|run| run.metadata.merged != Some(true))
         .filter(|run| {
-            current_integrity_for_run(root, run).is_some_and(|current| {
-                let recorded = &run.metadata.integrity;
-                // A run of another release reads as current -- its checkout
-                // has not moved -- but cannot be merged with this release's.
-                if recorded.fingerprint.instrumenter != current.fingerprint.instrumenter {
+            // Said like any other run left out: a source that cannot be
+            // fingerprinted now (its last measured file deleted) is still a
+            // run missing from the total.
+            let Some(current) = current_integrity_for_run(root, run) else {
+                outdated.push((
+                    *run,
+                    "its source cannot be measured as it is now".to_owned(),
+                    true,
+                ));
+                return false;
+            };
+            let recorded = &run.metadata.integrity;
+            // A run of another release reads as current -- its checkout
+            // has not moved -- but cannot be merged with this release's.
+            if recorded.fingerprint.instrumenter != current.fingerprint.instrumenter {
+                outdated.push((
+                    *run,
+                    supercov_engine::run_merge::recorded_by_another_release(run),
+                    true,
+                ));
+                return false;
+            }
+            if !compare_run_integrity(Some(recorded), &current).stale {
+                return true;
+            }
+            let files = supercov_engine::source_manifest::load_manifest(run).ok();
+            // What is measured has moved on: nothing makes this run a
+            // record of it. Said, with the files, so that a run left out
+            // is not a run silently missing from the total.
+            let moved = |domain: &str| {
+                let named = files
+                    .as_ref()
+                    .map(|files| {
+                        supercov_engine::source_manifest::changed_files(
+                            &files.manifest.files,
+                            |file| {
+                                fs::read_to_string(root.join(file)).ok().map(|text| {
+                                    supercov_engine::source_manifest::FileFingerprint::of(&text)
+                                        .sha256
+                                })
+                            },
+                        )
+                        .into_iter()
+                        .filter(|file| {
+                            !tests.contains(file)
+                                && !supercov_engine::run_currency::configuration_file(file)
+                        })
+                        .take(3)
+                        .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                // An added file is in no record to compare against, so
+                // it is counted rather than named.
+                let added = current
+                    .fingerprint
+                    .source_files
+                    .saturating_sub(recorded.fingerprint.source_files);
+                if named.is_empty() && added > 0 {
+                    format!("the {domain} has changed ({added} file(s) added)")
+                } else if named.is_empty() {
+                    format!("the {domain} has changed")
+                } else {
+                    format!("the {domain} has changed ({})", named.join(", "))
+                }
+            };
+            // A measured file added or removed: what is measured differs.
+            // A change to a file is judged below, file by file.
+            if recorded.fingerprint.source != current.fingerprint.source
+                && (files.is_none()
+                    || recorded.fingerprint.source_files != current.fingerprint.source_files)
+            {
+                outdated.push((*run, moved("source"), true));
+                return false;
+            }
+            if recorded.fingerprint.dependencies != current.fingerprint.dependencies {
+                outdated.push((*run, "the dependencies have changed".to_owned(), true));
+                return false;
+            }
+            // Only test-side files differ: each is judged by what the
+            // run's tests did with it.
+            let Some(files) = files else {
+                return false;
+            };
+            let recorded_files = &files.manifest.files;
+            let configurations = recorded_files
+                .keys()
+                .filter(|file| supercov_engine::run_currency::configuration_file(file))
+                .cloned()
+                .collect::<Vec<_>>();
+            let now = supercov_engine::run_currency::checkout_files(
+                root,
+                recorded_files,
+                &configurations,
+            );
+            let ran = supercov_engine::run_currency::Ran::of(run);
+            let playwright_changed = configurations.iter().any(|file| {
+                supercov_engine::test_loads::configuration_runner(file) == Some("playwright")
+                    && now.get(file).map(|is| &is.sha256)
+                        != recorded_files.get(file).map(|was| &was.sha256)
+            });
+            let reference = if playwright_changed {
+                reference()
+            } else {
+                None
+            };
+            let mut judgment = supercov_engine::run_currency::judge(
+                &checkout,
+                &run.metadata.command.join(" "),
+                recorded_files,
+                &now,
+                &|file| fs::read_to_string(root.join(file)).ok(),
+                supercov_engine::source_manifest::test_files(run).as_ref(),
+                &ran,
+                reference.as_ref(),
+                allow_changed,
+            );
+            // A configuration file the run was not recorded with: one
+            // was added, and it may set how its tests run.
+            if judgment.outdated.is_empty()
+                && recorded.fingerprint.configuration != current.fingerprint.configuration
+                && !configurations.iter().any(|file| {
+                    now.get(file).map(|is| &is.sha256)
+                        != recorded_files.get(file).map(|was| &was.sha256)
+                })
+                && !allow_changed
+            {
+                judgment
+                    .outdated
+                    .push("a configuration file was added".to_owned());
+            }
+            match judgment.outdated.first() {
+                Some(_) => {
                     outdated.push((
                         *run,
-                        supercov_engine::run_merge::recorded_by_another_release(run),
-                        true,
+                        supercov_engine::run_merge::listed(&judgment.outdated),
+                        judgment.settled,
                     ));
-                    return false;
+                    false
                 }
-                if !compare_run_integrity(Some(recorded), &current).stale {
-                    return true;
-                }
-                let files = supercov_engine::source_manifest::load_manifest(run).ok();
-                // What is measured has moved on: nothing makes this run a
-                // record of it. Said, with the files, so that a run left out
-                // is not a run silently missing from the total.
-                let moved = |domain: &str| {
-                    let named = files
-                        .as_ref()
-                        .map(|files| {
-                            supercov_engine::source_manifest::changed_files(
-                                &files.manifest.files,
-                                |file| {
-                                    fs::read_to_string(root.join(file)).ok().map(|text| {
-                                        supercov_engine::source_manifest::FileFingerprint::of(&text)
-                                            .sha256
-                                    })
-                                },
-                            )
-                            .into_iter()
-                            .filter(|file| {
-                                !tests.contains(file)
-                                    && !supercov_engine::run_currency::configuration_file(file)
-                            })
-                            .take(3)
-                            .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    if named.is_empty() {
-                        format!("the {domain} has changed")
-                    } else {
-                        format!("the {domain} has changed ({})", named.join(", "))
-                    }
-                };
-                // A measured file added or removed: what is measured differs.
-                // A change to a file is judged below, file by file.
-                if recorded.fingerprint.source != current.fingerprint.source
-                    && (files.is_none()
-                        || recorded.fingerprint.source_files != current.fingerprint.source_files)
-                {
-                    outdated.push((*run, moved("source"), true));
-                    return false;
-                }
-                if recorded.fingerprint.dependencies != current.fingerprint.dependencies {
-                    outdated.push((*run, "the dependencies have changed".to_owned(), true));
-                    return false;
-                }
-                // Only test-side files differ: each is judged by what the
-                // run's tests did with it.
-                let Some(files) = files else {
-                    return false;
-                };
-                let recorded_files = &files.manifest.files;
-                let configurations = recorded_files
-                    .keys()
-                    .filter(|file| supercov_engine::run_currency::configuration_file(file))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let now = supercov_engine::run_currency::checkout_files(
-                    root,
-                    recorded_files,
-                    &configurations,
-                );
-                let ran = supercov_engine::run_currency::Ran::of(run);
-                let playwright_changed = configurations.iter().any(|file| {
-                    supercov_engine::test_loads::configuration_runner(file) == Some("playwright")
-                        && now.get(file).map(|is| &is.sha256)
-                            != recorded_files.get(file).map(|was| &was.sha256)
-                });
-                let reference = if playwright_changed {
-                    reference()
-                } else {
-                    None
-                };
-                let mut judgment = supercov_engine::run_currency::judge(
-                    &checkout,
-                    &run.metadata.command.join(" "),
-                    recorded_files,
-                    &now,
-                    &|file| fs::read_to_string(root.join(file)).ok(),
-                    supercov_engine::source_manifest::test_files(run).as_ref(),
-                    &ran,
-                    reference.as_ref(),
-                    allow_changed,
-                );
-                // A configuration file the run was not recorded with: one
-                // was added, and it may set how its tests run.
-                if judgment.outdated.is_empty()
-                    && recorded.fingerprint.configuration != current.fingerprint.configuration
-                    && !configurations.iter().any(|file| {
-                        now.get(file).map(|is| &is.sha256)
-                            != recorded_files.get(file).map(|was| &was.sha256)
-                    })
-                    && !allow_changed
-                {
-                    judgment
-                        .outdated
-                        .push("a configuration file was added".to_owned());
-                }
-                match judgment.outdated.first() {
-                    Some(_) => {
-                        outdated.push((
-                            *run,
-                            supercov_engine::run_merge::listed(&judgment.outdated),
-                            judgment.settled,
-                        ));
-                        false
-                    }
-                    None => true,
-                }
-            })
+                None => true,
+            }
         })
         .collect::<Vec<_>>();
     current.sort_by(|left, right| {
