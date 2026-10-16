@@ -6946,9 +6946,18 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
         mut export: oxc_allocator::Box<'a, oxc_ast::ast::ExportDefaultDeclaration<'a>>,
         output: &mut oxc_allocator::Vec<'a, Statement<'a>>,
     ) {
-        if let ExportDefaultDeclarationKind::FunctionDeclaration(mut function) =
-            export.declaration.take_in(self.ast.allocator)
-        {
+        // Looked at before it is taken: taking it leaves a placeholder `null`,
+        // and a server entry that exported its handler by name (`export
+        // default handleRequest;`) exported `withRequestPhase(null)`.
+        if matches!(
+            export.declaration,
+            ExportDefaultDeclarationKind::FunctionDeclaration(_)
+        ) {
+            let ExportDefaultDeclarationKind::FunctionDeclaration(mut function) =
+                export.declaration.take_in(self.ast.allocator)
+            else {
+                unreachable!();
+            };
             let original_name = self
                 .names
                 .allocate("__supercovHandleRequestCoverageOriginal");
@@ -10075,6 +10084,37 @@ mod tests {
         assert_eq!(name_at(1, matcher).as_deref(), Some("toBe"));
         assert_eq!(name_at(0, 9).as_deref(), Some("expect"));
         assert_eq!(name_at(0, 18), None, "`from` is a keyword");
+    }
+
+    #[test]
+    fn a_server_entry_keeps_what_it_exports_by_default() {
+        // Taken before it was looked at, anything but a function declaration
+        // was replaced by a placeholder `null`: `export default handleRequest;`
+        // exported `withRequestPhase(null)`, and a class exported `null`.
+        for (source, export) in [
+            (
+                "function handleRequest(r) { return r; }\nexport default handleRequest;\n",
+                "export default __supercovWithRequestPhase13(handleRequest);",
+            ),
+            (
+                "export default class Entry {}\n",
+                "export default class Entry {}",
+            ),
+        ] {
+            let output = instrument_candidate_with_binding(
+                source,
+                "app/entry.server.ts",
+                RuntimeBinding::ModuleImport,
+                None,
+                false,
+            )
+            .unwrap();
+            assert!(
+                output.code.lines().any(|line| line == export),
+                "{export}\n{}",
+                output.code
+            );
+        }
     }
 
     #[test]

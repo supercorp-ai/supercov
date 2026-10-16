@@ -63,6 +63,38 @@ export function until(items, stop) {
   while (!(i >= items.length || items[i] === stop)) i += 1;
   return i;
 }
+
+export function fallback(a, b) {
+  if (!(a ?? b)) return 'nothing';
+  return 'something';
+}
+
+export function either(a, b) {
+  return (a ?? b) ? 'something' : 'falsy';
+}
+
+export function both(a, b) {
+  if (!!(a && b)) return 'both';
+  return 'not both';
+}
+
+export function claim(slot, value) {
+  if ((slot.value ||= value)) return slot.value;
+  return 'empty';
+}
+
+export function shape(o) {
+  return [typeof o?.a, void o?.a, !o?.a];
+}
+
+export function scan(limit, step) {
+  let seen = 0;
+  for (let i = 0; i < limit && (step ?? 1) > 0; ) {
+    i += step ?? 1;
+    seen += 1;
+  }
+  return seen;
+}
 `,
   'src/values.js': `export function settings(given) {
   const result = { ...given };
@@ -120,6 +152,19 @@ export function stringified(x) {
   return x - 1;
 }
 
+export function reflective(o, x, y) {
+  let v = x;
+  v ||= y;
+  const w = o?.f?.();
+  switch (v) {
+    case 1:
+      return w;
+    default:
+      return x && y;
+  }
+}
+
+export const reflectiveText = String(reflective);
 export const keyed = { [plain]: true };
 export const wrapped = '(' + concatenated + ')';
 export const viaString = String(stringified);
@@ -130,7 +175,18 @@ export const viaString = String(stringified);
   }
 }
 
-module.exports = { lookup };
+function inside(scope) {
+  with (scope) {
+    switch (kind) {
+      case 'call':
+        return target?.go?.() ?? (left && right);
+      default:
+        return (left ||= right);
+    }
+  }
+}
+
+module.exports = { lookup, inside };
 `,
   'src/typed.ts': `declare module 'virtual:config' {
   export const value: number;
@@ -165,14 +221,44 @@ export async function action({ request }: { request: Request }) {
 }
 
 export const title = 'Items';
+
+export function helper() {
+  return 'help';
+}
+
+export let headers;
+headers = () => ({ 'cache-control': 'no-store' });
+
+const page = 'items';
+export { page };
+
+export default function ItemsPage() {
+  return 'page';
+}
 `,
-  'app/entry.server.ts': `export default function handleRequest(request: Request) {
+  'app/routes/shared.ts': `export async function sharedLoader() {
+  return 'shared';
+}
+
+export function extra() {
+  return 'extra';
+}
+`,
+  'app/routes/reexport.ts': `export { sharedLoader as loader, extra } from './shared.ts';
+export { extra as 'extra-name' } from './shared.ts';
+export { extra as unrelated } from './shared.ts';
+`,
+  'app/entry.server.ts': `export const streamTimeout = 5000;
+
+function handleRequest(request: Request) {
   return request.method === 'HEAD' ? new Response(null) : new Response('ok');
 }
+
+export default handleRequest;
 `,
   'test/flow.test.mjs': `import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { countDown, drain, firstNegative, neither, notBoth, until } from '../src/flow.js';
+import { both, claim, countDown, drain, either, fallback, firstNegative, neither, notBoth, scan, shape, until } from '../src/flow.js';
 
 test('loops with parts left out', () => {
   assert.equal(firstNegative([1, -2]), 1);
@@ -180,6 +266,25 @@ test('loops with parts left out', () => {
   assert.deepEqual(countDown(2), [2, 1]);
   assert.equal(drain([1, 2]), 2);
   assert.equal(drain([]), 0);
+});
+
+test('coalescing and assigning decisions', () => {
+  assert.equal(fallback(null, 0), 'nothing');
+  assert.equal(fallback(null, 1), 'something');
+  assert.equal(fallback(2, null), 'something');
+  assert.equal(either(null, 0), 'falsy');
+  assert.equal(either(1, null), 'something');
+  assert.equal(both(true, true), 'both');
+  assert.equal(both(true, false), 'not both');
+  assert.equal(both(false, true), 'not both');
+  assert.equal(claim({}, 'x'), 'x');
+  assert.equal(claim({ value: 'y' }, 'x'), 'y');
+  assert.equal(claim({}, ''), 'empty');
+  assert.deepEqual(shape({ a: 1 }), ['number', undefined, false]);
+  assert.deepEqual(shape(null), ['undefined', undefined, true]);
+  assert.equal(scan(2, 1), 2);
+  assert.equal(scan(3, undefined), 3);
+  assert.equal(scan(2, 0), 0);
 });
 
 test('negated compound decisions', () => {
@@ -220,21 +325,27 @@ test('values', async () => {
 `,
   'test/source.test.mjs': `import assert from 'node:assert';
 import test from 'node:test';
-import { keyed, plain, viaString, wrapped } from '../src/source.js';
+import { keyed, plain, reflective, reflectiveText, viaString, wrapped } from '../src/source.js';
 
 test('source read three ways keeps its text', () => {
   assert.deepEqual(Object.keys(keyed), ['function plain(x) {\\n  return x + 1;\\n}']);
   assert.equal(wrapped, '(function concatenated(x) {\\n  return x * 2;\\n})');
   assert.equal(viaString, 'function stringified(x) {\\n  return x - 1;\\n}');
   assert.equal(plain(1), 2);
+  assert.ok(reflectiveText.startsWith('function reflective(o, x, y) {\\n  let v = x;'));
+  assert.equal(reflective({ f: () => 'w' }, 1, 2), 'w');
+  assert.equal(reflective(null, 0, 3), 0);
 });
 `,
   'test/legacy.test.cjs': `const { strict: assert } = require('node:assert');
 const test = require('node:test');
-const { lookup } = require('../src/legacy.cjs');
+const { lookup, inside } = require('../src/legacy.cjs');
 
 test('with and eval still read the scope', () => {
   assert.equal(lookup({ answer: 42 }, 'answer'), 42);
+  assert.equal(inside({ kind: 'call', target: { go: () => 'went' }, left: 1, right: 2 }), 'went');
+  assert.equal(inside({ kind: 'call', target: null, left: 1, right: 2 }), 2);
+  assert.equal(inside({ kind: 'other', target: null, left: 0, right: 3 }), 3);
 });
 `,
   'test/typed.test.mjs': `import assert from 'node:assert/strict';
@@ -254,8 +365,9 @@ test('typed and shebang modules', () => {
 `,
   'test/routes.test.mjs': `import assert from 'node:assert/strict';
 import test from 'node:test';
-import { action, loader, title } from '../app/routes/items.ts';
-import handleRequest from '../app/entry.server.ts';
+import ItemsPage, { action, headers, helper, loader, page, title } from '../app/routes/items.ts';
+import * as reexported from '../app/routes/reexport.ts';
+import handleRequest, { streamTimeout } from '../app/entry.server.ts';
 
 test('route handlers and the server entry', async () => {
   assert.equal(await loader({ request: new Request('http://x/items?q=a') }), 'a');
@@ -263,6 +375,15 @@ test('route handlers and the server entry', async () => {
   assert.equal(await action({ request: new Request('http://x/items', { method: 'POST' }) }), 'created');
   assert.equal(await action({ request: new Request('http://x/items', { method: 'PUT' }) }), 'ignored');
   assert.equal(title, 'Items');
+  assert.equal(helper(), 'help');
+  assert.deepEqual(headers(), { 'cache-control': 'no-store' });
+  assert.equal(page, 'items');
+  assert.equal(ItemsPage(), 'page');
+  assert.equal(await reexported.loader(), 'shared');
+  assert.equal(reexported.extra(), 'extra');
+  assert.equal(reexported['extra-name'](), 'extra');
+  assert.equal(reexported.unrelated(), 'extra');
+  assert.equal(streamTimeout, 5000);
   assert.equal(await handleRequest(new Request('http://x/', { method: 'HEAD' })).text(), '');
   assert.equal(await handleRequest(new Request('http://x/')).text(), 'ok');
 });
@@ -286,7 +407,7 @@ try {
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');
   if (process.env.ZOO_REPORT) console.log(report);
   // Each construct was driven both ways, so nothing is left uncovered.
-  for (const file of ['src/flow.js', 'src/values.js', 'src/typed.ts', 'src/cli.js', 'app/routes/items.ts', 'app/entry.server.ts']) {
+  for (const file of ['src/flow.js', 'src/values.js', 'src/typed.ts', 'src/cli.js', 'app/routes/items.ts', 'app/routes/shared.ts', 'app/entry.server.ts']) {
     const entry = byFile[file];
     assert.ok(entry, `${file} was not measured\n${report}`);
     for (const metric of ['lines', 'branches', 'mcdcConditions']) {

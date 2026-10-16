@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A React Router or Remix server entry that exported its handler by name, an arrow or a class (`export default handleRequest;`) exported `null` under measurement, so every request failed. Only `export default function` was kept.
+
 ## 4.12.2
 
 **Fixed**
