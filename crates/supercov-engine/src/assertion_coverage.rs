@@ -527,6 +527,9 @@ pub fn population_from(
             tests: ids,
         });
     }
+    if matches!(language, Language::JavaScript | Language::Python) {
+        credit_module_level(&mut statements, sources, language);
+    }
     let mut ran = vec![BTreeMap::<String, BTreeSet<usize>>::new(); tests.len()];
     for s in &statements {
         for &t in &s.tests {
@@ -545,6 +548,51 @@ pub fn population_from(
         files: Default::default(),
         quotes: Default::default(),
     })
+}
+
+/// A statement at a module's top level runs once, when the module is first
+/// loaded, and is recorded for whichever test loaded it -- often one an auth
+/// gate turns away -- so only that test was asked about it. Every test that
+/// runs the module's functions relies on it: they are credited too, after the
+/// tests recorded for it.
+fn credit_module_level(
+    statements: &mut [Statement],
+    sources: &BTreeMap<String, String>,
+    language: Language,
+) {
+    let mut files = BTreeMap::<String, Vec<usize>>::new();
+    for (index, statement) in statements.iter().enumerate() {
+        files.entry(statement.file.clone()).or_default().push(index);
+    }
+    for (file, indexes) in files {
+        let Some(source) = sources.get(&file) else {
+            continue;
+        };
+        let functions = outermost_functions(language, &file, source);
+        let inside = |line: usize| {
+            functions
+                .iter()
+                .any(|&(first, last)| first <= line && line <= last)
+        };
+        let users = indexes
+            .iter()
+            .filter(|&&index| inside(statements[index].line))
+            .flat_map(|&index| statements[index].tests.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let module_level = indexes
+            .iter()
+            .copied()
+            .filter(|&index| !inside(statements[index].line))
+            .collect::<Vec<_>>();
+        for index in module_level {
+            let tests = &mut statements[index].tests;
+            for &user in &users {
+                if !tests.contains(&user) {
+                    tests.push(user);
+                }
+            }
+        }
+    }
 }
 
 /// Whether two lines of code are the same but for spacing and a final `;`.
@@ -3089,6 +3137,68 @@ mod tests {
         );
         let lines = long.split('\n').collect::<Vec<_>>();
         assert_eq!(js_test_line(&lines, "b > x").map(|i| i + 1), Some(205));
+    }
+
+    /// Module-level code runs once, for whichever test loaded the module:
+    /// every test that runs the module's functions relies on it too.
+    #[test]
+    fn a_module_level_statement_is_credited_to_every_test_that_uses_the_module() {
+        let source =
+            "const limit = 10;\nexport function total(n) {\n  return n > limit ? limit : n;\n}\n";
+        let test = |name: &str| InputTest {
+            id: format!("t/{name}"),
+            file: Some("test/total.test.js".into()),
+            name: name.into(),
+            role: "test".into(),
+            runner: "node:test".into(),
+        };
+        let input = AssessmentInput {
+            tests: vec![
+                test("rejects without a key"),
+                test("caps"),
+                test("passes small"),
+            ],
+            points: vec![
+                InputPoint {
+                    file: "src/total.js".into(),
+                    line: 1,
+                    source: "const limit = 10;".into(),
+                    tests: vec![0],
+                },
+                InputPoint {
+                    file: "src/total.js".into(),
+                    line: 3,
+                    source: "return n > limit ? limit : n;".into(),
+                    tests: vec![1, 2],
+                },
+            ],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("src/total.js".to_owned(), source.to_owned())]);
+        let population = population_from(
+            Path::new("/nonexistent"),
+            &input,
+            &sources,
+            Language::JavaScript,
+        )
+        .unwrap();
+        let tests_of = |line: usize| {
+            let mut tests = population
+                .statements
+                .iter()
+                .find(|s| s.line == line)
+                .unwrap()
+                .tests
+                .clone();
+            tests.sort_unstable();
+            tests
+        };
+        assert_eq!(tests_of(1), [0, 1, 2], "the loader and the module's users");
+        assert_eq!(
+            tests_of(3),
+            [1, 2],
+            "code in a function keeps its own tests"
+        );
     }
 
     #[test]
