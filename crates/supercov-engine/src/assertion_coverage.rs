@@ -2820,6 +2820,44 @@ mod tests {
         );
     }
 
+    /// The small readers a question is built with: a statement's condition,
+    /// the part of a line before its value, a test call, and the numbers and
+    /// locations a cache key leaves out.
+    #[test]
+    fn statement_text_is_read_the_way_each_language_writes_it() {
+        assert_eq!(condition("if (a && b) {"), "a && b");
+        assert_eq!(condition("} else if (ready) {"), "ready");
+        assert_eq!(condition("if (a) return;"), "if (a) return;");
+        assert_eq!(condition("while (a) {"), "while (a) {");
+        assert_eq!(python_condition("elif x is None:"), "x is None");
+        assert_eq!(python_condition("if ready:"), "ready");
+        assert_eq!(
+            split_initializer("const x = f(1);").as_deref(),
+            Some("const x =")
+        );
+        assert_eq!(
+            split_initializer("if (a <= b && c != d) total = 1").as_deref(),
+            Some("if (a <= b && c != d) total =")
+        );
+        assert_eq!(split_initializer("a === b"), None);
+        assert_eq!(split_initializer("items.map((x) => x)"), None);
+        assert!(is_test_call("  it('works', () => {"));
+        assert!(is_test_call("test.only('works', () => {"));
+        assert!(is_test_call("test ('spaced', () => {"));
+        assert!(!is_test_call("items.push(1)"));
+        assert!(!is_test_call("testing(1)"));
+        assert_eq!(
+            strip_numbers("▶   12 total(1)\n    13 next\n  ... 4 lines not shown\nplain"),
+            "▶total(1)\n next\n...\nplain"
+        );
+        assert_eq!(
+            strip_location("src/a.js:12: `x` is deleted"),
+            "src/a.js:: `x` is deleted"
+        );
+        assert_eq!(strip_location("src/a.js:main: kept"), "src/a.js:main: kept");
+        assert_eq!(strip_location("no location"), "no location");
+    }
+
     #[test]
     fn python_changes_follow_the_audit() {
         let source = "import os\n\n\ndef f(x):\n    \"\"\"Docs.\"\"\"\n    y = x + 1\n    if y > 2:\n        return y\n    z: int\n    count += 1\n    return\ndef g(v):\n    if v:\n        pass\n    elif v is None:\n        pass\n";
