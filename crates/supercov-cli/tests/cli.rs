@@ -636,6 +636,41 @@ fn reports_carry_the_same_view_in_every_format() {
     assert!(interactive.contains("self-contained"), "{interactive}");
 }
 
+/// A diff says the code did not change only when neither the source nor
+/// what it runs on did: a new dependency is a change in the code too.
+#[test]
+fn a_diff_counts_a_dependency_change_as_a_change_in_the_code() {
+    let added_test = "test(\"express shipping costs fifteen\", () => {\n  assert.equal(shipping(10, true), 15);\n});\n\ntest(\"shipping is free over fifty\"";
+    let same_source = "Both runs measured the same source";
+
+    let project = Project::cart("diff-tests-only");
+    let before = project.measure(&[]);
+    project.edit(
+        "test/cart.test.js",
+        "test(\"shipping is free over fifty\"",
+        added_test,
+    );
+    let after = project.measure(&[]);
+    let diff = project.supercov(&["diff", &before, &after]).succeeds();
+    assert!(diff.contains(same_source), "{diff}");
+
+    let project = Project::cart("diff-dependency");
+    let before = project.measure(&[]);
+    project.edit(
+        "test/cart.test.js",
+        "test(\"shipping is free over fifty\"",
+        added_test,
+    );
+    project.edit(
+        "package.json",
+        "\"type\": \"module\"",
+        "\"type\": \"module\", \"dependencies\": { \"left-pad\": \"1.3.0\" }",
+    );
+    let after = project.measure(&[]);
+    let diff = project.supercov(&["diff", &before, &after]).succeeds();
+    assert!(!diff.contains(same_source), "{diff}");
+}
+
 #[test]
 fn diff_and_tests_affected_follow_a_change() {
     let project = Project::cart("change");
