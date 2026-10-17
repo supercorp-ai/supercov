@@ -2143,6 +2143,61 @@ mod tests {
         assert_eq!(x.code_line(7), 3);
     }
 
+    /// A comment the toolchain reads runs: editing one changes the file's
+    /// digest, where editing any other comment does not.
+    #[test]
+    fn a_comment_the_toolchain_reads_is_kept_and_any_other_is_erased() {
+        let go = |comment: &str| format!("package a\n\n{comment}\nfunc F() {{}}\n");
+        let script = |comment: &str| format!("{comment}\nx = 1\n");
+        type Pairs<'a> = &'a [(&'a str, &'a str)];
+        type Source<'a> = &'a dyn Fn(&str) -> String;
+        let cases: [(&str, Source, (&str, &str), Pairs); 3] = [
+            (
+                "a.go",
+                &go,
+                ("// a note", "// another note"),
+                &[
+                    ("//export F", "//export G"),
+                    ("//line a.go:1", "//line a.go:2"),
+                    ("//sys read(fd int)", "//sys write(fd int)"),
+                    ("//go:noinline", "//go:nosplit"),
+                    ("// +build linux", "// +build darwin"),
+                ],
+            ),
+            (
+                "a.py",
+                &script,
+                ("# a note", "# another note"),
+                &[
+                    ("# -*- coding: utf-8 -*-", "# -*- coding: latin-1 -*-"),
+                    ("# coding=utf-8", "# coding=latin-1"),
+                ],
+            ),
+            (
+                "a.rb",
+                &script,
+                ("# a note", "# another note"),
+                &[
+                    (
+                        "# -*- frozen_string_literal: true -*-",
+                        "# -*- frozen_string_literal: false -*-",
+                    ),
+                    (
+                        "# frozen_string_literal: true",
+                        "# frozen_string_literal: false",
+                    ),
+                ],
+            ),
+        ];
+        for (path, source, (note, other_note), directives) in cases {
+            let digest = |comment: &str| code(path, &source(comment)).unwrap().semantic;
+            assert_eq!(digest(note), digest(other_note), "{path}");
+            for (one, other) in directives {
+                assert_ne!(digest(one), digest(other), "{path}: {one}");
+            }
+        }
+    }
+
     #[test]
     fn a_supercov_pragma_in_a_comment_is_kept() {
         let a = code("a.js", "// supercov: observes x\nlet x = 1;\n").unwrap();
