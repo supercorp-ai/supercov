@@ -12359,6 +12359,43 @@ mod tests {
         assert!(output.code.contains(&format!("{}(", runtime.mcdc_end)));
     }
 
+    /// A server's request, upgrade and connection callbacks run in the
+    /// request's phase; a spread or a missing callback is left as written.
+    #[test]
+    fn server_callbacks_run_in_the_request_phase_however_they_are_passed() {
+        let source = "import http from 'node:http';\nconst handlers = [() => {}];\nconst server = http.createServer({}, function (req, res) { res.end('a'); });\nserver.on('request', ...handlers);\nserver.on('request');\nserver.on('connection', (socket) => socket.setNoDelay());\nserver.once('upgrade', onUpgrade);\nserver.on('close', () => {});\nfunction onUpgrade() {}\n";
+        let output = instrument_candidate(source, "src/server.mjs").unwrap();
+        let runtime = output.runtime.as_ref().expect("runtime binding");
+        let phase = &runtime.with_request_phase;
+        let line = |start: &str| {
+            output
+                .code
+                .lines()
+                .find(|line| line.starts_with(start))
+                .unwrap_or_else(|| panic!("no {start} in\n{}", output.code))
+                .to_owned()
+        };
+        assert!(line("const server").contains(&format!("{{}}, {phase}(function(req, res)")));
+        assert_eq!(
+            line("server.on(\"request\", ..."),
+            "server.on(\"request\", ...handlers);"
+        );
+        assert_eq!(line("server.on(\"request\")"), "server.on(\"request\");");
+        assert!(line("server.on(\"connection\"").contains(&format!("{phase}((socket)")));
+        // A connection callback is told it is one.
+        assert_eq!(
+            output.code.matches("\"connection\")").count(),
+            1,
+            "{}",
+            output.code
+        );
+        assert_eq!(
+            line("server.once"),
+            format!("server.once(\"upgrade\", {phase}(onUpgrade));")
+        );
+        assert!(!line("server.on(\"close\"").contains(phase.as_str()));
+    }
+
     #[test]
     fn leaves_look_alike_route_exports_alone() {
         for (file, source) in [
