@@ -1058,6 +1058,24 @@ pub(crate) fn snapshot(
     directory: &Path,
     attempt: &str,
 ) -> Result<RustEvidence, RustTestRunnerError> {
+    // Evidence files are named by the instrumentation that wrote them. A
+    // test may build and run a program instrumented on its own -- a fixture
+    // prepared inside the instrumented workspace -- and that program
+    // inherits the evidence directory; its obligations are not this run's.
+    let regions = read_rust_region_directory(directory, &probes.token, probes)
+        .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?
+        .into_iter()
+        .map(|(_, observations)| observations);
+    snapshot_regions(manifest, regions, attempt)
+}
+
+/// `snapshot` of regions already read: each one's records in the order its
+/// process wrote them. A server's windows arrive this way.
+pub(crate) fn snapshot_regions(
+    manifest: &CoverageManifest,
+    regions: impl IntoIterator<Item = Vec<crate::rust_runtime::RustProbeEntry>>,
+    attempt: &str,
+) -> Result<RustEvidence, RustTestRunnerError> {
     let points = manifest
         .points
         .iter()
@@ -1096,13 +1114,7 @@ pub(crate) fn snapshot(
     // Records carry no clock. The order they were written in is what matters,
     // and a sequence number preserves exactly that.
     let mut sequence = 0_i64;
-    // Evidence files are named by the instrumentation that wrote them. A
-    // test may build and run a program instrumented on its own -- a fixture
-    // prepared inside the instrumented workspace -- and that program
-    // inherits the evidence directory; its obligations are not this run's.
-    for (_, observations) in read_rust_region_directory(directory, &probes.token, probes)
-        .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?
-    {
+    for observations in regions {
         for entry in observations {
             sequence += 1;
             let thread = entry.thread;
@@ -1212,7 +1224,7 @@ pub(crate) fn snapshot(
     })
 }
 
-fn rust_coverage_model() -> CoverageModelDeclaration {
+pub(crate) fn rust_coverage_model() -> CoverageModelDeclaration {
     CoverageModelDeclaration {
         language: "rust".into(),
         variant: "rust-owned-probes-v1".into(),
@@ -1491,7 +1503,7 @@ fn rust_runner_limitations(runner: &str) -> Vec<FrontendLimitation> {
     ]
 }
 
-fn rust_runner_declaration(runner: &str) -> FrontendRunnerDeclaration {
+pub(crate) fn rust_runner_declaration(runner: &str) -> FrontendRunnerDeclaration {
     FrontendRunnerDeclaration {
         runner: runner.into(),
         execution_model: ExecutionModel::ProcessPerTest,
@@ -1606,18 +1618,29 @@ fn settle_cfg_gates(
     evidence_root: &Path,
     diagnostics: &mut dyn Write,
 ) -> Result<CoverageManifest, RustTestRunnerError> {
-    let mut manifest = project.manifest.clone();
     let probes = &project.probes;
     if probes.cfgs.is_empty() {
-        return Ok(manifest);
+        return Ok(project.manifest.clone());
     }
     let settled =
         crate::rust_runtime::read_rust_cfg_settlement(evidence_root, &probes.token, probes)
             .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?;
+    settle_cfg_gates_with(&project.manifest, probes, &settled, diagnostics)
+}
+
+/// `settle_cfg_gates` with what the builds said already gathered: a byte per
+/// gate, bit 0 left out somewhere, bit 1 built somewhere.
+pub(crate) fn settle_cfg_gates_with(
+    manifest: &CoverageManifest,
+    probes: &crate::rust_instrumenter::RustProbeLayout,
+    settled: &[u8],
+    diagnostics: &mut dyn Write,
+) -> Result<CoverageManifest, RustTestRunnerError> {
+    let mut manifest = manifest.clone();
     let left_out = probes
         .cfgs
         .iter()
-        .zip(&settled)
+        .zip(settled)
         .filter(|(_, bits)| **bits == 1)
         .map(|(gate, _)| gate)
         .collect::<Vec<_>>();
@@ -1628,7 +1651,7 @@ fn settle_cfg_gates(
     let unanswered = probes
         .cfgs
         .iter()
-        .zip(&settled)
+        .zip(settled)
         .filter(|(gate, bits)| {
             **bits == 0
                 && gate
@@ -1702,7 +1725,7 @@ fn settle_cfg_gates(
 }
 
 /// The manifest's structural limitation IDs, as the declaration references them.
-fn structural_limitations(manifest: &CoverageManifest) -> Vec<String> {
+pub(crate) fn structural_limitations(manifest: &CoverageManifest) -> Vec<String> {
     manifest
         .limitations
         .iter()
