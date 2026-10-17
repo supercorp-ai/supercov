@@ -416,7 +416,6 @@ impl Cache {
 struct Pass<'p> {
     population: &'p Population,
     model: &'static str,
-    salt: String,
     /// Per statement: (test, answer) in the order asked.
     answers: Vec<Vec<(usize, f64)>>,
     orders: Vec<Vec<usize>>,
@@ -434,9 +433,7 @@ impl Pass<'_> {
         if let Some(k) = self.keys.get(&(statement, test)) {
             return k.clone();
         }
-        let k = self
-            .population
-            .pair_key(statement, test, self.model, &self.salt);
+        let k = self.population.pair_key(statement, test, self.model);
         self.keys.insert((statement, test), k.clone());
         k
     }
@@ -648,17 +645,6 @@ fn run_pass(
     Ok(sent)
 }
 
-/// What changes every answer at once: the run's dependencies and test/build
-/// configuration. (The `execution` fingerprint also folds in the source, so it
-/// moves with every edit and would re-ask everything.)
-fn salt(run: &StoredRun) -> String {
-    let f = &run.metadata.integrity.fingerprint;
-    format!(
-        "{:x}",
-        Sha256::digest(format!("{}\n{}", f.dependencies, f.configuration))
-    )
-}
-
 fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, String> {
     if options.changed {
         // The checkout has changed since the run: its code is the snapshot
@@ -711,7 +697,6 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     let mut pass = Pass {
         population: &population,
         model: quality::model(),
-        salt: salt(run),
         answers: vec![Vec::new(); n],
         orders: (0..n).map(|s| population.order(s, FIRST_TESTS)).collect(),
         round: 0,
@@ -883,7 +868,6 @@ fn assess_changed(
         }
     }
     let model = quality::model();
-    let salt = salt(run);
     let mut cache = Cache::load(root);
     let mut answers = BTreeMap::<usize, Vec<(usize, f64)>>::new();
     let mut wanted = BTreeMap::<usize, Vec<usize>>::new(); // test -> statements
@@ -891,7 +875,7 @@ fn assess_changed(
     let mut reused = 0;
     for &s in &changed {
         for t in population.order(s, IMPACT_TESTS) {
-            let key = population.pair_key(s, t, model, &salt);
+            let key = population.pair_key(s, t, model);
             match cache.answers.get(&key).filter(|_| !options.refresh) {
                 Some(&p) => {
                     answers.entry(s).or_default().push((t, p));

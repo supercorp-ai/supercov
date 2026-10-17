@@ -544,6 +544,31 @@ fn an_assessment_is_saved_reused_and_drives_tests_affected() {
     assert!(reused.contains("100% asserted"), "{reused}");
     assert_eq!(seen.lock().unwrap().len(), asked, "every answer was reused");
 
+    // Nor does a run after a dependency or configuration change: no question
+    // shows either, so each is the same question. 4.17 keyed every answer on
+    // both fingerprints and asked the whole suite again.
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test", "lint": "true" }, "devDependencies": { "left-pad": "1.3.0" } }"#,
+    );
+    project.write(
+        "package-lock.json",
+        "{\"lockfileVersion\":3,\"packages\":{}}\n",
+    );
+    let reconfigured = project.measure(&[]);
+    let carried = project
+        .supercov_with(&["runs", &reconfigured, "assertions", "assess"], &jev)
+        .succeeds();
+    assert!(carried.contains("100% asserted"), "{carried}");
+    assert_eq!(seen.lock().unwrap().len(), asked, "{carried}");
+    // Back as it was: what follows asks which tests a change affects, and a
+    // configuration change affects them all.
+    project.write(
+        "package.json",
+        r#"{ "name": "cart", "private": true, "type": "module", "scripts": { "test": "node --test" } }"#,
+    );
+    std::fs::remove_file(project.root.join("package-lock.json")).unwrap();
+
     // `--refresh` asks every question again instead, for an answer shown to
     // be wrong, and keeps what it gets.
     let refreshed = project
