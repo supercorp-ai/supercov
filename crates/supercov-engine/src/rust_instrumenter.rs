@@ -44,6 +44,149 @@ impl std::fmt::Display for RustInstrumenterError {
 pub struct RustInstrumentedSource {
     pub code: String,
     pub manifest: CoverageManifest,
+    /// The numbering this file's probes used; empty when the caller numbers
+    /// a whole workspace and holds the numbering itself.
+    pub probes: RustProbeLayout,
+}
+
+/// The probes of an instrumentation, numbered: a probe call carries its
+/// ordinal, and the region the runtime writes holds one slot per ordinal in
+/// each space. The ids an ordinal stands for never cross the transport.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RustProbeLayout {
+    /// The instrumentation's token: regions are named by it, and a region
+    /// with another token is another instrumentation's.
+    #[serde(default)]
+    pub token: String,
+    /// Statements, functions and branch alternatives: what `hit` records.
+    pub hits: Vec<String>,
+    /// Statements that assert, and assertion sites in test code.
+    pub assertions: Vec<String>,
+    pub decisions: Vec<String>,
+    /// Code behind a `#[cfg]` the target alone does not settle -- a feature,
+    /// `test`, a build script's `--cfg`. Each crate's runtime writes what
+    /// `cfg!` says of the predicates in its own files when it maps the
+    /// region, so the compiler that built the code decides.
+    #[serde(default)]
+    pub cfgs: Vec<RustCfgGate>,
+}
+
+/// Code a `#[cfg]` predicate keeps or leaves out, and the obligations in it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RustCfgGate {
+    pub file: String,
+    /// The predicate as `cfg!` takes it: `feature = "serde"`,
+    /// `all(unix, not(test))`.
+    pub predicate: String,
+    /// The lines the gated code spans.
+    pub line: usize,
+    pub end_line: usize,
+    pub obligations: Vec<String>,
+}
+
+#[derive(Default)]
+struct ProbeNumbering {
+    layout: RustProbeLayout,
+    hits: std::collections::HashMap<String, u32>,
+    assertions: std::collections::HashMap<String, u32>,
+    decisions: std::collections::HashMap<String, u32>,
+}
+
+impl ProbeNumbering {
+    fn from_layout(layout: RustProbeLayout) -> Self {
+        let index = |ids: &[String]| {
+            ids.iter()
+                .enumerate()
+                .map(|(ordinal, id)| (id.clone(), ordinal as u32))
+                .collect()
+        };
+        Self {
+            hits: index(&layout.hits),
+            assertions: index(&layout.assertions),
+            decisions: index(&layout.decisions),
+            layout,
+        }
+    }
+
+    fn number(
+        ids: &mut Vec<String>,
+        index: &mut std::collections::HashMap<String, u32>,
+        id: &str,
+    ) -> u32 {
+        if let Some(ordinal) = index.get(id) {
+            return *ordinal;
+        }
+        let ordinal = ids.len() as u32;
+        ids.push(id.to_owned());
+        index.insert(id.to_owned(), ordinal);
+        ordinal
+    }
+}
+
+thread_local! {
+    /// The numbering of the instrumentation in progress on this thread:
+    /// every probe site asks it for its ordinal, so the files of one
+    /// workspace share one numbering without passing it to each site.
+    static NUMBERING: std::cell::RefCell<ProbeNumbering> =
+        std::cell::RefCell::new(ProbeNumbering::default());
+}
+
+fn hit_ordinal(id: &str) -> u32 {
+    NUMBERING.with(|numbering| {
+        let numbering = &mut *numbering.borrow_mut();
+        ProbeNumbering::number(&mut numbering.layout.hits, &mut numbering.hits, id)
+    })
+}
+
+fn assertion_ordinal(id: &str) -> u32 {
+    NUMBERING.with(|numbering| {
+        let numbering = &mut *numbering.borrow_mut();
+        ProbeNumbering::number(
+            &mut numbering.layout.assertions,
+            &mut numbering.assertions,
+            id,
+        )
+    })
+}
+
+fn cfg_gate_ordinal(gate: RustCfgGate) -> u32 {
+    NUMBERING.with(|numbering| {
+        let gates = &mut numbering.borrow_mut().layout.cfgs;
+        gates.push(gate);
+        (gates.len() - 1) as u32
+    })
+}
+
+fn decision_ordinal(id: &str) -> u32 {
+    NUMBERING.with(|numbering| {
+        let numbering = &mut *numbering.borrow_mut();
+        ProbeNumbering::number(
+            &mut numbering.layout.decisions,
+            &mut numbering.decisions,
+            id,
+        )
+    })
+}
+
+/// Hands this thread's numbering back when an instrumentation ends, however
+/// it ends.
+struct NumberingScope<'a> {
+    layout: &'a mut RustProbeLayout,
+}
+
+impl<'a> NumberingScope<'a> {
+    fn enter(layout: &'a mut RustProbeLayout) -> Self {
+        let taken = std::mem::take(layout);
+        NUMBERING.with(|numbering| *numbering.borrow_mut() = ProbeNumbering::from_layout(taken));
+        Self { layout }
+    }
+}
+
+impl Drop for NumberingScope<'_> {
+    fn drop(&mut self) {
+        *self.layout =
+            NUMBERING.with(|numbering| std::mem::take(&mut *numbering.borrow_mut()).layout);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +548,10 @@ struct RustObligationCollector<'a> {
     tests: Vec<TextRange>,
     /// Items the target's cfg leaves uncompiled, which no test can reach.
     compiled_out: Vec<TextRange>,
+    /// Ranges a `#[cfg]` the target does not settle may leave out; `collect`
+    /// fills `gated` with the obligations inside each.
+    gates: Vec<TextRange>,
+    gated: Vec<Vec<String>>,
     error: Option<RustInstrumenterError>,
 }
 
@@ -429,6 +576,8 @@ impl<'a> RustObligationCollector<'a> {
             obligation_ranges: Vec::new(),
             tests: Vec::new(),
             compiled_out: Vec::new(),
+            gates: Vec::new(),
+            gated: Vec::new(),
             error: None,
         }
     }
@@ -437,6 +586,48 @@ impl<'a> RustObligationCollector<'a> {
         self.tests = tests;
         self.compiled_out = compiled_out;
         self
+    }
+
+    fn gating(mut self, gates: Vec<TextRange>) -> Self {
+        self.gates = gates;
+        self
+    }
+
+    /// The obligations the manifest kept inside each gate, in order.
+    fn gate_obligations(&mut self) {
+        let kept = self
+            .manifest
+            .points
+            .iter()
+            .map(|point| point.id.as_str())
+            .chain(
+                self.manifest
+                    .decisions
+                    .iter()
+                    .map(|decision| decision.id.as_str()),
+            )
+            .chain(
+                self.manifest
+                    .branches
+                    .iter()
+                    .map(|branch| branch.id.as_str()),
+            )
+            .collect::<BTreeSet<_>>();
+        self.gated = self
+            .gates
+            .iter()
+            .map(|gate| {
+                let mut ids = self
+                    .obligation_ranges
+                    .iter()
+                    .filter(|(id, range)| gate.contains_range(*range) && kept.contains(id.as_str()))
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                ids.sort();
+                ids.dedup();
+                ids
+            })
+            .collect();
     }
 
     /// Test code is not measured, as the usual Rust coverage tools leave it
@@ -705,11 +896,22 @@ impl<'a> RustObligationCollector<'a> {
     }
 
     fn collect(
-        mut self,
+        self,
         file: &SourceFile,
         assertions: &[TextRange],
         matches: &[TextRange],
     ) -> Result<CoverageManifest, RustInstrumenterError> {
+        self.collect_gated(file, assertions, matches)
+            .map(|(manifest, _)| manifest)
+    }
+
+    /// `collect`, with the obligations inside each of the `gating` ranges.
+    fn collect_gated(
+        mut self,
+        file: &SourceFile,
+        assertions: &[TextRange],
+        matches: &[TextRange],
+    ) -> Result<(CoverageManifest, Vec<Vec<String>>), RustInstrumenterError> {
         let root = file.syntax();
 
         for list in root.descendants().filter_map(ast::StmtList::cast) {
@@ -931,6 +1133,7 @@ impl<'a> RustObligationCollector<'a> {
 
         self.decline_unreachable_obligations(root);
         self.leave_out_test_code();
+        self.gate_obligations();
 
         if let Some(error) = self.error {
             return Err(error);
@@ -949,7 +1152,7 @@ impl<'a> RustObligationCollector<'a> {
                 .and_then(|value| value.as_str())
                 .cmp(&right.get("id").and_then(|value| value.as_str()))
         });
-        Ok(self.manifest)
+        Ok((self.manifest, self.gated))
     }
 }
 
@@ -1415,15 +1618,53 @@ impl TargetCfg {
         }
     }
 
-    /// Whether an item's `#[cfg(..)]` keeps the compiler from building it.
+    /// Whether a node's `#[cfg(..)]` keeps the compiler from building it.
     fn compiles_out(&self, node: &ra_ap_syntax::SyntaxNode) -> bool {
-        item_attributes(node).iter().any(|text| {
-            text.strip_prefix("cfg(")
+        cfg_predicate(node).is_some_and(|expression| self.evaluate(&expression) == Some(false))
+    }
+}
+
+/// The `#[cfg(..)]` predicates on a node, as one: an item, a statement, a
+/// match arm, a field -- anything that carries attributes, and the inner
+/// `#![cfg(..)]` of a file or an inline module, which gates all of it.
+fn cfg_predicate(node: &ra_ap_syntax::SyntaxNode) -> Option<cargo_platform::CfgExpr> {
+    let attributes = ast::AnyHasAttrs::cast(node.clone())?;
+    let mut predicates = attributes
+        .attrs()
+        .filter_map(|attribute| attribute.meta())
+        .filter_map(|meta| {
+            // Spaces inside a value are the value's: `cfg(foo = "a b")`.
+            let text = meta.syntax().text().to_string();
+            text.trim()
+                .strip_prefix("cfg")
+                .map(str::trim_start)
+                .and_then(|rest| rest.strip_prefix('('))
                 .and_then(|inner| inner.strip_suffix(')'))
                 .and_then(|inner| inner.parse::<cargo_platform::CfgExpr>().ok())
-                .is_some_and(|expression| self.evaluate(&expression) == Some(false))
         })
+        .collect::<Vec<_>>();
+    match predicates.len() {
+        0 => None,
+        1 => predicates.pop(),
+        _ => Some(cargo_platform::CfgExpr::All(predicates)),
     }
+}
+
+/// Code behind a `#[cfg]` the target does not settle, with its predicate.
+/// Without a target every predicate is unsettled.
+fn unsettled_cfg_gates(
+    root: &ra_ap_syntax::SyntaxNode,
+    cfg: Option<&TargetCfg>,
+) -> Vec<(TextRange, cargo_platform::CfgExpr)> {
+    root.descendants()
+        .filter_map(|node| {
+            let predicate = cfg_predicate(&node)?;
+            if cfg.is_some_and(|cfg| cfg.evaluate(&predicate).is_some()) {
+                return None;
+            }
+            Some((node.text_range(), predicate))
+        })
+        .collect()
 }
 
 /// The outer attributes of an item, or of one inside an `impl` or a trait,
@@ -1761,17 +2002,18 @@ fn instrument_let_chain(
             continue;
         };
         operators.push(format!(
-            "({first}, {:?}, {:?})",
-            format!("{branch}:short-circuit"),
-            format!("{branch}:evaluated")
+            "({first}, {}, {})",
+            hit_ordinal(&format!("{branch}:short-circuit")),
+            hit_ordinal(&format!("{branch}:evaluated"))
         ));
     }
 
     let mark = format!("{runtime_path}::reached(&mut {frame}, 0);");
     let record_false = format!("{runtime_path}::decision_chain(&mut {frame}, false, {table});");
     let mut prefix = format!(
-        "{{ const {table}: &[(usize, &str, &str)] = &[{}]; let mut {frame} = {runtime_path}::DecisionFrame::new({id:?}, {}); ",
+        "{{ const {table}: &[(usize, u32, u32)] = &[{}]; let mut {frame} = {runtime_path}::DecisionFrame::new({}, {}); ",
         operators.join(", "),
+        decision_ordinal(&id),
         atoms.len()
     );
     if single_let {
@@ -1908,7 +2150,8 @@ fn instrument_decision(
         range,
         0,
         format!(
-            "({{ let mut {frame_name} = {runtime_path}::DecisionFrame::new({id:?}, {}); {runtime_path}::decision((",
+            "({{ let mut {frame_name} = {runtime_path}::DecisionFrame::new({}, {}); {runtime_path}::decision((",
+            decision_ordinal(&id),
             condition_ranges.len()
         ),
         format!("), &mut {frame_name}) }})"),
@@ -1957,6 +2200,25 @@ pub fn instrument_rust_file(
     test_file: bool,
     cfg: Option<&TargetCfg>,
 ) -> Result<RustInstrumentedSource, RustInstrumenterError> {
+    let mut layout = RustProbeLayout::default();
+    let mut transformed =
+        instrument_rust_file_numbered(file, source, runtime_path, test_file, cfg, &mut layout)?;
+    transformed.probes = layout;
+    Ok(transformed)
+}
+
+/// `instrument_rust_file`, numbering its probes in `layout`, which carries
+/// on from the files instrumented before it: one numbering spans the
+/// workspace, so every crate's runtime has the same slots.
+pub fn instrument_rust_file_numbered(
+    file: &str,
+    source: &str,
+    runtime_path: &str,
+    test_file: bool,
+    cfg: Option<&TargetCfg>,
+    layout: &mut RustProbeLayout,
+) -> Result<RustInstrumentedSource, RustInstrumenterError> {
+    let _numbering = NumberingScope::enter(layout);
     if !valid_runtime_path(runtime_path) {
         return Err(RustInstrumenterError::InvalidRuntimePath);
     }
@@ -1968,9 +2230,31 @@ pub fn instrument_rust_file(
     let parsed = parse_for_instrumentation(source)?;
     let tests = test_code_ranges(parsed.tree.syntax(), test_file);
     let compiled_out = compiled_out_ranges(parsed.tree.syntax(), cfg);
-    let mut manifest = RustObligationCollector::new(file, source)
+    // Code behind a predicate only the build can settle: its obligations are
+    // counted unless every build that ran leaves it out (`RustCfgGate`).
+    let gates = unsettled_cfg_gates(parsed.tree.syntax(), cfg)
+        .into_iter()
+        .filter(|(range, _)| !in_test_code(&tests, *range) && !in_test_code(&compiled_out, *range))
+        .collect::<Vec<_>>();
+    let (mut manifest, gated) = RustObligationCollector::new(file, source)
         .leaving_out(tests.clone(), compiled_out.clone())
-        .collect(&parsed.tree, &parsed.assertions, &parsed.matches)?;
+        .gating(gates.iter().map(|(range, _)| *range).collect())
+        .collect_gated(&parsed.tree, &parsed.assertions, &parsed.matches)?;
+    for ((range, predicate), obligations) in gates.iter().zip(gated) {
+        if obligations.is_empty() {
+            continue;
+        }
+        let line_of = |offset: ra_ap_syntax::TextSize| {
+            source[..usize::from(offset)].matches('\n').count() + 1
+        };
+        cfg_gate_ordinal(RustCfgGate {
+            file: file.to_owned(),
+            predicate: predicate.to_string(),
+            line: line_of(range.start()),
+            end_line: line_of(range.end()),
+            obligations,
+        });
+    }
     let ParsedSource {
         tree,
         assertions,
@@ -2013,7 +2297,7 @@ pub fn instrument_rust_file(
             push_direct(
                 insertions,
                 before_its_line(root, source, usize::from(range.start())),
-                format!("{runtime_path}::hit({id:?});"),
+                format!("{runtime_path}::hit({});", hit_ordinal(&id)),
             );
             return;
         }
@@ -2024,7 +2308,11 @@ pub fn instrument_rust_file(
         if let ast::Expr::BlockExpr(block) = &expression
             && let Some(offset) = block_entry_offset(block)
         {
-            push_direct(insertions, offset, format!("{runtime_path}::hit({id:?});"));
+            push_direct(
+                insertions,
+                offset,
+                format!("{runtime_path}::hit({});", hit_ordinal(&id)),
+            );
             return;
         }
         // A brace-delimited macro call closing a block without a semicolon
@@ -2059,7 +2347,7 @@ pub fn instrument_rust_file(
                 range,
                 range,
                 0,
-                format!("{{ {runtime_path}::hit({id:?}); "),
+                format!("{{ {runtime_path}::hit({}); ", hit_ordinal(&id)),
                 " }".into(),
             );
             return;
@@ -2081,7 +2369,7 @@ pub fn instrument_rust_file(
                 wrapped,
                 wrapped,
                 0,
-                format!(" {{ {runtime_path}::hit({id:?}); "),
+                format!(" {{ {runtime_path}::hit({}); ", hit_ordinal(&id)),
                 "; }".into(),
             );
             return;
@@ -2101,7 +2389,7 @@ pub fn instrument_rust_file(
             wrapped,
             wrapped,
             0,
-            format!(" {{ {runtime_path}::hit({id:?}); ("),
+            format!(" {{ {runtime_path}::hit({}); (", hit_ordinal(&id)),
             ") }".into(),
         );
     };
@@ -2160,7 +2448,7 @@ pub fn instrument_rust_file(
                 push_direct(
                     &mut insertions,
                     usize::from(range.end()),
-                    format!("{runtime_path}::assertion({id:?});"),
+                    format!("{runtime_path}::assertion({});", assertion_ordinal(&id)),
                 );
             }
             attributed_probe(
@@ -2214,7 +2502,7 @@ pub fn instrument_rust_file(
             push_direct(
                 &mut insertions,
                 offset,
-                format!("{runtime_path}::hit({id:?});"),
+                format!("{runtime_path}::hit({});", hit_ordinal(&id)),
             );
         }
     }
@@ -2232,7 +2520,7 @@ pub fn instrument_rust_file(
                 push_direct(
                     &mut insertions,
                     offset,
-                    format!("{runtime_path}::hit({id:?});"),
+                    format!("{runtime_path}::hit({});", hit_ordinal(&id)),
                 );
             }
         } else {
@@ -2242,7 +2530,7 @@ pub fn instrument_rust_file(
                 range,
                 closure.syntax().text_range(),
                 0,
-                format!("{{ {runtime_path}::hit({id:?}); ("),
+                format!("{{ {runtime_path}::hit({}); (", hit_ordinal(&id)),
                 ") }".into(),
             );
         }
@@ -2274,9 +2562,9 @@ pub fn instrument_rust_file(
             .map(|arm| {
                 let id = stable_id(file, "branch", arm.syntax().text_range(), "match-arm");
                 format!(
-                    "{:?}, {:?}",
-                    format!("{id}:missed"),
-                    format!("{id}:selected")
+                    "{}, {}",
+                    hit_ordinal(&format!("{id}:missed")),
+                    hit_ordinal(&format!("{id}:selected"))
                 )
             })
             .collect::<Vec<_>>()
@@ -2287,7 +2575,7 @@ pub fn instrument_rust_file(
             // On the brace's line, as every probe is: a line of its own
             // moved each line below it, and with them where a panic or a
             // doctest further down the file is reported.
-            format!(" const {table}: &[&str] = &[{entries}];"),
+            format!(" const {table}: &[u32] = &[{entries}];"),
         );
         for (index, arm) in arms.iter().enumerate() {
             let Some(body) = arm.expr() else {
@@ -2346,9 +2634,9 @@ pub fn instrument_rust_file(
             2,
             format!("{runtime_path}::logical(("),
             format!(
-                "), {short_circuits_when}, {:?}, {:?})",
-                format!("{id}:short-circuit"),
-                format!("{id}:evaluated")
+                "), {short_circuits_when}, {}, {})",
+                hit_ordinal(&format!("{id}:short-circuit")),
+                hit_ordinal(&format!("{id}:evaluated"))
             ),
         );
     }
@@ -2374,9 +2662,9 @@ pub fn instrument_rust_file(
             0,
             format!("{runtime_path}::for_loop(("),
             format!(
-                "), {:?}, {:?})",
-                format!("{id}:zero"),
-                format!("{id}:entered")
+                "), {}, {})",
+                hit_ordinal(&format!("{id}:zero")),
+                hit_ordinal(&format!("{id}:entered"))
             ),
         );
     }
@@ -2406,16 +2694,16 @@ pub fn instrument_rust_file(
             0,
             format!("{{ let mut {flag} = true; "),
             format!(
-                " {runtime_path}::zero_iterations({flag}, {:?}) }}",
-                format!("{id}:zero")
+                " {runtime_path}::zero_iterations({flag}, {}) }}",
+                hit_ordinal(&format!("{id}:zero"))
             ),
         );
         push_direct(
             &mut insertions,
             offset,
             format!(
-                " {runtime_path}::entered(&mut {flag}, {:?});",
-                format!("{id}:entered")
+                " {runtime_path}::entered(&mut {flag}, {});",
+                hit_ordinal(&format!("{id}:entered"))
             ),
         );
     }
@@ -2445,9 +2733,9 @@ pub fn instrument_rust_file(
             0,
             format!("{runtime_path}::TryProbe::probe(("),
             format!(
-                "), {:?}, {:?})",
-                format!("{id}:continued"),
-                format!("{id}:returned")
+                "), {}, {})",
+                hit_ordinal(&format!("{id}:continued")),
+                hit_ordinal(&format!("{id}:returned"))
             ),
         );
     }
@@ -2577,13 +2865,46 @@ pub fn instrument_rust_file(
 
     // Nothing survives in code the compiler leaves out; a probe there would
     // name an obligation the manifest no longer has, if the item were built.
+    // A probe at either edge belongs to its neighbour: the next statement's
+    // probe goes right after a stripped statement's `;` (semver's
+    // `#[cfg(target_endian = "big")] let ..;` took the probe of the line
+    // after it). A wrapper goes or stays whole, by the span it encloses.
     if !compiled_out.is_empty() {
-        insertions.retain(|insertion| {
-            !compiled_out.iter().any(|range| {
-                usize::from(range.start()) <= insertion.offset
-                    && insertion.offset <= usize::from(range.end())
+        let within = |start: usize, end: usize| {
+            compiled_out
+                .iter()
+                .any(|range| usize::from(range.start()) <= start && end <= usize::from(range.end()))
+        };
+        let strictly_inside = |offset: usize| {
+            compiled_out.iter().any(|range| {
+                usize::from(range.start()) < offset && offset < usize::from(range.end())
             })
-        });
+        };
+        let mut kept = Vec::with_capacity(insertions.len());
+        let mut pending = insertions.into_iter().peekable();
+        while let Some(insertion) = pending.next() {
+            match insertion.kind {
+                // `push_wrapper` pushes each wrapper's two halves together;
+                // a half without its pair is kept, as it was written.
+                InsertionKind::Start => {
+                    match pending.next_if(|next| next.kind == InsertionKind::End) {
+                        Some(end) if within(insertion.offset, end.offset) => {}
+                        Some(end) => {
+                            kept.push(insertion);
+                            kept.push(end);
+                        }
+                        None => kept.push(insertion),
+                    }
+                }
+                InsertionKind::End => kept.push(insertion),
+                InsertionKind::Direct => {
+                    if !strictly_inside(insertion.offset) {
+                        kept.push(insertion);
+                    }
+                }
+            }
+        }
+        insertions = kept;
     }
     // Only the assertion markers survive in test code, and only the sites
     // they name stay in the manifest.
@@ -2598,7 +2919,10 @@ pub fn instrument_rust_file(
             .iter()
             .map(|site| {
                 (
-                    format!("{runtime_path}::assertion({:?});", site.id),
+                    format!(
+                        "{runtime_path}::assertion({});",
+                        assertion_ordinal(&site.id)
+                    ),
                     site.id.clone(),
                 )
             })
@@ -2653,7 +2977,11 @@ pub fn instrument_rust_file(
         }
         return Err(RustInstrumenterError::Parse(errors));
     }
-    Ok(RustInstrumentedSource { code, manifest })
+    Ok(RustInstrumentedSource {
+        code,
+        manifest,
+        probes: RustProbeLayout::default(),
+    })
 }
 
 #[cfg(test)]
@@ -2676,25 +3004,25 @@ mod tests {
 mod __supercov_runtime_v1 {
     pub struct DecisionFrame;
     impl DecisionFrame {
-        pub fn new(_: &'static str, _: usize) -> Self { Self }
+        pub fn new(_: u32, _: usize) -> Self { Self }
     }
-    pub fn hit(_: &'static str) {}
-    pub fn arms(_: &[&'static str], _: usize) {}
-    pub fn logical(left: bool, _: bool, _: &'static str, _: &'static str) -> bool { left }
-    pub fn for_loop<I: IntoIterator>(iterable: I, _: &'static str, _: &'static str) -> I::IntoIter {
+    pub fn hit(_: u32) {}
+    pub fn arms(_: &[u32], _: usize) {}
+    pub fn logical(left: bool, _: bool, _: u32, _: u32) -> bool { left }
+    pub fn for_loop<I: IntoIterator>(iterable: I, _: u32, _: u32) -> I::IntoIter {
         iterable.into_iter()
     }
-    pub fn entered(_: &mut bool, _: &'static str) {}
-    pub fn zero_iterations(_: bool, _: &'static str) {}
+    pub fn entered(_: &mut bool, _: u32) {}
+    pub fn zero_iterations(_: bool, _: u32) {}
     pub trait TryProbe: Sized {
-        fn probe(self, _: &'static str, _: &'static str) -> Self { self }
+        fn probe(self, _: u32, _: u32) -> Self { self }
     }
     impl<T> TryProbe for T {}
     pub fn condition<V: std::ops::Not<Output = bool>>(value: V, _: &mut DecisionFrame, _: usize) -> bool { !!value }
     pub fn decision(value: bool, _: &mut DecisionFrame) -> bool { value }
     pub fn reached(_: &mut DecisionFrame, _: usize) -> bool { true }
-    pub fn decision_chain(_: &mut DecisionFrame, _: bool, _: &[(usize, &'static str, &'static str)]) {}
-    pub fn assertion(_: &'static str) {}
+    pub fn decision_chain(_: &mut DecisionFrame, _: bool, _: &[(usize, u32, u32)]) {}
+    pub fn assertion(_: u32) {}
 }
 "#;
 
@@ -2904,6 +3232,101 @@ fn main() {
         let windows = &instrumented.code[instrumented.code.find("#[cfg(windows)]").unwrap()
             ..instrumented.code.find("#[cfg(unix)]").unwrap()];
         assert!(!windows.contains("__supercov_runtime_v1"), "{windows}");
+    }
+
+    #[test]
+    fn code_behind_a_cfg_only_the_build_settles_is_gated_by_its_predicate() {
+        let cfg = TargetCfg::new(
+            &["unix", "target_os=\"linux\""]
+                .map(|value| value.parse::<cargo_platform::Cfg>().unwrap()),
+        );
+        let source = "\
+pub fn a() -> u8 {
+    #[cfg(windows)]
+    let v = 1;
+    #[cfg(unix)]
+    let v = 2;
+    #[cfg(debug_assertions)]
+    let w = v + 1;
+    #[cfg(not(debug_assertions))]
+    let w = v;
+    w
+}
+#[cfg(all(unix, feature = \"x y\"))]
+fn c() -> u8 {
+    3
+}
+#[cfg(feature = \"z\")]
+struct NoCode;
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {}
+}
+";
+        let instrumented = instrument_rust_file(
+            "src/lib.rs",
+            source,
+            "crate::__supercov_runtime_v1",
+            false,
+            Some(&cfg),
+        )
+        .unwrap();
+        let lines = instrumented
+            .manifest
+            .points
+            .iter()
+            .map(|point| (point.line, point.id.clone()))
+            .collect::<Vec<_>>();
+        // The target settles statements as it settles items.
+        assert!(lines.iter().all(|(line, _)| *line != 3), "{lines:?}");
+        let gates = &instrumented.probes.cfgs;
+        let described = gates
+            .iter()
+            .map(|gate| (gate.predicate.as_str(), gate.line, gate.end_line))
+            .collect::<Vec<_>>();
+        // Only code with obligations is gated; test code is not measured.
+        assert_eq!(
+            described,
+            [
+                ("debug_assertions", 6, 7),
+                ("not(debug_assertions)", 8, 9),
+                ("all(unix, feature = \"x y\")", 12, 15),
+            ],
+            "{gates:?}"
+        );
+        let in_c = lines
+            .iter()
+            .filter(|(line, _)| (13..=15).contains(line))
+            .map(|(_, id)| id.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(!in_c.is_empty());
+        assert_eq!(
+            gates[2]
+                .obligations
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            in_c
+        );
+        // Without a target, the target's own keys are the build's to settle.
+        let unsettled = instrument_rust_file(
+            "src/lib.rs",
+            source,
+            "crate::__supercov_runtime_v1",
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(
+            unsettled
+                .probes
+                .cfgs
+                .iter()
+                .any(|gate| gate.predicate == "windows" && gate.line == 2),
+            "{:?}",
+            unsettled.probes.cfgs
+        );
     }
 
     #[test]
@@ -3778,11 +4201,18 @@ fn main() {
             .filter(|branch| branch.kind == "match-arm")
         {
             for alternative in &branch.alternatives {
+                let ordinal = transformed
+                    .probes
+                    .hits
+                    .iter()
+                    .position(|id| id == &alternative.id)
+                    .unwrap_or_else(|| panic!("{} has no probe", alternative.id));
                 assert!(
-                    transformed.code.contains(&format!("{:?}", alternative.id)),
+                    transformed.code.contains("&[u32] = &["),
                     "{} is not in any table",
                     alternative.id
                 );
+                assert!(transformed.code.contains(&format!("{ordinal}")));
             }
         }
         let original = compile_and_run(source, "original-arms");
@@ -4043,7 +4473,7 @@ fn main() {
         assert!(
             transformed
                 .code
-                .contains("{ crate::__supercov_runtime_v1::hit(\"rs:statement:")
+                .contains("{ crate::__supercov_runtime_v1::hit(")
         );
         assert!(
             transformed

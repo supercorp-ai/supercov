@@ -169,11 +169,14 @@ files under a `tests`, `examples` or `benches` directory, files named
 `#[bench]`. Its assertions still mark which evidence a passing assertion
 witnessed.
 
-Neither is code the compiler never builds for the target: a `#[cfg(windows)]`
-function on Linux, or one behind `#[cfg(not(target_os = "macos"))]` on a Mac,
-is not counted. Only predicates the target settles (`unix`, `windows`,
-`target_*`) are decided; an item behind a feature or a custom cfg is counted
-either way.
+Neither is code the compiler never builds: a `#[cfg(windows)]` function on
+Linux, an item or statement behind a feature the build leaves off, or one
+behind a build script's `--cfg` that is not set. The target settles `unix`,
+`windows` and `target_*` before the run; every other predicate is settled by
+the build itself, as each crate's probes record what `cfg!` says of its gated
+code. Code no build of the run compiled is left out and the run names it
+(`N item(s) behind a #[cfg] no build compiled are outside the denominator`);
+code of a crate no test reached stays counted, and the run says that too.
 
 Use the repository's normal flags after the wrapped command:
 

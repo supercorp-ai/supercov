@@ -258,7 +258,12 @@ pub(crate) fn run_nextest(
             .map_err(io_error)?;
         }
         let attempt_id = format!("{run_id}:{}:{}", record.runner_attempt_id, record.attempt);
-        let evidence = snapshot(&project.manifest, &record.evidence, &attempt_id)?;
+        let evidence = snapshot(
+            &project.manifest,
+            &project.probes,
+            &record.evidence,
+            &attempt_id,
+        )?;
         results.push(RawTestResult {
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {

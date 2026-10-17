@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     coverage_report::CoverageManifest,
-    rust_instrumenter::{instrument_rust_file, test_code_path, test_item},
-    rust_runtime::render_rust_runtime,
+    rust_instrumenter::{instrument_rust_file_numbered, test_code_path, test_item},
+    rust_runtime::render_rust_region_runtime,
 };
 
 const RUST_APPLICATION_SOURCE: &str = "Rust application source";
@@ -36,6 +36,8 @@ pub struct PreparedRustProject {
     pub crate_roots: Vec<String>,
     pub runtime_module: String,
     pub manifest: CoverageManifest,
+    /// The probes' numbering: a region's slots, by ordinal.
+    pub probes: crate::rust_instrumenter::RustProbeLayout,
     pub preparation: RustPreparationTimings,
 }
 
@@ -262,25 +264,28 @@ fn push_workspace_source(path: &str, workspace: &Path, compiled: &mut BTreeSet<S
 /// Every file the crate roots reach. `tests` gets those only test code
 /// reaches -- through a test target's root or a `#[cfg(test)]` module --
 /// which are test code whatever their names. Every other route is followed
-/// first, so a file reached both ways is not test code.
+/// first, so a file reached both ways is not test code. `owners` gets the
+/// crate roots that compile each file: one file can be in several crates.
 fn resolve_module_tree(
     workspace: &Path,
     roots: &BTreeSet<PathBuf>,
     test_roots: &BTreeSet<PathBuf>,
     files: &mut BTreeSet<PathBuf>,
     tests: &mut BTreeSet<PathBuf>,
+    owners: &mut BTreeMap<PathBuf, BTreeSet<PathBuf>>,
 ) -> Result<(), RustProjectError> {
     let canonical_workspace = canonical_directory(workspace)?;
-    // (file, directory its `mod` children resolve in)
+    // (file, directory its `mod` children resolve in, crate root)
     let (mut pending, mut pending_tests): (Vec<_>, Vec<_>) = roots
         .iter()
-        .map(|root| (root.clone(), owner_directory(root)))
-        .partition(|(root, _)| !test_roots.contains(root));
+        .map(|root| (root.clone(), owner_directory(root), root.clone()))
+        .partition(|(root, _, _)| !test_roots.contains(root));
+    let mut visited = BTreeSet::new();
     loop {
-        let (file, directory, test) = match pending.pop() {
-            Some((file, directory)) => (file, directory, false),
+        let (file, directory, root, test) = match pending.pop() {
+            Some((file, directory, root)) => (file, directory, root, false),
             None => match pending_tests.pop() {
-                Some((file, directory)) => (file, directory, true),
+                Some((file, directory, root)) => (file, directory, root, true),
                 None => break,
             },
         };
@@ -314,12 +319,15 @@ fn resolve_module_tree(
         } else {
             continue;
         };
-        if !files.insert(file.clone()) {
-            continue;
-        }
-        if test {
+        // A file is test code by the first route that reaches it; it is
+        // walked again for every crate that reaches it, to find its owners.
+        if files.insert(file.clone()) && test {
             tests.insert(file.clone());
         }
+        if !visited.insert((file.clone(), root.clone())) {
+            continue;
+        }
+        owners.entry(file.clone()).or_default().insert(root.clone());
         let source = fs::read_to_string(&file).map_err(|error| RustProjectError::Io {
             path: file.clone(),
             reason: error.to_string(),
@@ -336,9 +344,9 @@ fn resolve_module_tree(
         );
         for (child, owner, gated) in declared {
             if test || gated {
-                pending_tests.push((child, owner));
+                pending_tests.push((child, owner, root.clone()));
             } else {
-                pending.push((child, owner));
+                pending.push((child, owner, root.clone()));
             }
         }
     }
@@ -619,6 +627,7 @@ fn decline_proc_macro_obligations(
         &BTreeSet::new(),
         &mut reached,
         &mut BTreeSet::new(),
+        &mut BTreeMap::new(),
     )?;
     let mut files = BTreeSet::new();
     for path in reached {
@@ -826,13 +835,24 @@ pub fn prepare_rust_project_for(
     let proc_macro_roots = proc_macro_crate_roots(&workspace, &packages)?;
     let mut files = BTreeSet::new();
     let mut tests = BTreeSet::new();
+    let mut owners = BTreeMap::new();
     resolve_module_tree(
         &workspace,
         &roots,
         &test_target_roots(&packages),
         &mut files,
         &mut tests,
+        &mut owners,
     )?;
+    // Which crates compile each file, by the name the gates carry.
+    let owners = owners
+        .into_iter()
+        .filter_map(|(path, roots)| {
+            confined_relative(&workspace, &path)
+                .ok()
+                .map(|relative| (relative, roots))
+        })
+        .collect::<BTreeMap<_, _>>();
     // Test code is instrumented for its assertion markers alone.
     let tests = tests
         .iter()
@@ -878,13 +898,23 @@ pub fn prepare_rust_project_for(
         scope: None,
         assertion_sites: Vec::new(),
     };
+    // One numbering spans the workspace: a file may be compiled into several
+    // crates, and every crate's runtime maps the same region.
+    let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
     for (relative, source) in &sources {
         let test_file = tests.contains(relative) || test_code_path(relative);
-        let transformed = instrument_rust_file(relative, source, &runtime_path, test_file, cfg)
-            .map_err(|error| RustProjectError::Instrument {
-                file: relative.clone(),
-                reason: error.to_string(),
-            })?;
+        let transformed = instrument_rust_file_numbered(
+            relative,
+            source,
+            &runtime_path,
+            test_file,
+            cfg,
+            &mut probes,
+        )
+        .map_err(|error| RustProjectError::Instrument {
+            file: relative.clone(),
+            reason: error.to_string(),
+        })?;
         merge_manifest(&mut manifest, transformed.manifest)?;
         fs::write(workspace.join(relative), transformed.code).map_err(|error| {
             RustProjectError::Io {
@@ -899,11 +929,30 @@ pub fn prepare_rust_project_for(
     decline_proc_macro_obligations(&workspace, &proc_macro_roots, &mut manifest)?;
 
     let token = manifest_token(&manifest);
+    probes.token = token.clone();
     let mut crate_roots = Vec::new();
     for root in roots {
         let relative = confined_relative(&workspace, &root)?;
-        let runtime = render_rust_runtime(&runtime_module, &crate_key(&token, &relative))
-            .map_err(RustProjectError::Runtime)?;
+        // The crate answers `cfg!` for the gates in the files it compiles.
+        let crate_cfgs = probes
+            .cfgs
+            .iter()
+            .enumerate()
+            .filter(|(_, gate)| {
+                owners
+                    .get(&gate.file)
+                    .is_some_and(|roots| roots.contains(&root))
+            })
+            .map(|(ordinal, _)| ordinal)
+            .collect::<Vec<_>>();
+        let runtime = render_rust_region_runtime(
+            &runtime_module,
+            &token,
+            &crate_key(&token, &relative),
+            &probes,
+            &crate_cfgs,
+        )
+        .map_err(RustProjectError::Runtime)?;
         let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
             path: root.clone(),
             reason: error.to_string(),
@@ -978,6 +1027,7 @@ pub fn prepare_rust_project_for(
         crate_roots,
         runtime_module,
         manifest,
+        probes,
         preparation,
     })
 }
@@ -1423,7 +1473,22 @@ fn integration_choice() {
         // The one function in it carries one function probe: instrumented
         // once, through whichever spelling reached it first.
         let instrumented = fs::read_to_string(root.join("src/shared.rs")).unwrap();
-        assert_eq!(instrumented.matches("rs:function:").count(), 1);
+        let function = prepared
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.file == "src/shared.rs" && point.id.starts_with("rs:function:"))
+            .expect("the shared function's probe");
+        let ordinal = prepared
+            .probes
+            .hits
+            .iter()
+            .position(|id| id == &function.id)
+            .unwrap();
+        assert_eq!(
+            instrumented.matches(&format!("::hit({ordinal});")).count(),
+            1
+        );
         let build = Command::new("cargo")
             .args(["test", "--no-run"])
             .current_dir(&root)
