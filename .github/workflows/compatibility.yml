@@ -11,12 +11,14 @@ on:
         description: "JSON list of runners for the per-OS jobs. Empty runs all five."
         default: ""
         type: string
-  # Every language on every platform, on the pull request. The per-OS legs
-  # exist because what breaks is usually a path, a shell or a line ending
-  # rather than logic, and finding that after a merge costs more than the
-  # runners do. Narrow it back to `["ubuntu-latest"]` below if the wait ever
-  # outgrows the value.
+  # Every language on every platform, on a pull request ready for review.
+  # The per-OS legs exist because what breaks is usually a path, a shell or a
+  # line ending rather than logic, and finding that after a merge costs more
+  # than the runners do. A draft gets CI only: some eighty jobs per draft,
+  # ten drafts open, held every job at the runner limit for hours. Marking a
+  # pull request ready starts the matrix.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 permissions:
   contents: read
 
@@ -28,7 +30,7 @@ concurrency:
 
 jobs:
   node:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',node,') }}
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',node,')) }}
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -43,13 +45,13 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npm run check
+      # `npm run check` runs on every Node in CI's check job.
       - run: npm run build
       - run: node ../../../bin/supercov.js -- npm test
         working-directory: tests/fixtures/no-build-node
 
   runners:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,') }}
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,')) }}
     name: ${{ matrix.name }} runners
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -92,7 +94,7 @@ jobs:
       - run: npm run test:fixture
 
   browsers:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,') }}
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,')) }}
     name: Playwright ${{ matrix.browser }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -114,8 +116,10 @@ jobs:
         env:
           SUPERCOV_BROWSER: ${{ matrix.browser }}
 
+  # Linux x64 is left out: CI's check job runs the workspace tests and clippy
+  # there, and engine-integrations the supervision and crash scripts.
   filesystems:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,') }}
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,')) }}
     name: Filesystem safety (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # Windows on Arm builds and tests the workspace in about 25 minutes.
@@ -123,7 +127,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -139,7 +143,7 @@ jobs:
       - run: npm run test:platform
 
   python:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',python,') }}
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',python,')) }}
     name: CPython ${{ matrix.python }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -184,7 +188,7 @@ jobs:
         run: python scripts/python-startup-benchmark.py
 
   ruby:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,') }}
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,')) }}
     name: Ruby ${{ matrix.ruby }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -220,7 +224,7 @@ jobs:
       - run: npm run test:ruby-coverage
 
   rust:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,') }}
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,')) }}
     name: Rust suites (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -247,7 +251,7 @@ jobs:
       - run: npm run test:rust-public-cargo
 
   go:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',go,') }}
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',go,')) }}
     # Go 1.22 on the newest macOS is not a thing that can work: its linker
     # writes no LC_UUID and macOS 26's dyld refuses to load a binary without
     # one, so every test binary the toolchain builds aborts before `main`.
@@ -299,7 +303,7 @@ jobs:
           SUPERCOV_REQUIRE_GO: "1"
 
   jvm:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,') }}
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,')) }}
     name: JDK ${{ matrix.java }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30

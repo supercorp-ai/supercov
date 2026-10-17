@@ -43,10 +43,8 @@ jobs:
         working-directory: examples/react-verification
       - run: npx playwright install --with-deps chromium
         working-directory: examples/react-verification
+      # The runtime tests and the direct Jest and Vitest scripts run in CI.
       - run: cargo build -p supercov
-      - run: npm run test:runtime
-      - run: node scripts/rust-direct-jest-integration.mjs
-      - run: node scripts/rust-direct-vitest-integration.mjs
       - run: npm run test:react
       - uses: actions/upload-artifact@v4
         if: always()

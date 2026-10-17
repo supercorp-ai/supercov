@@ -24,7 +24,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [22, 24]
+        # Every supported Node, here only: the Compatibility workflow's Node
+        # jobs ran the same check again on 22 and 24.
+        node: [22, 24, 25]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
