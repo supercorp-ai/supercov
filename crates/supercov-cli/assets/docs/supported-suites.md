@@ -189,6 +189,28 @@ npx supercov -- cargo nextest run --workspace
 explanation instead of silently falling back to plausible but inaccurate
 attribution.
 
+### Rust compiled to wasm in JavaScript tests
+
+A crate wasm-bindgen exposes to JavaScript (a `cdylib` that depends on
+`wasm-bindgen`) is measured when JavaScript tests load it: a Node suite
+(Vitest, Jest, node:test, Mocha) through the `nodejs` or bundler glue, or a
+Playwright suite whose page loads the `web` glue. Build the wasm in the test
+command, as the suite already does when it tests the crate it ships
+(`wasm-pack build && vitest`, or `cargo build --target wasm32-unknown-unknown`
+and `wasm-bindgen`), so the module the tests load is built from Supercov's
+copy:
+
+```sh
+npx supercov -- npm test
+npx supercov -- npx playwright test
+```
+
+The JavaScript runtime remembers each wasm instance, in the test process and
+in each page, and reads what the module ran at every test's end, so each test
+is credited exactly with its own lines and decisions. The crate's coverage is
+a Rust run beside the JavaScript run. What the copy built (`target/`, and the
+generated `pkg/` with its instrumented wasm) stays in the copy.
+
 ### A Rust Worker under browser tests
 
 A Playwright suite that starts a Cloudflare Worker written in Rust with

@@ -189,6 +189,7 @@ mod tests {
             expected_status: "passed".into(),
             provenance: Default::default(),
             window: Some(window),
+            attempt_id: None,
         }
     }
 

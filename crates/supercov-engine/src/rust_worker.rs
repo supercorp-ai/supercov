@@ -12,7 +12,7 @@
 //! what no single test's window holds is the run's background.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     io::Write,
     net::{SocketAddr, TcpListener, TcpStream},
@@ -27,23 +27,12 @@ use std::{
 
 use base64::Engine as _;
 use serde_json::{Value, json};
-use supercov_contracts::{
-    ExecutionModel, FrontendRunDeclaration, LANGUAGE_FRONTEND_PROTOCOL_VERSION, StructuralSource,
-};
 
 use crate::{
-    coverage_report::{
-        CoveragePhase, CoverageReportRequest, ExecutionScope, ExitCodeInput, RawTestResult,
-        TestProvenance,
-    },
-    evidence_archive::write_archive,
-    frontend_protocol::validate_frontend_report_request,
     integrity::{FrontendIntegrityInputs, create_explicit_run_integrity},
-    lifecycle::{note_kept_evidence, publish_run, remove_stored_tree_deferred},
-    run_store::{RawEvidenceMetadata, RunIntegrity, RunMetadata},
+    lifecycle::{note_kept_evidence, remove_stored_tree_deferred},
+    run_store::{RunIntegrity, RunMetadata},
     rust_project::PreparedRustProject,
-    rust_runtime::{RustProbeEntry, parse_rust_region, parse_rust_region_cfgs},
-    rust_test_runner::RustFrontendRun,
     served_tests::ServedTest,
 };
 
@@ -341,7 +330,9 @@ fn free_port() -> Result<u16, String> {
 
 /// The cfg values of wasm32-unknown-unknown, as the crate's own toolchain
 /// reports them: what decides which items the target leaves out.
-fn wasm_target_cfg(crate_directory: &Path) -> Option<crate::rust_instrumenter::TargetCfg> {
+pub(crate) fn wasm_target_cfg(
+    crate_directory: &Path,
+) -> Option<crate::rust_instrumenter::TargetCfg> {
     let output = std::process::Command::new("rustc")
         .args(["--print", "cfg", "--target", "wasm32-unknown-unknown"])
         .current_dir(crate_directory)
@@ -635,22 +626,12 @@ impl RustWorkerServer {
             let Ok(relative) = cargo_root.strip_prefix(workspace) else {
                 continue;
             };
-            let original = root.join(relative);
             let source_roots = crate::source_discovery::configured_source_roots(
                 &std::env::vars().collect::<BTreeMap<_, _>>(),
             );
-            let mut integrity_inputs =
-                crate::rust_run::collect_integrity_inputs(&original, command)?;
-            for files in [
-                &mut integrity_inputs.source_files,
-                &mut integrity_inputs.test_files,
-                &mut integrity_inputs.dependency_files,
-                &mut integrity_inputs.configuration_files,
-            ] {
-                for file in files.iter_mut() {
-                    *file = relative.join(&*file);
-                }
-            }
+            // The project's inputs, as a later query recomputes them to judge
+            // whether the run is current.
+            let mut integrity_inputs = crate::rust_run::collect_integrity_inputs(root, command)?;
             crate::source_discovery::fold_roots_into_configuration(
                 &mut integrity_inputs.execution_configuration,
                 source_roots.as_deref(),
@@ -664,9 +645,10 @@ impl RustWorkerServer {
             )
             .map_err(|error| error.to_string())?;
             let cfg = wasm_target_cfg(&cargo_root);
-            let project =
+            let mut project =
                 crate::rust_project::prepare_rust_project_for(&cargo_root, None, cfg.as_ref())
                     .map_err(|error| error.to_string())?;
+            crate::rust_wasm_evidence::root_paths(&mut project, relative);
             let directory = root
                 .join(".supercov/work")
                 .join(run_id)
@@ -743,7 +725,29 @@ impl RustWorkerServer {
             poller.finish();
         }
         let evidence_directory = self.directory.join("evidence");
-        let result = self.publish_windows(root, &evidence_directory, metadata, served, diagnostics);
+        let result = read_windows(&evidence_directory).and_then(|windows| {
+            crate::rust_wasm_evidence::publish(
+                root,
+                crate::rust_wasm_evidence::WasmRun {
+                    language: "Rust Worker",
+                    archive: "rust-worker-evidence.raw.gz",
+                    project: &self.project,
+                    integrity: &self.integrity,
+                    source_inputs: &self.source_inputs,
+                    source_roots: self.source_roots.clone(),
+                },
+                windows
+                    .into_iter()
+                    .map(|window| crate::rust_wasm_evidence::WasmRecord {
+                        owner: crate::rust_wasm_evidence::Owner::Window(window.start, window.end),
+                        regions: window.regions,
+                    })
+                    .collect(),
+                metadata,
+                served,
+                diagnostics,
+            )
+        });
         let result = result.map_err(|error| {
             let run = self
                 .directory
@@ -761,271 +765,10 @@ impl RustWorkerServer {
         let _ = remove_stored_tree_deferred(root, &self.directory);
         result
     }
-
-    fn publish_windows(
-        &self,
-        root: &Path,
-        evidence_directory: &Path,
-        metadata: RunMetadata,
-        served: &[ServedTest],
-        diagnostics: &mut dyn Write,
-    ) -> Result<Option<(PathBuf, RunMetadata)>, String> {
-        let windows = read_windows(evidence_directory)?;
-        if served.is_empty() || windows.is_empty() {
-            return Ok(None);
-        }
-        let probes = &self.project.probes;
-        let mut settled = vec![0_u8; probes.cfgs.len()];
-        let mut by_test = BTreeMap::<usize, Vec<Vec<RustProbeEntry>>>::new();
-        let mut background = Vec::<Vec<RustProbeEntry>>::new();
-        let mut overlapped = BTreeSet::new();
-        for window in &windows {
-            let running = served
-                .iter()
-                .enumerate()
-                .filter(|(_, test)| {
-                    test.window
-                        .is_some_and(|(start, end)| start <= window.end && window.start <= end)
-                })
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let mut records = Vec::new();
-            for (_, bytes) in &window.regions {
-                let entries = parse_rust_region(bytes, None, &probes.token, probes)
-                    .map_err(|error| error.to_string())?;
-                for (slot, bits) in settled
-                    .iter_mut()
-                    .zip(parse_rust_region_cfgs(bytes, &probes.token, probes).unwrap_or_default())
-                {
-                    *slot |= bits;
-                }
-                if !entries.is_empty() {
-                    records.push(entries);
-                }
-            }
-            if records.is_empty() {
-                continue;
-            }
-            match running.as_slice() {
-                [owner] => by_test.entry(*owner).or_default().extend(records),
-                _ => {
-                    if running.len() > 1 {
-                        overlapped.extend(running);
-                    }
-                    background.extend(records);
-                }
-            }
-        }
-        let manifest = crate::rust_test_runner::settle_cfg_gates_with(
-            &self.project.manifest,
-            probes,
-            &settled,
-            diagnostics,
-        )
-        .map_err(|error| error.to_string())?;
-        let run_id = &metadata.id;
-        let mut raw_results = Vec::new();
-        for (index, test) in served.iter().enumerate() {
-            let attempt_id = format!("{run_id}:worker:{index:08}");
-            let credited = by_test.remove(&index);
-            let attributed = credited.is_some();
-            let evidence = crate::rust_test_runner::snapshot_regions(
-                &manifest,
-                credited.unwrap_or_default(),
-                &attempt_id,
-            )
-            .map_err(|error| error.to_string())?;
-            let test_id = format!("{}::{}", test.file, test.test_id);
-            raw_results.push(RawTestResult {
-                test_id: Some(test_id.clone()),
-                scope: Some(ExecutionScope {
-                    version: 1,
-                    run_id: run_id.clone(),
-                    worker_id: test.worker.clone(),
-                    test_id: test_id.clone(),
-                    test_key: test_id.clone(),
-                    retry: test.retry,
-                    attempt_id,
-                }),
-                test: test.name.clone(),
-                test_file: Some(test.file.clone()),
-                title: Some(test.title.clone()),
-                retry: Some(test.retry),
-                status: Some(test.status.clone()),
-                expected_status: Some(test.expected_status.clone()),
-                flaky: false,
-                provenance: test.provenance.clone(),
-                role: "test".into(),
-                attribution: if attributed {
-                    crate::coverage_report::ATTRIBUTION_BY_TIME
-                } else {
-                    crate::coverage_report::ATTRIBUTION_RUN_WIDE
-                }
-                .into(),
-                phases: evidence.phases,
-                runtime: vec![evidence.snapshot],
-                browser: Vec::new(),
-                server: Vec::new(),
-            });
-        }
-        if !background.is_empty() {
-            // Whether it counts turns on whether what produced it passed, as
-            // for every test: the producers cannot be named, so the run is
-            // asked.
-            let status = if metadata.test_exit_code.unwrap_or_default() == 0 {
-                "passed"
-            } else {
-                "failed"
-            };
-            let attempt_id = format!("{run_id}:worker:background");
-            let evidence =
-                crate::rust_test_runner::snapshot_regions(&manifest, background, &attempt_id)
-                    .map_err(|error| error.to_string())?;
-            let test_id = "rust::background".to_owned();
-            raw_results.push(RawTestResult {
-                test_id: Some(test_id.clone()),
-                scope: Some(ExecutionScope {
-                    version: 1,
-                    run_id: run_id.clone(),
-                    worker_id: "background".into(),
-                    test_id: test_id.clone(),
-                    test_key: test_id.clone(),
-                    retry: 0,
-                    attempt_id,
-                }),
-                test: "execution no test could be credited with".into(),
-                test_file: None,
-                title: None,
-                retry: Some(0),
-                status: Some(status.into()),
-                expected_status: None,
-                flaky: false,
-                provenance: TestProvenance {
-                    runner: "playwright".into(),
-                    kind: "background".into(),
-                    project: None,
-                    source: "rust-owned-v1".into(),
-                    tags: Vec::new(),
-                },
-                role: "background".into(),
-                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
-                phases: vec![CoveragePhase {
-                    id: format!("{test_id}:background"),
-                    kind: "background".into(),
-                    operation: "execution outside any test".into(),
-                    source: None,
-                    caused_by_phase_id: None,
-                    started_at_ms: 0,
-                    ended_at_ms: Some(0),
-                    status: Some(status.into()),
-                    error: None,
-                }]
-                .into_iter()
-                .chain(evidence.phases)
-                .collect(),
-                runtime: vec![evidence.snapshot],
-                browser: Vec::new(),
-                server: Vec::new(),
-            });
-        }
-        let mut runner = crate::rust_test_runner::rust_runner_declaration("rust-libtest");
-        runner.runner = "playwright".into();
-        runner.execution_model = ExecutionModel::ParallelContextPropagated;
-        let declaration = FrontendRunDeclaration {
-            protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
-            frontend_id: "rust".into(),
-            frontend_version: "rust-owned-v1".into(),
-            language: "rust".into(),
-            structural_source: StructuralSource::OwnedProbes,
-            runners: vec![runner],
-            structural_limitations: crate::rust_test_runner::structural_limitations(&manifest),
-        };
-        let run = RustFrontendRun {
-            declaration,
-            request: CoverageReportRequest {
-                run_id: run_id.clone(),
-                manifest,
-                raw_results,
-                generated_at: metadata.started_at.clone(),
-                coverage_model: Some(crate::rust_test_runner::rust_coverage_model()),
-                integrity: None,
-                test_exit_code: ExitCodeInput::Present(Some(
-                    metadata.test_exit_code.unwrap_or_default(),
-                )),
-            },
-            exit_code: metadata.test_exit_code.unwrap_or_default(),
-            artifacts: 0,
-            artifact_files: Vec::new(),
-            build_ms: 0.0,
-            execution_ms: 0.0,
-        };
-        validate_frontend_report_request(&run.declaration, &run.request)
-            .map_err(|error| error.to_string())?;
-        let archive_path = root
-            .join(".supercov/work")
-            .join(&metadata.id)
-            .join("rust-worker-evidence.raw.gz");
-        if let Some(parent) = archive_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let raw = write_archive(
-            crate::source_capture::append(
-                run.archive_entries().map_err(|error| error.to_string())?,
-                &self.source_inputs,
-            )?,
-            &archive_path,
-        )
-        .map_err(|error| error.to_string())?;
-        let credited = served.len().saturating_sub(
-            run.request
-                .raw_results
-                .iter()
-                .filter(|result| result.attribution == crate::coverage_report::ATTRIBUTION_RUN_WIDE)
-                .count(),
-        );
-        let metadata = RunMetadata {
-            integrity: self.integrity.clone(),
-            raw_evidence: RawEvidenceMetadata {
-                schema_version: raw.schema_version,
-                format: raw.format.into(),
-                file: raw.file.into(),
-                files: raw.files,
-                uncompressed_bytes: raw.uncompressed_bytes,
-                compressed_bytes: raw.compressed_bytes,
-            },
-            source_roots: self.source_roots.clone(),
-            ..metadata
-        };
-        let run_directory =
-            publish_run(root, &metadata, &archive_path).map_err(|error| error.to_string())?;
-        writeln!(
-            diagnostics,
-            "[supercov] Rust Worker coverage: {} test(s), {credited} credited, across {} source file(s), credited by time",
-            served.len(),
-            self.project.source_files.len()
-        )
-        .map_err(|error| error.to_string())?;
-        let overlapped = overlapped
-            .into_iter()
-            .filter(|index| {
-                run.request.raw_results.get(*index).is_some_and(|result| {
-                    result.attribution == crate::coverage_report::ATTRIBUTION_RUN_WIDE
-                })
-            })
-            .count();
-        if overlapped > 0 {
-            writeln!(
-                diagnostics,
-                "[supercov] {overlapped} of those test(s) had the Worker's work only while another test ran too, so it is the run's and none of theirs; with `--workers=1` each test's is its own"
-            )
-            .map_err(|error| error.to_string())?;
-        }
-        Ok(Some((run_directory, metadata)))
-    }
 }
 
 /// The root of the Cargo workspace `directory`'s crate belongs to.
-fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
+pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("cargo")
         .args(["locate-project", "--workspace", "--message-format", "plain"])
         .current_dir(directory)

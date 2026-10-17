@@ -579,6 +579,8 @@ pub fn run_direct_javascript(
         && (root.join("go.mod").is_file()
             || !crate::go_project::workspace_modules(&root).is_empty());
     let serves_rust_worker = browser_suite && crate::rust_worker::RustWorkerServer::present(&root);
+    // A wasm library any JavaScript suite may load, not only a browser one.
+    let serves_rust_wasm = crate::rust_wasm::RustWasmServer::present(&root);
     let serves_jvm = browser_suite
         && [
             "pom.xml",
@@ -595,6 +597,7 @@ pub fn run_direct_javascript(
         && !serves_go
         && !serves_jvm
         && !serves_rust_worker
+        && !serves_rust_wasm
     {
         return Err(
             crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
@@ -749,6 +752,19 @@ pub fn run_direct_javascript(
             )?
             .into_iter()
             .map(Server::RustWorker),
+        );
+    }
+    if serves_rust_wasm {
+        servers.extend(
+            crate::rust_wasm::RustWasmServer::prepare(
+                &root,
+                &workspace,
+                &workspace.join(".supercov/server-evidence"),
+                &run_id,
+                &request.command,
+            )?
+            .into_iter()
+            .map(Server::RustWasm),
         );
     }
     if project.source_files.is_empty() && servers.is_empty() {
@@ -1457,6 +1473,7 @@ enum Server {
     Go(crate::go_run::GoServer),
     Jvm(crate::jvm_run::JvmServer),
     RustWorker(crate::rust_worker::RustWorkerServer),
+    RustWasm(crate::rust_wasm::RustWasmServer),
 }
 
 impl Server {
@@ -1467,6 +1484,7 @@ impl Server {
             Self::Go(_) => "Go",
             Self::Jvm(_) => "Java/Kotlin",
             Self::RustWorker(_) => "Rust Worker",
+            Self::RustWasm(_) => "Rust wasm",
         }
     }
 
@@ -1477,6 +1495,7 @@ impl Server {
             Self::Go(server) => server.source_files(),
             Self::Jvm(server) => server.source_files(),
             Self::RustWorker(server) => server.source_files(),
+            Self::RustWasm(server) => server.source_files(),
         }
     }
 
@@ -1487,6 +1506,7 @@ impl Server {
             Self::Go(server) => server.environment(),
             Self::Jvm(server) => server.environment(),
             Self::RustWorker(server) => server.environment(),
+            Self::RustWasm(server) => server.environment(),
         }
     }
 
@@ -1512,6 +1532,9 @@ impl Server {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
             Self::RustWorker(server) => {
+                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+            }
+            Self::RustWasm(server) => {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
         }
