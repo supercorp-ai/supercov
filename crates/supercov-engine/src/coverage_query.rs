@@ -1899,6 +1899,19 @@ pub struct CoverageFileDetailData {
     /// CLI when the run has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assertions: Option<serde_json::Value>,
+    /// Set when this page holds fewer gap lines than were asked for because
+    /// more would not fit in one reply: page one is then not the whole file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_cut: Option<PageCut>,
+}
+
+/// A page cut short to fit one reply, and where the rest starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageCut {
+    pub asked: usize,
+    pub returned: usize,
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2617,6 +2630,7 @@ pub fn coverage_file_detail_from(
             gap_lines: selected_gap_lines,
             total_limitations,
             assertions: None,
+            page_cut: None,
         },
         pagination(options.offset, options.limit, returned, total_gap_lines),
     ))

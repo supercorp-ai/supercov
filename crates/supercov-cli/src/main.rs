@@ -103,9 +103,50 @@ const DOC_TOPICS: &[&str] = &[
     "workspace-isolation",
 ];
 
+/// The source files a query is about: a line's, several lines', a file's or
+/// a decision's. Empty for a query about the whole run.
+fn queried_files(request: &supercov_engine::indexed_query::IndexedQueryRequest) -> Vec<String> {
+    let mut files = Vec::new();
+    if matches!(
+        request.command.as_str(),
+        "line" | "file" | "decision" | "source"
+    ) {
+        if let Some(file) = &request.file {
+            files.push(file.clone());
+        }
+        files.extend(request.more_lines.iter().map(|(file, _)| file.clone()));
+        if request.command == "decision"
+            && let Some(selector) = &request.selector
+            && let Some((file, line)) = selector.rsplit_once(':')
+            && line.parse::<usize>().is_ok()
+        {
+            files.push(file.to_owned());
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Whether `file` differs from what the run recorded of it, by content; None
+/// when the run recorded nothing of it. A run is stale as a whole when any
+/// file changed -- a test an agent just added -- but a line of a file that
+/// did not change reads exactly as the run measured it.
+fn file_changed_since_run(
+    root: &Path,
+    recorded: Option<&supercov_engine::source_manifest::FileManifest>,
+    file: &str,
+) -> Option<bool> {
+    let was = recorded?.get(file)?;
+    let now = fs::read_to_string(root.join(file))
+        .ok()
+        .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256);
+    Some(now.as_deref() != Some(was.sha256.as_str()))
+}
+
 fn hydrate_line_source_from_working_tree(
     root: &Path,
-    stale: bool,
+    recorded: Option<&supercov_engine::source_manifest::FileManifest>,
     data: &mut supercov_engine::coverage_query::CoverageCoversData,
 ) {
     let (location, source, origin) = match data {
@@ -134,9 +175,10 @@ fn hydrate_line_source_from_working_tree(
     let Some(line) = contents.lines().nth(location.line.saturating_sub(1)) else {
         return;
     };
+    let changed = file_changed_since_run(root, recorded, &location.file);
     *source = Some(line.into());
     *origin = Some(
-        if stale {
+        if changed == Some(true) {
             "working-tree-stale"
         } else {
             "working-tree-current"
@@ -1236,8 +1278,41 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
         let root = std::env::current_dir().map_err(|error| error.to_string())?;
         let view = load_run_view_filtered(selector, (!filter.is_empty()).then_some(&filter))?;
         // Mapping a patch onto coverage recorded from different source would
-        // annotate the wrong lines, which is worse than refusing.
+        // annotate the wrong lines, which is worse than refusing. A failed
+        // suite is different: its evidence still matches the source, so the
+        // change's coverage is reported -- as an error, never a pass.
         let blockers = view.blockers();
+        if !blockers.is_empty() && !view.stale {
+            let reasons = blockers
+                .into_iter()
+                .map(|blocker| blocker.reason)
+                .collect::<Vec<_>>();
+            let changed = changed_lines_against(&root, &base, &view)?;
+            let patch = supercov_engine::patch_view::build(&view, &changed);
+            if json {
+                print!(
+                    "{}",
+                    agent_json::success(
+                        "coverage.patch",
+                        &serde_json::json!({
+                            "result": "error",
+                            "reasons": reasons,
+                            "base": base,
+                            "patch": patch,
+                        }),
+                        None,
+                    )
+                    .map_err(|error| format!("response exceeds {} bytes", error.max_bytes))?
+                );
+            } else {
+                eprintln!("[supercov] this run cannot pass a patch gate:");
+                for reason in &reasons {
+                    eprintln!("  {reason}");
+                }
+                print!("{}", render_patch(&patch, &base, None, false));
+            }
+            return Ok(2);
+        }
         if !blockers.is_empty() {
             let reasons = blockers
                 .into_iter()
@@ -2499,6 +2574,31 @@ impl PublicQueryOutput {
         }
     }
 
+    /// Record that this page was cut to fit one reply: on stderr, and in a
+    /// file's data, which a reader takes for the whole file.
+    fn mark_page_cut(&mut self, asked: usize) {
+        let Self::Coverage { output, .. } = self else {
+            return;
+        };
+        let Some(page) = output.pagination.clone() else {
+            return;
+        };
+        if let supercov_engine::indexed_query::IndexedQueryData::FileDetail(data) = &mut output.data
+        {
+            data.page_cut = Some(supercov_engine::coverage_query::PageCut {
+                asked,
+                returned: page.returned,
+                next_offset: page.next_offset,
+            });
+        }
+        if let Some(next) = page.next_offset {
+            eprintln!(
+                "[supercov] this page holds {} of the {asked} entries asked for, as many as fit in one reply ({} in all); the rest start at --offset {next}",
+                page.returned, page.total
+            );
+        }
+    }
+
     /// How many entries of a page too large for one reply would fit, when
     /// it is that and not something else.
     fn page_that_fits(&self) -> Option<usize> {
@@ -2621,8 +2721,42 @@ fn execute_public_query(
                 request
                     .stale_reasons
                     .get_or_insert_with(|| comparison.reasons.clone());
-                if comparison.stale {
-                    let changed = changed_since_run(root, run);
+                // A query about some files is stale when those files
+                // changed, or what decides every file did; tests added
+                // since the run change nothing a line of source reads.
+                let queried = queried_files(&request);
+                let changed = if comparison.stale {
+                    changed_since_run(root, run)
+                } else {
+                    Vec::new()
+                };
+                let scoped_stale = |changed: &[String]| {
+                    comparison.reasons.iter().any(|reason| {
+                        reason != "test files changed" && reason != "instrumented source changed"
+                    }) || queried.iter().any(|file| changed.contains(file))
+                };
+                if comparison.stale && !queried.is_empty() {
+                    if scoped_stale(&changed) {
+                        let mine = queried
+                            .iter()
+                            .filter(|file| changed.contains(file))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        warnings.push(if mine.is_empty() {
+                            format!(
+                                "[supercov] stale run {}: {}",
+                                run.id,
+                                comparison.reasons.join(", ")
+                            )
+                        } else {
+                            format!(
+                                "[supercov] stale run {}: {} changed since the run",
+                                run.id,
+                                mine.join(", ")
+                            )
+                        });
+                    }
+                } else if comparison.stale {
                     let named = if changed.is_empty() {
                         String::new()
                     } else {
@@ -2745,25 +2879,25 @@ fn execute_public_query(
             })();
             result
                 .map(|mut output| {
+                    let recorded = matches!(
+                        output.data,
+                        supercov_engine::indexed_query::IndexedQueryData::Line(_)
+                            | supercov_engine::indexed_query::IndexedQueryData::Lines(_)
+                    )
+                    .then(|| supercov_engine::source_manifest::load_manifest(run).ok())
+                    .flatten()
+                    .map(|stored| stored.manifest.files);
                     if let supercov_engine::indexed_query::IndexedQueryData::Line(data) =
                         &mut output.data
                     {
-                        hydrate_line_source_from_working_tree(
-                            root,
-                            request.stale.unwrap_or(false),
-                            data,
-                        );
+                        hydrate_line_source_from_working_tree(root, recorded.as_ref(), data);
                     }
                     // Each line of several is given what one line is given.
                     if let supercov_engine::indexed_query::IndexedQueryData::Lines(data) =
                         &mut output.data
                     {
                         for line in &mut data.lines {
-                            hydrate_line_source_from_working_tree(
-                                root,
-                                request.stale.unwrap_or(false),
-                                line,
-                            );
+                            hydrate_line_source_from_working_tree(root, recorded.as_ref(), line);
                             line_assertions(run, line);
                         }
                     }
@@ -2916,6 +3050,10 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
             let mut invocation = invocation;
             let mut output = output;
             output.fit_lines();
+            let asked = match &invocation {
+                PublicQueryInvocation::Coverage { request, .. } => Some(request.limit),
+                _ => None,
+            };
             while let Some(fits) = output.page_that_fits() {
                 let PublicQueryInvocation::Coverage { request, .. } = &mut invocation else {
                     break;
@@ -2934,6 +3072,14 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                         return ExitCode::from(2);
                     }
                 }
+            }
+            // A page cut to fit says so, in the reply and beside it: taken
+            // for the whole of a file, page one hid most of its gaps.
+            if let (Some(asked), PublicQueryInvocation::Coverage { request, .. }) =
+                (asked, &invocation)
+                && request.limit < asked
+            {
+                output.mark_page_cut(asked);
             }
             match output.agent_json() {
                 Ok(output) => {

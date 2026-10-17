@@ -204,6 +204,11 @@ In `--json`, every file of `files` and `gaps` carries `totals` and `covered`
 for each metric beside what is missing, so a percentage can be worked out for
 any file or set of files.
 
+A page holds at most what fits in one reply, so a `--limit` larger than that
+returns fewer entries. Such a page says so: `pageCut` in `--json` gives
+`asked`, `returned` and `nextOffset`, and stderr names the `--offset` the rest
+start at.
+
 `line` reads the run once for every location it is given, so asking for
 twenty lines in one call costs about what one does. `--from-file` takes the
 locations from a file, one per line, skipping blank lines and `#` comments.
@@ -213,6 +218,14 @@ lists every test and phase. In `--json` the reply is `coverage.lines`, one
 entry per location in order, each location once. Locations that do not fit one
 reply are listed in `remaining`, and `pagination.nextOffset` says where the next
 reply starts: ask again with `--offset`, as for any page.
+
+A location naming no file of the run, or more than one, is listed under **Not
+answered** (`failed` in `--json`, each with its `location`, `code` and
+`message`) and the others are still answered; the call fails only when none
+is. A line whose file changed since the run is answered from the working tree
+with a warning naming that file; a change elsewhere, a test's included, does
+not make the answer stale. A line holding no statement, branch or function
+start is **NOT MEASURED** and says so.
 
 ```sh supercov
 npx supercov runs latest line app/routes/checkout.ts:42 app/routes/checkout.ts:57
@@ -320,6 +333,11 @@ passes, rather than claiming 100% for a patch that changed only comments. A
 changed file that looks like product source but is absent from the run is named
 separately, because treating it as zero uncovered lines would report success for
 code nothing ran.
+
+A run whose suite failed still shows the change's coverage, but `patch` exits 2
+and `--json` gives `result: "error"` with the reasons: a gate over a failed
+suite cannot pass. A run whose source has changed since is refused, because
+its lines no longer map onto the checkout.
 
 `--kind`, `--runner`, `--tag`, `--title` and `--test-file` ask whether some of
 the tests reach the change: the E2E tests, or the tests of one file.

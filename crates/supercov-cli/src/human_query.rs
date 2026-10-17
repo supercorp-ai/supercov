@@ -854,7 +854,7 @@ fn condition_gap(condition: &str, missing: &[String], needs: &str) -> String {
 fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
     // Several lines: each as one line reads, one after another.
     if let IndexedQueryData::Lines(data) = &output.data {
-        return data
+        let answered = data
             .lines
             .iter()
             .zip(&data.pages)
@@ -896,6 +896,16 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             })
             .collect::<Vec<_>>()
             .join("\n\n");
+        if data.failed.is_empty() {
+            return answered;
+        }
+        let failed = data
+            .failed
+            .iter()
+            .map(|failure| format!("  {}: {}", failure.location, failure.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!("{answered}\n\nNot answered\n{failed}");
     }
     let page = output.pagination.as_ref();
     match &output.data {
@@ -1619,6 +1629,15 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         "Status".into(),
                         format!("  {state}"),
                     ];
+                    // Said outright: a blank line, a comment or a type reads
+                    // NOT MEASURED, and beside a note about the working tree
+                    // that looked like Supercov had lost the line.
+                    if state == "NOT MEASURED" && data.total_limitations == 0 {
+                        lines.push(
+                            "  Nothing on this line is code the run measures: no statement, branch or function starts here."
+                                .into(),
+                        );
+                    }
                     if let Some(origin) = &data.source_origin {
                         lines.insert(
                             4,
