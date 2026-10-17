@@ -6507,3 +6507,47 @@ fn a_stale_run_names_the_files_that_changed_since_it() {
         "{said}"
     );
 }
+
+/// A page names the command for the next one; that command, run as printed,
+/// shows the next page.
+#[test]
+fn each_page_names_a_next_page_command_that_shows_it() {
+    let project = Project::cart("next-page");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    for args in [
+        &["file", "src/cart.js", "--group", "decision"][..],
+        &["test", "total"],
+        &["minimize", "--metric", "lines", "--target", "76"],
+    ] {
+        let first = project
+            .supercov(&[&["runs", "latest"][..], args, &["--limit", "1"]].concat())
+            .succeeds();
+        assert!(first.contains("showing 1-1 of "), "{first}");
+        let next = first
+            .lines()
+            .find_map(|line| line.strip_prefix("next page: supercov "))
+            .unwrap_or_else(|| panic!("no next page in\n{first}"));
+        let words = next
+            .split(' ')
+            .map(|word| word.trim_matches('\''))
+            .collect::<Vec<_>>();
+        assert!(
+            words.ends_with(&["--offset", "1", "--limit", "1"]),
+            "{next}"
+        );
+        let second = project.supercov(&words).succeeds();
+        assert!(second.contains("showing 2-2 of "), "{next}\n{second}");
+        assert!(
+            first.contains(&format!("all {} at once", total(&first))),
+            "{first}"
+        );
+    }
+
+    fn total(page: &str) -> String {
+        page.split("showing 1-1 of ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap()
+            .to_owned()
+    }
+}

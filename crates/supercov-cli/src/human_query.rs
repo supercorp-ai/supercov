@@ -2247,6 +2247,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn numbers_and_times_read_the_way_people_write_them() {
+        assert_eq!(
+            readable_timestamp("2026-10-16T10:29:02.377Z"),
+            "2026-10-16 10:29:02 UTC"
+        );
+        // Anything that is not a stored timestamp is shown as it is.
+        assert_eq!(readable_timestamp("2026-10-16"), "2026-10-16");
+        assert_eq!(
+            readable_timestamp("2026-10-16 10:29:02.377Z"),
+            "2026-10-16 10:29:02.377Z"
+        );
+        assert_eq!(number(0.0), "0");
+        assert_eq!(number(-0.0), "0");
+        assert_eq!(number(12.0), "12");
+        assert_eq!(number(2.5), "2.5");
+        assert_eq!(count(7), "7");
+        assert_eq!(count(1_234_567), "1,234,567");
+        assert_eq!(share(50.0, 0), "\u{2014}");
+    }
+
+    #[test]
     fn assertion_summary_reads_the_assessed_share_or_says_how_to_assess() {
         let report = serde_json::json!({"available":true,"summary":{"statements":4,"asserted":1,"percentage":25.0}});
         assert_eq!(
