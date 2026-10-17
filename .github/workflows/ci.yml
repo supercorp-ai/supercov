@@ -87,13 +87,22 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: clippy, rustfmt
+      # The packed-install check holds the binary to the glibc 2.28 floor the
+      # release promises; this runner's own glibc is 2.39, so the binary is
+      # linked the way native-artifacts.yml links it, with cargo-zigbuild.
+      - run: python3 -m pip install --user --break-system-packages cargo-zigbuild ziglang
       - run: npm ci
       - run: npm run test:watchdog
       - run: npm run test:engine-contract
       - run: npm run test:agent
       - run: npm run test:child-attribution
       - run: npm run test:host-loader
-      - run: npm run test:native-package
+      - run: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p supercov
+      - run: node scripts/native-package-integration.mjs --target x86_64-unknown-linux-gnu --binary target/x86_64-unknown-linux-gnu/release/supercov
+      - run: node scripts/native-release-set-integration.mjs
       - run: npm run test:packed-npx
       - run: npm run benchmark:check
 
