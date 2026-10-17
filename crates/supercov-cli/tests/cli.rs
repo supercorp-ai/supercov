@@ -6342,6 +6342,19 @@ fn a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file() {
         none["error"]["message"],
         "No tests match --tag api --test-file test/ui"
     );
+    // A query below the summary says the same.
+    let files = project
+        .supercov(&["runs", &run, "files", "--tag", "nightly", "--json"])
+        .json();
+    assert_eq!(files["error"]["code"], "TEST_FILTER_EMPTY", "{files}");
+    assert_eq!(files["error"]["message"], "No tests match --tag nightly");
+    let plain = project
+        .supercov(&["runs", &run, "gaps", "--title", "never named"])
+        .exits(2);
+    assert!(
+        plain.contains("No tests match --title never named"),
+        "{plain}"
+    );
 
     // Every query reads the same tests, and says which.
     let summary = project
