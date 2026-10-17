@@ -189,6 +189,31 @@ npx supercov -- cargo nextest run --workspace
 explanation instead of silently falling back to plausible but inaccurate
 attribution.
 
+### A Rust Worker under browser tests
+
+A Playwright suite that starts a Cloudflare Worker written in Rust with
+`wrangler dev`, built by `worker-build`, measures the Worker:
+
+```sh
+npx supercov -- npx playwright test
+```
+
+The crate is rewritten with probes in the copy the suite runs in, and
+`wrangler dev` builds it there as usual. The copy's wrangler configuration
+(`wrangler.toml`, `wrangler.json` or `wrangler.jsonc`) points `main` at a
+small entry of Supercov's that remembers the Worker's wasm instances and then
+is your entry, and gives `[dev]` an inspector port unless you set one; your
+own configuration and command are not changed. While the suite runs,
+Supercov reads what the Worker ran through that inspector every 5 ms, and
+each read is credited to the browser test that was running then, if only one
+was, as for a [Go server](#a-go-server-under-browser-tests). The Worker's
+coverage is a Rust run of its own, published as the run or beside the browser
+run. Requests made before the first test, such as the readiness check
+`webServer` waits on, are the run's and no test's.
+
+The build runs with `--cap-lints=warn`, so a crate that denies warnings still
+builds with the probes in it.
+
 ## Python
 
 | Runner | Attribution | Current requirement |

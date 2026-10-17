@@ -54,6 +54,7 @@ tree-sitter-go.workspace = true
 tree-sitter-java.workspace = true
 tree-sitter-kotlin-ng.workspace = true
 toml_edit.workspace = true
+tungstenite.workspace = true
 which.workspace = true
 
 [target.'cfg(windows)'.dependencies]

@@ -564,8 +564,9 @@ pub fn run_direct_javascript(
         &request.command,
     )
     .map_err(|error| error.to_string())?;
-    // Browser tests may drive a Python or Ruby server, whose source the
-    // probes measure in the copy the suite runs in. Without one, a project
+    // Browser tests may drive a server in another language -- Python, Ruby,
+    // Go, Java/Kotlin, a Rust Worker -- whose source the probes measure in
+    // the copy the suite runs in. Without one, a project
     // with no JavaScript source has nothing to measure.
     let browser_suite = project.playwright_config.is_some();
     let serves_python = browser_suite
@@ -577,6 +578,7 @@ pub fn run_direct_javascript(
     let serves_go = browser_suite
         && (root.join("go.mod").is_file()
             || !crate::go_project::workspace_modules(&root).is_empty());
+    let serves_rust_worker = browser_suite && crate::rust_worker::RustWorkerServer::present(&root);
     let serves_jvm = browser_suite
         && [
             "pom.xml",
@@ -592,6 +594,7 @@ pub fn run_direct_javascript(
         && !serves_ruby
         && !serves_go
         && !serves_jvm
+        && !serves_rust_worker
     {
         return Err(
             crate::project_discovery::ProjectDiscoveryError::NoSourceFiles
@@ -732,6 +735,21 @@ pub fn run_direct_javascript(
             crate::jvm_run::JvmServer::prepare(&root, &workspace, &run_id, &request.command)?
     {
         servers.push(Server::Jvm(server));
+    }
+    // A Rust Worker is instrumented in the copy too, and `wrangler dev`
+    // builds it there when the suite starts it.
+    if serves_rust_worker {
+        servers.extend(
+            crate::rust_worker::RustWorkerServer::prepare(
+                &root,
+                &workspace,
+                &run_id,
+                &request.command,
+                diagnostics,
+            )?
+            .into_iter()
+            .map(Server::RustWorker),
+        );
     }
     if project.source_files.is_empty() && servers.is_empty() {
         return Err(
@@ -1438,6 +1456,7 @@ enum Server {
     Ruby(crate::ruby_run::RubyServer),
     Go(crate::go_run::GoServer),
     Jvm(crate::jvm_run::JvmServer),
+    RustWorker(crate::rust_worker::RustWorkerServer),
 }
 
 impl Server {
@@ -1447,6 +1466,7 @@ impl Server {
             Self::Ruby(_) => "Ruby",
             Self::Go(_) => "Go",
             Self::Jvm(_) => "Java/Kotlin",
+            Self::RustWorker(_) => "Rust Worker",
         }
     }
 
@@ -1456,6 +1476,7 @@ impl Server {
             Self::Ruby(server) => server.source_files(),
             Self::Go(server) => server.source_files(),
             Self::Jvm(server) => server.source_files(),
+            Self::RustWorker(server) => server.source_files(),
         }
     }
 
@@ -1465,6 +1486,7 @@ impl Server {
             Self::Ruby(server) => server.environment(),
             Self::Go(server) => server.environment(),
             Self::Jvm(server) => server.environment(),
+            Self::RustWorker(server) => server.environment(),
         }
     }
 
@@ -1487,6 +1509,9 @@ impl Server {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
             Self::Jvm(server) => {
+                server.publish(root, evidence_run_id, metadata, served, diagnostics)
+            }
+            Self::RustWorker(server) => {
                 server.publish(root, evidence_run_id, metadata, served, diagnostics)
             }
         }

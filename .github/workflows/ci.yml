@@ -71,3 +71,24 @@ jobs:
       # Three of the scripts drive a real browser through Playwright.
       - run: npx playwright install --with-deps
       - run: npm run test:engine-integrations
+
+  # A Rust Worker under `wrangler dev`, measured through wrangler's inspector.
+  rust-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - run: cargo install worker-build --version 0.8.7 --locked
+      - run: npm ci
+      - run: cargo build -p supercov
+      - run: node scripts/rust-worker-playwright.mjs
+        env:
+          SUPERCOV_REQUIRE_RUST_WORKER: "1"

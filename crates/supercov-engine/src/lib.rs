@@ -67,6 +67,7 @@ pub mod rust_runner_attempt;
 pub mod rust_runtime;
 pub mod rust_test_context;
 pub mod rust_test_runner;
+pub mod rust_worker;
 pub mod security_candidates;
 pub mod served_tests;
 pub mod source_capture;
