@@ -2617,6 +2617,78 @@ mod tests {
         }
     }
 
+    /// The imports an added function brings: a package or a type comes out
+    /// with it; a module of the project, a side-effect import or a default
+    /// import that gained a name does not, so the file counts as changed.
+    #[test]
+    fn an_added_function_s_imports_come_out_with_it_only_when_nothing_else_loads() {
+        let before = code(
+            "h.ts",
+            "import d from './a';\n\nexport function open() {\n  return d();\n}\n",
+        )
+        .unwrap();
+        let tail = "\nexport function open() {\n  return d();\n}\n\nexport function more(x: Local) {\n  return b(x);\n}\n";
+        let more = Some(vec!["more".to_owned()]);
+        for (head, expected) in [
+            (
+                "import d from './a';\nimport type { Local } from './types';\nimport { b } from 'pkg';\n",
+                more.clone(),
+            ),
+            (
+                "import d from './a';\nimport { type Local, b } from 'pkg';\n",
+                more.clone(),
+            ),
+            (
+                "import d from './a';\nimport type { Local } from './types';\nimport { b } from '/abs/lib';\n",
+                None,
+            ),
+            (
+                "import d, { b } from './a';\nimport type { Local } from './types';\n",
+                None,
+            ),
+            (
+                "import d from './a';\nimport type { Local } from './types';\nimport { b } from 'pkg';\nimport {} from 'side';\n",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                only_added(&before, "h.ts", &format!("{head}{tail}")),
+                expected,
+                "{head}"
+            );
+        }
+        let python = code(
+            "t/h.py",
+            "import json\n\n\ndef make(x):\n    return json.dumps(x)\n",
+        )
+        .unwrap();
+        let kept = "import json\n\n\ndef make(x):\n    return json.dumps(x)\n\n\n";
+        for (after, expected) in [
+            (
+                format!(
+                    "import json\nimport os.path as p\n{}def more(x):\n    return p.join(x)\n",
+                    &kept[12..]
+                ),
+                more.clone(),
+            ),
+            // Exported by name, in either quote.
+            (
+                format!("{kept}def more(x):\n    return x\n\n__all__ = ['more']\n"),
+                None,
+            ),
+            // A star import can rebind any name the earlier code reads.
+            (
+                format!(
+                    "import json\nfrom random import *\n{}def more(x):\n    return random()\n",
+                    &kept[12..]
+                ),
+                None,
+            ),
+        ] {
+            assert_eq!(only_added(&python, "t/h.py", &after), expected, "{after}");
+        }
+    }
+
     #[test]
     fn an_added_function_that_shadows_a_global_is_a_change() {
         let before = code(
