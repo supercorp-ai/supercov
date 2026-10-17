@@ -2204,6 +2204,48 @@ mod tests {
         assert_eq!(strip_verbatim(r"\\?\"), None);
     }
 
+    #[test]
+    fn a_drive_needs_a_letter_and_a_colon() {
+        use super::strip_verbatim;
+        assert_eq!(strip_verbatim(r"\\?\1:\a"), None);
+        assert_eq!(strip_verbatim(r"\\?\C\a"), None);
+    }
+
+    /// A linked virtual environment is found up to two directories down, and
+    /// never inside what a project does not own: dependencies, Supercov's own
+    /// store, the repository.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_virtual_environment_is_found_only_where_the_project_keeps_it() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-venv-search-{}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let venv = base.join("venv");
+        fs::create_dir_all(&venv).unwrap();
+        fs::write(venv.join("pyvenv.cfg"), "home = /usr\n").unwrap();
+        let workspace = base.join("workspace");
+        for skipped in ["node_modules/pkg", ".supercov/x", ".git/y"] {
+            fs::create_dir_all(workspace.join(skipped)).unwrap();
+            std::os::unix::fs::symlink(&venv, workspace.join(skipped).join(".venv")).unwrap();
+        }
+        fs::create_dir_all(workspace.join("a/b/c")).unwrap();
+        std::os::unix::fs::symlink(&venv, workspace.join("a/b/c/.venv")).unwrap();
+        fs::write(workspace.join("a/file"), "").unwrap();
+        // Three levels down is past the search; the skipped trees hide theirs.
+        assert!(!links_a_virtual_environment(&workspace));
+        std::os::unix::fs::symlink(&venv, workspace.join("a/b/.venv")).unwrap();
+        assert!(links_a_virtual_environment(&workspace));
+        // A link to anything else is no environment.
+        let other = base.join("other");
+        fs::create_dir_all(workspace.join("api")).unwrap();
+        std::os::unix::fs::symlink(&other, workspace.join("api/.venv")).unwrap();
+        fs::remove_file(workspace.join("a/b/.venv")).unwrap();
+        assert!(!links_a_virtual_environment(&workspace));
+        fs::remove_dir_all(&base).unwrap();
+    }
+
     use super::*;
 
     fn writeback_fixture(name: &str) -> (PathBuf, PathBuf) {
