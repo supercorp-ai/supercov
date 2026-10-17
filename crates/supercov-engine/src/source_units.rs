@@ -2724,3 +2724,174 @@ mod tests {
         assert_eq!(x.structure, y.structure);
     }
 }
+
+#[cfg(test)]
+mod edge_unit_tests {
+    use super::*;
+
+    fn units(path: &str, source: &str) -> (Vec<String>, Vec<usize>) {
+        let code = code(path, source).expect("parses");
+        let units = code
+            .units
+            .iter()
+            .skip(1)
+            .map(|u| {
+                format!(
+                    "{}:{}{}",
+                    u.kind,
+                    u.path,
+                    if u.inert { " inert" } else { "" }
+                )
+            })
+            .collect();
+        (units, code.erased)
+    }
+
+    /// Declarations at the edges of each language's reading: ambient and
+    /// overload signatures, anonymous defaults and computed keys (no unit:
+    /// their text belongs to what holds them), magic comments, Rust unions
+    /// and both kinds of macro, and a file that does not parse.
+    #[test]
+    fn each_language_names_its_edge_declarations() {
+        let (ts, _) = units(
+            "a.ts",
+            "declare function ambient(a: string): void;\nfunction over(a: string): void;\nfunction over(a: any) {}\ndeclare const flag: boolean;\nconst arrow = () => 1;\nconst plain = 1;\nexport { a } from './x';\nexport default class {}\nexport default function () {}\nclass K { [key]() {} get g() { return 1 } static s = () => 2; [c] = 3; }\nconst o = { [k]: 1, m() {}, f: function () {}, n: 2 };\n",
+        );
+        assert_eq!(
+            ts,
+            [
+                "function:ambient inert",
+                "function:over inert",
+                "function:over#2",
+                "function:arrow",
+                "class:K",
+                "get:K.g",
+                "function:K.s",
+                "object:o",
+                "method:o.m",
+                "method:o.f",
+            ]
+        );
+        // A coding cookie is read by Python; a modeline or a late shebang is not.
+        let (py, erased) = units(
+            "a.py",
+            "# -*- coding: utf-8 -*-\n# vim: set ft=python :\n#!/usr/bin/env python\n__all__ = [\"f\"]\ndef f():\n    s = f\"x {y} z\"\n    return s\n",
+        );
+        assert_eq!(py, ["function:f"]);
+        assert_eq!(erased, [2, 3]);
+        let (rust, erased) = units(
+            "a.rs",
+            "//! crate docs\n#![allow(dead_code)]\n// supercov: keep\nunion U { a: u8 }\nmacro m() {}\nmacro_rules! r { () => {} }\nfn f() { let s = \"// not\"; let b = b\"x\"; let c = c\"y\"; }\n",
+        );
+        assert_eq!(rust, ["union:U", "macro:m", "macro:r", "function:f"]);
+        assert_eq!(erased, [1], "a Supercov pragma is kept");
+        assert_eq!(code("b.rs", "fn f( {\n"), None);
+    }
+
+    /// A comment taken out leaves a space only where the words on each side
+    /// would otherwise run together: `return/*c*/x` reads as `return x`.
+    #[test]
+    fn an_erased_comment_never_glues_two_words() {
+        for (plain, commented) in [
+            (
+                "function f(x) {\n  return x;\n}\n",
+                "function f(x) {\n  return/*c*/x;\n}\n",
+            ),
+            (
+                "function f(x) {\n  return $x;\n}\n",
+                "function f(x) {\n  return/*c*/$x;\n}\n",
+            ),
+            (
+                "function f(x) {\n  return _x;\n}\n",
+                "function f(x) {\n  return/*c*/_x;\n}\n",
+            ),
+            (
+                "const a = 1; const b = 2;\n",
+                "const a = 1; /* x */ const b = 2;\n",
+            ),
+            ("const a = (1);\n", "const a = (/* x */1);\n"),
+        ] {
+            assert_eq!(
+                code("g.js", plain).unwrap().semantic,
+                code("g.js", commented).unwrap().semantic,
+                "{commented}"
+            );
+        }
+        let (_, erased) = units(
+            "g.js",
+            "function f(x) {\n  if (x) return/*c*/x;\n  return/*c*/(x); // tail\n  /* own line */\n}\n",
+        );
+        assert_eq!(erased, [4]);
+    }
+
+    /// What only adding functions means, at its edges: a rename is a removal,
+    /// an empty change adds nothing, and a method, an ambient declaration, a
+    /// re-export, an anonymous default or a plain value is no added function.
+    #[test]
+    fn only_a_new_function_is_only_an_addition() {
+        let source = "export function a() {\n  return 1;\n}\n";
+        let before = code("h.ts", source).unwrap();
+        let renamed = code("h.ts", &source.replace("function a", "function b")).unwrap();
+        let diff = before.diff(&renamed);
+        assert_eq!(
+            (diff.removed.as_slice(), diff.added.as_slice()),
+            (&[1][..], &[1][..])
+        );
+        assert!(!diff.narrow(&before, &[1]));
+        for (label, tail, expected) in [
+            ("nothing", "", None),
+            ("a method", "export class C {\n  m() {}\n}\n", None),
+            (
+                "an ambient declaration",
+                "declare function d(): void;\n",
+                None,
+            ),
+            (
+                "a re-export",
+                "export { z } from './z';\nexport function e() {}\n",
+                None,
+            ),
+            (
+                "an anonymous default",
+                "export default function () {}\n",
+                None,
+            ),
+            ("a plain value", "export const w = 1;\n", None),
+            (
+                "an arrow function",
+                "export const v = () => 1;\n",
+                Some(vec!["v".to_owned()]),
+            ),
+        ] {
+            assert_eq!(
+                only_added(&before, "h.ts", &format!("{source}{tail}")),
+                expected,
+                "{label}"
+            );
+        }
+        assert_eq!(only_added(&before, "h.ts", &source.replace('a', "b")), None);
+        // A Python function `__all__` lists, or one existing code calls, was
+        // named before it existed: a change.
+        let python = "__all__ = [\"a\"]\n\ndef a():\n    return 1\n";
+        let before = code("h.py", python).unwrap();
+        for (label, after, expected) in [
+            (
+                "listed",
+                "__all__ = [\"a\", \"b\"]\n\ndef a():\n    return 1\n\ndef b():\n    return 2\n",
+                None,
+            ),
+            (
+                "called",
+                "__all__ = [\"a\"]\n\ndef a():\n    return b()\n\ndef b():\n    return 2\n",
+                None,
+            ),
+            (
+                "new",
+                "__all__ = [\"a\"]\n\ndef a():\n    return 1\n\ndef c():\n    return 3\n",
+                Some(vec!["c".to_owned()]),
+            ),
+        ] {
+            assert_eq!(only_added(&before, "h.py", after), expected, "{label}");
+        }
+    }
+}
