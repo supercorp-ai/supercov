@@ -258,6 +258,40 @@ end
   def self.not_with(value) = value.!
 
   def self.endless(value) = (value + 1)
+
+  # Empty handlers: the probe goes after \`then\`, the name, the class or the
+  # keyword, whichever the clause ends with.
+  def self.quiet_then(fail)
+    raise fail if fail
+  rescue RuntimeError => error then
+  end
+
+  def self.quiet_named(fail)
+    raise fail if fail
+  rescue RuntimeError => error
+  end
+
+  def self.quiet_class(fail)
+    raise fail if fail
+  rescue RuntimeError
+  end
+
+  def self.quiet_bare(fail)
+    raise fail if fail
+  rescue
+  end
+
+  def self.literal_unless(value)
+    unless true
+      value = :never
+    else
+      value = value.to_s
+    end
+    unless false
+      value = value.upcase
+    end
+    value
+  end
 end
 `,
   'test/zoo_test.rb': `require 'minitest/autorun'
@@ -356,6 +390,12 @@ class ZooTest < Minitest::Test
     assert_equal true, Edges.not_with(nil)
     assert_equal false, Edges.not_with(1)
     assert_equal 3, Edges.endless(2)
+    %i[quiet_then quiet_named quiet_class quiet_bare].each do |name|
+      assert_nil Edges.public_send(name, RuntimeError)
+      assert_nil Edges.public_send(name, nil)
+      assert_raises(NotImplementedError) { Edges.public_send(name, NotImplementedError) }
+    end
+    assert_equal 'AB', Edges.literal_unless(:ab)
   end
 
   def test_literals
