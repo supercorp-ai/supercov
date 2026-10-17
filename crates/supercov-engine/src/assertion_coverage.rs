@@ -1399,13 +1399,20 @@ impl Population {
         let lines = text.split('\n').collect::<Vec<_>>();
         let title = python_title(&t.name);
         let indent_of = |l: &str| l.len() - l.trim_start().len();
+        // Test classes in one file often share method names, so the method
+        // is looked for inside the class its id names, then anywhere.
+        let (from, to, body) = python_class_lines(&lines, &python_classes(&t.name));
+        let defines = |i: &usize| {
+            let t = lines[*i].trim_start();
+            t.starts_with(&format!("def {title}(")) || t.starts_with(&format!("async def {title}("))
+        };
+        // In the class's own body, not a class nested in it.
+        let own = |i: &usize| defines(i) && body.is_none_or(|body| indent_of(lines[*i]) == body);
         let start = (!title.is_empty())
             .then(|| {
-                lines.iter().position(|l| {
-                    let t = l.trim_start();
-                    t.starts_with(&format!("def {title}("))
-                        || t.starts_with(&format!("async def {title}("))
-                })
+                (from..to)
+                    .find(own)
+                    .or_else(|| (0..lines.len()).find(defines))
             })
             .flatten();
         let fmt = |i: usize| format!("{:5} {}", i + 1, lines[i]);
@@ -2283,6 +2290,53 @@ fn python_title(name: &str) -> &str {
     last.rsplit('.').next().unwrap_or(last)
 }
 
+/// The classes a Python test id names around its function: pytest's
+/// `file::TestA::TestB::test[param]`, unittest's `module.TestA.test`.
+fn python_classes(name: &str) -> Vec<&str> {
+    let name = name.split('[').next().unwrap_or(name);
+    if name.contains("::") {
+        let parts = name.split("::").collect::<Vec<_>>();
+        return parts[1..parts.len().saturating_sub(1)].to_vec();
+    }
+    let parts = name.split('.').collect::<Vec<_>>();
+    parts
+        .len()
+        .checked_sub(2)
+        .map(|at| parts[at])
+        .filter(|class| class.starts_with(|c: char| c.is_ascii_uppercase()))
+        .into_iter()
+        .collect()
+}
+
+/// The lines of the innermost of `classes`, each found inside the one before
+/// and ended by indentation, with the indentation of that class's own body;
+/// the whole file when one is not found.
+fn python_class_lines(lines: &[&str], classes: &[&str]) -> (usize, usize, Option<usize>) {
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let (mut from, mut to, mut body) = (0, lines.len(), None);
+    for class in classes {
+        let declared = (from..to).find(|&i| {
+            lines[i]
+                .trim_start()
+                .strip_prefix("class ")
+                .and_then(|rest| rest.strip_prefix(class))
+                .is_some_and(|rest| rest.starts_with(['(', ':']))
+        });
+        let Some(at) = declared else {
+            return (0, lines.len(), None);
+        };
+        let indent = indent_of(lines[at]);
+        let end = (at + 1..to)
+            .find(|&i| !lines[i].trim().is_empty() && indent_of(lines[i]) <= indent)
+            .unwrap_or(to);
+        body = (at + 1..end)
+            .find(|&i| !lines[i].trim().is_empty())
+            .map(|i| indent_of(lines[i]));
+        (from, to) = (at, end);
+    }
+    (from, to, body)
+}
+
 fn python_condition(line: &str) -> String {
     let t = line.trim();
     let t = t
@@ -2904,6 +2958,38 @@ mod tests {
                 "pub fn make() -> u8 {\n    1\n}\npub(crate) const LIMIT: u8 = 2;\nstruct Point {\n    x: u8,\n}\n"
             ),
             ["make 1-3", "LIMIT 4-4", "Point 5-7"]
+        );
+    }
+
+    #[test]
+    fn a_python_test_is_found_in_the_class_its_id_names() {
+        let text = "import pytest\n\n\nclass TestCart:\n    def test_total(self):\n        assert cart() == 0\n\n\nclass TestOrder:\n    class TestRefund:\n        def test_total(self):\n            assert refund() == 1\n\n    def test_total(self):\n        assert order() == 2\n";
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let at = |name: &str| {
+            let (from, to, body) = python_class_lines(&lines, &python_classes(name));
+            (from..to)
+                .find(|&i| {
+                    lines[i].trim_start().starts_with("def test_total(")
+                        && body
+                            .is_none_or(|body| lines[i].len() - lines[i].trim_start().len() == body)
+                })
+                .map(|i| i + 1)
+        };
+        assert_eq!(at("tests/test_a.py::TestCart::test_total"), Some(5));
+        assert_eq!(
+            at("tests/test_a.py::TestOrder::TestRefund::test_total[1]"),
+            Some(11)
+        );
+        // The class's own method, not the one of a class nested in it.
+        assert_eq!(at("tests/test_a.py::TestOrder::test_total"), Some(14));
+        assert_eq!(at("tests.test_a.TestCart.test_total"), Some(5));
+        assert_eq!(
+            python_classes("tests/test_a.py::test_plain"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            python_classes("tests.test_a.test_plain"),
+            Vec::<&str>::new()
         );
     }
 
