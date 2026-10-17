@@ -479,6 +479,168 @@ mod tests {
         path
     }
 
+    /// A program in a container writes into a region on a bind mount the
+    /// host reads while it runs. Docker Desktop's VM shows the host a shared
+    /// mapping only after `msync`, so with `SUPERCOV_CONTAINER` set a flusher
+    /// syncs every few milliseconds and stamps an epoch. Needs Docker and
+    /// pulls an image: `scripts/rust-region-container.mjs` runs it.
+    #[test]
+    #[ignore = "needs a Docker daemon; run by scripts/rust-region-container.mjs"]
+    fn a_region_in_a_container_is_read_live_from_the_host() {
+        // The program maps its region first (main's own probe), waits to be
+        // told to go, takes the decision, and says so: the host then has a
+        // second to see it while the program sleeps on. Without the flusher
+        // the VM's writeback shows it only seconds later, or at exit.
+        let source = r#"fn work(n: u32) -> u32 {
+    if n > 2 { n * 2 } else { n }
+}
+
+fn main() {
+    std::fs::write("/w/ready", "ready").unwrap();
+    while !std::path::Path::new("/w/go").exists() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    println!("{}", work(5));
+    std::fs::write("/w/done", "done").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(120));
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let runtime = region_runtime(&transformed.probes);
+        let directory = temporary_directory("container");
+        fs::write(
+            directory.join("main.rs"),
+            format!("{}\n{runtime}", transformed.code),
+        )
+        .unwrap();
+        let image =
+            std::env::var("SUPERCOV_RUST_IMAGE").unwrap_or_else(|_| "rust:1-bookworm".into());
+        let name = format!(
+            "supercov-region-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let started = Command::new("docker")
+            .args(["run", "-d", "--name", &name])
+            .arg("-v")
+            .arg(format!("{}:/w", directory.display()))
+            .args([
+                "-e",
+                "SUPERCOV_CONTAINER=1",
+                "-e",
+                "SUPERCOV_RUST_EVIDENCE_DIR=/w/evidence",
+                &image,
+                "sh",
+                "-c",
+                "cd /tmp && rustc --edition=2024 -O /w/main.rs -o program && ./program",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            started.status.success(),
+            "{}",
+            String::from_utf8_lossy(&started.stderr)
+        );
+        struct Removed(String);
+        impl Drop for Removed {
+            fn drop(&mut self) {
+                let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+            }
+        }
+        let _container = Removed(name.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        while !directory.join("ready").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the program never got ready: {}",
+                String::from_utf8_lossy(
+                    &Command::new("docker")
+                        .args(["logs", &name])
+                        .output()
+                        .unwrap()
+                        .stderr
+                )
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Let the guest's periodic writeback carry everything written so far.
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        fs::write(directory.join("go"), "go").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !directory.join("done").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the program never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // The program sleeps for two minutes yet: whatever the host reads
+        // now came through the live mapping.
+        let evidence = directory.join("evidence");
+        let work = transformed
+            .manifest
+            .decisions
+            .iter()
+            .find(|decision| decision.line == 2)
+            .unwrap()
+            .id
+            .clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let (decisions, epoch) = loop {
+            let regions = read_regions(&evidence, &transformed.probes);
+            let decisions = regions
+                .values()
+                .flatten()
+                .filter(|entry| {
+                    matches!(&entry.observation, RustProbeObservation::Decision { id, .. } if *id == work)
+                })
+                .count();
+            let epoch = fs::read_dir(&evidence)
+                .ok()
+                .and_then(|mut entries| entries.next())
+                .and_then(|entry| fs::read(entry.ok()?.path()).ok())
+                .and_then(|bytes| {
+                    bytes
+                        .get(48..52)
+                        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+                })
+                .unwrap_or(0);
+            if decisions > 0 && epoch > 0 || std::time::Instant::now() > deadline {
+                break (decisions, epoch);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let running = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", &name])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&running.stdout).trim(), "true");
+        assert_eq!(
+            decisions, 1,
+            "the decision the program took is visible while it runs"
+        );
+        assert!(epoch > 0, "the flusher stamps its epoch");
+        drop(_container);
+        let _ = Command::new("docker")
+            .args(["run", "--rm", "-v"])
+            .arg(format!("{}:/w", directory.display()))
+            .args([
+                &image,
+                "rm",
+                "-rf",
+                "/w/evidence",
+                "/w/ready",
+                "/w/go",
+                "/w/done",
+            ])
+            .output();
+        fs::remove_dir_all(directory).ok();
+    }
+
     #[test]
     fn the_runtime_records_which_gated_code_the_compiler_built() {
         let source = r#"#[cfg(feature = "on")]
