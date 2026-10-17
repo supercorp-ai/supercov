@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A Java project with two build files that both fail on warnings was told twice that Supercov "stopped the build failing on warnings" in its copy. Each relaxation is now said once.
 - A Next.js route handler at the root of `app/` (`app/route.ts`, serving `/`) was not wrapped like handlers deeper in `app/`, so what its `GET` or `POST` ran was not tied to the request that ran it. It is now.
 - A Rust condition in an array length (`[0; if WIDE { 4 } else { 2 }]`, or the same in a return type) runs at compile time and cannot be measured, but was counted as a decision no test evaluated: a gap no test could close. It is now declared unmeasured, like `const fn` bodies.
 - A Python test method deep in its file was sent to assessment with `...` before each of its class and decorator lines, as if lines were left out between adjacent decorators. `...` now marks only lines left out.
