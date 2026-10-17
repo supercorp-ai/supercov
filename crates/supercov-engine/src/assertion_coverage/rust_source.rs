@@ -1665,7 +1665,7 @@ pub(super) fn locate(lines: &[&str], name: &str) -> Option<Located> {
                 .is_some_and(|r| r.trim_start().starts_with('{'))
         });
         if let Some(at) = declared {
-            (from, to) = (at, (super::brace_end(lines, at) + 1).min(lines.len()));
+            (from, to) = (at, (super::block_end(lines, at) + 1).min(lines.len()));
         }
     }
     let defines = |i: &usize| {

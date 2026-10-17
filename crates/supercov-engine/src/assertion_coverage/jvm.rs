@@ -339,7 +339,7 @@ pub(super) fn locate(lines: &[&str], name: &str) -> Option<Located> {
         let Some(at) = (from..to).find(|&i| declares(lines[i])) else {
             break;
         };
-        (from, to) = (at, (super::brace_end(lines, at) + 1).min(lines.len()));
+        (from, to) = (at, (super::block_end(lines, at) + 1).min(lines.len()));
     }
     let declares_method = |i: &usize| {
         let t = lines[*i].trim_start();

@@ -794,6 +794,38 @@ fn python_statement_starts(source: &str) -> BTreeMap<usize, Vec<(String, Option<
     collector.out
 }
 
+/// The line a JavaScript test is declared on. Each group in its name
+/// (`cart > totals`) narrows the search to that group's block, since groups
+/// often hold tests of the same title; a title written as a string is
+/// preferred over the same words anywhere else.
+fn js_test_line(lines: &[&str], name: &str) -> Option<usize> {
+    let parts = name.split(" > ").collect::<Vec<_>>();
+    let (title, groups) = parts.split_last()?;
+    let quoted = |line: &str, text: &str| {
+        ['\'', '"', '`']
+            .iter()
+            .any(|quote| line.contains(&format!("{quote}{text}")))
+    };
+    let (mut from, mut to) = (0, lines.len());
+    for group in groups {
+        let needle = prefix(group, 40);
+        if needle.is_empty() {
+            continue;
+        }
+        if let Some(at) = (from..to).find(|&i| quoted(lines[i], needle)) {
+            (from, to) = (at, (block_end(lines, at) + 1).min(lines.len()));
+        }
+    }
+    let needle = prefix(title, 40);
+    if needle.is_empty() {
+        return None;
+    }
+    (from..to)
+        .find(|&i| quoted(lines[i], needle))
+        .or_else(|| (from..to).find(|&i| lines[i].contains(needle)))
+        .or_else(|| (0..lines.len()).find(|&i| lines[i].contains(needle)))
+}
+
 fn prefix(text: &str, chars: usize) -> &str {
     match text.char_indices().nth(chars) {
         Some((i, _)) => &text[..i],
@@ -1279,11 +1311,7 @@ impl Population {
         let t = &self.tests[test];
         let text = self.read(&t.file).unwrap_or_default();
         let lines = text.split('\n').collect::<Vec<_>>();
-        let title = t.name.rsplit(" > ").next().unwrap_or(&t.name);
-        let needle = prefix(title, 40);
-        let start = (!needle.is_empty())
-            .then(|| lines.iter().position(|l| l.contains(needle)))
-            .flatten();
+        let start = js_test_line(&lines, &t.name);
         let fmt = |i: usize| format!("{:5} {}", i + 1, lines[i]);
         let head = (0..lines.len().min(HEAD_LINES))
             .filter(|&i| !self.language.comment(lines[i]))
@@ -2048,9 +2076,19 @@ fn indent(line: &str) -> usize {
 /// The line closing the braces opened from `start` on (strings, characters
 /// and line comments aside).
 fn brace_end(lines: &[&str], start: usize) -> usize {
+    brace_end_within(lines, start, BODY_LINES)
+}
+
+/// Where the block opened at `start` closes, however long it is: the region
+/// a class, module or group holds, which is searched rather than shown.
+fn block_end(lines: &[&str], start: usize) -> usize {
+    brace_end_within(lines, start, lines.len())
+}
+
+fn brace_end_within(lines: &[&str], start: usize, limit: usize) -> usize {
     let mut depth = 0i64;
     let mut opened = false;
-    for (i, line) in lines.iter().enumerate().skip(start).take(BODY_LINES) {
+    for (i, line) in lines.iter().enumerate().skip(start).take(limit) {
         let mut chars = line.chars().peekable();
         let mut quote: Option<char> = None;
         while let Some(c) = chars.next() {
@@ -2074,7 +2112,10 @@ fn brace_end(lines: &[&str], start: usize) -> usize {
             return i;
         }
     }
-    (start + BODY_LINES).min(lines.len()).saturating_sub(1)
+    start
+        .saturating_add(limit)
+        .min(lines.len())
+        .saturating_sub(1)
 }
 
 /// The `end` (or `}`) closing a Ruby block or method opened on `start`.
@@ -2991,6 +3032,27 @@ mod tests {
             python_classes("tests.test_a.test_plain"),
             Vec::<&str>::new()
         );
+    }
+
+    #[test]
+    fn a_javascript_test_is_found_in_the_group_its_name_gives() {
+        let text = "import { totals } from '../src/cart.js';\n\ndescribe('cart', () => {\n  it('totals', () => {\n    expect(totals([])).toBe(0);\n  });\n});\n\ndescribe('order', () => {\n  describe('refund', () => {\n    it('totals', () => {});\n  });\n  it('totals', () => {\n    expect(1).toBe(1);\n  });\n});\n";
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let line = |name: &str| js_test_line(&lines, name).map(|i| i + 1);
+        assert_eq!(
+            line("cart > totals"),
+            Some(4),
+            "not the import that names it"
+        );
+        assert_eq!(line("order > refund > totals"), Some(11));
+        assert_eq!(line("totals"), Some(4));
+        // A group longer than a body is shown is still searched to its end.
+        let long = format!(
+            "describe('a', () => {{\n  it('x', () => {{}});\n}});\ndescribe('b', () => {{\n{}  it('x', () => {{}});\n}});\n",
+            "  const y = 1;\n".repeat(200)
+        );
+        let lines = long.split('\n').collect::<Vec<_>>();
+        assert_eq!(js_test_line(&lines, "b > x").map(|i| i + 1), Some(205));
     }
 
     #[test]
