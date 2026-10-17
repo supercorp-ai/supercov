@@ -72,6 +72,8 @@ pub fn render_rust_region_runtime(
     token: &str,
     crate_key: &str,
     layout: &crate::rust_instrumenter::RustProbeLayout,
+    // The ordinals of the `cfgs` in this crate's own files.
+    crate_cfgs: &[usize],
 ) -> Result<String, String> {
     let valid_identifier = !module_name.is_empty()
         && module_name.bytes().enumerate().all(|(index, byte)| {
@@ -86,6 +88,19 @@ pub fn render_rust_region_runtime(
     if crate_key.is_empty() || !crate_key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid Rust runtime crate key".into());
     }
+    let mut table = String::new();
+    for ordinal in crate_cfgs {
+        let gate = layout
+            .cfgs
+            .get(*ordinal)
+            .ok_or("a crate names a cfg gate the layout lacks")?;
+        // Re-parsed, so only a predicate `cfg!` accepts reaches the source.
+        let predicate = gate
+            .predicate
+            .parse::<cargo_platform::CfgExpr>()
+            .map_err(|error| format!("invalid cfg predicate {:?}: {error}", gate.predicate))?;
+        table.push_str(&format!("({ordinal}, cfg!({predicate})), "));
+    }
     Ok(REGION_TEMPLATE
         .replace("__SUPERCOV_MODULE__", module_name)
         .replace("__SUPERCOV_HITS__", &layout.hits.len().to_string())
@@ -97,6 +112,8 @@ pub fn render_rust_region_runtime(
             "__SUPERCOV_DECISIONS__",
             &layout.decisions.len().to_string(),
         )
+        .replace("__SUPERCOV_CFGS__", &layout.cfgs.len().to_string())
+        .replace("__SUPERCOV_CFG_TABLE__", &table)
         .replace("__SUPERCOV_TOKEN__", token)
         .replace(
             "__SUPERCOV_REGION_EXPORT__",
@@ -106,6 +123,47 @@ pub fn render_rust_region_runtime(
             "__SUPERCOV_CLEAR_EXPORT__",
             &format!("__supercov_clear_{crate_key}"),
         ))
+}
+
+struct RegionHeader {
+    entries_per_decision: usize,
+    body_at: usize,
+}
+
+/// A region's header, checked against this instrumentation: its token and
+/// the size of every table.
+fn region_header(
+    bytes: &[u8],
+    token: &str,
+    layout: &crate::rust_instrumenter::RustProbeLayout,
+) -> Result<RegionHeader, RustProbeReadError> {
+    const HEADER: usize = 128;
+    let u32_at = |offset: usize| -> Result<u32, RustProbeReadError> {
+        bytes
+            .get(offset..offset + 4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap_or([0; 4])))
+            .ok_or(RustProbeReadError::InvalidHeader)
+    };
+    if bytes.get(..8) != Some(REGION_MAGIC.as_slice())
+        || u32_at(8)? != REGION_VERSION
+        || u32_at(12)? as usize != HEADER
+        || u32_at(16)? as usize != layout.hits.len()
+        || u32_at(20)? as usize != layout.assertions.len()
+        || u32_at(24)? as usize != layout.decisions.len()
+        || u32_at(72)? as usize != layout.cfgs.len()
+    {
+        return Err(RustProbeReadError::InvalidHeader);
+    }
+    let stored_token = bytes
+        .get(56..56 + token.len())
+        .ok_or(RustProbeReadError::InvalidHeader)?;
+    if stored_token != token.as_bytes() {
+        return Err(RustProbeReadError::InvalidHeader);
+    }
+    Ok(RegionHeader {
+        entries_per_decision: u32_at(28)? as usize,
+        body_at: u32_at(32)? as usize,
+    })
 }
 
 /// One region, read back as the records its process wrote, in the order it
@@ -121,34 +179,15 @@ pub fn parse_rust_region(
     const HEADER: usize = 128;
     const PAGE: usize = 4096;
     const ENTRY: usize = 32;
-    let u32_at = |offset: usize| -> Result<u32, RustProbeReadError> {
-        bytes
-            .get(offset..offset + 4)
-            .map(|word| u32::from_le_bytes(word.try_into().unwrap_or([0; 4])))
-            .ok_or(RustProbeReadError::InvalidHeader)
-    };
     let u64_at = |offset: usize| -> Option<u64> {
         bytes
             .get(offset..offset + 8)
             .map(|word| u64::from_le_bytes(word.try_into().unwrap_or([0; 8])))
     };
-    if bytes.get(..8) != Some(REGION_MAGIC.as_slice())
-        || u32_at(8)? != REGION_VERSION
-        || u32_at(12)? as usize != HEADER
-        || u32_at(16)? as usize != layout.hits.len()
-        || u32_at(20)? as usize != layout.assertions.len()
-        || u32_at(24)? as usize != layout.decisions.len()
-    {
-        return Err(RustProbeReadError::InvalidHeader);
-    }
-    let stored_token = bytes
-        .get(56..56 + token.len())
-        .ok_or(RustProbeReadError::InvalidHeader)?;
-    if stored_token != token.as_bytes() {
-        return Err(RustProbeReadError::InvalidHeader);
-    }
-    let entries_per_decision = u32_at(28)? as usize;
-    let body_at = u32_at(32)? as usize;
+    let RegionHeader {
+        entries_per_decision,
+        body_at,
+    } = region_header(bytes, token, layout)?;
     let touched = |offset: usize| -> bool {
         let page = (offset - body_at) / PAGE;
         bytes
@@ -272,6 +311,72 @@ pub fn parse_rust_region(
     Ok(records.into_iter().map(|(_, entry)| entry).collect())
 }
 
+/// What the builds of a run said of each `cfg` gate: bit 0 some crate was
+/// built without the gated code, bit 1 some crate with it. Zero: no process
+/// of a crate holding it ever mapped a region, and the run cannot tell.
+pub fn parse_rust_region_cfgs(
+    bytes: &[u8],
+    token: &str,
+    layout: &crate::rust_instrumenter::RustProbeLayout,
+) -> Result<Vec<u8>, RustProbeReadError> {
+    let RegionHeader {
+        entries_per_decision,
+        body_at,
+    } = region_header(bytes, token, layout)?;
+    let cfgs_at = body_at
+        + layout.hits.len() * 8
+        + layout.assertions.len() * 8
+        + layout.decisions.len() * entries_per_decision * 32;
+    Ok((0..layout.cfgs.len())
+        .map(|ordinal| bytes.get(cfgs_at + ordinal).copied().unwrap_or(0) & 3)
+        .collect())
+}
+
+/// Every region of `token`'s instrumentation under `root`, at any depth --
+/// a run keeps a directory per test -- with what each said of the `cfg`
+/// gates, accumulated.
+pub fn read_rust_cfg_settlement(
+    root: &Path,
+    token: &str,
+    layout: &crate::rust_instrumenter::RustProbeLayout,
+) -> Result<Vec<u8>, RustProbeReadError> {
+    let mut settled = vec![0_u8; layout.cfgs.len()];
+    if layout.cfgs.is_empty() {
+        return Ok(settled);
+    }
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(RustProbeReadError::Io(error.to_string())),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| RustProbeReadError::Io(error.to_string()))?;
+            let kind = entry
+                .file_type()
+                .map_err(|error| RustProbeReadError::Io(error.to_string()))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if kind.is_dir() {
+                directories.push(entry.path());
+            } else if kind.is_file()
+                && name.starts_with(&format!("{token}-"))
+                && name.ends_with(".region")
+            {
+                let bytes = fs::read(entry.path())
+                    .map_err(|error| RustProbeReadError::Io(error.to_string()))?;
+                for (slot, bits) in settled
+                    .iter_mut()
+                    .zip(parse_rust_region_cfgs(&bytes, token, layout)?)
+                {
+                    *slot |= bits;
+                }
+            }
+        }
+    }
+    Ok(settled)
+}
+
 /// Every region of `token`'s instrumentation in a test's evidence
 /// directory -- one per process the test ran -- read back as records, by
 /// file name. A region another instrumentation wrote (a fixture instrumented
@@ -338,7 +443,16 @@ mod tests {
     /// The region runtime as a crate root gets it, for a source whose probes
     /// were numbered alone.
     fn region_runtime(probes: &RustProbeLayout) -> String {
-        render_rust_region_runtime("__supercov_runtime_v1", TOKEN, "abcdef012345", probes).unwrap()
+        // One crate: every gate is in its files.
+        let crate_cfgs = (0..probes.cfgs.len()).collect::<Vec<_>>();
+        render_rust_region_runtime(
+            "__supercov_runtime_v1",
+            TOKEN,
+            "abcdef012345",
+            probes,
+            &crate_cfgs,
+        )
+        .unwrap()
     }
 
     /// Every region an evidence directory holds, read back as records.
@@ -363,6 +477,82 @@ mod tests {
         ));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn the_runtime_records_which_gated_code_the_compiler_built() {
+        let source = r#"#[cfg(feature = "on")]
+fn built() -> u8 {
+    if std::env::args().count() > 99 { 1 } else { 2 }
+}
+
+#[cfg(feature = "off")]
+fn left_out() -> u8 {
+    3
+}
+
+#[cfg(not(feature = "on"))]
+fn not_on() -> u8 {
+    4
+}
+
+fn main() {
+    println!("{}", built());
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let predicates = transformed
+            .probes
+            .cfgs
+            .iter()
+            .map(|gate| gate.predicate.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            predicates,
+            [
+                "feature = \"on\"",
+                "feature = \"off\"",
+                "not(feature = \"on\")"
+            ]
+        );
+        let runtime = region_runtime(&transformed.probes);
+        let directory = temporary_directory("cfg-table");
+        let input = directory.join("main.rs");
+        let binary = directory.join("program");
+        let evidence = directory.join("evidence").join("test-1");
+        fs::write(&input, format!("{}\n{runtime}", transformed.code)).unwrap();
+        let compile = Command::new("rustc")
+            .args(["--edition=2024", "--cfg", "feature=\"on\""])
+            .arg(&input)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let output = Command::new(&binary)
+            .env("SUPERCOV_RUST_EVIDENCE_DIR", &evidence)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"2\n");
+        // Read from the run's root, a directory per test below it.
+        let settled =
+            read_rust_cfg_settlement(&directory.join("evidence"), TOKEN, &transformed.probes)
+                .unwrap();
+        assert_eq!(settled, [2, 1, 1]);
+        // A process that never maps a region answers for nothing.
+        let silent = directory.join("silent");
+        fs::create_dir(&silent).unwrap();
+        assert_eq!(
+            read_rust_cfg_settlement(&silent, TOKEN, &transformed.probes).unwrap(),
+            [0, 0, 0]
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -794,6 +984,7 @@ fn main() {
             hits: hits.iter().map(|id| (*id).to_owned()).collect(),
             assertions: Vec::new(),
             decisions: decisions.iter().map(|id| (*id).to_owned()).collect(),
+            cfgs: Vec::new(),
         }
     }
 

@@ -1280,7 +1280,8 @@ fn a_platform_gated_item_counts_only_where_it_compiles() {
         "pub fn platform() -> &'static str {\n    native()\n}\n\n#[cfg(unix)]\nfn native() -> &'static str {\n    \"unix\"\n}\n\n#[cfg(windows)]\nfn native() -> &'static str {\n    \"windows\"\n}\n\n#[cfg(feature = \"extra\")]\npub fn extra() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn names_the_platform() {\n        assert!(!super::platform().is_empty());\n    }\n}\n",
     );
     project.git(&["init", "-q"]);
-    project.supercov(&["--", "cargo", "test"]).succeeds();
+    let measured = project.supercov(&["--", "cargo", "test"]);
+    measured.succeeds();
     // The variant this host compiles is measured and covered; the other one
     // no test here could ever reach, and it is not counted.
     let (built, absent) = if cfg!(windows) { (11, 6) } else { (6, 11) };
@@ -1300,7 +1301,29 @@ fn a_platform_gated_item_counts_only_where_it_compiles() {
         .iter()
         .map(|line| line["line"].as_u64().unwrap())
         .collect::<Vec<_>>();
-    // A feature is not the target's to settle, so `extra` stays counted.
+    // A feature is not the target's to settle; the build settles it. This
+    // one was off, so `extra` was never compiled and is not counted either.
+    assert!(lines.is_empty(), "{gaps}");
+    assert!(
+        measured.stderr().contains(
+            "1 item(s) behind a #[cfg] no build compiled are outside the denominator: src/lib.rs:15 cfg(feature = \"extra\")"
+        ),
+        "{}",
+        measured.stderr()
+    );
+    // Built with the feature, it is code no test runs.
+    project
+        .supercov(&["--", "cargo", "test", "--features", "extra"])
+        .succeeds();
+    let gaps = project
+        .supercov(&["runs", "latest", "file", "src/lib.rs", "--json"])
+        .json();
+    let lines = gaps["data"]["gapLines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| line["line"].as_u64().unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(lines, [16, 17], "{gaps}");
     assert!(!lines.contains(&absent));
 }

@@ -1596,6 +1596,111 @@ fn decline_uncompiled_sources(
     (manifest, declined)
 }
 
+/// Take out the code a `#[cfg]` kept from every build that ran. Each crate's
+/// runtime wrote what `cfg!` said of the predicates in its files; code no
+/// build compiled could never have run, as the code of a file no build read
+/// (`decline_uncompiled_sources`). A gate no process of its crate answered
+/// for stays counted, and is said to.
+fn settle_cfg_gates(
+    project: &PreparedRustProject,
+    evidence_root: &Path,
+    diagnostics: &mut dyn Write,
+) -> Result<CoverageManifest, RustTestRunnerError> {
+    let mut manifest = project.manifest.clone();
+    let probes = &project.probes;
+    if probes.cfgs.is_empty() {
+        return Ok(manifest);
+    }
+    let settled =
+        crate::rust_runtime::read_rust_cfg_settlement(evidence_root, &probes.token, probes)
+            .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?;
+    let left_out = probes
+        .cfgs
+        .iter()
+        .zip(&settled)
+        .filter(|(_, bits)| **bits == 1)
+        .map(|(gate, _)| gate)
+        .collect::<Vec<_>>();
+    let removed = left_out
+        .iter()
+        .flat_map(|gate| gate.obligations.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let unanswered = probes
+        .cfgs
+        .iter()
+        .zip(&settled)
+        .filter(|(gate, bits)| {
+            **bits == 0
+                && gate
+                    .obligations
+                    .iter()
+                    .any(|id| !removed.contains(id.as_str()))
+        })
+        .map(|(gate, _)| gate)
+        .collect::<Vec<_>>();
+    let place = |gate: &&crate::rust_instrumenter::RustCfgGate| {
+        format!("{}:{} cfg({})", gate.file, gate.line, gate.predicate)
+    };
+    let listed = |gates: &[&crate::rust_instrumenter::RustCfgGate]| {
+        let mut text = gates
+            .iter()
+            .take(3)
+            .map(place)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if gates.len() > 3 {
+            text.push_str(", ...");
+        }
+        text
+    };
+    if !left_out.is_empty() {
+        writeln!(
+            diagnostics,
+            "[supercov] {} item(s) behind a #[cfg] no build compiled are outside the denominator: {}",
+            left_out.len(),
+            listed(&left_out)
+        )
+        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+    }
+    if !unanswered.is_empty() {
+        writeln!(
+            diagnostics,
+            "[supercov] {} item(s) behind a #[cfg] are counted though no test ran code of their crate to show whether it was built: {}",
+            unanswered.len(),
+            listed(&unanswered)
+        )
+        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+    }
+    if removed.is_empty() {
+        return Ok(manifest);
+    }
+    manifest
+        .points
+        .retain(|point| !removed.contains(point.id.as_str()));
+    manifest
+        .decisions
+        .retain(|decision| !removed.contains(decision.id.as_str()));
+    manifest
+        .branches
+        .retain(|branch| !removed.contains(branch.id.as_str()));
+    manifest
+        .unmeasured
+        .retain(|id| !removed.contains(id.as_str()));
+    // A boundary declared inside code no build compiled says nothing.
+    manifest.limitations.retain(|limitation| {
+        let file = limitation.get("file").and_then(serde_json::Value::as_str);
+        let line = limitation
+            .get("line")
+            .and_then(serde_json::Value::as_u64)
+            .map(|line| line as usize);
+        !left_out.iter().any(|gate| {
+            file == Some(gate.file.as_str())
+                && line.is_some_and(|line| (gate.line..=gate.end_line).contains(&line))
+        })
+    });
+    Ok(manifest)
+}
+
 /// The manifest's structural limitation IDs, as the declaration references them.
 fn structural_limitations(manifest: &CoverageManifest) -> Vec<String> {
     manifest
@@ -1677,6 +1782,10 @@ pub fn run_prepared_rust_tests(
             diagnostics,
         )?;
         let artifact_count = outcome.artifact_files.len();
+        let project = &PreparedRustProject {
+            manifest: settle_cfg_gates(project, &evidence_root, diagnostics)?,
+            ..project.clone()
+        };
         return Ok(RustFrontendRun {
             declaration: FrontendRunDeclaration {
                 protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -1974,6 +2083,10 @@ pub fn run_prepared_rust_tests(
         };
     // Only observed runners may be declared. A run with no tests at all keeps
     // the libtest declaration, as it always has.
+    let project = &PreparedRustProject {
+        manifest: settle_cfg_gates(project, &evidence_root, diagnostics)?,
+        ..project.clone()
+    };
     let ran_libtests = !results.is_empty();
     let ran_doctests = !doctest_results.is_empty();
     results.extend(doctest_results);

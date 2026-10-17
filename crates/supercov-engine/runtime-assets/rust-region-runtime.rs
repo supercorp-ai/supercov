@@ -30,7 +30,16 @@ mod __SUPERCOV_MODULE__ {
     const HITS: usize = __SUPERCOV_HITS__;
     const ASSERTIONS: usize = __SUPERCOV_ASSERTIONS__;
     const DECISIONS: usize = __SUPERCOV_DECISIONS__;
+    /// `#[cfg]` predicates of the workspace the target alone does not settle.
+    const CFGS: usize = __SUPERCOV_CFGS__;
     const TOKEN: &[u8] = b"__SUPERCOV_TOKEN__";
+    /// What `cfg!` says, in THIS crate, of the predicates in its own files:
+    /// the compiler that builds the crate decides, with its features, its
+    /// `test` and its build script's `--cfg`s. (A predicate naming a cfg the
+    /// crate never declares is the author's own warning; it is not repeated
+    /// here.)
+    #[allow(unexpected_cfgs)]
+    const COMPILED: &[(usize, bool)] = &[__SUPERCOV_CFG_TABLE__];
 
     const MAGIC: u64 = u64::from_le_bytes(*b"SCVRGN01");
     const VERSION: u32 = 1;
@@ -44,7 +53,9 @@ mod __SUPERCOV_MODULE__ {
     const ENTRY: usize = 32;
     const MAX_CONDITIONS: usize = 64;
 
-    const BODY: usize = HITS * 8 + ASSERTIONS * 8 + DECISIONS * DECISION_ENTRIES * ENTRY;
+    /// A byte per predicate: bit 0 some crate built without it, bit 1 with it.
+    const CFG_BYTES: usize = (CFGS + 7) / 8 * 8;
+    const BODY: usize = HITS * 8 + ASSERTIONS * 8 + DECISIONS * DECISION_ENTRIES * ENTRY + CFG_BYTES;
     const BODY_PAGES: usize = (BODY + PAGE - 1) / PAGE;
     /// One bit per body page a first sighting touched, so the reader reads
     /// only those pages of a mostly-empty sparse file.
@@ -53,6 +64,7 @@ mod __SUPERCOV_MODULE__ {
     const HITS_AT: usize = BODY_AT;
     const ASSERTIONS_AT: usize = HITS_AT + HITS * 8;
     const DECISIONS_AT: usize = ASSERTIONS_AT + ASSERTIONS * 8;
+    const CFGS_AT: usize = DECISIONS_AT + DECISIONS * DECISION_ENTRIES * ENTRY;
     const REGION_BYTES: usize = ((BODY_AT + BODY + PAGE - 1) / PAGE) * PAGE;
 
     const SEQUENCE_AT: usize = 40;
@@ -60,6 +72,7 @@ mod __SUPERCOV_MODULE__ {
     const EPOCH_AT: usize = 48;
     const FLAGS_AT: usize = 52;
     const TOKEN_AT: usize = 56;
+    const CFGS_COUNT_AT: usize = 72;
 
     // ------------------------------------------------------------- the region
     //
@@ -92,6 +105,7 @@ mod __SUPERCOV_MODULE__ {
         }
         match channel::open() {
             Some(pointer) if initialise(pointer) => {
+                settle_cfgs(pointer);
                 REGION.store(pointer, Ordering::Release);
                 STATE.store(2, Ordering::Release);
                 channel::started(pointer);
@@ -122,7 +136,7 @@ mod __SUPERCOV_MODULE__ {
     /// process may already be counting in this very file.
     fn initialise(base: *mut u8) -> bool {
         let magic = atomic_u64(base, 0);
-        let fields: [(usize, u32); 8] = [
+        let fields: [(usize, u32); 9] = [
             (8, VERSION),
             (12, HEADER as u32),
             (16, HITS as u32),
@@ -131,6 +145,7 @@ mod __SUPERCOV_MODULE__ {
             (28, DECISION_ENTRIES as u32),
             (32, BODY_AT as u32),
             (36, REGION_BYTES as u32),
+            (CFGS_COUNT_AT, CFGS as u32),
         ];
         if magic.load(Ordering::Acquire) == 0 {
             let mut index = 0;
@@ -157,6 +172,24 @@ mod __SUPERCOV_MODULE__ {
             index += 1;
         }
         true
+    }
+
+    /// Record which of this crate's gated code the compiler built. Every
+    /// crate writes its own predicates; one file compiled into two crates
+    /// may be built by one and not the other, so the bits accumulate.
+    fn settle_cfgs(base: *mut u8) {
+        let mut index = 0;
+        while index < COMPILED.len() {
+            let (ordinal, built) = COMPILED[index];
+            if ordinal < CFGS {
+                let offset = CFGS_AT + ordinal;
+                // SAFETY: inside the region's predicate bytes.
+                let byte = unsafe { &*base.add(offset).cast::<AtomicU8>() };
+                byte.fetch_or(if built { 2 } else { 1 }, Ordering::AcqRel);
+                touched(base, offset);
+            }
+            index += 1;
+        }
     }
 
     // ---------------------------------------------------------------- threads
@@ -913,6 +946,8 @@ mod __SUPERCOV_MODULE__ {
             }
             atomic_u32(base, SEQUENCE_AT).store(0, Ordering::Relaxed);
             atomic_u32(base, OVERFLOW_AT).store(0, Ordering::Relaxed);
+            // What the compiler built is no test's record: write it again.
+            settle_cfgs(base);
         }
     }
 }

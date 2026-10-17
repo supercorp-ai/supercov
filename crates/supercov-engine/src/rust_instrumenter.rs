@@ -63,6 +63,25 @@ pub struct RustProbeLayout {
     /// Statements that assert, and assertion sites in test code.
     pub assertions: Vec<String>,
     pub decisions: Vec<String>,
+    /// Code behind a `#[cfg]` the target alone does not settle -- a feature,
+    /// `test`, a build script's `--cfg`. Each crate's runtime writes what
+    /// `cfg!` says of the predicates in its own files when it maps the
+    /// region, so the compiler that built the code decides.
+    #[serde(default)]
+    pub cfgs: Vec<RustCfgGate>,
+}
+
+/// Code a `#[cfg]` predicate keeps or leaves out, and the obligations in it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RustCfgGate {
+    pub file: String,
+    /// The predicate as `cfg!` takes it: `feature = "serde"`,
+    /// `all(unix, not(test))`.
+    pub predicate: String,
+    /// The lines the gated code spans.
+    pub line: usize,
+    pub end_line: usize,
+    pub obligations: Vec<String>,
 }
 
 #[derive(Default)]
@@ -127,6 +146,14 @@ fn assertion_ordinal(id: &str) -> u32 {
             &mut numbering.assertions,
             id,
         )
+    })
+}
+
+fn cfg_gate_ordinal(gate: RustCfgGate) -> u32 {
+    NUMBERING.with(|numbering| {
+        let gates = &mut numbering.borrow_mut().layout.cfgs;
+        gates.push(gate);
+        (gates.len() - 1) as u32
     })
 }
 
@@ -521,6 +548,10 @@ struct RustObligationCollector<'a> {
     tests: Vec<TextRange>,
     /// Items the target's cfg leaves uncompiled, which no test can reach.
     compiled_out: Vec<TextRange>,
+    /// Ranges a `#[cfg]` the target does not settle may leave out; `collect`
+    /// fills `gated` with the obligations inside each.
+    gates: Vec<TextRange>,
+    gated: Vec<Vec<String>>,
     error: Option<RustInstrumenterError>,
 }
 
@@ -545,6 +576,8 @@ impl<'a> RustObligationCollector<'a> {
             obligation_ranges: Vec::new(),
             tests: Vec::new(),
             compiled_out: Vec::new(),
+            gates: Vec::new(),
+            gated: Vec::new(),
             error: None,
         }
     }
@@ -553,6 +586,48 @@ impl<'a> RustObligationCollector<'a> {
         self.tests = tests;
         self.compiled_out = compiled_out;
         self
+    }
+
+    fn gating(mut self, gates: Vec<TextRange>) -> Self {
+        self.gates = gates;
+        self
+    }
+
+    /// The obligations the manifest kept inside each gate, in order.
+    fn gate_obligations(&mut self) {
+        let kept = self
+            .manifest
+            .points
+            .iter()
+            .map(|point| point.id.as_str())
+            .chain(
+                self.manifest
+                    .decisions
+                    .iter()
+                    .map(|decision| decision.id.as_str()),
+            )
+            .chain(
+                self.manifest
+                    .branches
+                    .iter()
+                    .map(|branch| branch.id.as_str()),
+            )
+            .collect::<BTreeSet<_>>();
+        self.gated = self
+            .gates
+            .iter()
+            .map(|gate| {
+                let mut ids = self
+                    .obligation_ranges
+                    .iter()
+                    .filter(|(id, range)| gate.contains_range(*range) && kept.contains(id.as_str()))
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                ids.sort();
+                ids.dedup();
+                ids
+            })
+            .collect();
     }
 
     /// Test code is not measured, as the usual Rust coverage tools leave it
@@ -821,11 +896,22 @@ impl<'a> RustObligationCollector<'a> {
     }
 
     fn collect(
-        mut self,
+        self,
         file: &SourceFile,
         assertions: &[TextRange],
         matches: &[TextRange],
     ) -> Result<CoverageManifest, RustInstrumenterError> {
+        self.collect_gated(file, assertions, matches)
+            .map(|(manifest, _)| manifest)
+    }
+
+    /// `collect`, with the obligations inside each of the `gating` ranges.
+    fn collect_gated(
+        mut self,
+        file: &SourceFile,
+        assertions: &[TextRange],
+        matches: &[TextRange],
+    ) -> Result<(CoverageManifest, Vec<Vec<String>>), RustInstrumenterError> {
         let root = file.syntax();
 
         for list in root.descendants().filter_map(ast::StmtList::cast) {
@@ -1047,6 +1133,7 @@ impl<'a> RustObligationCollector<'a> {
 
         self.decline_unreachable_obligations(root);
         self.leave_out_test_code();
+        self.gate_obligations();
 
         if let Some(error) = self.error {
             return Err(error);
@@ -1065,7 +1152,7 @@ impl<'a> RustObligationCollector<'a> {
                 .and_then(|value| value.as_str())
                 .cmp(&right.get("id").and_then(|value| value.as_str()))
         });
-        Ok(self.manifest)
+        Ok((self.manifest, self.gated))
     }
 }
 
@@ -1531,15 +1618,53 @@ impl TargetCfg {
         }
     }
 
-    /// Whether an item's `#[cfg(..)]` keeps the compiler from building it.
+    /// Whether a node's `#[cfg(..)]` keeps the compiler from building it.
     fn compiles_out(&self, node: &ra_ap_syntax::SyntaxNode) -> bool {
-        item_attributes(node).iter().any(|text| {
-            text.strip_prefix("cfg(")
+        cfg_predicate(node).is_some_and(|expression| self.evaluate(&expression) == Some(false))
+    }
+}
+
+/// The `#[cfg(..)]` predicates on a node, as one: an item, a statement, a
+/// match arm, a field -- anything that carries attributes, and the inner
+/// `#![cfg(..)]` of a file or an inline module, which gates all of it.
+fn cfg_predicate(node: &ra_ap_syntax::SyntaxNode) -> Option<cargo_platform::CfgExpr> {
+    let attributes = ast::AnyHasAttrs::cast(node.clone())?;
+    let mut predicates = attributes
+        .attrs()
+        .filter_map(|attribute| attribute.meta())
+        .filter_map(|meta| {
+            // Spaces inside a value are the value's: `cfg(foo = "a b")`.
+            let text = meta.syntax().text().to_string();
+            text.trim()
+                .strip_prefix("cfg")
+                .map(str::trim_start)
+                .and_then(|rest| rest.strip_prefix('('))
                 .and_then(|inner| inner.strip_suffix(')'))
                 .and_then(|inner| inner.parse::<cargo_platform::CfgExpr>().ok())
-                .is_some_and(|expression| self.evaluate(&expression) == Some(false))
         })
+        .collect::<Vec<_>>();
+    match predicates.len() {
+        0 => None,
+        1 => predicates.pop(),
+        _ => Some(cargo_platform::CfgExpr::All(predicates)),
     }
+}
+
+/// Code behind a `#[cfg]` the target does not settle, with its predicate.
+/// Without a target every predicate is unsettled.
+fn unsettled_cfg_gates(
+    root: &ra_ap_syntax::SyntaxNode,
+    cfg: Option<&TargetCfg>,
+) -> Vec<(TextRange, cargo_platform::CfgExpr)> {
+    root.descendants()
+        .filter_map(|node| {
+            let predicate = cfg_predicate(&node)?;
+            if cfg.is_some_and(|cfg| cfg.evaluate(&predicate).is_some()) {
+                return None;
+            }
+            Some((node.text_range(), predicate))
+        })
+        .collect()
 }
 
 /// The outer attributes of an item, or of one inside an `impl` or a trait,
@@ -2105,9 +2230,31 @@ pub fn instrument_rust_file_numbered(
     let parsed = parse_for_instrumentation(source)?;
     let tests = test_code_ranges(parsed.tree.syntax(), test_file);
     let compiled_out = compiled_out_ranges(parsed.tree.syntax(), cfg);
-    let mut manifest = RustObligationCollector::new(file, source)
+    // Code behind a predicate only the build can settle: its obligations are
+    // counted unless every build that ran leaves it out (`RustCfgGate`).
+    let gates = unsettled_cfg_gates(parsed.tree.syntax(), cfg)
+        .into_iter()
+        .filter(|(range, _)| !in_test_code(&tests, *range) && !in_test_code(&compiled_out, *range))
+        .collect::<Vec<_>>();
+    let (mut manifest, gated) = RustObligationCollector::new(file, source)
         .leaving_out(tests.clone(), compiled_out.clone())
-        .collect(&parsed.tree, &parsed.assertions, &parsed.matches)?;
+        .gating(gates.iter().map(|(range, _)| *range).collect())
+        .collect_gated(&parsed.tree, &parsed.assertions, &parsed.matches)?;
+    for ((range, predicate), obligations) in gates.iter().zip(gated) {
+        if obligations.is_empty() {
+            continue;
+        }
+        let line_of = |offset: ra_ap_syntax::TextSize| {
+            source[..usize::from(offset)].matches('\n').count() + 1
+        };
+        cfg_gate_ordinal(RustCfgGate {
+            file: file.to_owned(),
+            predicate: predicate.to_string(),
+            line: line_of(range.start()),
+            end_line: line_of(range.end()),
+            obligations,
+        });
+    }
     let ParsedSource {
         tree,
         assertions,
@@ -3052,6 +3199,101 @@ fn main() {
         let windows = &instrumented.code[instrumented.code.find("#[cfg(windows)]").unwrap()
             ..instrumented.code.find("#[cfg(unix)]").unwrap()];
         assert!(!windows.contains("__supercov_runtime_v1"), "{windows}");
+    }
+
+    #[test]
+    fn code_behind_a_cfg_only_the_build_settles_is_gated_by_its_predicate() {
+        let cfg = TargetCfg::new(
+            &["unix", "target_os=\"linux\""]
+                .map(|value| value.parse::<cargo_platform::Cfg>().unwrap()),
+        );
+        let source = "\
+pub fn a() -> u8 {
+    #[cfg(windows)]
+    let v = 1;
+    #[cfg(unix)]
+    let v = 2;
+    #[cfg(debug_assertions)]
+    let w = v + 1;
+    #[cfg(not(debug_assertions))]
+    let w = v;
+    w
+}
+#[cfg(all(unix, feature = \"x y\"))]
+fn c() -> u8 {
+    3
+}
+#[cfg(feature = \"z\")]
+struct NoCode;
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {}
+}
+";
+        let instrumented = instrument_rust_file(
+            "src/lib.rs",
+            source,
+            "crate::__supercov_runtime_v1",
+            false,
+            Some(&cfg),
+        )
+        .unwrap();
+        let lines = instrumented
+            .manifest
+            .points
+            .iter()
+            .map(|point| (point.line, point.id.clone()))
+            .collect::<Vec<_>>();
+        // The target settles statements as it settles items.
+        assert!(lines.iter().all(|(line, _)| *line != 3), "{lines:?}");
+        let gates = &instrumented.probes.cfgs;
+        let described = gates
+            .iter()
+            .map(|gate| (gate.predicate.as_str(), gate.line, gate.end_line))
+            .collect::<Vec<_>>();
+        // Only code with obligations is gated; test code is not measured.
+        assert_eq!(
+            described,
+            [
+                ("debug_assertions", 6, 7),
+                ("not(debug_assertions)", 8, 9),
+                ("all(unix, feature = \"x y\")", 12, 15),
+            ],
+            "{gates:?}"
+        );
+        let in_c = lines
+            .iter()
+            .filter(|(line, _)| (13..=15).contains(line))
+            .map(|(_, id)| id.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(!in_c.is_empty());
+        assert_eq!(
+            gates[2]
+                .obligations
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            in_c
+        );
+        // Without a target, the target's own keys are the build's to settle.
+        let unsettled = instrument_rust_file(
+            "src/lib.rs",
+            source,
+            "crate::__supercov_runtime_v1",
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(
+            unsettled
+                .probes
+                .cfgs
+                .iter()
+                .any(|gate| gate.predicate == "windows" && gate.line == 2),
+            "{:?}",
+            unsettled.probes.cfgs
+        );
     }
 
     #[test]
