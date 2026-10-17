@@ -1498,6 +1498,7 @@ impl Server {
 
     /// The source this server was instrumented from: an image built from an
     /// earlier copy holds probes placed in other source.
+    #[cfg(unix)]
     fn source_fingerprint(&self) -> String {
         match self {
             Self::Python(server) => server.source_fingerprint(),
