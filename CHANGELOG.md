@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.17.2
+
+**Fixed**
+
+- Supercov could change what a Python program computed. A value made of three or more `or`/`and` operands (`path = given or os.environ.get("X") or shutil.which("x")`) came back as `True` instead of the operand, in every measured file after the first one with decisions, so code under test took other paths and tests failed that pass without Supercov.
+- A Jest project whose `jest-config` package sits only under `jest-cli` or `@jest/core` (npm's layout beside `next/jest`) ran under Jest's defaults: its configuration was not read, so tests it leaves out (`testPathIgnorePatterns`) ran too. It is now read through the Jest that runs.
+- A Jest test that opens with a docblock (`/** @jest-environment jsdom */`) ran in Jest's default environment ("window is not defined"): Supercov's loader went in front of the comment. It now goes after it, on the same line.
+- A measured run left generated scripts in `.supercov/workspaces/`, so a project whose tests lint `.` (`eslint .`) failed after it. The copy now keeps only its caches.
+- `runs clean` during a run that had just started said "could not acquire the Supercov project lock"; it now says a run is active.
+- `--limit 0` lists every entry in `runs <run>` queries (`file`, `gaps`, `files`, `line`, `test` and the rest), as it already did for `assertions`, `quality` and `security`.
+
 ## 4.17.1
 
 **Fixed**
