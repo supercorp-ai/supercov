@@ -6834,9 +6834,8 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
             .components()
             .filter_map(|component| component.as_os_str().to_str())
             .collect::<Vec<_>>();
-        components
-            .windows(2)
-            .any(|window| window[0] == "app" && window[1] != name)
+        // Anywhere under `app/`, `app/route.ts` (the handler for `/`) too.
+        components[..components.len().saturating_sub(1)].contains(&"app")
     }
 
     fn is_handler_name(&self, name: &str) -> bool {
@@ -12361,6 +12360,33 @@ mod tests {
     }
 
     #[test]
+    fn leaves_look_alike_route_exports_alone() {
+        for (file, source) in [
+            // Not under `app/`.
+            (
+                "lib/route.ts",
+                "export function GET(request) { return request.url; }",
+            ),
+            // Under `app/`, but not a route module or not a method name.
+            (
+                "app/api/items/handler.ts",
+                "export function GET(request) { return request.url; }",
+            ),
+            (
+                "app/route.ts",
+                "export function helper(request) { return request.url; }",
+            ),
+        ] {
+            let output = instrument_candidate(source, file).unwrap();
+            assert!(
+                !output.code.contains("withRequestPhase"),
+                "{file}: {}",
+                output.code
+            );
+        }
+    }
+
+    #[test]
     fn wraps_framework_request_exports_without_changing_the_public_api() {
         for (file, source, export_prefix) in [
             (
@@ -12377,6 +12403,17 @@ mod tests {
                 "app/api/items/route.ts",
                 "export function GET(request) { return Response.json({ url: request.url }); }",
                 "export const GET = ",
+            ),
+            // The root route handler serves `/`.
+            (
+                "app/route.ts",
+                "export function GET(request) { return Response.json({ url: request.url }); }",
+                "export const GET = ",
+            ),
+            (
+                "src/app/api/items/route.ts",
+                "export async function POST(request) { return Response.json(await request.json()); }",
+                "export const POST = ",
             ),
             (
                 "app/routes/example.ts",

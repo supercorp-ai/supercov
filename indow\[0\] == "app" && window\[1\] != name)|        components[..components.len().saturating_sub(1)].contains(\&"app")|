@@ -1,0 +1,1 @@
+window|window| window[0] == "app" && window[1] != name)
