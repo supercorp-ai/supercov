@@ -18,7 +18,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
     }
     if command == "diff" {
         return Some(
-            "Usage: supercov diff <older-run> <newer-run> [options]\n\nOptions:\n  --filter <all|passed|failed>\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --metric <metric>\n  --gained                       only what the newer run covers that the older did not\n  --offset <n>\n  --limit <n>                    entries per page (default 20); a page names the --limit that shows all\n  --json\n"
+            "Usage: supercov diff <older-run> <newer-run> [options]\n\nOptions:\n  --filter <all|passed|failed>\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --metric <metric>\n  --gained                       only what the newer run covers that the older did not\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n"
                 .into(),
         );
     }
@@ -27,7 +27,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .filter(|argument| !argument.starts_with('-'));
     let Some(_) = run else {
         return Some(
-            "Usage: supercov runs [options]\n       supercov runs <run-id> [query]\n\nLists runs and lazily calculates their coverage summaries.\n\nOptions:\n  --filter <all|passed|failed>\n  --offset <n>\n  --limit <n>                    entries per page (default 20); a page names the --limit that shows all\n  --json\n"
+            "Usage: supercov runs [options]\n       supercov runs <run-id> [query]\n\nLists runs and lazily calculates their coverage summaries.\n\nOptions:\n  --filter <all|passed|failed>\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n"
                 .into(),
         );
     };
@@ -37,7 +37,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .map(String::as_str);
     let Some(child) = child else {
         return Some(
-            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
+            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
                 .replace("  minimize              ", "  source <path>         matching current source with line numbers\n  minimize              "),
         );
     };
@@ -326,14 +326,16 @@ fn parse_options(
             }
             "--limit" => {
                 index += 1;
-                let Some(limit) = parse_unsigned(arguments.get(index), true) else {
+                // `--limit 0` is every entry, as `assertions`, `quality` and
+                // `security` spell it.
+                let Some(limit) = parse_unsigned(arguments.get(index), false) else {
                     return Err(PublicQueryError::invalid(
                         Some(&agent_command),
                         json_output,
-                        "--limit must be a positive integer",
+                        "--limit must be a number of entries, or 0 for all of them",
                     ));
                 };
-                options.limit = limit;
+                options.limit = if limit == 0 { usize::MAX } else { limit };
             }
             "--offset" => {
                 index += 1;
@@ -820,10 +822,14 @@ mod tests {
 
     #[test]
     fn validates_agent_options_before_storage_access() {
-        let error = parse_public_query("runs", &args(&["run-1", "gaps", "--limit", "0", "--json"]))
-            .unwrap_err();
+        let error =
+            parse_public_query("runs", &args(&["run-1", "gaps", "--limit", "-1", "--json"]))
+                .unwrap_err();
         assert_eq!(error.error.code, ErrorCode::InvalidArgument);
         assert_eq!(error.command.as_deref(), Some("coverage.gaps"));
-        assert_eq!(error.error.message, "--limit must be a positive integer");
+        assert_eq!(
+            error.error.message,
+            "--limit must be a number of entries, or 0 for all of them"
+        );
     }
 }

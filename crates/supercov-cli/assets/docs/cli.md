@@ -471,7 +471,7 @@ one as a public artifact.
 | `--title <text>` | Restrict to tests whose name contains this text |
 | `--test-file <path>` | Restrict to tests in this file, or in this directory |
 | `--metric all \| lines \| statements \| functions \| branches \| mcdc` | Choose a metric for `files`, `gaps`, `diff`, or `minimize` |
-| `--limit N`, `--offset N` | Page through a collection |
+| `--limit N`, `--offset N` | Page through a collection; `--limit 0` lists every entry |
 | `--json` | Return the machine-readable form |
 
 Collection output includes a copyable command for the next page.
