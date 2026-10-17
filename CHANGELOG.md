@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A Python test method deep in its file was sent to assessment with `...` before each of its class and decorator lines, as if lines were left out between adjacent decorators. `...` now marks only lines left out.
 - Rust assertion assessment asked about changes that could not compile or changed nothing: a raw pointer bound to a local (`let start = data.as_ptr();`) became `Default::default()`, a closure with a declared return type lost its braces (`|n: u8| -> u8 0`), and `Layout::new::<u8>()` was "changed" to `std::alloc::Layout::new::<u8>()`. Pointers now become `std::ptr::null()` or `null_mut()` through the locals that hold them, the closure keeps a block body, a value spelled with its path counts as the same value, and `.unwrap()` and `.expect()` give what they unwrap.
 
 ## 4.15.0

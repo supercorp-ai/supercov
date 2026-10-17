@@ -1433,25 +1433,30 @@ impl Population {
                 })
             })
             .flatten();
-        for i in class.into_iter().chain(first..start) {
+        // `...` where lines are left out between the ones shown.
+        let mut last = HEAD_LINES.min(lines.len()).checked_sub(1);
+        let mut show = |out: &mut Vec<String>, i: usize| {
             if i >= HEAD_LINES {
-                if out.last().is_some_and(|l| l != "  ...") {
+                if last.is_some_and(|l| i > l + 1) {
                     out.push("  ...".into());
                 }
                 out.push(fmt(i));
+                last = Some(i);
             }
+        };
+        for i in class.into_iter().chain(first..=start) {
+            show(&mut out, i);
         }
-        if start >= HEAD_LINES
-            && out.last().is_some_and(|l| l != "  ...")
-            && first == start
-            && class.is_none()
+        for (i, &l) in lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .take(BODY_LINES - 1)
         {
-            out.push("  ...".into());
-        }
-        for (i, &l) in lines.iter().enumerate().skip(start).take(BODY_LINES) {
-            if i > start && !l.trim().is_empty() && indent_of(l) <= indent {
+            if !l.trim().is_empty() && indent_of(l) <= indent {
                 break;
             }
+            // A comment in the body is left out without a mark.
             if !self.language.comment(l) && i >= HEAD_LINES {
                 out.push(fmt(i));
             }
@@ -2743,6 +2748,76 @@ mod tests {
         // Short or letterless pieces say nothing about a test.
         assert!(quoted_fragments("x = 'abc' + \"1234567\"").is_empty());
         assert!(quoted_fragments("return a + b").is_empty());
+    }
+
+    /// A pytest method far into its file: the file's first lines, then the
+    /// class around it, its decorators and its body, each once.
+    #[test]
+    fn a_python_test_deep_in_its_file_is_shown_with_its_class_and_decorators() {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-test-code-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        let mut file =
+            String::from("# The shop's tests.\nimport pytest\n\nfrom shop import total\n");
+        for i in 0..10 {
+            file.push_str(&format!("\n\ndef helper_{i}():\n    return {i}\n"));
+        }
+        file.push_str("\n\nclass TestTotal:\n    def test_first(self):\n        assert total([]) == 0\n\n    @pytest.mark.slow\n    @pytest.mark.parametrize(\"n\", [1])\n    def test_deep(self, n):\n        # one item\n        assert total([n]) == n\n\n    def test_after(self):\n        pass\n");
+        std::fs::write(root.join("tests/test_total.py"), &file).unwrap();
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: "tests/test_total.py::TestTotal::test_deep[1]".into(),
+                file: Some("tests/test_total.py".into()),
+                name: "tests/test_total.py::TestTotal::test_deep[1]".into(),
+                role: "test".into(),
+                runner: "pytest".into(),
+            }],
+            points: vec![InputPoint {
+                file: "shop.py".into(),
+                line: 1,
+                source: "return 0".into(),
+                tests: vec![0],
+            }],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("shop.py".to_owned(), "return 0\n".to_owned())]);
+        let population = population_from(&root, &input, &sources, Language::Python).unwrap();
+        let code = population.test_code(0);
+        std::fs::remove_dir_all(&root).unwrap();
+        let shown = code
+            .lines()
+            .map(|line| {
+                let line = line.trim_start();
+                line.split_once(' ').map_or(line, |(_, l)| l.trim_start())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown,
+            [
+                "import pytest",
+                "",
+                "from shop import total",
+                "",
+                "",
+                "def helper_0():",
+                "return 0",
+                "",
+                "",
+                "...",
+                "class TestTotal:",
+                "...",
+                "@pytest.mark.slow",
+                "@pytest.mark.parametrize(\"n\", [1])",
+                "def test_deep(self, n):",
+                "assert total([n]) == n",
+                "",
+            ],
+            "{code}"
+        );
     }
 
     #[test]

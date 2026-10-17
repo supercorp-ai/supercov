@@ -2223,6 +2223,47 @@ mod tests {
     }
 
     #[test]
+    fn nextest_list_projection_keeps_short_options_with_attached_values() {
+        let invocation = CargoTestInvocation {
+            program: "cargo".into(),
+            kind: RustCargoCommandKind::NextestRun,
+            arguments: [
+                "nextest",
+                "run",
+                "-pfixture",
+                "-Ffast",
+                "-Etest(=a)",
+                "-Pci",
+                "-Zbuild-std",
+                "-vv",
+                "name",
+            ]
+            .map(String::from)
+            .to_vec(),
+            runner_arguments: Vec::new(),
+        };
+        let listed = nextest_list_invocation(&invocation).unwrap();
+        // Each option carries its own value, so the filter after them is
+        // still read as the filter.
+        assert_eq!(
+            listed.arguments,
+            [
+                "nextest",
+                "list",
+                "-pfixture",
+                "-Ffast",
+                "-Etest(=a)",
+                "-Pci",
+                "-Zbuild-std",
+                "-vv",
+                "name",
+                "--message-format",
+                "json",
+            ]
+        );
+    }
+
+    #[test]
     fn nextest_list_projection_preserves_post_separator_libtest_selection() {
         let invocation = cargo_invocation(
             Path::new("."),

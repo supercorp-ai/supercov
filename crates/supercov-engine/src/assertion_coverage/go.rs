@@ -391,4 +391,29 @@ mod tests {
         let found = locate(&lines, "TestF/sub").unwrap();
         assert_eq!((found.start, found.end), (2, 6));
     }
+
+    /// A value whose type only its shape says: a named type's composite
+    /// literal is that type's empty one; a call says nothing.
+    #[test]
+    fn a_value_without_a_declared_type_is_zeroed_by_its_shape() {
+        let source = "package a\n\nfunc f() {\n\tp := Point{X: 1, Y: 2}\n\tc := config.Options{Verbose: true}\n\tn := 42\n\tr := `raw`\n\tv := compute(n)\n\tm := Point{X: 1}.Scale(2)\n}\n";
+        let at = |line| rewrite(source, line, Change::ValueUndefined);
+        assert_eq!(at(4).as_deref(), Some("p := Point{}"));
+        assert_eq!(at(5).as_deref(), Some("c := config.Options{}"));
+        assert_eq!(at(6).as_deref(), Some("n := 0"));
+        assert_eq!(at(7).as_deref(), Some("r := \"\""));
+        assert_eq!(at(8), None);
+        assert_eq!(at(9), None, "a method on a literal is not the literal");
+    }
+
+    #[test]
+    fn a_test_is_found_by_its_function_name_however_it_is_qualified() {
+        let test = "package a\n\nfunc TestFormat(t *testing.T) {}\n\nfunc TestF[T any](t *testing.T) {\n}\n";
+        let lines = test.split('\n').collect::<Vec<_>>();
+        // `TestF` is not `TestFormat`: the name ends where its parameters or
+        // type parameters begin.
+        assert_eq!(locate(&lines, "a::TestF").unwrap().start, 4);
+        assert_eq!(locate(&lines, "TestFormat/case").unwrap().start, 2);
+        assert!(locate(&lines, "TestMissing").is_none());
+    }
 }
