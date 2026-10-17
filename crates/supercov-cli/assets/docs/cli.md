@@ -28,6 +28,7 @@ npx supercov --help
 | Open an interactive report | `npx supercov report` |
 | Find the tests a change affects | `npx supercov runs latest tests affected` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
+| Add coverage measured elsewhere, by line | `npx supercov import lcov.info --test <name>` |
 | Remove stored runs | `npx supercov runs clean` |
 | Assess code quality with Jev | `npx supercov quality` |
 | See only files with findings | `npx supercov quality gaps` |
@@ -836,6 +837,38 @@ own:
 reusing the answers saved when its parts were assessed. `tests affected` of a
 merged run is answered from the runs it was merged from, which hold the record
 of what each test ran; a test in several of them is affected where any says so.
+
+## Add coverage measured elsewhere
+
+Some code runs where Supercov cannot measure it: a deployed worker, a
+production container, a binary another tool built. If that environment can
+write LCOV, or an LLVM profile, add its lines to a run:
+
+```sh
+npx supercov import lcov.info --test "edge in production"
+npx supercov import default.profraw --object target/debug/edge --test "edge binary"
+npx supercov import lcov.info --background --run <run-id>
+```
+
+The import publishes a new run made from the latest one (or the one `--run`
+names), and leaves that run as it was. The lines are credited to a test of
+their own, with runner `lcov` and kind `imported`, or to the run's background.
+
+This evidence is line-only. A line that ran credits every statement on it, and
+a function that was entered credits the function. Branches, decisions and MC/DC
+come only from Supercov's own measurement. A file the run did not measure joins
+it with one statement per recorded line, and is marked as measured only by the
+import.
+
+Paths are matched to the project: an absolute path under the project, or the
+one measured file a path ends with, such as `/app/src/lib.rs` for
+`src/lib.rs`. Files outside the project are left out and listed. If evidence
+names a line past the end of a file, it was recorded from other source, and
+the import refuses it.
+
+An LLVM profile needs the binaries it was recorded from (`--object`, repeated
+for more), and `llvm-profdata` and `llvm-cov`: from `rustup component add
+llvm-tools`, from `PATH`, or from `LLVM_PROFDATA` and `LLVM_COV`.
 
 ## Clean local data
 

@@ -67,6 +67,14 @@ const ROOT_INPUT_EXCLUSIONS: &[&str] = &[
     "test-results",
 ];
 
+/// What a coverage tool writes, never what a build reads: an LLVM profile
+/// (written to the working directory by default) or an LCOV file. Counted as
+/// configuration, producing one -- to import it -- made every run stale.
+fn is_coverage_output(name: &str) -> bool {
+    let extension = Path::new(name).extension().and_then(|value| value.to_str());
+    matches!(extension, Some("profraw" | "profdata" | "lcov")) || name == "lcov.info"
+}
+
 fn collect_project_inputs(
     root: &Path,
     directory: &Path,
@@ -87,6 +95,7 @@ fn collect_project_inputs(
             .map_err(|_| format!("Rust project contains a non-UTF-8 path: {}", path.display()))?;
         if (root_level && ROOT_INPUT_EXCLUSIONS.contains(&name.as_str()))
             || matches!(name.as_str(), ".supercov" | ".mcdc-pool")
+            || is_coverage_output(&name)
         {
             continue;
         }

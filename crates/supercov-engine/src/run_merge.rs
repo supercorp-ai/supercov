@@ -68,7 +68,7 @@ fn measured_tests(archive: &[EvidenceArchiveEntry]) -> BTreeMap<String, String> 
 
 /// An entry's records for the merge, without those of the tests measured
 /// again in another run. None when nothing of the entry is left.
-fn rewritten_contents(
+pub(crate) fn rewritten_contents(
     contents: &[u8],
     merged_run_id: &str,
     superseded: Option<&BTreeSet<String>>,
