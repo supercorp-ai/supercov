@@ -485,23 +485,10 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
         ast::Expr::MethodCallExpr(m) => {
             let name = m.name_ref()?.text().to_string();
             let receiver = m.receiver()?;
-            let receiver_text = receiver.syntax().text().to_string();
             // Raw pointers: a pointer moved is the same pointer type; a
             // cast names its target; a read gives what it points at.
             let pointer = || -> Option<String> {
-                let ty = infer(&receiver, crate_view).or_else(|| {
-                    if receiver_text.starts_with("ptr::addr_of!(")
-                        || receiver_text.ends_with(".as_ptr()")
-                    {
-                        Some("*const u8".into())
-                    } else if receiver_text.starts_with("ptr::addr_of_mut!(")
-                        || receiver_text.ends_with(".as_mut_ptr()")
-                    {
-                        Some("*mut u8".into())
-                    } else {
-                        None
-                    }
-                })?;
+                let ty = infer(&receiver, crate_view)?;
                 ty.starts_with('*').then_some(ty)
             };
             match name.as_str() {
@@ -532,6 +519,13 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
                         target.split_whitespace().collect::<String>()
                     ));
                 }
+                // What `?` would leave; a constructor read by its name
+                // (`Layout::from_size_align`) names what it makes, fallible
+                // or not.
+                "unwrap" | "expect" => {
+                    let ty = infer(&receiver, crate_view)?;
+                    return unwrap_try(&ty).or_else(|| (!ty.contains('<')).then_some(ty));
+                }
                 "read" | "read_unaligned" => {
                     if let Some(p) = pointer() {
                         return Some(
@@ -544,7 +538,25 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
                 }
                 _ => {}
             }
-            returns(&name)
+            returns(&name).or_else(|| match name.as_str() {
+                "as_ptr" => Some("*const u8".into()),
+                "as_mut_ptr" => Some("*mut u8".into()),
+                _ => None,
+            })
+        }
+        ast::Expr::MacroExpr(m) => {
+            let name = m
+                .macro_call()?
+                .path()?
+                .segment()?
+                .name_ref()?
+                .text()
+                .to_string();
+            match name.as_str() {
+                "addr_of" => Some("*const u8".into()),
+                "addr_of_mut" => Some("*mut u8".into()),
+                _ => None,
+            }
         }
         ast::Expr::BlockExpr(b) => infer(&b.stmt_list()?.tail_expr()?, crate_view),
         ast::Expr::MatchExpr(m) => {
@@ -727,7 +739,12 @@ fn typed(e: &ast::Expr, ty: Option<&str>, crate_view: &Crate) -> String {
         _ => None,
     };
     structural
-        .or_else(|| value_of(ty.as_deref()?, crate_view, 0).filter(|v| *v != text.trim()))
+        .or_else(|| {
+            // The same value spelled with its path is no change.
+            let text = text.trim();
+            value_of(ty.as_deref()?, crate_view, 0)
+                .filter(|v| v != text && !v.ends_with(&format!("::{text}")))
+        })
         .unwrap_or_else(|| replacement(&text, ty.as_deref()))
 }
 
@@ -1135,6 +1152,10 @@ fn closure(c: &ast::ClosureExpr, output: Option<&str>, crate_view: &Crate) -> Op
     let head = c.syntax().text().to_string()[..head_end].to_owned();
     let body_text = body.syntax().text().to_string();
     let new = changed(&body_text, ty.as_deref(), crate_view)?;
+    // `|x| -> u8 { .. }`: a declared return type needs a block body.
+    if c.ret_type().is_some() && !new.starts_with('{') {
+        return Some(format!("{head}{{ {new} }}"));
+    }
     Some(format!("{head}{new}"))
 }
 
@@ -1855,5 +1876,76 @@ mod replacement_tests {
         // A block assigned to `y` is not the function's value.
         assert_eq!(r[&10][0].1, "0");
         assert_eq!(r[&12][0].1, "0");
+    }
+
+    /// Raw pointers, constructors read by name, `unwrap`, `let`-`else` and
+    /// closures with a declared return type: each replacement is a value of
+    /// the statement's type that differs from it, and the type carries
+    /// through the locals it is bound to.
+    #[test]
+    fn pointers_and_constructors_keep_their_type_through_locals() {
+        let source = r#"use std::alloc::{alloc, Layout};
+use std::ptr;
+
+#[inline]
+fn made(len: usize, data: &[u8], buffer: &mut [u8]) -> Layout {
+    let layout = Layout::from_size_align(len, 1).unwrap();
+    let other = Layout::new::<u8>();
+    let block = unsafe { alloc(layout) };
+    let start = data.as_ptr();
+    let at = unsafe { start.add(2) };
+    let raw = ptr::addr_of!(data[0]);
+    let bytes = raw.cast::<u16>();
+    let mutable = buffer.as_mut_ptr();
+    let wide = mutable.cast::<u32>();
+    let read = unsafe { at.read() };
+    let doubled = |n: u8| -> u8 { n * 2 };
+    let Some(first) = Some(3u8) else {
+        return layout;
+    };
+    layout
+}
+
+#[test]
+fn checks() {
+    let a = 1;
+}
+
+#[tokio::test]
+async fn checks_later() {
+    let a = 1;
+}
+
+#[cfg(test)]
+mod tests {
+    fn helper() -> u8 {
+        let a = 1;
+        a
+    }
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let r = replacements("src/lib.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        assert_eq!(at(6), "std::alloc::Layout::new::<u8>()");
+        // The same value with its path written out is no change.
+        assert_eq!(at(7), "Default::default()");
+        assert_eq!(at(8), "std::ptr::null_mut()");
+        assert_eq!(at(9), "std::ptr::null()");
+        assert_eq!(at(10), "std::ptr::null()", "`start` is a pointer");
+        assert_eq!(at(11), "std::ptr::null()");
+        assert_eq!(at(12), "std::ptr::null()", "`raw` is a pointer");
+        assert_eq!(at(13), "std::ptr::null_mut()");
+        assert_eq!(at(14), "std::ptr::null_mut()");
+        assert_eq!(at(15), "0", "a read gives what the pointer points at");
+        assert_eq!(at(16), "|n: u8| -> u8 { 0 }");
+        assert_eq!(at(17), "None");
+        assert_eq!(at(20), "std::alloc::Layout::new::<u8>()");
+        // A test's own code, however its attribute is spelled, is the test.
+        let starts = statement_starts(source);
+        assert!(starts.contains_key(&6), "an attribute that is not a test's");
+        for line in [25, 30, 36, 37] {
+            assert_eq!(starts[&line][0].1, None, "line {line}");
+        }
     }
 }

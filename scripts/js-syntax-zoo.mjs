@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
+import { assessWithStandIn } from './assess-with-stand-in.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
@@ -501,7 +502,11 @@ try {
   // as written and say so.
   assert.ok(byFile['src/source.js'].measurementLimitations >= 3, report);
   assert.ok(byFile['src/legacy.cjs'].measurementLimitations >= 1, report);
-  console.log('[js-syntax-zoo] every construct the JavaScript instrumenter rewrites reads as its tests drove it');
+  // Every construct is read for what a test would have to catch, too.
+  const assessed = await assessWithStandIn(binary, root, {});
+  assert.equal(assessed.status, 0, assessed.output);
+  assert.match(assessed.output, /\b100% asserted \((\d+) of \1 executed statements\)/, assessed.output);
+  console.log('[js-syntax-zoo] every construct the JavaScript instrumenter rewrites reads as its tests drove it, and is assessed');
 } finally {
   if (!process.env.KEEP) rmSync(temporary, { recursive: true, force: true });
 }
