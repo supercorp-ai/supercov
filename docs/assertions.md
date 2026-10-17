@@ -133,6 +133,11 @@ never asked; the statement view (`assertions <file>:<line>`) says how many were,
 and names the test files none of whose tests were asked, which is where to look
 before writing a test that may already exist.
 
+A statement at a module's top level in JavaScript, TypeScript or Python runs
+once, when the first test loads the module, and is recorded for that test
+alone. Every test that runs the module's functions relies on it too, so those
+tests count as running it, after the one that loaded it.
+
 An asserted statement is a judgment too: some test was judged to fail if it
 changed, and the pass stops at the first that is. How strong that answer was
 says how far to trust it. Checked by applying each change and running the
