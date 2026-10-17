@@ -2969,8 +2969,8 @@ fn a_selector_that_matches_nothing_or_several_says_so() {
             "Decision not found: src/cart.js:99",
         ),
         (
-            vec!["runs", "latest", "test", "total", "--limit", "0"],
-            "--limit must be a positive integer",
+            vec!["runs", "latest", "test", "total", "--limit", "-1"],
+            "--limit must be a number of entries, or 0 for all of them",
         ),
     ] {
         let refused = project.supercov(&args).exits(2);
@@ -6743,4 +6743,31 @@ fn each_page_names_a_next_page_command_that_shows_it() {
             .unwrap()
             .to_owned()
     }
+}
+
+#[test]
+fn a_limit_of_zero_lists_every_entry_as_the_other_commands_do() {
+    let project = Project::cart("limit-zero-everywhere");
+    let run = project.measure(&[]);
+    let paged = project
+        .supercov(&["runs", &run, "files", "--limit", "1", "--json"])
+        .succeeds();
+    let paged: serde_json::Value = serde_json::from_str(&paged).unwrap();
+    let total = paged["pagination"]["total"].as_u64().unwrap();
+    let every = project
+        .supercov(&["runs", &run, "files", "--limit", "0", "--json"])
+        .succeeds();
+    let every: serde_json::Value = serde_json::from_str(&every).unwrap();
+    let page = &every["pagination"];
+    assert_eq!(page["returned"].as_u64(), Some(total), "{every}");
+    assert_eq!(
+        page["limit"].as_u64(),
+        Some(total),
+        "the page says how many all was: {every}"
+    );
+    assert_eq!(page["hasMore"], false, "{every}");
+    let refused = project
+        .supercov(&["runs", &run, "files", "--limit", "x"])
+        .exits(2);
+    assert!(refused.contains("0 for all of them"), "{refused}");
 }
