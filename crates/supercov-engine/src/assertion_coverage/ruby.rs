@@ -421,25 +421,46 @@ pub(super) fn locate(source: &str, lines: &[&str], runner: &str, name: &str) -> 
                 .or_else(|| method.strip_prefix("test: "))
                 .map(str::to_owned)
                 .or_else(|| method.strip_prefix("test_").map(|r| r.replace('_', " ")));
-            let start = lines
-                .iter()
-                .position(|l| {
-                    let t = l.trim_start();
-                    t.strip_prefix("def ").is_some_and(|r| {
-                        r.strip_prefix(method)
-                            .is_some_and(|r| r.is_empty() || r.starts_with(['(', ' ', ';']))
-                    })
+            // Test classes in one file often share method names: look in the
+            // class the name gives (`Shop::CartTest#test_total`) first.
+            let class = name
+                .rsplit_once('#')
+                .map(|(class, _)| class.rsplit("::").next().unwrap_or(class));
+            let (from, to) = class
+                .and_then(|class| {
+                    let at = lines.iter().position(|l| {
+                        l.trim_start()
+                            .strip_prefix("class ")
+                            .and_then(|rest| rest.strip_prefix(class))
+                            .is_some_and(|rest| {
+                                rest.is_empty() || rest.starts_with([' ', '<', ';'])
+                            })
+                    })?;
+                    Some((at, super::keyword_end(lines, at) + 1))
                 })
-                .or_else(|| {
-                    let d = described.as_deref()?;
-                    lines.iter().position(|l| {
-                        let t = l.trim_start();
-                        ["it ", "test ", "it(", "test("]
-                            .iter()
-                            .any(|k| t.starts_with(k))
-                            && (t.contains(&format!("\"{d}\"")) || t.contains(&format!("'{d}'")))
-                    })
-                })?;
+                .unwrap_or((0, lines.len()));
+            let defines = |i: &usize| {
+                let t = lines[*i].trim_start();
+                t.strip_prefix("def ").is_some_and(|r| {
+                    r.strip_prefix(method)
+                        .is_some_and(|r| r.is_empty() || r.starts_with(['(', ' ', ';']))
+                })
+            };
+            let describes = |i: &usize| {
+                described.as_deref().is_some_and(|d| {
+                    let t = lines[*i].trim_start();
+                    ["it ", "test ", "it(", "test("]
+                        .iter()
+                        .any(|k| t.starts_with(k))
+                        && (t.contains(&format!("\"{d}\"")) || t.contains(&format!("'{d}'")))
+                })
+            };
+            let to = to.min(lines.len());
+            let start = (from..to)
+                .find(defines)
+                .or_else(|| (0..lines.len()).find(defines))
+                .or_else(|| (from..to).find(describes))
+                .or_else(|| (0..lines.len()).find(describes))?;
             let class = class_line(lines, start);
             Some(Located {
                 context: class.into_iter().collect(),
@@ -673,5 +694,11 @@ mod tests {
         assert_eq!(line("Cart#test_0001_removes items"), (vec![5], 7));
         assert_eq!(line("Plain#test_adds"), (vec![10], 13));
         assert!(locate(tests, &lines, "minitest", "Plain#test_missing").is_none());
+        // Two classes, one method name: each test in its own class.
+        let two = "class CartTest < Minitest::Test\n  def test_total\n    assert_equal 0, cart\n  end\nend\n\nclass OrderTest < Minitest::Test\n  def test_total\n    assert_equal 2, order\n  end\nend\n";
+        let lines = two.split('\n').collect::<Vec<_>>();
+        let start = |name: &str| locate(two, &lines, "minitest", name).unwrap().start + 1;
+        assert_eq!(start("OrderTest#test_total"), 8);
+        assert_eq!(start("Shop::CartTest#test_total"), 2);
     }
 }
