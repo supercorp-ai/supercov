@@ -604,13 +604,57 @@ else {
     return print.apply(this, [kept.join("\\n"), ...message.slice(1)]);
 })(warnOnce)); } catch {}
 `.replace(/\n\s*/g, " ");
+    // A project's `turbopack.root`, set to its own directory, names the copy
+    // here, while the copy's dependencies are links into the project's
+    // node_modules. Turbopack resolves no package outside its root and
+    // panicked "Next.js package not found". The root Next settles on is
+    // widened to the nearest directory that holds the real `next` package
+    // too -- the project, which holds the copy; one that holds it is kept.
+    const widened = `
+;try { loadConfig = ((load) => async function loadConfig(...args) {
+    const config = await load.apply(this, args);
+    try {
+        const path = require("path"), fs = require("fs");
+        const root = config && config.turbopack && config.turbopack.root;
+        if (typeof root === "string") {
+            const dir = path.resolve(args[1] || process.cwd());
+            const held = [fs.realpathSync(path.dirname(require.resolve("next/package.json", { paths: [dir] })))];
+            for (let at = dir; at.includes(path.sep + ".supercov" + path.sep); at = path.dirname(at)) {
+                try { held.push(fs.realpathSync(path.join(at, "node_modules"))); } catch {}
+            }
+            let common = fs.realpathSync(root).split(path.sep);
+            for (const target of held) {
+                const parts = target.split(path.sep);
+                let i = 0;
+                while (i < common.length && i < parts.length && common[i] === parts[i]) i++;
+                common = common.slice(0, i);
+            }
+            const widened = common.join(path.sep) || path.sep;
+            if (widened !== fs.realpathSync(root)) {
+                config.turbopack.root = widened;
+                config.outputFileTracingRoot = widened;
+            }
+        }
+    } catch {}
+    return config;
+})(loadConfig); } catch {}
+`.replace(/\n\s*/g, " ");
+    const append = (content, code) => {
+        // After the last statement, before the source map's line.
+        const map = content.lastIndexOf("\n//# sourceMappingURL=");
+        return map < 0 ? `${content}${code}` : `${content.slice(0, map)}${code}${content.slice(map)}`;
+    };
     const compile = Module.prototype._compile;
     Module.prototype._compile = function _compile(content, filename, ...rest) {
-        if (typeof content === "string" && typeof filename === "string" && filename.endsWith("log.js") &&
-            /[\\/]next[\\/]dist[\\/]build[\\/]output[\\/]log\.js$/.test(filename)) {
-            // After the last statement, before the source map's line.
-            const map = content.lastIndexOf("\n//# sourceMappingURL=");
-            content = map < 0 ? `${content}${quieted}` : `${content.slice(0, map)}${quieted}${content.slice(map)}`;
+        if (typeof content === "string" && typeof filename === "string") {
+            if (filename.endsWith("log.js") &&
+                /[\\/]next[\\/]dist[\\/]build[\\/]output[\\/]log\.js$/.test(filename)) {
+                content = append(content, quieted);
+            }
+            else if (filename.endsWith("config.js") &&
+                /[\\/]next[\\/]dist[\\/]server[\\/]config\.js$/.test(filename)) {
+                content = append(content, widened);
+            }
         }
         return Reflect.apply(compile, this, [content, filename, ...rest]);
     };
@@ -1096,12 +1140,38 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1") {
         // Avoid paying to import three runner adapters in every launcher.
     }
     else {
-    const nodeTestAdapter = await import(__rewriteRelativeImportExtension(nodeTestWrapper));
-    const cjsNodeTestAdapter = Object.assign(nodeTestAdapter.test, nodeTestAdapter);
-    const nodeAssertAdapter = await import(__rewriteRelativeImportExtension(nodeAssertWrapper));
-    const cjsNodeAssertAdapter = Object.assign(nodeAssertAdapter.default, nodeAssertAdapter);
-    const nodeAssertStrictAdapter = await import(__rewriteRelativeImportExtension(nodeAssertStrictWrapper));
-    const cjsNodeAssertStrictAdapter = Object.assign(nodeAssertStrictAdapter.default, nodeAssertStrictAdapter);
+    // Node's module mocks keep the CJS resolver they find when node:test first
+    // loads (`const { _resolveFilename } = Module` in its mock loader). This
+    // preload runs before the command's own `--import`s, so loading node:test
+    // here handed the mock loader the resolver from before `--import tsx`
+    // mapped tsconfig paths: every `@/` import failed in a test that mocked a
+    // module. Where Node requires an ES module without a warning, each adapter
+    // loads on its first request instead, after every preload; elsewhere, as
+    // before, now.
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    const lazily = process.features?.require_module === true &&
+        (major > 23 || (major === 23 && minor >= 5) || (major === 22 && minor >= 13) || (major === 20 && minor >= 19));
+    const requireAdapter = Module.createRequire(import.meta.url);
+    const adapters = new Map();
+    const shapes = [
+        ["test", nodeTestWrapper, (module) => module.test],
+        ["assert", nodeAssertWrapper, (module) => module.default],
+        ["assert/strict", nodeAssertStrictWrapper, (module) => module.default],
+    ];
+    const adapter = (name) => {
+        if (!adapters.has(name)) {
+            const [, url, main] = shapes.find(([shape]) => shape === name);
+            const module = requireAdapter(fileURLToPath(url));
+            adapters.set(name, Object.assign(main(module), module));
+        }
+        return adapters.get(name);
+    };
+    if (!lazily) {
+        for (const [name, url, main] of shapes) {
+            const module = await import(__rewriteRelativeImportExtension(url));
+            adapters.set(name, Object.assign(main(module), module));
+        }
+    }
     const originalLoad = Module._load;
     Module._load = function supercovNodeTestLoad(request, parent, isMain) {
         const parentFile = parent?.filename?.replaceAll("\\", "/");
@@ -1113,12 +1183,10 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1") {
             (request === "node:test" || request === "test"))
             console.error("[supercov] node:test CJS request", { parentFile, projectRoot, belongsToProject });
         if ((request === "node:test" || request === "test") && belongsToProject)
-            return cjsNodeTestAdapter;
+            return adapter("test");
         if (["assert", "node:assert", "assert/strict", "node:assert/strict"].includes(request) &&
             belongsToProject)
-            return request.endsWith("/strict")
-                ? cjsNodeAssertStrictAdapter
-                : cjsNodeAssertAdapter;
+            return adapter(request.endsWith("/strict") ? "assert/strict" : "assert");
         return originalLoad.call(this, request, parent, isMain);
     };
     }

@@ -78,9 +78,20 @@ pub fn append(
 
 /// Read project files only when their exact bytes still match the run manifest.
 pub fn current_sources(root: &Path, manifest: &InputManifest) -> Result<Inputs, String> {
+    current_sources_for(root, manifest, |_| true)
+}
+
+/// [`current_sources`] for only the files `needed` names: a file the run
+/// recorded that the caller does not read -- a configuration file only CI
+/// generates, say -- may be missing or changed.
+pub fn current_sources_for(
+    root: &Path,
+    manifest: &InputManifest,
+    needed: impl Fn(&str) -> bool,
+) -> Result<Inputs, String> {
     let root = canonicalize_simplified(root).map_err(|e| e.to_string())?;
     let mut files = Files::new();
-    for (file, expected) in &manifest.files {
+    for (file, expected) in manifest.files.iter().filter(|(file, _)| needed(file)) {
         if !local_path(file) {
             return Err(format!("Invalid source path: {file}"));
         }

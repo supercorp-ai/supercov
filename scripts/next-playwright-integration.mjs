@@ -280,4 +280,22 @@ assert.equal(namedScope.mode, 'explicit');
 assert.equal(namedScope.counts.ambiguous, 0);
 assert.equal(namedScope.unclassifiedSource, undefined);
 
+// A project that pins Turbopack's root to its own directory: in the copy
+// that root is the copy, whose dependencies are links into the project's
+// node_modules, and Turbopack panicked "Next.js package not found".
+const configFile = resolve(fixture, 'next.config.ts');
+const config = readFileSync(configFile, 'utf8');
+writeFileSync(
+  configFile,
+  "import path from 'node:path';\nimport type { NextConfig } from 'next';\n\nconst nextConfig: NextConfig = { turbopack: { root: path.join(__dirname, '.') } };\n\nexport default nextConfig;\n",
+);
+try {
+  const pinned = supercov(['--', 'npm', 'run', 'test:e2e'], { SUPERCOV_TEST_KIND: 'e2e' });
+  assert.equal(pinned.status, 0, pinned.output);
+  assert.match(pinned.output, /4 passed/);
+  assert.doesNotMatch(pinned.output, /Next\.js package not found/);
+} finally {
+  writeFileSync(configFile, config);
+}
+
 console.log('[next-playwright] a Next.js application is measured through its unit and end-to-end suites, merged, read by directory, and assessed for assertions, quality and security');

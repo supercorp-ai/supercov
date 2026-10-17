@@ -10,6 +10,7 @@ use supercov_engine::{
 };
 
 const HELP: &str = r#"Usage: supercov runs <run> tests affected [--json | --names | --files] [--ran-changed | --asserting]
+                                     [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]
 
 Which of the run's tests the changes since that run could have reached, from
 what each test executed and what changed, declaration by declaration.
@@ -40,6 +41,11 @@ are listed first. Without an assessment the answer is coverage alone.
                were judged to catch no change to them. Smaller, and a
                judgment: over random changes it kept 92-95% of the tests a
                change broke, where --ran-changed kept all of them.
+
+--kind, --runner, --tag, --title, --test-file
+               Only the affected tests these pick, as every query reads them:
+               `--runner playwright --names` for Playwright's --grep from a
+               run that merged it with another runner's tests.
 
 With an assessment, --names and --files list the tests most likely to catch
 the change first. A test whose own file changed or that did not pass, and any
@@ -84,8 +90,18 @@ pub fn command(args: &[String]) -> ExitCode {
     let mut files = false;
     let mut asserting = false;
     let mut ran_changed = false;
+    let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut seen = BTreeSet::new();
-    for flag in &args[3..] {
+    let rest = &args[3..];
+    let mut index = 0;
+    while let Some(flag) = rest.get(index) {
+        index += 1;
+        if let Some(taken) = crate::test_filter_option(flag, rest, &mut index, &mut filter) {
+            if let Err(message) = taken {
+                return usage(message);
+            }
+            continue;
+        }
         if !seen.insert(flag.as_str()) {
             return usage(format!("Duplicate option: {flag}"));
         }
@@ -112,6 +128,10 @@ pub fn command(args: &[String]) -> ExitCode {
         let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
         let run = select_run(&inventory, Some(&args[0])).map_err(|e| e.to_string())?;
         let mut data = maps::affected_tests(&root, run)?;
+        if !filter.is_empty() {
+            let picked = crate::picked_tests(run, &filter)?;
+            keep_picked(&mut data, &picked, &filter);
+        }
         data["workingTree"] = working_tree(&root, run, &mut data);
         consult_assertions(&root, run, &mut data);
         Ok(data)
@@ -714,13 +734,40 @@ fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
     })
 }
 
+/// The answer for only the tests a filter picked: each bucket and its count,
+/// and the filter, so the answer says which tests it is about.
+fn keep_picked(
+    data: &mut Value,
+    picked: &BTreeSet<(String, Option<String>)>,
+    filter: &supercov_engine::coverage_report::TestFilter,
+) {
+    let is_picked = |test: &Value| {
+        let name = test["name"].as_str().unwrap_or_default().to_owned();
+        let file = test["file"].as_str().map(str::to_owned);
+        picked.contains(&(name.clone(), file)) || picked.contains(&(name, None))
+    };
+    for bucket in ["affected", "undetermined", "unaffected"] {
+        if let Some(tests) = data[bucket].as_array_mut() {
+            tests.retain(|test| is_picked(test));
+            data["summary"][bucket] = json!(tests.len());
+        }
+    }
+    data["summary"]["tests"] = json!(
+        ["affected", "undetermined", "unaffected"]
+            .iter()
+            .map(|bucket| data["summary"][*bucket].as_u64().unwrap_or(0))
+            .sum::<u64>()
+    );
+    data["filter"] = json!(filter.describe());
+}
+
 fn render(data: &Value) -> String {
     let mut out = String::new();
     let affected = data["affected"].as_array().cloned().unwrap_or_default();
     let undetermined = data["undetermined"].as_array().cloned().unwrap_or_default();
     let total = data["summary"]["tests"].as_u64().unwrap_or(0);
     out.push_str(&format!(
-        "Run {}: {} of {} {} affected by changes since the run{}\n",
+        "Run {}: {} of {} {} affected by changes since the run{}{}\n",
         data["run"].as_str().unwrap_or(""),
         affected.len(),
         total,
@@ -729,7 +776,11 @@ fn render(data: &Value) -> String {
             String::new()
         } else {
             format!(", {} undetermined", undetermined.len())
-        }
+        },
+        data["filter"]
+            .as_str()
+            .map(|filter| format!(" ({filter})"))
+            .unwrap_or_default()
     ));
     fn entries(out: &mut String, tests: &[Value]) {
         for test in tests {

@@ -288,8 +288,16 @@ impl std::ops::Deref for RunInputs {
 /// The run's manifest with the current checkout's sources, which must be the
 /// run's own byte for byte.
 pub fn load_inputs(root: &Path, run: &StoredRun) -> Result<RunInputs, String> {
+    load_inputs_for(root, run, |_| true)
+}
+/// [`load_inputs`] checking only the files `needed` names against the run.
+pub fn load_inputs_for(
+    root: &Path,
+    run: &StoredRun,
+    needed: impl Fn(&str) -> bool,
+) -> Result<RunInputs, String> {
     let stored = load_manifest(run)?;
-    let inputs = crate::source_capture::current_sources(root, &stored.manifest)?;
+    let inputs = crate::source_capture::current_sources_for(root, &stored.manifest, needed)?;
     Ok(RunInputs { inputs, stored })
 }
 pub fn load_manifest(run: &StoredRun) -> Result<RunManifest, String> {

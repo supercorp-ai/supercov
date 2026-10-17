@@ -2213,3 +2213,126 @@ fn unasserted_statements_page_with_a_next_page_command_that_shows_it() {
     let second = project.supercov(&words).succeeds();
     assert!(second.contains("showing 3-4 of "), "{next}\n{second}");
 }
+
+/// `assess` and `assertions` take the filters every query takes: assessing
+/// some tests asks only them about what they ran and saves apart from the
+/// whole run; reading with a filter shows what those tests assert.
+#[test]
+fn assertions_read_and_assess_some_of_the_tests() {
+    let project = Project::cart("assertion-filters");
+    let (base, seen) = gateway(MODEL, answer_yes);
+    let run = project.measure(&[]);
+    let estimate = |extra: &[&str]| {
+        let mut args = vec![
+            "runs",
+            run.as_str(),
+            "assertions",
+            "assess",
+            "--dry-run",
+            "--json",
+        ];
+        args.extend(extra);
+        project.supercov_with(&args, &through(&base)).json()
+    };
+    let whole = estimate(&[]);
+    let some = estimate(&["--title", "shipping"]);
+    assert!(
+        some["data"]["statements"].as_u64() < whole["data"]["statements"].as_u64(),
+        "{some}\n{whole}"
+    );
+    assert_eq!(some["data"]["filter"], "--title shipping");
+    assert!(seen.lock().unwrap().is_empty(), "a dry run sends nothing");
+
+    // Judged to catch nothing, so the reading names a file to inspect.
+    let (refusing, refused) = gateway(MODEL, answer_no);
+    let assessed = project
+        .supercov_with(
+            &["runs", &run, "assertions", "assess", "--title", "shipping"],
+            &through(&refusing),
+        )
+        .succeeds();
+    assert!(
+        assessed.contains("by the tests --title shipping picks"),
+        "{assessed}"
+    );
+    // Only the shipping test was asked.
+    let asked = refused
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, _, request)| {
+            request["state"]["test"]["name"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        asked.into_iter().collect::<Vec<_>>(),
+        ["shipping is free over fifty"]
+    );
+    // The whole run is not assessed; the filtered reading is.
+    let unfiltered = project.supercov(&["runs", &run, "assertions"]).succeeds();
+    assert!(unfiltered.contains("assertions assess"), "{unfiltered}");
+    let read = project
+        .supercov(&["runs", &run, "assertions", "--title", "shipping"])
+        .succeeds();
+    contains_all(
+        &read,
+        &["by the tests --title shipping picks", "--title 'shipping'"],
+    );
+
+    // After the whole run is assessed, a filter with no assessment of its
+    // own reads the whole one for its tests.
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let whole_read = project
+        .supercov(&["runs", &run, "assertions", "--json"])
+        .json();
+    let total_read = project
+        .supercov(&["runs", &run, "assertions", "--title", "total", "--json"])
+        .json();
+    assert_eq!(
+        total_read["data"]["filter"], "--title total",
+        "{total_read}"
+    );
+    assert!(
+        total_read["data"]["summary"]["statements"].as_u64()
+            < whole_read["data"]["summary"]["statements"].as_u64(),
+        "{total_read}\n{whole_read}"
+    );
+    let none = project
+        .supercov(&["runs", &run, "assertions", "--runner", "jest"])
+        .exits(2);
+    assert!(none.contains("No tests match --runner jest"), "{none}");
+}
+
+/// Assessing reads the files its questions quote, not every file the run
+/// recorded: a file CI generates and a checkout lacks does not stop it, while
+/// a changed file it does quote still does, by name.
+#[test]
+fn assessing_checks_only_the_files_its_questions_quote() {
+    let project = Project::cart("assertion-needed-files");
+    project.write("src/generated.js", "export const stack = 'isolated';\n");
+    project.commit("generated");
+    let (base, _) = gateway(MODEL, answer_yes);
+    let run = project.measure(&[]);
+    std::fs::remove_file(project.root.join("src/generated.js")).unwrap();
+    let assessed = project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    assert!(assessed.contains("asserted"), "{assessed}");
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let refused = project
+        .supercov_with(
+            &["runs", &run, "assertions", "assess", "--refresh"],
+            &through(&base),
+        )
+        .exits(2);
+    assert!(refused.contains("src/cart.js"), "{refused}");
+}
