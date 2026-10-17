@@ -3266,3 +3266,170 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod helper_shape_tests {
+    use super::*;
+
+    /// The line readers the questions are rendered with, each fed the shapes
+    /// that take its other ways: block-comment continuations, escaped and
+    /// unterminated quotes, braces in fixed text, a division beside a
+    /// comment, words that only contain a boolean, Ruby blocks closed on
+    /// their own line, and each language's definitions.
+    #[test]
+    fn the_line_readers_take_each_way() {
+        for (line, comment) in [
+            ("/* c", true),
+            ("*/", true),
+            ("*", true),
+            ("* doc", true),
+            ("*\tdoc", true),
+            ("  // x", true),
+            ("code", false),
+        ] {
+            assert_eq!(Language::Rust.comment(line), comment, "{line:?}");
+        }
+        assert_eq!(
+            name_words("parseV2Header getHTTPResponse"),
+            ["header", "http", "parse", "response"]
+                .map(str::to_owned)
+                .into()
+        );
+        for (text, fragments) in [
+            (
+                r#"x("a \"quoted\" value here")"#,
+                vec![r#"a \"quoted\" value here"#],
+            ),
+            ("'unterminated text here", vec![]),
+            (
+                r#""closing } brace text here""#,
+                vec!["closing } brace text here"],
+            ),
+            (r#""${a$b} literal text here""#, vec!["literal text here"]),
+            (r#""{x} after brace text""#, vec!["after brace text"]),
+        ] {
+            assert_eq!(quoted_fragments(text), fragments, "{text}");
+        }
+        // A `//` in a string is no comment, a lone `/` is division, and a
+        // `#` with no space after it is a JavaScript private field.
+        for (line, at) in [
+            (r#"let s = "a \" // b"; // c"#, 21),
+            ("a / b // c", 6),
+            ("x # y", 2),
+            ("x #y", 4),
+        ] {
+            assert_eq!(comment_start(line), at, "{line}");
+        }
+        assert_eq!(flipped_code("is_true(x) || true"), "is_true(x) || false");
+        assert_eq!(flipped_code("trueish = false"), "trueish = true");
+        assert_eq!(flipped_code("x = True"), "x = False");
+        assert_eq!(
+            brace_end_within(&["fn a() {", "  let x = 1 / 2; // }", "}", "after"], 0, 10),
+            2,
+            "a brace in a comment does not close the block"
+        );
+        let ruby = [
+            "it 'x' do x end",
+            "describe 'y' do",
+            "  it 'z' do",
+            "  end",
+            "end )",
+            "foo {",
+            "}",
+        ];
+        assert_eq!(keyword_end(&ruby, 0), 0);
+        assert_eq!(keyword_end(&ruby, 1), 4);
+        assert_eq!(keyword_end(&ruby, 5), 6);
+        let named = |lines: &[&str], language| {
+            definitions(lines, language)
+                .into_iter()
+                .map(|(name, a, b)| format!("{name} {a}-{b}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            named(
+                &[
+                    "subject{ make }",
+                    "subject(:thing) { 1 }",
+                    "def self.ready?",
+                    "end",
+                    "def go!",
+                    "end",
+                    "let(:item) { 2 }",
+                ],
+                Language::Ruby
+            ),
+            [
+                "subject 0-0",
+                "thing 1-1",
+                "ready? 2-3",
+                "go! 4-5",
+                "item 6-6"
+            ]
+        );
+        assert_eq!(
+            named(
+                &[
+                    "@Test",
+                    "public void run(int a) {",
+                    "}",
+                    "foo(1);",
+                    "return x(",
+                    "int y = z(",
+                    "  fun `helper name`() {}",
+                    "val f = { fun inner() }",
+                ],
+                Language::Jvm
+            ),
+            ["run 1-2", "helper 6-6", "inner 7-7"]
+        );
+        assert_eq!(
+            named(
+                &[
+                    "func (s *S) Method() {",
+                    "}",
+                    "var table = []int{",
+                    "}",
+                    "type T struct {",
+                    "}",
+                    "  func inner() {",
+                ],
+                Language::Go
+            ),
+            ["Method 0-1", "table 2-3", "T 4-5"]
+        );
+        // The test's own lines are not its helpers; what a helper names is.
+        let rust = [
+            "pub(crate) fn helper() {",
+            "}",
+            "const N: u8 = 1;",
+            "#[test]",
+            "fn t() {",
+            "  helper(); big();",
+            "}",
+            "fn big() {",
+            "  helper();",
+            "}",
+        ];
+        assert_eq!(
+            used_definitions(&rust, Language::Rust, 4, 6),
+            [0, 1, 7, 8, 9]
+        );
+        for (text, change, whole) in [
+            ("break\n;", Change::Skip, None),
+            ("call(\n1)", Change::Skip, Some(2)),
+            ("x", Change::Skip, None),
+            ("call(\n1)", Change::Invert, None),
+        ] {
+            let statement = Statement {
+                file: "a".into(),
+                line: 1,
+                text: text.into(),
+                change,
+                replacement: None,
+                tests: vec![],
+            };
+            assert_eq!(whole_statement(&statement), whole, "{text:?}");
+        }
+    }
+}
