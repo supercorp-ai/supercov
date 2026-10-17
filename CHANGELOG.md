@@ -4,7 +4,7 @@
 
 **Fixed**
 
-- A Python test in a class whose method name another class in the file also uses (`TestCart::test_total` and `TestOrder::test_total`) was assessed with the first one's code, and so was a Minitest test (`CartTest#test_total`). Each is now found in the class its id names.
+- A Python test in a class whose method name another class in the file also uses (`TestCart::test_total` and `TestOrder::test_total`) was assessed with the first one's code, and so were a Minitest test (`CartTest#test_total`) and a Rust test in one of several inline modules (`cart::tests::works`, `order::tests::works`). Each is now found in the class or module its id names.
 - A JUnit test in a `@Nested` class whose method name another nested class also uses (`WhenEmpty.total()` and `WithItems.total()`) was assessed with the first class's test code. Each test is now found in its own class.
 - A Rust test run through a package script lost the arguments given after the script's name: `supercov -- npm test -- adds` with `"test": "cargo test"` ran every test, where `npm test -- adds` runs only `adds`. They now reach Cargo as npm passes them.
 - A Rust test command run through a script (`npm test` running `cargo test`) was split differently from how `sh` runs it: an empty argument (`-- ''`) was dropped, a backslash in double quotes was removed (`"C:\work"` became `C:work`), and a line continuation was kept. It is split the way `sh` splits it now.

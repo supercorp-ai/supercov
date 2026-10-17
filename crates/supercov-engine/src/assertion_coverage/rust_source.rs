@@ -1647,14 +1647,38 @@ pub(super) fn locate(lines: &[&str], name: &str) -> Option<Located> {
         });
     }
     let function = name.rsplit("::").next().unwrap_or(name).trim();
-    let start = lines.iter().position(|l| {
-        let t = l.trim_start();
+    // `src/lib.rs::cart::tests::works`: modules in one file often hold tests
+    // of the same name, so each inline `mod` on the path narrows the search.
+    // A module that is a file of its own is not in this one.
+    let modules = name
+        .split("::")
+        .skip_while(|part| !part.ends_with(".rs"))
+        .skip(1)
+        .collect::<Vec<_>>();
+    let (mut from, mut to) = (0, lines.len());
+    for module in modules.iter().take(modules.len().saturating_sub(1)) {
+        let declared = (from..to).find(|&i| {
+            let t = lines[i].trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            t.strip_prefix("mod ")
+                .and_then(|r| r.strip_prefix(module))
+                .is_some_and(|r| r.trim_start().starts_with('{'))
+        });
+        if let Some(at) = declared {
+            (from, to) = (at, (super::brace_end(lines, at) + 1).min(lines.len()));
+        }
+    }
+    let defines = |i: &usize| {
+        let t = lines[*i].trim_start();
         let t = t.strip_prefix("pub ").unwrap_or(t);
         let t = t.strip_prefix("async ").unwrap_or(t);
         t.strip_prefix("fn ")
             .and_then(|r| r.strip_prefix(function))
             .is_some_and(|r| r.starts_with('(') || r.starts_with('<'))
-    })?;
+    };
+    let start = (from..to)
+        .find(defines)
+        .or_else(|| (0..lines.len()).find(defines))?;
     let mut first = start;
     while first > 0 && lines[first - 1].trim_start().starts_with("#[") {
         first -= 1;
@@ -1734,6 +1758,13 @@ mod tests {
         let lines = text.split('\n').collect::<Vec<_>>();
         let doc = locate(&lines, "src/lib.rs - (line 1)").unwrap();
         assert_eq!((doc.start, doc.end), (0, 5));
+        let two = "mod cart {\n    #[test]\n    fn works() {}\n}\n\nmod order {\n    #[cfg(test)]\n    mod tests {\n        #[test]\n        fn works() {}\n    }\n}\n";
+        let two_lines = two.split('\n').collect::<Vec<_>>();
+        let start = |name: &str| locate(&two_lines, name).unwrap().start + 1;
+        assert_eq!(start("src/lib.rs::order::tests::works"), 10);
+        assert_eq!(start("src/lib.rs::cart::works"), 3);
+        // A module in a file of its own is not looked for in this one.
+        assert_eq!(start("src/shop.rs::shop::order::tests::works"), 10);
         let test = locate(&lines, "tests/a.rs::works").unwrap();
         assert_eq!(
             (test.context.clone(), test.start, test.end),
