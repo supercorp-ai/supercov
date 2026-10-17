@@ -67,12 +67,12 @@ const ROOT_INPUT_EXCLUSIONS: &[&str] = &[
     "test-results",
 ];
 
-/// What a coverage tool writes, never what a build reads: an LLVM profile
-/// (written to the working directory by default) or an LCOV file. Counted as
-/// configuration, producing one -- to import it -- made every run stale.
+/// An LLVM profile, written to the working directory by default: what a
+/// binary built for coverage leaves, never what a build reads. Counted as
+/// configuration, writing one -- to import its lines -- made every run stale.
 fn is_coverage_output(name: &str) -> bool {
     let extension = Path::new(name).extension().and_then(|value| value.to_str());
-    matches!(extension, Some("profraw" | "profdata" | "lcov")) || name == "lcov.info"
+    matches!(extension, Some("profraw" | "profdata"))
 }
 
 fn collect_project_inputs(

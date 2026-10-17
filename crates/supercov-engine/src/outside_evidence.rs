@@ -1,11 +1,12 @@
-//! Line evidence measured where Supercov could not run: an LCOV file, or an
-//! LLVM profile with the binary it was recorded from, added to a run.
+//! Line evidence measured where Supercov could not run, as an LCOV file,
+//! added to a run. Supercov runs no other coverage tool: a profile another
+//! tool recorded is exported as LCOV by that tool first.
 //!
 //! Such evidence says which lines ran and which functions were entered, and
 //! nothing finer: not which statement on a line, which way a branch went, or
 //! which conditions decided. So it is credited by line, to a test of its own
 //! or to the run's background, and every line it credits is visibly its own:
-//! the test's runner is the tool that recorded it. A file the run did not
+//! the test is of kind `imported`, its runner `lines`. A file the run did not
 //! measure joins it with one statement per recorded line, and a limitation
 //! that says so. The run's own records are left exactly as they were.
 //!
@@ -13,8 +14,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Path, PathBuf},
-    process::Command,
+    path::Path,
 };
 
 use serde_json::{Value, json};
@@ -35,8 +35,8 @@ use crate::{
     source_manifest::{FileFingerprint, InputManifest, local_path},
 };
 
-/// The runner of an imported test: the format its evidence came in.
-pub const IMPORTED_RUNNER: &str = "lcov";
+/// The runner of an imported test: what its evidence can say.
+pub const IMPORTED_RUNNER: &str = "lines";
 /// The kind of an imported test, so `--kind` can pick or leave it out.
 pub const IMPORTED_KIND: &str = "imported";
 const BACKGROUND_RUNNER: &str = "background";
@@ -55,10 +55,8 @@ pub struct ImportRequest<'a> {
     pub root: &'a Path,
     /// The run to import into: an id, a prefix of one, or `latest`.
     pub run: Option<&'a str>,
-    /// An LCOV file, or an LLVM `.profraw`/`.profdata` with `objects`.
+    /// An LCOV tracefile.
     pub evidence: &'a Path,
-    /// The binaries an LLVM profile was recorded from.
-    pub objects: &'a [PathBuf],
     pub credit: Credit,
     /// The imported test's outcome, where it is known.
     pub status: Option<&'a str>,
@@ -139,7 +137,7 @@ fn parse_lcov(text: &str) -> Result<BTreeMap<String, RecordedFile>, String> {
                         let slot = record.lines.entry(line).or_default();
                         *slot = slot.saturating_add(count);
                     }
-                    // FN:<line>,<name> or, in lcov 2, FN:<line>,<end>,<name>
+                    // FN:<line>,<name> or, in LCOV 2, FN:<line>,<end>,<name>
                     "FN" if fields.len() >= 2 => {
                         let line = usize::try_from(number(fields[0], "FN line", at)?)
                             .map_err(|_| format!("line {at}: FN line out of range"))?;
@@ -170,104 +168,11 @@ fn parse_lcov(text: &str) -> Result<BTreeMap<String, RecordedFile>, String> {
     Ok(files)
 }
 
-/// An LLVM tool: where `LLVM_PROFDATA`/`LLVM_COV` say, else the one Rust's
-/// `llvm-tools` component installs, else whatever `PATH` has.
-fn llvm_tool(name: &str) -> PathBuf {
-    let variable = name.to_uppercase().replace('-', "_");
-    if let Some(path) = std::env::var_os(&variable).filter(|path| !path.is_empty()) {
-        return PathBuf::from(path);
-    }
-    let output = |args: &[&str]| {
-        Command::new("rustc")
-            .args(args)
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    };
-    if let (Some(sysroot), Some(version)) = (output(&["--print", "sysroot"]), output(&["-vV"]))
-        && let Some(host) = version.lines().find_map(|line| line.strip_prefix("host: "))
-    {
-        let tool = Path::new(&sysroot)
-            .join("lib/rustlib")
-            .join(host)
-            .join("bin")
-            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-        if tool.is_file() {
-            return tool;
-        }
-    }
-    PathBuf::from(name)
-}
-
-/// An LLVM profile as LCOV, through `llvm-profdata` and `llvm-cov export`.
-fn profile_as_lcov(profile: &Path, objects: &[PathBuf], work: &Path) -> Result<String, String> {
-    if objects.is_empty() {
-        return Err(format!(
-            "{} is an LLVM profile: name the binary it was recorded from with --object",
-            profile.display()
-        ));
-    }
-    let indexed = if profile.extension().is_some_and(|ext| ext == "profdata") {
-        profile.to_owned()
-    } else {
-        fs::create_dir_all(work).map_err(|error| error.to_string())?;
-        let indexed = work.join("imported.profdata");
-        let tool = llvm_tool("llvm-profdata");
-        let merged = Command::new(&tool)
-            .args(["merge", "-sparse"])
-            .arg(profile)
-            .arg("-o")
-            .arg(&indexed)
-            .output()
-            .map_err(|error| {
-                format!(
-                    "could not run {}: {error}. Install it with `rustup component add llvm-tools`, or set LLVM_PROFDATA",
-                    tool.display()
-                )
-            })?;
-        if !merged.status.success() {
-            return Err(format!(
-                "llvm-profdata could not read {}: {}",
-                profile.display(),
-                String::from_utf8_lossy(&merged.stderr).trim()
-            ));
-        }
-        indexed
-    };
-    let tool = llvm_tool("llvm-cov");
-    let mut command = Command::new(&tool);
-    command
-        .args(["export", "-format=lcov", "-instr-profile"])
-        .arg(&indexed)
-        .arg(&objects[0]);
-    for object in &objects[1..] {
-        command.arg("-object").arg(object);
-    }
-    let exported = command.output().map_err(|error| {
-        format!(
-            "could not run {}: {error}. Install it with `rustup component add llvm-tools`, or set LLVM_COV",
-            tool.display()
-        )
-    })?;
-    if !exported.status.success() {
-        return Err(format!(
-            "llvm-cov could not export {}: {}",
-            profile.display(),
-            String::from_utf8_lossy(&exported.stderr).trim()
-        ));
-    }
-    String::from_utf8(exported.stdout).map_err(|_| "llvm-cov wrote non-UTF-8 LCOV".into())
-}
-
-fn is_llvm_profile(path: &Path, bytes: &[u8]) -> bool {
-    // `\xfflprofr\x81` (raw) and `\xfflprofi\x81` (indexed), little-endian
-    // as written on every host LLVM profiles: the magic's bytes reversed.
+/// An LLVM profile, raw or indexed, by its magic: `\xfflprofr\x81` and
+/// `\xfflprofi\x81`, little-endian as written on every host LLVM profiles.
+fn is_llvm_profile(bytes: &[u8]) -> bool {
     let magic = |kind: u8| [0x81, kind, b'f', b'o', b'r', b'p', b'l', 0xff];
     bytes.len() >= 8 && (bytes[..8] == magic(b'r') || bytes[..8] == magic(b'i'))
-        || path
-            .extension()
-            .is_some_and(|ext| ext == "profraw" || ext == "profdata")
 }
 
 /// The project file a recorded path names: under the project root, or, for
@@ -359,7 +264,7 @@ fn scope_status(manifest: &CoverageManifest, file: &str) -> Option<(String, Stri
 
 fn imported_runner_declaration() -> FrontendRunnerDeclaration {
     let unavailable = |suffix: &str, scope, reason: &str| FrontendLimitation {
-        id: format!("lcov-{suffix}-unavailable"),
+        id: format!("imported-lines-{suffix}-unavailable"),
         scopes: vec![scope],
         reason: reason.into(),
     };
@@ -453,29 +358,14 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
     let work = request.root.join(".supercov/work").join(request.run_id);
     let bytes = fs::read(request.evidence)
         .map_err(|error| format!("Cannot read {}: {error}", request.evidence.display()))?;
-    let text = if is_llvm_profile(request.evidence, &bytes) {
-        profile_as_lcov(request.evidence, request.objects, &work.join("profile"))
-    } else {
-        if !request.objects.is_empty() {
-            return Err(format!(
-                "--object is for an LLVM profile; {} is read as LCOV",
-                request.evidence.display()
-            ));
-        }
-        String::from_utf8(bytes).map_err(|_| {
-            format!(
-                "{} is neither LCOV nor an LLVM profile",
-                request.evidence.display()
-            )
-        })
-    };
-    let text = match text {
-        Ok(text) => text,
-        Err(error) => {
-            let _ = remove_stored_tree_deferred(request.root, &work);
-            return Err(error);
-        }
-    };
+    if is_llvm_profile(&bytes) {
+        return Err(format!(
+            "{} is an LLVM profile: export it as LCOV with LLVM's own tools first, as `supercov docs cli` shows",
+            request.evidence.display()
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("{} is not an LCOV tracefile", request.evidence.display()))?;
     let recorded = parse_lcov(&text).map_err(|error| {
         format!(
             "Cannot read {} as LCOV: {error}",
@@ -805,9 +695,6 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             parent.id.clone(),
             request.evidence.display().to_string(),
         ];
-        for object in request.objects {
-            command.extend(["--object".to_owned(), object.display().to_string()]);
-        }
         match &request.credit {
             Credit::Test(name) => command.extend(["--test".to_owned(), name.clone()]),
             Credit::Background => command.push("--background".to_owned()),
@@ -930,10 +817,11 @@ mod tests {
     }
 
     #[test]
-    fn llvm_profiles_are_known_by_magic_or_name() {
+    fn llvm_profiles_are_known_by_their_magic() {
         let raw = [0x81, b'r', b'f', b'o', b'r', b'p', b'l', 0xff, 0];
-        assert!(is_llvm_profile(Path::new("default.bin"), &raw));
-        assert!(is_llvm_profile(Path::new("x.profraw"), b""));
-        assert!(!is_llvm_profile(Path::new("lcov.info"), b"SF:a\n"));
+        let indexed = [0x81, b'i', b'f', b'o', b'r', b'p', b'l', 0xff];
+        assert!(is_llvm_profile(&raw));
+        assert!(is_llvm_profile(&indexed));
+        assert!(!is_llvm_profile(b"SF:a\nDA:1,1\n"));
     }
 }

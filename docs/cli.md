@@ -842,17 +842,16 @@ of what each test ran; a test in several of them is affected where any says so.
 
 Some code runs where Supercov cannot measure it: a deployed worker, a
 production container, a binary another tool built. If that environment can
-write LCOV, or an LLVM profile, add its lines to a run:
+write an LCOV tracefile, add its lines to a run:
 
 ```sh
 npx supercov import lcov.info --test "edge in production"
-npx supercov import default.profraw --object target/debug/edge --test "edge binary"
 npx supercov import lcov.info --background --run <run-id>
 ```
 
 The import publishes a new run made from the latest one (or the one `--run`
 names), and leaves that run as it was. The lines are credited to a test of
-their own, with runner `lcov` and kind `imported`, or to the run's background.
+their own, of kind `imported` with runner `lines`, or to the run's background.
 
 This evidence is line-only. A line that ran credits every statement on it, and
 a function that was entered credits the function. Branches, decisions and MC/DC
@@ -866,9 +865,15 @@ one measured file a path ends with, such as `/app/src/lib.rs` for
 names a line past the end of a file, it was recorded from other source, and
 the import refuses it.
 
-An LLVM profile needs the binaries it was recorded from (`--object`, repeated
-for more), and `llvm-profdata` and `llvm-cov`: from `rustup component add
-llvm-tools`, from `PATH`, or from `LLVM_PROFDATA` and `LLVM_COV`.
+Supercov runs no other coverage tool. A profile another tool recorded is
+exported as LCOV by that tool first. For an LLVM profile from a binary built
+with `-C instrument-coverage`, with `rustup component add llvm-tools`:
+
+```sh
+llvm-profdata merge -sparse default.profraw -o edge.profdata
+llvm-cov export -format=lcov -instr-profile edge.profdata target/debug/edge > edge.info
+npx supercov import edge.info --test "edge binary"
+```
 
 ## Clean local data
 

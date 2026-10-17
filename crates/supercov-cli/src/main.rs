@@ -70,7 +70,7 @@ Compare, combine, and maintain:
   supercov diff <older> <newer>        compare two runs
   supercov report [run-id]             open a portable interactive HTML report
   supercov merge [<id> <id> ...]       combine runs; with none, those on the current source
-  supercov import <lcov|profraw> --test <name>
+  supercov import <tracefile> --test <name>
                                        add line evidence measured where Supercov could not run
   supercov runs clean [--keep N]       remove stored runs (all by default)
   supercov quality clean [--keep N]    remove saved assessments
@@ -475,7 +475,7 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-const IMPORT_USAGE: &str = "Usage: supercov import <evidence> (--test <name> | --background) [--run <run-id>]\n                       [--object <binary>]... [--status passed|failed]\n\nAdds line evidence measured where Supercov could not run -- an LCOV file, or an LLVM profile\n(.profraw, .profdata) with the binaries it was recorded from -- to a run, as a new run. The\nlines are credited to a test of their own, or to the run's background, and only by line: the\nevidence says nothing of branches, decisions or which statement on a line ran. A file the run\ndid not measure joins it with one statement per recorded line.\n\n--test <name>     credit the lines to a test with this name (runner lcov, kind imported)\n--background      credit them to the run's background\n--run <run-id>    the run to add them to (default: the latest)\n--object <binary> a binary the LLVM profile was recorded from; repeat for more\n--status <status> the imported test's outcome, where it is known";
+const IMPORT_USAGE: &str = "Usage: supercov import <tracefile> (--test <name> | --background) [--run <run-id>]\n                       [--status passed|failed]\n\nAdds line evidence measured where Supercov could not run, as an LCOV tracefile, to a run, as a\nnew run. The lines are credited to a test of their own, or to the run's background, and only by\nline: the evidence says nothing of branches, decisions or which statement on a line ran. A file\nthe run did not measure joins it with one statement per recorded line. A profile another tool\nrecorded is exported as LCOV by that tool first: `supercov docs cli` shows how.\n\n--test <name>     credit the lines to a test with this name (kind imported, runner lines)\n--background      credit them to the run's background\n--run <run-id>    the run to add them to (default: the latest)\n--status <status> the imported test's outcome, where it is known";
 
 fn import_command(arguments: Vec<String>) -> ExitCode {
     if arguments
@@ -489,7 +489,6 @@ fn import_command(arguments: Vec<String>) -> ExitCode {
     let mut test = None;
     let mut background = false;
     let mut run = None;
-    let mut objects = Vec::new();
     let mut status = None;
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
@@ -512,7 +511,6 @@ fn import_command(arguments: Vec<String>) -> ExitCode {
                 Ok(())
             }
             "--run" => value("--run").map(|id| run = Some(id)),
-            "--object" => value("--object").map(|object| objects.push(PathBuf::from(object))),
             "--status" => value("--status").map(|value| status = Some(value)),
             _ if argument.starts_with('-') => Err(format!("unknown option {argument}")),
             _ if evidence.is_none() => {
@@ -559,7 +557,6 @@ fn import_command(arguments: Vec<String>) -> ExitCode {
             root: &root,
             run: run.as_deref(),
             evidence: &evidence,
-            objects: &objects,
             credit,
             status: status.as_deref(),
             run_id: &run_id,

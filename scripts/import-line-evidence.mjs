@@ -2,15 +2,17 @@
 //
 //   node scripts/import-line-evidence.mjs
 //
-// `supercov import` takes an LCOV file, or an LLVM profile with the binary
-// it was recorded from, and publishes a new run: the evidence's lines are
+// `supercov import` takes an LCOV tracefile and publishes a new run: the
+// evidence's lines are
 // credited, by line only, to a test of their own or to the run's background,
 // and a project file the run did not measure joins it with the lines the
 // evidence recorded. What the run measured itself is left as it was, the new
 // run is as current as the old one, and evidence of other source -- a line
 // past a file's end -- is refused rather than mixed in.
-// The LLVM half needs `llvm-tools`; a job that installed it sets
-// SUPERCOV_REQUIRE_LLVM_TOOLS=1, and then it may not be skipped.
+// Supercov runs no other coverage tool, so an LLVM profile is exported as
+// LCOV by LLVM's own tools first, here as a user would. That half needs
+// `llvm-tools`; a job that installed it sets SUPERCOV_REQUIRE_LLVM_TOOLS=1,
+// and then it may not be skipped.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -60,7 +62,7 @@ try {
   // The suite's own test is as it was.
   assert.deepEqual(lines(js, id, 'local adds one'), lines(js, parent, 'local adds one'));
   const line = supercov(js, 'runs', id, 'line', 'src/app.js:9').stdout;
-  assert.match(line, /edge in production \[imported:edge in production\] — imported\/lcov/u, line);
+  assert.match(line, /edge in production \[imported:edge in production\] — imported\/lines/u, line);
   // Line evidence says nothing of branches: the `if` stays unproven.
   const summary = supercov(js, 'runs', id);
   assert.match(summary.stdout, /Branches +0\.00% \(0\/2\)/u, summary.stdout);
@@ -85,11 +87,12 @@ try {
   assert.match(stale.stderr, /records line 40 of src\/app\.js, which has 10 lines/u, stale.stderr);
   assert.equal(supercov(js, 'import', 'lcov.info', '--run', parent).status, 2);
 
-  // An LLVM profile of a binary built outside Supercov, imported with the
-  // binary, into the run `cargo test` made of the same crate.
+  // An LLVM profile of a binary built outside Supercov, exported as LCOV with
+  // LLVM's tools and imported into the run `cargo test` made of the crate.
   const llvm = run(tmpdir(), 'rustc', ['--print', 'sysroot']).stdout.trim();
   const host = run(tmpdir(), 'rustc', ['-vV']).stdout.match(/^host: (.+)$/mu)?.[1];
-  const tools = host && existsSync(join(llvm, 'lib', 'rustlib', host, 'bin', `llvm-profdata${process.platform === 'win32' ? '.exe' : ''}`));
+  const tool = (name) => join(llvm, 'lib', 'rustlib', host ?? '', 'bin', `${name}${process.platform === 'win32' ? '.exe' : ''}`);
+  const tools = host && existsSync(tool('llvm-profdata')) && existsSync(tool('llvm-cov'));
   if (!tools) {
     assert.ok(process.env.SUPERCOV_REQUIRE_LLVM_TOOLS !== '1', 'llvm-tools is missing where the job installed it');
     console.log('[import-line-evidence] LLVM profile: skipped, needs `rustup component add llvm-tools`');
@@ -112,7 +115,15 @@ try {
     // Where LLVM writes it by default: in the project, as `default.profraw`.
     const ran = run(rust, edge, [], { LLVM_PROFILE_FILE: join(rust, 'default.profraw') });
     assert.equal(ran.stdout.trim(), 'big', ran.stderr);
-    const profile = supercov(rust, 'import', 'default.profraw', '--object', edge, '--test', 'edge binary', '--status', 'passed');
+    // The profile itself is refused, with the way to export it.
+    const raw = supercov(rust, 'import', 'default.profraw', '--test', 'edge binary');
+    assert.equal(raw.status, 2, raw.stdout + raw.stderr);
+    assert.match(raw.stderr, /is an LLVM profile: export it as LCOV/u, raw.stderr);
+    assert.equal(run(rust, tool('llvm-profdata'), ['merge', '-sparse', 'default.profraw', '-o', join(root, 'edge.profdata')]).status, 0);
+    const exported = run(rust, tool('llvm-cov'), ['export', '-format=lcov', '-instr-profile', join(root, 'edge.profdata'), edge]);
+    assert.equal(exported.status, 0, exported.stderr);
+    writeFileSync(join(root, 'edge.info'), exported.stdout);
+    const profile = supercov(rust, 'import', join(root, 'edge.info'), '--test', 'edge binary', '--status', 'passed');
     assert.equal(profile.status, 0, profile.stdout + profile.stderr);
     const rustRun = runOf(profile.stdout);
     const credited = lines(rust, rustRun, 'edge binary');
@@ -127,7 +138,7 @@ try {
     // The import's work leaves nothing behind.
     assert.deepEqual(readdirSync(join(rust, '.supercov', 'work')).filter((entry) => !entry.startsWith('.')), []);
   }
-  console.log('[import-line-evidence] LCOV and LLVM profiles add line-only evidence to a run, credited to a named test or the background');
+  console.log('[import-line-evidence] LCOV, also exported from an LLVM profile, adds line-only evidence to a run, credited to a named test or the background');
 } finally {
   if (!process.env.KEEP) rmSync(root, { recursive: true, force: true });
 }
