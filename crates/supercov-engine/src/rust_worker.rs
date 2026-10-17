@@ -161,7 +161,8 @@ fn worker_configs(root: &Path) -> Vec<PathBuf> {
                 }
                 continue;
             }
-            if !kind.is_file() || !matches!(name, "wrangler.toml" | "wrangler.json" | "wrangler.jsonc")
+            if !kind.is_file()
+                || !matches!(name, "wrangler.toml" | "wrangler.json" | "wrangler.jsonc")
             {
                 continue;
             }
@@ -180,7 +181,10 @@ fn worker_configs(root: &Path) -> Vec<PathBuf> {
 /// A configuration as JSON whatever it was written in.
 fn read_config(path: &Path) -> Option<(String, Value)> {
     let text = fs::read_to_string(path).ok()?;
-    let document = if path.extension().is_some_and(|extension| extension == "toml") {
+    let document = if path
+        .extension()
+        .is_some_and(|extension| extension == "toml")
+    {
         let table = text.parse::<toml::Table>().ok()?;
         serde_json::to_value(table).ok()?
     } else {
@@ -296,7 +300,10 @@ fn strip_jsonc(text: &str) -> String {
 fn rewrite_config(config: &WorkerConfig, entry: &str, port: u16) -> Result<(), String> {
     let path = &config.path;
     let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let rewritten = if path.extension().is_some_and(|extension| extension == "toml") {
+    let rewritten = if path
+        .extension()
+        .is_some_and(|extension| extension == "toml")
+    {
         let mut document = text
             .parse::<toml_edit::DocumentMut>()
             .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -422,11 +429,7 @@ fn poll(port: u16, windows: &Path, stop: &AtomicBool) {
 /// One inspector connection: enable the runtime, learn the Worker's
 /// execution context, and take its regions on the clock. Returns when the
 /// connection ends, or after the last take once the run is over.
-fn session(
-    socket: &mut tungstenite::WebSocket<TcpStream>,
-    file: &mut fs::File,
-    stop: &AtomicBool,
-) {
+fn session(socket: &mut tungstenite::WebSocket<TcpStream>, file: &mut fs::File, stop: &AtomicBool) {
     use tungstenite::{Error, Message};
     let send = |socket: &mut tungstenite::WebSocket<TcpStream>, message: Value| {
         socket
@@ -492,7 +495,10 @@ fn session(
                     awaiting = None;
                     let end = now_ms();
                     let regions = &message["result"]["result"]["value"];
-                    if regions.as_array().is_some_and(|regions| !regions.is_empty()) {
+                    if regions
+                        .as_array()
+                        .is_some_and(|regions| !regions.is_empty())
+                    {
                         let line = json!({"start": window_start, "end": end, "regions": regions});
                         let _ = writeln!(file, "{line}");
                     }
@@ -530,7 +536,10 @@ fn read_windows(directory: &Path) -> Result<Vec<Window>, String> {
             entries
                 .filter_map(Result::ok)
                 .map(|entry| entry.path())
-                .filter(|path| path.extension().is_some_and(|extension| extension == "windows"))
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "windows")
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -563,7 +572,9 @@ fn window_from(value: &Value) -> Option<Window> {
             let data = base64::engine::general_purpose::STANDARD
                 .decode(segment.get(1)?.as_str()?)
                 .ok()?;
-            bytes.get_mut(offset..offset + data.len())?.copy_from_slice(&data);
+            bytes
+                .get_mut(offset..offset + data.len())?
+                .copy_from_slice(&data);
         }
         regions.push((crate_key, bytes));
     }
@@ -653,8 +664,9 @@ impl RustWorkerServer {
             )
             .map_err(|error| error.to_string())?;
             let cfg = wasm_target_cfg(&cargo_root);
-            let project = crate::rust_project::prepare_rust_project_for(&cargo_root, None, cfg.as_ref())
-                .map_err(|error| error.to_string())?;
+            let project =
+                crate::rust_project::prepare_rust_project_for(&cargo_root, None, cfg.as_ref())
+                    .map_err(|error| error.to_string())?;
             let directory = root
                 .join(".supercov/work")
                 .join(run_id)
@@ -739,7 +751,12 @@ impl RustWorkerServer {
                 .and_then(Path::file_name)
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            note_kept_evidence(root, &evidence_directory, &format!("{run}-rust-worker"), error)
+            note_kept_evidence(
+                root,
+                &evidence_directory,
+                &format!("{run}-rust-worker"),
+                error,
+            )
         });
         let _ = remove_stored_tree_deferred(root, &self.directory);
         result
@@ -959,11 +976,13 @@ impl RustWorkerServer {
             &archive_path,
         )
         .map_err(|error| error.to_string())?;
-        let credited = served
-            .len()
-            .saturating_sub(run.request.raw_results.iter().filter(|result| {
-                result.attribution == crate::coverage_report::ATTRIBUTION_RUN_WIDE
-            }).count());
+        let credited = served.len().saturating_sub(
+            run.request
+                .raw_results
+                .iter()
+                .filter(|result| result.attribution == crate::coverage_report::ATTRIBUTION_RUN_WIDE)
+                .count(),
+        );
         let metadata = RunMetadata {
             integrity: self.integrity.clone(),
             raw_evidence: RawEvidenceMetadata {

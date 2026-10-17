@@ -578,8 +578,7 @@ pub fn run_direct_javascript(
     let serves_go = browser_suite
         && (root.join("go.mod").is_file()
             || !crate::go_project::workspace_modules(&root).is_empty());
-    let serves_rust_worker =
-        browser_suite && crate::rust_worker::RustWorkerServer::present(&root);
+    let serves_rust_worker = browser_suite && crate::rust_worker::RustWorkerServer::present(&root);
     let serves_jvm = browser_suite
         && [
             "pom.xml",
