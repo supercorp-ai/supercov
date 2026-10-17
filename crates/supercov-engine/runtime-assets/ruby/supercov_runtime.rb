@@ -1738,6 +1738,9 @@ module Supercov
           args = Supercov::Propagation.with_environment(runtime, args)
           super(*args, **kwargs, &block)
         end
+        # Private, as Kernel's own are: a public `system` would answer it
+        # sent to any object.
+        private :spawn, :system
       end)
       IO.singleton_class.prepend(Module.new do
         define_method(:popen) do |*args, **kwargs, &block|
@@ -1745,6 +1748,23 @@ module Supercov
           super(*args, **kwargs, &block)
         end
       end)
+      # `exec` replaces this process with another program: no `at_exit`
+      # runs, and what this one recorded would go with it. Close the
+      # evidence first, as exit would; the new program keeps the identity.
+      # (Should `exec` fail and the program go on, the rest of it is not
+      # measured.)
+      [Kernel, Kernel.singleton_class, Process.singleton_class].each do |owner|
+        owner.prepend(Module.new do
+          define_method(:exec) do |*args, **kwargs|
+            args = Supercov::Propagation.with_environment(runtime, args)
+            runtime.close
+            super(*args, **kwargs)
+          end
+          # Kernel#exec is private: a public one would answer `exec` sent to
+          # any object, a delegator's database connection's included.
+          private :exec if owner == Kernel
+        end)
+      end
     end
 
     def self.with_environment(runtime, args)
