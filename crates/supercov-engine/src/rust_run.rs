@@ -271,6 +271,7 @@ pub fn run_direct_rust(
                 crate_roots: Vec::new(),
                 runtime_module: String::new(),
                 manifest: cached.manifest,
+                probes: cached.probes,
                 preparation: Default::default(),
             }
         } else {
@@ -370,6 +371,7 @@ pub fn run_direct_rust(
             // The manifest the run reported: pruned to what the build
             // compiled, so a reused build reuses the same denominator.
             &run.request.manifest,
+            &project.probes,
             &run.artifact_files,
         )?;
 

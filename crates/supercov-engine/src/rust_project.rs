@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     coverage_report::CoverageManifest,
-    rust_instrumenter::{instrument_rust_file, test_code_path, test_item},
-    rust_runtime::render_rust_runtime,
+    rust_instrumenter::{instrument_rust_file_numbered, test_code_path, test_item},
+    rust_runtime::render_rust_region_runtime,
 };
 
 const RUST_APPLICATION_SOURCE: &str = "Rust application source";
@@ -36,6 +36,8 @@ pub struct PreparedRustProject {
     pub crate_roots: Vec<String>,
     pub runtime_module: String,
     pub manifest: CoverageManifest,
+    /// The probes' numbering: a region's slots, by ordinal.
+    pub probes: crate::rust_instrumenter::RustProbeLayout,
     pub preparation: RustPreparationTimings,
 }
 
@@ -878,13 +880,23 @@ pub fn prepare_rust_project_for(
         scope: None,
         assertion_sites: Vec::new(),
     };
+    // One numbering spans the workspace: a file may be compiled into several
+    // crates, and every crate's runtime maps the same region.
+    let mut probes = crate::rust_instrumenter::RustProbeLayout::default();
     for (relative, source) in &sources {
         let test_file = tests.contains(relative) || test_code_path(relative);
-        let transformed = instrument_rust_file(relative, source, &runtime_path, test_file, cfg)
-            .map_err(|error| RustProjectError::Instrument {
-                file: relative.clone(),
-                reason: error.to_string(),
-            })?;
+        let transformed = instrument_rust_file_numbered(
+            relative,
+            source,
+            &runtime_path,
+            test_file,
+            cfg,
+            &mut probes,
+        )
+        .map_err(|error| RustProjectError::Instrument {
+            file: relative.clone(),
+            reason: error.to_string(),
+        })?;
         merge_manifest(&mut manifest, transformed.manifest)?;
         fs::write(workspace.join(relative), transformed.code).map_err(|error| {
             RustProjectError::Io {
@@ -899,11 +911,17 @@ pub fn prepare_rust_project_for(
     decline_proc_macro_obligations(&workspace, &proc_macro_roots, &mut manifest)?;
 
     let token = manifest_token(&manifest);
+    probes.token = token.clone();
     let mut crate_roots = Vec::new();
     for root in roots {
         let relative = confined_relative(&workspace, &root)?;
-        let runtime = render_rust_runtime(&runtime_module, &crate_key(&token, &relative))
-            .map_err(RustProjectError::Runtime)?;
+        let runtime = render_rust_region_runtime(
+            &runtime_module,
+            &token,
+            &crate_key(&token, &relative),
+            &probes,
+        )
+        .map_err(RustProjectError::Runtime)?;
         let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
             path: root.clone(),
             reason: error.to_string(),
@@ -978,6 +996,7 @@ pub fn prepare_rust_project_for(
         crate_roots,
         runtime_module,
         manifest,
+        probes,
         preparation,
     })
 }
@@ -1423,7 +1442,22 @@ fn integration_choice() {
         // The one function in it carries one function probe: instrumented
         // once, through whichever spelling reached it first.
         let instrumented = fs::read_to_string(root.join("src/shared.rs")).unwrap();
-        assert_eq!(instrumented.matches("rs:function:").count(), 1);
+        let function = prepared
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.file == "src/shared.rs" && point.id.starts_with("rs:function:"))
+            .expect("the shared function's probe");
+        let ordinal = prepared
+            .probes
+            .hits
+            .iter()
+            .position(|id| id == &function.id)
+            .unwrap();
+        assert_eq!(
+            instrumented.matches(&format!("::hit({ordinal});")).count(),
+            1
+        );
         let build = Command::new("cargo")
             .args(["test", "--no-run"])
             .current_dir(&root)

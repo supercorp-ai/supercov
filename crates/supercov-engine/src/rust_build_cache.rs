@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{coverage_report::CoverageManifest, lifecycle::atomic_write, run_store::RunIntegrity};
 
-pub const RUST_BUILD_CACHE_SCHEMA_VERSION: u32 = 1;
+pub const RUST_BUILD_CACHE_SCHEMA_VERSION: u32 = 2;
 const CACHE_FILE: &str = ".supercov/rust-build-cache.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +32,8 @@ pub struct RustBuildCacheMetadata {
     pub instrumented_source_sha256: String,
     pub artifacts: Vec<RustArtifactFingerprint>,
     pub manifest: CoverageManifest,
+    /// The probes' numbering the cached build was compiled with.
+    pub probes: crate::rust_instrumenter::RustProbeLayout,
 }
 
 #[derive(Serialize)]
@@ -203,6 +205,9 @@ pub fn read_rust_build_cache(
     Some(metadata)
 }
 
+// The manifest and the probes' numbering are the instrumentation the cached
+// build was compiled with; they are written together.
+#[allow(clippy::too_many_arguments)]
 pub fn write_rust_build_cache(
     project_root: &Path,
     workspace: &Path,
@@ -210,6 +215,7 @@ pub fn write_rust_build_cache(
     created_at: &str,
     source_files: &[String],
     manifest: &CoverageManifest,
+    probes: &crate::rust_instrumenter::RustProbeLayout,
     artifacts: &[PathBuf],
 ) -> Result<RustBuildCacheMetadata, String> {
     let mut source_files = source_files.to_vec();
@@ -226,6 +232,7 @@ pub fn write_rust_build_cache(
         instrumented_source_sha256,
         artifacts: fingerprint_artifacts(&target_directory, artifacts)?,
         manifest: manifest.clone(),
+        probes: probes.clone(),
     };
     let mut bytes = serde_json::to_vec_pretty(&metadata).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
@@ -288,6 +295,7 @@ mod tests {
             "time",
             &["tests/test.rs".into(), "src/lib.rs".into()],
             &manifest,
+            &crate::rust_instrumenter::RustProbeLayout::default(),
             &[target.join("debug/test-bin")],
         )
         .unwrap();

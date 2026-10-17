@@ -38,7 +38,7 @@ use crate::{
     },
     evidence_archive::EvidenceArchiveEntry,
     rust_project::PreparedRustProject,
-    rust_runtime::{RustProbeObservation, read_rust_probe_directory},
+    rust_runtime::{RustProbeObservation, read_rust_region_directory},
     rust_test_context::preflight_rust_test_contexts,
 };
 
@@ -1054,6 +1054,7 @@ struct PendingRecord {
 /// its records from one.
 pub(crate) fn snapshot(
     manifest: &CoverageManifest,
+    probes: &crate::rust_instrumenter::RustProbeLayout,
     directory: &Path,
     attempt: &str,
 ) -> Result<RustEvidence, RustTestRunnerError> {
@@ -1099,13 +1100,9 @@ pub(crate) fn snapshot(
     // test may build and run a program instrumented on its own -- a fixture
     // prepared inside the instrumented workspace -- and that program
     // inherits the evidence directory; its obligations are not this run's.
-    let token = crate::rust_project::manifest_token(manifest);
-    for (name, observations) in read_rust_probe_directory(directory)
+    for (_, observations) in read_rust_region_directory(directory, &probes.token, probes)
         .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?
     {
-        if !name.starts_with(&token) {
-            continue;
-        }
         for entry in observations {
             sequence += 1;
             let thread = entry.thread;
@@ -1798,11 +1795,7 @@ pub fn run_prepared_rust_tests(
                                 &target_libdir,
                                 &task.artifact.executable,
                             ))
-                            .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
-                            .env(
-                                crate::rust_probe_transport::RUST_CONTEXT_ENV,
-                                format!("{:016x}", task.context_id),
-                            ),
+                            .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory),
                     )
                     .map(|output| ProcessOutcome {
                         task: ProcessTask {
@@ -1922,7 +1915,7 @@ pub fn run_prepared_rust_tests(
         if exit != 0 {
             overall_exit = exit;
         }
-        let evidence = snapshot(&project.manifest, &directory, &attempt_id)?;
+        let evidence = snapshot(&project.manifest, &project.probes, &directory, &attempt_id)?;
         results.push(RawTestResult {
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
