@@ -2858,6 +2858,55 @@ mod tests {
         assert_eq!(strip_location("no location"), "no location");
     }
 
+    /// A helper file's named definitions, so a test is sent only the helpers
+    /// it names: methods with their bodies (a brace on its own line too),
+    /// Kotlin functions, RSpec `let` and `subject`, Rust items.
+    #[test]
+    fn helper_definitions_are_read_the_way_each_language_declares_them() {
+        let names = |language: Language, text: &str| {
+            let lines = text.split('\n').collect::<Vec<_>>();
+            definitions(&lines, language)
+                .into_iter()
+                .map(|(name, start, end)| format!("{name} {}-{}", start + 1, end + 1))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(
+                Language::Jvm,
+                "class Helpers {\n  static int total(int a) {\n    return a;\n  }\n  private static final Map<String, Integer> PRICES = Map.of(\"a\", 1);\n  public <T> List<T> wrap(T value)\n  {\n    return List.of(value);\n  }\n  void call() { helper(1); }\n}\n"
+            ),
+            ["total 2-4", "wrap 6-9", "call 10-10"]
+        );
+        assert_eq!(
+            names(
+                Language::Jvm,
+                "object Fixtures {\n    private fun price(x: Int) = x * 2\n    val list = listOf(1).map { it }\n    suspend fun later() {\n    }\n}\n"
+            ),
+            ["price 2-2", "later 4-5"]
+        );
+        assert_eq!(
+            names(
+                Language::Ruby,
+                "module Helpers\n  def self.make(x)\n    x\n  end\n  let(:order) { 1 }\n  let!(:user) { 2 }\n  subject(:cart) { 3 }\n  subject { 4 }\n  def valid?\n    true\n  end\nend\n"
+            ),
+            [
+                "make 2-4",
+                "order 5-5",
+                "user 6-6",
+                "cart 7-7",
+                "subject 8-8",
+                "valid? 9-11"
+            ]
+        );
+        assert_eq!(
+            names(
+                Language::Rust,
+                "pub fn make() -> u8 {\n    1\n}\npub(crate) const LIMIT: u8 = 2;\nstruct Point {\n    x: u8,\n}\n"
+            ),
+            ["make 1-3", "LIMIT 4-4", "Point 5-7"]
+        );
+    }
+
     #[test]
     fn python_changes_follow_the_audit() {
         let source = "import os\n\n\ndef f(x):\n    \"\"\"Docs.\"\"\"\n    y = x + 1\n    if y > 2:\n        return y\n    z: int\n    count += 1\n    return\ndef g(v):\n    if v:\n        pass\n    elif v is None:\n        pass\n";
