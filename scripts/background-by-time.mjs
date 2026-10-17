@@ -14,25 +14,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer as createNetServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
+import { freePorts } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 // Inside the repository, so the suite finds its Playwright.
 const root = resolve(repository, 'target', `background-by-time-${process.pid}-${Date.now()}`);
-// Ports the system says are free: a random one in a fixed range met a
-// process another gate left listening on a CI runner (EADDRINUSE).
-const freePort = () =>
-  new Promise((settle, fail) => {
-    const server = createNetServer();
-    server.once('error', fail);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close(() => settle(port));
-    });
-  });
-const [app, stripe, ...workerPorts] = await Promise.all(Array.from({ length: 6 }, freePort));
+const [app, stripe, ...workerPorts] = await freePorts(6);
 const workers = [workerPorts.slice(0, 2), workerPorts.slice(2, 4)];
 
 const files = {

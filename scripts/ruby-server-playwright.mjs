@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { freePorts } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
@@ -19,8 +20,7 @@ const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/
 const ruby = process.env.SUPERCOV_RUBY ?? ['/opt/homebrew/opt/ruby/bin/ruby'].find((candidate) => existsSync(candidate)) ?? 'ruby';
 const rubyBin = ruby.includes('/') ? dirname(ruby) : undefined;
 const root = resolve(repository, 'target', `ruby-server-playwright-${process.pid}-${Date.now()}`);
-const port = 48000 + Math.floor(Math.random() * 1500);
-const stripe = port + 1;
+const [port, stripe] = await freePorts(2);
 
 if (process.platform === 'win32') {
   console.log('[ruby-server-playwright] skipped on Windows: the fixture starts its mock through env -u');
