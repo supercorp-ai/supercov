@@ -642,6 +642,85 @@ fn main() {
     }
 
     #[test]
+    fn a_statement_after_one_the_target_strips_keeps_its_probe() {
+        // semver's identifier.rs: the probe of the line after a stripped
+        // statement goes right after that statement's `;`, and was dropped
+        // with it, so a line every test ran read as never executed.
+        let source = r#"fn width(value: u64) -> u32 {
+    #[cfg(target_endian = "little")]
+    let zero = value.leading_zeros();
+    #[cfg(target_endian = "big")]
+    let zero = value.trailing_zeros();
+
+    let bytes = 8 - zero / 8;
+    bytes
+}
+
+fn main() {
+    println!("{}", width(1));
+}
+"#;
+        let endian = if cfg!(target_endian = "little") {
+            "little"
+        } else {
+            "big"
+        };
+        let cfg =
+            crate::rust_instrumenter::TargetCfg::new(&[format!("target_endian=\"{endian}\"")
+                .parse::<cargo_platform::Cfg>()
+                .unwrap()]);
+        let transformed = crate::rust_instrumenter::instrument_rust_file(
+            "src/main.rs",
+            source,
+            "crate::__supercov_runtime_v1",
+            false,
+            Some(&cfg),
+        )
+        .unwrap();
+        let after = transformed
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.line == 7)
+            .unwrap()
+            .id
+            .clone();
+        let runtime = region_runtime(&transformed.probes);
+        let directory = temporary_directory("stripped-neighbour");
+        let input = directory.join("main.rs");
+        let binary = directory.join("program");
+        let evidence = directory.join("evidence");
+        fs::write(&input, format!("{}\n{runtime}", transformed.code)).unwrap();
+        let compile = Command::new("rustc")
+            .arg("--edition=2024")
+            .arg(&input)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let output = Command::new(&binary)
+            .env("SUPERCOV_RUST_EVIDENCE_DIR", &evidence)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let hits = read_regions(&evidence, &transformed.probes)
+            .into_values()
+            .flatten()
+            .filter_map(|entry| match entry.observation {
+                RustProbeObservation::Hit { id } => Some(id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(hits.contains(&after), "{after} not among {hits:?}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn the_runtime_records_which_gated_code_the_compiler_built() {
         let source = r#"#[cfg(feature = "on")]
 fn built() -> u8 {

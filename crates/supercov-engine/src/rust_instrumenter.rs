@@ -2865,13 +2865,46 @@ pub fn instrument_rust_file_numbered(
 
     // Nothing survives in code the compiler leaves out; a probe there would
     // name an obligation the manifest no longer has, if the item were built.
+    // A probe at either edge belongs to its neighbour: the next statement's
+    // probe goes right after a stripped statement's `;` (semver's
+    // `#[cfg(target_endian = "big")] let ..;` took the probe of the line
+    // after it). A wrapper goes or stays whole, by the span it encloses.
     if !compiled_out.is_empty() {
-        insertions.retain(|insertion| {
-            !compiled_out.iter().any(|range| {
-                usize::from(range.start()) <= insertion.offset
-                    && insertion.offset <= usize::from(range.end())
+        let within = |start: usize, end: usize| {
+            compiled_out
+                .iter()
+                .any(|range| usize::from(range.start()) <= start && end <= usize::from(range.end()))
+        };
+        let strictly_inside = |offset: usize| {
+            compiled_out.iter().any(|range| {
+                usize::from(range.start()) < offset && offset < usize::from(range.end())
             })
-        });
+        };
+        let mut kept = Vec::with_capacity(insertions.len());
+        let mut pending = insertions.into_iter().peekable();
+        while let Some(insertion) = pending.next() {
+            match insertion.kind {
+                // `push_wrapper` pushes each wrapper's two halves together;
+                // a half without its pair is kept, as it was written.
+                InsertionKind::Start => {
+                    match pending.next_if(|next| next.kind == InsertionKind::End) {
+                        Some(end) if within(insertion.offset, end.offset) => {}
+                        Some(end) => {
+                            kept.push(insertion);
+                            kept.push(end);
+                        }
+                        None => kept.push(insertion),
+                    }
+                }
+                InsertionKind::End => kept.push(insertion),
+                InsertionKind::Direct => {
+                    if !strictly_inside(insertion.offset) {
+                        kept.push(insertion);
+                    }
+                }
+            }
+        }
+        insertions = kept;
     }
     // Only the assertion markers survive in test code, and only the sites
     // they name stay in the manifest.
