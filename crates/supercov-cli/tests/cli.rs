@@ -789,7 +789,7 @@ fn a_mocking_test_resolves_paths_a_later_preload_maps() {
     );
     project.write(
         "test/app.test.js",
-        "const { mock, test } = require('node:test');\nconst assert = require('node:assert/strict');\nmock.module('../src/clock.js', { exports: { now: () => 7 } });\ntest('stamps a line', () => {\n  const { stamp } = require('../src/app.js');\n  assert.equal(stamp('a'), 'log: a at 7');\n});\n",
+        "const { mock, test } = require('node:test');\nconst assert = require('node:assert/strict');\nmock.module('../src/clock.js', { namedExports: { now: () => 7 } });\ntest('stamps a line', () => {\n  const { stamp } = require('../src/app.js');\n  assert.equal(stamp('a'), 'log: a at 7');\n});\n",
     );
     let command = [
         "node",
