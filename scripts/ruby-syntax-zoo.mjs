@@ -281,6 +281,39 @@ end
   rescue
   end
 
+  # A guarded body that ends in a jump with several values: its completion
+  # is the jump's own value.
+  def self.begin_return(value)
+    begin
+      Integer(value)
+      return value, :parsed
+    rescue ArgumentError
+      :bad
+    end
+  end
+
+  def self.begin_splat(items, rounds = [1])
+    rounds.each do
+      begin
+        items.fetch(0)
+        break *items
+      rescue IndexError
+        break :empty
+      end
+    end
+  end
+
+  def self.begin_next(items)
+    items.map do |item|
+      begin
+        Integer(item)
+        next item, 1
+      rescue ArgumentError
+        next 0
+      end
+    end
+  end
+
   def self.literal_unless(value)
     unless true
       value = :never
@@ -396,6 +429,16 @@ class ZooTest < Minitest::Test
       assert_raises(NotImplementedError) { Edges.public_send(name, NotImplementedError) }
     end
     assert_equal 'AB', Edges.literal_unless(:ab)
+    assert_equal ['3', :parsed], Edges.begin_return('3')
+    assert_equal :bad, Edges.begin_return('x')
+    assert_equal [1, 2], Edges.begin_splat([1, 2])
+    assert_equal :empty, Edges.begin_splat([])
+    assert_equal [['1', 1], 0], Edges.begin_next(%w[1 x])
+    assert_equal [], Edges.begin_next([])
+    assert_raises(TypeError) { Edges.begin_return(nil) }
+    assert_raises(NoMethodError) { Edges.begin_splat(nil) }
+    assert_equal [], Edges.begin_splat([1], [])
+    assert_raises(TypeError) { Edges.begin_next([nil]) }
   end
 
   def test_literals
