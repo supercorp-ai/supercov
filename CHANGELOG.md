@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.17.1
+
+**Fixed**
+
+- Assessment asked only one test about a statement at a module's top level (`const limit = 10;`, `const router = express.Router()`): it runs once, when the first test loads the module, and was recorded for that test alone, often one an auth check turned away, so it read "1 of 1 asked, not asserted". Every test that runs the module's functions now counts as running it too, after the test that loaded it. JavaScript, TypeScript and Python.
+
 ## 4.17.0
 
 **Added**
