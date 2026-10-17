@@ -31,6 +31,7 @@ pub mod jvm_project;
 pub mod jvm_run;
 pub mod lifecycle;
 pub mod orchestration;
+pub mod outside_evidence;
 pub mod owned_evidence;
 pub mod owned_server;
 pub mod patch_view;
