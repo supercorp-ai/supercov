@@ -1,20 +1,18 @@
 # Changelog
 
-## Unreleased
+## 4.16.0
 
 **Fixed**
 
-- A Django project was not recognised: `supercov -- python manage.py test` said it could not find the language when the project declares itself only by `manage.py` and `requirements.txt`. Django's runner is now measured like unittest, each test credited with its own coverage.
-- A Python test in a class whose method name another class in the file also uses (`TestCart::test_total` and `TestOrder::test_total`) was assessed with the first one's code, and so were a Minitest test (`CartTest#test_total`), a Rust test in one of several inline modules (`cart::tests::works`) and a JavaScript test in one of several `describe` groups (`cart > totals`, `order > totals`), whose title could also match an import. Each is now found in the class, module or group its name gives.
-- A JUnit test in a `@Nested` class whose method name another nested class also uses (`WhenEmpty.total()` and `WithItems.total()`) was assessed with the first class's test code. Each test is now found in its own class.
-- A Rust test run through a package script lost the arguments given after the script's name: `supercov -- npm test -- adds` with `"test": "cargo test"` ran every test, where `npm test -- adds` runs only `adds`. They now reach Cargo as npm passes them.
-- A Rust test command run through a script (`npm test` running `cargo test`) was split differently from how `sh` runs it: an empty argument (`-- ''`) was dropped, a backslash in double quotes was removed (`"C:\work"` became `C:work`), and a line continuation was kept. It is split the way `sh` splits it now.
-- A Rails-style Ruby test whose name starts with a four-letter word (`test "adds numbers"`, `test "with a coupon"`) was read as a numbered minitest/spec example and its code was not found, so assessment asked about it without the test. It is found by its name now.
-- A Java project with two build files that both fail on warnings was told twice that Supercov "stopped the build failing on warnings" in its copy. Each relaxation is now said once.
-- A Next.js route handler at the root of `app/` (`app/route.ts`, serving `/`) was not wrapped like handlers deeper in `app/`, so what its `GET` or `POST` ran was not tied to the request that ran it. It is now.
-- A Rust condition in an array length (`[0; if WIDE { 4 } else { 2 }]`, or the same in a return type) runs at compile time and cannot be measured, but was counted as a decision no test evaluated: a gap no test could close. It is now declared unmeasured, like `const fn` bodies.
-- A Python test method deep in its file was sent to assessment with `...` before each of its class and decorator lines, as if lines were left out between adjacent decorators. `...` now marks only lines left out.
-- Rust assertion assessment asked about changes that could not compile or changed nothing: a raw pointer bound to a local (`let start = data.as_ptr();`) became `Default::default()`, a closure with a declared return type lost its braces (`|n: u8| -> u8 0`), and `Layout::new::<u8>()` was "changed" to `std::alloc::Layout::new::<u8>()`. Pointers now become `std::ptr::null()` or `null_mut()` through the locals that hold them, the closure keeps a block body, a value spelled with its path counts as the same value, and `.unwrap()` and `.expect()` give what they unwrap. A float `0.0` became `0.0` again and was skipped as no change; it now becomes `1.0`. A `None` became `Default::default()`, which is `None`; it now becomes `Some(Default::default())`.
+- Django projects are recognised: `supercov -- python manage.py test` measures Django's runner like unittest, each test credited with its own coverage, in projects that declare themselves only by `manage.py` and `requirements.txt`.
+- A Rust test run through a package script keeps its arguments: `supercov -- npm test -- adds` with `"test": "cargo test"` ran every test. The command is also split the way `sh` splits it, keeping empty arguments and backslashes in double quotes and joining line continuations.
+- Assessment shows each test its own code when tests in one file share a name: Python classes (`TestCart::test_total`, `TestOrder::test_total`), Minitest classes, JUnit `@Nested` classes, Rust inline modules and JavaScript `describe` groups.
+- A Rails-style Ruby test whose first word has four letters (`test "adds numbers"`) is found for assessment; it was read as a numbered minitest/spec example.
+- A Next.js route handler at the root of `app/` (`app/route.ts`) ties what it runs to the request that ran it, as deeper handlers do.
+- A Rust condition in an array length runs at compile time and is declared unmeasured, like a `const fn` body, instead of counting as a gap no test could close.
+- Rust assessment no longer asks about changes that cannot compile or change nothing: a raw pointer held in a local becomes `std::ptr::null()`, a closure with a return type keeps its braces, `0.0` becomes `1.0`, `None` becomes `Some(Default::default())`, and a value spelled with its path counts as the same value.
+- A Python test deep in its file is sent with `...` only where lines are left out, not between adjacent decorators.
+- A Java project with two build files is told once, not twice, that its build stopped failing on warnings.
 
 ## 4.15.0
 
