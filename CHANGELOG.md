@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A JUnit test in a `@Nested` class whose method name another nested class also uses (`WhenEmpty.total()` and `WithItems.total()`) was assessed with the first class's test code. Each test is now found in its own class.
 - A Rust test run through a package script lost the arguments given after the script's name: `supercov -- npm test -- adds` with `"test": "cargo test"` ran every test, where `npm test -- adds` runs only `adds`. They now reach Cargo as npm passes them.
 - A Rust test command run through a script (`npm test` running `cargo test`) was split differently from how `sh` runs it: an empty argument (`-- ''`) was dropped, a backslash in double quotes was removed (`"C:\work"` became `C:work`), and a line continuation was kept. It is split the way `sh` splits it now.
 - A Rails-style Ruby test whose name starts with a four-letter word (`test "adds numbers"`, `test "with a coupon"`) was read as a numbered minitest/spec example and its code was not found, so assessment asked about it without the test. It is found by its name now.

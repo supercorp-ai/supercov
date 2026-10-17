@@ -314,12 +314,45 @@ pub(super) fn locate(lines: &[&str], name: &str) -> Option<Located> {
     if method.is_empty() {
         return None;
     }
-    let start = lines.iter().position(|l| {
-        let t = l.trim_start();
+    // `Outer$Inner#method`: JUnit's `@Nested` classes reuse method names, so
+    // the method is looked for inside the class the name gives. A numbered
+    // segment is an anonymous class and names nothing to look for.
+    let class = name.split('#').next().unwrap_or(name);
+    let (mut from, mut to) = (0, lines.len());
+    for nested in class
+        .split('$')
+        .skip(1)
+        .filter(|part| !part.is_empty() && !part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        let declares = |line: &str| {
+            ["class ", "object "].iter().any(|keyword| {
+                line.match_indices(&format!("{keyword}{nested}"))
+                    .any(|(at, found)| {
+                        (at == 0 || !line.as_bytes()[at - 1].is_ascii_alphanumeric())
+                            && line[at + found.len()..]
+                                .chars()
+                                .next()
+                                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+                    })
+            })
+        };
+        let Some(at) = (from..to).find(|&i| declares(lines[i])) else {
+            break;
+        };
+        (from, to) = (at, (super::brace_end(lines, at) + 1).min(lines.len()));
+    }
+    let declares_method = |i: &usize| {
+        let t = lines[*i].trim_start();
         t.contains(&format!("void {method}("))
             || t.contains(&format!("fun {method}("))
             || t.contains(&format!("fun `{method}`("))
-    })?;
+    };
+    // A class longer than a body is read is searched past its first lines,
+    // then the whole file, rather than not at all.
+    let start = (from..to)
+        .find(declares_method)
+        .or_else(|| (from..lines.len()).find(declares_method))
+        .or_else(|| (0..lines.len()).find(declares_method))?;
     let indent = super::indent(lines[start]);
     let mut first = start;
     while first > 0 && {
@@ -362,6 +395,25 @@ pub(super) fn imports(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `@Nested` classes reuse method names: each test is found in its own.
+    #[test]
+    fn a_nested_test_is_found_in_its_own_class() {
+        let text = "class CartTest {\n  @Nested\n  class WhenEmpty {\n    @Test\n    void total() {\n      assertEquals(0, cart.total());\n    }\n  }\n\n  @Nested\n  class WithItems {\n    @Test\n    void total() {\n      assertEquals(3, cart.total());\n    }\n  }\n}\n";
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let at = |name: &str| locate(&lines, name).map(|found| found.start + 1);
+        assert_eq!(at("app.CartTest$WithItems#total()"), Some(13));
+        assert_eq!(at("app.CartTest$WhenEmpty#total()"), Some(5));
+        // Without a nested class, or with an anonymous one, the first.
+        assert_eq!(at("app.CartTest#total()"), Some(5));
+        assert_eq!(at("app.CartTest$1#total()"), Some(5));
+        let kotlin = "class CartSpec {\n    inner class Empty {\n        @Test\n        fun `has no total`() {}\n    }\n    inner class EmptyOther {\n        @Test\n        fun `has no total`() {}\n    }\n}\n";
+        let lines = kotlin.split('\n').collect::<Vec<_>>();
+        assert_eq!(
+            locate(&lines, "app.CartSpec$EmptyOther#has no total()").map(|found| found.start + 1),
+            Some(8)
+        );
+    }
     use crate::assertion_coverage::{Language, change_at};
 
     #[test]
