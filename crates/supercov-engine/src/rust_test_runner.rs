@@ -311,6 +311,9 @@ pub(crate) struct RustLibtestSelection {
 pub(crate) struct RustCargoExecutionSelection {
     pub run_libtests: bool,
     pub run_doctests: bool,
+    /// The command asked for every test, not `--doc` by name: Cargo then
+    /// runs doctests only for the selected packages that can have them.
+    pub implicit_doctests: bool,
     pub doctest_arguments: Vec<String>,
 }
 
@@ -792,6 +795,7 @@ pub(crate) fn rust_cargo_execution_selection(
         return Ok(RustCargoExecutionSelection {
             run_libtests: true,
             run_doctests: false,
+            implicit_doctests: false,
             doctest_arguments: Vec::new(),
         });
     }
@@ -845,6 +849,7 @@ pub(crate) fn rust_cargo_execution_selection(
     Ok(RustCargoExecutionSelection {
         run_libtests,
         run_doctests,
+        implicit_doctests: run_doctests && !doc,
         doctest_arguments,
     })
 }
