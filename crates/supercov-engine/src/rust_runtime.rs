@@ -720,6 +720,66 @@ fn main() {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A program that hands its process to another with `exec` -- a cache
+    /// front end handing over to the runner's Node -- runs no exit code; the
+    /// region is the file, so what it recorded is there anyway.
+    #[cfg(unix)]
+    #[test]
+    fn what_a_program_ran_before_exec_is_kept() {
+        let source = r#"use std::os::unix::process::CommandExt;
+
+fn restore(key: &str) -> &'static str {
+    if key.starts_with("v1-") { "hit" } else { "miss" }
+}
+
+fn main() {
+    let outcome = restore("v1-abc");
+    let error = std::process::Command::new("/bin/sh")
+        .args(["-c", &format!("echo {outcome}")])
+        .exec();
+    panic!("exec failed: {error}");
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let runtime = region_runtime(&transformed.probes);
+        let directory = temporary_directory("exec");
+        let input = directory.join("main.rs");
+        let binary = directory.join("program");
+        let evidence = directory.join("evidence");
+        fs::write(&input, format!("{}\n{runtime}", transformed.code)).unwrap();
+        let compile = Command::new("rustc")
+            .arg("--edition=2024")
+            .arg(&input)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let output = Command::new(&binary)
+            .env("SUPERCOV_RUST_EVIDENCE_DIR", &evidence)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hit\n");
+        let decisions = read_regions(&evidence, &transformed.probes)
+            .into_values()
+            .flatten()
+            .filter_map(|entry| match entry.observation {
+                RustProbeObservation::Decision {
+                    values, outcome, ..
+                } => Some((values, outcome)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decisions, [(vec![Some(true)], true)]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn the_runtime_records_which_gated_code_the_compiler_built() {
         let source = r#"#[cfg(feature = "on")]
