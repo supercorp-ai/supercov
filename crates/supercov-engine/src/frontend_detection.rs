@@ -104,12 +104,13 @@ fn supported_by_command(command_tokens: &[String]) -> Vec<(FrontendLanguage, &'s
         ));
     }
 
+    // Django's `manage.py test` runs unittest without naming it.
     let python_command = command_tokens.iter().any(|token| {
         matches!(
             token.as_str(),
             "pytest" | "py.test" | "unittest" | "tox" | "nox"
         )
-    });
+    }) || has_sequence(command_tokens, &["manage.py", "test"]);
     if python_command {
         launched.push((
             FrontendLanguage::Python,
@@ -200,9 +201,17 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
             ),
             (
                 FrontendLanguage::Python,
-                ["pyproject.toml", "pytest.ini", "tox.ini"]
-                    .iter()
-                    .any(|name| regular_file(&root.join(name))),
+                [
+                    "pyproject.toml",
+                    "pytest.ini",
+                    "tox.ini",
+                    "setup.py",
+                    "setup.cfg",
+                    "requirements.txt",
+                    "manage.py",
+                ]
+                .iter()
+                .any(|name| regular_file(&root.join(name))),
                 "Python project/test metadata exists and the test command is opaque",
             ),
             (
@@ -321,6 +330,31 @@ mod tests {
         }
         fs::create_dir(&root).unwrap();
         root
+    }
+
+    /// Django's runner is unittest under another name, in projects that
+    /// often declare themselves only by `manage.py` and `requirements.txt`.
+    #[test]
+    fn a_django_project_is_python_by_its_command_or_its_files() {
+        let root = fixture("django");
+        fs::write(root.join("manage.py"), "import django\n").unwrap();
+        fs::write(root.join("requirements.txt"), "django\n").unwrap();
+        let command = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            detect_frontends(&root, &command("python manage.py test shop")).frontends,
+            [FrontendLanguage::Python]
+        );
+        // A wrapper that names no runner still finds the project's Python.
+        assert_eq!(
+            detect_frontends(&root, &command("make test")).frontends,
+            [FrontendLanguage::Python]
+        );
+        // `manage.py` running something else is not a test run.
+        assert!(!command_launches_supported_frontend(
+            &root,
+            &command("python manage.py migrate")
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

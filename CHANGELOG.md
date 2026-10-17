@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A Django project was not recognised: `supercov -- python manage.py test` said it could not find the language when the project declares itself only by `manage.py` and `requirements.txt`. Django's runner is now measured like unittest, each test credited with its own coverage.
 - A Python test in a class whose method name another class in the file also uses (`TestCart::test_total` and `TestOrder::test_total`) was assessed with the first one's code, and so were a Minitest test (`CartTest#test_total`), a Rust test in one of several inline modules (`cart::tests::works`) and a JavaScript test in one of several `describe` groups (`cart > totals`, `order > totals`), whose title could also match an import. Each is now found in the class, module or group its name gives.
 - A JUnit test in a `@Nested` class whose method name another nested class also uses (`WhenEmpty.total()` and `WithItems.total()`) was assessed with the first class's test code. Each test is now found in its own class.
 - A Rust test run through a package script lost the arguments given after the script's name: `supercov -- npm test -- adds` with `"test": "cargo test"` ran every test, where `npm test -- adds` runs only `adds`. They now reach Cargo as npm passes them.
