@@ -157,6 +157,20 @@ pub(super) fn replacements(file: &str, source: &str, signatures: &Signatures) ->
                         // the `else` run.
                         let changed = if s.let_else().is_some() && pattern.starts_with("Some(") {
                             "None".to_owned()
+                        } else if s.let_else().is_some()
+                            && let Some((other, fallback)) = if pattern.starts_with("Ok(") {
+                                Some(("Err(", "Err(Default::default())"))
+                            } else if pattern.starts_with("Err(") {
+                                Some(("Ok(", "Ok(Default::default())"))
+                            } else {
+                                None
+                            }
+                        {
+                            // The other variant: `Result` has no default, and
+                            // `Default::default()` here never compiled.
+                            Some(typed(&value, ty.as_deref(), &crate_view))
+                                .filter(|changed| changed.starts_with(other))
+                                .unwrap_or_else(|| fallback.to_owned())
                         } else {
                             typed(&value, ty.as_deref(), &crate_view)
                         };
@@ -2063,5 +2077,159 @@ mod tests {
         for line in [25, 30, 36, 37] {
             assert_eq!(starts[&line][0].1, None, "line {line}");
         }
+    }
+}
+
+#[cfg(test)]
+mod edge_shape_tests {
+    use super::*;
+
+    /// The shapes at the edges of each reading: a loop that is no value, a
+    /// bare `return`, a `let` with nothing to change, `let`-`else` on each
+    /// variant, constructors the crate cannot call, and `Self` only as a
+    /// whole word.
+    #[test]
+    fn each_reading_takes_its_other_way() {
+        let lib = r#"pub struct Point { pub x: u8 }
+impl Point {
+    pub unsafe fn raw() -> Point { Point { x: 0 } }
+    pub fn generic<T>() -> Point { Point { x: 0 } }
+    pub fn origin() -> Point { Point { x: 0 } }
+    pub const ORIGIN: Point = Point { x: 0 };
+    pub const LIMIT: u8 = 9;
+    pub fn chain(&self) -> Vec<SelfRef> { Vec::new() }
+    pub fn mine(&self) -> MySelf { todo!() }
+    pub fn tail(&self) -> Self_ { todo!() }
+    pub fn me(&self) -> Option<Self> { None }
+}
+"#;
+        let source = r#"fn spins() {
+    loop {
+        break;
+    }
+}
+fn early(x: u8) {
+    if x > 1 {
+        return;
+    }
+    let pending;
+    pending = 1;
+    let Ok(v) = unknown(x) else {
+        return;
+    };
+    let Err(e) = unknown(x) else {
+        return;
+    };
+}
+fn made() -> Thing {
+    let m = Thing::with_capacity(3);
+    let n = thing::new();
+    let o = Point::origin();
+    m
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/parse.rs", source)].into_iter());
+        // Unsafe and generic functions, and a constant of another type, make
+        // nothing a test could be given.
+        let makers = signatures.makers["Point"]
+            .iter()
+            .map(|maker| maker.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(makers, ["origin", "ORIGIN"]);
+        // `Self` is replaced as a word, never inside one.
+        for (name, ty) in [
+            ("chain", "Vec<SelfRef>"),
+            ("mine", "MySelf"),
+            ("tail", "Self_"),
+            ("me", "Option<Point>"),
+        ] {
+            assert_eq!(signatures.returns[name].as_deref(), Some(ty), "{name}");
+        }
+        let r = replacements("src/parse.rs", source, &signatures);
+        let at = |line: usize| r.get(&line).map(|changes| changes[0].1.as_str());
+        // A loop that is no value and a bare `return` change nothing.
+        assert_eq!(at(2), None);
+        assert_eq!(at(8), None);
+        assert_eq!(at(10), None, "`let pending;` has no value");
+        assert_eq!(at(11), Some("0"));
+        // `let`-`else` takes the variant that runs the `else`, whatever the
+        // value's type: `Result` has no default.
+        assert_eq!(at(12), Some("Err(Default::default())"));
+        assert_eq!(at(15), Some("Ok(Default::default())"));
+        // A constructor read by name makes its type; one the crate cannot
+        // make, or a lowercase path, is no constructor.
+        assert_eq!(at(20), Some("Default::default()"));
+        assert_eq!(at(21), Some("Default::default()"));
+        assert_eq!(at(22), Some("Point::ORIGIN"));
+        let starts = statement_starts(source);
+        assert_eq!(starts[&2][0].1, Some(Change::Skip));
+        assert_eq!(starts[&8][0].1, Some(Change::Skip));
+        assert_eq!(starts[&10][0].1, None);
+        assert_eq!(starts[&12][0].1, Some(Change::ValueUndefined));
+    }
+
+    /// Types read from an expression's shape, through `match`, `if`/`else
+    /// if`, `?`, generics, tuples, arrays, comparisons and references.
+    #[test]
+    fn a_type_read_from_shapes_changes_the_value_it_belongs_to() {
+        let lib = "pub fn parse(t: &str) -> Result<u8, Error> { todo!() }\npub struct Error;\npub struct P;\nimpl std::ops::Add for P {\n    type Output = P;\n    fn add(self, o: P) -> Self::Output { o }\n}\n";
+        let source = r#"fn f(r: Wrapper, b: Box<u8>, t: &str, a: f64, z: f64, file: File) -> u8 {
+    let w = match r {
+        Ok(x) => x,
+        Err(_) => 0,
+    };
+    let j = if a > z { 1 } else if a < z { 2 } else { 3 };
+    let o = if a > z { Ordering::Less } else { std::cmp::Ordering::Greater };
+    let q = match a { _ => cmp::Ordering::Equal };
+    let n = b?;
+    let g: Result<u8,> = parse(t);
+    let (q1, q2): (u8, u8, u8) = triple();
+    let arr: [u8; 2] = [1, 2];
+    let rep = [0u8; 4];
+    let rep2 = [a; 4];
+    let pc = a.partial_cmp(&z);
+    let pc2 = PartialOrd::partial_cmp(&a, &z);
+    let r3 = &t[1..];
+    let rd = file.read();
+    let Ok(parsed) = parse(t) else {
+        return 0;
+    };
+    w
+}
+"#;
+        let signatures = signatures([("src/lib.rs", lib), ("src/f.rs", source)].into_iter());
+        let r = replacements("src/f.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        // `Ok(x) => x` of something that is no `Result` says nothing.
+        assert_eq!(at(2), "Default::default()");
+        assert_eq!(at(6), "Default::default()");
+        assert_eq!(
+            r[&6][1..].iter().map(|c| c.1.as_str()).collect::<Vec<_>>(),
+            ["0", "0", "0"]
+        );
+        assert_eq!(
+            at(7),
+            "(if a > z { Ordering::Less } else { std::cmp::Ordering::Greater }).reverse()"
+        );
+        assert_eq!(r[&7][1].1, "Ordering::Greater");
+        assert_eq!(r[&7][2].1, "Ordering::Less");
+        assert_eq!(at(8), "(match a { _ => cmp::Ordering::Equal }).reverse()");
+        assert_eq!(at(9), "Default::default()", "a `Box` is no `Result`");
+        assert_eq!(at(10), "Err(Default::default())");
+        assert_eq!(at(11), "{ let mut v = triple(); v.0 = v.0 ^ 1; v }");
+        assert_eq!(at(12), "[0, 2]");
+        assert_eq!(at(13), "[1u8; 4]");
+        assert_eq!(at(14), "[0.0; 4]");
+        assert_eq!(
+            at(15),
+            "(a.partial_cmp(&z)).map(std::cmp::Ordering::reverse)"
+        );
+        assert_eq!(
+            at(16),
+            "(PartialOrd::partial_cmp(&a, &z)).map(std::cmp::Ordering::reverse)"
+        );
+        assert_eq!(at(17), "&t[..0]");
+        assert_eq!(at(18), "Default::default()", "`file` is no pointer");
+        assert_eq!(at(19), "Err(Default::default())");
     }
 }
