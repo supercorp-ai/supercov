@@ -2532,3 +2532,54 @@ mod tests {
         assert_eq!(result.exit_code(), 0);
     }
 }
+
+#[cfg(test)]
+mod console_name_tests {
+    use super::*;
+
+    /// A path Go prints from the copy (`../../../../pkg/a.go`) reads as it
+    /// would from the project, wherever it stands in the line and with either
+    /// separator; text that only contains the prefix inside a word, or reaches
+    /// above the project, is left as printed.
+    #[test]
+    fn a_path_printed_from_the_copy_reads_from_the_project() {
+        let names = ConsoleNames {
+            places: Vec::new(),
+            up_to_the_project: Some("../../".into()),
+        };
+        for (printed, shown) in [
+            ("../../pkg/a.go:12: failed", "pkg/a.go:12: failed"),
+            ("--- FAIL ../../a.go done", "--- FAIL ./a.go done"),
+            ("at ..\\..\\pkg\\a.go:3", "at pkg\\a.go:3"),
+            ("x../../pkg/a.go", "x../../pkg/a.go"),
+            ("../../../outside.go", "../../../outside.go"),
+            ("nothing to see", "nothing to see"),
+        ] {
+            assert_eq!(names.line(printed), shown, "{printed}");
+        }
+        let plain = ConsoleNames::default();
+        assert_eq!(plain.line("../../a.go"), "../../a.go");
+    }
+
+    #[test]
+    fn a_zero_interval_or_timeout_is_refused() {
+        let zero = Duration::ZERO;
+        for options in [
+            SupervisionOptions {
+                diagnostic_interval: zero,
+                ..SupervisionOptions::default()
+            },
+            SupervisionOptions {
+                termination_grace: zero,
+                ..SupervisionOptions::default()
+            },
+            SupervisionOptions {
+                timeout: Some(zero),
+                ..SupervisionOptions::default()
+            },
+        ] {
+            assert!(validate_options(options).is_err(), "{options:?}");
+        }
+        assert!(validate_options(SupervisionOptions::default()).is_ok());
+    }
+}
