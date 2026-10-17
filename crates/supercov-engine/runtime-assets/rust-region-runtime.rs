@@ -497,11 +497,14 @@ mod __SUPERCOV_MODULE__ {
             let state = unsafe { &*base.add(entry).cast::<AtomicU8>() };
             match state.load(Ordering::Acquire) {
                 2 => {
-                    // SAFETY: a readable entry is never written again.
+                    // SAFETY: a readable entry is never written again. The
+                    // values are only 8-aligned (the table follows the 8-byte
+                    // slots), and x86_64 loads a u128 with an aligned SSE move
+                    // that faults on anything less than 16: unaligned access.
                     let same = unsafe {
                         base.add(entry + 1).read() == tag.0
                             && base.add(entry + 2).read() == tag.1
-                            && base.add(entry + 16).cast::<u128>().read() == frame.values
+                            && base.add(entry + 16).cast::<u128>().read_unaligned() == frame.values
                     };
                     if same {
                         return;
@@ -517,7 +520,7 @@ mod __SUPERCOV_MODULE__ {
                     unsafe {
                         base.add(entry + 1).write(tag.0);
                         base.add(entry + 2).write(tag.1);
-                        base.add(entry + 16).cast::<u128>().write(frame.values);
+                        base.add(entry + 16).cast::<u128>().write_unaligned(frame.values);
                     }
                     atomic_u64(base, entry + 8).store((sequence << 32) | thread() as u64, Ordering::Relaxed);
                     state.store(2, Ordering::Release);
