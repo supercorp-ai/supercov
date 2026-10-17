@@ -4,6 +4,7 @@
 // Jest accepts, or the "jest" key of package.json -- and adds the adapter
 // (jest.cjs) and the reporter (jestReporter.mjs). Nothing of the user's is
 // replaced: their setup files and reporters keep running.
+import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,12 +12,38 @@ import { fileURLToPath } from "node:url";
 const here = (name) => fileURLToPath(new URL(`./${name}`, import.meta.url));
 const asList = (value) => (value === undefined ? [] : Array.isArray(value) ? value : [value]);
 
+// The jest-config of the Jest that is running, so version and resolution
+// match Jest's. npm may leave it only under jest-cli or @jest/core
+// (node_modules/jest-cli/node_modules/jest-config), where the project root
+// does not see it: from the root, then from the running Jest's own packages.
+function jestConfig() {
+    const fromRoot = createRequire(resolve(process.cwd(), "package.json"));
+    const bases = [fromRoot];
+    try {
+        bases.push(createRequire(realpathSync(process.argv[1])));
+    } catch {}
+    for (const base of [...bases]) {
+        for (const owner of ["jest-cli/package.json", "@jest/core/package.json", "jest/package.json"]) {
+            try {
+                bases.push(createRequire(base.resolve(owner)));
+            } catch {}
+        }
+    }
+    let first;
+    for (const base of bases) {
+        try {
+            return base("jest-config");
+        } catch (error) {
+            first ??= error;
+        }
+    }
+    throw first;
+}
+
 export default async function supercovJestConfig() {
     let config = { rootDir: process.cwd() };
     try {
-        // The project's own jest-config, so version and resolution match Jest's.
-        const projectRequire = createRequire(resolve(process.cwd(), "package.json"));
-        const { readInitialOptions } = projectRequire("jest-config");
+        const { readInitialOptions } = jestConfig();
         const original = process.env["SUPERCOV_ORIGINAL_JEST_CONFIG"] || undefined;
         const read = await readInitialOptions(original, { skipMultipleConfigError: true });
         config = read.config ?? config;
