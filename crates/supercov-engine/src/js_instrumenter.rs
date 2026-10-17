@@ -11098,6 +11098,46 @@ mod tests {
         }
     }
 
+    /// A sandbox call is wrapped only when its argument maps the host's
+    /// workspace to the guest's, and never for Supercov's own or a test
+    /// framework's modules.
+    #[test]
+    fn only_a_host_to_guest_mapping_makes_a_capability_candidate() {
+        assert!(capability_source_candidate(
+            "run({ hostPath: a, guestPath: b })"
+        ));
+        assert!(capability_source_candidate(
+            "run({ hostRoot: a, guestRoot: b })"
+        ));
+        assert!(capability_source_candidate(
+            "start({ Mounts: [{ source: a, target: b }] })"
+        ));
+        assert!(capability_source_candidate(
+            "start({ mounts: [{ source: a, target: b }] })"
+        ));
+        for unrelated in [
+            "run({ hostPath: a })",
+            "run({ hostRoot: a, guestPath: b })",
+            "start({ mounts: [{ source: a }] })",
+            "start({ source: a, target: b })",
+            "snapshot(machine.spawn())",
+        ] {
+            assert!(!capability_source_candidate(unrelated), "{unrelated}");
+        }
+        let wrapper = "./.supercov/capability.mjs";
+        for excluded in [
+            wrapper,
+            "node:child_process",
+            "virtual:supercov-runtime",
+            "../.supercov/node_modules/x.mjs",
+            "vitest",
+            "@playwright/test",
+        ] {
+            assert!(excluded_capability_import(excluded, wrapper), "{excluded}");
+        }
+        assert!(!excluded_capability_import("e2b", wrapper));
+    }
+
     #[test]
     fn an_arrow_that_returns_an_assertion_still_returns_it() {
         // `await loginError(page)` waits for the matcher only if the arrow
