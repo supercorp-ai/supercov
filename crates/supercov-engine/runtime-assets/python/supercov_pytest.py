@@ -274,7 +274,9 @@ def pytest_runtest_logreport(report):
         max(int(getattr(report, "rerun", 0) or 0), 0),
         report.when,
         report.outcome,
-        bool(getattr(report, "wasxfail", False)),
+        # The xfail reason, empty for a bare `@pytest.mark.xfail`: present
+        # at all is what marks the expectation.
+        hasattr(report, "wasxfail"),
         file=_report_file(report),
         tags=_tags.get(report.nodeid),
     )
