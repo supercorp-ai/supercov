@@ -2137,6 +2137,27 @@ pub fn prune_cached_workspace_sources(
         remove_stored_tree_deferred(root, &entry.path())?;
         removed.push(name);
     }
+    // The configurations and helpers each run writes into the copy's
+    // `.supercov/` (playwright.config.mjs, vitest.config.mjs ...) are
+    // written again by the next run. Left behind, they are scripts inside the
+    // project that a linter run over `.` reads: ESLint's flat config ignores
+    // only node_modules and .git, so `eslint .` failed after a measured run.
+    let generated = workspace.join(".supercov");
+    if let Ok(entries) = fs::read_dir(&generated) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let script = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                matches!(
+                    e,
+                    "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" | "jsx" | "tsx"
+                )
+            });
+            if script && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
+                removed.push(format!(".supercov/{}", entry.file_name().to_string_lossy()));
+            }
+        }
+    }
     removed.sort();
     Ok(removed)
 }
@@ -3220,12 +3241,21 @@ mod tests {
             "{\"schemaVersion\":2}",
         )
         .unwrap();
+        fs::write(
+            workspace.join(".supercov/vitest.config.mjs"),
+            "export default {}",
+        )
+        .unwrap();
+        fs::write(workspace.join(".supercov/manifest.json"), "{}").unwrap();
         prune_cached_workspace_sources(&root, &lock).unwrap();
         assert!(!workspace.join("tests/e2e/app.spec.js").exists());
         assert_eq!(
             fs::read_to_string(artifacts.join("digest")).unwrap(),
             "instrumented test"
         );
+        // A script a linter over `.` would read is gone; caches stay.
+        assert!(!workspace.join(".supercov/vitest.config.mjs").exists());
+        assert!(workspace.join(".supercov/manifest.json").exists());
         lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }

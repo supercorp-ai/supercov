@@ -71,3 +71,51 @@ jobs:
       # Three of the scripts drive a real browser through Playwright.
       - run: npx playwright install --with-deps
       - run: npm run test:engine-integrations
+
+  # The rest of the release check: the steps no other job ran, so a pull
+  # request's green tick covers everything a release checks and a release
+  # needs no long local run. They ran only in `release:check` on a busy
+  # machine, where the timing gates (the watchdog's timeout exit) and the
+  # fixtures on fixed ports failed for reasons of their own.
+  release-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: clippy, rustfmt
+      # The packed-install check holds the binary to the glibc 2.28 floor the
+      # release promises; this runner's own glibc is 2.39, so the binary is
+      # linked the way native-artifacts.yml links it, with cargo-zigbuild.
+      - run: python3 -m pip install --user --break-system-packages cargo-zigbuild ziglang
+      - run: npm ci
+      - run: npm run test:watchdog
+      - run: npm run test:engine-contract
+      - run: npm run test:agent
+      - run: npm run test:child-attribution
+      - run: npm run test:host-loader
+      - run: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p supercov
+      - run: node scripts/native-package-integration.mjs --target x86_64-unknown-linux-gnu --binary target/x86_64-unknown-linux-gnu/release/supercov
+      - run: node scripts/native-release-set-integration.mjs
+      - run: npm run test:packed-npx
+      - run: npm run benchmark:check
+
+  # clang's own MC/DC as the oracle for Supercov's: the golden file was made
+  # with Apple's toolchain, which the script finds through `xcrun`.
+  clang-mcdc-oracle:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:clang-mcdc

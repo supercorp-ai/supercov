@@ -2396,6 +2396,19 @@ pub(crate) const RUNTIME_LOADER_START: &str = "if (!globalThis.__SUPERCOV_DIRECT
 /// `globalThis.__SUPERCOV_DIRECT_RUNTIME__`, `Function` and `Error` outside a
 /// function body the type checker does not read. The file's own location
 /// comes from a stack taken at its top level; `bootstrap` is relative to it.
+/// The offset just past a block comment that opens the source at `from`
+/// (after any whitespace), or `from` when none does.
+pub(crate) fn after_leading_block_comment(source: &str, from: usize) -> usize {
+    let rest = &source[from..];
+    let start = from + (rest.len() - rest.trim_start().len());
+    if !source[start..].starts_with("/*") {
+        return from;
+    }
+    source[start + 2..]
+        .find("*/")
+        .map_or(from, |end| start + 2 + end + 2)
+}
+
 pub(crate) fn runtime_loader(bootstrap: &str) -> String {
     let specifier = serde_json::to_string(bootstrap).expect("a path string serializes");
     format!(
@@ -2487,18 +2500,28 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
     // `dist/`), and the test failed on a module that was not there. It goes
     // first, as the import was evaluated first, on the first line so every
     // other line stays where it was.
+    // After a leading comment too: Jest reads a test's docblock pragmas
+    // (`/** @jest-environment jsdom */`) only from a comment the file opens
+    // with, so a loader in front of it ran the test in the wrong environment
+    // ("window is not defined").
     if let Some(bootstrap) = assertion_runtime.filter(|_| assertions > 0) {
-        let at = if source.starts_with("#!") {
+        let mut at = if source.starts_with("#!") {
             source
                 .find('\n')
                 .map_or(source.len(), |newline| newline + 1)
         } else {
             0
         };
+        at = after_leading_block_comment(source, at);
+        let space = if source[..at].ends_with("*/") {
+            " "
+        } else {
+            ""
+        };
         edits.push(TextEdit::insert(
             at,
             i64::MIN,
-            format!("{} ", runtime_loader(bootstrap)),
+            format!("{space}{} ", runtime_loader(bootstrap)),
         ));
     }
     // An inline map is resolved relative to the transformed file itself, and
@@ -10701,6 +10724,31 @@ mod tests {
         assert!(output.code.contains("node:assert/strict.equal"));
         assert!(output.code.contains("tests/value.test.mjs:2:1"));
         assert!(output.code.contains("assert.equal(value(), 1)"));
+    }
+
+    #[test]
+    fn a_docblock_the_test_opens_with_stays_first_for_jest_to_read() {
+        let source = "/** @jest-environment jsdom */\n\nimport assert from 'node:assert';\nassert.equal(value(), 1);\n";
+        let output = instrument_node_assertion_phases_with_runtime_imports(
+            source,
+            "tests/view.test.ts",
+            &[],
+            None,
+            Some("../.supercov/node_modules/bootstrap.cjs"),
+        )
+        .unwrap();
+        let lines = output.code.lines().collect::<Vec<_>>();
+        assert!(
+            lines[0].starts_with(
+                "/** @jest-environment jsdom */ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {"
+            ),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[3].contains("assert.equal(value(), 1)"),
+            "lines stay where they were"
+        );
     }
 
     #[test]

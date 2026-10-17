@@ -161,7 +161,8 @@ try {
     "test('a discovered test', () => { expect(1).toBe(1); });",
     '',
   ].join('\n'));
-  const typelessListed = supercov(typeless, ['--', 'node', 'node_modules/playwright/cli.js', 'test', '--config', 'tests/e2e/playwright.config.ts', '--list']);
+  // The copy is kept to read the wrapper it ran with; a run prunes its scripts.
+  const typelessListed = supercov(typeless, ['--', 'node', 'node_modules/playwright/cli.js', 'test', '--config', 'tests/e2e/playwright.config.ts', '--list'], { SUPERCOV_KEEP_WORKSPACE: '1' });
   assert.equal(typelessListed.status, 0, typelessListed.output);
   assert.match(typelessListed.output, /Total: 1 test in 1 file/, typelessListed.output);
   // Playwright 1.60 is the one that failed; a later one loads the file either

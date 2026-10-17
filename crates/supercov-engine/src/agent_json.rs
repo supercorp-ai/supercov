@@ -84,6 +84,18 @@ pub fn success<T: Serialize>(
     data: &T,
     page: Option<&AgentPagination>,
 ) -> Result<String, ResponseTooLarge> {
+    // `--limit 0` asks for every entry; the page says how many that was.
+    let every;
+    let page = match page {
+        Some(page) if page.limit == usize::MAX => {
+            every = AgentPagination {
+                limit: page.total,
+                ..page.clone()
+            };
+            Some(&every)
+        }
+        other => other,
+    };
     let json = newline_json(&SuccessEnvelope {
         schema_version: AGENT_JSON_SCHEMA_VERSION,
         ok: true,

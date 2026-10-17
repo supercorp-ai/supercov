@@ -67,7 +67,7 @@ def _sha256(data: bytes):
     _sha256 = sha256
     return sha256(data)
 
-PROBE_VERSION = 8
+PROBE_VERSION = 9
 # A context's hit array is a slot file mapped into memory. Its first bytes
 # name the context for the reader, so obligations are numbered from here.
 SLOT_HEADER = 16
@@ -252,6 +252,7 @@ class FileProbes:
                     sorted(self.entry_heads.items()),
                     sorted(self.loop_heads.items()),
                     sorted(self.single_heads.items()),
+                    sorted(self.value_decisions),
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -309,6 +310,11 @@ class PlanIndex:
             probes.decisions = {span: decision_base + d for span, d in probes.decisions.items()}
             probes.singles = {span: decision_base + d for span, d in probes.singles.items()}
             probes.leaves = {span: (decision_base + d, i, inv) for span, (d, i, inv) in probes.leaves.items()}
+            # Run-wide like the rest: the transform asks whether a decision's
+            # run-wide index is a value's, and a file's own numbers matched
+            # only in the first file with decisions -- elsewhere `a or b or c`
+            # handed back True instead of the operand.
+            probes.value_decisions = {decision_base + d for d in probes.value_decisions}
             group_base = len(self.boolop_groups)
             self.boolop_groups.extend(probes.boolop_groups)
             probes.boolops = {span: group_base + g for span, g in probes.boolops.items()}
