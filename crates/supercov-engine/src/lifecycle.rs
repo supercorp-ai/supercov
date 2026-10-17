@@ -24,16 +24,27 @@ static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum LifecycleError {
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
     InvalidRunId(String),
     UnsafePath(PathBuf),
     InvalidState(String),
-    ActiveRun { run_id: String, pid: u32 },
+    ActiveRun {
+        run_id: String,
+        pid: u32,
+    },
+    /// A run holds its share of the store but has not yet written its name.
+    StartingRun,
     Cleaning,
     LockUnavailable,
     PublicationExists(String),
     Metadata(serde_json::Error),
-    EvidenceLength { expected: u64, actual: u64 },
+    EvidenceLength {
+        expected: u64,
+        actual: u64,
+    },
     EvidenceChanged,
 }
 
@@ -54,6 +65,10 @@ impl std::fmt::Display for LifecycleError {
             Self::ActiveRun { run_id, pid } => write!(
                 formatter,
                 "coverage run {run_id} is active in this project (pid {pid}). Its storage can be cleaned when no run is active."
+            ),
+            Self::StartingRun => write!(
+                formatter,
+                "a coverage run is active in this project, starting. Its storage can be cleaned when no run is active."
             ),
             Self::Cleaning => {
                 write!(
@@ -699,7 +714,9 @@ impl ProjectLock {
                 })
             };
             return Err(if alone {
-                holder().map_or(LifecycleError::LockUnavailable, |owner| {
+                // A run that took its share a moment ago may not have
+                // written its name yet: it is still a run, not a lock fault.
+                holder().map_or(LifecycleError::StartingRun, |owner| {
                     LifecycleError::ActiveRun {
                         run_id: owner.run_id,
                         pid: owner.pid,
@@ -2064,6 +2081,27 @@ mod tests {
             }
             other => panic!("cleaning under two runs: {:?}", other.map(|_| ())),
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleaning_under_a_run_that_has_not_written_its_name_names_a_starting_run() {
+        let root = project();
+        let mut run = ProjectLock::acquire(&root, "run", "start").unwrap();
+        // The moment between taking its share of the store and naming itself.
+        fs::remove_file(owner_file(&root, run.copy())).unwrap();
+        let refused = ProjectLock::acquire_alone(&root, "clean", "start").map(|_| ());
+        assert!(
+            matches!(refused, Err(LifecycleError::StartingRun)),
+            "{refused:?}"
+        );
+        assert!(
+            refused
+                .unwrap_err()
+                .to_string()
+                .contains("is active in this project")
+        );
+        run.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
