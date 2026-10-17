@@ -376,6 +376,79 @@ test('typed and shebang modules', () => {
   assert.equal(greet(''), 'hello');
 });
 `,
+  // Optional chains through private fields, computed members, calls and
+  // \`!\`; a negated group inside a decision; rest patterns with defaults; and
+  // TypeScript defaults whose type only their shape says.
+  'src/edges.js': `export class Vault {
+  #inner;
+  constructor(inner) {
+    this.#inner = inner;
+  }
+  static peek(vault) {
+    return vault?.#inner?.value;
+  }
+}
+
+export function chains(o, k) {
+  const name = o?.list[k]?.name;
+  const size = o?.make?.().size;
+  const idle = !o?.ready;
+  return [name, size, idle];
+}
+
+export function negatedPair(x, a, b) {
+  if (x || !(a && b)) return 'yes';
+  return 'no';
+}
+
+export function rests([first, ...[second = 2]] = [], { a, ...others } = {}) {
+  return [first, second, a, Object.keys(others).length];
+}
+`,
+  'src/edges.ts': `export function defaults(a = (5), b = \`plain\`, c = -1, d = 'x' as const, e = 2 as number) {
+  return [a, b, c, d, e];
+}
+
+export function inner(o?: { inner?: { v: number } }) {
+  return o?.inner!.v;
+}
+`,
+  'test/edges.test.mjs': `import assert from 'node:assert/strict';
+import test from 'node:test';
+import { Vault, chains, negatedPair, rests } from '../src/edges.js';
+import { defaults, inner } from '../src/edges.ts';
+
+test('optional chains', () => {
+  assert.equal(Vault.peek(null), undefined);
+  assert.equal(Vault.peek(new Vault(null)), undefined);
+  assert.equal(Vault.peek(new Vault({ value: 3 })), 3);
+  assert.deepEqual(chains(null, 0), [undefined, undefined, true]);
+  assert.deepEqual(chains({ list: [null], ready: true }, 0), [undefined, undefined, false]);
+  assert.deepEqual(
+    chains({ list: [{ name: 'n' }], make: () => ({ size: 2 }), ready: false }, 0),
+    ['n', 2, true],
+  );
+});
+
+test('a negated group', () => {
+  assert.equal(negatedPair(true, true, true), 'yes');
+  assert.equal(negatedPair(false, true, true), 'no');
+  assert.equal(negatedPair(false, false, true), 'yes');
+  assert.equal(negatedPair(false, true, false), 'yes');
+});
+
+test('rest patterns with defaults', () => {
+  assert.deepEqual(rests(), [undefined, 2, undefined, 0]);
+  assert.deepEqual(rests([1, 5], { a: 1, b: 2 }), [1, 5, 1, 1]);
+});
+
+test('typescript defaults', () => {
+  assert.deepEqual(defaults(), [5, 'plain', -1, 'x', 2]);
+  assert.deepEqual(defaults(1, 'b', 2, 'y', 3), [1, 'b', 2, 'y', 3]);
+  assert.equal(inner(undefined), undefined);
+  assert.equal(inner({ inner: { v: 4 } }), 4);
+});
+`,
   'src/grouped.js': `export function both(a, b) {
   const ok = (a && b);
   return ok;
@@ -490,7 +563,7 @@ try {
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');
   if (process.env.ZOO_REPORT) console.log(report);
   // Each construct was driven both ways, so nothing is left uncovered.
-  for (const file of ['src/flow.js', 'src/values.js', 'src/grouped.js', 'src/typed.ts', 'src/cli.js', 'app/routes/items.ts', 'app/routes/shared.ts', 'app/entry.server.ts']) {
+  for (const file of ['src/flow.js', 'src/values.js', 'src/grouped.js', 'src/edges.js', 'src/edges.ts', 'src/typed.ts', 'src/cli.js', 'app/routes/items.ts', 'app/routes/shared.ts', 'app/entry.server.ts']) {
     const entry = byFile[file];
     assert.ok(entry, `${file} was not measured\n${report}`);
     for (const metric of ['lines', 'branches', 'mcdcConditions']) {
