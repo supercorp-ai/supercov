@@ -200,39 +200,61 @@ struct ProcessOutcome {
     output: Output,
 }
 
+/// A command line split the way POSIX `sh` splits a script's: quotes group,
+/// `''` and `""` are an empty word, and inside double quotes a backslash
+/// escapes only `$`, `` ` ``, `"`, `\` and a newline.
 fn shell_words(value: &str) -> Result<Vec<String>, RustTestRunnerError> {
     let mut words = Vec::new();
     let mut current = String::new();
+    // A word can be empty (`''`), so whether one has begun is its own fact.
+    let mut started = false;
     let mut quote = None;
-    let mut escaped = false;
-    for character in value.chars() {
-        if escaped {
-            current.push(character);
-            escaped = false;
-        } else if character == '\\' && quote != Some('\'') {
-            escaped = true;
-        } else if matches!(character, '\'' | '"') {
-            if quote == Some(character) {
-                quote = None;
-            } else if quote.is_none() {
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match (quote, character) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('\''), _) => current.push(character),
+            (Some(_), '\\') => match characters.peek() {
+                // A backslash before a line break continues the line.
+                Some('\n') => {
+                    characters.next();
+                }
+                Some('$' | '`' | '"' | '\\') => {
+                    current.extend(characters.next());
+                }
+                Some(_) => current.push('\\'),
+                None => quote = Some('\\'),
+            },
+            (Some(_), _) => current.push(character),
+            (None, '\\') => match characters.next() {
+                Some('\n') => {}
+                Some(escaped) => {
+                    current.push(escaped);
+                    started = true;
+                }
+                None => quote = Some('\\'),
+            },
+            (None, '\'' | '"') => {
                 quote = Some(character);
-            } else {
+                started = true;
+            }
+            (None, _) if character.is_whitespace() => {
+                if std::mem::take(&mut started) {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (None, _) => {
                 current.push(character);
+                started = true;
             }
-        } else if character.is_whitespace() && quote.is_none() {
-            if !current.is_empty() {
-                words.push(std::mem::take(&mut current));
-            }
-        } else {
-            current.push(character);
         }
     }
-    if escaped || quote.is_some() {
+    if quote.is_some() {
         return Err(RustTestRunnerError::UnsupportedCommand(
             "the expanded Cargo command contains an incomplete quote or escape".into(),
         ));
     }
-    if !current.is_empty() {
+    if started {
         words.push(current);
     }
     Ok(words)
@@ -2220,6 +2242,47 @@ mod tests {
                 .to_string()
                 .contains("cannot yet be assigned exact selected-test identity")
         );
+    }
+
+    /// A package script's command split as `sh` runs it.
+    #[test]
+    fn a_script_command_splits_the_way_sh_splits_it() {
+        let words = |text: &str| shell_words(text).unwrap();
+        assert_eq!(
+            words("cargo  test --workspace"),
+            ["cargo", "test", "--workspace"]
+        );
+        assert_eq!(
+            words(r#"cargo test --config 'target.x.runner="a b"' -- "two words""#),
+            [
+                "cargo",
+                "test",
+                "--config",
+                r#"target.x.runner="a b""#,
+                "--",
+                "two words"
+            ]
+        );
+        // An empty argument is an argument.
+        assert_eq!(
+            words(r#"cargo test -- '' """#),
+            ["cargo", "test", "--", "", ""]
+        );
+        // In double quotes a backslash escapes only what `sh` lets it.
+        assert_eq!(
+            words(r#""C:\work\app" "say \"hi\" \$HOME""#),
+            [r"C:\work\app", r#"say "hi" $HOME"#]
+        );
+        // Outside quotes it escapes anything; in single quotes nothing.
+        assert_eq!(words(r"a\ b 'c\d'"), ["a b", r"c\d"]);
+        assert_eq!(words("joined'' x\"\"y"), ["joined", "xy"]);
+        assert_eq!(
+            words("cargo test \\\n  --workspace \"a\\\nb\""),
+            ["cargo", "test", "--workspace", "ab"]
+        );
+        for broken in ["cargo test 'open", "cargo test \"open", r"cargo test \"] {
+            assert!(shell_words(broken).is_err(), "{broken}");
+        }
     }
 
     #[test]
