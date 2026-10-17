@@ -1096,12 +1096,38 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1") {
         // Avoid paying to import three runner adapters in every launcher.
     }
     else {
-    const nodeTestAdapter = await import(__rewriteRelativeImportExtension(nodeTestWrapper));
-    const cjsNodeTestAdapter = Object.assign(nodeTestAdapter.test, nodeTestAdapter);
-    const nodeAssertAdapter = await import(__rewriteRelativeImportExtension(nodeAssertWrapper));
-    const cjsNodeAssertAdapter = Object.assign(nodeAssertAdapter.default, nodeAssertAdapter);
-    const nodeAssertStrictAdapter = await import(__rewriteRelativeImportExtension(nodeAssertStrictWrapper));
-    const cjsNodeAssertStrictAdapter = Object.assign(nodeAssertStrictAdapter.default, nodeAssertStrictAdapter);
+    // Node's module mocks keep the CJS resolver they find when node:test first
+    // loads (`const { _resolveFilename } = Module` in its mock loader). This
+    // preload runs before the command's own `--import`s, so loading node:test
+    // here handed the mock loader the resolver from before `--import tsx`
+    // mapped tsconfig paths: every `@/` import failed in a test that mocked a
+    // module. Where Node requires an ES module without a warning, each adapter
+    // loads on its first request instead, after every preload; elsewhere, as
+    // before, now.
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    const lazily = process.features?.require_module === true &&
+        (major > 23 || (major === 23 && minor >= 5) || (major === 22 && minor >= 13) || (major === 20 && minor >= 19));
+    const requireAdapter = Module.createRequire(import.meta.url);
+    const adapters = new Map();
+    const shapes = [
+        ["test", nodeTestWrapper, (module) => module.test],
+        ["assert", nodeAssertWrapper, (module) => module.default],
+        ["assert/strict", nodeAssertStrictWrapper, (module) => module.default],
+    ];
+    const adapter = (name) => {
+        if (!adapters.has(name)) {
+            const [, url, main] = shapes.find(([shape]) => shape === name);
+            const module = requireAdapter(fileURLToPath(url));
+            adapters.set(name, Object.assign(main(module), module));
+        }
+        return adapters.get(name);
+    };
+    if (!lazily) {
+        for (const [name, url, main] of shapes) {
+            const module = await import(__rewriteRelativeImportExtension(url));
+            adapters.set(name, Object.assign(main(module), module));
+        }
+    }
     const originalLoad = Module._load;
     Module._load = function supercovNodeTestLoad(request, parent, isMain) {
         const parentFile = parent?.filename?.replaceAll("\\", "/");
@@ -1113,12 +1139,10 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1") {
             (request === "node:test" || request === "test"))
             console.error("[supercov] node:test CJS request", { parentFile, projectRoot, belongsToProject });
         if ((request === "node:test" || request === "test") && belongsToProject)
-            return cjsNodeTestAdapter;
+            return adapter("test");
         if (["assert", "node:assert", "assert/strict", "node:assert/strict"].includes(request) &&
             belongsToProject)
-            return request.endsWith("/strict")
-                ? cjsNodeAssertStrictAdapter
-                : cjsNodeAssertAdapter;
+            return adapter(request.endsWith("/strict") ? "assert/strict" : "assert");
         return originalLoad.call(this, request, parent, isMain);
     };
     }

@@ -763,6 +763,59 @@ fn tests_affected_narrows_to_the_tests_a_filter_picks() {
     assert_eq!(unit_names.trim(), "", "no unit test ran the changed line");
 }
 
+/// Node's module mocks keep the CJS resolver they find when node:test first
+/// loads. A preload the command gives (`--import tsx`, which maps tsconfig
+/// paths by patching it) comes after Supercov's own, so the adapter must not
+/// load node:test before the command's preloads have run.
+#[test]
+fn a_mocking_test_resolves_paths_a_later_preload_maps() {
+    let project = Project::empty("mock-paths");
+    project.write(
+        "package.json",
+        r#"{ "name": "mock-paths", "private": true }"#,
+    );
+    project.write(
+        "alias.mjs",
+        "import Module from 'node:module';\nimport path from 'node:path';\nconst resolve = Module._resolveFilename;\nModule._resolveFilename = function (request, ...rest) {\n  if (request.startsWith('@/')) request = path.resolve('src', request.slice(2));\n  return resolve.call(this, request, ...rest);\n};\n",
+    );
+    project.write(
+        "src/lib/log.js",
+        "exports.log = (line) => (line ? `log: ${line}` : 'empty');\n",
+    );
+    project.write("src/clock.js", "exports.now = () => Date.now();\n");
+    project.write(
+        "src/app.js",
+        "const { log } = require('@/lib/log');\nconst { now } = require('./clock');\nexports.stamp = (line) => `${log(line)} at ${now()}`;\n",
+    );
+    project.write(
+        "test/app.test.js",
+        "const { mock, test } = require('node:test');\nconst assert = require('node:assert/strict');\nmock.module('../src/clock.js', { exports: { now: () => 7 } });\ntest('stamps a line', () => {\n  const { stamp } = require('../src/app.js');\n  assert.equal(stamp('a'), 'log: a at 7');\n});\n",
+    );
+    let command = [
+        "node",
+        "--import",
+        "./alias.mjs",
+        "--experimental-test-module-mocks",
+        "--test",
+        "test/app.test.js",
+    ];
+    let plain = std::process::Command::new(command[0])
+        .args(&command[1..])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stdout)
+    );
+    let measured = project
+        .supercov(&[&["--"][..], &command].concat())
+        .succeeds();
+    assert!(measured.contains("pass 1"), "{measured}");
+    assert!(!measured.contains("Cannot find module"), "{measured}");
+}
+
 #[test]
 fn diff_and_tests_affected_follow_a_change() {
     let project = Project::cart("change");
