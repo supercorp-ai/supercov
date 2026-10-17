@@ -1419,6 +1419,10 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
         let zero = digits.chars().all(|c| c == '0' || c == '_');
         return format!("{}{suffix}", if zero { "1" } else { "0" });
     }
+    // `0.0`, `1.5e3`, `2f32`: zero becomes one, anything else zero.
+    if let Some(value) = float_literal_value(e) {
+        return if value == 0.0 { "1.0" } else { "0.0" }.into();
+    }
     if e.starts_with('"') && e.ends_with('"') {
         return if e == "\"\"" {
             "\"supercov\"".into()
@@ -1460,6 +1464,8 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
         Some("String") => "String::new()".into(),
         Some(t) if t.starts_with('&') && t.ends_with("str") => "\"\"".into(),
         Some(t) if t.starts_with("Option<") && !e.starts_with("None") => "None".into(),
+        // `Default::default()` would be `None` again.
+        Some(t) if t.starts_with("Option<") => "Some(Default::default())".into(),
         Some(t) if result_like(t) => err_or_ok(e),
         Some(t) if t.ends_with("Ordering") => {
             ordering(e).unwrap_or_else(|| format!("({e}).reverse()"))
@@ -1527,6 +1533,15 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
             }
         }
     }
+}
+
+/// A float literal's value: `0.0`, `1_000.5`, `1.5e3`, `2f32`.
+fn float_literal_value(e: &str) -> Option<f64> {
+    let number = e.trim_end_matches("f32").trim_end_matches("f64");
+    let float = number.contains(['.', 'e', 'E']) || number.len() < e.len();
+    (float && number.starts_with(|c: char| c.is_ascii_digit()))
+        .then(|| number.replace('_', "").parse::<f64>().ok())
+        .flatten()
 }
 
 /// `Vec::new()` or `vec![]`: a vector with nothing in it.
@@ -1774,6 +1789,76 @@ mod replacement_tests {
             "Default::default()"
         );
         assert_eq!(replacement("|x| x == 1", None), "Default::default()");
+    }
+
+    /// Every shape `replacement` reads, typed and untyped: the value it
+    /// gives is of the same type and never the same value.
+    #[test]
+    fn each_shape_is_replaced_by_a_value_that_differs() {
+        for (expr, ty, expected) in [
+            // A float zero becomes one; `Default::default()` would be zero.
+            ("0.0", Some("f64"), "1.0"),
+            ("0_0.0f32", None, "1.0"),
+            ("2.5", Some("f32"), "0.0"),
+            ("1.5e3", None, "0.0"),
+            ("ratio", Some("f64"), "0.0"),
+            // `Default::default()` of an `Option` is `None` again.
+            ("None", Some("Option<Foo>"), "Some(Default::default())"),
+            (
+                "String::new()",
+                Some("String"),
+                "String::from(\"supercov\")",
+            ),
+            ("name.clone()", Some("String"), "String::new()"),
+            ("name", Some("&'static str"), "\"\""),
+            ("Err(e)", Some("io::Result<()>"), "Ok(Default::default())"),
+            (
+                "parse(text)",
+                Some("ParseResult"),
+                "Err(Default::default())",
+            ),
+            (
+                "Ordering::Equal",
+                Some("std::cmp::Ordering"),
+                "Ordering::Less",
+            ),
+            ("vec![]", Some("Vec<u8>"), "vec![Default::default()]"),
+            ("vec![1]", Some("Vec<u8>"), "Vec::new()"),
+            ("x", Some("()"), "()"),
+            ("match x { _ => 1 }", None, "Default::default()"),
+            ("!ready", None, "!(!ready)"),
+            ("a != b", None, "!(a != b)"),
+            ("path.is_file()", None, "!(path.is_file())"),
+            ("Some(1)", None, "None"),
+            ("Ok(1)", None, "Err(Default::default())"),
+            ("Err(e)", None, "Ok(Default::default())"),
+            ("std::cmp::Ordering::Greater", None, "Ordering::Less"),
+            ("vec![ ]", None, "vec![Default::default()]"),
+            ("Vec::new()", None, "vec![Default::default()]"),
+            ("vec![1, 2]", None, "Vec::new()"),
+            ("String::new()", None, "String::from(\"supercov\")"),
+            ("format!(\"\")", None, "String::from(\"supercov\")"),
+            ("String::from(\"a\")", None, "String::new()"),
+            ("x.to_string()", None, "String::new()"),
+            ("name.to_owned()", None, "String::new()"),
+            ("items.count()", None, "0"),
+            ("n.leading_zeros()", None, "0"),
+            ("mem::size_of::<u64>()", None, "0"),
+            ("x as u32", None, "0"),
+            ("s.trim_end()", None, "\"\""),
+            ("s.as_str()", None, "\"\""),
+            ("s.trim_end_matches('/')", None, "\"\""),
+            ("\"\"", None, "\"supercov\""),
+            ("1_000", None, "0"),
+            ("0_000u16", None, "1u16"),
+        ] {
+            assert_eq!(replacement(expr, ty), expected, "{expr} as {ty:?}");
+        }
+        let source = "fn a() -> f64 {\n    0.0\n}\nfn b() -> Option<Foo> {\n    None\n}\nfn c() {\n    let x: f32 = 0.0;\n}\n";
+        let r = replacements("src/lib.rs", source, &Signatures::default());
+        assert_eq!(r[&2][0].1, "1.0");
+        assert_eq!(r[&5][0].1, "Some(Default::default())");
+        assert_eq!(r[&8][0].1, "1.0");
     }
 
     /// dtolnay/semver's shapes that used to fall back to
