@@ -189,6 +189,29 @@ npx supercov -- cargo nextest run --workspace
 explanation instead of silently falling back to plausible but inaccurate
 attribution.
 
+### Rust tests compiled to wasm
+
+`cargo test --target <wasm target>` runs each test through the target runner
+Cargo is configured with, and so does Supercov, one test per process:
+
+```sh
+npx supercov -- cargo test --target wasm32-unknown-unknown
+npx supercov -- cargo test --target wasm32-wasip1
+```
+
+- `wasm32-unknown-unknown` with `wasm-bindgen-test-runner` (what
+  `wasm-pack test --node` sets up) runs each test module in Node. Supercov
+  gives Node a hook that writes what the module ran, which lives in its
+  memory, to the run as the test's process ends.
+- `wasm32-wasip1` with `wasmtime` or `wasmer` as the runner: Supercov opens
+  the test's evidence directory to the module (`--dir`) and names it in the
+  module's environment (`--env`), and the module writes what it runs to a
+  file there as it runs.
+
+Each test is credited exactly, assertions included, as for a native test.
+Tests that run in a browser through `wasm-bindgen-test-runner`'s headless
+mode are not covered yet.
+
 ## Python
 
 | Runner | Attribution | Current requirement |
