@@ -530,7 +530,10 @@ pub(crate) fn cargo_invocation(
     let words = if command.iter().any(|word| executable_name(word) == "cargo") {
         command.to_vec()
     } else {
-        let expanded = crate::project_discovery::expanded_command(root, command);
+        // A package script runs with the arguments after its name appended,
+        // so a filter given to `npm test -- adds` reaches Cargo.
+        let expanded = crate::project_discovery::script_command(root, command)
+            .unwrap_or_else(|| crate::project_discovery::expanded_command(root, command));
         shell_words(&expanded)?
     };
     let cargo = words
@@ -2091,6 +2094,34 @@ mod tests {
             )
             .starts_with("\u{1b}[1m\u{1b}[92m     Running\u{1b}[0m unittests ")
         );
+    }
+
+    /// `npm test -- adds` runs the script with `adds` after it: the filter
+    /// reaches Cargo, so only the tests it names run.
+    #[test]
+    fn a_filter_given_to_a_package_script_reaches_cargo() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-npm-cargo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{ "scripts": { "test": "cargo test --lib" } }"#,
+        )
+        .unwrap();
+        let invocation = cargo_invocation(
+            &root,
+            &["npm".into(), "test".into(), "--".into(), "adds".into()],
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(invocation.kind, RustCargoCommandKind::CargoTest);
+        assert_eq!(invocation.arguments, ["test", "--lib", "adds"]);
     }
 
     #[test]

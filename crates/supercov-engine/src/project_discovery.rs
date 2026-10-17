@@ -392,6 +392,52 @@ pub fn expanded_command(root: &Path, command: &[String]) -> String {
     joined
 }
 
+/// The command a package-manager script runs, with the arguments given after
+/// the script's name where the package manager puts them, after the script
+/// (`npm test -- adds` with `"test": "cargo test"` runs `cargo test adds`).
+/// Each argument is quoted, so splitting the result as `sh` does gives it
+/// back whole. None when the command runs no script of the package.
+pub fn script_command(root: &Path, command: &[String]) -> Option<String> {
+    let executable = command
+        .first()
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())?
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    if !["npm", "pnpm", "yarn", "bun"].contains(&executable.as_str()) {
+        return None;
+    }
+    let name = match command.iter().position(|argument| argument == "run") {
+        Some(run) => run + 1,
+        None => 1,
+    };
+    let manifest = package_json(root);
+    let script = script(&manifest, command.get(name)?)?;
+    let mut extra = &command[name + 1..];
+    // The package manager's own separator is not the script's.
+    if extra.first().is_some_and(|argument| argument == "--") {
+        extra = &extra[1..];
+    }
+    let quote = |argument: &String| {
+        let plain = !argument.is_empty()
+            && argument
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_./:=,+@%-".contains(c));
+        if plain {
+            argument.clone()
+        } else {
+            format!("'{}'", argument.replace('\'', r"'\''"))
+        }
+    };
+    Some(
+        std::iter::once(script.to_owned())
+            .chain(extra.iter().map(quote))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 fn relative_build_output(source: &str) -> bool {
     let mut rest = source;
     let mut relative = false;
@@ -838,6 +884,44 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    /// A script runs with the arguments after its name appended, the package
+    /// manager's own `--` left out and each argument kept whole.
+    #[test]
+    fn a_script_command_carries_the_arguments_after_the_script_name() {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-script-command-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{ "scripts": { "test": "cargo test", "unit": "cargo test --lib" } }"#,
+        )
+        .unwrap();
+        let words = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let command = |line: &str| script_command(&root, &words(line));
+        assert_eq!(
+            command("npm test -- adds").as_deref(),
+            Some("cargo test adds")
+        );
+        assert_eq!(command("npm run unit").as_deref(), Some("cargo test --lib"));
+        assert_eq!(
+            command("pnpm run unit adds --release").as_deref(),
+            Some("cargo test --lib adds --release")
+        );
+        let mut quoted = words("npm test --");
+        quoted.extend(["two words".into(), "it's".into(), String::new()]);
+        assert_eq!(
+            script_command(&root, &quoted).as_deref(),
+            Some(r"cargo test 'two words' 'it'\''s' ''")
+        );
+        assert_eq!(command("cargo test"), None);
+        assert_eq!(command("npm run missing"), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     fn project(label: &str, files: &[(&str, &str)]) -> crate::test_directory::TestDirectory {
         // The clock ticks once per microsecond: the counter is what keeps two
