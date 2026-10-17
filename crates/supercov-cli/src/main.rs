@@ -1038,6 +1038,28 @@ pub(crate) fn test_filter_option(
     Some(Ok(()))
 }
 
+/// Each test `filter` picks in `run`, by name and file, from the run's
+/// filtered index: the same tests every query reads under that filter. A
+/// filter no test matches is refused, as a query refuses it.
+pub(crate) fn picked_tests(
+    run: &StoredRun,
+    filter: &supercov_engine::coverage_report::TestFilter,
+) -> Result<std::collections::BTreeSet<(String, Option<String>)>, String> {
+    let container = open_query_index_for(run, Some(filter)).map_err(|error| match &error {
+        RunIndexError::Report(ReportError::NoTestMatches(described)) => {
+            format!("No tests match {described}")
+        }
+        _ => format!("Failed to open coverage index: {error}"),
+    })?;
+    let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
+    Ok(index
+        .test_summaries(supercov_engine::coverage_index::CoverageViewId::All)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|test| (test.name, test.file))
+        .collect())
+}
+
 fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .args(arguments)

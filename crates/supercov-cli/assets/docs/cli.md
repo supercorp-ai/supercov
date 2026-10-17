@@ -246,6 +246,7 @@ after source changes.
 npx supercov runs <run-id> assertions assess --dry-run
 npx supercov runs <run-id> assertions assess
 npx supercov runs <run-id> assertions assess --refresh   # ask again instead of reusing saved answers
+npx supercov runs <run-id> assertions assess --tag @e2e --dry-run
 npx supercov runs <run-id> assertions
 npx supercov runs <run-id> assertions --all --json
 ```
@@ -257,6 +258,13 @@ saved result without the network. The regular run summary shows the same share,
 and JSON reports expose it under `data.assertionCoverage`. See
 [Assertion coverage](assertions.md) for what counts as asserted and how answers
 are reused across runs.
+
+`--kind`, `--runner`, `--tag`, `--title` and `--test-file` assess or read some of
+the tests, as they narrow every query. `assess --tag @e2e` asks only those tests
+about the statements they ran and saves the result apart from the run's whole
+assessment; its answers are kept, so a later `assess` asks only what is left.
+`assertions --tag @e2e` reads what those tests assert: a statement that only
+other tests catch is not asserted there.
 
 ## Fail CI below a coverage floor
 
@@ -621,7 +629,10 @@ pass in the run is listed regardless.
 per line, for a runner's filter. A Vitest, Playwright or node:test test inside
 `describe` blocks is printed as the blocks and the test joined by spaces
 (`small charges`), which is what `vitest -t`, `--grep` and
-`--test-name-pattern` match. A helper beside the tests, or source outside what is
+`--test-name-pattern` match. `--kind`, `--runner`, `--tag`, `--title` and
+`--test-file` list only the affected tests they pick: from a run that merged two
+runners' suites, `tests affected --names --runner playwright` gives Playwright
+only its own tests. A helper beside the tests, or source outside what is
 measured, that changed affects the tests whose files import it (a JavaScript or
 TypeScript helper that only gained functions affects none), and every test
 where Supercov cannot read the imports. A dependency,

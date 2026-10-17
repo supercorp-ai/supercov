@@ -275,6 +275,42 @@ pub struct AssessmentInput {
     pub decisions: Vec<InputPoint>,
 }
 
+impl AssessmentInput {
+    /// Only the tests `keep` picks, and the statements and decisions they ran:
+    /// what assessing some of a run's tests asks about.
+    pub fn only_tests(&self, keep: impl Fn(&InputTest) -> bool) -> AssessmentInput {
+        let mut renumbered = vec![None; self.tests.len()];
+        let mut tests = Vec::new();
+        for (index, test) in self.tests.iter().enumerate() {
+            if keep(test) {
+                renumbered[index] = Some(tests.len() as u32);
+                tests.push(test.clone());
+            }
+        }
+        let narrow = |points: &[InputPoint]| {
+            points
+                .iter()
+                .filter_map(|point| {
+                    let tests = point
+                        .tests
+                        .iter()
+                        .filter_map(|test| renumbered.get(*test as usize).copied().flatten())
+                        .collect::<Vec<_>>();
+                    (!tests.is_empty()).then(|| InputPoint {
+                        tests,
+                        ..point.clone()
+                    })
+                })
+                .collect()
+        };
+        AssessmentInput {
+            points: narrow(&self.points),
+            decisions: narrow(&self.decisions),
+            tests,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct InputTest {
     pub id: String,

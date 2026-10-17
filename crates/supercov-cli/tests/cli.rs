@@ -671,6 +671,98 @@ fn a_diff_counts_a_dependency_change_as_a_change_in_the_code() {
     assert!(!diff.contains(same_source), "{diff}");
 }
 
+/// `tests affected` reads only the tests a filter picks, as every query does:
+/// a merged run's names for one runner, or only some of the affected tests.
+#[test]
+fn tests_affected_narrows_to_the_tests_a_filter_picks() {
+    let project = Project::cart("affected-filter");
+    project.measure(&[]);
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let picked = project
+        .supercov(&["runs", "latest", "tests", "affected", "--title", "shipping"])
+        .succeeds();
+    contains_all(
+        &picked,
+        &[
+            "1 of 1 test affected",
+            "(--title shipping)",
+            "shipping is free over fifty",
+        ],
+    );
+    let others = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "tests",
+            "affected",
+            "--names",
+            "--title",
+            "!shipping",
+        ])
+        .succeeds();
+    assert_eq!(others.trim(), "", "only the shipping test was affected");
+    let json = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "tests",
+            "affected",
+            "--json",
+            "--runner",
+            "node:test",
+        ])
+        .json();
+    assert_eq!(json["data"]["summary"]["tests"], 3, "{json}");
+    assert_eq!(json["data"]["filter"], "--runner node:test");
+    let none = project
+        .supercov(&["runs", "latest", "tests", "affected", "--runner", "jest"])
+        .exits(2);
+    assert!(none.contains("No tests match --runner jest"), "{none}");
+    let missing = project
+        .supercov(&["runs", "latest", "tests", "affected", "--tag"])
+        .exits(2);
+    assert!(missing.contains("--tag needs a value"), "{missing}");
+
+    // A merged run answers from its parts: each kind's affected tests alone.
+    let project = Project::cart("affected-filter-merged");
+    project
+        .supercov_with(
+            &["--", "node", "--test", "--test-name-pattern=total"],
+            &[("SUPERCOV_TEST_KIND", "unit")],
+        )
+        .succeeds();
+    let unit = project.latest();
+    project
+        .supercov_with(
+            &["--", "node", "--test", "--test-name-pattern=shipping"],
+            &[("SUPERCOV_TEST_KIND", "e2e")],
+        )
+        .succeeds();
+    let e2e = project.latest();
+    project.supercov(&["merge", &unit, &e2e]).succeeds();
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let e2e_names = project
+        .supercov(&[
+            "runs", "latest", "tests", "affected", "--names", "--kind", "e2e",
+        ])
+        .succeeds();
+    assert_eq!(e2e_names.trim(), "shipping is free over fifty");
+    let unit_names = project
+        .supercov(&[
+            "runs", "latest", "tests", "affected", "--names", "--kind", "unit",
+        ])
+        .succeeds();
+    assert_eq!(unit_names.trim(), "", "no unit test ran the changed line");
+}
+
 #[test]
 fn diff_and_tests_affected_follow_a_change() {
     let project = Project::cart("change");

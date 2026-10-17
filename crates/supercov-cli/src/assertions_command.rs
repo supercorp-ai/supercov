@@ -21,6 +21,7 @@ use supercov_engine::{
 
 const HELP: &str = r#"Usage: supercov runs <run> assertions [<file> | <file>:<line> | --test <name>] [--weak] [--offset N] [--limit N | --all] [--json]
        supercov runs <run> assertions assess [--changed] [--refresh] [--dry-run] [--workers N] [--json]
+       Either takes --kind, --runner, --tag, --title, --test-file to read or assess some of the tests.
 
 How much of the executed code the tests assert: a statement counts as asserted
 when changing it would make at least one passing test that runs it fail. The
@@ -67,6 +68,14 @@ Reading the saved result goes from the run down, a page at a time:
               plans the same requests whatever this is, so it changes only
               how long the pass takes.
 --json        Structured output for integrations.
+
+--kind, --runner, --tag, --title, --test-file
+              Only the tests these pick, as every query reads them; a leading
+              `!` leaves those out. `assess --tag @e2e` asks only those tests
+              about the statements they ran, saves its result apart from the
+              run's whole assessment, and keeps its answers for a later
+              `assess`. Reading with a filter shows what those tests assert:
+              a statement only other tests catch is not asserted there.
 "#;
 
 const CACHE_VERSION: u32 = 1;
@@ -144,6 +153,8 @@ struct Options {
     offset: usize,
     limit: Option<usize>,
     workers: usize,
+    /// Only some of the run's tests: assessed, or read.
+    filter: supercov_engine::coverage_report::TestFilter,
 }
 
 /// Where in the saved result a reading looks.
@@ -272,6 +283,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         offset: 0,
         limit: Some(PAGE),
         workers: 24,
+        filter: Default::default(),
     };
     let mut i = 0;
     let mut weak = false;
@@ -280,6 +292,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
         i = 1;
     }
     while i < args.len() {
+        let mut next = i + 1;
+        if let Some(taken) = crate::test_filter_option(&args[i], args, &mut next, &mut o.filter) {
+            taken?;
+            i = next;
+            continue;
+        }
         match args[i].as_str() {
             "--dry-run" | "--workers" | "--changed" if !o.assess => {
                 return Err(format!("{} belongs to `assertions assess`", args[i]));
@@ -658,7 +676,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
                 stored.manifest.language
             ));
         };
-        let input = assessment_input(run)?;
+        let input = narrowed(run, assessment_input(run)?, &options.filter)?;
         let sources = snapshot
             .iter()
             .filter(|(file, _)| stored.manifest.files.contains_key(*file))
@@ -675,7 +693,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
             inputs.inputs.language
         ));
     };
-    let input = assessment_input(run)?;
+    let input = narrowed(run, assessment_input(run)?, &options.filter)?;
     let population = coverage::population_from(root, &input, &inputs.inputs.files, language)?;
     let n = population.statements.len();
     let mut pass = Pass {
@@ -736,6 +754,7 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
         let cost = |tokens: usize| tokens as f64 / 1e6 * quality::USD_PER_MILLION_INPUT_TOKENS;
         return Ok(json!({
             "run": run.id, "dryRun": true, "statements": n, "answeredFromCache": n - undecided,
+            "filter": (!options.filter.is_empty()).then(|| options.filter.describe()),
             "firstRound": {"requests": plan.len(), "inputTokens": bytes, "costUsd": cost(bytes)},
             "atMost": {"requests": most_requests, "inputTokens": most_tokens, "costUsd": cost(most_tokens)},
             "note": "Statements their first tests are not judged to catch are asked of more tests, so the pass costs between the first round and the most, which is what it sends when no test is judged to catch anything.",
@@ -787,13 +806,25 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
     )?;
     reused += sent.reused;
     let (requests, tokens) = (sent.requests, sent.tokens);
-    let result = summary(run, &population, &pass, requests, tokens, reused);
+    let mut result = summary(run, &population, &pass, requests, tokens, reused);
+    // Some of the tests are assessed apart from the whole run, whose result
+    // `tests affected` and every unfiltered reading go on reading.
+    let saved_as = if options.filter.is_empty() {
+        RESULT_FILE.to_owned()
+    } else {
+        result["filter"] = json!(options.filter.describe());
+        result["filterArgs"] = json!(filter_args(&options.filter));
+        filtered_result_file(&options.filter)
+    };
     let _ = std::fs::write(
-        run.directory.join(RESULT_FILE),
+        run.directory.join(saved_as),
         serde_json::to_vec(&result).unwrap_or_default(),
     );
-    // Every file the questions rendered, and the run's sources, as verified.
-    let mut kept = population.files_read();
+    // Every file the questions rendered, and the run's sources, as verified,
+    // beside what an earlier pass kept: a pass over some of the tests read
+    // fewer files than `assess --changed` may need.
+    let mut kept = coverage::load_snapshot(&run.directory.join(SNAPSHOT_FILE)).unwrap_or_default();
+    kept.extend(population.files_read());
     kept.extend(
         inputs
             .inputs
@@ -1089,6 +1120,173 @@ fn assessment_input(run: &StoredRun) -> Result<coverage::AssessmentInput, String
     }
 }
 
+/// The assessment input with only the tests `filter` picks, as every query
+/// picks them; all of it with no filter.
+fn narrowed(
+    run: &StoredRun,
+    input: coverage::AssessmentInput,
+    filter: &supercov_engine::coverage_report::TestFilter,
+) -> Result<coverage::AssessmentInput, String> {
+    if filter.is_empty() {
+        return Ok(input);
+    }
+    let picked = crate::picked_tests(run, filter)?;
+    let narrowed = input.only_tests(|test| picks(&picked, &test.name, test.file.as_deref()));
+    if narrowed.points.is_empty() {
+        return Err(format!(
+            "the tests {} picks ran no assessed statement",
+            filter.describe()
+        ));
+    }
+    Ok(narrowed)
+}
+
+fn picks(picked: &BTreeSet<(String, Option<String>)>, name: &str, file: Option<&str>) -> bool {
+    picked.contains(&(name.to_owned(), file.map(str::to_owned)))
+        || picked.contains(&(name.to_owned(), None))
+}
+
+/// The options that give `filter` again, for the commands a reading names.
+fn filter_args(filter: &supercov_engine::coverage_report::TestFilter) -> Vec<String> {
+    let mut args = Vec::new();
+    for (flag, value) in [("--kind", &filter.kind), ("--runner", &filter.runner)] {
+        if let Some(value) = value {
+            args.extend([flag.to_owned(), value.clone()]);
+        }
+    }
+    for (flag, values) in [
+        ("--tag", &filter.tags),
+        ("--title", &filter.titles),
+        ("--test-file", &filter.files),
+    ] {
+        for value in values {
+            args.extend([flag.to_owned(), value.clone()]);
+        }
+    }
+    args
+}
+
+/// ` --tag '@e2e'`: a reading's filter, for each command it names.
+fn flags(data: &Value) -> String {
+    data["filterArgs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|arg| {
+            if arg.starts_with("--") {
+                format!(" {arg}")
+            } else {
+                format!(" {}", quote(arg))
+            }
+        })
+        .collect()
+}
+
+/// Where an assessment of only the tests `filter` picks is saved, beside the
+/// run's whole one.
+fn filtered_result_file(filter: &supercov_engine::coverage_report::TestFilter) -> String {
+    let digest = Sha256::digest(filter.describe().as_bytes());
+    let hex = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("assertion-coverage-{hex}.json")
+}
+
+/// The run's whole assessment read for only the tests a filter picks: each
+/// statement those tests ran, with their answers alone. A statement they ran
+/// that was asserted by another test before they were asked is not asked of
+/// them, and says so.
+fn narrow_result(
+    mut result: Value,
+    input: &coverage::AssessmentInput,
+    picked: &BTreeSet<(String, Option<String>)>,
+    filter: &supercov_engine::coverage_report::TestFilter,
+) -> Value {
+    let running = input
+        .points
+        .iter()
+        .map(|point| {
+            let tests = point
+                .tests
+                .iter()
+                .filter_map(|t| input.tests.get(*t as usize))
+                .filter(|test| picks(picked, &test.name, test.file.as_deref()))
+                .collect::<Vec<_>>();
+            ((point.file.as_str(), point.line as u64), tests)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let statements = result["statements"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|mut statement| {
+            let file = statement["file"].as_str()?.to_owned();
+            let line = statement["line"].as_u64()?;
+            let tests = running.get(&(file.as_str(), line)).filter(|t| !t.is_empty())?;
+            let answers = statement["answers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|answer| {
+                    picks(
+                        picked,
+                        answer["name"].as_str().unwrap_or_default(),
+                        answer["file"].as_str(),
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let best = answers.iter().max_by(|a, b| {
+                let p = |v: &Value| v["p"].as_f64().unwrap_or(0.0);
+                p(a).total_cmp(&p(b))
+            });
+            let asserted = best.is_some_and(|b| b["p"].as_f64().unwrap_or(0.0) >= THRESHOLD);
+            statement["asserted"] = json!(asserted);
+            statement["answer"] = best.map_or(Value::Null, |b| b["p"].clone());
+            statement["test"] = best.map_or(Value::Null, |b| json!({"file": b["file"], "name": b["name"]}));
+            statement["testsAsked"] = json!(answers.len());
+            statement["testsRunningIt"] = json!(tests.len());
+            statement["notAsked"] = if asserted || answers.len() >= tests.len() {
+                Value::Null
+            } else {
+                let mut files = BTreeMap::<&str, usize>::new();
+                for test in tests.iter().filter(|test| {
+                    !answers.iter().any(|a| {
+                        a["name"].as_str() == Some(test.name.as_str())
+                            && a["file"].as_str() == test.file.as_deref()
+                    })
+                }) {
+                    *files.entry(test.file.as_deref().unwrap_or("")).or_default() += 1;
+                }
+                json!({
+                    "tests": tests.len() - answers.len(),
+                    "files": files.iter().map(|(file, tests)| json!({"file": file, "tests": tests})).collect::<Vec<_>>(),
+                })
+            };
+            statement["answers"] = json!(answers);
+            Some(statement)
+        })
+        .collect::<Vec<_>>();
+    let asserted = statements.iter().filter(|s| s["asserted"] == true).count();
+    let total = statements.len();
+    result["summary"]["statements"] = json!(total);
+    result["summary"]["asserted"] = json!(asserted);
+    result["summary"]["notAsserted"] = json!(total - asserted);
+    result["summary"]["percentage"] = if total == 0 {
+        Value::Null
+    } else {
+        json!((asserted as f64 * 1000.0 / total as f64).round() / 10.0)
+    };
+    result["statements"] = json!(statements);
+    result["filter"] = json!(filter.describe());
+    result["filterArgs"] = json!(filter_args(filter));
+    result
+}
+
 pub(crate) fn saved(run: &StoredRun) -> Option<Value> {
     std::fs::read(run.directory.join(RESULT_FILE))
         .ok()
@@ -1175,7 +1373,26 @@ fn not_assessed(run: &StoredRun) -> Value {
 
 /// The run's saved result, or where the last one is when this run has none.
 fn read(run: &StoredRun, runs: &[StoredRun], options: &Options) -> Result<Value, String> {
-    if let Some(result) = saved(run) {
+    if !options.filter.is_empty() {
+        // An assessment of exactly these tests, else the whole one read for
+        // them; the filter is checked against the run either way.
+        let picked = crate::picked_tests(run, &options.filter)?;
+        let own = std::fs::read(run.directory.join(filtered_result_file(&options.filter)))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let result = match own {
+            Some(result) => Some(result),
+            None => saved(run)
+                .map(|whole| {
+                    assessment_input(run)
+                        .map(|input| narrow_result(whole, &input, &picked, &options.filter))
+                })
+                .transpose()?,
+        };
+        if let Some(result) = result {
+            return view(result, &options.target, options.offset, options.limit);
+        }
+    } else if let Some(result) = saved(run) {
         return view(result, &options.target, options.offset, options.limit);
     }
     let last = runs
@@ -1188,7 +1405,12 @@ fn read(run: &StoredRun, runs: &[StoredRun], options: &Options) -> Result<Value,
         "run": run.id,
         "assessed": false,
         "lastAssessed": last,
-        "assess": format!("{} runs {} assertions assess", crate::launcher_command(), run.id),
+        "assess": format!(
+            "{} runs {} assertions assess{}",
+            crate::launcher_command(),
+            run.id,
+            flags(&json!({"filterArgs": filter_args(&options.filter)}))
+        ),
         "note": "Answers from earlier assessments are reused when the same question comes up, so assessing a later run usually asks only about what changed; `assess --dry-run` shows how many questions it would send.",
     }))
 }
@@ -1637,17 +1859,22 @@ fn page_footer(data: &Value, command: &str) -> String {
 fn render_files(run: &str, data: &Value) -> String {
     let s = &data["summary"];
     let mut out = format!(
-        "Run {run}: {} asserted ({} of {} executed statements)\n",
+        "Run {run}: {} asserted ({} of {} executed statements){}\n",
         share(&s["percentage"]),
         s["asserted"],
-        s["statements"]
+        s["statements"],
+        data["filter"]
+            .as_str()
+            .map(|filter| format!(", by the tests {filter} picks"))
+            .unwrap_or_default()
     );
     out.push_str(&weak_line(
         &s["weaklyAsserted"],
         &format!(
-            "{} runs {} assertions --weak",
+            "{} runs {} assertions{} --weak",
             crate::launcher_command(),
-            quote(run)
+            quote(run),
+            flags(data)
         ),
     ));
     let files = data["files"].as_array().cloned().unwrap_or_default();
@@ -1668,16 +1895,18 @@ fn render_files(run: &str, data: &Value) -> String {
     out.push_str(&page_footer(
         data,
         &format!(
-            "{} runs {} assertions",
+            "{} runs {} assertions{}",
             crate::launcher_command(),
-            quote(run)
+            quote(run),
+            flags(data)
         ),
     ));
     if let Some(first) = files.iter().find(|f| f["notAsserted"].as_u64() > Some(0)) {
         out.push_str(&format!(
-            "inspect a file: {} runs {} assertions {}\n",
+            "inspect a file: {} runs {} assertions{} {}\n",
             crate::launcher_command(),
             quote(run),
+            flags(data),
             quote(first["file"].as_str().unwrap_or(""))
         ));
     }
@@ -1721,16 +1950,18 @@ fn render_weak(run: &str, data: &Value) -> String {
     out.push_str(&page_footer(
         data,
         &format!(
-            "{} runs {} assertions --weak",
+            "{} runs {} assertions{} --weak",
             crate::launcher_command(),
-            quote(run)
+            quote(run),
+            flags(data)
         ),
     ));
     if let Some(first) = files.first() {
         out.push_str(&format!(
-            "inspect a file: {} runs {} assertions {} --weak\n",
+            "inspect a file: {} runs {} assertions{} {} --weak\n",
             crate::launcher_command(),
             quote(run),
+            flags(data),
             quote(first["file"].as_str().unwrap_or(""))
         ));
     }
@@ -1767,17 +1998,19 @@ fn render_weak_file(run: &str, data: &Value) -> String {
     out.push_str(&page_footer(
         data,
         &format!(
-            "{} runs {} assertions {} --weak",
+            "{} runs {} assertions{} {} --weak",
             crate::launcher_command(),
             quote(run),
+            flags(data),
             quote(file)
         ),
     ));
     if let Some(first) = weak.first() {
         out.push_str(&format!(
-            "inspect a statement: {} runs {} assertions {}\n",
+            "inspect a statement: {} runs {} assertions{} {}\n",
             crate::launcher_command(),
             quote(run),
+            flags(data),
             quote(&format!("{file}:{}", first["line"]))
         ));
     }
@@ -1797,9 +2030,10 @@ fn render_file(run: &str, data: &Value) -> String {
     let weak = weak_line(
         &s["weaklyAsserted"],
         &format!(
-            "{} runs {} assertions {} --weak",
+            "{} runs {} assertions{} {} --weak",
             crate::launcher_command(),
             quote(run),
+            flags(data),
             quote(file)
         ),
     );
@@ -1837,17 +2071,19 @@ fn render_file(run: &str, data: &Value) -> String {
     out.push_str(&page_footer(
         data,
         &format!(
-            "{} runs {} assertions {}",
+            "{} runs {} assertions{} {}",
             crate::launcher_command(),
             quote(run),
+            flags(data),
             quote(file)
         ),
     ));
     if let Some(first) = not.first() {
         out.push_str(&format!(
-            "inspect a statement: {} runs {} assertions {}\n",
+            "inspect a statement: {} runs {} assertions{} {}\n",
             crate::launcher_command(),
             quote(run),
+            flags(data),
             quote(&format!("{file}:{}", first["line"]))
         ));
     }
@@ -1962,9 +2198,10 @@ fn render_test(run: &str, data: &Value) -> String {
     out.push_str(&page_footer(
         data,
         &format!(
-            "{} runs {} assertions --test {}",
+            "{} runs {} assertions{} --test {}",
             crate::launcher_command(),
             quote(run),
+            flags(data),
             quote(name)
         ),
     ));

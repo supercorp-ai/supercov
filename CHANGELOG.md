@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `assertions` and `assertions assess` take `--kind`, `--runner`, `--tag`, `--title` and `--test-file`, as every query does. `assess --tag @e2e` asks only those tests about the statements they ran (`--dry-run` estimates just that) and saves the result apart from the run's whole assessment; `assertions --tag @e2e` reads what those tests assert.
+- `tests affected` takes the same filters: from a run that merged two runners' suites, `tests affected --names --runner playwright` lists only Playwright's affected tests, for its `--grep`.
+
 ## 4.16.0
 
 **Fixed**
