@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A Rails-style Ruby test whose name starts with a four-letter word (`test "adds numbers"`, `test "with a coupon"`) was read as a numbered minitest/spec example and its code was not found, so assessment asked about it without the test. It is found by its name now.
 - A Java project with two build files that both fail on warnings was told twice that Supercov "stopped the build failing on warnings" in its copy. Each relaxation is now said once.
 - A Next.js route handler at the root of `app/` (`app/route.ts`, serving `/`) was not wrapped like handlers deeper in `app/`, so what its `GET` or `POST` ran was not tied to the request that ran it. It is now.
 - A Rust condition in an array length (`[0; if WIDE { 4 } else { 2 }]`, or the same in a return type) runs at compile time and cannot be measured, but was counted as a decision no test evaluated: a gap no test could close. It is now declared unmeasured, like `const fn` bodies.

@@ -410,7 +410,14 @@ pub(super) fn locate(source: &str, lines: &[&str], runner: &str, name: &str) -> 
             let method = name.rsplit_once('#').map_or(name, |(_, m)| m);
             let described = method
                 .strip_prefix("test_")
-                .and_then(|r| r.get(5..).filter(|_| r.as_bytes().get(4) == Some(&b'_')))
+                // minitest/spec numbers each `it`: `test_0001_adds`. A word
+                // of four letters is not a number (`test_adds_numbers`).
+                .and_then(|r| {
+                    r.get(5..).filter(|_| {
+                        r.as_bytes().get(4) == Some(&b'_')
+                            && r.as_bytes()[..4].iter().all(u8::is_ascii_digit)
+                    })
+                })
                 .or_else(|| method.strip_prefix("test: "))
                 .map(str::to_owned)
                 .or_else(|| method.strip_prefix("test_").map(|r| r.replace('_', " ")));
@@ -621,5 +628,50 @@ mod tests {
             (found.context.clone(), found.start, found.end),
             (vec![0], 1, 3)
         );
+    }
+
+    /// RSpec numbers runnables as it runs them: a shared group's definition
+    /// is none, `it_behaves_like` is one group, and `include_examples` adds
+    /// examples the source does not count, so a later number is shown as its
+    /// group.
+    #[test]
+    fn shared_examples_number_the_way_rspec_runs_them() {
+        let spec = "RSpec.shared_examples \"a thing\" do\n  it \"works\" do\n  end\nend\n\nRSpec.describe A do\n  before { skip \"not here\" if ENV[\"CI\"] }\n  it_behaves_like \"a thing\"\n  it \"after\" do\n    expect(1).to eq(1)\n  end\n  include_examples \"a thing\"\n  it \"last\" do\n  end\nend\n";
+        let lines = spec.split('\n').collect::<Vec<_>>();
+        let at = |id: &str| {
+            let found = locate(spec, &lines, "rspec", &format!("spec/a_spec.rb[{id}]")).unwrap();
+            (found.start + 1, found.end + 1)
+        };
+        assert_eq!(at("1"), (6, 15), "the describe, not the shared definition");
+        assert_eq!(at("1:1"), (8, 8), "it_behaves_like is one group");
+        assert_eq!(at("1:2"), (9, 11));
+        assert_eq!(at("1:3"), (12, 12));
+        assert_eq!(at("1:4"), (6, 15), "after include_examples: the group");
+    }
+
+    #[test]
+    fn scenarios_and_described_tests_are_found_by_their_names() {
+        let feature = "Feature: cart\n\n  Scenario: adds\n    Given a cart\n    Then it adds\n\n  @slow\n  Scenario: removes\n    Given a cart\n";
+        let lines = feature.split('\n').collect::<Vec<_>>();
+        let adds = locate(feature, &lines, "cucumber", "features/cart.feature:3").unwrap();
+        assert_eq!(
+            (adds.start, adds.end),
+            (2, 5),
+            "up to the next scenario's tag"
+        );
+        let last = locate(feature, &lines, "cucumber", "features/cart.feature:8").unwrap();
+        assert_eq!((last.start, last.end), (7, lines.len() - 1));
+        // Rails' `test "adds numbers"`, minitest/spec's numbered `it`, and a
+        // method named for a word the description starts with.
+        let tests = "class CartTest < ActiveSupport::TestCase\n  test \"adds numbers\" do\n    assert true\n  end\nend\ndescribe Cart do\n  it 'removes items' do\n    assert true\n  end\nend\nclass Plain < Minitest::Test\n  def test_adds_more; assert true; end\n  def test_adds\n    assert true\n  end\nend\n";
+        let lines = tests.split('\n').collect::<Vec<_>>();
+        let line = |name: &str| {
+            let found = locate(tests, &lines, "minitest", name).unwrap();
+            (found.context, found.start + 1)
+        };
+        assert_eq!(line("CartTest#test_adds_numbers"), (vec![0], 2));
+        assert_eq!(line("Cart#test_0001_removes items"), (vec![5], 7));
+        assert_eq!(line("Plain#test_adds"), (vec![10], 13));
+        assert!(locate(tests, &lines, "minitest", "Plain#test_missing").is_none());
     }
 }
