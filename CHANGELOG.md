@@ -9,6 +9,7 @@
 
 **Fixed**
 
+- A Next.js project whose `next.config` sets `turbopack.root` to its own directory could not run Turbopack under Supercov (`Next.js package not found`, or a `node_modules` link "out of the filesystem root"): in the copy that root excluded the dependencies it links to. The root is now widened to hold them.
 - A node:test suite that mocks modules (`--experimental-test-module-mocks`) and maps import paths with a preload that patches Node's resolver (`--import tsx` 4.20, tsconfig `@/` paths) failed under Supercov with `Cannot find module '@/...'`: Supercov loaded node:test before the command's own preload, and Node's mock loader kept the resolver it found then. The adapter now loads when a test first asks for node:test.
 - `assertions assess` refused a checkout that lacked any file the run had read, such as a git-ignored `.env` only CI generates. It now checks only the files its questions quote, each assessed statement's source and each test's own file, and still names any of those that changed.
 

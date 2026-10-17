@@ -604,13 +604,57 @@ else {
     return print.apply(this, [kept.join("\\n"), ...message.slice(1)]);
 })(warnOnce)); } catch {}
 `.replace(/\n\s*/g, " ");
+    // A project's `turbopack.root`, set to its own directory, names the copy
+    // here, while the copy's dependencies are links into the project's
+    // node_modules. Turbopack resolves no package outside its root and
+    // panicked "Next.js package not found". The root Next settles on is
+    // widened to the nearest directory that holds the real `next` package
+    // too -- the project, which holds the copy; one that holds it is kept.
+    const widened = `
+;try { loadConfig = ((load) => async function loadConfig(...args) {
+    const config = await load.apply(this, args);
+    try {
+        const path = require("path"), fs = require("fs");
+        const root = config && config.turbopack && config.turbopack.root;
+        if (typeof root === "string") {
+            const dir = path.resolve(args[1] || process.cwd());
+            const held = [fs.realpathSync(path.dirname(require.resolve("next/package.json", { paths: [dir] })))];
+            for (let at = dir; at.includes(path.sep + ".supercov" + path.sep); at = path.dirname(at)) {
+                try { held.push(fs.realpathSync(path.join(at, "node_modules"))); } catch {}
+            }
+            let common = fs.realpathSync(root).split(path.sep);
+            for (const target of held) {
+                const parts = target.split(path.sep);
+                let i = 0;
+                while (i < common.length && i < parts.length && common[i] === parts[i]) i++;
+                common = common.slice(0, i);
+            }
+            const widened = common.join(path.sep) || path.sep;
+            if (widened !== fs.realpathSync(root)) {
+                config.turbopack.root = widened;
+                config.outputFileTracingRoot = widened;
+            }
+        }
+    } catch {}
+    return config;
+})(loadConfig); } catch {}
+`.replace(/\n\s*/g, " ");
+    const append = (content, code) => {
+        // After the last statement, before the source map's line.
+        const map = content.lastIndexOf("\n//# sourceMappingURL=");
+        return map < 0 ? `${content}${code}` : `${content.slice(0, map)}${code}${content.slice(map)}`;
+    };
     const compile = Module.prototype._compile;
     Module.prototype._compile = function _compile(content, filename, ...rest) {
-        if (typeof content === "string" && typeof filename === "string" && filename.endsWith("log.js") &&
-            /[\\/]next[\\/]dist[\\/]build[\\/]output[\\/]log\.js$/.test(filename)) {
-            // After the last statement, before the source map's line.
-            const map = content.lastIndexOf("\n//# sourceMappingURL=");
-            content = map < 0 ? `${content}${quieted}` : `${content.slice(0, map)}${quieted}${content.slice(map)}`;
+        if (typeof content === "string" && typeof filename === "string") {
+            if (filename.endsWith("log.js") &&
+                /[\\/]next[\\/]dist[\\/]build[\\/]output[\\/]log\.js$/.test(filename)) {
+                content = append(content, quieted);
+            }
+            else if (filename.endsWith("config.js") &&
+                /[\\/]next[\\/]dist[\\/]server[\\/]config\.js$/.test(filename)) {
+                content = append(content, widened);
+            }
         }
         return Reflect.apply(compile, this, [content, filename, ...rest]);
     };
