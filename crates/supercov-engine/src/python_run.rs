@@ -669,6 +669,11 @@ impl PythonServer {
         }))
     }
 
+    /// The source this server was instrumented from.
+    pub fn source_fingerprint(&self) -> String {
+        self.integrity.fingerprint.source.clone()
+    }
+
     pub fn source_files(&self) -> usize {
         self.project.plan.files.len()
     }

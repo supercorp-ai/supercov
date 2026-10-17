@@ -122,6 +122,7 @@ gates! {
     go_servers => "go-server-playwright.mjs",
     jvm_servers => "jvm-server-playwright.mjs",
     docker_servers => "docker-server-playwright.mjs",
+    docker_clients => "docker-clients-playwright.mjs",
     failure_output_node => "failure-output.mjs" ["node", "ava", "tap"],
     failure_output_python => "failure-output.mjs" ["python"],
     failure_output_ruby => "failure-output.mjs" ["ruby"],

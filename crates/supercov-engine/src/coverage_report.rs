@@ -283,6 +283,12 @@ pub struct RawTestResult {
     pub browser: Vec<RuntimeSnapshot>,
     #[serde(default)]
     pub server: Vec<ServerRecord>,
+    /// When the attempt ran, on the runner's clock: its first and last
+    /// moment, in milliseconds since the epoch. Server work that names no
+    /// test is judged by it; a frontend that runs each test in a process of
+    /// its own has no need of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<[i64; 2]>,
 }
 
 fn default_test_role() -> String {
@@ -3284,6 +3290,7 @@ pub fn archive_request(
     background.records.clone_from(&background_records);
     if had_background {
         raw_results.push(RawTestResult {
+            span: None,
             test_id: Some(format!("background:{}", request.run_id)),
             scope: None,
             test: "Background / unattributed".into(),
@@ -3708,6 +3715,7 @@ mod tests {
 
     fn raw(id: &str, retry: usize, status: &str, hits: &[&str]) -> RawTestResult {
         RawTestResult {
+            span: None,
             test_id: Some(id.into()),
             scope: None,
             test: id.into(),
@@ -3745,6 +3753,7 @@ mod tests {
     #[test]
     fn a_filter_keeps_the_setup_of_the_files_it_picks_and_nothing_else() {
         let in_file = |id: &str, role: &str, file: &str| RawTestResult {
+            span: None,
             role: role.into(),
             test_file: Some(file.into()),
             ..raw(id, 0, "passed", &[])

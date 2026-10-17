@@ -1588,10 +1588,15 @@ const instrumentedFixtures = {
             const serverOutput = serverEvidencePath(scope);
             mkdirSync(serverEvidenceDirectory(scope), { recursive: true });
             rmSync(serverOutput, { force: true });
+            // The attempt's first and last moment: a server's work that names
+            // no test is credited by time to the one test running then, and a
+            // test is running for all of this, not only during its actions.
+            const startedAtMs = Date.now();
             try {
                 await use();
             }
             finally {
+                const endedAtMs = Date.now();
                 try {
                     const browser = await controller.collectRuntimeSnapshots();
                     const server = readServerRecords(scope);
@@ -1621,6 +1626,7 @@ const instrumentedFixtures = {
                         ...(controller.workerEvidenceMissing ? { attribution: "partial" } : {}),
                         browser,
                         server,
+                        span: [startedAtMs, endedAtMs],
                     };
                     appendEvidenceLine(`${JSON.stringify(payload)}\n`);
                 }

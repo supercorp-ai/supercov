@@ -131,6 +131,9 @@ pub fn read(evidence_directory: &Path) -> Vec<ServedTest> {
         provenance: crate::coverage_report::TestProvenance,
         #[serde(default)]
         phases: Vec<Phase>,
+        /// The attempt's first and last moment, from fixtures that record it.
+        #[serde(default)]
+        span: Option<[i64; 2]>,
     }
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -163,12 +166,21 @@ pub fn read(evidence_directory: &Path) -> Vec<ServedTest> {
             .filter_map(|line| serde_json::from_str::<Attempt>(line).ok())
         {
             let worker = format!("playwright:{}", attempt.scope.worker_id);
-            let start = attempt.phases.iter().map(|phase| phase.started_at_ms).min();
-            let end = attempt
-                .phases
-                .iter()
-                .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
-                .max();
+            // The whole attempt where the fixture recorded it: a test runs
+            // between its actions too, and a span of its actions alone is a
+            // few milliseconds a sweep of the server's clock can miss.
+            // Otherwise, its first and last phase.
+            let (start, end) = match attempt.span {
+                Some([start, end]) => (Some(start), Some(end)),
+                None => (
+                    attempt.phases.iter().map(|phase| phase.started_at_ms).min(),
+                    attempt
+                        .phases
+                        .iter()
+                        .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
+                        .max(),
+                ),
+            };
             served
                 .entry((worker.clone(), attempt.test_id.clone(), attempt.retry))
                 .or_insert(ServedTest {
@@ -190,6 +202,55 @@ pub fn read(evidence_directory: &Path) -> Vec<ServedTest> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_test_is_running_for_its_whole_attempt_where_the_fixture_says_so() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-served-span-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let attempt = |id: &str, span: Option<[i64; 2]>| {
+            let mut line = serde_json::json!({
+                "testId": id,
+                "scope": {"workerId": "w0"},
+                "test": id,
+                "testFile": "a.spec.js",
+                "title": id,
+                "retry": 0,
+                "status": "passed",
+                "provenance": {"runner": "playwright", "kind": "e2e", "source": "explicit"},
+                "phases": [{"id": "p", "kind": "action", "operation": "get", "startedAtMs": 1050, "endedAtMs": 1053}],
+            });
+            if let Some(span) = span {
+                line["span"] = serde_json::json!(span);
+            }
+            line.to_string()
+        };
+        std::fs::write(
+            directory.join("playwright-worker-0.mcdc.jsonl"),
+            format!(
+                "{}\n{}\n",
+                attempt("spanned", Some([1000, 1110])),
+                attempt("older", None)
+            ),
+        )
+        .unwrap();
+        let served = read(&directory)
+            .into_iter()
+            .map(|test| (test.test_id, test.window))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        // The attempt, pauses and all; a fixture that records no span is
+        // judged by its phases, as before.
+        assert_eq!(served["spanned"], Some((1000, 1110)));
+        assert_eq!(served["older"], Some((1050, 1053)));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     use super::*;
 
     // A request to a server the suite runs itself is the test's whose phase
