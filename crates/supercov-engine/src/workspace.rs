@@ -2772,6 +2772,55 @@ mod tests {
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
+    /// Names that arrive from outside -- a run id, a path to reuse, a path to
+    /// write back -- are refused when they could leave the place they name.
+    #[test]
+    fn names_that_could_leave_their_directory_are_refused() {
+        let (root, workspace) = writeback_fixture("names");
+        let unsafe_path = |result: Result<PathBuf, WorkspaceError>| {
+            matches!(result, Err(WorkspaceError::UnsafePath(_)))
+        };
+        for run_id in ["", ".", "..", "a/b", "a\\b", "a\0b", "a\nb"] {
+            assert!(
+                unsafe_path(isolated_workspace_path(&root, run_id)),
+                "{run_id:?}"
+            );
+        }
+        let isolated = isolated_workspace_path(&root, "run_1").unwrap();
+        assert!(isolated.starts_with(workspace_container(&root).join("work").join("run_1")));
+
+        fs::write(workspace.join("kept.txt"), "kept\n").unwrap();
+        for requested in [
+            workspace.join("kept.txt"),
+            PathBuf::from("../kept.txt"),
+            PathBuf::from("./kept.txt"),
+            PathBuf::new(),
+            PathBuf::from("missing.txt"),
+        ] {
+            assert!(
+                unsafe_path(checked_reuse_path(&workspace, &requested)),
+                "{requested:?}"
+            );
+        }
+        assert_eq!(
+            checked_reuse_path(&workspace, Path::new("kept.txt")).unwrap(),
+            workspace.join("kept.txt")
+        );
+
+        for relative in ["", "../escape.txt", "/etc/passwd", "a/../../b"] {
+            assert!(
+                matches!(
+                    validate_writeback_destination(&root, Path::new(relative)),
+                    Err(WorkspaceError::UnsafePath(_))
+                ),
+                "{relative:?}"
+            );
+        }
+        // A destination that does not exist yet is fine.
+        validate_writeback_destination(&root, Path::new("reports/new/result.txt")).unwrap();
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn writeback_refuses_a_symlinked_destination() {
