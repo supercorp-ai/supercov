@@ -32,6 +32,9 @@ pub struct ServedTest {
     /// When the attempt ran, in milliseconds since the epoch, first and
     /// last moment: what a request that named no test is judged by.
     pub window: Option<(i64, i64)>,
+    /// The attempt's own id, as its runner's scope names it: what a take at
+    /// the test's edge is recorded under.
+    pub attempt_id: Option<String>,
 }
 
 /// One phase starting: in which process (its transport), where in its
@@ -112,10 +115,24 @@ pub fn owner<'a>(
 /// Each browser test attempt the suite reported, read from the Playwright
 /// fixture's evidence lines.
 pub fn read(evidence_directory: &Path) -> Vec<ServedTest> {
+    read_journals(evidence_directory, |name| {
+        name.starts_with("playwright-worker-")
+    })
+}
+
+/// Each test attempt any runner reported -- node:test, Vitest, Jest, Mocha,
+/// AVA, tap, Playwright -- read from the evidence journals they all write.
+pub fn read_attempts(evidence_directory: &Path) -> Vec<ServedTest> {
+    read_journals(evidence_directory, |_| true)
+}
+
+fn read_journals(evidence_directory: &Path, wanted: impl Fn(&str) -> bool) -> Vec<ServedTest> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Scope {
         worker_id: String,
+        #[serde(default)]
+        attempt_id: Option<String>,
     }
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -131,6 +148,9 @@ pub fn read(evidence_directory: &Path) -> Vec<ServedTest> {
         provenance: crate::coverage_report::TestProvenance,
         #[serde(default)]
         phases: Vec<Phase>,
+        /// `background` for a record of work between tests: no test.
+        #[serde(default)]
+        role: Option<String>,
     }
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -148,9 +168,7 @@ pub fn read(evidence_directory: &Path) -> Vec<ServedTest> {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name.starts_with("playwright-worker-") && name.ends_with(".mcdc.jsonl")
-                })
+                .is_some_and(|name| wanted(name) && name.ends_with(".mcdc.jsonl"))
         })
         .collect::<Vec<_>>();
     files.sort();
@@ -161,6 +179,7 @@ pub fn read(evidence_directory: &Path) -> Vec<ServedTest> {
         for attempt in text
             .lines()
             .filter_map(|line| serde_json::from_str::<Attempt>(line).ok())
+            .filter(|attempt| attempt.role.as_deref().is_none_or(|role| role == "test"))
         {
             let worker = format!("playwright:{}", attempt.scope.worker_id);
             let start = attempt.phases.iter().map(|phase| phase.started_at_ms).min();
@@ -182,6 +201,7 @@ pub fn read(evidence_directory: &Path) -> Vec<ServedTest> {
                     expected_status: attempt.expected_status.unwrap_or_else(|| "passed".into()),
                     provenance: attempt.provenance,
                     window: start.zip(end),
+                    attempt_id: attempt.scope.attempt_id,
                 });
         }
     }
