@@ -11006,6 +11006,98 @@ mod tests {
         assert!(output.code.contains("expect.toBe"));
     }
 
+    /// Each way a test file reaches an assertion, and the look-alikes that
+    /// are not one: another library's `expect`, a `require` of a name only
+    /// known at run time, a local `expect`, and calls that can short-circuit
+    /// before the assertion runs.
+    #[test]
+    fn an_assertion_is_recognised_however_it_was_reached_and_only_then() {
+        for (file, source, assertions) in [
+            (
+                "t/a.test.js",
+                "describe('x', () => { it('y', () => expect(a()).toBe(1)); });\n",
+                1,
+            ),
+            ("t/b.test.js", "it('y', () => expect(a()).toBe(1));\n", 1),
+            (
+                "t/p.test.js",
+                "describe('x', function () { expect(a()).toBe(1); });\n",
+                1,
+            ),
+            // A global `expect` with none of the test globals beside it.
+            ("t/q.test.js", "expect(a()).toBe(1);\n", 0),
+            (
+                "t/c.test.cjs",
+                "const { expect } = require('vitest');\nexpect(a()).toBe(1);\n",
+                1,
+            ),
+            (
+                "t/d.test.cjs",
+                "const { expect: check } = require('@jest/globals');\ncheck(a()).toBe(1);\n",
+                1,
+            ),
+            (
+                "t/i.test.mjs",
+                "import { expect as e } from 'vitest';\ne(a()).toBe(1);\n",
+                1,
+            ),
+            (
+                "t/n.test.cjs",
+                "const { strict } = require('node:assert');\nstrict.equal(a(), 1);\n",
+                1,
+            ),
+            (
+                "t/s.test.cjs",
+                "const assert = require('node:assert').strict;\nassert.equal(a(), 1);\n",
+                1,
+            ),
+            // An export of `node:assert` that is not an assertion.
+            (
+                "t/h.test.mjs",
+                "import { ok, AssertionError } from 'node:assert';\nok(a());\nnew AssertionError({});\n",
+                1,
+            ),
+            (
+                "t/j.test.cjs",
+                "const { equal, AssertionError } = require('assert');\nequal(a(), 1);\nnew AssertionError({});\n",
+                1,
+            ),
+            (
+                "t/e.test.cjs",
+                "const { expect } = require('chai');\nexpect(a()).to.equal(1);\n",
+                0,
+            ),
+            (
+                "t/f.test.cjs",
+                "const name = 'node:assert';\nconst assert = require(name);\nassert.ok(a());\n",
+                0,
+            ),
+            (
+                "t/o.test.cjs",
+                "const [first] = require('node:assert');\nfirst(a());\n",
+                0,
+            ),
+            (
+                "t/m.test.mjs",
+                "import { test } from 'node:test';\nconst expect = (v) => ({ toBe() {} });\ntest('x', () => expect(a()).toBe(1));\n",
+                0,
+            ),
+            (
+                "t/k.test.mjs",
+                "import assert from 'node:assert';\nassert?.ok(a());\nassert.ok?.(b());\n",
+                0,
+            ),
+        ] {
+            let output = instrument_node_assertion_phases(source, file).unwrap();
+            assert_eq!(output.assertions, assertions, "{file}");
+            assert_eq!(
+                output.code.matches("withNodeAssertionPhase").count(),
+                assertions,
+                "{file}"
+            );
+        }
+    }
+
     #[test]
     fn an_arrow_that_returns_an_assertion_still_returns_it() {
         // `await loginError(page)` waits for the matcher only if the arrow
