@@ -686,14 +686,26 @@ fn assess(root: &Path, run: &StoredRun, options: &Options) -> Result<Value, Stri
             coverage::population_from(root, &input, &sources, language)?.with_files(snapshot);
         return assess_changed(root, run, options, &population);
     }
-    let inputs = maps::load_inputs(root, run)?;
+    let input = narrowed(run, assessment_input(run)?, &options.filter)?;
+    // Only the files the questions quote are checked against the run: the
+    // source of each assessed statement and each test's own file. A file the
+    // run merely read -- an .env only CI generates -- may be missing here.
+    let needed = input
+        .points
+        .iter()
+        .chain(&input.decisions)
+        // A statement no test ran is not asked about.
+        .filter(|point| !point.tests.is_empty())
+        .map(|point| point.file.as_str())
+        .chain(input.tests.iter().filter_map(|test| test.file.as_deref()))
+        .collect::<BTreeSet<_>>();
+    let inputs = maps::load_inputs_for(root, run, |file| needed.contains(file))?;
     let Some(language) = coverage::Language::from_manifest(&inputs.inputs.language) else {
         return Err(format!(
             "Assertion coverage supports JavaScript, TypeScript, Python, Ruby, Go, Rust, Java and Kotlin runs; this run is {}",
             inputs.inputs.language
         ));
     };
-    let input = narrowed(run, assessment_input(run)?, &options.filter)?;
     let population = coverage::population_from(root, &input, &inputs.inputs.files, language)?;
     let n = population.statements.len();
     let mut pass = Pass {

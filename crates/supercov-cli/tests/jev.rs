@@ -2307,3 +2307,32 @@ fn assertions_read_and_assess_some_of_the_tests() {
         .exits(2);
     assert!(none.contains("No tests match --runner jest"), "{none}");
 }
+
+/// Assessing reads the files its questions quote, not every file the run
+/// recorded: a file CI generates and a checkout lacks does not stop it, while
+/// a changed file it does quote still does, by name.
+#[test]
+fn assessing_checks_only_the_files_its_questions_quote() {
+    let project = Project::cart("assertion-needed-files");
+    project.write("src/generated.js", "export const stack = 'isolated';\n");
+    project.commit("generated");
+    let (base, _) = gateway(MODEL, answer_yes);
+    let run = project.measure(&[]);
+    std::fs::remove_file(project.root.join("src/generated.js")).unwrap();
+    let assessed = project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    assert!(assessed.contains("asserted"), "{assessed}");
+    project.edit(
+        "src/cart.js",
+        "return express ? 15 : 5;",
+        "return express ? 20 : 5;",
+    );
+    let refused = project
+        .supercov_with(
+            &["runs", &run, "assertions", "assess", "--refresh"],
+            &through(&base),
+        )
+        .exits(2);
+    assert!(refused.contains("src/cart.js"), "{refused}");
+}
