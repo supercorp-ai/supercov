@@ -3739,6 +3739,44 @@ mod tests {
         }
     }
 
+    /// A filtered view keeps the tests it picks and the setup that ran in
+    /// their files; setup in another file, and work outside every test, is
+    /// no picked test's.
+    #[test]
+    fn a_filter_keeps_the_setup_of_the_files_it_picks_and_nothing_else() {
+        let in_file = |id: &str, role: &str, file: &str| RawTestResult {
+            role: role.into(),
+            test_file: Some(file.into()),
+            ..raw(id, 0, "passed", &[])
+        };
+        let results = vec![
+            in_file("app", "test", "tests/app.test.js"),
+            in_file("other", "test", "tests/other.test.js"),
+            in_file("app setup", "setup", "tests/app.test.js"),
+            in_file("other setup", "setup", "tests/other.test.js"),
+            in_file("background", "background", "tests/app.test.js"),
+        ];
+        let filter = TestFilter {
+            files: vec!["tests/app.test.js".into()],
+            runner: Some("node:test".into()),
+            ..TestFilter::default()
+        };
+        assert!(!filter.is_empty());
+        let kept = filter.select(results.clone()).unwrap();
+        assert_eq!(
+            kept.iter().map(|raw| raw.test.as_str()).collect::<Vec<_>>(),
+            ["app", "app setup"]
+        );
+        let jest = TestFilter {
+            runner: Some("jest".into()),
+            ..TestFilter::default()
+        };
+        assert!(matches!(
+            jest.select(results),
+            Err(ReportError::NoTestMatches(described)) if described == "--runner jest"
+        ));
+    }
+
     #[test]
     fn server_work_no_request_named_is_credited_to_the_only_test_running() {
         let phase = |start: i64, end: i64| CoveragePhase {

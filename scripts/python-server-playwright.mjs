@@ -15,13 +15,14 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { freePorts } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const python = process.env.SUPERCOV_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
 // Inside the repository, so the suite finds its Playwright.
 const base = resolve(repository, 'target', `python-server-playwright-${process.pid}-${Date.now()}`);
-const port = 46000 + Math.floor(Math.random() * 2000);
+const [port, port1, port2, port3, port4, port5] = await freePorts(6);
 
 const write = (root, files) => {
   for (const [file, text] of Object.entries(files)) {
@@ -145,7 +146,7 @@ try {
   // A webhook a mock Supercov does not measure sends: the request names no
   // test, and its work is the test's that was running when it came.
   const webhook = resolve(base, 'webhook');
-  const stripe = port + 4;
+  const stripe = port4;
   write(webhook, {
     'package.json': '{ "name": "python-webhook", "private": true, "type": "module" }\n',
     'app/__init__.py': '',
@@ -193,12 +194,12 @@ class Handler(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
 `,
     // Answers the charge, then calls the app's webhook by itself.
-    'mocks/stripe.mjs': `import { createServer } from 'node:http';\n\ncreateServer((request, response) => {\n  if (request.url === '/charge') {\n    response.end('{}');\n    setTimeout(() => fetch('http://127.0.0.1:${port + 5}/webhook', { method: 'POST', body: JSON.stringify({ type: 'charge.succeeded' }) }), 100);\n    return;\n  }\n  response.end('ready');\n}).listen(${stripe}, '127.0.0.1');\n`,
+    'mocks/stripe.mjs': `import { createServer } from 'node:http';\n\ncreateServer((request, response) => {\n  if (request.url === '/charge') {\n    response.end('{}');\n    setTimeout(() => fetch('http://127.0.0.1:${port5}/webhook', { method: 'POST', body: JSON.stringify({ type: 'charge.succeeded' }) }), 100);\n    return;\n  }\n  response.end('ready');\n}).listen(${stripe}, '127.0.0.1');\n`,
     'playwright.config.js': config([
-      { command: `${python} -m app.server ${port + 5}`, url: `http://127.0.0.1:${port + 5}/ready`, reuseExistingServer: false },
+      { command: `${python} -m app.server ${port5}`, url: `http://127.0.0.1:${port5}/ready`, reuseExistingServer: false },
       // Started without Supercov, as an external mock binary would be.
       { command: 'env -u NODE_OPTIONS node mocks/stripe.mjs', url: `http://127.0.0.1:${stripe}/`, reuseExistingServer: false },
-    ], `http://127.0.0.1:${port + 5}`),
+    ], `http://127.0.0.1:${port5}`),
     'tests/checkout.spec.js': "import { expect, test } from '@playwright/test';\n\ntest('a checkout is paid when the webhook arrives', async ({ request }) => {\n  await request.get('/checkout');\n  await expect.poll(async () => (await request.get('/state')).text()).toBe('paid');\n});\n\ntest('the state can be read', async ({ request }) => {\n  expect(await (await request.get('/state')).text()).toBeTruthy();\n});\n",
   });
   if (process.platform !== 'win32') {
@@ -238,13 +239,13 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
     'app/__init__.py': '',
     'app/grades.py': grades,
     'app/server.py': server,
-    'src/front.js': `import { createServer } from 'node:http';\n\nexport function label(grade) {\n  return grade === 'A' ? 'top' : 'other';\n}\n\ncreateServer(async (request, response) => {\n  if (request.url === '/ready') return response.end('ready');\n  response.end(label(await (await fetch('http://127.0.0.1:${port + 1}/grade?score=95')).text()));\n}).listen(${port + 2}, '127.0.0.1');\n`,
+    'src/front.js': `import { createServer } from 'node:http';\n\nexport function label(grade) {\n  return grade === 'A' ? 'top' : 'other';\n}\n\ncreateServer(async (request, response) => {\n  if (request.url === '/ready') return response.end('ready');\n  response.end(label(await (await fetch('http://127.0.0.1:${port1}/grade?score=95')).text()));\n}).listen(${port2}, '127.0.0.1');\n`,
     'playwright.config.js': config([
-      { command: `${python} -m app.server ${port + 1}`, url: `http://127.0.0.1:${port + 1}/ready`, reuseExistingServer: false },
-      { command: 'node src/front.js', url: `http://127.0.0.1:${port + 2}/ready`, reuseExistingServer: false },
-    ], `http://127.0.0.1:${port + 1}`),
+      { command: `${python} -m app.server ${port1}`, url: `http://127.0.0.1:${port1}/ready`, reuseExistingServer: false },
+      { command: 'node src/front.js', url: `http://127.0.0.1:${port2}/ready`, reuseExistingServer: false },
+    ], `http://127.0.0.1:${port1}`),
     'tests/grades.spec.js': specs['tests/grades.spec.js'],
-    'tests/front.spec.js': `import { expect, test } from '@playwright/test';\n\ntest('the front labels the grade', async ({ request }) => {\n  expect(await (await request.get('http://127.0.0.1:${port + 2}/label')).text()).toBe('top');\n});\n`,
+    'tests/front.spec.js': `import { expect, test } from '@playwright/test';\n\ntest('the front labels the grade', async ({ request }) => {\n  expect(await (await request.get('http://127.0.0.1:${port2}/label')).text()).toBe('top');\n});\n`,
   });
   for (const file of ['tests/grades.spec.js', 'tests/front.spec.js']) {
     const both = measure(mixed, [file]);
@@ -279,7 +280,7 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
       'app/django_app.py': 'import sys\n\nfrom django.conf import settings\nfrom django.http import HttpResponse\nfrom django.urls import path\n\nfrom gradebook import grade\n\nsettings.configure(DEBUG=True, ROOT_URLCONF=__name__, ALLOWED_HOSTS=["*"], SECRET_KEY="fixture")\n\n\ndef ready(request):\n    return HttpResponse("ready")\n\n\ndef graded(request):\n    return HttpResponse(grade(int(request.GET["score"])))\n\n\nurlpatterns = [path("ready", ready), path("grade", graded)]\n\nif __name__ == "__main__":\n    from django.core.management import execute_from_command_line\n\n    execute_from_command_line([sys.argv[0], "runserver", "--noreload", sys.argv[1]])\n',
       'app/django_wsgi.py': 'from django.core.wsgi import get_wsgi_application\n\nimport app.django_app  # noqa: F401\n\napplication = get_wsgi_application()\n',
       'app/django_asgi.py': 'from django.core.asgi import get_asgi_application\n\nimport app.django_app  # noqa: F401\n\napplication = get_asgi_application()\n',
-      'playwright.config.js': `const at = '127.0.0.1:${port + 3}';\nconst servers = {\n  flask: \`.venv/bin/python -m flask --app app.flask_app run --port ${port + 3}\`,\n  fastapi: \`.venv/bin/python -m uvicorn app.fastapi_app:app --port ${port + 3}\`,\n  django: \`.venv/bin/python -m app.django_app \${at}\`,\n  'flask-gunicorn': \`.venv/bin/gunicorn -w 1 -b \${at} app.flask_app:app\`,\n  'django-gunicorn': \`.venv/bin/gunicorn -w 2 --threads 2 -b \${at} app.django_wsgi:application\`,\n  'django-uvicorn': \`.venv/bin/python -m uvicorn app.django_asgi:application --port ${port + 3}\`,\n};\nexport default {\n  testDir: process.env.TESTS ?? 'tests',\n  workers: 1,\n  reporter: 'line',\n  use: { baseURL: \`http://\${at}\` },\n  webServer: { command: servers[process.env.SERVER], url: \`http://\${at}/ready\`, reuseExistingServer: false },\n};\n`,
+      'playwright.config.js': `const at = '127.0.0.1:${port3}';\nconst servers = {\n  flask: \`.venv/bin/python -m flask --app app.flask_app run --port ${port3}\`,\n  fastapi: \`.venv/bin/python -m uvicorn app.fastapi_app:app --port ${port3}\`,\n  django: \`.venv/bin/python -m app.django_app \${at}\`,\n  'flask-gunicorn': \`.venv/bin/gunicorn -w 1 -b \${at} app.flask_app:app\`,\n  'django-gunicorn': \`.venv/bin/gunicorn -w 2 --threads 2 -b \${at} app.django_wsgi:application\`,\n  'django-uvicorn': \`.venv/bin/python -m uvicorn app.django_asgi:application --port ${port3}\`,\n};\nexport default {\n  testDir: process.env.TESTS ?? 'tests',\n  workers: 1,\n  reporter: 'line',\n  use: { baseURL: \`http://\${at}\` },\n  webServer: { command: servers[process.env.SERVER], url: \`http://\${at}/ready\`, reuseExistingServer: false },\n};\n`,
       'tests/grades.spec.js': "import { expect, test } from '@playwright/test';\n\ntest('a high score is an A', async ({ request }) => {\n  expect(await (await request.get('/grade?score=95')).text()).toBe('A');\n});\n\ntest('a low score fails', async ({ request }) => {\n  expect(await (await request.get('/grade?score=10')).text()).toBe('fail');\n});\n",
       // A body the server reads after the view has returned.
       'streams/stream.spec.js': "import { expect, test } from '@playwright/test';\n\ntest('a streamed grade passes', async ({ request }) => {\n  expect(await (await request.get('/stream?score=70')).text()).toBe('pass');\n});\n",

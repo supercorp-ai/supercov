@@ -2183,3 +2183,33 @@ fn every_rust_return_shape_is_asked_as_a_change_of_its_type() {
         "{asked}"
     );
 }
+
+/// A file's unasserted statements page like every other listing: the next
+/// page's command, run as printed, shows the next page.
+#[test]
+fn unasserted_statements_page_with_a_next_page_command_that_shows_it() {
+    let project = Project::cart("assertion-pages");
+    let (base, _) = gateway(MODEL, answer_no);
+    let run = project.measure(&[]);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let first = project
+        .supercov(&["runs", &run, "assertions", "src/cart.js", "--limit", "2"])
+        .succeeds();
+    assert!(first.contains("showing 1-2 of "), "{first}");
+    let next = first
+        .lines()
+        .find_map(|line| line.strip_prefix("next page: supercov "))
+        .unwrap_or_else(|| panic!("no next page in\n{first}"));
+    let words = next
+        .split(' ')
+        .map(|word| word.trim_matches('\''))
+        .collect::<Vec<_>>();
+    assert!(
+        words.ends_with(&["--offset", "2", "--limit", "2"]),
+        "{next}"
+    );
+    let second = project.supercov(&words).succeeds();
+    assert!(second.contains("showing 3-4 of "), "{next}\n{second}");
+}

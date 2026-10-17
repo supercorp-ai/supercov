@@ -636,6 +636,41 @@ fn reports_carry_the_same_view_in_every_format() {
     assert!(interactive.contains("self-contained"), "{interactive}");
 }
 
+/// A diff says the code did not change only when neither the source nor
+/// what it runs on did: a new dependency is a change in the code too.
+#[test]
+fn a_diff_counts_a_dependency_change_as_a_change_in_the_code() {
+    let added_test = "test(\"express shipping costs fifteen\", () => {\n  assert.equal(shipping(10, true), 15);\n});\n\ntest(\"shipping is free over fifty\"";
+    let same_source = "Both runs measured the same source";
+
+    let project = Project::cart("diff-tests-only");
+    let before = project.measure(&[]);
+    project.edit(
+        "test/cart.test.js",
+        "test(\"shipping is free over fifty\"",
+        added_test,
+    );
+    let after = project.measure(&[]);
+    let diff = project.supercov(&["diff", &before, &after]).succeeds();
+    assert!(diff.contains(same_source), "{diff}");
+
+    let project = Project::cart("diff-dependency");
+    let before = project.measure(&[]);
+    project.edit(
+        "test/cart.test.js",
+        "test(\"shipping is free over fifty\"",
+        added_test,
+    );
+    project.edit(
+        "package.json",
+        "\"type\": \"module\"",
+        "\"type\": \"module\", \"dependencies\": { \"left-pad\": \"1.3.0\" }",
+    );
+    let after = project.measure(&[]);
+    let diff = project.supercov(&["diff", &before, &after]).succeeds();
+    assert!(!diff.contains(same_source), "{diff}");
+}
+
 #[test]
 fn diff_and_tests_affected_follow_a_change() {
     let project = Project::cart("change");
@@ -6342,6 +6377,19 @@ fn a_measured_run_reads_back_for_some_of_its_tests_by_tag_title_or_file() {
         none["error"]["message"],
         "No tests match --tag api --test-file test/ui"
     );
+    // A query below the summary says the same.
+    let files = project
+        .supercov(&["runs", &run, "files", "--tag", "nightly", "--json"])
+        .json();
+    assert_eq!(files["error"]["code"], "TEST_FILTER_EMPTY", "{files}");
+    assert_eq!(files["error"]["message"], "No tests match --tag nightly");
+    let plain = project
+        .supercov(&["runs", &run, "gaps", "--title", "never named"])
+        .exits(2);
+    assert!(
+        plain.contains("No tests match --title never named"),
+        "{plain}"
+    );
 
     // Every query reads the same tests, and says which.
     let summary = project
@@ -6506,4 +6554,48 @@ fn a_stale_run_names_the_files_that_changed_since_it() {
         said.contains("changed since the run: test/more.test.js, test/price.test.js"),
         "{said}"
     );
+}
+
+/// A page names the command for the next one; that command, run as printed,
+/// shows the next page.
+#[test]
+fn each_page_names_a_next_page_command_that_shows_it() {
+    let project = Project::cart("next-page");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    for args in [
+        &["file", "src/cart.js", "--group", "decision"][..],
+        &["test", "total"],
+        &["minimize", "--metric", "lines", "--target", "76"],
+    ] {
+        let first = project
+            .supercov(&[&["runs", "latest"][..], args, &["--limit", "1"]].concat())
+            .succeeds();
+        assert!(first.contains("showing 1-1 of "), "{first}");
+        let next = first
+            .lines()
+            .find_map(|line| line.strip_prefix("next page: supercov "))
+            .unwrap_or_else(|| panic!("no next page in\n{first}"));
+        let words = next
+            .split(' ')
+            .map(|word| word.trim_matches('\''))
+            .collect::<Vec<_>>();
+        assert!(
+            words.ends_with(&["--offset", "1", "--limit", "1"]),
+            "{next}"
+        );
+        let second = project.supercov(&words).succeeds();
+        assert!(second.contains("showing 2-2 of "), "{next}\n{second}");
+        assert!(
+            first.contains(&format!("all {} at once", total(&first))),
+            "{first}"
+        );
+    }
+
+    fn total(page: &str) -> String {
+        page.split("showing 1-1 of ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap()
+            .to_owned()
+    }
 }

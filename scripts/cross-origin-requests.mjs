@@ -12,13 +12,13 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { freePorts } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 // Inside the repository, so the suite finds its Playwright.
 const root = resolve(repository, 'target', `cross-origin-${process.pid}-${Date.now()}`);
-const app = 42000 + Math.floor(Math.random() * 3000);
-const api = app + 3000;
+const [app, api] = await freePorts(2);
 
 const files = {
   'package.json': '{ "name": "cross-origin", "private": true, "type": "module" }\n',

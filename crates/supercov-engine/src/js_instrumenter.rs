@@ -6834,9 +6834,8 @@ impl<'a> RouteRequestPhaseTransformer<'a, '_> {
             .components()
             .filter_map(|component| component.as_os_str().to_str())
             .collect::<Vec<_>>();
-        components
-            .windows(2)
-            .any(|window| window[0] == "app" && window[1] != name)
+        // Anywhere under `app/`, `app/route.ts` (the handler for `/`) too.
+        components[..components.len().saturating_sub(1)].contains(&"app")
     }
 
     fn is_handler_name(&self, name: &str) -> bool {
@@ -11006,6 +11005,138 @@ mod tests {
         assert!(output.code.contains("expect.toBe"));
     }
 
+    /// Each way a test file reaches an assertion, and the look-alikes that
+    /// are not one: another library's `expect`, a `require` of a name only
+    /// known at run time, a local `expect`, and calls that can short-circuit
+    /// before the assertion runs.
+    #[test]
+    fn an_assertion_is_recognised_however_it_was_reached_and_only_then() {
+        for (file, source, assertions) in [
+            (
+                "t/a.test.js",
+                "describe('x', () => { it('y', () => expect(a()).toBe(1)); });\n",
+                1,
+            ),
+            ("t/b.test.js", "it('y', () => expect(a()).toBe(1));\n", 1),
+            (
+                "t/p.test.js",
+                "describe('x', function () { expect(a()).toBe(1); });\n",
+                1,
+            ),
+            // A global `expect` with none of the test globals beside it.
+            ("t/q.test.js", "expect(a()).toBe(1);\n", 0),
+            (
+                "t/c.test.cjs",
+                "const { expect } = require('vitest');\nexpect(a()).toBe(1);\n",
+                1,
+            ),
+            (
+                "t/d.test.cjs",
+                "const { expect: check } = require('@jest/globals');\ncheck(a()).toBe(1);\n",
+                1,
+            ),
+            (
+                "t/i.test.mjs",
+                "import { expect as e } from 'vitest';\ne(a()).toBe(1);\n",
+                1,
+            ),
+            (
+                "t/n.test.cjs",
+                "const { strict } = require('node:assert');\nstrict.equal(a(), 1);\n",
+                1,
+            ),
+            (
+                "t/s.test.cjs",
+                "const assert = require('node:assert').strict;\nassert.equal(a(), 1);\n",
+                1,
+            ),
+            // An export of `node:assert` that is not an assertion.
+            (
+                "t/h.test.mjs",
+                "import { ok, AssertionError } from 'node:assert';\nok(a());\nnew AssertionError({});\n",
+                1,
+            ),
+            (
+                "t/j.test.cjs",
+                "const { equal, AssertionError } = require('assert');\nequal(a(), 1);\nnew AssertionError({});\n",
+                1,
+            ),
+            (
+                "t/e.test.cjs",
+                "const { expect } = require('chai');\nexpect(a()).to.equal(1);\n",
+                0,
+            ),
+            (
+                "t/f.test.cjs",
+                "const name = 'node:assert';\nconst assert = require(name);\nassert.ok(a());\n",
+                0,
+            ),
+            (
+                "t/o.test.cjs",
+                "const [first] = require('node:assert');\nfirst(a());\n",
+                0,
+            ),
+            (
+                "t/m.test.mjs",
+                "import { test } from 'node:test';\nconst expect = (v) => ({ toBe() {} });\ntest('x', () => expect(a()).toBe(1));\n",
+                0,
+            ),
+            (
+                "t/k.test.mjs",
+                "import assert from 'node:assert';\nassert?.ok(a());\nassert.ok?.(b());\n",
+                0,
+            ),
+        ] {
+            let output = instrument_node_assertion_phases(source, file).unwrap();
+            assert_eq!(output.assertions, assertions, "{file}");
+            assert_eq!(
+                output.code.matches("withNodeAssertionPhase").count(),
+                assertions,
+                "{file}"
+            );
+        }
+    }
+
+    /// A sandbox call is wrapped only when its argument maps the host's
+    /// workspace to the guest's, and never for Supercov's own or a test
+    /// framework's modules.
+    #[test]
+    fn only_a_host_to_guest_mapping_makes_a_capability_candidate() {
+        assert!(capability_source_candidate(
+            "run({ hostPath: a, guestPath: b })"
+        ));
+        assert!(capability_source_candidate(
+            "run({ hostRoot: a, guestRoot: b })"
+        ));
+        assert!(capability_source_candidate(
+            "start({ Mounts: [{ source: a, target: b }] })"
+        ));
+        assert!(capability_source_candidate(
+            "start({ mounts: [{ source: a, target: b }] })"
+        ));
+        for unrelated in [
+            "run({ hostPath: a })",
+            "run({ hostRoot: a, guestPath: b })",
+            "start({ mounts: [{ source: a }] })",
+            "start({ source: a, target: b })",
+            "snapshot(machine.spawn())",
+        ] {
+            assert!(!capability_source_candidate(unrelated), "{unrelated}");
+        }
+        let wrapper = "./.supercov/capability.mjs";
+        for excluded in [
+            wrapper,
+            "node:child_process",
+            "virtual:supercov-runtime",
+            "../.supercov/node_modules/x.mjs",
+            "vitest",
+            "@playwright/test",
+        ] {
+            assert!(excluded_capability_import(excluded, wrapper), "{excluded}");
+        }
+        assert!(!excluded_capability_import("e2b", wrapper));
+    }
+
     #[test]
     fn an_arrow_that_returns_an_assertion_still_returns_it() {
         // `await loginError(page)` waits for the matcher only if the arrow
@@ -12228,6 +12359,70 @@ mod tests {
         assert!(output.code.contains(&format!("{}(", runtime.mcdc_end)));
     }
 
+    /// A server's request, upgrade and connection callbacks run in the
+    /// request's phase; a spread or a missing callback is left as written.
+    #[test]
+    fn server_callbacks_run_in_the_request_phase_however_they_are_passed() {
+        let source = "import http from 'node:http';\nconst handlers = [() => {}];\nconst server = http.createServer({}, function (req, res) { res.end('a'); });\nserver.on('request', ...handlers);\nserver.on('request');\nserver.on('connection', (socket) => socket.setNoDelay());\nserver.once('upgrade', onUpgrade);\nserver.on('close', () => {});\nfunction onUpgrade() {}\n";
+        let output = instrument_candidate(source, "src/server.mjs").unwrap();
+        let runtime = output.runtime.as_ref().expect("runtime binding");
+        let phase = &runtime.with_request_phase;
+        let line = |start: &str| {
+            output
+                .code
+                .lines()
+                .find(|line| line.starts_with(start))
+                .unwrap_or_else(|| panic!("no {start} in\n{}", output.code))
+                .to_owned()
+        };
+        assert!(line("const server").contains(&format!("{{}}, {phase}(function(req, res)")));
+        assert_eq!(
+            line("server.on(\"request\", ..."),
+            "server.on(\"request\", ...handlers);"
+        );
+        assert_eq!(line("server.on(\"request\")"), "server.on(\"request\");");
+        assert!(line("server.on(\"connection\"").contains(&format!("{phase}((socket)")));
+        // A connection callback is told it is one.
+        assert_eq!(
+            output.code.matches("\"connection\")").count(),
+            1,
+            "{}",
+            output.code
+        );
+        assert_eq!(
+            line("server.once"),
+            format!("server.once(\"upgrade\", {phase}(onUpgrade));")
+        );
+        assert!(!line("server.on(\"close\"").contains(phase.as_str()));
+    }
+
+    #[test]
+    fn leaves_look_alike_route_exports_alone() {
+        for (file, source) in [
+            // Not under `app/`.
+            (
+                "lib/route.ts",
+                "export function GET(request) { return request.url; }",
+            ),
+            // Under `app/`, but not a route module or not a method name.
+            (
+                "app/api/items/handler.ts",
+                "export function GET(request) { return request.url; }",
+            ),
+            (
+                "app/route.ts",
+                "export function helper(request) { return request.url; }",
+            ),
+        ] {
+            let output = instrument_candidate(source, file).unwrap();
+            assert!(
+                !output.code.contains("withRequestPhase"),
+                "{file}: {}",
+                output.code
+            );
+        }
+    }
+
     #[test]
     fn wraps_framework_request_exports_without_changing_the_public_api() {
         for (file, source, export_prefix) in [
@@ -12245,6 +12440,17 @@ mod tests {
                 "app/api/items/route.ts",
                 "export function GET(request) { return Response.json({ url: request.url }); }",
                 "export const GET = ",
+            ),
+            // The root route handler serves `/`.
+            (
+                "app/route.ts",
+                "export function GET(request) { return Response.json({ url: request.url }); }",
+                "export const GET = ",
+            ),
+            (
+                "src/app/api/items/route.ts",
+                "export async function POST(request) { return Response.json(await request.json()); }",
+                "export const POST = ",
             ),
             (
                 "app/routes/example.ts",

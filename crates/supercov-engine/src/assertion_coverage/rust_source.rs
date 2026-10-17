@@ -485,23 +485,10 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
         ast::Expr::MethodCallExpr(m) => {
             let name = m.name_ref()?.text().to_string();
             let receiver = m.receiver()?;
-            let receiver_text = receiver.syntax().text().to_string();
             // Raw pointers: a pointer moved is the same pointer type; a
             // cast names its target; a read gives what it points at.
             let pointer = || -> Option<String> {
-                let ty = infer(&receiver, crate_view).or_else(|| {
-                    if receiver_text.starts_with("ptr::addr_of!(")
-                        || receiver_text.ends_with(".as_ptr()")
-                    {
-                        Some("*const u8".into())
-                    } else if receiver_text.starts_with("ptr::addr_of_mut!(")
-                        || receiver_text.ends_with(".as_mut_ptr()")
-                    {
-                        Some("*mut u8".into())
-                    } else {
-                        None
-                    }
-                })?;
+                let ty = infer(&receiver, crate_view)?;
                 ty.starts_with('*').then_some(ty)
             };
             match name.as_str() {
@@ -532,6 +519,13 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
                         target.split_whitespace().collect::<String>()
                     ));
                 }
+                // What `?` would leave; a constructor read by its name
+                // (`Layout::from_size_align`) names what it makes, fallible
+                // or not.
+                "unwrap" | "expect" => {
+                    let ty = infer(&receiver, crate_view)?;
+                    return unwrap_try(&ty).or_else(|| (!ty.contains('<')).then_some(ty));
+                }
                 "read" | "read_unaligned" => {
                     if let Some(p) = pointer() {
                         return Some(
@@ -544,7 +538,25 @@ fn infer(e: &ast::Expr, crate_view: &Crate) -> Option<String> {
                 }
                 _ => {}
             }
-            returns(&name)
+            returns(&name).or_else(|| match name.as_str() {
+                "as_ptr" => Some("*const u8".into()),
+                "as_mut_ptr" => Some("*mut u8".into()),
+                _ => None,
+            })
+        }
+        ast::Expr::MacroExpr(m) => {
+            let name = m
+                .macro_call()?
+                .path()?
+                .segment()?
+                .name_ref()?
+                .text()
+                .to_string();
+            match name.as_str() {
+                "addr_of" => Some("*const u8".into()),
+                "addr_of_mut" => Some("*mut u8".into()),
+                _ => None,
+            }
         }
         ast::Expr::BlockExpr(b) => infer(&b.stmt_list()?.tail_expr()?, crate_view),
         ast::Expr::MatchExpr(m) => {
@@ -727,7 +739,12 @@ fn typed(e: &ast::Expr, ty: Option<&str>, crate_view: &Crate) -> String {
         _ => None,
     };
     structural
-        .or_else(|| value_of(ty.as_deref()?, crate_view, 0).filter(|v| *v != text.trim()))
+        .or_else(|| {
+            // The same value spelled with its path is no change.
+            let text = text.trim();
+            value_of(ty.as_deref()?, crate_view, 0)
+                .filter(|v| v != text && !v.ends_with(&format!("::{text}")))
+        })
         .unwrap_or_else(|| replacement(&text, ty.as_deref()))
 }
 
@@ -1135,6 +1152,10 @@ fn closure(c: &ast::ClosureExpr, output: Option<&str>, crate_view: &Crate) -> Op
     let head = c.syntax().text().to_string()[..head_end].to_owned();
     let body_text = body.syntax().text().to_string();
     let new = changed(&body_text, ty.as_deref(), crate_view)?;
+    // `|x| -> u8 { .. }`: a declared return type needs a block body.
+    if c.ret_type().is_some() && !new.starts_with('{') {
+        return Some(format!("{head}{{ {new} }}"));
+    }
     Some(format!("{head}{new}"))
 }
 
@@ -1398,6 +1419,10 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
         let zero = digits.chars().all(|c| c == '0' || c == '_');
         return format!("{}{suffix}", if zero { "1" } else { "0" });
     }
+    // `0.0`, `1.5e3`, `2f32`: zero becomes one, anything else zero.
+    if let Some(value) = float_literal_value(e) {
+        return if value == 0.0 { "1.0" } else { "0.0" }.into();
+    }
     if e.starts_with('"') && e.ends_with('"') {
         return if e == "\"\"" {
             "\"supercov\"".into()
@@ -1439,6 +1464,8 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
         Some("String") => "String::new()".into(),
         Some(t) if t.starts_with('&') && t.ends_with("str") => "\"\"".into(),
         Some(t) if t.starts_with("Option<") && !e.starts_with("None") => "None".into(),
+        // `Default::default()` would be `None` again.
+        Some(t) if t.starts_with("Option<") => "Some(Default::default())".into(),
         Some(t) if result_like(t) => err_or_ok(e),
         Some(t) if t.ends_with("Ordering") => {
             ordering(e).unwrap_or_else(|| format!("({e}).reverse()"))
@@ -1506,6 +1533,15 @@ pub(super) fn replacement(expr: &str, ty: Option<&str>) -> String {
             }
         }
     }
+}
+
+/// A float literal's value: `0.0`, `1_000.5`, `1.5e3`, `2f32`.
+fn float_literal_value(e: &str) -> Option<f64> {
+    let number = e.trim_end_matches("f32").trim_end_matches("f64");
+    let float = number.contains(['.', 'e', 'E']) || number.len() < e.len();
+    (float && number.starts_with(|c: char| c.is_ascii_digit()))
+        .then(|| number.replace('_', "").parse::<f64>().ok())
+        .flatten()
 }
 
 /// `Vec::new()` or `vec![]`: a vector with nothing in it.
@@ -1611,14 +1647,38 @@ pub(super) fn locate(lines: &[&str], name: &str) -> Option<Located> {
         });
     }
     let function = name.rsplit("::").next().unwrap_or(name).trim();
-    let start = lines.iter().position(|l| {
-        let t = l.trim_start();
+    // `src/lib.rs::cart::tests::works`: modules in one file often hold tests
+    // of the same name, so each inline `mod` on the path narrows the search.
+    // A module that is a file of its own is not in this one.
+    let modules = name
+        .split("::")
+        .skip_while(|part| !part.ends_with(".rs"))
+        .skip(1)
+        .collect::<Vec<_>>();
+    let (mut from, mut to) = (0, lines.len());
+    for module in modules.iter().take(modules.len().saturating_sub(1)) {
+        let declared = (from..to).find(|&i| {
+            let t = lines[i].trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            t.strip_prefix("mod ")
+                .and_then(|r| r.strip_prefix(module))
+                .is_some_and(|r| r.trim_start().starts_with('{'))
+        });
+        if let Some(at) = declared {
+            (from, to) = (at, (super::block_end(lines, at) + 1).min(lines.len()));
+        }
+    }
+    let defines = |i: &usize| {
+        let t = lines[*i].trim_start();
         let t = t.strip_prefix("pub ").unwrap_or(t);
         let t = t.strip_prefix("async ").unwrap_or(t);
         t.strip_prefix("fn ")
             .and_then(|r| r.strip_prefix(function))
             .is_some_and(|r| r.starts_with('(') || r.starts_with('<'))
-    })?;
+    };
+    let start = (from..to)
+        .find(defines)
+        .or_else(|| (0..lines.len()).find(defines))?;
     let mut first = start;
     while first > 0 && lines[first - 1].trim_start().starts_with("#[") {
         first -= 1;
@@ -1698,6 +1758,13 @@ mod tests {
         let lines = text.split('\n').collect::<Vec<_>>();
         let doc = locate(&lines, "src/lib.rs - (line 1)").unwrap();
         assert_eq!((doc.start, doc.end), (0, 5));
+        let two = "mod cart {\n    #[test]\n    fn works() {}\n}\n\nmod order {\n    #[cfg(test)]\n    mod tests {\n        #[test]\n        fn works() {}\n    }\n}\n";
+        let two_lines = two.split('\n').collect::<Vec<_>>();
+        let start = |name: &str| locate(&two_lines, name).unwrap().start + 1;
+        assert_eq!(start("src/lib.rs::order::tests::works"), 10);
+        assert_eq!(start("src/lib.rs::cart::works"), 3);
+        // A module in a file of its own is not looked for in this one.
+        assert_eq!(start("src/shop.rs::shop::order::tests::works"), 10);
         let test = locate(&lines, "tests/a.rs::works").unwrap();
         assert_eq!(
             (test.context.clone(), test.start, test.end),
@@ -1753,6 +1820,76 @@ mod replacement_tests {
             "Default::default()"
         );
         assert_eq!(replacement("|x| x == 1", None), "Default::default()");
+    }
+
+    /// Every shape `replacement` reads, typed and untyped: the value it
+    /// gives is of the same type and never the same value.
+    #[test]
+    fn each_shape_is_replaced_by_a_value_that_differs() {
+        for (expr, ty, expected) in [
+            // A float zero becomes one; `Default::default()` would be zero.
+            ("0.0", Some("f64"), "1.0"),
+            ("0_0.0f32", None, "1.0"),
+            ("2.5", Some("f32"), "0.0"),
+            ("1.5e3", None, "0.0"),
+            ("ratio", Some("f64"), "0.0"),
+            // `Default::default()` of an `Option` is `None` again.
+            ("None", Some("Option<Foo>"), "Some(Default::default())"),
+            (
+                "String::new()",
+                Some("String"),
+                "String::from(\"supercov\")",
+            ),
+            ("name.clone()", Some("String"), "String::new()"),
+            ("name", Some("&'static str"), "\"\""),
+            ("Err(e)", Some("io::Result<()>"), "Ok(Default::default())"),
+            (
+                "parse(text)",
+                Some("ParseResult"),
+                "Err(Default::default())",
+            ),
+            (
+                "Ordering::Equal",
+                Some("std::cmp::Ordering"),
+                "Ordering::Less",
+            ),
+            ("vec![]", Some("Vec<u8>"), "vec![Default::default()]"),
+            ("vec![1]", Some("Vec<u8>"), "Vec::new()"),
+            ("x", Some("()"), "()"),
+            ("match x { _ => 1 }", None, "Default::default()"),
+            ("!ready", None, "!(!ready)"),
+            ("a != b", None, "!(a != b)"),
+            ("path.is_file()", None, "!(path.is_file())"),
+            ("Some(1)", None, "None"),
+            ("Ok(1)", None, "Err(Default::default())"),
+            ("Err(e)", None, "Ok(Default::default())"),
+            ("std::cmp::Ordering::Greater", None, "Ordering::Less"),
+            ("vec![ ]", None, "vec![Default::default()]"),
+            ("Vec::new()", None, "vec![Default::default()]"),
+            ("vec![1, 2]", None, "Vec::new()"),
+            ("String::new()", None, "String::from(\"supercov\")"),
+            ("format!(\"\")", None, "String::from(\"supercov\")"),
+            ("String::from(\"a\")", None, "String::new()"),
+            ("x.to_string()", None, "String::new()"),
+            ("name.to_owned()", None, "String::new()"),
+            ("items.count()", None, "0"),
+            ("n.leading_zeros()", None, "0"),
+            ("mem::size_of::<u64>()", None, "0"),
+            ("x as u32", None, "0"),
+            ("s.trim_end()", None, "\"\""),
+            ("s.as_str()", None, "\"\""),
+            ("s.trim_end_matches('/')", None, "\"\""),
+            ("\"\"", None, "\"supercov\""),
+            ("1_000", None, "0"),
+            ("0_000u16", None, "1u16"),
+        ] {
+            assert_eq!(replacement(expr, ty), expected, "{expr} as {ty:?}");
+        }
+        let source = "fn a() -> f64 {\n    0.0\n}\nfn b() -> Option<Foo> {\n    None\n}\nfn c() {\n    let x: f32 = 0.0;\n}\n";
+        let r = replacements("src/lib.rs", source, &Signatures::default());
+        assert_eq!(r[&2][0].1, "1.0");
+        assert_eq!(r[&5][0].1, "Some(Default::default())");
+        assert_eq!(r[&8][0].1, "1.0");
     }
 
     /// dtolnay/semver's shapes that used to fall back to
@@ -1855,5 +1992,76 @@ mod replacement_tests {
         // A block assigned to `y` is not the function's value.
         assert_eq!(r[&10][0].1, "0");
         assert_eq!(r[&12][0].1, "0");
+    }
+
+    /// Raw pointers, constructors read by name, `unwrap`, `let`-`else` and
+    /// closures with a declared return type: each replacement is a value of
+    /// the statement's type that differs from it, and the type carries
+    /// through the locals it is bound to.
+    #[test]
+    fn pointers_and_constructors_keep_their_type_through_locals() {
+        let source = r#"use std::alloc::{alloc, Layout};
+use std::ptr;
+
+#[inline]
+fn made(len: usize, data: &[u8], buffer: &mut [u8]) -> Layout {
+    let layout = Layout::from_size_align(len, 1).unwrap();
+    let other = Layout::new::<u8>();
+    let block = unsafe { alloc(layout) };
+    let start = data.as_ptr();
+    let at = unsafe { start.add(2) };
+    let raw = ptr::addr_of!(data[0]);
+    let bytes = raw.cast::<u16>();
+    let mutable = buffer.as_mut_ptr();
+    let wide = mutable.cast::<u32>();
+    let read = unsafe { at.read() };
+    let doubled = |n: u8| -> u8 { n * 2 };
+    let Some(first) = Some(3u8) else {
+        return layout;
+    };
+    layout
+}
+
+#[test]
+fn checks() {
+    let a = 1;
+}
+
+#[tokio::test]
+async fn checks_later() {
+    let a = 1;
+}
+
+#[cfg(test)]
+mod tests {
+    fn helper() -> u8 {
+        let a = 1;
+        a
+    }
+}
+"#;
+        let signatures = signatures([("src/lib.rs", source)].into_iter());
+        let r = replacements("src/lib.rs", source, &signatures);
+        let at = |line: usize| r[&line][0].1.as_str();
+        assert_eq!(at(6), "std::alloc::Layout::new::<u8>()");
+        // The same value with its path written out is no change.
+        assert_eq!(at(7), "Default::default()");
+        assert_eq!(at(8), "std::ptr::null_mut()");
+        assert_eq!(at(9), "std::ptr::null()");
+        assert_eq!(at(10), "std::ptr::null()", "`start` is a pointer");
+        assert_eq!(at(11), "std::ptr::null()");
+        assert_eq!(at(12), "std::ptr::null()", "`raw` is a pointer");
+        assert_eq!(at(13), "std::ptr::null_mut()");
+        assert_eq!(at(14), "std::ptr::null_mut()");
+        assert_eq!(at(15), "0", "a read gives what the pointer points at");
+        assert_eq!(at(16), "|n: u8| -> u8 { 0 }");
+        assert_eq!(at(17), "None");
+        assert_eq!(at(20), "std::alloc::Layout::new::<u8>()");
+        // A test's own code, however its attribute is spelled, is the test.
+        let starts = statement_starts(source);
+        assert!(starts.contains_key(&6), "an attribute that is not a test's");
+        for line in [25, 30, 36, 37] {
+            assert_eq!(starts[&line][0].1, None, "line {line}");
+        }
     }
 }

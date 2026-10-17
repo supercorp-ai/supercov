@@ -2015,6 +2015,47 @@ mod tests {
     }
 
     use super::*;
+
+    /// A project builds images when a Dockerfile or compose file sits at its
+    /// root or one directory down, in any of the names Docker reads; one
+    /// deeper, in a hidden directory or in `node_modules` does not count.
+    #[test]
+    fn a_project_builds_images_when_a_docker_file_is_near_its_root() {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let case = |files: &[&str]| {
+            let root = std::env::temp_dir().join(format!(
+                "supercov-images-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir(&root).unwrap();
+            for file in files {
+                let path = root.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, "FROM node\n").unwrap();
+            }
+            let images = builds_images(&root);
+            fs::remove_dir_all(&root).unwrap();
+            images
+        };
+        for files in [
+            &["Dockerfile"][..],
+            &["Dockerfile.dev"],
+            &["api/app.dockerfile"],
+            &["compose.yaml"],
+            &["deploy/docker-compose.yml"],
+        ] {
+            assert!(case(files), "{files:?}");
+        }
+        for files in [
+            &["src/index.js"][..],
+            &["a/b/Dockerfile"],
+            &[".devcontainer/Dockerfile"],
+            &["node_modules/Dockerfile"],
+        ] {
+            assert!(!case(files), "{files:?}");
+        }
+    }
     use crate::project_discovery::discover_coverage_project;
 
     fn temporary(name: &str) -> PathBuf {

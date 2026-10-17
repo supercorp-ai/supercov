@@ -13,6 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
+import { assessWithStandIn } from './assess-with-stand-in.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
@@ -234,7 +235,11 @@ try {
   assert.ok(entry.totals.mcdcConditions > 0, report);
   // A narrowing `instanceof` cannot carry operand probes: the two say so.
   assert.equal(entry.measurementLimitations, 2, report);
-  console.log('[java-syntax-zoo] every construct the JVM instrumenter rewrites reads as its tests drove it');
+  // Every construct is read for what a test would have to catch, too.
+  const assessed = await assessWithStandIn(binary, root, environment);
+  assert.equal(assessed.status, 0, assessed.output);
+  assert.match(assessed.output, /\b100% asserted \((\d+) of \1 executed statements\)/, assessed.output);
+  console.log('[java-syntax-zoo] every construct the JVM instrumenter rewrites reads as its tests drove it, and is assessed');
 } finally {
   if (!process.env.KEEP) rmSync(temporary, { recursive: true, force: true });
 }

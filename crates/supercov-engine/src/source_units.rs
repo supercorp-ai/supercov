@@ -2143,6 +2143,61 @@ mod tests {
         assert_eq!(x.code_line(7), 3);
     }
 
+    /// A comment the toolchain reads runs: editing one changes the file's
+    /// digest, where editing any other comment does not.
+    #[test]
+    fn a_comment_the_toolchain_reads_is_kept_and_any_other_is_erased() {
+        let go = |comment: &str| format!("package a\n\n{comment}\nfunc F() {{}}\n");
+        let script = |comment: &str| format!("{comment}\nx = 1\n");
+        type Pairs<'a> = &'a [(&'a str, &'a str)];
+        type Source<'a> = &'a dyn Fn(&str) -> String;
+        let cases: [(&str, Source, (&str, &str), Pairs); 3] = [
+            (
+                "a.go",
+                &go,
+                ("// a note", "// another note"),
+                &[
+                    ("//export F", "//export G"),
+                    ("//line a.go:1", "//line a.go:2"),
+                    ("//sys read(fd int)", "//sys write(fd int)"),
+                    ("//go:noinline", "//go:nosplit"),
+                    ("// +build linux", "// +build darwin"),
+                ],
+            ),
+            (
+                "a.py",
+                &script,
+                ("# a note", "# another note"),
+                &[
+                    ("# -*- coding: utf-8 -*-", "# -*- coding: latin-1 -*-"),
+                    ("# coding=utf-8", "# coding=latin-1"),
+                ],
+            ),
+            (
+                "a.rb",
+                &script,
+                ("# a note", "# another note"),
+                &[
+                    (
+                        "# -*- frozen_string_literal: true -*-",
+                        "# -*- frozen_string_literal: false -*-",
+                    ),
+                    (
+                        "# frozen_string_literal: true",
+                        "# frozen_string_literal: false",
+                    ),
+                ],
+            ),
+        ];
+        for (path, source, (note, other_note), directives) in cases {
+            let digest = |comment: &str| code(path, &source(comment)).unwrap().semantic;
+            assert_eq!(digest(note), digest(other_note), "{path}");
+            for (one, other) in directives {
+                assert_ne!(digest(one), digest(other), "{path}: {one}");
+            }
+        }
+    }
+
     #[test]
     fn a_supercov_pragma_in_a_comment_is_kept() {
         let a = code("a.js", "// supercov: observes x\nlet x = 1;\n").unwrap();
@@ -2559,6 +2614,78 @@ mod tests {
                 None,
                 "{changed}"
             );
+        }
+    }
+
+    /// The imports an added function brings: a package or a type comes out
+    /// with it; a module of the project, a side-effect import or a default
+    /// import that gained a name does not, so the file counts as changed.
+    #[test]
+    fn an_added_function_s_imports_come_out_with_it_only_when_nothing_else_loads() {
+        let before = code(
+            "h.ts",
+            "import d from './a';\n\nexport function open() {\n  return d();\n}\n",
+        )
+        .unwrap();
+        let tail = "\nexport function open() {\n  return d();\n}\n\nexport function more(x: Local) {\n  return b(x);\n}\n";
+        let more = Some(vec!["more".to_owned()]);
+        for (head, expected) in [
+            (
+                "import d from './a';\nimport type { Local } from './types';\nimport { b } from 'pkg';\n",
+                more.clone(),
+            ),
+            (
+                "import d from './a';\nimport { type Local, b } from 'pkg';\n",
+                more.clone(),
+            ),
+            (
+                "import d from './a';\nimport type { Local } from './types';\nimport { b } from '/abs/lib';\n",
+                None,
+            ),
+            (
+                "import d, { b } from './a';\nimport type { Local } from './types';\n",
+                None,
+            ),
+            (
+                "import d from './a';\nimport type { Local } from './types';\nimport { b } from 'pkg';\nimport {} from 'side';\n",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                only_added(&before, "h.ts", &format!("{head}{tail}")),
+                expected,
+                "{head}"
+            );
+        }
+        let python = code(
+            "t/h.py",
+            "import json\n\n\ndef make(x):\n    return json.dumps(x)\n",
+        )
+        .unwrap();
+        let kept = "import json\n\n\ndef make(x):\n    return json.dumps(x)\n\n\n";
+        for (after, expected) in [
+            (
+                format!(
+                    "import json\nimport os.path as p\n{}def more(x):\n    return p.join(x)\n",
+                    &kept[12..]
+                ),
+                more.clone(),
+            ),
+            // Exported by name, in either quote.
+            (
+                format!("{kept}def more(x):\n    return x\n\n__all__ = ['more']\n"),
+                None,
+            ),
+            // A star import can rebind any name the earlier code reads.
+            (
+                format!(
+                    "import json\nfrom random import *\n{}def more(x):\n    return random()\n",
+                    &kept[12..]
+                ),
+                None,
+            ),
+        ] {
+            assert_eq!(only_added(&python, "t/h.py", &after), expected, "{after}");
         }
     }
 

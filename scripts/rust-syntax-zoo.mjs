@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
+import { assessWithStandIn } from './assess-with-stand-in.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
@@ -23,7 +24,7 @@ const root = resolve(temporary, 'zoo');
 
 const files = {
   'Cargo.toml': '[package]\nname = "zoo"\nversion = "0.1.0"\nedition = "2024"\n\n[dependencies]\n',
-  'src/lib.rs': 'pub mod consts;\npub mod flow;\npub mod macros;\npub mod shapes;\n',
+  'src/lib.rs': 'pub mod consts;\npub mod flow;\npub mod macros;\npub mod shapes;\npub mod values;\n',
   'src/flow.rs': `pub fn pick(value: Option<u32>, limit: u32) -> &'static str {
     if let Some(v) = value
         && v > limit
@@ -150,6 +151,72 @@ pub static TABLE: [u8; 4] = [1, 2, 3, 4];
 pub fn lookup(index: usize) -> Option<u8> {
     TABLE.get(index).copied()
 }
+
+// Code that runs at compile time, or inside the allocator, cannot carry a
+// probe: each shape below must still compile and behave.
+pub const fn first_even(values: &[u32]) -> Option<u32> {
+    let mut i = 0;
+    while i < values.len() {
+        if values[i] % 2 == 0 && values[i] > 0 {
+            return Some(values[i]);
+        }
+        i += 1;
+    }
+    None
+}
+
+pub const fn sign(x: i32) -> i32 {
+    match x {
+        n if n > 0 => 1,
+        0 => 0,
+        _ => -1,
+    }
+}
+
+pub const fn halvings(mut n: u32) -> u32 {
+    let mut count = 0;
+    loop {
+        if n == 0 {
+            break count;
+        }
+        n /= 2;
+        count += 1;
+    }
+}
+
+pub const SQUARES: [u32; 3] = {
+    let mut squares = [0; 3];
+    let mut i = 0;
+    while i < 3 {
+        squares[i] = (i * i) as u32;
+        i += 1;
+    }
+    squares
+};
+
+pub fn inline_const() -> u32 {
+    const { if LIMIT > 5 { 2 } else { 3 } }
+}
+
+pub fn sized() -> [u8; if LIMIT > 5 { 2 } else { 3 }] {
+    [0; if LIMIT > 5 { 2 } else { 3 }]
+}
+
+pub struct Counting;
+
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if layout.size() > 0 && layout.align() <= 16 {
+            unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, pointer, layout) }
+    }
+}
 `,
   'src/macros.rs': `macro_rules! double {
     ($x:expr) => {
@@ -159,6 +226,146 @@ pub fn lookup(index: usize) -> Option<u8> {
 
 pub fn twice(x: u32) -> u32 {
     double!(x) + double!(1)
+}
+`,
+  // Statements of every shape assertion assessment reads a value from: the
+  // change a test would have to catch depends on the value's type.
+  'src/values.rs': `use std::alloc::{alloc, dealloc, Layout};
+use std::cmp::Ordering;
+use std::ptr;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Version {
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl Version {
+    pub fn new(major: u32, minor: u32) -> Self {
+        Version { major, minor }
+    }
+
+    pub fn from_pair(pair: (u32, u32)) -> Self {
+        let made = Version::new(pair.0, pair.1);
+        made
+    }
+
+    pub fn with_minor(&self, minor: u32) -> Self {
+        let copy = Version { minor, ..self.clone() };
+        copy
+    }
+
+    pub fn order(&self, other: &Version) -> Ordering {
+        let by_major = self.major.cmp(&other.major);
+        if by_major != Ordering::Equal {
+            return by_major;
+        }
+        self.minor.cmp(&other.minor)
+    }
+}
+
+pub fn parse(text: &str) -> Result<Version, String> {
+    let (major, minor) = text.split_once('.').ok_or("no dot")?;
+    let major: u32 = major.parse().map_err(|_| "major".to_string())?;
+    let minor = minor.parse::<u32>().map_err(|_| "minor".to_string())?;
+    Ok(Version::new(major, minor))
+}
+
+pub fn first_or(text: &str, fallback: Version) -> Version {
+    let parsed = match parse(text) {
+        Ok(version) => version,
+        Err(_) => fallback,
+    };
+    parsed
+}
+
+pub fn maybe(text: &str) -> Option<u32> {
+    let found = Some(text.len() as u32);
+    let doubled = found.map(|n| n * 2);
+    doubled
+}
+
+pub fn pair(text: &str) -> (usize, bool) {
+    let shaped = (text.len(), text.is_empty());
+    shaped
+}
+
+pub fn scaled(values: &[f64], factor: f64) -> Vec<f64> {
+    let scale = |value: f64| -> f64 { value * factor };
+    let out = values.iter().map(|v| scale(*v)).collect::<Vec<_>>();
+    out
+}
+
+pub fn bytes_sum(data: &[u8]) -> u32 {
+    let start = data.as_ptr();
+    let mut total = 0u32;
+    for index in 0..data.len() {
+        let at = unsafe { start.add(index) };
+        let byte = unsafe { at.read() };
+        total += u32::from(byte);
+    }
+    total
+}
+
+pub fn first_word(data: &[u16]) -> u16 {
+    let raw = ptr::addr_of!(data[0]);
+    let as_bytes = raw.cast::<u8>();
+    let low = unsafe { as_bytes.read() };
+    u16::from(low) | (unsafe { raw.read() } & 0xff00)
+}
+
+pub fn scratch(len: usize) -> u8 {
+    let layout = Layout::from_size_align(len, 1).unwrap();
+    let block = unsafe { alloc(layout) };
+    unsafe { block.write(7) };
+    let value = unsafe { block.read() };
+    unsafe { dealloc(block, layout) };
+    value
+}
+`,
+  'tests/values.rs': `use std::cmp::Ordering;
+use zoo::values::*;
+
+#[test]
+fn values_of_every_shape() {
+    let one = Version::new(1, 2);
+    assert_eq!(Version::from_pair((1, 2)), one);
+    assert_eq!(one.with_minor(5).minor, 5);
+    assert_eq!(one.order(&Version::new(2, 0)), Ordering::Less);
+    assert_eq!(one.order(&Version::new(1, 1)), Ordering::Greater);
+    assert_eq!(parse("3.4"), Ok(Version::new(3, 4)));
+    assert!(parse("nodot").is_err());
+    assert!(parse("x.1").is_err());
+    assert!(parse("1.y").is_err());
+    assert_eq!(first_or("bad", one.clone()), one);
+    assert_eq!(first_or("2.0", one.clone()), Version::new(2, 0));
+    assert_eq!(maybe("abc"), Some(6));
+    assert_eq!(pair(""), (0, true));
+    assert_eq!(scaled(&[1.0, 2.0], 2.0), vec![2.0, 4.0]);
+    assert_eq!(bytes_sum(&[1, 2, 3]), 6);
+    assert_eq!(first_word(&[0x1234]), 0x1234);
+    assert_eq!(scratch(4), 7);
+}
+`,
+  'tests/consts.rs': `use std::alloc::{GlobalAlloc, Layout};
+use zoo::consts::*;
+
+#[test]
+fn compile_time_code_runs_unprobed() {
+    assert_eq!(first_even(&[1, 3, 4]), Some(4));
+    assert_eq!(first_even(&[0, 1]), None);
+    assert_eq!((sign(5), sign(0), sign(-5)), (1, 0, -1));
+    assert_eq!((halvings(0), halvings(8)), (0, 4));
+    assert_eq!(SQUARES, [0, 1, 4]);
+    assert_eq!(inline_const(), 2);
+    assert_eq!(sized().len(), 2);
+    let layout = Layout::from_size_align(8, 8).unwrap();
+    unsafe {
+        let block = Counting.alloc(layout);
+        assert!(!block.is_null());
+        Counting.dealloc(block, layout);
+        assert!(Counting.alloc(Layout::from_size_align(0, 1).unwrap()).is_null());
+    }
 }
 `,
   'tests/zoo.rs': `use zoo::consts::*;
@@ -260,7 +467,20 @@ try {
   }
   // Const contexts and macro expansions cannot hold a probe, and say so.
   assert.ok(byFile['src/macros.rs']?.measurementLimitations >= 1, report);
-  console.log('[rust-syntax-zoo] every construct the Rust instrumenter rewrites reads as its tests drove it');
+  // Code that runs at compile time or in the allocator is declared unmeasured,
+  // never owed: an array length read as a decision nothing evaluated would be
+  // a gap no test could close.
+  const consts = byFile['src/consts.rs'];
+  assert.ok(consts?.measurementLimitations >= 2, report);
+  for (const metric of ['lines', 'branches', 'mcdcConditions']) {
+    assert.equal(consts.covered[metric], consts.totals[metric], `src/consts.rs: ${metric}\n${report}`);
+  }
+  // Every construct is read for what a test would have to catch, too: each
+  // executed statement asked about and, with a stand-in that says yes, asserted.
+  const assessed = await assessWithStandIn(binary, root);
+  assert.equal(assessed.status, 0, assessed.output);
+  assert.match(assessed.output, /\b100% asserted \((\d+) of \1 executed statements\)/, assessed.output);
+  console.log('[rust-syntax-zoo] every construct the Rust instrumenter rewrites reads as its tests drove it, and is assessed');
 } finally {
   if (!process.env.KEEP) rmSync(temporary, { recursive: true, force: true });
 }

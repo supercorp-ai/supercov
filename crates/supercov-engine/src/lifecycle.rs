@@ -1882,6 +1882,60 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A full clean previews exactly what it removes -- runs, finished
+    /// workspaces, evidence no run published, kept failed evidence and the
+    /// build cache -- and a preview removes none of it.
+    #[test]
+    fn a_full_clean_previews_everything_it_removes_and_the_preview_removes_nothing() {
+        let root = project();
+        let (evidence, bytes) = evidence(&root);
+        publish_run(&root, &metadata("run_published", bytes), &evidence).unwrap();
+        write_run_state(
+            &root,
+            &state(
+                &root,
+                "run_finished",
+                RunStateStatus::Complete,
+                std::process::id(),
+            ),
+        )
+        .unwrap();
+        let stored = [
+            root.join(".supercov/evidence/run_orphaned"),
+            root.join(FAILED_EVIDENCE).join("run_failed"),
+            root.join(".supercov/.cache/build"),
+        ];
+        for directory in &stored {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let clean = |dry_run| {
+            cleanup_storage_locked(&root, CleanupOptions { keep: 0, dry_run }, true).unwrap()
+        };
+        let preview = clean(true);
+        assert_eq!(preview.removed_runs, ["run_published"]);
+        assert_eq!(
+            preview.removed_workspaces,
+            ["run_published", "run_finished"]
+        );
+        assert_eq!(preview.removed_evidence, ["run_orphaned"]);
+        assert_eq!(preview.removed_failed_evidence, ["run_failed"]);
+        assert!(preview.removed_build_cache);
+        assert!(root.join(".supercov/runs/run_published").exists());
+        assert!(root.join(".supercov/work/run_finished").exists());
+        assert!(stored.iter().all(|directory| directory.exists()));
+
+        assert_eq!(clean(false), preview);
+        assert!(!root.join(".supercov/runs/run_published").exists());
+        assert!(!root.join(".supercov/work/run_finished").exists());
+        assert!(stored.iter().all(|directory| !directory.exists()));
+        assert!(
+            root.join("src/index.js").exists(),
+            "the project's own files stay"
+        );
+        sweep_trash(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn retention_keeps_the_newest_runs_when_run_ids_disagree_with_recency() {
         let root = project();

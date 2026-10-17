@@ -909,6 +909,26 @@ fn checks_license_headers(workspace: &Path) -> bool {
         .is_ok_and(|pom| maven_effective(workspace, &pom).contains("apache-rat"))
 }
 
+/// What relaxing one build file's warning policy changed, each said once
+/// however many build files changed it. Switching a static analyser off is
+/// named separately: it is a bigger thing than not failing on a warning, and
+/// the user should hear it said rather than work it out.
+fn note_relaxations(existing: &str, updated: &str, relaxed: &mut Vec<&'static str>) {
+    let fail_on_warning = "<failOnWarning>false</failOnWarning>";
+    let warnings = updated.contains(fail_on_warning) != existing.contains(fail_on_warning)
+        || existing.contains("-Werror") && !updated.contains("-Werror");
+    let error_prone =
+        existing.contains("Xplugin:ErrorProne") && !updated.contains("Xplugin:ErrorProne");
+    for (changed, note) in [
+        (warnings, "stopped the build failing on warnings"),
+        (error_prone, "switched Error Prone off"),
+    ] {
+        if changed && !relaxed.contains(&note) {
+            relaxed.push(note);
+        }
+    }
+}
+
 /// A build file with its warnings-as-errors policy relaxed.
 ///
 /// A project is free to fail its build on any warning, and several good ones
@@ -1242,22 +1262,9 @@ fn instrument_workspace(
         let Some(updated) = without_warnings_as_errors(&existing) else {
             continue;
         };
-        // Named separately, because switching a static analyser off is a
-        // bigger thing than not failing on a warning and the user should hear
-        // it said rather than work it out.
-        if !relaxed.contains(&"stopped the build failing on warnings")
-            && updated.contains("<failOnWarning>false</failOnWarning>")
-                != existing.contains("<failOnWarning>false</failOnWarning>")
-            || existing.contains("-Werror") && !updated.contains("-Werror")
-        {
-            relaxed.push("stopped the build failing on warnings");
-        }
-        if existing.contains("Xplugin:ErrorProne") && !updated.contains("Xplugin:ErrorProne") {
-            relaxed.push("switched Error Prone off");
-        }
+        note_relaxations(&existing, &updated, &mut relaxed);
         write(&path, &updated)?;
     }
-    relaxed.dedup();
     let license_check = build == JvmBuild::Maven && checks_license_headers(workspace);
 
     // The platform listener is compiled from the project's own test sources,
@@ -2394,6 +2401,61 @@ mod tests {
             None
         );
         assert_eq!(named_modules(JvmBuild::Maven, &words("mvn test")), None);
+        assert_eq!(
+            named_modules(JvmBuild::Maven, &words("mvn --projects ./core test")),
+            Some(BTreeSet::from(["core".to_owned()]))
+        );
+        // A module left out is no list of the ones that run.
+        assert_eq!(
+            named_modules(JvmBuild::Maven, &words("mvn -pl core,!slow test")),
+            None
+        );
+    }
+
+    #[test]
+    fn each_relaxation_is_said_once_however_many_build_files_needed_it() {
+        let mut relaxed = Vec::new();
+        // Two build files, each failing on warnings and running Error Prone.
+        for _ in 0..2 {
+            note_relaxations("-Werror -Xplugin:ErrorProne", "-Xlint:none", &mut relaxed);
+        }
+        assert_eq!(
+            relaxed,
+            [
+                "stopped the build failing on warnings",
+                "switched Error Prone off"
+            ]
+        );
+        let mut maven = Vec::new();
+        note_relaxations(
+            "<failOnWarning>true</failOnWarning>",
+            "<failOnWarning>false</failOnWarning>",
+            &mut maven,
+        );
+        assert_eq!(maven, ["stopped the build failing on warnings"]);
+        let mut unchanged = Vec::new();
+        note_relaxations("-Xlint:all", "-Xlint:all", &mut unchanged);
+        assert!(unchanged.is_empty());
+    }
+
+    #[test]
+    fn the_platform_version_follows_jupiter_s() {
+        assert_eq!(platform_of_jupiter("5.13.1").as_deref(), Some("1.13.1"));
+        assert_eq!(
+            platform_of_jupiter("5.10.0-M1</version>").as_deref(),
+            Some("1.10.0-M1")
+        );
+        assert_eq!(platform_of_jupiter("6.0.1").as_deref(), Some("6.0.1"));
+        for unknown in [
+            "${junit.version}",
+            "5.10",
+            "5..1",
+            "5.x.1",
+            "4.13.2",
+            "five.1.0",
+        ] {
+            assert_eq!(platform_of_jupiter(unknown), None, "{unknown}");
+        }
     }
 
     #[test]

@@ -14,12 +14,13 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { freePorts } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 // Inside the repository, so the suite finds its Playwright.
 const root = resolve(repository, 'target', `leaving-page-${process.pid}-${Date.now()}`);
-const port = 42000 + Math.floor(Math.random() * 3000);
+const [port] = await freePorts(1);
 
 const files = {
   'package.json': '{ "name": "leaving-page", "private": true, "type": "module" }\n',

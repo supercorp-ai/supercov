@@ -794,6 +794,38 @@ fn python_statement_starts(source: &str) -> BTreeMap<usize, Vec<(String, Option<
     collector.out
 }
 
+/// The line a JavaScript test is declared on. Each group in its name
+/// (`cart > totals`) narrows the search to that group's block, since groups
+/// often hold tests of the same title; a title written as a string is
+/// preferred over the same words anywhere else.
+fn js_test_line(lines: &[&str], name: &str) -> Option<usize> {
+    let parts = name.split(" > ").collect::<Vec<_>>();
+    let (title, groups) = parts.split_last()?;
+    let quoted = |line: &str, text: &str| {
+        ['\'', '"', '`']
+            .iter()
+            .any(|quote| line.contains(&format!("{quote}{text}")))
+    };
+    let (mut from, mut to) = (0, lines.len());
+    for group in groups {
+        let needle = prefix(group, 40);
+        if needle.is_empty() {
+            continue;
+        }
+        if let Some(at) = (from..to).find(|&i| quoted(lines[i], needle)) {
+            (from, to) = (at, (block_end(lines, at) + 1).min(lines.len()));
+        }
+    }
+    let needle = prefix(title, 40);
+    if needle.is_empty() {
+        return None;
+    }
+    (from..to)
+        .find(|&i| quoted(lines[i], needle))
+        .or_else(|| (from..to).find(|&i| lines[i].contains(needle)))
+        .or_else(|| (0..lines.len()).find(|&i| lines[i].contains(needle)))
+}
+
 fn prefix(text: &str, chars: usize) -> &str {
     match text.char_indices().nth(chars) {
         Some((i, _)) => &text[..i],
@@ -1279,11 +1311,7 @@ impl Population {
         let t = &self.tests[test];
         let text = self.read(&t.file).unwrap_or_default();
         let lines = text.split('\n').collect::<Vec<_>>();
-        let title = t.name.rsplit(" > ").next().unwrap_or(&t.name);
-        let needle = prefix(title, 40);
-        let start = (!needle.is_empty())
-            .then(|| lines.iter().position(|l| l.contains(needle)))
-            .flatten();
+        let start = js_test_line(&lines, &t.name);
         let fmt = |i: usize| format!("{:5} {}", i + 1, lines[i]);
         let head = (0..lines.len().min(HEAD_LINES))
             .filter(|&i| !self.language.comment(lines[i]))
@@ -1399,13 +1427,20 @@ impl Population {
         let lines = text.split('\n').collect::<Vec<_>>();
         let title = python_title(&t.name);
         let indent_of = |l: &str| l.len() - l.trim_start().len();
+        // Test classes in one file often share method names, so the method
+        // is looked for inside the class its id names, then anywhere.
+        let (from, to, body) = python_class_lines(&lines, &python_classes(&t.name));
+        let defines = |i: &usize| {
+            let t = lines[*i].trim_start();
+            t.starts_with(&format!("def {title}(")) || t.starts_with(&format!("async def {title}("))
+        };
+        // In the class's own body, not a class nested in it.
+        let own = |i: &usize| defines(i) && body.is_none_or(|body| indent_of(lines[*i]) == body);
         let start = (!title.is_empty())
             .then(|| {
-                lines.iter().position(|l| {
-                    let t = l.trim_start();
-                    t.starts_with(&format!("def {title}("))
-                        || t.starts_with(&format!("async def {title}("))
-                })
+                (from..to)
+                    .find(own)
+                    .or_else(|| (0..lines.len()).find(defines))
             })
             .flatten();
         let fmt = |i: usize| format!("{:5} {}", i + 1, lines[i]);
@@ -1433,25 +1468,30 @@ impl Population {
                 })
             })
             .flatten();
-        for i in class.into_iter().chain(first..start) {
+        // `...` where lines are left out between the ones shown.
+        let mut last = HEAD_LINES.min(lines.len()).checked_sub(1);
+        let mut show = |out: &mut Vec<String>, i: usize| {
             if i >= HEAD_LINES {
-                if out.last().is_some_and(|l| l != "  ...") {
+                if last.is_some_and(|l| i > l + 1) {
                     out.push("  ...".into());
                 }
                 out.push(fmt(i));
+                last = Some(i);
             }
+        };
+        for i in class.into_iter().chain(first..=start) {
+            show(&mut out, i);
         }
-        if start >= HEAD_LINES
-            && out.last().is_some_and(|l| l != "  ...")
-            && first == start
-            && class.is_none()
+        for (i, &l) in lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .take(BODY_LINES - 1)
         {
-            out.push("  ...".into());
-        }
-        for (i, &l) in lines.iter().enumerate().skip(start).take(BODY_LINES) {
-            if i > start && !l.trim().is_empty() && indent_of(l) <= indent {
+            if !l.trim().is_empty() && indent_of(l) <= indent {
                 break;
             }
+            // A comment in the body is left out without a mark.
             if !self.language.comment(l) && i >= HEAD_LINES {
                 out.push(fmt(i));
             }
@@ -2036,9 +2076,19 @@ fn indent(line: &str) -> usize {
 /// The line closing the braces opened from `start` on (strings, characters
 /// and line comments aside).
 fn brace_end(lines: &[&str], start: usize) -> usize {
+    brace_end_within(lines, start, BODY_LINES)
+}
+
+/// Where the block opened at `start` closes, however long it is: the region
+/// a class, module or group holds, which is searched rather than shown.
+fn block_end(lines: &[&str], start: usize) -> usize {
+    brace_end_within(lines, start, lines.len())
+}
+
+fn brace_end_within(lines: &[&str], start: usize, limit: usize) -> usize {
     let mut depth = 0i64;
     let mut opened = false;
-    for (i, line) in lines.iter().enumerate().skip(start).take(BODY_LINES) {
+    for (i, line) in lines.iter().enumerate().skip(start).take(limit) {
         let mut chars = line.chars().peekable();
         let mut quote: Option<char> = None;
         while let Some(c) = chars.next() {
@@ -2062,7 +2112,10 @@ fn brace_end(lines: &[&str], start: usize) -> usize {
             return i;
         }
     }
-    (start + BODY_LINES).min(lines.len()).saturating_sub(1)
+    start
+        .saturating_add(limit)
+        .min(lines.len())
+        .saturating_sub(1)
 }
 
 /// The `end` (or `}`) closing a Ruby block or method opened on `start`.
@@ -2276,6 +2329,53 @@ fn python_title(name: &str) -> &str {
     let last = name.rsplit("::").next().unwrap_or(name);
     let last = last.split('[').next().unwrap_or(last);
     last.rsplit('.').next().unwrap_or(last)
+}
+
+/// The classes a Python test id names around its function: pytest's
+/// `file::TestA::TestB::test[param]`, unittest's `module.TestA.test`.
+fn python_classes(name: &str) -> Vec<&str> {
+    let name = name.split('[').next().unwrap_or(name);
+    if name.contains("::") {
+        let parts = name.split("::").collect::<Vec<_>>();
+        return parts[1..parts.len().saturating_sub(1)].to_vec();
+    }
+    let parts = name.split('.').collect::<Vec<_>>();
+    parts
+        .len()
+        .checked_sub(2)
+        .map(|at| parts[at])
+        .filter(|class| class.starts_with(|c: char| c.is_ascii_uppercase()))
+        .into_iter()
+        .collect()
+}
+
+/// The lines of the innermost of `classes`, each found inside the one before
+/// and ended by indentation, with the indentation of that class's own body;
+/// the whole file when one is not found.
+fn python_class_lines(lines: &[&str], classes: &[&str]) -> (usize, usize, Option<usize>) {
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let (mut from, mut to, mut body) = (0, lines.len(), None);
+    for class in classes {
+        let declared = (from..to).find(|&i| {
+            lines[i]
+                .trim_start()
+                .strip_prefix("class ")
+                .and_then(|rest| rest.strip_prefix(class))
+                .is_some_and(|rest| rest.starts_with(['(', ':']))
+        });
+        let Some(at) = declared else {
+            return (0, lines.len(), None);
+        };
+        let indent = indent_of(lines[at]);
+        let end = (at + 1..to)
+            .find(|&i| !lines[i].trim().is_empty() && indent_of(lines[i]) <= indent)
+            .unwrap_or(to);
+        body = (at + 1..end)
+            .find(|&i| !lines[i].trim().is_empty())
+            .map(|i| indent_of(lines[i]));
+        (from, to) = (at, end);
+    }
+    (from, to, body)
 }
 
 fn python_condition(line: &str) -> String {
@@ -2743,6 +2843,216 @@ mod tests {
         // Short or letterless pieces say nothing about a test.
         assert!(quoted_fragments("x = 'abc' + \"1234567\"").is_empty());
         assert!(quoted_fragments("return a + b").is_empty());
+    }
+
+    /// A pytest method far into its file: the file's first lines, then the
+    /// class around it, its decorators and its body, each once.
+    #[test]
+    fn a_python_test_deep_in_its_file_is_shown_with_its_class_and_decorators() {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-test-code-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        let mut file =
+            String::from("# The shop's tests.\nimport pytest\n\nfrom shop import total\n");
+        for i in 0..10 {
+            file.push_str(&format!("\n\ndef helper_{i}():\n    return {i}\n"));
+        }
+        file.push_str("\n\nclass TestTotal:\n    def test_first(self):\n        assert total([]) == 0\n\n    @pytest.mark.slow\n    @pytest.mark.parametrize(\"n\", [1])\n    def test_deep(self, n):\n        # one item\n        assert total([n]) == n\n\n    def test_after(self):\n        pass\n");
+        std::fs::write(root.join("tests/test_total.py"), &file).unwrap();
+        let input = AssessmentInput {
+            tests: vec![InputTest {
+                id: "tests/test_total.py::TestTotal::test_deep[1]".into(),
+                file: Some("tests/test_total.py".into()),
+                name: "tests/test_total.py::TestTotal::test_deep[1]".into(),
+                role: "test".into(),
+                runner: "pytest".into(),
+            }],
+            points: vec![InputPoint {
+                file: "shop.py".into(),
+                line: 1,
+                source: "return 0".into(),
+                tests: vec![0],
+            }],
+            decisions: Vec::new(),
+        };
+        let sources = BTreeMap::from([("shop.py".to_owned(), "return 0\n".to_owned())]);
+        let population = population_from(&root, &input, &sources, Language::Python).unwrap();
+        let code = population.test_code(0);
+        std::fs::remove_dir_all(&root).unwrap();
+        let shown = code
+            .lines()
+            .map(|line| {
+                let line = line.trim_start();
+                line.split_once(' ').map_or(line, |(_, l)| l.trim_start())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown,
+            [
+                "import pytest",
+                "",
+                "from shop import total",
+                "",
+                "",
+                "def helper_0():",
+                "return 0",
+                "",
+                "",
+                "...",
+                "class TestTotal:",
+                "...",
+                "@pytest.mark.slow",
+                "@pytest.mark.parametrize(\"n\", [1])",
+                "def test_deep(self, n):",
+                "assert total([n]) == n",
+                "",
+            ],
+            "{code}"
+        );
+    }
+
+    /// The small readers a question is built with: a statement's condition,
+    /// the part of a line before its value, a test call, and the numbers and
+    /// locations a cache key leaves out.
+    #[test]
+    fn statement_text_is_read_the_way_each_language_writes_it() {
+        assert_eq!(condition("if (a && b) {"), "a && b");
+        assert_eq!(condition("} else if (ready) {"), "ready");
+        assert_eq!(condition("if (a) return;"), "if (a) return;");
+        assert_eq!(condition("while (a) {"), "while (a) {");
+        assert_eq!(python_condition("elif x is None:"), "x is None");
+        assert_eq!(python_condition("if ready:"), "ready");
+        assert_eq!(
+            split_initializer("const x = f(1);").as_deref(),
+            Some("const x =")
+        );
+        assert_eq!(
+            split_initializer("if (a <= b && c != d) total = 1").as_deref(),
+            Some("if (a <= b && c != d) total =")
+        );
+        assert_eq!(split_initializer("a === b"), None);
+        assert_eq!(split_initializer("items.map((x) => x)"), None);
+        assert!(is_test_call("  it('works', () => {"));
+        assert!(is_test_call("test.only('works', () => {"));
+        assert!(is_test_call("test ('spaced', () => {"));
+        assert!(!is_test_call("items.push(1)"));
+        assert!(!is_test_call("testing(1)"));
+        assert_eq!(
+            strip_numbers("▶   12 total(1)\n    13 next\n  ... 4 lines not shown\nplain"),
+            "▶total(1)\n next\n...\nplain"
+        );
+        assert_eq!(
+            strip_location("src/a.js:12: `x` is deleted"),
+            "src/a.js:: `x` is deleted"
+        );
+        assert_eq!(strip_location("src/a.js:main: kept"), "src/a.js:main: kept");
+        assert_eq!(strip_location("no location"), "no location");
+    }
+
+    /// A helper file's named definitions, so a test is sent only the helpers
+    /// it names: methods with their bodies (a brace on its own line too),
+    /// Kotlin functions, RSpec `let` and `subject`, Rust items.
+    #[test]
+    fn helper_definitions_are_read_the_way_each_language_declares_them() {
+        let names = |language: Language, text: &str| {
+            let lines = text.split('\n').collect::<Vec<_>>();
+            definitions(&lines, language)
+                .into_iter()
+                .map(|(name, start, end)| format!("{name} {}-{}", start + 1, end + 1))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(
+                Language::Jvm,
+                "class Helpers {\n  static int total(int a) {\n    return a;\n  }\n  private static final Map<String, Integer> PRICES = Map.of(\"a\", 1);\n  public <T> List<T> wrap(T value)\n  {\n    return List.of(value);\n  }\n  void call() { helper(1); }\n}\n"
+            ),
+            ["total 2-4", "wrap 6-9", "call 10-10"]
+        );
+        assert_eq!(
+            names(
+                Language::Jvm,
+                "object Fixtures {\n    private fun price(x: Int) = x * 2\n    val list = listOf(1).map { it }\n    suspend fun later() {\n    }\n}\n"
+            ),
+            ["price 2-2", "later 4-5"]
+        );
+        assert_eq!(
+            names(
+                Language::Ruby,
+                "module Helpers\n  def self.make(x)\n    x\n  end\n  let(:order) { 1 }\n  let!(:user) { 2 }\n  subject(:cart) { 3 }\n  subject { 4 }\n  def valid?\n    true\n  end\nend\n"
+            ),
+            [
+                "make 2-4",
+                "order 5-5",
+                "user 6-6",
+                "cart 7-7",
+                "subject 8-8",
+                "valid? 9-11"
+            ]
+        );
+        assert_eq!(
+            names(
+                Language::Rust,
+                "pub fn make() -> u8 {\n    1\n}\npub(crate) const LIMIT: u8 = 2;\nstruct Point {\n    x: u8,\n}\n"
+            ),
+            ["make 1-3", "LIMIT 4-4", "Point 5-7"]
+        );
+    }
+
+    #[test]
+    fn a_python_test_is_found_in_the_class_its_id_names() {
+        let text = "import pytest\n\n\nclass TestCart:\n    def test_total(self):\n        assert cart() == 0\n\n\nclass TestOrder:\n    class TestRefund:\n        def test_total(self):\n            assert refund() == 1\n\n    def test_total(self):\n        assert order() == 2\n";
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let at = |name: &str| {
+            let (from, to, body) = python_class_lines(&lines, &python_classes(name));
+            (from..to)
+                .find(|&i| {
+                    lines[i].trim_start().starts_with("def test_total(")
+                        && body
+                            .is_none_or(|body| lines[i].len() - lines[i].trim_start().len() == body)
+                })
+                .map(|i| i + 1)
+        };
+        assert_eq!(at("tests/test_a.py::TestCart::test_total"), Some(5));
+        assert_eq!(
+            at("tests/test_a.py::TestOrder::TestRefund::test_total[1]"),
+            Some(11)
+        );
+        // The class's own method, not the one of a class nested in it.
+        assert_eq!(at("tests/test_a.py::TestOrder::test_total"), Some(14));
+        assert_eq!(at("tests.test_a.TestCart.test_total"), Some(5));
+        assert_eq!(
+            python_classes("tests/test_a.py::test_plain"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            python_classes("tests.test_a.test_plain"),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn a_javascript_test_is_found_in_the_group_its_name_gives() {
+        let text = "import { totals } from '../src/cart.js';\n\ndescribe('cart', () => {\n  it('totals', () => {\n    expect(totals([])).toBe(0);\n  });\n});\n\ndescribe('order', () => {\n  describe('refund', () => {\n    it('totals', () => {});\n  });\n  it('totals', () => {\n    expect(1).toBe(1);\n  });\n});\n";
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let line = |name: &str| js_test_line(&lines, name).map(|i| i + 1);
+        assert_eq!(
+            line("cart > totals"),
+            Some(4),
+            "not the import that names it"
+        );
+        assert_eq!(line("order > refund > totals"), Some(11));
+        assert_eq!(line("totals"), Some(4));
+        // A group longer than a body is shown is still searched to its end.
+        let long = format!(
+            "describe('a', () => {{\n  it('x', () => {{}});\n}});\ndescribe('b', () => {{\n{}  it('x', () => {{}});\n}});\n",
+            "  const y = 1;\n".repeat(200)
+        );
+        let lines = long.split('\n').collect::<Vec<_>>();
+        assert_eq!(js_test_line(&lines, "b > x").map(|i| i + 1), Some(205));
     }
 
     #[test]
