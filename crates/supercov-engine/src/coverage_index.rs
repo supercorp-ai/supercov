@@ -4188,6 +4188,7 @@ mod tests {
                 assertion_sites: Vec::new(),
             },
             raw_results: vec![RawTestResult {
+                span: None,
                 test_id: Some("test".into()),
                 scope: None,
                 test: "test".into(),
@@ -4513,6 +4514,7 @@ mod tests {
                 assertion_sites: Vec::new(),
             },
             raw_results: vec![RawTestResult {
+                span: None,
                 test_id: Some("unstarted".into()),
                 scope: None,
                 test: "unstarted".into(),

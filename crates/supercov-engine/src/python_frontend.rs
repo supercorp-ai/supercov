@@ -706,6 +706,7 @@ pub fn import_python_coverage_json(
             })
             .collect();
         raw_results.push(RawTestResult {
+            span: None,
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &worker, &test, retry)),
             test: test.clone(),
@@ -745,6 +746,7 @@ pub fn import_python_coverage_json(
         let test = format!("__supercov_background__:{}", context.worker_id);
         let phase = phase_id(run_id, &context.worker_id, &test, 0, "background");
         raw_results.push(RawTestResult {
+            span: None,
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &context.worker_id, &test, 0)),
             test: "Python background execution".into(),

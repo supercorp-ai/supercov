@@ -679,6 +679,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
                 tags: test.tags.clone(),
             };
             RawTestResult {
+                span: None,
                 scope: Some(ExecutionScope {
                     version: 1,
                     run_id: run_id.to_owned(),
@@ -784,6 +785,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> Result<OwnedFrontendRun, Ow
             vectors: Vec::new(),
         };
         raw_results.push(RawTestResult {
+            span: None,
             scope: Some(ExecutionScope {
                 version: 1,
                 run_id: run_id.to_owned(),

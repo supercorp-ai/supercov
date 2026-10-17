@@ -260,6 +260,7 @@ pub(crate) fn run_nextest(
         let attempt_id = format!("{run_id}:{}:{}", record.runner_attempt_id, record.attempt);
         let evidence = snapshot(&project.manifest, &record.evidence, &attempt_id)?;
         results.push(RawTestResult {
+            span: None,
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
                 version: 1,

@@ -1924,6 +1924,7 @@ pub fn run_prepared_rust_tests(
         }
         let evidence = snapshot(&project.manifest, &directory, &attempt_id)?;
         results.push(RawTestResult {
+            span: None,
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
                 version: 1,

@@ -4536,6 +4536,7 @@ mod tests {
 
     fn result(id: &str, vector: McdcVector) -> RawTestResult {
         RawTestResult {
+            span: None,
             test_id: Some(id.into()),
             scope: None,
             test: id.into(),
