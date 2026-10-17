@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A Rust condition in an array length (`[0; if WIDE { 4 } else { 2 }]`, or the same in a return type) runs at compile time and cannot be measured, but was counted as a decision no test evaluated: a gap no test could close. It is now declared unmeasured, like `const fn` bodies.
 - A Python test method deep in its file was sent to assessment with `...` before each of its class and decorator lines, as if lines were left out between adjacent decorators. `...` now marks only lines left out.
 - Rust assertion assessment asked about changes that could not compile or changed nothing: a raw pointer bound to a local (`let start = data.as_ptr();`) became `Default::default()`, a closure with a declared return type lost its braces (`|n: u8| -> u8 0`), and `Layout::new::<u8>()` was "changed" to `std::alloc::Layout::new::<u8>()`. Pointers now become `std::ptr::null()` or `null_mut()` through the locals that hold them, the closure keeps a block body, a value spelled with its path counts as the same value, and `.unwrap()` and `.expect()` give what they unwrap. A float `0.0` became `0.0` again and was skipped as no change; it now becomes `1.0`. A `None` became `Default::default()`, which is `None`; it now becomes `Some(Default::default())`.
 

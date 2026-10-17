@@ -202,10 +202,69 @@ alias $zoo_hello $zoo_greeting
   end
 end
 `,
+  // Shapes beside the ones above: empty branches, a rescue naming its error
+  // with \`then\`, jumps that end an arm, and calls that look like the
+  // special ones (\`Class.new\`, \`refine\`, \`!\`) but are not.
+  'lib/edges.rb': `module Edges
+  class Base; end
+
+  def self.empty_branches(flag)
+    if flag
+    else
+    end
+    unless flag
+    end
+    flag ? :yes : :no
+  end
+
+  def self.rescued(kind)
+    raise ArgumentError, 'bad' if kind == :argument
+    raise KeyError, 'missing' if kind == :key
+    raise TypeError, 'other' if kind == :type
+    :none
+  rescue ArgumentError => error then error.message
+  rescue KeyError
+    :key
+  end
+
+  def self.pair_break(items)
+    items.each { |item| break item, item * 2 if item > 1 }
+  end
+
+  def self.case_jump(items)
+    found = []
+    items.each do |item|
+      case item
+      when 0 then next
+      when 9 then break
+      else found << item
+      end
+    end
+    found
+  end
+
+  def self.loop_jump(items)
+    items.map do |item|
+      if item.nil?
+        next 0
+      else
+        item
+      end
+    end
+  end
+
+  def self.plain_new = Class.new(Base)
+
+  def self.not_with(value) = value.!
+
+  def self.endless(value) = (value + 1)
+end
+`,
   'test/zoo_test.rb': `require 'minitest/autorun'
 require 'flow'
 require 'shapes'
 require 'literals'
+require 'edges'
 
 Ready = Struct.new(:ready?)
 
@@ -278,6 +337,27 @@ class ZooTest < Minitest::Test
     assert_equal 'hello', $zoo_hello
   end
 
+  def test_edges
+    assert_equal :yes, Edges.empty_branches(true)
+    assert_equal :no, Edges.empty_branches(false)
+    assert_equal 'bad', Edges.rescued(:argument)
+    assert_equal :key, Edges.rescued(:key)
+    assert_equal :none, Edges.rescued(:other)
+    assert_raises(TypeError) { Edges.rescued(:type) }
+    assert_equal [], Edges.pair_break([])
+    assert_equal [], Edges.case_jump([])
+    assert_equal [], Edges.loop_jump([])
+    assert_equal [2, 4], Edges.pair_break([1, 2])
+    assert_equal [1], Edges.pair_break([1])
+    assert_equal [1, 2], Edges.case_jump([0, 1, 2])
+    assert_equal [1], Edges.case_jump([1, 9, 2])
+    assert_equal [0, 3], Edges.loop_jump([nil, 3])
+    assert_equal Edges::Base, Edges.plain_new.superclass
+    assert_equal true, Edges.not_with(nil)
+    assert_equal false, Edges.not_with(1)
+    assert_equal 3, Edges.endless(2)
+  end
+
   def test_literals
     assert_equal %i[yes yes yes yes yes yes yes no no],
                  %i[true integer float rational imaginary string symbol false nil].map { |kind| Literals.constant(kind) }
@@ -305,7 +385,7 @@ try {
   const report = listed.map((entry) => `${entry.file}: lines ${entry.covered.lines}/${entry.totals.lines} branches ${entry.covered.branches}/${entry.totals.branches} MC/DC ${entry.covered.mcdcConditions}/${entry.totals.mcdcConditions} limits ${entry.measurementLimitations}`).join('\n');
   if (process.env.ZOO_REPORT) console.log(report);
   // Each construct was driven both ways, so nothing is left uncovered.
-  for (const file of ['lib/flow.rb', 'lib/shapes.rb', 'lib/literals.rb']) {
+  for (const file of ['lib/flow.rb', 'lib/shapes.rb', 'lib/literals.rb', 'lib/edges.rb']) {
     const entry = byFile[file];
     assert.ok(entry, `${file} was not measured\n${report}`);
     for (const metric of ['lines', 'branches', 'mcdcConditions']) {

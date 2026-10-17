@@ -128,17 +128,8 @@ fn in_const_context(node: &ra_ap_syntax::SyntaxNode) -> bool {
 /// file: declining a handful of allocator bodies costs almost no exactness,
 /// while instrumenting the live one costs the whole run.
 fn in_global_allocator(node: &ra_ap_syntax::SyntaxNode) -> bool {
-    node.ancestors().any(|ancestor| {
-        ast::Impl::cast(ancestor).is_some_and(|block| {
-            block.trait_().is_some_and(|implemented| {
-                implemented
-                    .syntax()
-                    .descendants_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == "GlobalAlloc")
-            })
-        })
-    })
+    node.ancestors()
+        .any(|ancestor| in_global_allocator_impl(&ancestor))
 }
 
 /// Report whether this `impl` block implements `GlobalAlloc`.
@@ -653,24 +644,9 @@ impl<'a> RustObligationCollector<'a> {
     /// over its obligation IDs, and the report still needs a line to hang the
     /// limitation on -- and are reported as unmeasured rather than uncovered.
     fn decline_unreachable_obligations(&mut self, root: &ra_ap_syntax::SyntaxNode) {
-        // The regions themselves, not their contents: a node is unreachable
-        // exactly when one of these encloses it.
-        let unreachable = root
-            .descendants()
-            .filter(|node| {
-                (ast::Fn::cast(node.clone())
-                    .is_some_and(|function| function.const_token().is_some())
-                    || ast::BlockExpr::cast(node.clone())
-                        .is_some_and(|block| block.const_token().is_some())
-                    || ast::Const::can_cast(node.kind())
-                    || ast::Static::can_cast(node.kind()))
-                    || ast::Impl::can_cast(node.kind()) && in_global_allocator_impl(node)
-            })
-            .map(|node| node.text_range())
-            .collect::<Vec<_>>();
-        if unreachable.is_empty() {
-            return;
-        }
+        // Exactly where no probe can be placed -- compile-time code, array
+        // lengths and const arguments included -- nothing can be recorded,
+        // so nothing is owed.
         let mut declined = self
             .manifest
             .unmeasured
@@ -678,10 +654,11 @@ impl<'a> RustObligationCollector<'a> {
             .cloned()
             .collect::<BTreeSet<_>>();
         for (id, range) in &self.obligation_ranges {
-            if unreachable
-                .iter()
-                .any(|region| region.contains_range(*range))
-            {
+            let node = match root.covering_element(*range) {
+                ra_ap_syntax::NodeOrToken::Node(node) => Some(node),
+                ra_ap_syntax::NodeOrToken::Token(token) => token.parent(),
+            };
+            if node.is_some_and(|node| cannot_carry_probe(&node)) {
                 declined.insert(id.clone());
             }
         }

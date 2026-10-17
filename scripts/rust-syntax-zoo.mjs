@@ -151,6 +151,72 @@ pub static TABLE: [u8; 4] = [1, 2, 3, 4];
 pub fn lookup(index: usize) -> Option<u8> {
     TABLE.get(index).copied()
 }
+
+// Code that runs at compile time, or inside the allocator, cannot carry a
+// probe: each shape below must still compile and behave.
+pub const fn first_even(values: &[u32]) -> Option<u32> {
+    let mut i = 0;
+    while i < values.len() {
+        if values[i] % 2 == 0 && values[i] > 0 {
+            return Some(values[i]);
+        }
+        i += 1;
+    }
+    None
+}
+
+pub const fn sign(x: i32) -> i32 {
+    match x {
+        n if n > 0 => 1,
+        0 => 0,
+        _ => -1,
+    }
+}
+
+pub const fn halvings(mut n: u32) -> u32 {
+    let mut count = 0;
+    loop {
+        if n == 0 {
+            break count;
+        }
+        n /= 2;
+        count += 1;
+    }
+}
+
+pub const SQUARES: [u32; 3] = {
+    let mut squares = [0; 3];
+    let mut i = 0;
+    while i < 3 {
+        squares[i] = (i * i) as u32;
+        i += 1;
+    }
+    squares
+};
+
+pub fn inline_const() -> u32 {
+    const { if LIMIT > 5 { 2 } else { 3 } }
+}
+
+pub fn sized() -> [u8; if LIMIT > 5 { 2 } else { 3 }] {
+    [0; if LIMIT > 5 { 2 } else { 3 }]
+}
+
+pub struct Counting;
+
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if layout.size() > 0 && layout.align() <= 16 {
+            unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, pointer, layout) }
+    }
+}
 `,
   'src/macros.rs': `macro_rules! double {
     ($x:expr) => {
@@ -281,6 +347,27 @@ fn values_of_every_shape() {
     assert_eq!(scratch(4), 7);
 }
 `,
+  'tests/consts.rs': `use std::alloc::{GlobalAlloc, Layout};
+use zoo::consts::*;
+
+#[test]
+fn compile_time_code_runs_unprobed() {
+    assert_eq!(first_even(&[1, 3, 4]), Some(4));
+    assert_eq!(first_even(&[0, 1]), None);
+    assert_eq!((sign(5), sign(0), sign(-5)), (1, 0, -1));
+    assert_eq!((halvings(0), halvings(8)), (0, 4));
+    assert_eq!(SQUARES, [0, 1, 4]);
+    assert_eq!(inline_const(), 2);
+    assert_eq!(sized().len(), 2);
+    let layout = Layout::from_size_align(8, 8).unwrap();
+    unsafe {
+        let block = Counting.alloc(layout);
+        assert!(!block.is_null());
+        Counting.dealloc(block, layout);
+        assert!(Counting.alloc(Layout::from_size_align(0, 1).unwrap()).is_null());
+    }
+}
+`,
   'tests/zoo.rs': `use zoo::consts::*;
 use zoo::flow::*;
 use zoo::macros::*;
@@ -380,6 +467,14 @@ try {
   }
   // Const contexts and macro expansions cannot hold a probe, and say so.
   assert.ok(byFile['src/macros.rs']?.measurementLimitations >= 1, report);
+  // Code that runs at compile time or in the allocator is declared unmeasured,
+  // never owed: an array length read as a decision nothing evaluated would be
+  // a gap no test could close.
+  const consts = byFile['src/consts.rs'];
+  assert.ok(consts?.measurementLimitations >= 2, report);
+  for (const metric of ['lines', 'branches', 'mcdcConditions']) {
+    assert.equal(consts.covered[metric], consts.totals[metric], `src/consts.rs: ${metric}\n${report}`);
+  }
   // Every construct is read for what a test would have to catch, too: each
   // executed statement asked about and, with a stand-in that says yes, asserted.
   const assessed = await assessWithStandIn(binary, root);
