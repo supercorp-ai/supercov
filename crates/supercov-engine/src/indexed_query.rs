@@ -382,6 +382,25 @@ fn compact_line(mut data: CoverageCoversData) -> CoverageCoversData {
     data
 }
 
+/// Whether a several-line query's error belongs to one location -- its file
+/// is not in the run, or names more than one -- rather than to the run.
+fn location_failure(error: &QueryError) -> bool {
+    matches!(
+        error,
+        QueryError::SourceNotFound(_) | QueryError::AmbiguousSelector { .. }
+    )
+}
+
+/// A location of a several-line query that could not be answered.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageLineFailure {
+    /// As asked: `file:line`.
+    pub location: String,
+    pub code: agent_json::ErrorCode,
+    pub message: String,
+}
+
 /// Several lines asked in one call, each answered as `line` answers it, but
 /// compactly: see [`compact_line`].
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -393,6 +412,11 @@ pub struct CoverageLinesData {
     /// them in another call.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub remaining: Vec<String>,
+    /// Locations that could not be answered -- a file the run has no record
+    /// of, a line past its end -- each with why. The others are answered:
+    /// one mistyped path no longer costs every other location its reply.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<CoverageLineFailure>,
     /// Each line's own page of tests and obligations, for a reader that
     /// renders them one by one.
     #[serde(skip)]
@@ -608,8 +632,10 @@ pub fn query_indexed(
         let mut lines = Vec::new();
         let mut pages = Vec::new();
         let mut cache = crate::coverage_query::CoversCache::default();
+        let mut failed = Vec::new();
+        let mut first_failure = None;
         for (file, line) in locations.into_iter().skip(request.offset) {
-            let (data, page) = crate::coverage_query::coverage_covers_query_cached(
+            let answer = crate::coverage_query::coverage_covers_query_cached(
                 index,
                 CoverageCoversQueryOptions {
                     run: &request.run_id,
@@ -622,9 +648,31 @@ pub fn query_indexed(
                     limit: request.limit.min(BATCH_LINE_TESTS),
                 },
                 &mut cache,
-            )?;
-            lines.push(compact_line(data));
-            pages.push(page);
+            );
+            match answer {
+                Ok((data, page)) => {
+                    lines.push(compact_line(data));
+                    pages.push(page);
+                }
+                // A failure of the location itself: the others still count.
+                Err(error) if location_failure(&error) => {
+                    let wrapped = IndexedQueryError::Query(error);
+                    let agent = wrapped.agent_error();
+                    failed.push(CoverageLineFailure {
+                        location: format!("{file}:{line}"),
+                        code: agent.code,
+                        message: agent.message,
+                    });
+                    first_failure.get_or_insert(wrapped);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // Every location failed: the call failed, as one location's would.
+        if lines.is_empty()
+            && let Some(error) = first_failure
+        {
+            return Err(error);
         }
         let returned = lines.len();
         return Ok(IndexedQueryOutput {
@@ -633,6 +681,7 @@ pub fn query_indexed(
                 run: request.run_id.clone(),
                 lines,
                 remaining: Vec::new(),
+                failed,
                 pages,
             })),
             pagination: Some(supercov_contracts::AgentPagination {

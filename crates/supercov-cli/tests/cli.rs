@@ -2581,6 +2581,206 @@ fn the_file_view_counts_and_labels_lines_as_the_summary_and_line_view_do() {
 }
 
 #[test]
+fn a_line_query_answers_every_line_it_can_and_warns_only_about_files_that_changed() {
+    let project = Project::cart("line-answers");
+    project.write(
+        "src/tax.js",
+        "export function rate(country) {\n  return country === \"LT\" ? 0.21 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { rate } from \"../src/tax.js\";\n\ntest(\"rate in LT\", () => {\n  assert.equal(rate(\"LT\"), 0.21);\n});\n",
+    );
+    project.measure(&[]);
+
+    // One mistyped path among several: the others are still answered, the
+    // mistake is named beside them, and the call succeeds.
+    let mixed = project.supercov(&[
+        "runs",
+        "latest",
+        "line",
+        "src/cart.js:14",
+        "src/crat.js:3",
+        "src/tax.js:2",
+    ]);
+    let answered = mixed.succeeds();
+    contains_all(
+        &answered,
+        &[
+            "return express ? 15 : 5;",
+            "return country === \"LT\" ? 0.21 : 0;",
+            "Not answered\n  src/crat.js:3: ",
+        ],
+    );
+    let json = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "line",
+            "src/cart.js:14",
+            "src/crat.js:3",
+            "--json",
+        ])
+        .json();
+    assert_eq!(json["ok"], true, "{json}");
+    assert_eq!(
+        json["data"]["failed"][0]["location"], "src/crat.js:3",
+        "{json}"
+    );
+    assert_eq!(
+        json["data"]["failed"].as_array().unwrap().len(),
+        1,
+        "{json}"
+    );
+    // Every path wrong is still a mistake.
+    let wrong = project
+        .supercov(&["runs", "latest", "line", "src/crat.js:3"])
+        .exits(2);
+    assert!(wrong.contains("src/crat.js"), "{wrong}");
+
+    // A blank line is no code at all, and the answer says why.
+    let blank = project
+        .supercov(&["runs", "latest", "line", "src/cart.js:11"])
+        .succeeds();
+    contains_all(
+        &blank,
+        &[
+            "Status\n  NOT MEASURED",
+            "Nothing on this line is code the run measures",
+        ],
+    );
+
+    // Only a test changed: the source lines asked about are as the run saw
+    // them, so nothing is stale about the answer.
+    project.edit("test/tax.test.js", "rate in LT", "rate in Lithuania");
+    let after_test_edit = project.supercov(&["runs", "latest", "line", "src/tax.js:2"]);
+    after_test_edit.succeeds();
+    assert!(
+        !after_test_edit.stderr().contains("stale run"),
+        "{}",
+        after_test_edit.stderr()
+    );
+
+    // cart.js changed: a question about tax.js is still answered from the
+    // run with no warning, one about cart.js names the file that changed.
+    project.edit("src/cart.js", "return 0;", "return 0; // free");
+    let unchanged = project.supercov(&["runs", "latest", "line", "src/tax.js:2"]);
+    let unchanged_output = unchanged.succeeds();
+    assert!(
+        !unchanged.stderr().contains("stale run"),
+        "{}",
+        unchanged.stderr()
+    );
+    assert!(
+        !unchanged_output.contains("working tree"),
+        "{unchanged_output}"
+    );
+    let changed = project.supercov(&["runs", "latest", "line", "src/cart.js:16"]);
+    changed.succeeds();
+    assert!(
+        changed.stderr().contains("stale run") && changed.stderr().contains("src/cart.js"),
+        "{}",
+        changed.stderr()
+    );
+}
+
+#[test]
+fn a_patch_on_a_failing_run_shows_its_coverage_and_still_cannot_pass() {
+    let project = Project::cart("patch-failing");
+    project.edit(
+        "src/cart.js",
+        "  return items.map((item) => item.name).join(\", \");",
+        "  const names = items.map((item) => item.name);\n  return names.join(\", \");",
+    );
+    project.edit(
+        "test/cart.test.js",
+        "shipping(60, false), 0",
+        "shipping(60, false), 1",
+    );
+    project.supercov(&["--", "node", "--test"]).exits(1);
+    let human = project
+        .supercov(&["runs", "patch", "--base", "HEAD"])
+        .exits(2);
+    contains_all(
+        &human,
+        &[
+            "this run cannot pass a patch gate",
+            "0 of 2 changed executable line(s) covered",
+            "src/cart.js",
+        ],
+    );
+    let ran = project.supercov(&["runs", "patch", "--base", "HEAD", "--json"]);
+    ran.exits(2);
+    let json = ran.json();
+    assert_eq!(json["data"]["result"], "error", "{json}");
+    assert_eq!(json["data"]["patch"]["eligible"], 2, "{json}");
+    assert_eq!(json["data"]["patch"]["covered"], 0, "{json}");
+    assert!(
+        json["data"]["reasons"]
+            .as_array()
+            .is_some_and(|reasons| !reasons.is_empty()),
+        "{json}"
+    );
+}
+
+#[test]
+fn a_page_too_large_for_one_reply_says_where_the_rest_starts() {
+    let project = Project::empty("page-cut");
+    project.write(
+        "package.json",
+        r#"{ "name": "wide", "private": true, "type": "module" }"#,
+    );
+    let mut source = String::new();
+    for index in 0..400 {
+        source.push_str(&format!(
+            "export function step{index}(flag) {{\n  return flag ? \"a long enough value for line {index} to take some room in a reply\" : {index};\n}}\n"
+        ));
+    }
+    project.write("src/wide.js", &source);
+    project.write(
+        "test/wide.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { step0 } from \"../src/wide.js\";\n\ntest(\"step0\", () => {\n  assert.equal(step0(false), 0);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.measure(&[]);
+    let page = project.supercov(&[
+        "runs",
+        "latest",
+        "file",
+        "src/wide.js",
+        "--limit",
+        "1000",
+        "--json",
+    ]);
+    let json = page.json();
+    let cut = &json["data"]["pageCut"];
+    assert_eq!(cut["asked"], 1000, "{json}");
+    let returned = cut["returned"].as_u64().unwrap();
+    assert!(returned > 0 && returned < 1000, "{json}");
+    assert_eq!(cut["nextOffset"], returned, "{json}");
+    assert!(
+        page.stderr().contains(&format!(
+            "this page holds {returned} of the 1000 entries asked for"
+        )),
+        "{}",
+        page.stderr()
+    );
+    // A page that fits is not marked.
+    let small = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "file",
+            "src/wide.js",
+            "--limit",
+            "5",
+            "--json",
+        ])
+        .json();
+    assert!(small["data"]["pageCut"].is_null(), "{small}");
+}
+
+#[test]
 fn todo_tests_are_counted_as_node_test_counts_them() {
     // supergateway's suite: node said 1,076 tests, 1,057 passed, 6 todo;
     // Supercov said 1,071 total and 1,058 passed. A body-less todo was never
