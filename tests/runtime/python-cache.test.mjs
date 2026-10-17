@@ -374,6 +374,31 @@ for choose in (compound.choose, single.choose):
     child(code, root, env)
 `));
 
+test('a value decision returns its operand in every planned file, not only the first', { skip }, () => run(fixture + `
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    (root / 'first.py').write_text(source)
+    (root / 'pick.py').write_text('def pick(a, b, c):\\n    return a or b or c\\n')
+    # \`a or b or c\` is regrouped as \`(a or b) or c\`: \`a or b\` is a decision
+    # used as a value, the whole a short-circuiting group of two.
+    pick = {"decisions": [{"id": "pick:d", "kind": "value", "value": True, "span": [[2,11],[2,17]],
+                           "outcomeTrue": "pick:t", "outcomeFalse": "pick:f",
+                           "conditions": [{"span": [[2,11],[2,12]], "not": 0}, {"span": [[2,16],[2,17]], "not": 0}]}],
+            "logical": [{"boolop": [[2,11],[2,22]], "operand": 1, "shortCircuit": "pick:s", "evaluated": "pick:e"}]}
+    plan = root / 'plan.json'
+    plan.write_text(json.dumps({'version':1,'root':str(root),'files':{'first.py':file_plan('first'),'pick.py':pick}}))
+    plain = {k:v for k,v in os.environ.items() if not k.startswith('SUPERCOV_') and k != 'PYTHONPATH'}
+    env = dict(plain, PYTHONPATH=sys.argv[1], SUPERCOV_PYTHON_PLAN=str(plan), SUPERCOV_RUN_ID='value', SUPERCOV_PYTHON_EVIDENCE_DIR=str(root / 'evidence'))
+    code = \'\'\'import first, pick
+assert pick.pick(None, '/b', 'c') == '/b', pick.pick(None, '/b', 'c')
+assert pick.pick('/a', None, 'c') == '/a'
+assert pick.pick(None, '', 'c') == 'c'
+assert pick.pick(0, None, None) is None
+\'\'\'
+    child(code, root, plain)
+    child(code, root, env)
+`));
+
 test('a match without a catch-all preserves selected, missed and unmatched outcomes', { skip }, () => run(fixture + `
 if sys.version_info < (3, 10): raise SystemExit(0)
 import ast
