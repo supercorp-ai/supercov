@@ -7078,3 +7078,27 @@ fn import_says_what_is_wrong_with_its_arguments_and_takes_values_inline() {
         .supercov(&["import", "lcov.info", "--test=device", "--status=passed"])
         .succeeds();
 }
+
+#[test]
+fn a_kind_or_runner_no_test_has_is_said_to_match_nothing_by_every_query() {
+    let project = Project::cart("filter-matches-nothing");
+    project.measure(&[]);
+    for query in ["summary", "scope", "gaps", "files"] {
+        for (flag, value, said) in [
+            ("--kind", "e2e", "No tests match kind=e2e"),
+            ("--runner", "jest", "No tests match runner=jest"),
+        ] {
+            let stderr = project
+                .supercov(&["runs", "latest", query, flag, value])
+                .exits(2);
+            assert!(stderr.contains(said), "{query} {flag} {value}: {stderr}");
+            assert!(!stderr.contains("invalid coverage index"), "{query}: {stderr}");
+        }
+    }
+    contains_all(
+        &project
+            .supercov(&["runs", "latest", "summary", "--runner", "node:test"])
+            .succeeds(),
+        &["(runner node:test)"],
+    );
+}

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `summary` and `scope` with a `--kind` or `--runner` no test has said the coverage index was invalid; they now say no tests match, as the other queries do.
+- A Rust `let Ok(x) = ... else` or `let Err(..)` whose value the instrumenter stood in for became `Default::default()`, which a `Result` does not have, and the crate failed to build.
+
 ## 4.19.0
 
 **Added**

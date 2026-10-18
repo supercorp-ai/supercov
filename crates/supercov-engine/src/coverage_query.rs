@@ -2978,6 +2978,29 @@ pub fn coverage_diff_query(
     ))
 }
 
+/// The projection a kind or runner filter reads. The index keeps one only
+/// for a pair some test has, so a filter no test matches is said to match
+/// none rather than read as a broken index.
+fn filtered_projection(
+    index: &CoverageIndex<'_>,
+    view: CoverageViewId,
+    kind: Option<&str>,
+    runner: Option<&str>,
+) -> Result<crate::coverage_index::IndexedProjection, QueryError> {
+    if (kind.is_some() || runner.is_some())
+        && !index.test_summaries(view)?.iter().any(|test| {
+            kind.is_none_or(|kind| test.provenance.kind == kind)
+                && runner.is_none_or(|runner| test.provenance.runner == runner)
+        })
+    {
+        return Err(QueryError::TestFilterEmpty {
+            kind: kind.map(str::to_owned),
+            runner: runner.map(str::to_owned),
+        });
+    }
+    Ok(index.projection(view, kind, runner)?)
+}
+
 pub fn coverage_scope_query(
     index: &CoverageIndex<'_>,
     options: CoverageScopeQueryOptions<'_>,
@@ -2985,7 +3008,7 @@ pub fn coverage_scope_query(
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
-    let projection = index.projection(options.view, options.kind, options.runner)?;
+    let projection = filtered_projection(index, options.view, options.kind, options.runner)?;
     let scope = projection
         .source_scope
         .ok_or(QueryError::ScopeUnavailable)?;
@@ -3042,7 +3065,7 @@ pub fn coverage_summary_query(
     index: &CoverageIndex<'_>,
     options: CoverageSummaryQueryOptions<'_>,
 ) -> Result<CoverageSummaryData, QueryError> {
-    let projection = index.projection(options.view, options.kind, options.runner)?;
+    let projection = filtered_projection(index, options.view, options.kind, options.runner)?;
     let mut test_kind_sources = BTreeMap::new();
     for test in index.test_summaries(options.view)?.iter().filter(|t| {
         t.role == "test"
