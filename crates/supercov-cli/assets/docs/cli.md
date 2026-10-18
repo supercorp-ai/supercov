@@ -937,6 +937,7 @@ SUPERCOV_TEST_KIND=e2e npx supercov -- npx playwright test
 | --- | --- |
 | `0` | The command or query succeeded |
 | Wrapped command's code | The test command failed and Supercov preserved its status |
+| `127`, `126` | The test command could not start: no such program, or one that may not be run, as a shell reports it |
 | `1` | A valid measurement failed a policy you set, such as a coverage floor |
 | `2` | Supercov could not complete the request, or the evidence cannot answer it |
 

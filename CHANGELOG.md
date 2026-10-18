@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- A test command that could not start (no such program) exited `1`, which reads as a failed policy; it exits `127`, or `126` for a file that may not be run, as a shell does.
 - `diff` with a third run id ignored it; it is refused now.
 - `kinds` and `runners` ignored `--kind` and `--runner` while echoing them back, so `runners --kind unit` (which `summary` suggests) counted every test; they now group only the tests the filter picks.
 - `line <file>:<n>` past the end of the file read as a line the run did not measure, and `:0` showed line 1 as line 0; both are refused now.

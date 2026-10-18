@@ -1960,9 +1960,16 @@ fn process_exit_code(code: i32) -> ExitCode {
 /// The status of a run that never measured anything. One that could not
 /// start because the project's storage was being cleaned is Supercov's not
 /// completing the request, which is 2: 1 reads as the tests failing.
+///
+/// A command that could not be started exits as a shell's would: 127 when
+/// there is no such program, 126 when it may not be run.
 fn could_not_measure(error: &str) -> ExitCode {
     if error.contains("storage is being cleaned") {
         ExitCode::from(2)
+    } else if error.contains("could not spawn") && error.contains("(os error 2)") {
+        ExitCode::from(127)
+    } else if error.contains("could not spawn") && error.contains("(os error 13)") {
+        ExitCode::from(126)
     } else {
         ExitCode::from(1)
     }

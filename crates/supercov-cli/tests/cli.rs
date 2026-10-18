@@ -7182,3 +7182,19 @@ fn diff_refuses_a_third_run() {
     assert!(said.contains("unexpected argument extra"), "{said}");
     project.supercov(&["diff", &id, &id]).succeeds();
 }
+
+#[test]
+fn a_command_that_cannot_start_exits_as_a_shell_would() {
+    let project = Project::cart("cannot-start");
+    let missing = project.supercov(&["--", "no-such-program-xyz"]).exits(127);
+    assert!(
+        missing.contains("could not spawn no-such-program-xyz"),
+        "{missing}"
+    );
+    #[cfg(unix)]
+    {
+        project.write("not-executable.sh", "#!/bin/sh\nexit 0\n");
+        let denied = project.supercov(&["--", "./not-executable.sh"]).exits(126);
+        assert!(denied.contains("could not spawn"), "{denied}");
+    }
+}
