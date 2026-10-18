@@ -7031,3 +7031,50 @@ fn a_limit_of_zero_lists_every_entry_as_the_other_commands_do() {
         .exits(2);
     assert!(refused.contains("0 for all of them"), "{refused}");
 }
+
+#[test]
+fn import_says_what_is_wrong_with_its_arguments_and_takes_values_inline() {
+    let project = Project::cart("import-arguments");
+    project.measure(&[]);
+    project.write("lcov.info", "SF:src/cart.js\nDA:1,1\nend_of_record\n");
+
+    contains_all(
+        &project.supercov(&["import", "--help"]).succeeds(),
+        &["Usage: supercov import <tracefile>"],
+    );
+    contains_all(
+        &project.supercov(&["docs", "-h"]).succeeds(),
+        &["Usage: supercov docs [topic]"],
+    );
+    for (arguments, said) in [
+        (
+            &["import", "lcov.info", "--test"][..],
+            "--test needs a value",
+        ),
+        (&["import", "--bogus"][..], "unknown option --bogus"),
+        (
+            &["import", "lcov.info", "other.info", "--test", "x"][..],
+            "unexpected argument other.info",
+        ),
+        (
+            &["import", "lcov.info"][..],
+            "--test <name> or --background",
+        ),
+        (&["import", "--background"][..], "name the evidence file"),
+        (
+            &["import", "lcov.info", "--test=  "][..],
+            "the imported test needs a name",
+        ),
+        (
+            &["import", "lcov.info", "--test=device", "--status=flaky"][..],
+            "--status is passed or failed, not flaky",
+        ),
+    ] {
+        let stderr = project.supercov(arguments).exits(2);
+        assert!(stderr.contains(said), "{arguments:?}: {stderr}");
+    }
+    // Every value given inline, as `--name=value`.
+    project
+        .supercov(&["import", "lcov.info", "--test=device", "--status=passed"])
+        .succeeds();
+}
