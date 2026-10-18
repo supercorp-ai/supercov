@@ -3585,6 +3585,13 @@ mod tests {
             "def l(x)\n  y = if x then 1 elsif x.nil? then return 2 else 3 end\n  z = (begin; 1; rescue; 2; end)\n  [y, z]\nend\n",
             // Parentheses and negations around a decision's conditions.
             "def m(a, b)\n  return 1 if ()\n  return 2 if (a; b)\n  return 3 if !(a && b)\n  return 4 if not(a || b)\n  return 5 if !!a\n  return 6 if (!a) && ((b))\n  7\nend\n",
+            // Values whose arms may or may not jump, in every construct.
+            "def n(x)\n  a = (unless x then 1 end)\n  b = (begin; return 1 if x; 2; end)\n  c = (begin; 1; rescue; 2; else; return 3 if x; 4; end)\n  d = (begin; 1; rescue ArgumentError; 2; rescue StandardError; 3; end)\n  e = case x when 1 then 2 end\n  f = case x\n      in Integer then (return 3 if x; 3)\n      else 4\n      end\n  g = case x\n      in Integer then 5\n      end\n  h = (x; return 6 if x; 7)\n  i = ()\n  [a, b, c, d, e, f, g, h, i]\nend\n",
+            // Last statements that cannot be wrapped or that jump.
+            "def o\n  a, b = 1, 2\nend\ndef p\n  alias q o\nend\ndef r\n  alias $new $old\nend\ndef s\n  undef r\nend\n",
+            "def t(x)\n  begin\n    x.call\n  rescue StandardError\n    retry\n  end\nend\ndef u(xs)\n  xs.each { |x| redo if x }\n  xs.each do |x|\n    next x if x\n    break\n  end\nend\n",
+            "def v(x)\n  if x\n    return 1\n  elsif x.nil?\n    2\n  end\nend\ndef w(x)\n  unless x\n    1\n  end\nend\ndef y(x)\n  case x\n  in 1 then return 1\n  in 2 then 2\n  end\nend\n",
+            "def z(x)\n  return 1 if !x.nil?\n  return 2 if x.!\n  return 3 if !x.call(1)\n  return 4 if x&.y && !x\n  x&.(1)\n  (x)\nend\n",
         ];
         for source in shapes {
             let mut next = 0;
