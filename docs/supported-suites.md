@@ -508,8 +508,10 @@ beyond one deferred line per test that binds it to its evidence.
 
 `go test` builds one binary per package, so each test package records its own
 evidence and Supercov merges them. It also caches packages that passed, and a
-cached package does not run — so Supercov adds `-count=1` unless your command
-already says otherwise, and tells you it did.
+cached package does not run — so Supercov adds `-count=1` to `GOFLAGS` unless
+your command or `GOFLAGS` already says otherwise, and tells you it did. Through
+`GOFLAGS` it reaches `go test` however your command starts it, `make test`
+included.
 
 A test that calls `t.Parallel()` runs alongside others. Probes are a store into
 one array shared by the process, so nothing can say which of two concurrent

@@ -534,45 +534,54 @@ fn declares_test_main_textually(source: &str) -> bool {
     })
 }
 
-/// `go test` caches a package that passed, and a cached package does not run.
-/// The command with Go's test parallelism turned down to one.
-///
-/// `-parallel` bounds how many tests calling `t.Parallel()` run at once. At 1
-/// they resume one at a time, so each is the only test running when its probes
-/// fire and the harness can announce it like any serial test.
-fn command_run_in_order(command: &[String]) -> (Vec<String>, bool) {
-    if command
-        .iter()
-        .any(|argument| argument == "-parallel" || argument.starts_with("-parallel="))
-    {
-        // The author already said what they wanted; saying it louder is not
-        // Supercov's call.
-        return (command.to_vec(), false);
-    }
-    let mut updated = command.to_vec();
-    let position = updated
-        .iter()
-        .position(|argument| argument == "test")
-        .map_or(updated.len(), |index| index + 1);
-    updated.insert(position, "-parallel=1".into());
-    (updated, true)
-}
-
-fn command_with_fresh_results(command: &[String]) -> (Vec<String>, bool) {
-    if command
-        .iter()
-        .any(|argument| argument == "-count" || argument.starts_with("-count="))
-    {
-        return (command.to_vec(), false);
-    }
-    let mut updated = command.to_vec();
-    // After the subcommand, so `go -count=1 test` is never produced.
-    let position = updated
-        .iter()
-        .position(|argument| argument == "test")
-        .map_or(updated.len(), |index| index + 1);
-    updated.insert(position, "-count=1".into());
-    (updated, true)
+/// What the run adds to Go's flags, given the command and the `GOFLAGS` it
+/// would have run with: `-count=1`, since `go test` caches a package that
+/// passed and a cached package does not run, so it records nothing; and, for
+/// `--exact-attribution`, `-parallel=1`, so tests calling `t.Parallel()`
+/// resume one at a time and each is the only test running when its probes
+/// fire. A flag the author already set, on the command line or in
+/// `GOFLAGS`, stays theirs. Through `GOFLAGS` they reach every `go test` the
+/// command starts -- from a Makefile or a script as much as directly -- Go
+/// leaves them out of commands that do not take them, and a flag the
+/// command names itself still wins. Returns the new `GOFLAGS`, if any, and
+/// which of the two it added.
+fn go_flags(
+    command: &[String],
+    ambient: Option<&str>,
+    exact_attribution: bool,
+) -> (Option<String>, bool, bool) {
+    let named = |flag: &str| {
+        command
+            .iter()
+            .map(String::as_str)
+            .chain(ambient.unwrap_or_default().split_whitespace())
+            .any(|argument| {
+                argument
+                    .strip_prefix('-')
+                    .map(|rest| rest.strip_prefix('-').unwrap_or(rest))
+                    .is_some_and(|rest| {
+                        rest == flag
+                            || rest
+                                .strip_prefix(flag)
+                                .is_some_and(|value| value.starts_with('='))
+                    })
+            })
+    };
+    let fresh = !named("count");
+    let serial = exact_attribution && !named("parallel");
+    let added = [fresh.then_some("-count=1"), serial.then_some("-parallel=1")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let flags = (!added.is_empty()).then(|| {
+        ambient
+            .into_iter()
+            .filter(|flags| !flags.trim().is_empty())
+            .chain(added)
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    (flags, fresh, serial)
 }
 
 /// The fingerprint a later query compares against the stored run.
@@ -650,11 +659,12 @@ pub fn run_direct_go(
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
         // Decided before instrumenting, because whether a parallel test can be
         // announced depends on whether anything will be running beside it.
-        let (command, serialised) = if request.exact_attribution {
-            command_run_in_order(&request.command)
-        } else {
-            (request.command.clone(), false)
-        };
+        let command = request.command.clone();
+        let (go_flags, forced_fresh, serialised) = go_flags(
+            &command,
+            std::env::var("GOFLAGS").ok().as_deref(),
+            request.exact_attribution,
+        );
         let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
         let roots = crate::source_discovery::ExplicitSourceRoots::from_environment_in(
             &root, &workspace, &ambient,
@@ -726,7 +736,6 @@ pub fn run_direct_go(
             )
             .map_err(|error| error.to_string())?;
         }
-        let (command, forced_fresh) = command_with_fresh_results(&command);
         if forced_fresh {
             writeln!(
                 diagnostics,
@@ -744,7 +753,12 @@ pub fn run_direct_go(
                     program: command[0].clone().into(),
                     arguments: command[1..].iter().map(OsString::from).collect(),
                     cwd: workspace.clone(),
-                    environment: None,
+                    environment: go_flags.map(|flags| {
+                        std::env::vars_os()
+                            .filter(|(name, _)| name != "GOFLAGS")
+                            .chain([(OsString::from("GOFLAGS"), OsString::from(flags))])
+                            .collect()
+                    }),
                     captured_output: None,
                     console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
@@ -1129,21 +1143,69 @@ mod tests {
         assert_eq!(package_name("import \"fmt\"\n"), None);
     }
 
+    /// `go test` skips a package whose result it has cached, and a package
+    /// that does not run records nothing; `--exact-attribution` needs tests
+    /// to run one at a time. Both go in through GOFLAGS, after whatever
+    /// GOFLAGS held, unless the author already set them anywhere.
     #[test]
-    fn caching_is_disabled_unless_the_author_already_chose() {
-        // `go test` skips a package whose result it has cached, and a package
-        // that does not run records nothing. A run that measured half a suite
-        // without saying so would be worse than a slow one.
-        let (command, forced) =
-            command_with_fresh_results(&["go".into(), "test".into(), "./...".into()]);
-        assert!(forced);
-        assert_eq!(command, ["go", "test", "-count=1", "./..."]);
-
-        // An author who already said how many times to run means it.
-        let (command, forced) =
-            command_with_fresh_results(&["go".into(), "test".into(), "-count=3".into()]);
-        assert!(!forced);
-        assert_eq!(command, ["go", "test", "-count=3"]);
+    fn go_flags_add_only_what_the_author_did_not_set() {
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        for (command, ambient, exact, expected) in [
+            (
+                "go test ./...",
+                None,
+                false,
+                (Some("-count=1"), true, false),
+            ),
+            ("make test", None, false, (Some("-count=1"), true, false)),
+            (
+                "go test ./...",
+                None,
+                true,
+                (Some("-count=1 -parallel=1"), true, true),
+            ),
+            (
+                "go test ./...",
+                Some("-mod=vendor"),
+                false,
+                (Some("-mod=vendor -count=1"), true, false),
+            ),
+            (
+                "go test ./...",
+                Some("  "),
+                false,
+                (Some("-count=1"), true, false),
+            ),
+            ("go test -count=3", None, false, (None, false, false)),
+            ("go test -count 3", None, false, (None, false, false)),
+            ("go test --count=2", None, false, (None, false, false)),
+            ("make test", Some("-count=2"), false, (None, false, false)),
+            (
+                "go test -parallel 4 ./...",
+                None,
+                true,
+                (Some("-count=1"), true, false),
+            ),
+            (
+                "make test",
+                Some("-parallel=2 -count=1"),
+                true,
+                (None, false, false),
+            ),
+            (
+                "go test -countx",
+                None,
+                false,
+                (Some("-count=1"), true, false),
+            ),
+        ] {
+            let (flags, fresh, serial) = go_flags(&words(command), ambient, exact);
+            assert_eq!(
+                (flags.as_deref(), fresh, serial),
+                expected,
+                "{command} {ambient:?} {exact}"
+            );
+        }
     }
 
     #[test]
@@ -1207,28 +1269,5 @@ mod tests {
             runtime_for(&[("svc".to_owned(), "r".to_owned())], "other/x.go"),
             ""
         );
-        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
-        assert_eq!(
-            command_run_in_order(&words("go test ./...")),
-            (words("go test -parallel=1 ./..."), true)
-        );
-        for kept in ["go test -parallel 4 ./...", "go test -parallel=2"] {
-            assert_eq!(
-                command_run_in_order(&words(kept)),
-                (words(kept), false),
-                "{kept}"
-            );
-        }
-        assert_eq!(
-            command_with_fresh_results(&words("go test ./...")),
-            (words("go test -count=1 ./..."), true)
-        );
-        for kept in ["go test -count 3", "go test -count=1"] {
-            assert_eq!(
-                command_with_fresh_results(&words(kept)),
-                (words(kept), false),
-                "{kept}"
-            );
-        }
     }
 }

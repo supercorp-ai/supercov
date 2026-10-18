@@ -8456,3 +8456,36 @@ fn imports_that_cannot_add_anything_are_refused() {
         ],
     );
 }
+
+/// Go's flags reach `go test` through GOFLAGS, so a suite started from a
+/// Makefile is measured, and a command that is not `go test` is left as
+/// written instead of being handed `-count=1`.
+#[test]
+fn a_go_suite_behind_make_is_measured_and_other_go_commands_are_left_alone() {
+    let made = Project::empty("go-make");
+    made.write("go.mod", "module example.com/made\n\ngo 1.21\n");
+    made.write(
+        "x.go",
+        "package x\n\nfunc F(a bool) int {\n\tif a {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+    );
+    made.write(
+        "x_test.go",
+        "package x\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) { F(true) }\n",
+    );
+    made.write("Makefile", "test:\n\tgo test ./...\n");
+    let measured = made.supercov(&["--", "make", "test"]);
+    assert_eq!(measured.code(), 0, "{}", measured.stderr());
+    assert!(
+        measured.stderr().contains("added -count=1"),
+        "{}",
+        measured.stderr()
+    );
+    let summary = made.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["command: make test", "Passed      1"]);
+    let vetted = made.supercov(&["--", "go", "vet", "./..."]);
+    assert!(
+        !vetted.stderr().contains("malformed import path"),
+        "{}",
+        vetted.stderr()
+    );
+}
