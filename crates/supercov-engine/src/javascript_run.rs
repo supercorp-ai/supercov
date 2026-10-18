@@ -1639,3 +1639,122 @@ mod environment_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coverage_report::{ExecutionScope, RuntimeSnapshot, TestProvenance};
+
+    fn result(
+        test_id: Option<&str>,
+        retry: Option<usize>,
+        scope: Option<(&str, &str, usize)>,
+        observed: bool,
+    ) -> RawTestResult {
+        RawTestResult {
+            span: None,
+            test_id: test_id.map(str::to_owned),
+            scope: scope.map(|(worker, test, retry)| ExecutionScope {
+                version: 1,
+                run_id: "run".into(),
+                worker_id: worker.into(),
+                test_id: test.into(),
+                test_key: test.into(),
+                retry,
+                attempt_id: format!("{test}:{retry}"),
+            }),
+            test: "t".into(),
+            test_file: None,
+            title: None,
+            retry,
+            status: Some("passed".into()),
+            expected_status: None,
+            flaky: false,
+            provenance: TestProvenance {
+                runner: "vitest".into(),
+                kind: "unit".into(),
+                project: None,
+                source: "runner-default".into(),
+                tags: Vec::new(),
+            },
+            role: "test".into(),
+            attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
+            phases: vec![],
+            runtime: if observed {
+                vec![RuntimeSnapshot {
+                    decisions: vec![],
+                    hits: vec!["h".into()],
+                    events: vec![],
+                    logicals: vec![],
+                    phase_id: None,
+                }]
+            } else {
+                vec![]
+            },
+            browser: vec![],
+            server: vec![],
+        }
+    }
+
+    /// A runner is exact only where every result names its test, worker
+    /// and retry the way its scope does; any one missing or disagreeing
+    /// makes it unattributed, with a limitation for each kind.
+    #[test]
+    fn a_runner_is_exact_only_when_every_result_says_who_ran_it() {
+        let exact = result(Some("a"), Some(0), Some(("w1", "a", 0)), true);
+        let declared = |results: &[RawTestResult]| {
+            javascript_runner_declaration("vitest".into(), &results.iter().collect::<Vec<_>>())
+        };
+        let good = declared(std::slice::from_ref(&exact));
+        assert_eq!(
+            good.execution_model,
+            ExecutionModel::ParallelContextPropagated
+        );
+        assert!(good.limitations.is_empty());
+        // Nothing observed needs no worker.
+        assert_eq!(
+            declared(&[result(Some("a"), Some(0), None, false)]).execution_model,
+            ExecutionModel::ParallelContextPropagated
+        );
+        for (case, bad) in [
+            (
+                "no test id",
+                result(None, Some(0), Some(("w1", "a", 0)), true),
+            ),
+            (
+                "empty test id",
+                result(Some(""), Some(0), Some(("w1", "a", 0)), true),
+            ),
+            (
+                "test id disagrees",
+                result(Some("a"), Some(0), Some(("w1", "b", 0)), true),
+            ),
+            (
+                "no worker",
+                result(Some("a"), Some(0), Some(("", "a", 0)), true),
+            ),
+            ("observed, no scope", result(Some("a"), Some(0), None, true)),
+            (
+                "no retry",
+                result(Some("a"), None, Some(("w1", "a", 0)), true),
+            ),
+            (
+                "retry disagrees",
+                result(Some("a"), Some(1), Some(("w1", "a", 0)), true),
+            ),
+        ] {
+            let declaration = declared(&[exact.clone(), bad]);
+            assert_eq!(
+                declaration.execution_model,
+                ExecutionModel::ParallelUnattributed,
+                "{case}"
+            );
+            assert_eq!(declaration.limitations.len(), 6, "{case}");
+            assert_eq!(declaration.limitations[0].id, "vitest-no-worker");
+        }
+        assert_eq!(
+            declared(&[]).execution_model,
+            ExecutionModel::ParallelUnattributed
+        );
+    }
+}
