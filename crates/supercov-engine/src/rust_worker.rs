@@ -1220,6 +1220,17 @@ mod tests {
     }
 
     #[test]
+    fn jsonc_edges_a_cut_string_a_lone_slash_and_a_star_inside_a_comment() {
+        // Cut off inside a string, right after an escape or plainly.
+        assert_eq!(strip_jsonc("\"abc\\"), "\"abc\\");
+        assert_eq!(strip_jsonc("\"open"), "\"open");
+        // A slash that starts no comment is kept.
+        assert_eq!(strip_jsonc("{\"n\": 1 / 2}"), "{\"n\": 1 / 2}");
+        // A star inside a block comment does not end it.
+        assert_eq!(strip_jsonc("/* a * b **/{}"), "{}");
+    }
+
+    #[test]
     fn the_worker_build_caps_lints_at_warn_whatever_it_inherited() {
         assert_eq!(worker_rustflags(""), "--cap-lints=warn -A unused_parens");
         assert_eq!(
@@ -1468,6 +1479,36 @@ mod tests {
         let (_, document) = read_config(&json_path).unwrap();
         assert_eq!(document["main"], ENTRY_FILE);
         assert_eq!(document["dev"]["inspector_port"], 9555);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_inspector_port_joins_whatever_dev_settings_are_there() {
+        let root = temporary("dev-settings");
+        let write = |name: &str, text: &str| {
+            let path = root.join(name);
+            fs::write(&path, text).unwrap();
+            let config = parse_config(&path).unwrap();
+            rewrite_config(&config, ENTRY_FILE, Some(9444)).unwrap();
+            read_config(&path).unwrap().1
+        };
+        // A TOML [dev] table that sets something else keeps it.
+        let toml = write(
+            "wrangler.toml",
+            "main = \"build/worker/shim.mjs\"\n\n[dev]\nport = 8787\n",
+        );
+        assert_eq!(toml["dev"]["port"], 8787);
+        assert_eq!(toml["dev"]["inspector_port"], 9444);
+        // JSON with no dev, a dev that is not an object, and one that is.
+        let none = write("a.json", "{\"main\": \"shim.mjs\"}");
+        assert_eq!(none["dev"], json!({"inspector_port": 9444}));
+        let odd = write("b.json", "{\"main\": \"shim.mjs\", \"dev\": true}");
+        assert_eq!(odd["dev"], json!({"inspector_port": 9444}));
+        let kept = write(
+            "c.json",
+            "{\"main\": \"shim.mjs\", \"dev\": {\"port\": 8787}}",
+        );
+        assert_eq!(kept["dev"], json!({"port": 8787, "inspector_port": 9444}));
         fs::remove_dir_all(root).unwrap();
     }
 
