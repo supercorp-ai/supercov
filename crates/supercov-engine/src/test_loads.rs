@@ -371,7 +371,13 @@ impl Imports {
     }
 
     fn resolve(&self, from: &str, specifier: &str) -> Resolved {
-        let specifier = specifier.split(['?', '#']).next().unwrap_or(specifier);
+        // A query or fragment is no part of the file; a leading `#` is a
+        // package.json subpath import, the whole name.
+        let specifier = specifier.split('?').next().unwrap_or(specifier);
+        let specifier = match specifier.char_indices().skip(1).find(|(_, c)| *c == '#') {
+            Some((at, _)) => &specifier[..at],
+            None => specifier,
+        };
         if specifier.starts_with("./") || specifier.starts_with("../") || specifier == "." {
             let base = Path::new(from).parent().unwrap_or(Path::new(""));
             return self.file(&base.join(specifier));
@@ -1164,6 +1170,106 @@ mod tests {
         assert_eq!(
             imports.named_by("e2e/playwright.config.ts"),
             ["e2e/global-setup.ts"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every way a JavaScript, Python or Ruby test names what it loads:
+    /// followed where Supercov can, and the first it cannot named.
+    #[test]
+    fn each_specifier_shape_is_followed_or_named() {
+        let root = project(&[
+            (
+                "package.json",
+                r##"{"name":"app","imports":{"#lib/*":"./src/lib/*.js","#util":"./src/util.js","#pkg":"dep"},"dependencies":{"@scope/pkg":"1","dep":"1"}}"##,
+            ),
+            ("tsconfig.json", r#"{"extends":"./tsconfig.base.json"}"#),
+            (
+                "tsconfig.base.json",
+                r#"{"compilerOptions":{"paths":{"~/*":["src/*"]}}}"#,
+            ),
+            ("src/lib/x.js", "export default 1;\n"),
+            ("src/util.js", "export default 1;\n"),
+            ("src/y.ts", "export default 1;\n"),
+            ("tests/types.ts", "export type T = 1;\n"),
+            ("tests/z.ts", "export const z = 1;\n"),
+            ("tests/star.ts", "export const s = 1;\n"),
+            ("tests/cjs.ts", "export = 1;\n"),
+            ("tests/resolved.js", "module.exports = 1;\n"),
+            ("tests/mocked.js", "module.exports = 1;\n"),
+            ("tests/literal.js", "module.exports = 1;\n"),
+            (
+                "tests/a.test.ts",
+                "import x from '#lib/x';\nimport u from '#util';\nimport y from '~/y';\nimport s from '@scope/pkg';\nimport d from 'dep/sub';\nexport type { T } from './types';\nexport { z } from './z';\nexport * from './star';\nimport fs = require('./cjs');\nrequire.resolve('./resolved');\njest.mock('./mocked');\nrequire(`./literal`);\n",
+            ),
+            ("tests/abs.test.js", "import a from '/abs/file';\n"),
+            ("tests/hash.test.js", "import a from '#missing';\n"),
+            (
+                "tests/package.test.js",
+                "import a from '#pkg';\nimport b from './z.ts#fragment';\n",
+            ),
+            ("tests/scope.test.js", "import a from '@scope';\n"),
+            (
+                "tests/nm.test.js",
+                "import a from './node_modules/x/index.js';\n",
+            ),
+            (
+                "tests/test_p.py",
+                "import sys\nimport importlib\npytest_plugins = [\"tests.plugin\"]\nsys.path.insert(0, \"src\")\nimportlib.import_module(\"x\")\n__import__(\"y\")\n",
+            ),
+            ("tests/plugin.py", "X = 1\n"),
+            (".rspec", "--require spec_helper\n--require=other\n"),
+            ("spec/spec_helper.rb", "X = 1\n"),
+            ("spec/other.rb", "Y = 1\n"),
+            (
+                "spec/a_spec.rb",
+                "$LOAD_PATH.unshift(__dir__)\nrequire_relative 'other'\n",
+            ),
+        ]);
+        let imports = Imports::new(&root);
+        let all = imports.loads(["tests/a.test.ts"]);
+        assert_eq!(all.open, None, "{all:?}");
+        for file in [
+            "src/lib/x.js",
+            "src/util.js",
+            "src/y.ts",
+            "tests/z.ts",
+            "tests/star.ts",
+            "tests/cjs.ts",
+            "tests/resolved.js",
+            "tests/mocked.js",
+            "tests/literal.js",
+        ] {
+            assert!(all.files.contains(file), "{file}: {all:?}");
+        }
+        assert!(
+            !all.files.contains("tests/types.ts"),
+            "a type export loads nothing"
+        );
+        let packaged = imports.loads(["tests/package.test.js"]);
+        assert_eq!(packaged.open, None, "{packaged:?}");
+        assert!(packaged.files.contains("tests/z.ts"));
+        for (entry, open) in [
+            ("tests/abs.test.js", "imports '/abs/file'"),
+            ("tests/hash.test.js", "imports '#missing'"),
+            ("tests/scope.test.js", "imports '@scope'"),
+            ("tests/test_p.py", "changes sys.path"),
+            ("spec/a_spec.rb", "changes $LOAD_PATH"),
+        ] {
+            let loads = imports.loads([entry]);
+            assert!(
+                loads
+                    .open
+                    .as_deref()
+                    .is_some_and(|said| said.contains(open)),
+                "{entry}: {loads:?}"
+            );
+        }
+        assert_eq!(imports.loads(["tests/nm.test.js"]).open, None);
+        let ruby = imports.loads(["spec/a_spec.rb"]);
+        assert!(
+            ruby.files.contains("spec/spec_helper.rb") && ruby.files.contains("spec/other.rb"),
+            "{ruby:?}"
         );
         fs::remove_dir_all(root).unwrap();
     }

@@ -9,6 +9,7 @@
 - `diff` said "most lost first" above a list of files where nothing was lost.
 - `minimize` with no `--target` asked for 100% and so failed on any run its tests do not fully cover, although the CLI guide shows it first; it now keeps everything the tests together cover, and `--target` still asks for a percentage.
 - `line` listed a branch's unrun outcomes in an order that changed from call to call (`true; false`, then `false; true`); they are listed in the order the run recorded them.
+- `tests affected` and merges could not follow a package.json subpath import (`import x from '#lib/x'`): the specifier was cut at its `#` and read as empty, so every test importing one counted as reaching anything. Subpath imports, with or without `*`, now resolve to their file.
 - `assertions --test <name>` that matched no assessed test pointed at `runs <run> tests`, which lists no tests; it names the assessed tests instead.
 - `assertions` and `assertions --weak` with an `--offset` past the last file printed the summary and no table; they say the offset is past the end.
 - A Rust file with an attributed `let` whose value is a boolean decision (`#[allow(unused)] let kept = a && b;`) was not instrumented at all: the probe around the value and the decision's crossed and the result did not parse. They nest now.
