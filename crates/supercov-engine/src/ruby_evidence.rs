@@ -1854,7 +1854,7 @@ mod tests {
             Err(error) => error.to_string(),
         };
         let ok = process("3.4.1", 1);
-        assert_eq!(read(&[ok.clone()]), "accepted");
+        assert_eq!(read(std::slice::from_ref(&ok)), "accepted");
         let phase = |ctx: u64, phase: &str, worker: &str, test: &str| json!({"t":"phase","ctx":ctx,"at":1,"worker":worker,"test":test,"retry":0,"phase":phase});
         let outcome = |phase: &str, outcome: &str, runner: &str| json!({"t":"outcome","worker":"main","test":"T","retry":0,"phase":phase,"outcome":outcome,"xfail":false,"runner":runner});
         for (records, said) in [

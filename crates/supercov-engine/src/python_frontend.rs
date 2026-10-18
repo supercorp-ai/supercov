@@ -919,8 +919,8 @@ mod tests {
             }
         };
         assert_eq!(import(&|_| {}), "accepted");
-        let file = |v: &mut Value| v["files"][0].take();
-        let cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        type Edit = Box<dyn Fn(&mut Value)>;
+        let cases: Vec<(&str, Edit)> = vec![
             (
                 "UnsupportedSchema",
                 Box::new(|v| v["schemaVersion"] = json!(2)),
@@ -1036,7 +1036,6 @@ mod tests {
             (
                 "InvalidFile",
                 Box::new(|v| {
-                    let _ = file(v);
                     v["files"] = json!([]);
                 }),
             ),
