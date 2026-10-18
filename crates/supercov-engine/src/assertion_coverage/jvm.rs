@@ -572,4 +572,38 @@ mod tests {
             vec!["app/Outer.java", "app/Outer.kt"]
         );
     }
+    /// What each Kotlin and Java statement shape is asked as. A class-level
+    /// property and an expression-bodied function are not statements here, so
+    /// nothing is asked of them.
+    #[test]
+    fn each_jvm_statement_shape_is_asked_its_own_way() {
+        let kotlin = "class K {\n    val lazyOne by lazy { 1 }\n    val plain: Int = 2\n    fun f(a: Boolean): Int {\n        val x: Int\n        x = 3\n        val y = if (a) 1 else 2\n        val z = try { 4 } catch (e: Exception) { 5 }\n        var w: String? = null\n        w = \"v\"\n        if (a) return 6\n        return if (a) x else y\n    }\n    fun g(a: Boolean) = if (a) 7 else 8\n    fun h(a: Boolean): Int {\n        return try { 9 } finally { }\n    }\n}\n";
+        let starts = statement_starts("K.kt", kotlin);
+        let first = |line: usize| starts.get(&line).map(|entries| entries[0].1);
+        assert_eq!(first(2), None);
+        assert_eq!(first(5), Some(None), "a declaration with no value");
+        assert_eq!(first(6), Some(Some(Change::ValueUndefined)));
+        assert_eq!(first(7), Some(Some(Change::ValueUndefined)));
+        assert_eq!(starts[&8].len(), 3, "the try value and each branch's");
+        assert_eq!(
+            first(9),
+            Some(Some(Change::Skip)),
+            "null is already the other value"
+        );
+        assert_eq!(first(11), Some(Some(Change::Invert)));
+        assert_eq!(first(12), Some(Some(Change::ReturnUndefined)));
+        assert_eq!(first(14), None);
+        assert_eq!(first(16), Some(Some(Change::ReturnUndefined)));
+        assert!(statement_starts("build.gradle.kts", "val v = 1\nprintln(v)\n").is_empty());
+        let java = "class J {\n    int f(boolean a) {\n        int x;\n        x = 1;\n        if (a) x = 2;\n        String s = a ? \"t\" : null;\n        Object o = null;\n        if (o != null) { return 3; }\n        return x;\n    }\n}\n";
+        let starts = statement_starts("J.java", java);
+        let first = |line: usize| starts.get(&line).map(|entries| entries[0].1);
+        assert_eq!(first(3), Some(None));
+        assert_eq!(first(4), Some(Some(Change::ValueUndefined)));
+        assert_eq!(first(5), Some(Some(Change::Invert)));
+        assert_eq!(first(6), Some(Some(Change::ValueUndefined)));
+        assert_eq!(first(7), Some(Some(Change::Skip)));
+        assert_eq!(starts[&8].len(), 3);
+        assert_eq!(first(9), Some(Some(Change::ReturnUndefined)));
+    }
 }
