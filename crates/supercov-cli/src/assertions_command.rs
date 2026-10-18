@@ -1660,10 +1660,35 @@ fn view(
             }
             let (test_file, test_name) = match tests.len() {
                 0 => {
-                    return Err(format!(
-                        "no assessed test is named {query}; `{} runs {run} tests` lists the run's tests",
-                        crate::launcher_command()
-                    ));
+                    // The assessed tests are the only names this can take.
+                    let assessed = all
+                        .iter()
+                        .flat_map(|s| s["answers"].as_array().cloned().unwrap_or_default())
+                        .filter_map(|a| {
+                            Some((
+                                a["file"].as_str().unwrap_or("").to_owned(),
+                                a["name"].as_str()?.to_owned(),
+                            ))
+                        })
+                        .collect::<BTreeSet<_>>();
+                    let listed = assessed
+                        .iter()
+                        .take(10)
+                        .map(|(file, name)| format!("  {name} ({file})"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let more = assessed.len().saturating_sub(10);
+                    return Err(if assessed.is_empty() {
+                        format!("no assessed test is named {query}; this assessment asked no test")
+                    } else if more > 0 {
+                        format!(
+                            "no assessed test is named {query}; the assessed tests include:\n{listed}\n  and {more} more"
+                        )
+                    } else {
+                        format!(
+                            "no assessed test is named {query}; the assessed tests are:\n{listed}"
+                        )
+                    });
                 }
                 1 => tests.into_iter().next().unwrap(),
                 n => {
@@ -1862,6 +1887,9 @@ fn page_footer(data: &Value, command: &str) -> String {
     let offset = page["offset"].as_u64().unwrap_or(0);
     let returned = page["returned"].as_u64().unwrap_or(0);
     let total = page["total"].as_u64().unwrap_or(0);
+    if returned == 0 && total > 0 {
+        return format!("showing none of {total}: --offset {offset} is past the end\n");
+    }
     let start = if returned == 0 { 0 } else { offset + 1 };
     let mut out = format!("showing {start}-{} of {total}\n", offset + returned);
     if let Some(next) = page["nextOffset"].as_u64() {
@@ -1916,6 +1944,9 @@ fn render_files(run: &str, data: &Value) -> String {
     ));
     let files = data["files"].as_array().cloned().unwrap_or_default();
     if files.is_empty() {
+        if data["page"]["total"].as_u64() > Some(0) {
+            out.push_str(&page_footer(data, ""));
+        }
         return out;
     }
     out.push_str(&format!(
@@ -1973,6 +2004,9 @@ fn render_weak(run: &str, data: &Value) -> String {
     );
     let files = data["files"].as_array().cloned().unwrap_or_default();
     if files.is_empty() {
+        if data["page"]["total"].as_u64() > Some(0) {
+            out.push_str(&page_footer(data, ""));
+        }
         return out;
     }
     out.push_str("\nAn asserted statement is one some test was judged to catch; the judgment is the test's strongest answer. Checked by applying each change, a verdict on an answer under 75% was wrong about 1 time in 20, and one on a stronger answer about 1 in 50. Files, most such statements first:\n  WEAK  ASSERTED  FILE\n");

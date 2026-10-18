@@ -9,6 +9,8 @@
 - `diff` said "most lost first" above a list of files where nothing was lost.
 - `minimize` with no `--target` asked for 100% and so failed on any run its tests do not fully cover, although the CLI guide shows it first; it now keeps everything the tests together cover, and `--target` still asks for a percentage.
 - `line` listed a branch's unrun outcomes in an order that changed from call to call (`true; false`, then `false; true`); they are listed in the order the run recorded them.
+- `assertions --test <name>` that matched no assessed test pointed at `runs <run> tests`, which lists no tests; it names the assessed tests instead.
+- `assertions` and `assertions --weak` with an `--offset` past the last file printed the summary and no table; they say the offset is past the end.
 - A Rust file with an attributed `let` whose value is a boolean decision (`#[allow(unused)] let kept = a && b;`) was not instrumented at all: the probe around the value and the decision's crossed and the result did not parse. They nest now.
 - `assert.strict.equal(...)` (and every other method under `assert.strict`) on an imported or required `node:assert` was not counted as an assertion, so the test's assertion coverage left it out; it is read as the strict module's assertion.
 - A damaged run index whose branch, statement or function anchor claimed covered MC/DC conditions was read as valid; it is refused.

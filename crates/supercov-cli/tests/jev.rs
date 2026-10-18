@@ -2446,3 +2446,57 @@ fn a_test_file_whose_tests_were_never_asked_is_not_read_as_asserting_nothing() {
         "{asked}"
     );
 }
+
+#[test]
+fn assertion_views_page_name_assessed_tests_and_refuse_what_matches_nothing() {
+    let project = Project::cart("assertion-view-edges");
+    let (base, _) = gateway(MODEL, answer_all_but_the_sum);
+    let run = project.measure(&[]);
+    project
+        .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
+        .succeeds();
+    let said = |args: &[&str]| {
+        let mut full = vec!["runs", run.as_str(), "assertions"];
+        full.extend(args);
+        project.supercov(&full)
+    };
+    contains_all(
+        &said(&["--weak"]).succeeds(),
+        &["0 of 7 asserted statements rest on an answer under 75%"],
+    );
+    contains_all(
+        &said(&["src/cart.js:9"]).succeeds(),
+        &[
+            "Change: returns undefined",
+            "would fail   total applies a coupon",
+        ],
+    );
+    contains_all(
+        &said(&["--test", "shipping is free over fifty"]).succeeds(),
+        &[
+            "judged to catch a change to 2 of the 2 statements",
+            "Catches",
+        ],
+    );
+    // A page past the end says so instead of leaving the table out.
+    contains_all(
+        &said(&["--offset", "5"]).succeeds(),
+        &["showing none of 1: --offset 5 is past the end"],
+    );
+    // A name that matches no assessed test lists the ones there are.
+    contains_all(
+        &said(&["--test", "nobody"]).exits(2),
+        &[
+            "no assessed test is named nobody; the assessed tests are:",
+            "  total adds prices (test/cart.test.js)",
+        ],
+    );
+    contains_all(
+        &said(&["src/cart.js:99"]).exits(2),
+        &["no assessed statement at src/cart.js:99"],
+    );
+    contains_all(
+        &said(&["src/cart.js", "--test", "total adds prices"]).exits(2),
+        &["give a file, a file:line or --test, not more than one"],
+    );
+}
