@@ -1835,6 +1835,39 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A copy whose owner file names a live process that holds no lock -- a
+    /// release that locked nothing -- still counts: cleaning is refused
+    /// naming it, and a run takes the next copy.
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_without_a_lock_still_holds_its_copy() {
+        let root = project();
+        let locks = root.join(".supercov/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let foreign = LockOwner {
+            run_id: "run_foreign".into(),
+            pid: 1,
+            started_at: "earlier".into(),
+        };
+        fs::write(
+            locks.join(format!("{}.json", copy_lock_name(1))),
+            serde_json::to_vec(&foreign).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            ProjectLock::acquire_alone(&root, "clean-1", "now"),
+            Err(LifecycleError::ActiveRun { pid: 1, .. })
+        ));
+        let mut lock = ProjectLock::acquire(&root, "run_mine", "now").unwrap();
+        assert_eq!(lock.copy(), 2);
+        assert!(lock.protects(&root));
+        assert!(!lock.protects(&root.join("other")));
+        lock.release().unwrap();
+        lock.release().unwrap();
+        assert!(!lock.protects(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn final_rename_failure_exposes_no_run_and_removes_staging() {
         let root = project();
