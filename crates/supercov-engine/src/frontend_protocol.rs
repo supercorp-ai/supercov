@@ -546,4 +546,163 @@ mod tests {
             Err(FrontendProtocolError::InvalidUnstartedResult(_))
         ));
     }
+
+    /// Every identity a runner declares exact is checked on every result: a
+    /// result missing or contradicting one is refused for that one.
+    #[test]
+    fn each_exact_identity_is_required_on_its_own() {
+        type Edit = Box<dyn Fn(&mut FrontendRunDeclaration, &mut CoverageReportRequest)>;
+        let check = |edit: &Edit| {
+            let mut declaration = declaration();
+            let mut request = request();
+            edit(&mut declaration, &mut request);
+            match validate_frontend_report_request(&declaration, &request) {
+                Ok(()) => "accepted".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        let unstarted = |raw: &mut RawTestResult| {
+            raw.scope = None;
+            raw.retry = None;
+            raw.status = Some("unstarted".into());
+            raw.phases.clear();
+            raw.runtime.clear();
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            (
+                "MissingExactIdentity { runner: \"fixture-runner\", axis: \"test\" }",
+                Box::new(|_, r| r.raw_results[0].test_id = None),
+            ),
+            (
+                "MissingExactIdentity { runner: \"fixture-runner\", axis: \"test\" }",
+                Box::new(|_, r| r.raw_results[0].test_id = Some(" ".into())),
+            ),
+            (
+                "InvalidUnstartedResult",
+                Box::new(move |_, r| {
+                    unstarted(&mut r.raw_results[0]);
+                    r.raw_results[0].role = "setup".into();
+                }),
+            ),
+            (
+                "InvalidUnstartedResult",
+                Box::new(move |_, r| {
+                    let scope = r.raw_results[0].scope.clone();
+                    unstarted(&mut r.raw_results[0]);
+                    r.raw_results[0].scope = scope;
+                }),
+            ),
+            (
+                "InvalidUnstartedResult",
+                Box::new(move |_, r| {
+                    unstarted(&mut r.raw_results[0]);
+                    r.raw_results[0].flaky = true;
+                }),
+            ),
+            (
+                "ScopeRunMismatch",
+                Box::new(|_, r| r.raw_results[0].scope.as_mut().unwrap().run_id = "other".into()),
+            ),
+            (
+                "MissingExactIdentity { runner: \"fixture-runner\", axis: \"worker\" }",
+                Box::new(|_, r| r.raw_results[0].scope.as_mut().unwrap().worker_id = " ".into()),
+            ),
+            (
+                "MissingExactIdentity { runner: \"fixture-runner\", axis: \"test\" }",
+                Box::new(|_, r| r.raw_results[0].scope.as_mut().unwrap().test_id = " ".into()),
+            ),
+            (
+                "MissingExactIdentity { runner: \"fixture-runner\", axis: \"test\" }",
+                Box::new(|_, r| r.raw_results[0].scope.as_mut().unwrap().test_id = "other".into()),
+            ),
+            (
+                "MissingExactIdentity { runner: \"fixture-runner\", axis: \"retry\" }",
+                Box::new(|_, r| r.raw_results[0].retry = None),
+            ),
+            (
+                "RetryMismatch",
+                Box::new(|_, r| r.raw_results[0].retry = Some(1)),
+            ),
+            // With no scope and nothing observed, the retry is still owed.
+            (
+                "MissingExactIdentity { runner: \"fixture-runner\", axis: \"retry\" }",
+                Box::new(|_, r| {
+                    let raw = &mut r.raw_results[0];
+                    raw.scope = None;
+                    raw.retry = None;
+                    raw.phases.clear();
+                    raw.runtime.clear();
+                }),
+            ),
+            // A runner whose worker is not exact need not scope its observations.
+            (
+                "accepted",
+                Box::new(|d, r| {
+                    d.runners[0].attribution.worker = AttributionPrecision::Unavailable;
+                    d.runners[0].limitations.push(FrontendLimitation {
+                        id: "no-worker".into(),
+                        scopes: vec![FrontendLimitationScope::Worker],
+                        reason: "The fixture runner has one worker".into(),
+                    });
+                    r.raw_results[0].scope = None;
+                }),
+            ),
+            (
+                "InvalidPhaseKind",
+                Box::new(|_, r| r.raw_results[0].phases[0].kind = "hook".into()),
+            ),
+            (
+                "MissingExactIdentity { runner: \"fixture-runner\", axis: \"phase\" }",
+                Box::new(|_, r| {
+                    r.raw_results[0].phases[0].id = " ".into();
+                    r.raw_results[0].runtime[0].events[0].phase_id = None;
+                }),
+            ),
+            (
+                "DuplicatePhase",
+                Box::new(|_, r| {
+                    let phase = r.raw_results[0].phases[0].clone();
+                    r.raw_results[0].phases.push(phase);
+                }),
+            ),
+            // A phase id is unique across the whole run, not only its result.
+            (
+                "DuplicatePhase",
+                Box::new(|_, r| {
+                    let mut other = r.raw_results[0].clone();
+                    other.test_id = Some("other".into());
+                    other.test = "other".into();
+                    let scope = other.scope.as_mut().unwrap();
+                    scope.test_id = "other".into();
+                    scope.test_key = "other".into();
+                    scope.attempt_id = "other-attempt".into();
+                    r.raw_results.push(other);
+                }),
+            ),
+            (
+                "UnknownPhaseReference",
+                Box::new(|_, r| {
+                    r.raw_results[0].phases[0].caused_by_phase_id = Some("missing".into())
+                }),
+            ),
+            (
+                "UnknownPhaseReference",
+                Box::new(|_, r| r.raw_results[0].runtime[0].phase_id = Some("missing".into())),
+            ),
+            (
+                "CyclicPhaseReference",
+                Box::new(|_, r| {
+                    let mut second = r.raw_results[0].phases[0].clone();
+                    second.id = "second".into();
+                    second.caused_by_phase_id = Some("assertion".into());
+                    r.raw_results[0].phases[0].caused_by_phase_id = Some("second".into());
+                    r.raw_results[0].phases.push(second);
+                }),
+            ),
+        ];
+        for (expected, edit) in &cases {
+            let said = check(edit);
+            assert!(said.starts_with(expected), "{expected}: {said}");
+        }
+    }
 }
