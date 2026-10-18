@@ -356,7 +356,7 @@ impl Drop for RunCleanup {
                 &self.run_id,
                 RunStateStatus::Failed,
                 &self.started_at,
-                Some("Rust run exited before reaching a terminal lifecycle state".into()),
+                Some("the run stopped before it finished".into()),
             );
         }
         if let Some(workspace) = &self.workspace {
@@ -1644,6 +1644,59 @@ mod environment_tests {
 mod tests {
     use super::*;
     use crate::coverage_report::{ExecutionScope, RuntimeSnapshot, TestProvenance};
+
+    /// A run that stops between writing its state and finishing is marked
+    /// failed, in words about the run it was, and releases its lock.
+    #[test]
+    fn a_run_that_stops_early_is_marked_failed_as_itself() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-js-cleanup-{}-{}",
+            std::process::id(),
+            now_nonce()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let started_at = "2026-01-01T00:00:00.000Z".to_owned();
+        let lock = ProjectLock::acquire(&root, "run-early", &started_at).unwrap();
+        write_run_state(
+            &root,
+            &RunState {
+                id: "run-early".into(),
+                pid: std::process::id(),
+                root: root.display().to_string(),
+                workspace: String::new(),
+                started_at: started_at.clone(),
+                updated_at: started_at.clone(),
+                status: RunStateStatus::Preparing,
+                signal: None,
+                error: None,
+            },
+        )
+        .unwrap();
+        let mut cleanup = RunCleanup {
+            root: root.to_path_buf(),
+            run_id: "run-early".into(),
+            started_at,
+            lock,
+            workspace: None,
+            state_written: false,
+            terminal_recorded: false,
+            keep_workspace: false,
+        };
+        cleanup.mark_state_written();
+        drop(cleanup);
+        let state: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join(".supercov/work/run-early/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["error"], "the run stopped before it finished");
+        assert_ne!(state["status"], serde_json::json!("preparing"));
+        // The lock went with it: another run can take the store.
+        ProjectLock::acquire(&root, "run-next", "2026-01-01T00:00:01.000Z")
+            .unwrap()
+            .release()
+            .unwrap();
+    }
 
     fn result(
         test_id: Option<&str>,
